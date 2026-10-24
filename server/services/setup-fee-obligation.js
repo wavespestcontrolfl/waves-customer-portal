@@ -416,6 +416,98 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
   return { parentId, amount: owedAmount, alertId: alert?.id || null };
 }
 
+// ONE "is this customer's setup fee already settled somewhere else?" predicate
+// (GATE_SETUP_FEE_SETTLED_ANYWHERE). The unminted-setup-fee alert, the
+// completion hold it drives (both via findUnmintedSetupFeeObligation) and the
+// alert reconcile (setup-fee-alert-reconcile.js) all ask it, so they can never
+// disagree. The note-based checks above only see invoices that cite
+// "accepted estimate #<id>"; a fee collected on an ordinary invoice (cash on a
+// visit invoice, a waived $0 line, an annual prepay bundle) carries no such
+// stamp and used to read as "never billed". Settled means, for this customer:
+//   - a PAID invoice line that is the setup / membership fee
+//     (">= expectedFeeCents" summed, same cents-exact rule as the stamped
+//     scan), or
+//   - a live invoice with an explicit waived setup-fee line ("waived" in the
+//     description, or a $0 setup-fee line); a waived line riding a positive
+//     amount (the prepay bundle) needs the invoice PAID, or
+//   - a covered annual-prepay term on the visit's date, or a PAID annual-prepay
+//     invoice from the last 13 months.
+// Gate off returns { settled: false } before any read. Pass `lock: true` inside
+// a transaction to read the invoices FOR UPDATE (the reconcile does).
+const SETUP_FEE_SETTLED_PREPAY_WINDOW_MS = 400 * 24 * 60 * 60 * 1000;
+
+function settledFeeLineName(li) {
+  const desc = String(li?.description || '').trim();
+  const cat = String(li?.category || '').trim();
+  return /(?:setup|membership) fee/i.test(desc)
+    || /^waveguard membership$/i.test(desc)
+    || /^waveguard membership$/i.test(cat);
+}
+
+function settledLineCents(li) {
+  const qty = li?.quantity != null ? Number(li.quantity) : 1;
+  const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+  return Number.isFinite(amt) ? Math.round(amt * 100) : null;
+}
+
+async function settledVisitDate(conn, visitId) {
+  if (!visitId || !require('../config/feature-gates').setupFeeSettledAnywhereLive()) return null;
+  const row = await conn('scheduled_services').where({ id: visitId }).first('scheduled_date');
+  return row?.scheduled_date ? require('./estimate-first-application-invoice').dateOnly(row.scheduled_date) : null;
+}
+
+async function setupFeeSettledElsewhere(conn, {
+  customerId, expectedFeeCents = 0, visitDate = null, lock = false,
+} = {}) {
+  if (!require('../config/feature-gates').setupFeeSettledAnywhereLive()) return { settled: false };
+  if (!customerId) return { settled: false };
+  let query = conn('invoices')
+    .where({ customer_id: customerId })
+    .whereRaw(`(line_items::text ILIKE '%fee%' OR line_items::text ILIKE '%membership%' OR line_items::text ILIKE '%prepay%' OR line_items::text ILIKE '%prepaid%')`);
+  if (lock) query = query.forUpdate();
+  const rows = await query.select('id', 'status', 'line_items', 'created_at');
+  const dead = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void', 'draft']);
+  let paidFeeCents = 0;
+  let paidFeeInvoiceId = null;
+  for (const row of rows) {
+    const status = String(row.status || '').toLowerCase();
+    if (dead.has(status)) continue;
+    let items = row.line_items;
+    if (typeof items === 'string') {
+      try { items = JSON.parse(items); } catch { items = null; }
+    }
+    if (!Array.isArray(items)) continue;
+    for (const li of items) {
+      const cents = settledLineCents(li);
+      if (cents === null) continue;
+      const desc = String(li?.description || '');
+      const waived = /(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0);
+      if (waived && (cents === 0 || status === 'paid')) {
+        return { settled: true, reason: 'waived', invoiceId: row.id };
+      }
+      if (status !== 'paid') continue;
+      if (/annual prepay/i.test(String(li?.category || '')) && cents > 0
+        && row.created_at && Date.now() - new Date(row.created_at).getTime() <= SETUP_FEE_SETTLED_PREPAY_WINDOW_MS) {
+        return { settled: true, reason: 'annual_prepay', invoiceId: row.id };
+      }
+      if (cents > 0 && !waived && settledFeeLineName(li)) {
+        paidFeeCents += cents;
+        paidFeeInvoiceId = paidFeeInvoiceId || row.id;
+      }
+    }
+  }
+  if (paidFeeCents > 0 && paidFeeCents >= expectedFeeCents) {
+    return { settled: true, reason: 'paid_fee', invoiceId: paidFeeInvoiceId };
+  }
+  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+  const term = await AnnualPrepayRenewals.coveredTermsAsOf(conn, visitDate || null)
+    .where('t.customer_id', customerId)
+    .whereNull('t.annual_plan_version') // a termite annual plan never waives the WaveGuard fee
+    .first('t.id');
+  if (term) return { settled: true, reason: 'annual_prepay_term', termId: term.id };
+  return { settled: false };
+}
+
 /**
  * @param {object} params
  * @param {string} params.sourceEstimateId  the visit's source_estimate_id
@@ -574,6 +666,14 @@ async function findUnmintedSetupFeeObligation({
     .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
   const coveredFeeCents = liveStampedFeeCents + refundedFeeCents;
   if (coveredFeeCents >= expectedFeeCents) return { owed: false };
+  // GATE_SETUP_FEE_SETTLED_ANYWHERE: the fee was paid, waived or prepaid on an
+  // invoice that never cited this estimate (the stamped scan above cannot see it).
+  const settledElsewhere = await setupFeeSettledElsewhere(conn, {
+    customerId: estimate.customer_id,
+    expectedFeeCents,
+    visitDate: await settledVisitDate(conn, excludeScheduledServiceId),
+  });
+  if (settledElsewhere.settled) return { owed: false, settledElsewhere };
   const remainingFeeCents = expectedFeeCents - coveredFeeCents;
   // A CANCELED fee-carrying invoice satisfies only when #3474's
   // canceledSetupFee lane can PROVABLY discover it (Codex P0, pre-push
@@ -727,6 +827,7 @@ module.exports = {
   estimateSetupSeries,
   officeParkedSetupFeeSeries,
   findUnmintedSetupFeeObligation,
+  setupFeeSettledElsewhere,
   parkSetupFeeStampForOffice,
   isPlanApplicationRow,
   SETUP_FEE_OFFICE_BILLING_ALERT,
