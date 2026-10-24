@@ -3321,3 +3321,7 @@ and the series extension's join into the customer's own stop (an own visit on
 the candidate date is now an ordinary clash). `GATE_VISIT_GROUPS` had no
 other reader, so it is removed too. Visits created before this keep working:
 Separate, closeout, the live fan-out, unit moves and the /visit links.
+
+## 2026-10-24 — The lawn visit read has its own Gemini model setting
+
+Owner ruling (lawn scoring review, "GO"): the lawn visit assessment and the paired-photo recheck read photos with `MODEL_GEMINI_LAWN_ASSESSMENT` (default `gemini-3.8-flash`), not the shared photo-lane `MODEL_GEMINI_VISION`. On 2026-10-23 `MODEL_GEMINI_VISION` moved to Gemini 4 Argon; on the lawn read Argon took 48-64 s per 4-photo read against the 70 s budget and 1 of its 3 reads timed out (the OpenAI backup timed out with it). Flash read 16 visits in 10-53 s with no failure. The other photo lanes keep following `MODEL_GEMINI_VISION`. Roll back by setting `MODEL_GEMINI_LAWN_ASSESSMENT` to another Gemini id.
