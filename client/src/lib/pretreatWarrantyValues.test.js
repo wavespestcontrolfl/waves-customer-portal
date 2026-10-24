@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   FINAL_EXTERIOR_NOT_DONE,
+  sentCertificate,
   pretreatWarrantyValues,
   basisDateProblem,
   daysSinceTreatment,
@@ -103,5 +104,14 @@ describe('pretreatWarrantyValues', () => {
   it('flattens certificate text to one line without bold markers', () => {
     const v = pretreatWarrantyValues({ findings: { ...findings, product_name: 'Termidor SC\n\n**WE REPAIR ALL DAMAGE.**' } });
     expect(v.treatment.product).toBe('Termidor SC WE REPAIR ALL DAMAGE.');
+  });
+
+  it('reads the as-sent copy (object or JSON string), or null when never sent', () => {
+    const copy = { findings: { gallons_applied: '180' }, project_date: '2026-10-01' };
+    expect(sentCertificate({ id: 'p1', project_date: '2026-11-01', pretreat_sent_snapshot: copy }))
+      .toEqual({ project: { id: 'p1', project_date: '2026-10-01', pretreat_sent_snapshot: copy }, findings: { gallons_applied: '180' } });
+    expect(sentCertificate({ pretreat_sent_snapshot: JSON.stringify(copy) }).findings).toEqual({ gallons_applied: '180' });
+    expect(sentCertificate({ pretreat_sent_snapshot: null })).toBeNull();
+    expect(sentCertificate({})).toBeNull();
   });
 });

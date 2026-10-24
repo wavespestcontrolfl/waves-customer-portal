@@ -2168,6 +2168,10 @@ const gates = {
   // unless exactly 'true'. This entry is for logGateStatus only — the canonical
   // CALL-TIME reader is pinParkedCheckLive() below.
   pinParkedCheck: process.env.GATE_PIN_PARKED_CHECK === 'true',
+  // New construction warranty renewal reminder (owner 10-23 option A on #6515).
+  // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only —
+  // the canonical CALL-TIME reader is warrantyRenewalReminderLive() below.
+  warrantyRenewalReminder: process.env.GATE_WARRANTY_RENEWAL_REMINDER === 'true',
   // Truck check (docs/tool-inventory-tracker-scope.md PR 1). Ships DARK: off
   // unless exactly 'true'. This entry is for logGateStatus only — the canonical
   // CALL-TIME reader is truckKitLive() below.
