@@ -181,6 +181,27 @@ describe('SmartRebooker.projectNextVisitDates', () => {
     expect(out.byDate['2026-10-22']).toBe('2027-04-22');
   });
 
+  test('deferred placement names the next visit off a closed day, as the move writes it; read once for every offered date', async () => {
+    const layers = jest.spyOn(require('../services/scheduling/blackout-dates'), 'getBlackoutLayers')
+      .mockResolvedValue({ dates: new Set(['2027-01-28']), weeklyDaysOff: new Set(), closedHolidays: new Set() });
+    process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS = 'true';
+    try {
+      const out = await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22', '2026-10-29'], { conn: connFor(plan()) });
+      expect(out.byDate).toEqual({ '2026-10-22': '2027-01-29', '2026-10-29': '2027-01-29' });
+      expect(layers).toHaveBeenCalledTimes(1);
+      // Without deferred placement the customer's move refuses a closed
+      // projected date instead, so the cadence date is named, unread.
+      mockDeferred = false;
+      layers.mockClear();
+      const kept = await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(plan()) });
+      expect(kept.byDate['2026-10-22']).toBe('2027-01-28');
+      expect(layers).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS;
+      layers.mockRestore();
+    }
+  });
+
   test('a weekend-averse plan shifts the named date off the weekend, as the move does', async () => {
     mockNoWeekends = true;
     // 2026-10-24 is a Saturday; three months later, 2027-01-24, is a Sunday.
