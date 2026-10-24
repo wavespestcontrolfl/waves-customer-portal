@@ -649,9 +649,12 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
     if (await knownCallerPhoneExists(db, phone)) return { leadId: null, customerId: null, created: false, notOwned: 'customer' };
   }
-  let customer = opts.identityCustomerId
+  // The text reader's strict check above already proved no customer holds the
+  // number; the voice lookup's last-10-digit match could still pick an
+  // international customer with the same trailing digits.
+  let customer = viaSms ? null : (opts.identityCustomerId
     ? await db('customers').where({ id: opts.identityCustomerId }).whereNull('deleted_at').first()
-    : (identityPhone ? await findCustomerByPhone(identityPhone) : null);
+    : (identityPhone ? await findCustomerByPhone(identityPhone) : null));
   // Name-aware guard: on a shared line the phone-only match can resolve the
   // wrong household member. If the agent captured a name that conflicts with the
   // matched customer's, don't link (treat as a new, unlinked caller) rather than

@@ -269,7 +269,9 @@ postgres('text-thread lead reader', () => {
   });
 
   test('an international number is not read, and never shares a US number\'s thread', async () => {
-    // Same last 10 digits as TEXTER, different country.
+    // Same last 10 digits as TEXTER, different country — a sender and a customer.
+    const intlCustomer = randomUUID();
+    await trx('customers').insert({ id: intlCustomer, first_name: 'Abroad', last_name: 'Customer', phone: '+449415550177', email: `${randomUUID()}@example.invalid` });
     await text('Hello, quote please', { minutesAgo: 10, from: '+449415550177' });
     expect((await sweep()).candidates).toBe(0);
 
@@ -279,6 +281,8 @@ postgres('text-thread lead reader', () => {
     const prompt = dispatchWithFallback.mock.calls[0][1].text;
     expect(prompt).toContain('Sam Example');
     expect(prompt).not.toContain('Hello, quote please');
+    const [lead] = await leads().where('phone', TEXTER);
+    expect(lead.customer_id).toBeNull();
   });
 
   test('texts to the tech line are not candidates', async () => {
