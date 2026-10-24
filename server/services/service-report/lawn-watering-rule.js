@@ -30,7 +30,10 @@
 //     later. 'directs' = a label direction ("Irrigate within 24 hours of
 //     application"); 'best_results' = a "for best results" window (T-Storm
 //     2G). Absent = our own or a maker window, which may follow a hold
-//     (rule C).
+//     (rule C). With rain_counts (the label lets rain do it, T-Storm 2G),
+//     label first still writes it as a run: "rain and regular watering
+//     count" over one day reads as nothing to do (the rain sentence of
+//     GATE_LAWN_WATERING_TEXT_FORECAST says when rain will do it).
 //   label_best_results (hold with label_minimum only): the part of the hold
 //     above label_minimum is a label "for best results" line, not our own
 //     rule. A 'best_results' window never shortens it: the hold goes first.
@@ -178,16 +181,16 @@ function validateWaterInFields(value, errors) {
 }
 
 // label_window and beside_hold_by_hours (see the header). A label window is a
-// short run counted from the application: never a rain-only step, a same-day
-// rule (already the label's own, rule E) or a long window (rule D). A beside-hold
-// window is our own or a maker's, so never on a label window, and longer than
-// the rule's own window.
+// short run counted from the application: never a same-day rule (already the
+// label's own, rule E) or a long window (rule D); a rain_counts one is still a
+// run under label first. A beside-hold window is our own or a maker's, so never
+// on a label window, and longer than the rule's own window.
 function validateClashWindow(value, byHours, errors) {
   const out = {};
   if (value.label_window != null) {
     if (!LABEL_WINDOWS.includes(value.label_window)) errors.push(`label_window must be one of ${LABEL_WINDOWS.join(', ')}`);
-    else if (value.rain_counts === true || value.water_in_same_day === true || (byHours != null && byHours > LONG_WINDOW_HOURS)) {
-      errors.push(`label_window is for a short window only (no rain_counts, no water_in_same_day, at most ${LONG_WINDOW_HOURS} hours)`);
+    else if (value.water_in_same_day === true || (byHours != null && byHours > LONG_WINDOW_HOURS)) {
+      errors.push(`label_window is for a short window only (no water_in_same_day, at most ${LONG_WINDOW_HOURS} hours)`);
     } else out.label_window = value.label_window;
   }
   if (value.beside_hold_by_hours != null) {

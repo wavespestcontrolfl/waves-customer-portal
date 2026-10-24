@@ -501,18 +501,20 @@ function longWaterInLines(long, lead, combined) {
 // Each resolved rule by what it asks of the customer. A water-in is short (a
 // one-off run) or long (rule D) by its own window.
 // rain_counts: a label step rain may do ("if no rain falls within 7 days,
-// irrigate"), worded as a long window whatever its length.
-const isLongWaterIn = (r) => r.rain_counts === true || finitePositive(r.water_in_by_hours, 24) > LONG_WINDOW_HOURS;
+// irrigate"), worded as a long window whatever its length; label first, a
+// label_window one (T-Storm 2G, one day) is a run.
+const isLongWaterIn = (r, labelFirst) => (r.rain_counts === true && !(labelFirst && r.label_window))
+  || finitePositive(r.water_in_by_hours, 24) > LONG_WINDOW_HOURS;
 const RULE_GROUP = {
   hold: () => 'holds',
-  water_in: (r) => (isLongWaterIn(r) ? 'longs' : 'waterIns'),
+  water_in: (r, labelFirst) => (isLongWaterIn(r, labelFirst) ? 'longs' : 'waterIns'),
   none: () => 'nones',
 };
-function groupRules(resolved) {
+function groupRules(resolved, labelFirst) {
   const groups = { holds: [], waterIns: [], longs: [], nones: [] };
   resolved.forEach((r) => {
     const groupOf = RULE_GROUP[r.mode];
-    if (groupOf) groups[groupOf(r)].push(r);
+    if (groupOf) groups[groupOf(r, labelFirst)].push(r);
   });
   return groups;
 }
@@ -810,7 +812,7 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhe
     return withNoClaim(out, 'unchecked_rules', namesWhere(list, resolved, isGuessed));
   }
 
-  const groups = groupRules(resolved);
+  const groups = groupRules(resolved, labelFirst);
   const { waterIns, longs, nones } = groups;
   if (!groups.holds.length && !waterIns.length && !longs.length) return noneInstruction(out, nones, list);
   const yielded = yieldedHolds(groups.holds, waterIns, labelFirst);

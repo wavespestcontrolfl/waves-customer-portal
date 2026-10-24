@@ -2628,7 +2628,9 @@ entries picks the direction per logged target (`service_products.targets`), so
 one product can add a hold and a water-in; no covered target reads the product's
 top-level rule, or the first entry of a target-only rule. (2) A water-in whose
 window the label writes (a same-day rule, or a catalog `label_window`, since
-2026-10-24) counts from the application and never follows a hold. When a hold
+2026-10-24) counts from the application and never follows a hold; one that
+also carries `rain_counts` reads as a water-in run, not the long-window rain
+sentences. When a hold
 leaves it no deadline, as few holds as it needs that carry a `label_minimum`
 shorten to that minimum, latest-ending first ("Skip your turf watering until
 today’s treatment has dried." or a nearer clock time), judged with a 2-hour

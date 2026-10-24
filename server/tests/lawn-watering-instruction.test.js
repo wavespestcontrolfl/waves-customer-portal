@@ -1044,7 +1044,8 @@ describe('label ladder for clashing products (rule E, Y, H)', () => {
   const TUE_830PM = '2026-10-28T00:30:00Z';
   const named = (...list) => list.map(([name, rule]) => ({ name, rule }));
   const GRUBS = ['Grubs', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, label_window: 'directs', source: 'label' }];
-  const T_STORM = ['TStorm', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, label_window: 'best_results', source: 'label' }];
+  // As the catalog stores it: rain may do the watering in ("activate ... with irrigation or natural rainfall").
+  const T_STORM = ['TStorm', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, rain_counts: true, label_window: 'best_results', source: 'label' }];
   const DYLOX = ['Dylox', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'owner' }];
   const FERTILIZER = ['Fertilizer', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'owner' }];
   const HUMECTANT = ['Humectant', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 2, beside_hold_by_hours: 24, source: 'owner' }];
@@ -1120,6 +1121,17 @@ describe('label ladder for clashing products (rule E, Y, H)', () => {
     const ins = build(named(GRUBS, long), at(TUE_9AM));
     expect(ins.state).toBeNull();
     expect(ins.noClaim).toEqual({ reason: 'water_in_conflict', products: ['Grubs', 'Long'], holdProducts: ['Long'], waterInProducts: ['Grubs'] });
+  });
+
+  test('a rain-counting label window is a run label first, and the long rain line gate off', () => {
+    expect(linesOf(named(T_STORM), TUE_9AM)).toEqual([
+      'Water in today’s treatment with about ¼ inch by Wed 9 AM.',
+      'Run it even if it is not your usual day.',
+    ]);
+    expect(linesOf(named(T_STORM), TUE_9AM, { labelFirst: false })).toEqual([
+      'Today’s treatment needs about ¼ inch of water by Wed 9 AM.',
+      'Rain and your regular watering both count.',
+    ]);
   });
 
   test('a best-results window shortens our own hold to its label minimum', () => {

@@ -378,7 +378,8 @@ describe('clash keys', () => {
     expect(errorsOf({ mode: 'hold', hold_hours: 24, label_window: 'directs', source: 'label' })).toContain('label_window is for a water-in only');
     expect(errorsOf({ mode: 'water_in', water_in_by_hours: 24, yields_to_label_water_in: true, source: 'owner' })).toContain('yields_to_label_water_in is for a hold only');
     expect(errorsOf({ mode: 'water_in', water_in_by_hours: 24, label_window: 'sometimes', source: 'label' })).toContain('label_window must be one of directs, best_results');
-    expect(errorsOf({ mode: 'water_in', water_in_by_hours: 24, rain_counts: true, label_window: 'directs', source: 'label' })[0]).toMatch(/^label_window is for a short window only/);
+    // A rain-counting label window (T-Storm 2G) is valid: label first still writes it as a run.
+    expect(validateRule({ mode: 'water_in', water_in_by_hours: 24, rain_counts: true, label_window: 'best_results', source: 'label' }).rule).toMatchObject({ rain_counts: true, label_window: 'best_results' });
     expect(errorsOf({ mode: 'water_in', water_in_by_hours: 24, water_in_same_day: true, label_window: 'directs', source: 'label' })[0]).toMatch(/^label_window is for a short window only/);
     expect(errorsOf({ mode: 'water_in', water_in_by_hours: 336, label_window: 'directs', source: 'label' })[0]).toMatch(/^label_window is for a short window only/);
     expect(errorsOf({ mode: 'water_in', water_in_by_hours: 24, beside_hold_by_hours: 12, source: 'owner' })).toContain('beside_hold_by_hours must be longer than water_in_by_hours');
