@@ -44,6 +44,7 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     const del = async (table, ids, column = 'id') => { if (ids.length) await db(table).whereIn(column, ids).del(); };
     await db('audit_log').whereIn('resource_id', made.commitmentIds).del();
     await del('job_status_history', made.visitIds, 'job_id');
+    await del('reschedule_log', made.visitIds, 'scheduled_service_id');
     await del('scheduled_services', made.visitIds);
     await del('leads', made.leadIds || []);
     await del('estimates', made.estimateIds || []);
@@ -454,6 +455,38 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       if (cleanup) await cleanup();
       delete process.env.GATE_EMAIL_OPERATIONAL_ACTIONS;
       delete process.env.GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE;
+    });
+  });
+
+  describe('review round 5', () => {
+    test('a same-status reschedule that is undone reopens the visit-backed close', async () => {
+      const w = await world({ kind: 'schedule_visit' });
+      const visit = await addVisit(w, { scheduled_date: '2099-01-22', created_at: new Date(Date.now() - 30 * DAY) });
+      await db('reschedule_log').insert({ scheduled_service_id: visit, customer_id: w.customerId, original_date: '2099-01-15', new_date: '2099-01-22', initiated_by: 'admin', created_at: later(20) });
+      await db('scheduled_services').where({ id: visit }).update({ updated_at: later(21) });
+      say(w, fulfilledBy(`visit:${visit}`, 'moved after the request'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      // Moved back to the first move's original slot: the loader clears moved_at, so the witness is gone.
+      await db('reschedule_log').insert({ scheduled_service_id: visit, customer_id: w.customerId, original_date: '2099-01-22', new_date: '2099-01-15', initiated_by: 'admin', created_at: later(30) });
+      await db('scheduled_services').where({ id: visit }).update({ scheduled_date: '2099-01-15', updated_at: later(31) });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('a fulfilled verdict the speaker check downgrades is cached: the same evidence is not judged again', async () => {
+      const w = await world();
+      const call = await addCall(w);
+      say(w, fulfilledBy(`call:${call}`, 'Great, thanks'));
+      await run(w);
+      await run(w);
+      expect(asked(w)).toHaveLength(1);
+      expect(askedThread(w)).toHaveLength(0);
+      const stored = (await row(w.commitment.id)).contact_check.ai_close.fulfillment_check;
+      expect(stored).toMatchObject({ verdict: 'uncertain', reason: 'not_waves_words' });
+      expect(stored.evidence_hash).toBeTruthy();
+      expect((await row(w.commitment.id)).status).toBe('open');
     });
   });
 

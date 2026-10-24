@@ -188,6 +188,9 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
     if (!fresh) { budget.left -= 1; model += 1; }
     checked = await verify(current, evidence, { now, requireModel: true });
     verdict = sayWavesWords(checked, evidence);
+    // A fulfilled verdict the speaker check downgraded is cached as the downgrade, with its evidence hash: the same
+    // evidence is not judged again on every pass (storeCache never keeps a fulfilled one).
+    if (verdict !== checked) checked = { ...verdict, evidence_hash: checked.evidence_hash, retry_after: null };
   }
   const result = { outcome: 'judged', verdict, current, message, evidence, model,
     cache: { fulfillment_check: checked, thread_check: cache?.thread_check ?? null } };
