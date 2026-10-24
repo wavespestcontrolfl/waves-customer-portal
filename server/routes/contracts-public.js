@@ -15,6 +15,10 @@ const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 // a second literal here) keeps the two in lockstep.
 const { ANNUAL_TEMPLATE_KEY: ANNUAL_TERMITE_TEMPLATE_KEY } = require('../services/termite-annual-activation');
 
+// The commercial proposal agreement's template key (a literal, so this route
+// does not load the service for every other contract).
+const COMMERCIAL_AGREEMENT_TEMPLATE_KEY = 'service_agreement.commercial_pest';
+
 const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -147,14 +151,27 @@ router.post('/:token/sign', async (req, res, next) => {
       // decision below reads the LOCKED rows).
       const contractPeek = await trx('customer_contracts')
         .where({ share_token_hash: tokenHash })
-        .first('id', 'customer_id');
+        .first('id', 'customer_id', 'document_template_key', 'document_variables_snapshot');
       if (!contractPeek) {
         response = { status: 404, body: { error: 'Contract not found' } };
         return;
       }
+      // Commercial proposal agreement (GATE_COMMERCIAL_PROPOSAL_SIGN): the customer-comms fence first, then the
+      // customer row, then the estimate row, then the contract row — the agreement issuer's order (comms fence →
+      // customers → estimates → leads → call_log → template → contracts). The fence is the one the manual commercial
+      // win (estimate-manual-acceptance) holds before it locks the estimate and promotes the customer, so signing and
+      // marking won serialize instead of deadlocking. Null for every other contract (the service is not even
+      // loaded, and no fence is taken: their path is unchanged).
+      const commercial = contractPeek.document_template_key === COMMERCIAL_AGREEMENT_TEMPLATE_KEY
+        ? require('../services/commercial-proposal-agreement')
+        : null;
+      if (commercial && contractPeek.customer_id) {
+        await require('../utils/customer-comms-lock').lockCustomerComms(trx, contractPeek.customer_id);
+      }
       if (contractPeek.customer_id) {
         await trx('customers').where({ id: contractPeek.customer_id }).forUpdate().first('id');
       }
+      const estimateLock = commercial ? await commercial.lockEstimateForSign(trx, contractPeek) : null;
       const locked = await trx('customer_contracts')
         .where({ id: contractPeek.id })
         .forUpdate()
@@ -181,6 +198,16 @@ router.post('/:token/sign', async (req, res, next) => {
       if (['cancelled', 'voided'].includes(locked.status)) {
         response = { status: 410, body: { error: 'Contract is no longer available', status: locked.status } };
         return;
+      }
+
+      // The signature is only good for the quote the contract shows: a proposal edited, an estimate closed, Net 30 dropped
+      // or the gate thrown since it was issued cancels the stale contract (committed with this transaction) and refuses.
+      if (estimateLock) {
+        const stale = await commercial.refuseStaleSignature({ trx, contract: locked, estimateLock, req });
+        if (stale) {
+          response = { status: 409, body: { error: stale, code: 'proposal_changed' } };
+          return;
+        }
       }
 
       const contract = await contractQuery(trx).where('cc.id', locked.id).first();
@@ -368,6 +395,18 @@ router.post('/:token/sign', async (req, res, next) => {
         },
       ).catch((notifyErr) => {
         logger.warn(`[contracts-public] countersign bell failed for contract ${signedContract.id}: ${notifyErr.message}`);
+      });
+    }
+
+    // Commercial proposal agreement (GATE_COMMERCIAL_PROPOSAL_SIGN): after the
+    // commit, tell the office the signature is in so they mark the estimate won
+    // and schedule the first visit. The estimate is not touched. Inert for every
+    // other contract: the service reads the estimate marker only an agreement it
+    // issued carries, so a signature collected before a kill still reaches the
+    // office. Never throws out of this route (the service catches and logs).
+    if (signedContract?.id && signedContract.documentTemplateKey === COMMERCIAL_AGREEMENT_TEMPLATE_KEY) {
+      void require('../services/commercial-proposal-agreement').handleAgreementSigned({ contractId: signedContract.id }).catch((err) => {
+        logger.warn(`[contracts-public] commercial agreement signed hook errored for contract ${signedContract.id}: ${err.message}`);
       });
     }
 

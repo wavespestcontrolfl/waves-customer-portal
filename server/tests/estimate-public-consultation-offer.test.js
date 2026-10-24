@@ -77,6 +77,7 @@ jest.mock('../config/feature-gates', () => ({
   pafSetupFeeLive: () => false,
   estimateConsultationOfferLive: () => process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
   leadInspectionLinkLive: () => process.env.GATE_LEAD_INSPECTION_LINK === 'true',
+  commercialProposalSignLive: () => false,
 }));
 
 const mockComputeConsultationSlotsForLead = jest.fn();

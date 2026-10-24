@@ -19126,6 +19126,86 @@ router.post('/:token/change-request', softExitLimiter, async (req, res, next) =>
   }
 });
 
+// Mirrors referralLinkLimiter: gate-aware skip so a dark gate answers the
+// generic 404 on every probe, shared IPv6-safe key.
+const commercialAgreementLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.commercialProposalSignLive(),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like contactPhonePreGuard. It stamps the
+// privacy headers first, so EVERY response of this route carries them: router.param's malformed-token 404, the global
+// limiter's 429, this route's own 429 and the handler's answers. With the gate off it answers the generic 404 here,
+// before any limiter, so a dark route can never read as a 429. Raw-path match (one non-slash token segment, optional
+// trailing slash), POST only.
+const COMMERCIAL_AGREEMENT_PATH_RE = /^\/[^/]+\/commercial-agreement\/?$/i;
+function stampCommercialAgreementHeaders(res) {
+  res.set('Cache-Control', 'no-store');
+  res.set('Pragma', 'no-cache');
+  res.set('X-Robots-Tag', 'noindex');
+  res.set('Referrer-Policy', 'no-referrer');
+}
+function commercialAgreementPreGuard(req, res, next) {
+  if (req.method !== 'POST' || !COMMERCIAL_AGREEMENT_PATH_RE.test(req.path || '')) return next();
+  stampCommercialAgreementHeaders(res);
+  if (!featureGates.commercialProposalSignLive()) return res.status(404).json({ error: 'Estimate not found' });
+  return next();
+}
+
+// The eligibility checks the commercial-agreement issuer and the contract sign route both re-run on the estimate row they
+// have locked (estimates → leads → call_log): a decline, expiry, archive or linkage correction landing in between wins.
+// true = the estimate is no longer open for online signing.
+async function commercialAgreementBlockedFor(trx, locked) {
+  if (!isEstimateCustomerViewable(locked) || !isEstimateAcceptActive(locked)) return true;
+  const linkData = parseEstimateDataSafe(locked);
+  const eng = linkData?.estimatorEngine;
+  if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+  if (await callSideBlockForEstimateData(trx, linkData, { estimateStatus: locked.status })) return true;
+  const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+  if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+    await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+  }
+  return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true, estimateStatus: locked.status }));
+}
+
+// POST /api/estimates/:token/commercial-agreement — the proposal's "Accept &
+// sign agreement" tap (GATE_COMMERCIAL_PROPOSAL_SIGN). Issues, or re-opens, the
+// Commercial Pest Service Agreement for the estimate's customer and returns its
+// public signing URL. It is NOT acceptance: the estimate is never changed and no
+// visit, invoice or charge is made (owner ruling 2026-09-24, staff confirm
+// commercial). Contract mirrors referral-link: gate + generic 404 (dark, unknown,
+// not viewable, accepted/declined/expired, no authored proposal and the staff
+// preview marker are indistinguishable), call-side verdict re-run on the locked
+// row. The one distinct answer, 409 for an estimate with no customer account,
+// comes only after the token has cleared every eligibility check.
+router.post('/:token/commercial-agreement', commercialAgreementLimiter, async (req, res, next) => {
+  // Also stamped here: the handler must be correct on its own, without the pre-guard mount.
+  stampCommercialAgreementHeaders(res);
+  const notFound = () => res.status(404).json({ error: 'Estimate not found' });
+  try {
+    // A staff preview tap (?adminPreview=1) never issues an agreement.
+    if (!featureGates.commercialProposalSignLive() || req.query.adminPreview === '1') return notFound();
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return notFound();
+    if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) return notFound();
+    if (!isEstimateCustomerViewable(estimate) || !isEstimateAcceptActive(estimate)) return notFound();
+    const result = await require('../services/commercial-proposal-agreement').ensureAgreement({ estimate, req, blockedFor: commercialAgreementBlockedFor });
+    if (!result.ok) {
+      return res.status(result.status).json(result.status === 404 ? { error: 'Estimate not found' } : { error: result.error, code: result.code });
+    }
+    return res.status(result.status).json({ signingUrl: result.signingUrl });
+  } catch (err) {
+    // err.code only, never err.message (PG constraint errors can quote customer data).
+    logger.warn(`[estimate-public] commercial-agreement failed (code=${err?.code || 'none'})`);
+    next(err);
+  }
+});
+
 // Mirrors extensionRequestLimiter exactly (codex #3376 r2): the shared
 // add-service limiter runs BEFORE the handler's gate check, so a dark gate
 // would leak a distinctive 429 on the ninth probe instead of the promised
@@ -30622,6 +30702,14 @@ async function composeEstimateDataPayload(estimate, {
     // commercial copy pack + the on-page proposal line items ride this flag —
     // fail-closed, absent flag renders exactly today's page.
     const commercialGlassEnabled = featureGates.isEnabled('estimateCommercialGlass');
+    // "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): an authored commercial proposal on an open
+    // estimate. Nothing is read or added with the gate off. A staff preview never offers the tap (the route
+    // refuses it too); the document render pass does, as a link to this page.
+    const commercialAgreementCta = featureGates.commercialProposalSignLive()
+      && terminalState === null && !adminDraftPreview && (isPdfRenderPass || !verifiedStaffPreview)
+      && isEstimateAcceptActive(estimate)
+      ? await require('../services/commercial-proposal-agreement').agreementCtaFor(estimate)
+      : null;
     // Public proposal view — the authored buildings/line items the customer's
     // emailed PDF already contains, projected for the on-page glass render.
     // Resolved with the SAME live billing lane as the PDF generator so the
@@ -31329,6 +31417,7 @@ async function composeEstimateDataPayload(estimate, {
         // "inspection required" quote-required copy — and is channel-aware
         // about whether the PDF was actually emailed.
         commercialProposal: quoteRequirement.reason === 'commercial_proposal',
+        ...(commercialAgreementCta ? { commercialAgreement: commercialAgreementCta } : {}),
         // Auto-priced commercial (no quote-required proposal): React needs the
         // commercial identity too — its bundle card keeps the monthly contract
         // price, mirroring the SSR fork (codex #3128 r5).
@@ -31800,6 +31889,8 @@ module.exports = router;
 module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.mapImagePreGuard = mapImagePreGuard;
 module.exports.contactPhonePreGuard = contactPhonePreGuard;
+module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
+module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;

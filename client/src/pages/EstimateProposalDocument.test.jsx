@@ -269,6 +269,20 @@ describe('EstimateProposalDocument', () => {
     expect(href('doc-action-email')).toBe('mailto:contact@wavespestcontrol.com?subject=Estimate%20EST-2099-0001');
   });
 
+  // GATE_COMMERCIAL_PROPOSAL_SIGN: a PDF cannot POST, so the sign button is a real link to the estimate page.
+  it('commercial signing: the primary action is a link to the estimate page, and only when the server offers it', () => {
+    const offered = { ...BASE_DATA, cta: { ...BASE_DATA.cta, quoteRequired: true, commercialAgreement: { canSign: true, state: 'none' } } };
+    const { container } = render(<EstimateProposalDocument data={offered} token="tok-123" />);
+    const online = container.querySelector('[data-testid="doc-action-online"]');
+    expect(online.tagName).toBe('A');
+    expect(online.textContent).toBe('Accept & sign agreement');
+    expect(online.getAttribute('href')).toBe('https://portal.wavespestcontrol.com/estimate/tok-123');
+    expect(container.textContent).toContain('tap Accept & sign agreement above to review and sign your service agreement online');
+    const absent = render(<EstimateProposalDocument data={{ ...BASE_DATA, cta: { ...BASE_DATA.cta, quoteRequired: true } }} token="tok-123" />).container;
+    expect(absent.querySelector('[data-testid="doc-action-online"]').textContent).toBe('View estimate online');
+    expect(absent.textContent).not.toContain('Accept & sign agreement');
+  });
+
   it('offers no accept button where the customer cannot self-book', () => {
     const declined = { ...BASE_DATA, cta: { ...BASE_DATA.cta, terminalState: 'declined' } };
     const { container: d } = render(<EstimateProposalDocument data={declined} token="tok-123" />);
