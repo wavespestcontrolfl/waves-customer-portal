@@ -22,7 +22,7 @@ function fakeConn(answers) {
   const conn = (table) => {
     const b = {};
     const calls = [];
-    for (const m of ['where', 'orWhere', 'orWhereIn', 'whereNull', 'whereNotNull', 'select', 'orderBy']) {
+    for (const m of ['where', 'orWhere', 'orWhereIn', 'whereNull', 'whereNotNull', 'select', 'orderBy', 'leftJoin', 'join', 'on']) {
       b[m] = (...args) => {
         seen.push([table, m, ...args]);
         calls.push([m, ...args]);
@@ -37,42 +37,43 @@ function fakeConn(answers) {
     };
     return b;
   };
+  conn.raw = (sql) => ({ raw: sql });
   conn.seen = seen;
   return conn;
 }
 
-// scheduled_services answers two reads: the prepay-link probe (whereNotNull)
-// and the newest completed visit.
+// scheduled_services answers the prepay-link probe; 'invoices as i' the
+// newest paid base-visit invoice.
 const lastPaidConn = (amount, { prepayLinked = false } = {}) => fakeConn({
-  scheduled_services: (calls) => (calls.some((c) => c[0] === 'whereNotNull')
-    ? (prepayLinked ? { id: 'linked-child' } : undefined)
-    : { id: 'visit-9' }),
-  invoices: amount == null ? undefined : { total: String(amount + 7), tax_amount: '7.00' },
+  scheduled_services: prepayLinked ? { id: 'linked-child' } : undefined,
+  'invoices as i': amount == null ? undefined : { total: String(amount + 7), tax_amount: '7.00' },
 });
 
 describe('lastPaidSeriesVisitAmount', () => {
-  test('pre-tax total of the paid invoice on the newest completed visit', async () => {
+  test('pre-tax total of the newest paid invoice on a completed base visit', async () => {
     const conn = lastPaidConn(117);
     await expect(guards.lastPaidSeriesVisitAmount(conn, 'root-1')).resolves.toBe(117);
-    expect(conn.seen).toContainEqual(['scheduled_services', 'where', 'status', 'completed']);
-    // Base visits only: a booster (is_recurring false) or a free callback is
-    // never the baseline (a newer $0 booster must not replace the paid price).
-    expect(conn.seen).toContainEqual(['scheduled_services', 'where', 'is_recurring', true]);
-    expect(conn.seen).toContainEqual(['scheduled_services', 'orWhere', 'is_callback', false]);
-    expect(conn.seen).toContainEqual(['invoices', 'where', 'status', 'paid']);
+    const q = conn.seen.filter(([t]) => t === 'invoices as i').map(([, ...rest]) => rest);
+    // Paid only, completed base visits only (no booster, no free callback),
+    // newest VISIT first — so an unpaid just-completed visit never hides an
+    // earlier paid one (the row is chosen among paid invoices).
+    expect(q).toContainEqual(['where', 'i.status', 'paid']);
+    expect(q).toContainEqual(['where', 'ss.status', 'completed']);
+    expect(q).toContainEqual(['where', 'ss.is_recurring', true]);
+    expect(q).toContainEqual(['orWhere', 'ss.is_callback', false]);
+    expect(q).toContainEqual(['orderBy', 'ss.scheduled_date', 'desc']);
+    expect(q).toContainEqual(['leftJoin', 'service_records as sr', 'sr.id', 'i.service_record_id']);
   });
   test('an applied estimate deposit is a prior payment: added back to the baseline', async () => {
     const conn = fakeConn({
-      scheduled_services: { id: 'visit-9' },
-      invoices: {
+      'invoices as i': {
         total: '57.00', tax_amount: '7.00',
         line_items: JSON.stringify([{ category: 'service', amount: 100 }, { category: 'deposit_credit', amount: -50 }]),
       },
     });
     await expect(guards.lastPaidSeriesVisitAmount(conn, 'root-1')).resolves.toBe(100);
   });
-  test('null with no completed visit or no paid invoice', async () => {
-    await expect(guards.lastPaidSeriesVisitAmount(fakeConn({}), 'root-1')).resolves.toBeNull();
+  test('null with no paid invoice on any completed base visit', async () => {
     await expect(guards.lastPaidSeriesVisitAmount(lastPaidConn(null), 'root-1')).resolves.toBeNull();
   });
 });
@@ -110,7 +111,7 @@ describe('extensionPriceVerdict', () => {
   test('exempt: a series whose prepay term links only a child (mid-series prepay), even under a cancelled root', async () => {
     const conn = lastPaidConn(null, { prepayLinked: true });
     await expect(guards.extensionPriceVerdict(conn, { parent: cancelled, parentId: 'r', child: child(333.45) })).resolves.toBeNull();
-    expect(conn.seen.some(([t, m]) => t === 'invoices' && m === 'first')).toBe(false);
+    expect(conn.seen.some(([t, m]) => t === 'invoices as i' && m === 'first')).toBe(false);
   });
   test('exempt: callback, always-free type, unpriced child, root-linked prepay series — and no reads', async () => {
     const cases = [

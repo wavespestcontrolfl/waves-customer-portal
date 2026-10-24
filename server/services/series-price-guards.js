@@ -43,28 +43,26 @@ const positiveAmount = (value) => {
 };
 
 // What the series last collected: the PAID invoice (pre-tax, deposit credit
-// added back) tied to its most
-// recent completed BASE visit (is_recurring, not a callback — boosters share
-// recurring_parent_id with is_recurring false, as latestLiveSeriesVisit in
-// admin-schedule.js excludes them; a free re-service is no price evidence),
-// linked by scheduled_service_id or through that visit's service record.
-// null when there is no such visit or it has no paid invoice — the
-// comparison is then skipped.
+// added back) of its newest completed BASE visit that has one — is_recurring,
+// not a callback (boosters share recurring_parent_id with is_recurring false,
+// as latestLiveSeriesVisit in admin-schedule.js excludes them; a free
+// re-service is no price evidence). Newest PAID, not newest completed: the
+// visit whose completion triggered the extension usually has an open or
+// processing invoice yet. The invoice is tied to the visit by
+// scheduled_service_id or through its service record. null when no such
+// invoice exists — the comparison is then skipped.
 async function lastPaidSeriesVisitAmount(conn, rootId) {
-  const visit = await conn('scheduled_services')
-    .where((q) => q.where('id', rootId).orWhere('recurring_parent_id', rootId))
-    .where('is_recurring', true)
-    .where((q) => q.whereNull('is_callback').orWhere('is_callback', false))
-    .where('status', 'completed')
-    .orderBy('scheduled_date', 'desc')
-    .first('id');
-  if (!visit) return null;
-  const invoice = await conn('invoices')
-    .where('status', 'paid')
-    .where((q) => q.where('scheduled_service_id', visit.id)
-      .orWhereIn('service_record_id', conn('service_records').select('id').where('scheduled_service_id', visit.id)))
-    .orderBy('created_at', 'desc')
-    .first('total', 'tax_amount', 'line_items');
+  const invoice = await conn('invoices as i')
+    .leftJoin('service_records as sr', 'sr.id', 'i.service_record_id')
+    .join('scheduled_services as ss', (j) => j.on(conn.raw('ss.id = COALESCE(i.scheduled_service_id, sr.scheduled_service_id)')))
+    .where((q) => q.where('ss.id', rootId).orWhere('ss.recurring_parent_id', rootId))
+    .where('ss.is_recurring', true)
+    .where((q) => q.whereNull('ss.is_callback').orWhere('ss.is_callback', false))
+    .where('ss.status', 'completed')
+    .where('i.status', 'paid')
+    .orderBy('ss.scheduled_date', 'desc')
+    .orderBy('i.created_at', 'desc')
+    .first('i.total', 'i.tax_amount', 'i.line_items');
   if (!invoice) return null;
   // `total` already nets out an applied estimate deposit (a prior payment,
   // not a discount — InvoiceService.create), so add it back.
