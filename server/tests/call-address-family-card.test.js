@@ -372,6 +372,19 @@ const SKIP = !process.env.DATABASE_URL;
       expect(await cardsFor(callLogId)).toHaveLength(1);
     });
 
+    test('New customer reports a pass that failed or skipped as not started, so the screen can say no customer was created', async () => {
+      const processor = require('../services/call-recording-processor');
+      for (const outcome of [{ success: false, error: 'extraction failed' }, { skipped: true, reason: 'already_processing' }]) {
+        const { card } = await filed();
+        const spy = jest.spyOn(processor, 'processRecording').mockResolvedValueOnce(outcome);
+        const out = await post(`${card.id}/new-customer`, { expected_updated_at: card.updated_at });
+        spy.mockRestore();
+        expect(out.status).toBe(200);
+        expect(out.body.reprocess.started).toBe(false);
+        expect(out.body.reprocess.reason).toBeTruthy();
+      }
+    });
+
     test('New customer on a call that already has a customer, or a busy pass, changes nothing', async () => {
       const { mom, callLogId, card } = await filed();
       await trx('call_log').where({ id: callLogId }).update({ customer_id: mom });

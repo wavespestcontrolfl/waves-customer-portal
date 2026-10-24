@@ -2031,7 +2031,9 @@ router.post('/:id/new-customer', async (req, res) => {
     let reprocess = { started: false, reason: null };
     try {
       const out = await require('../services/call-recording-processor').processRecording(call.twilio_call_sid, { force: true, operator: true });
-      reprocess = { started: !(out?.skipped), reason: out?.skipped ? (out.reason || 'skipped') : null };
+      // A pass that skipped or failed (a blocked claim, a rejected transcription, a failed extraction) created nobody.
+      const ran = !out?.skipped && out?.success !== false;
+      reprocess = { started: ran, reason: ran ? null : (out?.reason || out?.error || 'not_completed') };
     } catch (procErr) {
       reprocess = { started: false, reason: 'failed' };
       logger.warn(`[admin-triage] new-customer reprocess failed for card ${item.id}: ${procErr.code || procErr.name || 'error'}`);
