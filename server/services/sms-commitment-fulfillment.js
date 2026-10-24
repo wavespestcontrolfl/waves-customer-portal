@@ -1024,7 +1024,11 @@ function fulfillmentFingerprint(commitment, evidence, { eventOnly = false } = {}
     evidence: commitment.evidence, due_at: commitment.due_at, sms_context };
   return { obligation, evidenceHash: hashExtractionSource(JSON.stringify({ version: VERSION, fulfillmentPolicy: FULFILLMENT_POLICY, policy: MODELS.TEXT_POLICIES.highStakes,
     obligation, records: [...evidence.records].sort((a, b) => a.ref.localeCompare(b.ref)),
-    failures: [...evidence.failures].sort(), ...(eventOnly ? { eventOnly: true } : {}) })) };
+    failures: [...evidence.failures].sort(), ...(eventOnly ? { eventOnly: true } : {}),
+    // GATE_SMS_FOLLOWUP_WITNESS_FIX changes which records are admissible, so a
+    // verdict cached under one policy must not answer under the other. Gate
+    // off adds nothing: today's hashes (and cached verdicts) stay as they are.
+    ...(smsFollowupWitnessFixLive() ? { witnessFix: true } : {}) })) };
 }
 
 // An unowned commercial proposal belongs to the customer only through live
