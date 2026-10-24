@@ -639,6 +639,28 @@ async function generateFix(markdown, findings, deps = {}, frontmatterFailure = n
 }
 
 /**
+ * The related-post / publish-host guardrail options out of a run's guardContext
+ * (the output of runner._deriveGuardrailOptions). Fail closed: a context that
+ * names related paths but does not explicitly say they are still live
+ * (relatedPostLinksLive === true) quarantines them, so a hand-built or partial
+ * context can never widen the allowance beyond what the run-context gate
+ * (which passes the derived options straight through) grants. No related
+ * paths means nothing to allow and the evaluate() defaults apply.
+ */
+function relatedPostGuardOptions(runContext) {
+  const ctx = runContext || {};
+  const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x) : []);
+  const relatedPostLinks = strings(ctx.relatedPostLinks);
+  return {
+    relatedPostLinks,
+    relatedPostHosts: strings(ctx.relatedPostHosts),
+    relatedPostLinksLive: relatedPostLinks.length ? ctx.relatedPostLinksLive === true : true,
+    staleRelatedPostLinks: strings(ctx.staleRelatedPostLinks),
+    publishHosts: strings(ctx.publishHosts),
+  };
+}
+
+/**
  * Re-run the publisher's pre-PR content gates on a remediated file before
  * committing. Mirrors astro-publisher (frontmatter schema + content guardrails
  * + comparison/named-competitor + fact-check). Async — fact-check is an LLM
@@ -702,6 +724,13 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
       forbidAllPrices: runContext.forbidAllPrices === true,
       requiredSourceUrls: Array.isArray(runContext.requiredSourceUrls) ? runContext.requiredSourceUrls : [],
       allowedInternalLinks: Array.isArray(runContext.allowedInternalLinks) ? runContext.allowedInternalLinks : [],
+      // Related-post allowances the ORIGINAL publish gate used (brief
+      // voice_constraints.related_posts, frozen host binding, the liveness
+      // recheck). Without them every related-post link the post legitimately
+      // carries parks this preflight as UNKNOWN_INTERNAL_ROUTE (astro blog
+      // PRs #691 #696 #698 #710 #711). Same semantics as the run-context gate:
+      // case-exact paths, host-bound, stale paths always denied.
+      ...relatedPostGuardOptions(runContext),
       isRefresh: runContext.isRefresh === true,
       priorBody: typeof runContext.priorBody === 'string' ? runContext.priorBody : null,
       // This function validates BLOG files — declare it so the blog meta

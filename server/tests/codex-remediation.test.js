@@ -1521,6 +1521,93 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     }
   });
 
+  describe('preflight judges related-post links with the publish-time allowances', () => {
+    const REL_A = '/lawn-care/mowing-height-by-grass-type/';
+    const REL_B = '/lawn-care/new-sod-care/';
+    const NOT_RELATED = '/lawn-care/invented-route-not-in-brief/';
+    const HUB = ['wavespestcontrol.com'];
+    const mdLinking = (...paths) => `---\n${JSON.stringify(TERMITE_FM, null, 2)}\n---\nBait stations target the colony itself. ${paths.map((p, i) => `See [guide ${i}](${p}) for more.`).join(' ')}\n\n## Frequently Asked Questions\n\n### How long does bait last?\n\nStations stay in service as long as they are monitored.`;
+    const ctx = (extra = {}) => ({
+      relatedPostLinks: [REL_A, REL_B],
+      relatedPostHosts: HUB,
+      relatedPostLinksLive: true,
+      staleRelatedPostLinks: [],
+      publishHosts: HUB,
+      ...extra,
+    });
+    const run = (md, guardContext) => rem.validateFixedBlogFile(md, { operatorFaqException: true, guardContext }, gateDeps);
+
+    test('baseline: related-post paths park UNKNOWN_INTERNAL_ROUTE without the run context (the bug)', async () => {
+      const r = await run(mdLinking(REL_A, REL_B), {});
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/UNKNOWN_INTERNAL_ROUTE/);
+    });
+
+    test('a fix linking the brief related-post paths passes', async () => {
+      const r = await run(mdLinking(REL_A, REL_B), ctx());
+      expect(r.ok).toBe(true);
+    });
+
+    test('a fix linking a path outside the related list still parks UNKNOWN_INTERNAL_ROUTE', async () => {
+      const r = await run(mdLinking(REL_A, NOT_RELATED), ctx());
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/UNKNOWN_INTERNAL_ROUTE/);
+    });
+
+    test('relatedPostLinksLive=false still denies the related paths', async () => {
+      const r = await run(mdLinking(REL_A), ctx({ relatedPostLinksLive: false }));
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/UNKNOWN_INTERNAL_ROUTE/);
+    });
+
+    test('a context that omits relatedPostLinksLive fails closed', async () => {
+      const { relatedPostLinksLive, ...partial } = ctx();
+      const r = await run(mdLinking(REL_A), partial);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/UNKNOWN_INTERNAL_ROUTE/);
+    });
+
+    test('a path that failed the liveness recheck stays denied', async () => {
+      const r = await run(mdLinking(REL_A, REL_B), ctx({ staleRelatedPostLinks: [REL_B] }));
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/UNKNOWN_INTERNAL_ROUTE/);
+    });
+
+    test('related paths stay case-exact', async () => {
+      const r = await run(mdLinking('/lawn-care/New-Sod-Care/'), ctx());
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/UNKNOWN_INTERNAL_ROUTE/);
+    });
+
+    test('an absolute link to the related path on a host outside the frozen set is denied', async () => {
+      const r = await run(mdLinking(`https://www.sarasotaflpestcontrol.com${REL_A}`), ctx());
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/UNKNOWN_INTERNAL_ROUTE/);
+    });
+
+    test('an absolute link to the related path on the frozen host passes', async () => {
+      const r = await run(mdLinking(`https://www.wavespestcontrol.com${REL_A}`), ctx());
+      expect(r.ok).toBe(true);
+    });
+
+    test('forwards the related-post options to the guardrails evaluate call', async () => {
+      const guardMod = require('../services/content/content-guardrails');
+      const spy = jest.spyOn(guardMod, 'evaluate');
+      try {
+        await run(mdLinking(REL_A), ctx({ staleRelatedPostLinks: [REL_B] }));
+        expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+          relatedPostLinks: [REL_A, REL_B],
+          relatedPostHosts: HUB,
+          relatedPostLinksLive: true,
+          staleRelatedPostLinks: [REL_B],
+          publishHosts: HUB,
+        }));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   test('runRemediationForPr threads ctx.operatorFaqException into the content-gate re-run', async () => {
     let optsSeen = null;
     const spy = (md, opts) => { optsSeen = opts; return { ok: true }; };
