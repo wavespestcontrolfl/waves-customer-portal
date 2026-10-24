@@ -282,6 +282,9 @@ function computeReturn(inputs = {}) {
   if (seBase > 0 && otherIncome > 0 && seBase + otherIncome > addlThreshold) {
     warnings.push(warn('addl_medicare_wages', 'The Additional Medicare Tax counts self-employment earnings only. Wages in Other income are not added: ask a tax preparer.'));
   }
+  if (seTax > 0 && otherIncome > 0 && round2(seBase + otherIncome) > K.ss_wage_base) {
+    warnings.push(warn('ss_wage_base_wages', 'Wages use up the Social Security wage base before self-employment earnings do. This engine does not subtract wages in Other income, so the SE tax can be too high. Check Schedule SE lines 8a to 10 by hand.'));
+  }
   // income before the NOL deduction: the base of the 80% limit
   const agiBeforeNol = round2(profit + otherIncome - halfSe);
   const standard = K.standard_deduction[filing];

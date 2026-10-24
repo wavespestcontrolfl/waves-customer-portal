@@ -178,6 +178,15 @@ describe('Schedule SE', () => {
     expect(r.half_se_deduction).toBe(14131.98);
     expect(r.total_tax).toBe(Math.round((r.income_tax + 28263.96 + 194.76) * 100) / 100);
   });
+  test('wages in other income can use up the wage base: a warning, no number changes', () => {
+    // base 40,000 x 0.9235 = 36,940; with 150,000 of other income that is over the 176,100 wage base
+    const r = computeReturn(inputs({ gross_receipts: 40000, other_income: 150000 }));
+    expect(r.warnings.find((w) => w.code === 'ss_wage_base_wages').message).toBe('Wages use up the Social Security wage base before self-employment earnings do. This engine does not subtract wages in Other income, so the SE tax can be too high. Check Schedule SE lines 8a to 10 by hand.');
+    expect(r.se_tax).toBe(se(40000).se_tax);
+    // 36,940 + 139,160 = 176,100: at the wage base, not over it
+    expect(codes(computeReturn(inputs({ gross_receipts: 40000, other_income: 139160 })))).not.toContain('ss_wage_base_wages');
+    expect(codes(se(40000))).not.toContain('ss_wage_base_wages');
+  });
 });
 
 describe('home office', () => {
