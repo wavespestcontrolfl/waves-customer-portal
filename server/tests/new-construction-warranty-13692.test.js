@@ -10,7 +10,7 @@ jest.mock('../services/consumer-notices', () => ({
   findConsumerNotice: (...args) => mockFind(...args),
 }));
 
-const { templateIssueWithWarnings, templateIssueValues } = require('../services/new-construction-warranty');
+const { templateIssueWithWarnings } = require('../services/new-construction-warranty');
 
 const KEY = 'service_agreement.termite_new_construction_warranty';
 const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Owner', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' };
@@ -41,18 +41,20 @@ const office = (noticeDate = '09/01/2026', basisDate = '09/01/2026') => ({
     issuer: { name: 'Pat Office', title: 'Office Manager' },
   },
 });
-const issue = (body, options) => templateIssueWithWarnings(KEY, body, customer, conn, options);
+const issue = (body) => templateIssueWithWarnings(KEY, body, customer, conn);
+// The grace end is an Eastern date: 16:00 UTC is the same day in Eastern time.
+const onDay = (day) => jest.useFakeTimers({ now: new Date(`${day}T16:00:00Z`), doNotFake: ['nextTick', 'setImmediate'] });
 
-afterEach(() => { delete process.env.GATE_WARRANTY_13692_CHECK; mockFind.mockReset(); });
+afterEach(() => { jest.useRealTimers(); delete process.env.GATE_WARRANTY_13692_CHECK; mockFind.mockReset(); });
 
 describe('gate off', () => {
   test('uses the typed date exactly as before and never looks for a notice', async () => {
-    const { values, warnings } = await issue(office('08/15/2026'), { today: '2027-01-01' });
+    onDay('2027-01-01');
+    const { values, warnings } = await issue(office('08/15/2026'));
     expect(values.warranty.consumer_notice_date).toBe('08/15/2026');
     expect(warnings).toEqual([]);
     expect(mockFind).not.toHaveBeenCalled();
     await expect(issue(office('10/05/2026'))).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/on or before the treatment date/) });
-    await expect(templateIssueValues(KEY, office('08/15/2026'), customer, conn)).resolves.toMatchObject({ warranty: { consumer_notice_date: '08/15/2026' } });
   });
 });
 
@@ -61,7 +63,8 @@ describe('gate on', () => {
 
   test('a notice on file prints its signed date, the typed value is ignored, and there is no warning', async () => {
     mockFind.mockResolvedValue({ source: 'esign', id: 'e1', signedOn: '08/20/2026' });
-    const { values, warnings } = await issue(office('garbage'), { today: '2027-03-01' });
+    onDay('2027-03-01');
+    const { values, warnings } = await issue(office('garbage'));
     expect(values.warranty.consumer_notice_date).toBe('08/20/2026');
     expect(warnings).toEqual([]);
     // Looks for a notice on or before the earlier of the contract basis date and the treatment date.
@@ -71,26 +74,30 @@ describe('gate on', () => {
 
   test('the treatment date limits the lookup when it is the earlier one', async () => {
     mockFind.mockResolvedValue({ source: 'paper', id: 'p1', signedOn: '09/01/2026' });
-    await issue(office('', '10/01/2026'), { today: '2026-10-24' });
+    onDay('2026-10-24');
+    await issue(office('', '10/01/2026'));
     expect(mockFind.mock.calls[0][2]).toEqual({ onOrBefore: { y: 2026, m: 10, d: 1 } });
   });
 
   test('none on file through the grace end: the typed date still works and the preview carries a warning', async () => {
     mockFind.mockResolvedValue(null);
-    for (const today of ['2026-10-24', '2026-11-24']) {
-      const { values, warnings } = await issue(office('08/15/2026'), { today });
+    for (const day of ['2026-10-24', '2026-11-24']) {
+      onDay(day);
+      const { values, warnings } = await issue(office('08/15/2026'));
       expect(values.warranty.consumer_notice_date).toBe('08/15/2026');
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toMatch(/No signed FDACS-13692/);
       expect(warnings[0]).toMatch(/11\/24\/2026/);
     }
     // The typed date keeps its own checks.
-    await expect(issue(office('09/15/2026'), { today: '2026-10-24' })).rejects.toMatchObject({ status: 400 });
+    onDay('2026-10-24');
+    await expect(issue(office('09/15/2026'))).rejects.toMatchObject({ status: 400 });
   });
 
   test('none on file after the grace end: refuses with 409', async () => {
     mockFind.mockResolvedValue(null);
-    await expect(issue(office('08/15/2026'), { today: '2026-11-25' })).rejects.toMatchObject({
+    onDay('2026-11-25');
+    await expect(issue(office('08/15/2026'))).rejects.toMatchObject({
       status: 409,
       message: 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form) on or before the contract basis date, then issue the warranty.',
     });
@@ -98,8 +105,9 @@ describe('gate on', () => {
 
   test('preview and issue print the same text: the same inputs give the same values', async () => {
     mockFind.mockResolvedValue({ source: 'paper', id: 'p1', signedOn: '08/20/2026' });
-    const preview = await issue(office('08/15/2026'), { today: '2026-10-24' });
-    const locked = await issue(office('08/15/2026'), { today: '2026-10-24' });
+    onDay('2026-10-24');
+    const preview = await issue(office('08/15/2026'));
+    const locked = await issue(office('08/15/2026'));
     expect(locked.values).toEqual(preview.values);
   });
 

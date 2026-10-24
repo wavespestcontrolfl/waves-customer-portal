@@ -219,16 +219,16 @@ const NOTICE_WARNING = `No signed FDACS-13692 consumer notice is on file for thi
 const NOTICE_REQUIRED = 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form) on or before the contract basis date, then issue the warranty.';
 
 // { signedOn } when a usable notice is on file, else { warnings } while the
-// grace lasts; refuses after it. Gate off = nothing here (the typed date).
-// `today` is injectable (YYYY-MM-DD, Eastern).
-async function consumerNoticeOnFile(body, customer, initial, conn, today) {
+// grace lasts (through the grace end, an Eastern date); refuses after it.
+// Gate off = nothing here (the typed date).
+async function consumerNoticeOnFile(body, customer, initial, conn) {
   if (!warranty13692CheckLive()) return { signedOn: null, warnings: [] };
   const basis = parseUs(body?.values?.basis?.date);
   if (!basis) throw bad('Enter the contract basis date as MM/DD/YYYY.');
   // The notice comes before the contract and before the treatment.
   const found = await findConsumerNotice(conn, customer.id, { onOrBefore: key(basis) < key(initial) ? basis : initial });
   if (found) return { signedOn: found.signedOn, warnings: [] };
-  if (key(parseIso(today)) > key(parseIso(CONSUMER_NOTICE_GRACE_END))) throw bad(NOTICE_REQUIRED, 409);
+  if (key(parseIso(etDateString())) > key(parseIso(CONSUMER_NOTICE_GRACE_END))) throw bad(NOTICE_REQUIRED, 409);
   return { signedOn: null, warnings: [NOTICE_WARNING] };
 }
 
@@ -499,7 +499,7 @@ function sentCertificate(project, customer) {
 // transaction with `trx`, which locks the certificate row, so the snapshot is
 // the certificate as it stands at insert time. Any other template passes its
 // values through.
-async function templateIssueWithWarnings(templateKey, body, customer, conn = db, { today = etDateString() } = {}) {
+async function templateIssueWithWarnings(templateKey, body, customer, conn = db) {
   if (BUILDER_DOCUMENT_KEYS.includes(templateKey)) return { values: builderDocumentValues(templateKey, body), warnings: [] };
   if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return { values: body?.values || {}, warnings: [] };
   const projectId = issueRequestProjectId(body);
@@ -522,7 +522,7 @@ async function templateIssueWithWarnings(templateKey, body, customer, conn = db,
   const { initial, values } = certificateValues(asSent, findings, { basisKind: body?.values?.basis?.kind });
   Object.assign(values.treatment, soilLiquid(values.treatment));
   const issuer = body?.values?.issuer || {};
-  const notice = await consumerNoticeOnFile(body, customer, initial, conn, today);
+  const notice = await consumerNoticeOnFile(body, customer, initial, conn);
   const printed = screenValues({
     ...values,
     // Named here, or the context falls back to the customer's plan tier.
@@ -537,10 +537,6 @@ async function templateIssueWithWarnings(templateKey, body, customer, conn = db,
     issuer: { name: oneLine(issuer.name), title: oneLine(issuer.title), license: WAVES_FDACS_LICENSE_NUMBER },
   });
   return { values: printed, warnings: notice.warnings };
-}
-
-async function templateIssueValues(templateKey, body, customer, conn = db, options) {
-  return (await templateIssueWithWarnings(templateKey, body, customer, conn, options)).values;
 }
 
 // ── Builder Master Agreement and Lot Order (owner 10-24) ────────────────────
@@ -635,6 +631,5 @@ module.exports = {
   renderHash,
   supersedeOpenNewConstructionWarranty,
   snapshotWarrantyNumber,
-  templateIssueValues,
   templateIssueWithWarnings,
 };

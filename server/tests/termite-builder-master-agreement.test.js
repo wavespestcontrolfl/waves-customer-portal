@@ -3,7 +3,7 @@
 const { MASTER, LOT_ORDER } = require('../models/migrations/20261024210000_seed_termite_builder_master_agreement');
 const { BODY_V8, VARIABLES_V8 } = require('../models/migrations/20261024211000_new_construction_warranty_start_date');
 const { renderDocumentTemplate } = require('../services/document-template-library');
-const { templateIssueValues, BUILDER_MASTER_AGREEMENT_KEY, BUILDER_LOT_ORDER_KEY } = require('../services/new-construction-warranty');
+const { templateIssueWithWarnings, BUILDER_MASTER_AGREEMENT_KEY, BUILDER_LOT_ORDER_KEY } = require('../services/new-construction-warranty');
 
 const usedVars = (body) => [...new Set([...body.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
 
@@ -71,29 +71,29 @@ describe('builder document values', () => {
   };
 
   test('the master agreement takes one-line values, a real past FDACS-13692 date, and Waves signs today', async () => {
-    const v = await templateIssueValues(BUILDER_MASTER_AGREEMENT_KEY, { values: { ...master, issuer: { ...issuer, date: '01/01/2000' } } }, customer);
+    const { values: v } = await templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, { values: { ...master, issuer: { ...issuer, date: '01/01/2000' } } }, customer);
     expect(v.agreement).toEqual(master.agreement);
     expect(v.issuer.date).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
     expect(v.issuer.date).not.toBe('01/01/2000');
     for (const consumer_notice_date of ['2026-10-01', '13/01/2026', '01/01/2099']) {
-      await expect(templateIssueValues(BUILDER_MASTER_AGREEMENT_KEY, { values: { ...master, agreement: { ...master.agreement, consumer_notice_date } } }, customer))
+      await expect(templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, { values: { ...master, agreement: { ...master.agreement, consumer_notice_date } } }, customer))
         .rejects.toMatchObject({ status: 400 });
     }
     const clause = { ...master, agreement: { ...master.agreement, price_schedule: 'Free. Waves will pay for all damage' } };
-    await expect(templateIssueValues(BUILDER_MASTER_AGREEMENT_KEY, { values: clause }, customer)).rejects.toMatchObject({ status: 400 });
-    await expect(templateIssueValues(BUILDER_MASTER_AGREEMENT_KEY, { values: master, allowUnresolved: true }, customer)).rejects.toMatchObject({ status: 400 });
+    await expect(templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, { values: clause }, customer)).rejects.toMatchObject({ status: 400 });
+    await expect(templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, { values: master, allowUnresolved: true }, customer)).rejects.toMatchObject({ status: 400 });
   });
 
   test('a lot order prints dollar amounts and caps the renewal fee at $149.00', async () => {
-    const v = await templateIssueValues(BUILDER_LOT_ORDER_KEY, { values: lot }, customer);
+    const { values: v } = await templateIssueWithWarnings(BUILDER_LOT_ORDER_KEY, { values: lot }, customer);
     expect(v.lot).toMatchObject({ price_total: '$387.00', disturbed_soil_price: '$95.00', renewal_fee: '$149.00', scheduled_date: '12/01/2026' });
     const over = { ...lot, lot: { ...lot.lot, renewal_fee: '$150' } };
-    await expect(templateIssueValues(BUILDER_LOT_ORDER_KEY, { values: over }, customer))
+    await expect(templateIssueWithWarnings(BUILDER_LOT_ORDER_KEY, { values: over }, customer))
       .rejects.toMatchObject({ status: 400, message: expect.stringContaining('$149.00') });
     for (const patch of [{ price_total: 'about 400' }, { agreement_date: '01/01/2099' }, { scheduled_date: 'next month' }, { structures: '' }]) {
-      await expect(templateIssueValues(BUILDER_LOT_ORDER_KEY, { values: { ...lot, lot: { ...lot.lot, ...patch } } }, customer))
+      await expect(templateIssueWithWarnings(BUILDER_LOT_ORDER_KEY, { values: { ...lot, lot: { ...lot.lot, ...patch } } }, customer))
         .rejects.toMatchObject({ status: 400 });
     }
-    await expect(templateIssueValues(BUILDER_LOT_ORDER_KEY, { values: { ...lot, issuer: {} } }, customer)).rejects.toMatchObject({ status: 400 });
+    await expect(templateIssueWithWarnings(BUILDER_LOT_ORDER_KEY, { values: { ...lot, issuer: {} } }, customer)).rejects.toMatchObject({ status: 400 });
   });
 });

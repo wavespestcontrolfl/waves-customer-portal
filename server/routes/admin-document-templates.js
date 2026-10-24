@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  NEW_CONSTRUCTION_WARRANTY_KEY, assertConfirmedRender, issueDeliveryState, renderHash, supersedeOpenNewConstructionWarranty, templateIssueValues, templateIssueWithWarnings,
+  NEW_CONSTRUCTION_WARRANTY_KEY, assertConfirmedRender, issueDeliveryState, renderHash, supersedeOpenNewConstructionWarranty, templateIssueWithWarnings,
 } = require('../services/new-construction-warranty');
 
 const router = express.Router();
@@ -422,7 +422,7 @@ router.post('/:key/contracts', async (req, res, next) => {
       .first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    const values = await templateIssueValues(loaded.template.template_key, req.body, customer);
+    const { values } = await templateIssueWithWarnings(loaded.template.template_key, req.body, customer);
     const context = buildCustomerDocumentContext(customer, values);
     // The agreement may cover a property that differs from the customer's
     // primary address (rental/second property): buildCustomerDocumentContext
@@ -474,7 +474,7 @@ router.post('/:key/contracts', async (req, res, next) => {
       // overrides (name/email/phone/propertyAddress) still win.
       // Rebuilt on the transaction: the warranty re-reads its certificate
       // under a row lock, so an edit committed before this insert is in it.
-      const liveValues = await templateIssueValues(loaded.template.template_key, req.body, freshDocCustomer, trx);
+      const { values: liveValues } = await templateIssueWithWarnings(loaded.template.template_key, req.body, freshDocCustomer, trx);
       const liveContext = buildCustomerDocumentContext(freshDocCustomer, liveValues);
       if (propertyAddress) liveContext.customer = { ...liveContext.customer, address: propertyAddress };
       const liveRendered = renderDocumentTemplate({
