@@ -211,6 +211,8 @@ export function useAddressAskLookup(
 // Tier chips stay on the file's zinc palette — the label carries the tier, not a metal colour.
 const TIER_COLORS = { Platinum: D.text, Gold: D.text, Silver: D.text, Bronze: D.text, 'One-Time': D.text };
 
+// Search length for the time box while no service line is on the form yet.
+export const PRE_SERVICE_SEARCH_MINUTES = 30;
 const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
 
 
@@ -1494,7 +1496,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultQuickAddAddress = null, requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', addressFirstTimes = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1587,16 +1589,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // usable lot size (catalog fallback applies); 'loading'/'error' must never
   // show a substitute amount or allow submission of an auto line.
   const [mosquitoQuote, setMosquitoQuote] = useState(null);
-  // defaultQuickAddAddress (the Dispatch Find a time panel: a new caller, address first) opens
-  // the New customer block with the address filled. Nothing is created until staff press Add customer.
-  const [showQuickAdd, setShowQuickAdd] = useState(() => !!defaultQuickAddAddress?.address);
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [quickAdd, setQuickAdd] = useState(() => ({
     firstName: '', lastName: '', phone: '', email: '', profileLabel: '',
-    address: defaultQuickAddAddress?.address || '',
-    city: defaultQuickAddAddress?.city || '',
-    state: defaultQuickAddAddress?.state || 'FL',
-    zip: defaultQuickAddAddress?.zip || '',
+    address: '', city: '', state: 'FL', zip: '',
   }));
+  // Address-first best times (GATE_NEW_APPT_ADDRESS_TIMES, owner 2026-10-24,
+  // replacing the Dispatch "Find a time" drawer): a NEW caller has no customer
+  // record, so the time box searches on the New customer block's address
+  // alone. The target is set only when a suggestion is picked (geocoded
+  // coordinates), never from half-typed text, and any hand edit to the
+  // address lines drops it until the next pick.
+  const [quickAddTarget, setQuickAddTarget] = useState(null);
   // 409 phone-match conflict from quick-add ({ code, match }) — the admin
   // picks attach / duplicate / separate account and we resubmit with the flag.
   const [quickAddConflict, setQuickAddConflict] = useState(null);
@@ -1630,6 +1634,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // for — editing either invalidates it.
   const setQuickAddField = (k, v) => {
     if (['phone', 'address', 'city', 'state', 'zip'].includes(k)) setQuickAddConflict(null);
+    if (['address', 'city', 'state', 'zip'].includes(k)) setQuickAddTarget(null);
     setQuickAdd((q) => ({ ...q, [k]: v }));
   };
 
@@ -3996,18 +4001,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
-  const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
+  // No customer yet (a new caller): with the gate on, the New customer
+  // block's picked address is the search subject instead.
+  const addressOnlyTimes = addressFirstTimes && !selectedCustomer && !!quickAddTarget;
+  const bestTimesTarget = addressOnlyTimes ? quickAddTarget : bookingPropertyTarget(selectedBookingProperty);
   // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
   // availability strip (days around the chosen date) instead.
   const { bestTimes, picked, pickedByTech, bestInRange, availability } = useBestTimes({
     summary: true,
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
+    addressOnly: addressOnlyTimes,
     // Rank at the CHOSEN property, not the customer's primary.
     address: bestTimesTarget.address,
     lat: bestTimesTarget.lat,
     lng: bestTimesTarget.lng,
-    durationMinutes: slotCheckDuration,
+    // Before a service is picked the search stands on a 30-minute visit
+    // (owner 2026-10-24); the lines' own durations take over once added.
+    durationMinutes: slotCheckDuration > 0 ? slotCheckDuration : PRE_SERVICE_SEARCH_MINUTES,
     // Same tech scoping as the ranged search — auto mode searches all techs.
     technicianId: techMode === 'choose' && techId ? techId : undefined,
     // The picked-hour verdict is priced on ONE technician's route. In Auto
@@ -5159,15 +5170,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       onChange={(val) => setQuickAddField('address', val)}
                       onSelect={(parts) => {
                         setQuickAddConflict(null);
+                        // Keep an apartment / unit (line2): quick-add has one street
+                        // line, and a re-geocode on blur must not drop it (Codex #6411 r1).
+                        const line1 = [parts.line1 || parts.formatted || '', parts.line2].filter(Boolean).join(' ');
                         setQuickAdd(q => ({
                           ...q,
-                          // Keep an apartment / unit (line2): quick-add has one street
-                          // line, and a re-geocode on blur must not drop it (Codex #6411 r1).
-                          address: [parts.line1 || parts.formatted || '', parts.line2].filter(Boolean).join(' '),
+                          address: line1,
                           city: parts.city || q.city,
                           state: parts.state || q.state,
                           zip: parts.zip || q.zip,
                         }));
+                        setQuickAddTarget({
+                          address: parts.formatted || [line1, parts.city, parts.state, parts.zip].filter(Boolean).join(', '),
+                          lat: parts.lat ?? null,
+                          lng: parts.lng ?? null,
+                        });
                       }}
                       style={inputStyle}
                       placeholder=""
@@ -5328,6 +5345,240 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 ? `The caller more likely said: ${addressAsk.candidates.join('; ')}. `
                 : ''}
               Confirm it with the customer before dispatching — the callback is pending in the Triage Inbox.
+            </div>
+          )}
+        </div>
+
+        {/* Section 3: Date — above Services (owner 2026-10-24): the best
+            times answer "when can we come" as soon as there is an address. */}
+        <div style={sectionStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Date</div>
+            {selectedCustomer && selectedService && (
+              <button
+                onClick={() => handleFindTimes({ horizonDays: 7 })}
+                disabled={findingTimes}
+                style={{
+                  padding: '6px 12px', background: findingTimes ? '#E4E4E7' : `${D.teal}15`,
+                  color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
+                  fontSize: 12, fontWeight: 500, cursor: findingTimes ? 'default' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}
+                title="Rank the best slots by drive-time detour"
+              >
+                {findingTimes ? 'Finding...' : 'Find best times'}
+              </button>
+            )}
+          </div>
+          {selectedCustomer && selectedService && (
+            <button
+              onClick={() => handleFindTimes({ horizonDays: 90 })}
+              disabled={findingTimes}
+              style={{
+                width: '100%', marginBottom: 10, padding: '8px 12px',
+                background: '#FFFFFF', color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
+                fontSize: 12, fontWeight: 500, cursor: findingTimes ? 'default' : 'pointer',
+              }}
+              title="Search up to 90 days from the selected date"
+            >
+              Find more dates
+            </button>
+          )}
+
+          {slotError && (
+            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red }}>
+              {slotError}
+            </div>
+          )}
+
+          {timeSlots !== null && (
+            <div style={{ marginBottom: 12, background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 500, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : `No feasible slots in next ${findTimeHorizonDays} days`}
+                </div>
+                <button onClick={() => setTimeSlots(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 16, cursor: 'pointer', padding: 4 }}>✕</button>
+              </div>
+              {timeSlots.length > 0 && (
+                <>
+                {!timeSlots.some(slot => Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= 15) && (
+                  <div style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
+                    No route near this customer that day yet — here's what's close.
+                  </div>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
+                  {timeSlots.map((slot) => (
+                    <button
+                      key={`${slot.date}-${slot.technician.id}-${slot.start_time}`}
+                      onClick={() => applySlot(slot)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                        background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
+                        cursor: 'pointer', textAlign: 'left', minHeight: 52,
+                      }}
+                    >
+                      <div style={{
+                        fontSize: 11, fontWeight: 500, color: D.teal, background: `${D.teal}15`,
+                        borderRadius: 6, padding: '4px 8px', minWidth: 28, textAlign: 'center',
+                      }}>#{slot.rank}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 500, color: '#18181B' }}>
+                          {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
+                        </div>
+                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                          {findTimeSlotDetail(slot)}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, color: D.teal, fontWeight: 500 }}>Use →</div>
+                    </button>
+                  ))}
+                </div>
+                </>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
+            <div>
+              <label style={labelStyle}>Date</label>
+              <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Time</label>
+              <select value={timeChosen ? windowStart : ''} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle}>
+                {!timeChosen && <option value="" disabled>Choose a time</option>}
+                {HOURLY_TIME_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {duplicateConflict && (
+            <section ref={duplicateConflictRef} aria-label="Existing recurring programs" style={{ padding: 16, marginBottom: 16, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 500 }}>An active program already exists</div>
+              <p>{duplicateConflict.retryUncertain
+                ? 'The program list changed. Your previous save may have completed. Check the existing appointments before starting another program.'
+                : 'Open a program to edit or extend it. Create a separate program only when this customer needs additional recurring work.'}</p>
+              {duplicateConflict.existingSeries?.map((series) => (
+                <div key={series.id} style={{ padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
+                  <div>{series.serviceType} · {String(series.pattern || 'Recurring').replaceAll('_', ' ')}</div>
+                  <div>Next visit: {series.nextUpcomingDate || 'Not scheduled'}</div>
+                  <div>Recorded address: {series.recordedAddress || 'Not recorded — check the existing appointment'}</div>
+                  <a href={`/admin/dispatch?tab=schedule&date=${encodeURIComponent(series.appointmentDate || series.nextUpcomingDate || apptDate)}&appointment=${encodeURIComponent(series.appointmentId || series.id)}`}
+                    target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, color: D.text, textDecoration: 'underline' }}>Open existing program</a>
+                </div>
+              ))}
+              {duplicateConflict.canCreateSeparateProgram === true && !duplicateConflict.retryUncertain && (
+                <div style={{ marginTop: 12 }}>
+                  <label htmlFor="separate-program-reason">Reason for a separate recurring program</label>
+                  <textarea id="separate-program-reason" value={separateProgramReason} maxLength={500}
+                    onChange={(event) => setSeparateProgramReason(event.target.value)}
+                    placeholder="Describe the additional scope of work"
+                    style={{ display: 'block', boxSizing: 'border-box', width: '100%', margin: '8px 0', padding: 12, fontSize: 14, border: `1px solid ${D.border}`, borderRadius: 6 }} />
+                  <button type="button" disabled={!canSubmit || separateProgramReason.trim().length < 5}
+                    onClick={() => handleSubmit(duplicateConflict)}
+                    style={{ minHeight: 44, padding: '10px 16px', fontSize: 14, borderRadius: 6, background: D.text, color: D.white, border: 'none', opacity: !canSubmit || separateProgramReason.trim().length < 5 ? 0.5 : 1 }}>
+                    Create separate recurring program
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
+          <CallBookingConflictNotice
+            conflict={callBookingConflict}
+            sectionRef={callBookingConflictRef}
+            canSubmit={canSubmit}
+            onBookAnother={async () => {
+              // One submit only: cleared even when handleSubmit returns
+              // before the submit loop reads it (a blocked save), so a
+              // later ordinary save never carries the override.
+              // The override names exactly the visits this box listed: one
+              // that arrives after it was shown is a new conflict.
+              callBookingDuplicateOverrideRef.current = new Map([[
+                callBookingConflict.key,
+                (callBookingConflict.existingVisits || []).map((v) => v.id),
+              ]]);
+              try {
+                await handleSubmit(callBookingConflict.separateProgram || undefined);
+              } finally {
+                callBookingDuplicateOverrideRef.current = new Map();
+              }
+            }}
+          />
+          <SlotConflictNotice
+            // The strip states the route problem itself; the
+            // double-booking notice (no `warning`) always stays.
+            conflicts={stripCoversRouteWarning(availability, { currentDate: apptDate ? String(apptDate).split('T')[0] : null, currentStart: windowStart })
+              ? (slotConflicts || []).filter((conflict) => !conflict.warning)
+              : slotConflicts}
+            style={{ marginBottom: 10 }}
+          />
+          <AvailabilityStrip
+            availability={availability}
+            bestRows
+            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
+            currentStart={windowStart}
+            currentTechnicianId={techMode === 'choose' ? techId : null}
+            onPick={(slot) => {
+              // Same adoption as the hint chips: the hour was scored for
+              // one technician, so taking it books that technician.
+              setApptDate(slot.date);
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
+              }
+            }}
+            style={{ marginBottom: 10 }}
+          />
+          <HourTechCompare
+            // A partly committed booking is locked to retry or close: the
+            // remaining groups must keep the technician already chosen.
+            rows={partialCommitLocked ? [] : pickedByTech}
+            onPick={(row) => {
+              // The drive was priced on this technician's route: picking
+              // the row books them, as the hint chips do.
+              setTechMode('choose');
+              setTechId(row.technicianId);
+              appliedSuggestionRef.current = true;
+            }}
+            style={{ marginBottom: 10 }}
+          />
+          <BestTimeHint
+            bestTimes={bestTimes}
+            picked={picked}
+            bestInRange={bestInRange}
+            currentStart={windowStart}
+            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
+            currentTechnicianId={techMode === 'choose' ? techId : null}
+            onPick={(slot) => {
+              // Mirror applySlot: the detour was scored for a specific
+              // technician, so picking the chip adopts that tech too —
+              // leaving auto mode would let assignment land elsewhere and
+              // falsify the advertised detour.
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
+              }
+            }}
+            onPickDate={(slot) => {
+              setApptDate(slot.date);
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
+              }
+            }}
+            style={{ marginBottom: 10 }}
+          />
+
+          {hasRecurringServices && firstCustomRecurringIndex < 0 && (
+            <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 10, marginTop: 4 }}>
+              {weekendRuleControl()}
             </div>
           )}
         </div>
@@ -6283,239 +6534,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           );
         })()}
-
-        {/* Section 3: Date */}
-        <div style={sectionStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Date</div>
-            {selectedCustomer && selectedService && (
-              <button
-                onClick={() => handleFindTimes({ horizonDays: 7 })}
-                disabled={findingTimes}
-                style={{
-                  padding: '6px 12px', background: findingTimes ? '#E4E4E7' : `${D.teal}15`,
-                  color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
-                  fontSize: 12, fontWeight: 500, cursor: findingTimes ? 'default' : 'pointer',
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                }}
-                title="Rank the best slots by drive-time detour"
-              >
-                {findingTimes ? 'Finding...' : 'Find best times'}
-              </button>
-            )}
-          </div>
-          {selectedCustomer && selectedService && (
-            <button
-              onClick={() => handleFindTimes({ horizonDays: 90 })}
-              disabled={findingTimes}
-              style={{
-                width: '100%', marginBottom: 10, padding: '8px 12px',
-                background: '#FFFFFF', color: D.teal, border: `1px solid ${D.teal}55`, borderRadius: 8,
-                fontSize: 12, fontWeight: 500, cursor: findingTimes ? 'default' : 'pointer',
-              }}
-              title="Search up to 90 days from the selected date"
-            >
-              Find more dates
-            </button>
-          )}
-
-          {slotError && (
-            <div style={{ background: `${D.red}15`, border: `1px solid ${D.red}55`, borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: D.red }}>
-              {slotError}
-            </div>
-          )}
-
-          {timeSlots !== null && (
-            <div style={{ marginBottom: 12, background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 10, padding: 10 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <div style={{ fontSize: 11, fontWeight: 500, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  {timeSlots.length > 0 ? `Top ${timeSlots.length} Slots (ranked by detour)` : `No feasible slots in next ${findTimeHorizonDays} days`}
-                </div>
-                <button onClick={() => setTimeSlots(null)} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 16, cursor: 'pointer', padding: 4 }}>✕</button>
-              </div>
-              {timeSlots.length > 0 && (
-                <>
-                {!timeSlots.some(slot => Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= 15) && (
-                  <div style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
-                    No route near this customer that day yet — here's what's close.
-                  </div>
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
-                  {timeSlots.map((slot) => (
-                    <button
-                      key={`${slot.date}-${slot.technician.id}-${slot.start_time}`}
-                      onClick={() => applySlot(slot)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
-                        background: D.card, border: `1px solid ${D.border}`, borderRadius: 8,
-                        cursor: 'pointer', textAlign: 'left', minHeight: 52,
-                      }}
-                    >
-                      <div style={{
-                        fontSize: 11, fontWeight: 500, color: D.teal, background: `${D.teal}15`,
-                        borderRadius: 6, padding: '4px 8px', minWidth: 28, textAlign: 'center',
-                      }}>#{slot.rank}</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 500, color: '#18181B' }}>
-                          {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
-                        </div>
-                        <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                          {findTimeSlotDetail(slot)}
-                        </div>
-                      </div>
-                      <div style={{ fontSize: 11, color: D.teal, fontWeight: 500 }}>Use →</div>
-                    </button>
-                  ))}
-                </div>
-                </>
-              )}
-            </div>
-          )}
-
-          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 10 }}>
-            <div>
-              <label style={labelStyle}>Date</label>
-              <input type="date" value={apptDate} onChange={e => setApptDate(e.target.value)} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle} />
-            </div>
-            <div>
-              <label style={labelStyle}>Time</label>
-              <select value={timeChosen ? windowStart : ''} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle}>
-                {!timeChosen && <option value="" disabled>Choose a time</option>}
-                {HOURLY_TIME_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          {duplicateConflict && (
-            <section ref={duplicateConflictRef} aria-label="Existing recurring programs" style={{ padding: 16, marginBottom: 16, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, lineHeight: 1.5 }}>
-              <div style={{ fontWeight: 500 }}>An active program already exists</div>
-              <p>{duplicateConflict.retryUncertain
-                ? 'The program list changed. Your previous save may have completed. Check the existing appointments before starting another program.'
-                : 'Open a program to edit or extend it. Create a separate program only when this customer needs additional recurring work.'}</p>
-              {duplicateConflict.existingSeries?.map((series) => (
-                <div key={series.id} style={{ padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
-                  <div>{series.serviceType} · {String(series.pattern || 'Recurring').replaceAll('_', ' ')}</div>
-                  <div>Next visit: {series.nextUpcomingDate || 'Not scheduled'}</div>
-                  <div>Recorded address: {series.recordedAddress || 'Not recorded — check the existing appointment'}</div>
-                  <a href={`/admin/dispatch?tab=schedule&date=${encodeURIComponent(series.appointmentDate || series.nextUpcomingDate || apptDate)}&appointment=${encodeURIComponent(series.appointmentId || series.id)}`}
-                    target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, color: D.text, textDecoration: 'underline' }}>Open existing program</a>
-                </div>
-              ))}
-              {duplicateConflict.canCreateSeparateProgram === true && !duplicateConflict.retryUncertain && (
-                <div style={{ marginTop: 12 }}>
-                  <label htmlFor="separate-program-reason">Reason for a separate recurring program</label>
-                  <textarea id="separate-program-reason" value={separateProgramReason} maxLength={500}
-                    onChange={(event) => setSeparateProgramReason(event.target.value)}
-                    placeholder="Describe the additional scope of work"
-                    style={{ display: 'block', boxSizing: 'border-box', width: '100%', margin: '8px 0', padding: 12, fontSize: 14, border: `1px solid ${D.border}`, borderRadius: 6 }} />
-                  <button type="button" disabled={!canSubmit || separateProgramReason.trim().length < 5}
-                    onClick={() => handleSubmit(duplicateConflict)}
-                    style={{ minHeight: 44, padding: '10px 16px', fontSize: 14, borderRadius: 6, background: D.text, color: D.white, border: 'none', opacity: !canSubmit || separateProgramReason.trim().length < 5 ? 0.5 : 1 }}>
-                    Create separate recurring program
-                  </button>
-                </div>
-              )}
-            </section>
-          )}
-          <CallBookingConflictNotice
-            conflict={callBookingConflict}
-            sectionRef={callBookingConflictRef}
-            canSubmit={canSubmit}
-            onBookAnother={async () => {
-              // One submit only: cleared even when handleSubmit returns
-              // before the submit loop reads it (a blocked save), so a
-              // later ordinary save never carries the override.
-              // The override names exactly the visits this box listed: one
-              // that arrives after it was shown is a new conflict.
-              callBookingDuplicateOverrideRef.current = new Map([[
-                callBookingConflict.key,
-                (callBookingConflict.existingVisits || []).map((v) => v.id),
-              ]]);
-              try {
-                await handleSubmit(callBookingConflict.separateProgram || undefined);
-              } finally {
-                callBookingDuplicateOverrideRef.current = new Map();
-              }
-            }}
-          />
-          <SlotConflictNotice
-            // The strip states the route problem itself; the
-            // double-booking notice (no `warning`) always stays.
-            conflicts={stripCoversRouteWarning(availability, { currentDate: apptDate ? String(apptDate).split('T')[0] : null, currentStart: windowStart })
-              ? (slotConflicts || []).filter((conflict) => !conflict.warning)
-              : slotConflicts}
-            style={{ marginBottom: 10 }}
-          />
-          <AvailabilityStrip
-            availability={availability}
-            bestRows
-            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
-            currentStart={windowStart}
-            currentTechnicianId={techMode === 'choose' ? techId : null}
-            onPick={(slot) => {
-              // Same adoption as the hint chips: the hour was scored for
-              // one technician, so taking it books that technician.
-              setApptDate(slot.date);
-              setWindowStart(slot.start);
-              if (slot.technicianId) {
-                setTechMode('choose');
-                setTechId(slot.technicianId);
-                appliedSuggestionRef.current = true;
-              }
-            }}
-            style={{ marginBottom: 10 }}
-          />
-          <HourTechCompare
-            // A partly committed booking is locked to retry or close: the
-            // remaining groups must keep the technician already chosen.
-            rows={partialCommitLocked ? [] : pickedByTech}
-            onPick={(row) => {
-              // The drive was priced on this technician's route: picking
-              // the row books them, as the hint chips do.
-              setTechMode('choose');
-              setTechId(row.technicianId);
-              appliedSuggestionRef.current = true;
-            }}
-            style={{ marginBottom: 10 }}
-          />
-          <BestTimeHint
-            bestTimes={bestTimes}
-            picked={picked}
-            bestInRange={bestInRange}
-            currentStart={windowStart}
-            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
-            currentTechnicianId={techMode === 'choose' ? techId : null}
-            onPick={(slot) => {
-              // Mirror applySlot: the detour was scored for a specific
-              // technician, so picking the chip adopts that tech too —
-              // leaving auto mode would let assignment land elsewhere and
-              // falsify the advertised detour.
-              setWindowStart(slot.start);
-              if (slot.technicianId) {
-                setTechMode('choose');
-                setTechId(slot.technicianId);
-                appliedSuggestionRef.current = true;
-              }
-            }}
-            onPickDate={(slot) => {
-              setApptDate(slot.date);
-              setWindowStart(slot.start);
-              if (slot.technicianId) {
-                setTechMode('choose');
-                setTechId(slot.technicianId);
-                appliedSuggestionRef.current = true;
-              }
-            }}
-            style={{ marginBottom: 10 }}
-          />
-
-          {hasRecurringServices && firstCustomRecurringIndex < 0 && (
-            <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 10, marginTop: 4 }}>
-              {weekendRuleControl()}
-            </div>
-          )}
-        </div>
 
         {/* Section 3b: Technician — its own section below Recurring */}
         <div style={sectionStyle}>
