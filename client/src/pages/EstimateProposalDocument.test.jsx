@@ -67,6 +67,18 @@ const BASE_DATA = {
 };
 
 describe('EstimateProposalDocument', () => {
+  it('shows the tax row with its rate and amount when the proposal carries tax, and none when it does not', () => {
+    const taxed = render(<EstimateProposalDocument data={{
+      ...BASE_DATA, proposal: { ...BASE_DATA.proposal, totals: { ...BASE_DATA.proposal.totals, taxRate: 0.07 } },
+    }} token="tok-123" />).container.textContent;
+    expect(taxed).toContain('Sales tax (7.00%)');
+    expect(taxed).toContain('$33.60');
+    const untaxed = render(<EstimateProposalDocument data={{
+      ...BASE_DATA, proposal: { ...BASE_DATA.proposal, totals: { ...BASE_DATA.proposal.totals, totalTax: 0, hasTax: false, firstYearTotal: 480 } },
+    }} token="tok-123" />).container.textContent;
+    expect(untaxed).not.toContain('Sales tax (');
+  });
+
   it('renders the authored commercial proposal as a document', () => {
     const { container } = render(<EstimateProposalDocument data={BASE_DATA} token="tok-123" />);
     expect(container.querySelector('.estimate-document-v1')).toBeTruthy();

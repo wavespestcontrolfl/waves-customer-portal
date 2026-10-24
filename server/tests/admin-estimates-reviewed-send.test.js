@@ -1596,6 +1596,62 @@ describe('reviewed message parity', () => {
     const payload = email.sendTemplate.mock.calls[0][0].payload;
     expect(preview.body.messages.email.text.split('\n')[0]).toBe(payload.price_summary);
     expect(payload.price_summary).toContain(`first-year total $${firstYearTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+    expect(payload.price_summary).not.toMatch(/tax/);
+  });
+
+  test('a taxed commercial proposal email price line states the tax amount and rate beside the first-year total', async () => {
+    row.estimate_data = { proposal: {
+      enabled: true,
+      taxRate: 0.07,
+      buildings: [{ name: 'Synthetic property', lineItems: [
+        { id: 'synthetic-taxable-line', description: 'Synthetic taxable service', quantity: 1, unitPrice: 100, frequency: 'monthly', taxable: true },
+      ] }],
+    } };
+    const result = await router.sendEstimateNow(structuredClone(row), 'email');
+    expect(result.sent).toBe(true);
+    const { price_summary: priceSummary } = email.sendTemplate.mock.calls[0][0].payload;
+    // 1,200.00 annual x 7% = 84.00 tax; first year 1,284.00
+    expect(priceSummary).toContain('$84.00 tax (7.00%)');
+    expect(priceSummary).toContain('first-year total $1,284.00');
+    expect(priceSummary.indexOf('tax (7.00%)')).toBeLessThan(priceSummary.indexOf('first-year total'));
+  });
+});
+
+describe('GET /:id/proposal suggestedTaxRate', () => {
+  const TaxCalculator = require('../services/tax-calculator');
+  afterEach(() => jest.restoreAllMocks());
+
+  test('returns the canonical county rate for a customer', async () => {
+    row.customer_id = 'synthetic-customer';
+    const calculate = jest.spyOn(TaxCalculator, 'calculateTax')
+      .mockResolvedValue({ rate: 0.07, amount: 0.07, taxable: true, county: 'Manatee' });
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.suggestedTaxRate).toBe(0.07);
+    expect(calculate).toHaveBeenCalledWith('synthetic-customer', 'nonresidential_pest_control', 1, expect.objectContaining({ isCommercial: true }));
+  });
+
+  test('returns 0 for a tax-exempt customer so nothing is filled', async () => {
+    row.customer_id = 'synthetic-exempt-customer';
+    jest.spyOn(TaxCalculator, 'calculateTax')
+      .mockResolvedValue({ rate: 0, amount: 0, taxable: false, county: null, reason: 'Tax exempt — synthetic' });
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.suggestedTaxRate).toBe(0);
+  });
+
+  test('returns the resolver default (FL commercial 7%) with no customer, without a customer lookup', async () => {
+    row.customer_id = null;
+    const calculate = jest.spyOn(TaxCalculator, 'calculateTax');
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.suggestedTaxRate).toBe(require('../services/estimate-converter').FL_COMMERCIAL_TAX_RATE);
+    expect(calculate).not.toHaveBeenCalled();
+  });
+
+  test('does not fail the read when the resolver cannot run', async () => {
+    row.customer_id = 'synthetic-customer';
+    jest.spyOn(require('../services/estimate-converter'), 'resolveCommercialPrepayBaseRate').mockRejectedValue(new Error('synthetic lookup failure'));
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.body.suggestedTaxRate).toBeNull();
+    expect(res.body.proposal).toBeTruthy();
   });
 });
 
