@@ -3726,15 +3726,15 @@ function initScheduledJobs() {
   // modes: unset = off, 'observe' = candidates, exams and decisions only,
   // 'true' = activation and rollback. Off returns before any lock is taken.
   //   - Boot: keep the drafter's snapshot of the active prompt patch fresh.
-  //   - DAILY 6:10AM ET: make a candidate rule from the newest eligible pathology
+  //   - DAILY 6:12AM ET: make a candidate rule from the newest eligible pathology
   //     proposal, then examine it. Exam runs spend real LLM calls, so a candidate
   //     exam starts at most once a week (the interval is in the service).
-  //   - DAILY 6:40AM ET: rollback monitor (database reads only), after the 5:10
+  //   - DAILY 6:42AM ET: rollback monitor (database reads only), after the 5:10
   //     exam sweep has had time to finish.
   // =========================================================================
-  require('./sms-prompt-patch').startPatchRefresh();
+  if (isEnabled('smsPromptAutopromote')) require('./sms-prompt-patch').startPatchRefresh();
 
-  cron.schedule('10 6 * * *', async () => {
+  cron.schedule('12 6 * * *', async () => {
     if (!isEnabled('smsPromptAutopromote')) return;
     logger.info('Running: SMS prompt auto-promote tick');
     try {
@@ -3744,7 +3744,7 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  cron.schedule('40 6 * * *', async () => {
+  cron.schedule('42 6 * * *', async () => {
     if (!isEnabled('smsPromptAutopromote')) return;
     logger.info('Running: SMS prompt rollback monitor');
     try {

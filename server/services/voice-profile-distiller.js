@@ -390,6 +390,38 @@ async function getApprovedVoiceProfile({ dbi = db } = {}) {
   return row || null;
 }
 
+// Durable proof that a profile was once APPROVED: reviewVoiceProfile writes this activity_log row in the SAME transaction
+// as the status flip (both the human click and the auto-distiller pass `audit`). Status 'superseded' alone proves nothing:
+// distillVoiceProfile also stamps an unreviewed pending exception 'superseded' when a newer run replaces it, and that
+// profile never passed approval. Used for GATE_SMS_VOICE_PROFILE_PIN eligibility and for revoking a superseded profile.
+const APPROVAL_EVIDENCE_SQL = `EXISTS (
+  SELECT 1 FROM activity_log al
+   WHERE al.action = 'voice_profile_reviewed'
+     AND al.metadata->>'profile_id' = voice_profiles.id::text
+     AND al.metadata->>'action' = 'approve')`;
+
+/**
+ * A specific profile version, for GATE_SMS_VOICE_PROFILE_PIN (owner 2026-10-24). Only a version that was once APPROVED
+ * counts: the live 'approved' row, or a 'superseded' row with approval evidence in activity_log (a profile becomes
+ * superseded when a newer one is approved, so a pin on last week's profile must keep working after the nightly run
+ * approves a new one; a pending exception that was only ever superseded has no approval row and cannot be pinned).
+ * 'pending' was never reviewed and 'rejected' also covers a REVOKED profile (the operator kill switch), so neither can be
+ * pinned. Same columns as getApprovedVoiceProfile. Errors propagate (the caller decides what an unknowable state means).
+ */
+async function getPinnedVoiceProfile(version, { dbi = db } = {}) {
+  if (!Number.isInteger(version) || version <= 0) return null;
+  const row = await dbi('voice_profiles')
+    .where({ version })
+    .where(function approvedOnce() {
+      this.where({ status: 'approved' })
+        .orWhere(function supersededAfterApproval() {
+          this.where({ status: 'superseded' }).whereRaw(APPROVAL_EVIDENCE_SQL);
+        });
+    })
+    .first('id', 'version', 'profile_text');
+  return row || null;
+}
+
 /**
  * One-click review. approve/reject act on a PENDING profile; revoke acts on
  * the APPROVED one — that's the operator kill switch now that green profiles
@@ -423,7 +455,12 @@ async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db, exp
     const row = await trx('voice_profiles').where({ id }).forUpdate().first('id', 'status', 'version');
     if (!row) return { ok: false, status: 404, error: 'profile not found' };
     const requiredStatus = action === 'revoke' ? 'approved' : 'pending';
-    if (row.status !== requiredStatus) {
+    // GATE_SMS_VOICE_PROFILE_PIN: a pinned profile can be a SUPERSEDED one that the SMS drafter still reads, so the
+    // operator kill switch must reach it. Revoke also accepts a superseded profile with approval evidence (never a
+    // superseded pending exception); it becomes 'rejected', which a pin no longer resolves.
+    const supersededRevoke = action === 'revoke' && row.status === 'superseded'
+      && await trx('voice_profiles').where({ id }).whereRaw(APPROVAL_EVIDENCE_SQL).first('id');
+    if (row.status !== requiredStatus && !supersededRevoke) {
       return { ok: false, status: 409, error: `profile is ${row.status}, not ${requiredStatus}` };
     }
     if (expectedWatermark !== undefined) {
@@ -485,5 +522,6 @@ module.exports = {
   evaluateAutoApproval,
   distillVoiceProfile,
   getApprovedVoiceProfile,
+  getPinnedVoiceProfile,
   reviewVoiceProfile,
 };

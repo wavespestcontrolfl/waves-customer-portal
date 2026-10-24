@@ -9,9 +9,10 @@
  *   - sms_prompt_patches: one row per candidate rule block. The block is immutable after insert
  *     (patch_text + patch_sha); only status and the decision columns move. At most ONE row is
  *     'active' and at most ONE is 'candidate' (partial unique indexes), so the drafter appends
- *     at most one block and the loop works on one candidate at a time. patch_no is the short
- *     number the prompt_version identity carries ('P<base36>' tag): every draft stamped with a
- *     patch is cohort-distinct from every draft without it.
+ *     at most one block and the loop works on one candidate at a time. patch_no is the
+ *     number behind the one-letter tag (patch_no mod 26) the prompt_version identity carries:
+ *     every draft stamped with a patch is cohort-distinct from every draft without it, and from
+ *     the next patch (numbers are consecutive).
  *   - sms_prompt_patch_events: the audit trail. One row per step (created, exam, rejected,
  *     promoted, would_promote, rolled_back). Numbers and codes only: no message text.
  *   - sms_sealed_eval_runs.prompt_patch_id: marks an EXAM-ONLY run that drafted with a candidate
@@ -62,11 +63,12 @@ exports.up = async function up(knex) {
         ADD CONSTRAINT sms_prompt_patches_status_check
         CHECK (status IN ('candidate', 'active', 'retired', 'rejected'))
     `);
-    // The tag is 'P' + base36 in at most two characters (version identities are varchar(40)).
     await knex.raw(`
       ALTER TABLE sms_prompt_patches
-        ADD CONSTRAINT sms_prompt_patches_no_check
-        CHECK (patch_no BETWEEN 1 AND 1295)
+        ADD CONSTRAINT sms_prompt_patches_mode_check
+        CHECK (mode_at_creation IN ('observe', 'true')),
+        ADD CONSTRAINT sms_prompt_patches_rules_check
+        CHECK (jsonb_typeof(rules) = 'array' AND patch_no >= 1)
     `);
     await knex.raw("CREATE UNIQUE INDEX sms_prompt_patches_one_active ON sms_prompt_patches ((true)) WHERE status = 'active'");
     await knex.raw("CREATE UNIQUE INDEX sms_prompt_patches_one_candidate ON sms_prompt_patches ((true)) WHERE status = 'candidate'");

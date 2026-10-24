@@ -99,7 +99,7 @@ describe('buildReportCopyContext lawn assessment grounding', () => {
     expect(contextText).not.toContain('fungus control');
     expect(contextText).not.toContain('thatch');
     // Unchanged categories carry no delta suffix.
-    expect(contextText).toContain('weed suppression 81/100,');
+    expect(contextText).toContain('weed control 81/100,');
     expect(signals.hasLawnAssessment).toBe(true);
   });
 
@@ -141,7 +141,7 @@ describe('buildReportCopyContext lawn assessment grounding', () => {
     });
     expect(contextText).toContain('turf density 72/100');
     expect(contextText).not.toContain('0/100');
-    expect(contextText).not.toContain('weed suppression');
+    expect(contextText).not.toContain('weed control');
     expect(contextText).not.toContain('stress/damage');
   });
 

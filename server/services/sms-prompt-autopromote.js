@@ -502,6 +502,8 @@ async function examCheck({ dbi, patch }) {
   const runs = await dbi({ r: 'sms_sealed_eval_runs' })
     .leftJoin({ b: 'sms_sealed_eval_runs' }, 'b.id', 'r.baseline_run_id')
     .where('r.prompt_version', patch.active_version)
+    // The tag is one letter (patch number mod 26): never read another patch's exam run.
+    .where((q) => q.whereNull('r.prompt_patch_id').orWhere('r.prompt_patch_id', patch.id))
     .where('r.status', 'complete')
     .whereIn('r.provider_leg', LIVE_EXAM_LEGS)
     .select('r.id', 'r.provider_leg', 'r.significance', 'r.unsafe_count', 'r.items_judged', 'b.unsafe_count as base_unsafe', 'b.items_judged as base_judged');

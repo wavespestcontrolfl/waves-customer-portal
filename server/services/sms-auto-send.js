@@ -1326,6 +1326,9 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
       // subquery convention this codebase already uses elsewhere
       // (availability.js's whereNotExists(function linkedVisit() {...})).
       this.where('md.prompt_version', drafter.PROMPT_VERSION)
+        // the bare v11 identity with '+category' tags (the voice-pin 'v' and
+        // edit-learning 'e' tags reach v11 drafts too when real answers is off)
+        .orWhere('md.prompt_version', 'like', `${drafter.PROMPT_VERSION.replace(/[\\%_]/g, '\\$&')}+%`)
         // the whole real-answers family (bare, '_cf', later suffixes, any
         // '+category' tags) — NOT the current REAL_ANSWERS_PROMPT_VERSION,
         // which moves with every suffix bump and would strand rows stamped

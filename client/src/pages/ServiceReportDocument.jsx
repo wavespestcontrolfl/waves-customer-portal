@@ -1014,7 +1014,7 @@ export default function ServiceReportDocument({ data, token }) {
   const LEGACY_LAWN_SCORE_LABELS = [
     ['turfDensity', 'Turf density'],
     ['colorHealth', 'Color & vigor'],
-    ['weedSuppression', 'Weed suppression'],
+    ['weedSuppression', 'Weed control'],
     ['stressDamage', 'Stress / damage'],
     ['fungusControl', 'Fungus control'],
     ['thatchScore', 'Thatch'],

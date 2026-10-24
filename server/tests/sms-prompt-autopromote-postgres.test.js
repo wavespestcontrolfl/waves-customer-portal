@@ -20,7 +20,7 @@ const judge = require('../services/sms-shadow-judge');
 const sealed = require('../services/sms-sealed-eval');
 const auto = require('../services/sms-prompt-autopromote');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
-const patchesMigration = require('../models/migrations/20261024210000_sms_prompt_patches');
+const patchesMigration = require('../models/migrations/20261024220000_sms_prompt_patches');
 const outcomesMigration = require('../models/migrations/20261024130000_sms_reply_outcomes');
 
 jest.setTimeout(60000);
@@ -74,6 +74,8 @@ postgres('SMS prompt auto-promote', () => {
       const [draft] = await trx('message_drafts').insert({ prompt_version: baseVersion(), status: 'shadow', drafter: 'house_voice' }).returning('id');
       const [item] = await trx('sms_sealed_eval_items').insert({
         source_draft_id: draft.id, inbound_message: 'synthetic inbound', facts_block: factsBlock, human_reply_text: 'synthetic human reply',
+        // Before the run's own start: inside one transaction now() has microseconds the JS cutoff loses.
+        sealed_at: new Date(Date.now() - 3600_000),
       }).returning('id');
       ids.push(item.id);
     }
@@ -319,7 +321,7 @@ postgres('SMS prompt auto-promote', () => {
       expect(out).toMatchObject({ promoted: patch.id, patchNo: patch.patch_no });
 
       const row = await rowOf(patch.id);
-      const version = `${baseVersion()}+P${patch.patch_no.toString(36).toUpperCase()}`;
+      const version = `${baseVersion()}+${patchLib.patchTagFor(patch.patch_no)}`;
       expect(row).toMatchObject({ status: 'active', active_version: version, prior_version: baseVersion(), would_promote: true });
       expect(await eventsOf(patch.id)).toEqual(['exam_started', 'would_promote', 'promoted']);
 
@@ -507,7 +509,7 @@ postgres('SMS prompt auto-promote', () => {
       expect(gen.mock.calls.every(([args]) => args.promptPatch.id === patch.id && args.promptPatch.text === patch.patch_text)).toBe(true);
       const run = await trx('sms_sealed_eval_runs').where({ id: exam.runId }).first();
       expect(run).toMatchObject({
-        prompt_version: `${IDENTITY}+P${patch.patch_no.toString(36).toUpperCase()}`, prompt_patch_id: patch.id, baseline_run_id: plain.runId, status: 'complete',
+        prompt_version: `${IDENTITY}+${patchLib.patchTagFor(patch.patch_no)}`, prompt_patch_id: patch.id, baseline_run_id: plain.runId, status: 'complete',
       });
       expect(JSON.parse(JSON.stringify(run.significance))).toMatchObject({ pairedItems: 4 });
       // The live drafter never saw the candidate.

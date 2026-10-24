@@ -27,7 +27,7 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
-const { gateEnvValue, multiTechTextTimesLive } = require('../config/feature-gates');
+const { gateEnvValue, multiTechTextTimesLive, smsVoiceProfilePinVersion, smsEditLearningLive } = require('../config/feature-gates');
 const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
@@ -254,16 +254,35 @@ const PROMPT_VERSION_COLUMN_MAX = 40;
 function realAnswersBaseVersion() {
   return gateEnvValue('GATE_SMS_OFFERS_SCHEDULER') ? NEXT_OF_SERIES_PROMPT_VERSION : REAL_ANSWERS_PROMPT_VERSION;
 }
+// VOICE INPUT TAGS (owner 2026-10-24, GATE_SMS_VOICE_PROFILE_PIN + GATE_SMS_EDIT_LEARNING). Neither gate edits the
+// prompt text or the facts block; each changes WHICH voice text the draft receives, so each is a cohort of its own:
+//   'v' = a voice profile pin is set (the drafter reads that profile version, not the newest approved one),
+//   'e' = edit learning is on (the few-shot exemplars rank edited-suggestion and human_better replies first).
+// They join the single-character '+' tag set the four hand-off categories already use (b c l m), sorted with them, so
+// the flip order never changes the identity: real-answers base (32 chars) + '+' + up to six tags = 39, under
+// PROMPT_VERSION_COLUMN_MAX (40), pinned by a test. The tag follows the INPUT, not just the env var: 'v' needs the
+// voice-profile kill switch on (SHADOW_VOICE_PROFILE) and 'e' needs the exemplars to reach the prompt (SHADOW_FEWSHOT and
+// SHADOW_DRAFT_VERIFY on). Both apply to the bare v11 identity too (a draft that used the old prompt still got the pinned
+// profile or the ranked exemplars). sms-sealed-eval's fact-marker contract reads only the category tags it knows, so 'v'
+// and 'e' add no fact marker: the facts block is unchanged. The tag says the gate was set, not that the pinned version
+// resolved; the version actually used is always in intended_actions.voice_profile_version.
+function voiceInputTags() {
+  const tags = [];
+  if (smsVoiceProfilePinVersion() !== null && VOICE_PROFILE_ENABLED) tags.push('v');
+  if (smsEditLearningLive() && FEWSHOT_ENABLED && VERIFY_ENABLED) tags.push('e');
+  return tags;
+}
+function withVoiceInputTags(base, categoryTags = []) {
+  const tags = [...categoryTags, ...voiceInputTags()].sort();
+  return tags.length ? `${base}+${tags.join('')}` : base;
+}
 function currentPromptVersionBase() {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return PROMPT_VERSION;
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return withVoiceInputTags(PROMPT_VERSION);
   const activeCategoryTags = REAL_ANSWERS_HANDOFF_CATEGORIES
     .filter((c) => gateEnvValue(c.gate))
-    .map((c) => c.tag)
-    .sort();
+    .map((c) => c.tag);
   const base = realAnswersBaseVersion();
-  const version = activeCategoryTags.length
-    ? `${base}+${activeCategoryTags.join('')}`
-    : base;
+  const version = withVoiceInputTags(base, activeCategoryTags);
   if (version.length > PROMPT_VERSION_COLUMN_MAX) {
     // Fail closed to the bare identity rather than risk a DB write erroring
     // out mid-draft — a truncated-to-the-wrong-thing label is a smaller
@@ -285,8 +304,9 @@ function currentPromptVersionBase() {
  */
 function currentPromptVersion() {
   const base = currentPromptVersionBase();
-  if (base === PROMPT_VERSION) return base;
-  return promptPatch.resolvePromptPatch({ realAnswersOn: true, baseVersion: base }).version || base;
+  // The learned-rules block only exists in the real-answers prompt (the v11 prompt never gets one).
+  const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  return promptPatch.resolvePromptPatch({ realAnswersOn, baseVersion: base }).version || base;
 }
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
@@ -4418,8 +4438,28 @@ const VOICE_PROFILE_ENABLED = process.env.SHADOW_VOICE_PROFILE !== 'false';
  */
 async function resolveEffectiveVoiceProfile({ dbi = db } = {}) {
   if (!VOICE_PROFILE_ENABLED) return null;
-  const { getApprovedVoiceProfile } = require('./voice-profile-distiller');
+  const { getApprovedVoiceProfile, getPinnedVoiceProfile } = require('./voice-profile-distiller');
+  // GATE_SMS_VOICE_PROFILE_PIN (owner 2026-10-24): the pinned version stands in for the newest approved one, here, so
+  // the drafter, graduation's readiness pin, the sealed-exam run pin and auto-send's staleness check all read the SAME
+  // profile. The distiller keeps approving nightly; only this reader is pinned. A pin that does not resolve to a
+  // once-approved profile falls back to today's behavior (newest approved) and logs once per distinct problem.
+  const pin = smsVoiceProfilePinVersion();
+  if (pin !== null) {
+    const pinned = await getPinnedVoiceProfile(pin, { dbi });
+    if (pinned) return pinned;
+    warnPinFallbackOnce(`missing:${pin}`, `voice profile pin v${pin} is not an approved profile version; using the newest approved profile`);
+  } else if (String(process.env.GATE_SMS_VOICE_PROFILE_PIN || '').trim()) {
+    warnPinFallbackOnce('invalid', 'GATE_SMS_VOICE_PROFILE_PIN is not a whole version number; no pin applied');
+  }
   return getApprovedVoiceProfile({ dbi });
+}
+
+// One warning per distinct pin problem per process, so a bad pin does not log on every draft. No customer data.
+const pinFallbackWarned = new Set();
+function warnPinFallbackOnce(key, message) {
+  if (pinFallbackWarned.has(key)) return;
+  pinFallbackWarned.add(key);
+  logger.warn(`[sms-shadow] ${message}`);
 }
 
 /**
@@ -5390,7 +5430,28 @@ ${lines}`;
  * Fail-safe: any error (or the kill switch, or no intent) → [] so drafting is
  * never blocked on the corpus.
  */
-async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false } = {}) {
+// GATE_SMS_EDIT_LEARNING exemplar ranking (owner 2026-10-24). All three facts are read at FETCH time from the live
+// tables, never stamped on the corpus row at mine time: the corpus is insert-ignore (a row never changes after it is
+// mined), a judgment lands days after the reply, and rows mined before the gate went on would otherwise never rank.
+//   the reply's send resolved a suggestion decision: sms_log.metadata.agent_decision_id -> agent_decisions.id (the link
+//     both send paths stamp; the nightly judge and the corrections view join the same way). The uuid cast sits behind a
+//     shape check so one malformed metadata value cannot fail the query.
+//   edited   = that decision's human_verdict is 'corrected', or the send is a legacy 'ai_revised' draft-queue send.
+//   verbatim = human_verdict 'accepted': staff sent the suggestion unchanged, so the text is the drafter's own.
+//   judged   = shadow_draft_judgments.human_reply_sms_id = the corpus row's source_id (both sms_log ids) with verdict
+//     'human_better': the judge scored the human's reply above the draft for the same inbound.
+const LINKED_DECISION_VERDICT_SQL = (verdict) => `EXISTS (
+  SELECT 1 FROM sms_log sl JOIN agent_decisions ad
+    ON ad.id = CASE WHEN sl.metadata->>'agent_decision_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    THEN (sl.metadata->>'agent_decision_id')::uuid END
+   WHERE sl.id = voice_corpus_examples.source_id AND ad.human_verdict = '${verdict}')`;
+const EDITED_SUGGESTION_SQL = `(${LINKED_DECISION_VERDICT_SQL('corrected')}
+  OR EXISTS (SELECT 1 FROM sms_log sl WHERE sl.id = voice_corpus_examples.source_id AND sl.message_type = 'ai_revised'))`;
+const JUDGED_HUMAN_BETTER_SQL = `EXISTS (SELECT 1 FROM shadow_draft_judgments j
+   WHERE j.human_reply_sms_id = voice_corpus_examples.source_id AND j.verdict = 'human_better')`;
+const OUTCOME_RANK_SQL = `CASE WHEN ${EDITED_SUGGESTION_SQL} OR ${JUDGED_HUMAN_BETTER_SQL} THEN 0 ELSE 1 END`;
+
+async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false, outcomeRanked = false } = {}) {
   if (!FEWSHOT_ENABLED || !intent || limit <= 0) return [];
   try {
     const query = dbi('voice_corpus_examples')
@@ -5406,10 +5467,17 @@ async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, ex
       // backfill, and exam paths share this fetch), not just during runs:
       // "sealed" means never trained on, not merely not trained on today.
       // (source_id for sms_human_reply rows IS the reply's sms_log id.)
-      .whereNotIn('source_id', dbi('sms_sealed_eval_items').select('human_reply_sms_id').whereNotNull('human_reply_sms_id'))
-      .orderBy('occurred_at', 'desc')
-      .limit(limit)
-      .select('inbound_text', 'reply_text');
+      .whereNotIn('source_id', dbi('sms_sealed_eval_items').select('human_reply_sms_id').whereNotNull('human_reply_sms_id'));
+    if (outcomeRanked) {
+      // Edit learning: never teach the drafter its own text (a suggestion sent unchanged), then edited-suggestion and
+      // human_better replies first, newest within each tier. Off, the query below is the original newest-first one.
+      query
+        .whereRaw(`NOT ${LINKED_DECISION_VERDICT_SQL('accepted')}`)
+        .orderByRaw(`${OUTCOME_RANK_SQL} ASC, occurred_at DESC`);
+    } else {
+      query.orderBy('occurred_at', 'desc');
+    }
+    query.limit(limit).select('inbound_text', 'reply_text');
     if (excludeCustomerIds.length) query.whereNotIn('customer_id', excludeCustomerIds);
     return await query;
   } catch (err) {
@@ -5761,7 +5829,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // consumer (graduation cohorts, sealed-eval exam checks) shares.
   // promptPatchVersion comes from the SAME patch read that built `system`, so the stamp always
   // matches the prompt even if the active-patch snapshot refreshes mid-draft.
-  const promptVersion = realAnswersApplied ? (promptPatchVersion || currentPromptVersionBase()) : PROMPT_VERSION;
+  const promptVersion = realAnswersApplied ? (promptPatchVersion || currentPromptVersionBase()) : withVoiceInputTags(PROMPT_VERSION);
   // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
   // saw the day of the original message — building from a live context here
   // would grade the draft against today's schedule/balance (the exact drift
@@ -5906,7 +5974,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // Gratitude has fixed server-approved copy. Mutable corpus examples add no
   // value here and would change the examined prompt without a version change.
   const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
-    ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
+    ? await fetchVoiceExemplars({ intent: intent?.intent, outcomeRanked: smsEditLearningLive() }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
   const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, reserviceLaneDecides && reserviceMixedRequest({ inboundMessage, context, coveredLanes: reserviceStateCoveredLanes(reserviceState) }) ? RESERVICE_MIXED_REQUEST_HINT : '');
 

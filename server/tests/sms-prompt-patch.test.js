@@ -35,37 +35,47 @@ describe('mode reader', () => {
 });
 
 describe('version identity', () => {
-  test('the tag rides at the end of the tags part and splits back out', () => {
-    expect(patch.patchTagFor(3)).toBe('P3');
-    expect(patch.patchTagFor(35)).toBe('PZ');
+  const REAL = 'house_voice_v12_real_answers26_n';
+  // The longest identity in use without a patch: next-of-series base (32) + '+' + six one-character
+  // tags (four hand-off categories b c l m, voice pin v, edit learning e) = 39 characters.
+  const LONGEST = `${REAL}+bcelmv`;
+
+  test('one uppercase letter rides at the end of the tags part and splits back out', () => {
+    expect(patch.patchTagFor(1)).toBe('A');
+    expect(patch.patchTagFor(3)).toBe('C');
+    expect(patch.patchTagFor(26)).toBe('Z');
+    expect(patch.patchTagFor(27)).toBe('A');
     expect(patch.patchTagFor(0)).toBe('');
-    expect(patch.patchTagFor(1296)).toBe('');
-    expect(patch.stampPatchVersion('house_voice_v12_real_answers26_n', 3)).toBe('house_voice_v12_real_answers26_n+P3');
-    expect(patch.stampPatchVersion('house_voice_v12_real_answers26_n+bc', 3)).toBe('house_voice_v12_real_answers26_n+bcP3');
-    expect(patch.splitPromptVersion('house_voice_v12_real_answers26_n+bcP3')).toEqual({ base: 'house_voice_v12_real_answers26_n', tags: 'bc', patchTag: 'P3' });
-    expect(patch.splitPromptVersion('house_voice_v12_real_answers26_n+bc')).toEqual({ base: 'house_voice_v12_real_answers26_n', tags: 'bc', patchTag: '' });
+    expect(patch.patchTagFor(1.5)).toBe('');
+    expect(patch.stampPatchVersion(REAL, 3)).toBe(`${REAL}+C`);
+    expect(patch.stampPatchVersion(`${REAL}+bc`, 3)).toBe(`${REAL}+bcC`);
+    expect(patch.stampPatchVersion('house_voice_v11+v', 2)).toBe('house_voice_v11+vB');
+    expect(patch.splitPromptVersion(`${REAL}+bcC`)).toEqual({ base: REAL, tags: 'bc', patchTag: 'C' });
+    expect(patch.splitPromptVersion(`${REAL}+bc`)).toEqual({ base: REAL, tags: 'bc', patchTag: '' });
     expect(patch.splitPromptVersion('house_voice_v11')).toEqual({ base: 'house_voice_v11', tags: '', patchTag: '' });
   });
 
+  test('the longest combination (all category tags + voice pin + edit learning) plus a patch tag is exactly 40', () => {
+    expect(LONGEST).toHaveLength(39);
+    const stamped = patch.stampPatchVersion(LONGEST, 26);
+    expect(stamped).toBe(`${LONGEST}Z`);
+    expect(stamped).toHaveLength(patch.VERSION_COLUMN_MAX);
+    expect(patch.splitPromptVersion(stamped)).toEqual({ base: REAL, tags: 'bcelmv', patchTag: 'Z' });
+  });
+
   test('a tagged identity that would pass 40 characters is refused, never truncated', () => {
-    // The longest identity in use (all four category tags, the next-of-series base) is 37
-    // characters; the longest tag is 3, so the worst case lands exactly on the 40 limit.
-    const longest = 'house_voice_v12_real_answers26_n+bcml';
-    expect(longest).toHaveLength(37);
-    expect(patch.stampPatchVersion(longest, 35)).toBe(`${longest}PZ`);
-    expect(patch.stampPatchVersion(longest, 1295)).toBe(`${longest}PZZ`);
-    expect(patch.stampPatchVersion(longest, 1295)).toHaveLength(40);
-    expect(patch.stampPatchVersion(`${longest}xxxx`, 5)).toBeNull();
+    expect(patch.stampPatchVersion(`${LONGEST}x`, 5)).toBeNull();
+    expect(patch.stampPatchVersion(LONGEST, 0)).toBeNull();
   });
 
   test('a patch tag never changes the fact contract the sealed exam requires', () => {
-    for (const version of ['house_voice_v12_real_answers26_n', 'house_voice_v12_real_answers26_n+c', 'house_voice_v12_real_answers26_n+bcml']) {
-      const tagged = patch.stampPatchVersion(version, 12);
+    for (const version of [REAL, `${REAL}+c`, `${REAL}+bcml`, LONGEST]) {
+      const tagged = patch.stampPatchVersion(version, 3);
       expect(sealed.requiredFactMarkers(tagged)).toEqual(sealed.requiredFactMarkers(version));
       expect(sealed.forbiddenFactMarkers(tagged)).toEqual(sealed.forbiddenFactMarkers(version));
     }
-    // Base36 tag 'C' (12) must not read as the lowercase complaints tag 'c'.
-    expect(sealed.requiredFactMarkers('house_voice_v12_real_answers26_n+PC')).toEqual(sealed.requiredFactMarkers('house_voice_v12_real_answers26_n'));
+    // The uppercase 'C' (patch 3) must not read as the lowercase complaints tag 'c'.
+    expect(sealed.requiredFactMarkers(`${REAL}+C`)).toEqual(sealed.requiredFactMarkers(REAL));
   });
 });
 
@@ -129,22 +139,38 @@ describe('the drafter prompt and its identity', () => {
     const plain = drafter.buildSystemPromptWithProfile('').system;
     patch.setActivePatchSnapshot(snapshot(3));
     const patched = drafter.buildSystemPromptWithProfile('');
-    expect(patched.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+P3`);
+    expect(patched.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+C`);
     expect(patched.system).toContain(block().text);
     expect(patched.system.indexOf('LEARNED REPLY RULES')).toBeLessThan(patched.system.indexOf('Respond with ONLY a JSON object'));
     // Removing the block gives back exactly the plain prompt.
     expect(patched.system.replace(block().text, '')).toBe(plain);
     expect(drafter.currentPromptVersion()).toBe(patched.promptPatchVersion);
-    expect(drafter.currentPromptVersionBase()).not.toContain('P3');
+    expect(drafter.currentPromptVersionBase()).not.toMatch(/[A-Z]$/);
   });
 
   test('the tag joins the category tags and the voice profile still composes after the block', () => {
     setEnv('GATE_SMS_AGENT_COMPLAINTS', 'true');
     patch.setActivePatchSnapshot(snapshot(7));
-    expect(drafter.currentPromptVersion()).toMatch(/\+cP7$/);
+    expect(drafter.currentPromptVersion()).toMatch(/\+cG$/);
     const withProfile = drafter.buildSystemPromptWithProfile('Warm and brief.');
     expect(withProfile.applied).toBe(true);
     expect(withProfile.system).toContain(block().text);
+  });
+
+  test('longest live combination (next-of-series base, four categories, voice pin, edit learning) plus a patch fits 40 and is applied', () => {
+    setEnv('GATE_SMS_OFFERS_SCHEDULER', 'true');
+    for (const name of ['GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_EDIT_LEARNING']) setEnv(name, 'true');
+    setEnv('GATE_SMS_VOICE_PROFILE_PIN', '4');
+    const base = drafter.currentPromptVersionBase();
+    expect(base).toBe('house_voice_v12_real_answers26_n+bcelmv');
+    expect(base).toHaveLength(39);
+    patch.setActivePatchSnapshot(snapshot(3));
+    const live = drafter.currentPromptVersion();
+    expect(live).toBe(`${base}C`);
+    expect(live.length).toBeLessThanOrEqual(patch.VERSION_COLUMN_MAX);
+    const built = drafter.buildSystemPromptWithProfile('');
+    expect(built.promptPatchVersion).toBe(live);
+    expect(built.system).toContain(block().text);
   });
 
   test.each([['observe'], [undefined], ['false']])('mode %s: an active row is not applied (prompt and version unchanged)', (mode) => {
@@ -168,7 +194,7 @@ describe('the drafter prompt and its identity', () => {
     setEnv('GATE_SMS_PROMPT_AUTOPROMOTE', 'observe');
     const exam = drafter.buildSystemPromptWithProfile('', { promptPatch: snapshot(9) });
     expect(exam.system).toContain(block().text);
-    expect(exam.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+P9`);
+    expect(exam.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+I`);
     expect(drafter.currentPromptVersion()).toBe(drafter.currentPromptVersionBase());
     // null means "no patch at all", even over a live one.
     setEnv('GATE_SMS_PROMPT_AUTOPROMOTE', 'true');

@@ -4,7 +4,7 @@
 //
 //   1. no active ingredient / catalog name in a sentence (category words instead)
 //   2. the seasonal color line rule (cool month AND score did not rise)
-//   3. "Weed Pressure" -> "Weed Cleanliness"
+//   3. weed card label (now "Weed control" with the gate off too, owner 2026-10-24)
 //   4. the pest re-service footer wording (payload flag; client tests cover the render)
 //   5. stale Water Gap / Mowing Height charts
 //   6. the water target source line
@@ -326,18 +326,18 @@ describe('fix 2: the seasonal color line rule', () => {
   });
 });
 
-describe('fix 3: Weed Cleanliness', () => {
+describe('fix 3: Weed control', () => {
   const cardOf = (v2) => v2.diagnosis.find((c) => c.key === 'weed_pressure');
 
-  test('gate off keeps Weed Pressure; gate on is Weed Cleanliness with the same status words and explanation at every level', () => {
+  test('the weed card is named Weed control with the gate off and on, with the same status words and explanation at every level', () => {
     for (const weedSuppression of [95, 75, 60, 30, null]) {
       const a = baseAssessment({ scores: { turfDensity: 80, weedSuppression, colorHealth: 80, stressDamage: 80, fungusControl: 90, overallScore: 80, season: 'peak' } });
       gateOff();
       const off = cardOf(buildLawnReportV2({ lawnAssessment: a }));
       gateOn();
       const on = cardOf(buildLawnReportV2({ lawnAssessment: a }));
-      expect(off.label).toBe('Weed Pressure');
-      expect(on.label).toBe('Weed Cleanliness');
+      expect(off.label).toBe('Weed control');
+      expect(on.label).toBe('Weed control');
       const { label: _l1, ...restOff } = off;
       const { label: _l2, ...restOn } = on;
       expect(restOn).toEqual(restOff);

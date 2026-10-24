@@ -40,6 +40,7 @@ const {
 const { buildPublicLawnReport } = require('./public-lawn-diagnostic');
 const { isEnabled } = require('../config/feature-gates');
 const { verifyTurnstileToken } = require('../utils/turnstile');
+const { consumeSharedDailyCap, DAILY_LIMIT_MESSAGE, PHOTO_ASSESSMENT_CAP } = require('../middleware/public-llm-shared-cap');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { setPublicPrivacyHeaders, sanitizePricingSnapshot } = require('../utils/public-report-egress');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
@@ -200,6 +201,11 @@ router.post('/analyze', analyzeLimiter, async (req, res, next) => {
     // Prospect free-text goes to the ADMIN view only — never into the model
     // context (prompt-injection surface) and never into customer-facing copy.
     const prospectNote = cleanString(body.note, 500);
+
+    // Shared daily paid-LLM ceiling (GATE_PUBLIC_LLM_SHARED_CAP): counted here,
+    // after every rejection above, once per request, right before the paid call.
+    const sharedCap = await consumeSharedDailyCap(PHOTO_ASSESSMENT_CAP);
+    if (!sharedCap.allowed) return res.status(429).json(DAILY_LIMIT_MESSAGE);
 
     const season = lawnAssessment.getSeason(etParts(new Date()).month);
     const { findings, findingsSource, fallbackReason, provenance } = await runFindingsLadder({

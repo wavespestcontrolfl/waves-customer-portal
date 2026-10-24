@@ -10,11 +10,14 @@
  * Design rules that live here:
  *  - No active patch (or the gate not 'true') means the drafter prompt and its version identity
  *    are byte-identical to today. The block is '' and the tag is ''.
- *  - Whatever changes what a live draft receives changes its prompt_version: the tag 'P<n>'
- *    (n in base36, one or two characters) rides at the end of the tags part of the identity,
- *    for example 'house_voice_v12_real_answers26_n+bcP3'. Uppercase P cannot collide with the
- *    lowercase category tags. If the tagged identity would pass the varchar(40) columns, the
- *    patch is NOT applied at all (prompt and identity stay in step).
+ *  - Whatever changes what a live draft receives changes its prompt_version: one
+ *    UPPERCASE letter (patch number mod 26) rides at the end of the tags part of the identity,
+ *    for example 'house_voice_v12_real_answers26_n+bcA'. Every other tag (category b c l m,
+ *    voice input v e) is lowercase, so the letter cannot collide with them. ONE character is
+ *    deliberate: the longest identity without a patch is 39 characters (32-character
+ *    real-answers base + '+' + six tags), so one more character is exactly the varchar(40)
+ *    limit. If a tagged identity would still pass 40, the patch is NOT applied at all (prompt
+ *    and identity stay in step).
  *  - The drafter reads the snapshot once per draft and stamps the version from that same read.
  *  - The block is model-written text, so it is sanitized, capped and screened by deterministic
  *    guards (owner rules: no prices or discounts, no promised visits or refunds, nothing that
@@ -28,8 +31,8 @@ const { smsPromptAutopromoteMode } = require('../config/feature-gates');
 
 const GATE_ENV = 'GATE_SMS_PROMPT_AUTOPROMOTE';
 const VERSION_COLUMN_MAX = 40;
-const PATCH_NO_MAX = 1295; // 'ZZ' in base36: the longest tag is 'P' + two characters
-const PATCH_TAG_RE = /P[0-9A-Z]{1,2}$/;
+const PATCH_TAG_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const PATCH_TAG_RE = /[A-Z]$/;
 
 const MAX_RULE_CHARS = 300;
 const MAX_RULES = 5;
@@ -45,13 +48,13 @@ const promptAutopromoteMode = smsPromptAutopromoteMode;
 
 function patchTagFor(patchNo) {
   const n = Number(patchNo);
-  if (!Number.isInteger(n) || n < 1 || n > PATCH_NO_MAX) return '';
-  return `P${n.toString(36).toUpperCase()}`;
+  if (!Number.isInteger(n) || n < 1) return '';
+  return PATCH_TAG_LETTERS[(n - 1) % PATCH_TAG_LETTERS.length];
 }
 
 /**
  * Split a prompt identity into its base ('house_voice_v12_real_answers26_n'), the lowercase
- * category tags ('bc') and the patch tag ('P3' or ''). Pure; tolerates every identity in use.
+ * tags ('bc') and the patch tag ('A' or ''). Pure; tolerates every identity in use.
  */
 function splitPromptVersion(promptVersion) {
   const text = String(promptVersion || '');
@@ -208,7 +211,6 @@ function resolvePromptPatch({ realAnswersOn, options, baseVersion }) {
 module.exports = {
   GATE_ENV,
   VERSION_COLUMN_MAX,
-  PATCH_NO_MAX,
   MAX_RULE_CHARS,
   MAX_RULES,
   MAX_BLOCK_CHARS,
