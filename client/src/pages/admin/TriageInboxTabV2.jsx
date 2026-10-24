@@ -348,27 +348,34 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
 // family_account_candidates (suggest-only): who called, who they named, and each live account with that
 // name. The "Open customer" links reuse the customer_ids shape (the server resolves a merged-away
 // candidate to its survivor in openCustomerIds). Staff confirm, then link the call with the relink action.
-export function FamilyEvidence({ payload, openCustomerIds = null }) {
+// Roles the Attach action may file (server list: ATTACH_ROLES in call-family-name-link.js).
+const ATTACH_ROLE_OPTIONS = [
+  ["family_member", "Family member"], ["spouse_partner", "Spouse or partner"], ["tenant", "Tenant"], ["landlord", "Landlord"],
+  ["home_buyer", "Home buyer"], ["home_seller", "Home seller"], ["property_manager", "Property manager"],
+  ["real_estate_agent", "Real estate agent"], ["other", "Other"],
+];
+
+export function FamilyEvidence({ payload, openCustomerIds = null, canAttach = false, canNewCustomer = false, busy = false, onAttach, onNewCustomer }) {
   const p = parsePayload(payload);
+  const [role, setRole] = useState(null);
   if (!p) return null;
-  const ids = [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds : Array.isArray(p.customer_ids) ? p.customer_ids : [])
-    .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))];
+  const ids = [...new Set((openCustomerIds || p.customer_ids || []).map(String).filter((id) => UUID_PATTERN.test(id)))];
+  const candidates = p.holder_candidates || [];
+  const chosenRole = role || p.caller_role || "other";
   const rows = [
-    p.caller_name && { label: "Caller", value: [p.caller_name, p.caller_phone && `calling from ${p.caller_phone}`, p.caller_callback_phone && `callback ${p.caller_callback_phone}`].filter(Boolean).join(" · ") },
-    p.account_holder_name && { label: "Named", value: p.account_holder_name },
-    ...(Array.isArray(p.holder_candidates) ? p.holder_candidates : []).map((c, i) => ({
-      label: i === 0 ? "Account" : `Account (${i + 1})`,
-      value: [c.name, c.city, c.matched_phone ? `has the number ${c.matched_phone}` : null, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
-    })),
-    p.more_accounts === true && { label: "More", value: "more accounts share this name — search by name" },
-    p.reason && { label: "Next", value: p.reason },
-  ].filter(Boolean);
+    ["Caller", p.caller_name && [p.caller_name, p.caller_phone && `calling from ${p.caller_phone}`, p.caller_callback_phone && `callback ${p.caller_callback_phone}`]],
+    ["Named", [p.account_holder_name]],
+    ...candidates.map((c, i) => [i ? `Account (${i + 1})` : "Account", [c.name, c.city, c.matched_phone && `has the number ${c.matched_phone}`, c.address_matches === true && "address matches"]]),
+    ["More", [p.more_accounts === true && "more accounts share this name — search by name"]],
+    ["Next", [p.reason]],
+  ].map(([label, parts]) => [label, [].concat(parts || []).filter(Boolean).join(" · ")]).filter(([, value]) => value);
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
       <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before linking</div>
-      {rows.map((r) => (
-        <div key={`${r.label}-${r.value}`} className="text-14 text-ink-secondary">
-          <span className="text-ink-tertiary">{r.label}:</span> {r.value}
+      {p.question && <div className="text-14 font-medium text-zinc-900 mb-1">{p.question}</div>}
+      {rows.map(([label, value]) => (
+        <div key={`${label}-${value}`} className="text-14 text-ink-secondary">
+          <span className="text-ink-tertiary">{label}:</span> {value}
         </div>
       ))}
       {ids.map((id, i) => (
@@ -376,6 +383,30 @@ export function FamilyEvidence({ payload, openCustomerIds = null }) {
           {ids.length > 1 ? `Open customer ${i + 1}` : "Open customer"}
         </a>
       ))}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {canAttach && (
+          <label className="flex items-center gap-1.5 text-13 text-ink-secondary">
+            Role
+            <select value={chosenRole} onChange={(e) => setRole(e.target.value)} className="h-8 px-2 rounded-md border-hairline text-13 bg-white">
+              {ATTACH_ROLE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </label>
+        )}
+        {canAttach && candidates.map((c) => (
+          <Button key={c.id} size="sm" variant="primary" disabled={busy}
+            title="Adds the caller to this customer's contacts and links the call. Nothing is sent to them."
+            onClick={() => onAttach(c.id, chosenRole)}>
+            {candidates.length > 1 ? `Attach as contact to ${c.name}` : "Attach as contact"}
+          </Button>
+        ))}
+        {canNewCustomer && (
+          <Button size="sm" variant="secondary" disabled={busy}
+            title="Closes this card and reprocesses the call, which creates the customer record."
+            onClick={onNewCustomer}>
+            New customer
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1052,6 +1083,37 @@ export default function TriageInboxTabV2({ isAdmin }) {
       });
   };
 
+  // GATE_CALL_ADDRESS_FAMILY_CARD card actions. Attach files the caller in the account's first free contact slot and
+  // links the call; New customer closes the card and reprocesses the call. Both are version-bound like the other
+  // card actions: a card refreshed since it was displayed is a 409.
+  const familyCardAction = (item, path, body, failText) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/${path}`, {
+      method: "POST",
+      body: JSON.stringify({ ...body, expected_updated_at: item.updated_at }),
+    })
+      .then((res) => {
+        setActioning(null);
+        load(mode, status);
+        // New customer closes the card first, then reprocesses the call: say so when the reprocess did not run, or
+        // nobody knows the customer was not created.
+        if (res?.reprocess && !res.reprocess.customer_created) {
+          setError("The card is closed, but no customer was created: the call was not reprocessed, or the pass found nothing to create one from. Reprocess the call from its recording, or add the customer by hand.");
+        }
+      })
+      .catch((err) => {
+        setActioning(null);
+        if (err?.status === 409 || err?.status === 400) {
+          load(mode, status);
+          setError(err.message || "This card changed since it loaded — review it and try again.");
+          return;
+        }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : failText);
+      });
+  };
+  const attachContact = (item, customerId, role) => familyCardAction(item, "attach-contact", { customer_id: customerId, role }, "Attach failed — try again.");
+  const newCustomerFromCard = (item) => familyCardAction(item, "new-customer", {}, "New customer failed — try again.");
+
   const openDeny = (item, kind) => { setDenyFields([]); setDenyFor({ item, kind }); };
   const toggleDenyField = (key) =>
     setDenyFields((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -1400,7 +1462,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, busy: actioning === busyKey, onSave: () => saveContactNote(item) })}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, canAttach: item.can_attach_contact === true, canNewCustomer: item.can_new_customer === true, busy: actioning === busyKey, onSave: () => saveContactNote(item), onAttach: (customerId, role) => attachContact(item, customerId, role), onNewCustomer: () => newCustomerFromCard(item) })}
                     {isTriage && <ClosedNoTextAction item={item} onLineCanText={() => setLineCanTextFor(item)} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (

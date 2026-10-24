@@ -44,6 +44,7 @@
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_SETUP_FEE_SETTLED_ANYWHERE=true (owner 2026-10-24 setup-fee alert audit: the "setup fee never invoiced, bill BOTH" admin alert, the completion hold it starts and the alert reconcile also treat the setup fee as settled when the customer's own invoices show it paid, waived or prepaid even though no invoice cites the accepted estimate: a paid line named setup fee or WaveGuard Membership for at least the frozen fee, a live $0 or waived setup-fee line, or a covered non-termite annual-prepay term or paid annual-prepay invoice. Settled = no alert, no hold, the normal visit invoice is made, and a standing alert is closed instead of reopened when the visit is billed. Read at call time via setupFeeSettledAnywhereLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
+ *   GATE_CALL_ADDRESS_FAMILY_CARD=true (owner 2026-10-24 "yes build": a caller on a number no account carries who states a service address a live customer already has no longer gets a new customer record. The call files ONE suggest-only office card, "<caller> called about <customer>'s home. Add as a contact?", with two actions: Attach as contact (the caller's name, number and role go into the first free service-contact slot of that customer and the call is relinked to it) and New customer (the card is closed and the call is reprocessed, which creates the record the old way). While the gate is on, any family-account card basis also keeps the pass from creating a customer for the call. Read at call time via callAddressFamilyCardLive(), strict 'true', dark by default; off = byte-identical to before. Sends no message and starts no opt-in.)
  *   GATE_NEIGHBORHOOD_NAMING=true (the neighborhood sweep names every live home's community: it looks up homes never checked, names Sarasota homes from the plat number on the county's plat layer, and for a home the county cannot name uses the community the customer said on a call, linked as unconfirmed and kept out of the shared directory (no code filed from it, no entries read for its visits, no shared visitor pass) until the county or the office confirms it; read at call time via neighborhoodNamingLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_ACCESS is live; off = the sweep is byte-identical to before. No message, no bell.)
  *   GATE_NEIGHBORHOOD_ADDRESS_LOOKUP=true (when a home's stored pin sits on another lot, the neighborhood naming asks the county roll for the home's own address and links it only when the lots at that house number, full street and ZIP all name one community; also reads a '#201' unit tail as a unit; read at call time via neighborhoodAddressLookupLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_NAMING is live; off = the pin-only match as before. No message, no bell.)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
@@ -5274,6 +5275,14 @@ function setupFeeSettledAnywhereLive() {
   return process.env.GATE_SETUP_FEE_SETTLED_ANYWHERE === 'true';
 }
 
+// GATE_CALL_ADDRESS_FAMILY_CARD read at CALL time — strict `=== 'true'`; unset = kill.
+// call-family-name-link.js matchStatedAddressAccounts (the stated_address_on_account basis),
+// the processor's no-mint hold on a filed family card, and the card's two actions
+// (routes/admin-triage.js attach-contact / new-customer) all read it here.
+function callAddressFamilyCardLive() {
+  return process.env.GATE_CALL_ADDRESS_FAMILY_CARD === 'true';
+}
+
 // A technician's add / mark-wrong on a visit's neighborhood gate codes
 // (routes/admin-neighborhood-access.js). Needs the directory itself live.
 function neighborhoodTechActionsLive() {
@@ -7746,3 +7755,5 @@ module.exports.smsFollowupWitnessFixLive = smsFollowupWitnessFixLive;
 module.exports.setupFeeSettledAnywhereLive = setupFeeSettledAnywhereLive;
 // GATE_SATELLITE_PALM_COUNT_TYPED reader, on its own line so gate PRs never conflict.
 module.exports.satellitePalmCountTypedLive = satellitePalmCountTypedLive;
+// GATE_CALL_ADDRESS_FAMILY_CARD reader, on its own line so gate PRs never conflict.
+module.exports.callAddressFamilyCardLive = callAddressFamilyCardLive;
