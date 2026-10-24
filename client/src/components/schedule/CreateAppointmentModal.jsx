@@ -1088,6 +1088,35 @@ export function isOfficeRequestLine(svc) {
   return OFFICE_REQUEST_SERVICE_KEYS.includes((svc?.service_key ?? svc?.serviceKey) || '');
 }
 
+// Rodent trapping notice (owner ruling 2026-09-26): trapping covers the setup
+// visit + 1 trap check, and visit 3 and later is booked as Rodent Trap Check -
+// Additional, except on jobs sold before 9/27/2026. There is no trapping-job
+// record, so the modal asks the server for this address's recent trapping
+// visits and shows the notice on a trapping line once 2 are on file. It is
+// read-only: no line, price or save changes. The office decides.
+export const RODENT_TRAPPING_NOTICE_KEYS = ['rodent_trapping', 'rodent_trapping_followup', 'rodent_trap_check_additional'];
+export const RODENT_TRAPPING_INCLUDED_VISITS = 2;
+export const RODENT_TRAPPING_NOTICE_FAILED = "Couldn't load this address's trapping visits. Check the visit history before booking a trap check.";
+
+export function isRodentTrappingLine(svc) {
+  return RODENT_TRAPPING_NOTICE_KEYS.includes((svc?.service_key ?? svc?.serviceKey) || '');
+}
+
+// The notice for GET /admin/schedule/rodent-trapping-visits' answer, or null
+// below the included visits. No dollar figures: the extra check's price is
+// its catalog row's, shown on the line once the office adds it.
+export function rodentTrappingNoticeText(result) {
+  const count = Number(result?.count);
+  if (!Number.isInteger(count) || count < RODENT_TRAPPING_INCLUDED_VISITS) return null;
+  const visits = Array.isArray(result?.visits) ? result.visits : [];
+  const latest = /^\d{4}-(\d{2})-(\d{2})$/.exec(String(visits[visits.length - 1]?.date || ''));
+  const windowDays = Number(result?.windowDays);
+  const span = Number.isInteger(windowDays) && windowDays > 0 ? ` in the ${windowDays} days before this visit` : '';
+  return `${count} trapping visits at this address${span}${latest ? ` (latest ${Number(latest[1])}/${Number(latest[2])})` : ''}. `
+    + 'Trapping covers the setup visit + 1 trap check; book visit 3 and later as Rodent Trap Check - Additional. '
+    + 'Jobs sold before 9/27/2026 keep all their checks included.';
+}
+
 // "Text, 3 h ago" / "Call, yesterday" — the suggestion's source and age.
 export function suggestionSourceLabel(suggestion, now = Date.now()) {
   if (!suggestion) return '';
@@ -2898,6 +2927,37 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
     })();
   }, [selectedCustomer?.id, hasAutoMosquitoLine, mosquitoQuote]);
+
+  // Rodent trapping notice (rodentTrappingNoticeText). The address is the
+  // booking's: the picked property, else the linked estimate's (the booking
+  // route stamps that one), else the customer's primary. It waits for the
+  // saved-address list, which can move the booking to another property, and
+  // re-asks when the customer, address or date changes. The effect keys on
+  // the request alone, so its cleanup only ever drops a superseded answer.
+  const trappingLineIndex = services.findIndex(isRodentTrappingLine);
+  const trappingPropertyId = String((propertyPickerActive && selectedPropertyId) || linkedEstimate?.propertyId || '');
+  const trappingDate = /^\d{4}-\d{2}-\d{2}$/.test(String(apptDate || '')) ? String(apptDate) : '';
+  const trappingNoticeKey = selectedCustomer?.id && trappingLineIndex >= 0
+    && ['ready', 'hidden', 'error'].includes(bookingPropertyState)
+    ? `${selectedCustomer.id}|${trappingPropertyId}|${trappingDate}`
+    : null;
+  const [trappingVisits, setTrappingVisits] = useState(null);
+  useEffect(() => {
+    if (!trappingNoticeKey) return undefined;
+    let cancelled = false;
+    const [customerId, propertyId, date] = trappingNoticeKey.split('|');
+    const qs = new URLSearchParams({ customerId });
+    if (propertyId) qs.set('propertyId', propertyId);
+    if (date) qs.set('date', date);
+    adminFetch(`/admin/schedule/rodent-trapping-visits?${qs.toString()}`)
+      .then((result) => { if (!cancelled) setTrappingVisits({ key: trappingNoticeKey, result }); })
+      .catch(() => { if (!cancelled) setTrappingVisits({ key: trappingNoticeKey, failed: true }); });
+    return () => { cancelled = true; };
+  }, [trappingNoticeKey]);
+  const trappingAnswer = trappingNoticeKey && trappingVisits?.key === trappingNoticeKey ? trappingVisits : null;
+  const trappingNotice = trappingAnswer?.failed
+    ? RODENT_TRAPPING_NOTICE_FAILED
+    : rodentTrappingNoticeText(trappingAnswer?.result);
 
   const doSearch = async (val) => {
     setCustomerSearch(val);
@@ -5662,6 +5722,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     gridRow: isMobile ? '3' : undefined,
                   }}
                 >x</button>
+
+                {idx === trappingLineIndex && trappingNotice && (
+                  <div
+                    role="status"
+                    data-testid="rodent-trapping-notice"
+                    style={{
+                      gridColumn: '1 / -1', padding: '8px 10px', borderRadius: 6,
+                      border: `1px solid ${D.border}`, background: D.bg,
+                      fontSize: 14, lineHeight: 1.45, color: D.text,
+                    }}
+                  >
+                    {trappingNotice}
+                  </div>
+                )}
 
                 {svc.cadence === 'custom' && (
                   <div
