@@ -836,4 +836,4 @@ function customerEmailBellEligible({ customerId, classification, listUnsubscribe
   return hasAlignedAuth(authenticationResults, domainFromAddress(fromAddress));
 }
 
-module.exports = { syncEmails, upsertEmail, customerEmailBellEligible, sweepUnclaimedCustomerEmailBells };
+module.exports = { syncEmails, upsertEmail, customerEmailBellEligible, sweepUnclaimedCustomerEmailBells, NEVER_RING_CLASSES };

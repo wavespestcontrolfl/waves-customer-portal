@@ -1337,6 +1337,13 @@ const gates = {
   // services/access-code-capture.js; this entry is for logGateStatus only.
   accessCodesCalls: gateEnvValue('GATE_ACCESS_CODES_CALLS'),
 
+  // Access codes from inbound customer emails (owner 2026-10-24): the same
+  // sweep also reads emails into the same found list. Exactly `true` (not 1 or
+  // on); needs GATE_ACCESS_CODES_SECTION and GATE_ACCESS_CODES_EMAILS_SINCE (an
+  // offset ISO instant), so turning it on never reads history. Read at call
+  // time in services/access-code-capture.js; this entry is for logGateStatus only.
+  accessCodesEmails: process.env.GATE_ACCESS_CODES_EMAILS === 'true',
+
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
   // email-operational-actions.js; this entry is for logGateStatus only.

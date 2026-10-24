@@ -88,6 +88,7 @@ active: [
         row(),
         row({ id: 'c2', kind: 'garage', code: '5555', instructions: null, life: 'visit', scheduledDate: '2026-10-08', sourceType: 'staff', sourceAt: null }),
         row({ id: 'c3', kind: 'neighborhood_gate', code: '#3394', instructions: null, sourceType: 'call' }),
+        row({ id: 'c4', kind: 'neighborhood_gate', code: '#4821', instructions: null, sourceType: 'email' }),
       ],
       found: [found()],
     }));
@@ -95,6 +96,8 @@ active: [
     const code = await screen.findByText('1234');
     // a code the office accepted from a call says so
     expect(within(screen.getByText('#3394').closest('.rounded-sm')).getByText('Call, Oct 3')).toBeInTheDocument();
+    // and one from an email says so too
+    expect(within(screen.getByText('#4821').closest('.rounded-sm')).getByText('Email, Oct 3')).toBeInTheDocument();
     expect(code).toHaveClass('font-mono');
     const first = within(code.closest('.rounded-sm'));
     expect(first.getByText('On the back fence')).toBeInTheDocument();

@@ -325,6 +325,19 @@ it("a code from an unknown number shows the sender and a one-tap link to the sug
   expect(screen.queryByText(/a number with no customer record/)).toBeNull();
 });
 
+it("a code from an email address with no customer shows the address, and the row says Email", async () => {
+  rawAdminFetch.mockImplementation((path, init) => (path.startsWith("/admin/access-codes/found")
+    ? response({ total: 1, items: [{ ...UNLINKED_ROW, senderPhone: null, senderEmail: "stranger@example.invalid", sourceType: "email", code: "#4821", kind: "neighborhood_gate", instructions: null,
+      sourceQuote: "the gate code is #4821", suggestedCustomer: null }] })
+    : unlinkedRoutes()(path, init)));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  expect(await screen.findByText(/From stranger@example.invalid, an address with no customer record/)).toBeInTheDocument();
+  expect(screen.queryByText(/a number with no customer record/)).toBeNull();
+  expect(screen.getByText(/^Email, /)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+});
+
 it("with no suggestion the office finds a customer and links the one it picks", async () => {
   rawAdminFetch.mockImplementation((path, init) => (path.startsWith("/admin/access-codes/found")
     ? response({ total: 1, items: [{ ...UNLINKED_ROW, suggestedCustomer: null }] })

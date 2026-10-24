@@ -64,7 +64,7 @@ export function sourceLabel(row) {
   // Copied from the customer's profile field by the one-list sweep.
   if (row.sourceType === "profile") return "From the profile";
   const day = fmtDay(dayKey(row.sourceAt));
-  const what = row.sourceType === "call" ? "Call" : "Text";
+  const what = { call: "Call", email: "Email" }[row.sourceType] || "Text";
   return day ? `${what}, ${day}` : what;
 }
 
@@ -297,7 +297,8 @@ function LinkToCustomer({ row, onLink, onSearch, busy, run }) {
   return (
     <div className="grid gap-2">
       <div className="text-ui-label text-ink-secondary">
-        {row.senderPhone ? `From ${phoneLabel(row.senderPhone)}, a number with no customer record.` : "From a number with no customer record."}
+        {row.senderEmail ? `From ${row.senderEmail}, an address with no customer record.`
+          : (row.senderPhone ? `From ${phoneLabel(row.senderPhone)}, a number with no customer record.` : "From a number with no customer record.")}
         {" "}Link it to a customer to save it.
       </div>
       {suggested && (
