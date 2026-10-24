@@ -393,7 +393,7 @@
         "credential_table:scheduled_services"
       ],
       "unresolved": [],
-      "hash": "30735ecded574f80a597bec5a563d386"
+      "hash": "483f3e6fb595214fa442cd57093795eb"
     },
     {
       "endpoint": "/admin/customers/:id/latest-scheduled-service",

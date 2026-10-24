@@ -1143,11 +1143,14 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
 // How long a provider/schema failure is reused before the model is retried.
 const PROVIDER_RETRY_MS = 3600000;
 
-async function verifySmsFulfillment(commitment, evidence, { now = new Date(), eventOnly = false } = {}) {
+// requireModel: no shortcut closes the obligation without the model's quoted
+// proof (a call promise, call-promise-ai-close.js): a person's later text is
+// then evidence for the model to judge, never a close of its own.
+async function verifySmsFulfillment(commitment, evidence, { now = new Date(), eventOnly = false, requireModel = false } = {}) {
   const previous = commitment.sms_context?.fulfillment_check;
   const { obligation, evidenceHash } = fulfillmentFingerprint(commitment, evidence, { eventOnly });
   if (previous?.evidence_hash === evidenceHash && (!previous.retry_after || new Date(previous.retry_after) > now)) return previous;
-  const verdict = await checkSmsFulfillment(obligation, evidence, { eventOnly });
+  const verdict = await checkSmsFulfillment(obligation, evidence, { eventOnly, requireModel });
   // Retry provider/schema failures after a bounded pause. Semantic open or
   // uncertain results remain valid until their evidence or contract changes.
   return { ...verdict, evidence_hash: evidenceHash, ...(eventOnly ? { event_only: true } : {}),
@@ -1155,8 +1158,8 @@ async function verifySmsFulfillment(commitment, evidence, { now = new Date(), ev
       ? new Date(now.getTime() + PROVIDER_RETRY_MS).toISOString() : null };
 }
 
-async function checkSmsFulfillment(commitment, evidence, { eventOnly = false } = {}) {
-  const reply = replyFulfillment(evidence, commitment, { eventOnly });
+async function checkSmsFulfillment(commitment, evidence, { eventOnly = false, requireModel = false } = {}) {
+  const reply = requireModel ? null : replyFulfillment(evidence, commitment, { eventOnly });
   if (reply) return reply;
   // Only a supporting channel's truncation may wait for the witness; every
   // other failure is settled before a provider sees the evidence.

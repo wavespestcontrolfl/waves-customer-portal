@@ -1625,25 +1625,29 @@ async function directEstimatesSentAfter(conn, probes) {
 
 // Shared ownership fence for delivered estimates, including commercial
 // proposals whose estimate is unowned but whose live lead has a customer.
-function whereEstimateCustomerOwnership(query, customerId) {
-  return query.whereRaw(`(estimates.customer_id = ? OR (
+function estimateOwnershipSql(customer) {
+  return `(estimates.customer_id = ${customer} OR (
           estimates.customer_id IS NULL
           AND (estimates.id IN (
             SELECT l.estimate_id FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id = ? AND l.estimate_id IS NOT NULL
+            WHERE l.deleted_at IS NULL AND l.customer_id = ${customer} AND l.estimate_id IS NOT NULL
           ) OR estimates.estimate_data ->> 'lead_id' IN (
             SELECT l.id::text FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id = ?
+            WHERE l.deleted_at IS NULL AND l.customer_id = ${customer}
           ))
           AND estimates.id NOT IN (
             SELECT l.estimate_id FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ? AND l.estimate_id IS NOT NULL
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ${customer} AND l.estimate_id IS NOT NULL
           )
           AND COALESCE(estimates.estimate_data ->> 'lead_id', '') NOT IN (
             SELECT l.id::text FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ?
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ${customer}
           )
-        ))`, [customerId, customerId, customerId, customerId, customerId]);
+        ))`;
+}
+
+function whereEstimateCustomerOwnership(query, customerId) {
+  return query.whereRaw(estimateOwnershipSql("?"), [customerId, customerId, customerId, customerId, customerId]);
 }
 
 // whereEstimateCustomerOwnership for MANY customers in ONE query: each
@@ -3130,6 +3134,12 @@ function proofThatKeeps(c, proof, prior) {
   return proof.strength === "direct" || proof.kind === CUSTOMER_LEFT || closesOnAssociation(c, proof) ? proof : null;
 }
 
+// The deterministic stand check of each close a model judged, by its proof's basis.
+const MODEL_CLOSE_STANDS = {
+  [PERSON_CONTACT_BASIS]: (...args) => require("./call-commitment-contact-check").contactCloseStands(...args),
+  ai_check: (...args) => require("./call-promise-ai-close").aiCloseStands(...args),
+};
+
 // Judges refreshFulfillment's automatically closed rows again: still kept by
 // the same record (untouched), kept by another (re-pointed, same customer
 // guard as the open-row write for a slot proof), or reopened carrying
@@ -3142,13 +3152,15 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
   let reopened = 0;
   for (const c of kept) {
     const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
-    // A close a model judged from one person's text or call back stays while
-    // that record stands — read again here, deterministically, whether or not
-    // PROMISE_CONTACT_CHECK is on (the switch only stops NEW checks). Anything
+    // A close a model judged stays while the record it cites stands — a person's
+    // text or call back (PERSON_CONTACT_BASIS), or any line's record found by the
+    // AI check (call-promise-ai-close.js) — read again here, deterministically,
+    // whether or not its gate is on (the switch only stops NEW checks). Anything
     // else falls through to the ordinary re-judge below, which reopens it.
-    if (prior?.basis === PERSON_CONTACT_BASIS) {
-      const stands = await require("./call-commitment-contact-check").contactCloseStands(conn, c, row, prior).catch((err) => {
-        logger.warn(`[call-commitments] contact-close lookup failed for ${c.id}: ${err.message}`);
+    const closeStands = MODEL_CLOSE_STANDS[prior?.basis];
+    if (closeStands) {
+      const stands = await closeStands(conn, c, row, prior).catch((err) => {
+        logger.warn(`[call-commitments] model-close lookup failed for ${c.id}: ${err.message}`);
         return LOOKUP_FAILED;
       });
       if (stands === LOOKUP_FAILED) { failed += 1; continue; }
@@ -3312,6 +3324,9 @@ async function listLapsedEvidenceClosedCallIds(conn) {
     );
     for (const r of direct?.rows || []) if (!ids.includes(r.call_log_id)) ids.push(r.call_log_id);
   }
+  // The AI check's closes (call-promise-ai-close.js) are read again on a bounded schedule rather than by a field
+  // list: the oldest-read few, whose re-judge re-runs the evidence path that admitted them.
+  for (const id of await require("./call-promise-ai-close").listRecheckCallIds(conn)) if (!ids.includes(id)) ids.push(id);
   return ids;
 }
 async function listLapsedAssociationCloses(conn) {
@@ -3362,7 +3377,7 @@ async function listLapsedAssociationCloses(conn) {
               AND NOT ${promiseMediumSql('text', 'judge')})
           OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'call_log'
               AND NOT ${promiseMediumSql('call', 'judge')})
-          OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
+          OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service' AND (cc.fulfillment ->> 'basis') IS DISTINCT FROM 'ai_check'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           -- A close resting on a call (the customer phoning in): the evidence
           -- call was relinked to another customer (or is gone), so it no
@@ -4280,6 +4295,7 @@ module.exports = {
   PLACEHOLDER_NAME_SQL_RE,
   isMissingName,
   whereEstimateCustomerOwnership,
+  estimateOwnershipSql,
   whereEstimateOwnedByAny,
   whereEstimateOnCustomerRecord,
   ESTIMATE_OWNER_SQL,

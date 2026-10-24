@@ -59,30 +59,58 @@ const normalized = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').tri
 // got it" is always in view.
 // `now` null reads with no upper bound: a close is re-validated against every
 // text that exists by then, including one stamped after the tick began.
-async function loadThreadMessages(conn, message, now) {
+// Non-conversation inbound rows (opt-outs, reactions, help keywords) are never part of the thread.
+const conversationOnly = (q) => q.where((w) => w.whereNull('message_type').orWhereNotIn('message_type', NOT_CONVERSATION));
+
+// The two kinds of text that count as a person speaking in the conversation, as filtered queries over sms_log
+// (no order, limit or columns yet): every inbound text of the customer's (conversation types only), and the texts
+// a person from Waves sent that left the provider. Shared by the thread loader and the newest-message read, so
+// the two can never disagree about what a human message is.
+function humanTextQueries(conn, message, now) {
   const after = new Date(message.created_at);
   // The same conversation only: the number the source text came from (or went
-  // to), like the record loader. Another phone on the account is not evidence.
+  // to), like the record loader. Another phone on the account is not evidence —
+  // except for a source that has no thread number (message.any_customer_phone: a
+  // call promise, like the record loader), where any of the customer's own
+  // texts counts; both sources stay scoped to the customer.
   const peer = tenDigits(message.direction === 'inbound' ? message.from_phone : message.to_phone);
-  if (peer.length < 10) return { records: [] };
+  const anyPhone = message.any_customer_phone === true;
+  if (peer.length < 10 && !anyPhone) return null;
   const phoneOf = (column) => `RIGHT(regexp_replace(${column}, '[^0-9]', '', 'g'), 10) = ?`;
+  const onPeer = (q, column) => (anyPhone ? q : q.whereRaw(phoneOf(column), [peer]));
   // Recruiting threads (applicant texts) are owner-only and never evidence.
   const base = () => excludeRecruitingSmsLog(conn('sms_log').where({ customer_id: message.customer_id })
     .where('created_at', '>', after)
     .modify((q) => { if (now) q.where('created_at', '<=', now); })
-    .whereNot('id', message.id)
-    .orderBy('created_at', 'desc').limit(THREAD_LIMIT)
-    .select('id', 'direction', 'message_body', 'created_at'));
-  const inbound = base().where({ direction: 'inbound' }).whereRaw(phoneOf('from_phone'), [peer])
-    .where((q) => q.whereNull('message_type').orWhereNotIn('message_type', NOT_CONVERSATION));
-  const outbound = excludeUnresolvedSendReservations(base().where({ direction: 'outbound' }).whereRaw(phoneOf('to_phone'), [peer]))
-    .whereIn('status', ['sent', 'delivered']).whereRaw(operatorReplySql('sms_log'))
-    // A scheduled text is stamped at handoff; one QUEUED before the source
-    // text never answers it, like writtenAfterAsk in the record check.
-    .whereRaw(`CASE WHEN sms_log.metadata->>'scheduled_sms_log_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-      THEN NOT EXISTS (SELECT 1 FROM sms_log q WHERE q.id = (sms_log.metadata->>'scheduled_sms_log_id')::uuid AND q.created_at <= ?)
-      ELSE TRUE END`, [after]);
-  const [customerRows, staffRows] = await Promise.all([inbound, outbound]);
+    .whereNot('id', message.id));
+  return {
+    inbound: () => conversationOnly(onPeer(base().where({ direction: 'inbound' }), 'from_phone')),
+    outbound: () => excludeUnresolvedSendReservations(onPeer(base().where({ direction: 'outbound' }), 'to_phone'))
+      .whereIn('status', ['sent', 'delivered']).whereRaw(operatorReplySql('sms_log'))
+      // A scheduled text is stamped at handoff; one QUEUED before the source
+      // text never answers it, like writtenAfterAsk in the record check.
+      .whereRaw(`CASE WHEN sms_log.metadata->>'scheduled_sms_log_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        THEN NOT EXISTS (SELECT 1 FROM sms_log q WHERE q.id = (sms_log.metadata->>'scheduled_sms_log_id')::uuid AND q.created_at <= ?)
+        ELSE TRUE END`, [after]),
+  };
+}
+
+// The time of the newest HUMAN message after `message`: a text the customer sent (any phone) or one a person
+// from Waves sent. Automated notices, reminders, tracker links and receipts are not human messages. Read straight
+// from sms_log, not through the newest-THREAD_LIMIT page, so later texts cannot hide it. Null when there is none.
+async function latestHumanTextAt(conn, message) {
+  const queries = humanTextQueries(conn, message, null);
+  if (!queries) return null;
+  const [customer, staff] = await Promise.all([queries.inbound().max({ at: 'created_at' }).first(), queries.outbound().max({ at: 'created_at' }).first()]);
+  const times = [customer?.at, staff?.at].filter(Boolean).map((v) => new Date(v));
+  return times.length ? new Date(Math.max(...times.map((d) => d.getTime()))) : null;
+}
+
+async function loadThreadMessages(conn, message, now) {
+  const queries = humanTextQueries(conn, message, now);
+  if (!queries) return { records: [] };
+  const page = (q) => q.orderBy('created_at', 'desc').limit(THREAD_LIMIT).select('id', 'direction', 'message_body', 'created_at');
+  const [customerRows, staffRows] = await Promise.all([page(queries.inbound()), page(queries.outbound())]);
   const tag = (rows, who) => rows.filter((row) => typeof row.message_body === 'string' && row.message_body.trim())
     .map((row) => ({ ref: `sms:${row.id}`, id: row.id, who, created_at: row.created_at, text: row.message_body.slice(0, TEXT_LIMIT) }));
   const records = [...tag(customerRows, 'customer'), ...tag(staffRows, 'waves_staff')]
@@ -175,4 +203,4 @@ async function revalidateThreadCompletion(trx, commitment, message, verdict) {
   return !!cited && normalized(cited.text).includes(normalized(verdict.quote));
 }
 
-module.exports = { BASIS, THREAD_PROMPT_VERSION, THREAD_POLICY, loadThreadMessages, threadFingerprint, groundThreadVerdict, verifyThreadCompletion, revalidateThreadCompletion };
+module.exports = { BASIS, THREAD_PROMPT_VERSION, THREAD_POLICY, THREAD_LIMIT, loadThreadMessages, latestHumanTextAt, threadFingerprint, groundThreadVerdict, verifyThreadCompletion, revalidateThreadCompletion };

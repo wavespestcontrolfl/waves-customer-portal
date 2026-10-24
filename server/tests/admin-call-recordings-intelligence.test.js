@@ -7,6 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn(), quarantineCardRecording: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(() => Promise.resolve(true)) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../services/call-promise-ai-close', () => ({ runInBackground: jest.fn() }));
 jest.mock('../services/sms-operational-actions', () => ({
   smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
 }));
@@ -236,6 +237,8 @@ describe('GET /commitments/open — the Owed queue', () => {
     expect(commitments.listOpenCommitments.mock.calls.filter(([, o]) => o.prepare)).toHaveLength(1);
     expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
     expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(3);
+    // The AI check for the page's calls runs behind the response.
+    expect(require('../services/call-promise-ai-close').runInBackground).toHaveBeenCalledWith({ conn: db, callIds: [CALL_ID] });
   });
 
   test('the queue is paged: a full page plus the probe row says has_more with the next offset; offset is validated (codex #3725 r17 P2)', async () => {

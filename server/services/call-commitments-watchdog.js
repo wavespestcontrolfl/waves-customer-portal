@@ -141,6 +141,12 @@ async function runInner({ now = new Date() } = {}) {
     }
     refreshed += (r.fulfilled || 0) + (r.reopened || 0);
   }
+  // The fixed rules above left these open: the AI check (GATE_CALL_PROMISE_AI_CLOSE,
+  // dark) looks across every line for the record that kept the promise and
+  // closes it on a quoted proof. Bounded model calls; never fails the pass.
+  refreshed += await require('./call-promise-ai-close').runCallPromiseAiClose({ conn: db, now })
+    .then((r) => r.closed || 0)
+    .catch((err) => { logger.warn(`[call-commitments-watchdog] AI close pass failed: ${err.code || err.name}`); return 0; });
   if (refreshed > 0) rows = await listAllOpenWaves(now);
   let candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));
   // While the one-hour follow-up pager is live AND healthy it owns the
