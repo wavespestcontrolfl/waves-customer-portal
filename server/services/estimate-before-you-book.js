@@ -95,7 +95,9 @@ const COMMERCIAL_SECTIONS = [
     lines: [
       { rank: 1, text: 'We set your service day and time with you, around your business hours.' },
       { rank: 1, text: 'There is no deposit.' },
-      { rank: 2, text: "Your service agreement runs 12 months and renews each year. Either side can cancel with 30 days' written notice." },
+      // Only while the proposal's own term, renewal and cancellation agree with the agreement (or are blank): a
+      // proposal with authored custom terms (24 months, month-to-month) must not contradict itself, so the line drops.
+      { rank: 2, when: (s) => s.termsMatchAgreement === true, text: "Your service agreement runs 12 months and renews each year. Either side can cancel with 30 days' written notice." },
       { rank: 3, text: 'We can send a certificate of insurance and name your business as an additional insured on request.' },
     ],
   },
@@ -209,9 +211,22 @@ function planTermsApply(estimate, proposal) {
 // The one estimate-dependent verdict (the no-contract line). The 90-day refund line is worded "if your
 // estimate offers a prepaid year", so it needs no prepay verdict (Codex #6504 r1/r4 kept finding prepay
 // shapes a local verdict missed).
+// The agreement's term, renewal, cancellation and price-adjustment terms agree with the proposal's authored ones (blank
+// counts as agreeing): the signing chokepoint's own rule, with the payment term set aside (that line is about the term,
+// not billing). Fails closed: an unreadable answer drops the line.
+function termsMatchAgreement(proposal) {
+  try {
+    const { agreementTermsConflict, AGREEMENT_TERMS } = require('./commercial-proposal-agreement');
+    const terms = { ...(proposal?.commercialTerms || {}), paymentTerms: AGREEMENT_TERMS.paymentTerms };
+    return agreementTermsConflict({ ...proposal, commercialTerms: terms }) === null;
+  } catch {
+    return false;
+  }
+}
+
 function estimateSignals(estimate, proposal) {
   if (isKnownCommercial(proposal)) {
-    return { planTerms: false, commercial: true, families: proposalServiceFamilies(proposal) };
+    return { planTerms: false, commercial: true, families: proposalServiceFamilies(proposal), termsMatchAgreement: termsMatchAgreement(proposal) };
   }
   return { planTerms: planTermsApply(estimate, proposal) };
 }

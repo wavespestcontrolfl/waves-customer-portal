@@ -317,6 +317,20 @@ describe('Before you book: commercial page', () => {
   const pageOf = (estimate) => beforeYouBookForEstimate(estimate, normalizeProposal(estimate));
   const textsOf = (page) => page.sections.map((section) => ({ key: section.key, heading: section.heading, lines: section.lines.map((line) => line.text) }));
 
+  test('the 12-month agreement line prints only while the proposal terms agree with the agreement (blank or aligned)', () => {
+    const AGREEMENT_LINE = SCHEDULING[2];
+    const linesOf = (estimate) => textsOf(pageOf(estimate)).find((section) => section.key === 'scheduling').lines;
+    // Blank terms: the agreement governs.
+    expect(linesOf(authored(['Monthly pest service']))).toContain(AGREEMENT_LINE);
+    // Aligned terms (payment term set aside): still prints.
+    expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { initialTermMonths: 12 } }))).toContain(AGREEMENT_LINE);
+    // Authored custom terms: the line drops so the document does not contradict itself.
+    expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { initialTermMonths: 24 } }))).not.toContain(AGREEMENT_LINE);
+    expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { cancellation: 'Cancel any time.' } }))).not.toContain(AGREEMENT_LINE);
+    // The rest of the scheduling section stays.
+    expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { initialTermMonths: 24 } }))).toEqual(SCHEDULING.filter((line) => line !== AGREEMENT_LINE));
+  });
+
   test('residential output is byte-identical to the page before this change (hash of the original build)', () => {
     // sha256 of JSON.stringify(buildBeforeYouBook(signals, { phone: '(941) 555-0100' })) on origin/main before the commercial page.
     const phone = { phone: '(941) 555-0100' };
