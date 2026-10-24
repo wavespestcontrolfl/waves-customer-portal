@@ -989,6 +989,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
   const db = dbInstance || require('../../models/db');
   _syncsInFlight += 1;
   let constantsSnapshot = null;
+  let mistingProvenanceSnapshot = null;
 
   // The finally below is the ONLY decrement — early returns (missing table,
   // empty config) and throws all pass through it, so the counter can't leak.
@@ -1008,6 +1009,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
     if (Object.keys(config).length === 0) return false;
     constantsSnapshot = snapshotPricingConstants();
+    mistingProvenanceSnapshot = require('./mosquito-misting-config').snapshotMistingRefillProvenance();
 
     // ── Global ───────────────────────────────────────────────
     if (config.global_labor_rate?.value) constants.GLOBAL.LABOR_RATE = config.global_labor_rate.value;
@@ -2212,6 +2214,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     return true;
   } catch (err) {
     restorePricingConstants(constantsSnapshot);
+    // The refill provenance travels with the constants: restored prices must not keep the failed apply's "from the row" answer.
+    require('./mosquito-misting-config').restoreMistingRefillProvenance(mistingProvenanceSnapshot);
     console.error('[pricing-engine] DB sync failed, using defaults:', err.message);
     return false;
   } finally {

@@ -127,6 +127,12 @@ async function assertNoMistingRefillMoves(trx, lockedRows, propertyId, edited = 
   }
 }
 
+// Which locked rows the move re-addresses: the anchor, its package children, and every member not in a historical status.
+function rowsTheMoveUpdates(locked, { anchorId, packageChildIds }) {
+  return locked.filter((row) => row.id === anchorId || (packageChildIds || []).includes(row.id)
+    || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
+}
+
 async function applyAppointmentAddress(trx, plan, actorId) {
   const fresh = await planAppointmentAddress(trx, plan.anchor.id, plan.propertyId, plan.scope);
   const fingerprint = (p) => JSON.stringify(p.rows.map((row) => [row.id, row.customer_id, row.recurring_parent_id,
@@ -141,10 +147,11 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
+  const addressRows = rowsTheMoveUpdates(locked, { anchorId: plan.anchor.id, packageChildIds: fresh.packageChildIds });
   await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId, plan.editedVisit || null);
-  await assertNoMistingRefillMoves(trx, locked, plan.propertyId, plan.editedVisit || null);
-  const addressRows = locked.filter((row) => row.id === plan.anchor.id || (fresh.packageChildIds || []).includes(row.id)
-    || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
+  // Only the rows this move actually re-addresses are judged (Codex #6559 r1 P2): a completed series parent the plan carries for its
+  // fingerprint stays where it is, so a refill on it never blocks moving the future occurrences.
+  await assertNoMistingRefillMoves(trx, addressRows, plan.propertyId, plan.editedVisit || null);
   for (const visit of fresh.visits) {
     const verdict = await frozenVisitVerdict(trx, visit.id);
     // A retained historical member must never be left at a different property
@@ -223,4 +230,4 @@ async function refreshAppointmentAddressBriefs(conn, ids) {
 }
 
 module.exports = { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs, assertNoMistingRefillMoves };
-module.exports._test = { assertAreaAddOnLimitsAtDestination };
+module.exports._test = { assertAreaAddOnLimitsAtDestination, rowsTheMoveUpdates };

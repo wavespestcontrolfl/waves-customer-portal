@@ -2087,39 +2087,16 @@ async function assertRefillPlacementOnEdit(database, id, { updates, addonsPosted
   if (kept) throw mistingRefill.refusalError(await mistingRefill.resolveRefillAttachment({ parentServiceKey: next }, database));
 }
 
-// A misting refill is priced for one house (the accepted misting estimate's property) and is never carried to another. Under the save's
-// row lock, with the visit's address plan in hand:
-//  - a save that MOVES the address (any visit the plan moves, the edited one included) cannot carry a refill: not one posted on the
-//    edited visit, not one stored on the edited visit (when its add-ons are not replaced) or on another occurrence the plan moves. The
-//    price was set for the old house; remove the refill, move the address, add it again;
-//  - a save that stays put must still be at the house each refill line was priced for, so another editor's move landing after the
-//    price was set is a retryable conflict, not a stale price.
-//  - and the HOST must still be the misting plan under the lock: the resolver judged the host from a read taken before the lock, so
-//    another editor's service switch landing in between would leave a refill on a non-misting visit (pre-push P1, PR 2c). The save's own
-//    explicit service (updates.service_key_snapshot) was already judged before the lock; here only a host the save leaves alone is re-read.
-async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceAddons, updates }) {
+// Under the save's row lock, after the shared address mover (applyAppointmentAddress) has already refused any refill the plan would
+// carry to another house (assertNoMistingRefillMoves in services/appointment-address.js, the ONE move judge for Update Details, the
+// Intelligence Bar and the geocode review), three things are re-read against the LOCKED row (Codex #6559 r1 P2: no second copy of the
+// move decision here):
+//  - the placement rule for a service-only save (a refill another editor attached after the pre-lock check must not ride a service
+//    change onto a non-plan visit);
+//  - each priced refill line's house: another editor's move landing after the price was set is a retryable conflict, not a stale price;
+//  - the host service, when the save leaves it alone: the resolver judged it from a read taken before the lock.
+async function assertRefillPropertyCurrent(trx, visitId, { replaceAddons, updates }) {
   const lines = Array.isArray(replaceAddons) ? replaceAddons.filter(Boolean) : null;
-  if (addressPlan) {
-    // Only a visit whose property actually changes is "moved": the sheet posts the current property too, and a series plan lists
-    // occurrences already at the destination.
-    const ids = [...new Set([String(visitId), ...(addressPlan.rows || []).map((row) => String(row.id))])];
-    const heldAt = await trx('scheduled_services').whereIn('id', ids).select('id', 'property_id');
-    const moved = (Array.isArray(heldAt) ? heldAt : []).filter((row) => String(row.property_id || '') !== String(addressPlan.propertyId || '')).map((row) => String(row.id));
-    const editedMoves = moved.includes(String(visitId));
-    const stored = lines ? moved.filter((id) => id !== String(visitId)) : moved;
-    const postedRefill = editedMoves && !!lines && lines.some((line) => mistingRefill.isRefillKey(line.serviceKey));
-    const storedRefill = stored.length > 0
-      && !!(await trx('scheduled_service_addons').whereIn('scheduled_service_id', stored).where({ service_key_snapshot: MISTING_REFILL_KEY }).first('id'));
-    if ((postedRefill || storedRefill) && mistingRefill.refillLive()) {
-      throw Object.assign(
-        httpError(409, 'A misting refill is priced for the house it was set up for. Remove the refill (Edit visit, Add-ons), change the address, then add the refill again.'),
-        { code: 'MISTING_REFILL_ADDRESS_MOVE' },
-      );
-    }
-    if (editedMoves) return;
-  }
-  // The placement rule again, under the lock (dry audit round 13 P1): a service-only save judged "no refill to strand" before the
-  // transaction, and a refill another editor attached in between would otherwise ride the service change onto a non-plan visit.
   await assertRefillPlacementOnEdit(trx, visitId, { updates, addonsPosted: Array.isArray(lines) });
   const priced = (lines || []).filter((line) => line.refillPricedForProperty !== undefined);
   if (!priced.length) return;
@@ -2132,17 +2109,21 @@ async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceA
     );
   }
   if (updates && updates.service_key_snapshot !== undefined) return;
-  let hostKey = row && row.service_key_snapshot;
-  if (!hostKey && row && row.service_id) {
-    const svc = await trx('services').where({ id: row.service_id }).first('service_key').catch(() => null);
-    hostKey = svc && svc.service_key;
-  }
-  if (hostKey !== MISTING_SERVICE_KEY) {
+  if ((await lockedHostKey(trx, row)) !== MISTING_SERVICE_KEY) {
     throw Object.assign(
       httpError(409, 'This visit\'s service changed while you were editing, and a misting refill only goes on a Mosquito Misting Service Plan visit. Reload and save again.'),
       { code: 'VISIT_CHANGED_RETRY' },
     );
   }
+}
+
+// The locked row's service key: its snapshot, else the catalog row behind service_id, else null (judged as not the plan).
+async function lockedHostKey(trx, row) {
+  if (!row) return null;
+  if (row.service_key_snapshot) return row.service_key_snapshot;
+  if (!row.service_id) return null;
+  const svc = await trx('services').where({ id: row.service_id }).first('service_key').catch(() => null);
+  return (svc && svc.service_key) || null;
 }
 
 // Read at call time, like the completion that bills the add-on does. A partial test mock of the gates module reads as off.
@@ -15736,7 +15717,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             .first('customer_id', 'scheduled_date')
           : null;
         await assertAreaAddOnEdit(trx, req.params.id, { updates, replaceAddons, addressPlan });
-        await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons, updates });
+        await assertRefillPropertyCurrent(trx, req.params.id, { replaceAddons, updates });
         await areaAddOnRows.clearOwnAreaAddOnScopeOnServiceChange(trx, req.params.id, updates);
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {

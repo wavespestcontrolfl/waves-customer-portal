@@ -132,6 +132,15 @@ function mistingRefillPriceIsFromRow(solution) {
   return appliedRefillPrices.has(String(solution == null ? '' : solution).trim().toLowerCase());
 }
 
+// db-bridge snapshots this beside the constants before a sync and restores both when the sync fails (Codex #6559 r1 P2): a failed
+// refresh restores the in-code prices, so the provenance of the failed apply must not survive with them.
+function snapshotMistingRefillProvenance() {
+  return new Set(appliedRefillPrices);
+}
+function restoreMistingRefillProvenance(snapshot) {
+  if (snapshot instanceof Set) appliedRefillPrices = new Set(snapshot);
+}
+
 function applyMosquitoMistingPricingConfig(row, target = MOSQUITO_MISTING) {
   appliedRefillPrices = new Set();
   rebaseMosquitoMisting(target);
@@ -184,4 +193,6 @@ module.exports = {
   rebaseMosquitoMisting,
   mistingRefillPriceFor,
   mistingRefillPriceIsFromRow,
+  snapshotMistingRefillProvenance,
+  restoreMistingRefillProvenance,
 };

@@ -432,54 +432,61 @@ describe('Update Details that moves the visit to another house never carries a r
       expect(trx.reads).toEqual([]);
     });
 
-    test('an address change with a refill posted on the edited visit is refused', async () => {
-      await expect(assertRefillPropertyCurrent(trxFor(), VISIT, { addressPlan: { propertyId: OTHER, rows: [{ id: VISIT }] }, replaceAddons: [priced(HOUSE)] }))
-        .rejects.toMatchObject({ status: 409, code: 'MISTING_REFILL_ADDRESS_MOVE' });
+    test('the move decision lives in the shared address mover, not here: an address plan is not read by this check', async () => {
+      // Codex #6559 r1 P2: applyAppointmentAddress (services/appointment-address.js, assertNoMistingRefillMoves) runs earlier in the
+      // same transaction and is the one judge of a refill that would change house; this check keeps no second copy.
+      const trx = trxFor({ addons: [stored(VISIT)] });
+      await expect(assertRefillPropertyCurrent(trx, VISIT, { replaceAddons: undefined })).resolves.toBeUndefined();
+      expect(trx.reads).toEqual([]);
+    });
+  });
+
+  describe('the shared address mover judges only the rows the move re-addresses (assertNoMistingRefillMoves)', () => {
+    const address = require('../services/appointment-address');
+    const { rowsTheMoveUpdates } = address._test;
+    const trxWith = (addons) => (table) => {
+      let rows = table === 'scheduled_service_addons' ? addons : [];
+      const q = {
+        where(cond) { rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
+        whereIn(col, values) { rows = rows.filter((r) => values.includes(r[col])); return q; },
+        first: async () => rows[0],
+      };
+      return q;
+    };
+    const row = (id, property, status = 'pending') => ({ id, property_id: property, status });
+    const stored = (visit) => ({ id: `row-${visit}`, scheduled_service_id: visit, service_key_snapshot: 'mosquito_misting_refill' });
+
+    test('a completed series parent the plan carries is not a row the move updates; the anchor and package children always are', () => {
+      const locked = [row('parent', HOUSE, 'completed'), row(VISIT, HOUSE), row('kid', HOUSE, 'rescheduled'), row('done', HOUSE, 'completed')];
+      expect(rowsTheMoveUpdates(locked, { anchorId: VISIT, packageChildIds: ['kid'] }).map((r) => r.id)).toEqual([VISIT, 'kid']);
+      expect(rowsTheMoveUpdates(locked, { anchorId: 'parent', packageChildIds: [] }).map((r) => r.id)).toEqual(['parent', VISIT]);
     });
 
-    test('a property-only request (no add-ons posted) is refused when the edited visit stores a refill', async () => {
-      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(VISIT)] }), VISIT, { addressPlan: { propertyId: OTHER, rows: [{ id: VISIT }] }, replaceAddons: undefined }))
-        .rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
+    test('a refill on the completed parent does not block moving the future occurrences; one on a moved occurrence still does', async () => {
+      const trx = trxWith([stored('parent')]);
+      await expect(address.assertNoMistingRefillMoves(trx, [row(VISIT, HOUSE), row(MOVED, HOUSE)], OTHER, null)).resolves.toBeUndefined();
+      await expect(address.assertNoMistingRefillMoves(trxWith([stored(MOVED)]), [row(VISIT, HOUSE), row(MOVED, HOUSE)], OTHER, null))
+        .rejects.toMatchObject({ statusCode: 409, code: 'MISTING_REFILL_ADDRESS_MOVE' });
     });
 
-    test('a series address move is refused when ANY occurrence it moves stores a refill, even though the edited visit has none', async () => {
-      const plan = { propertyId: OTHER, rows: [{ id: VISIT }, { id: MOVED }] };
-      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(MOVED)] }), VISIT, { addressPlan: plan, replaceAddons: [] }))
-        .rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
-      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(MOVED)] }), VISIT, { addressPlan: plan, replaceAddons: undefined }))
-        .rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
+    test('the edited visit is judged by what the save leaves on it; a row already at the destination is not moving', async () => {
+      const edited = { id: VISIT, rowKeys: ['mosquito_misting_refill'] };
+      await expect(address.assertNoMistingRefillMoves(trxWith([]), [row(VISIT, HOUSE)], OTHER, edited)).rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
+      await expect(address.assertNoMistingRefillMoves(trxWith([stored(VISIT)]), [row(VISIT, HOUSE)], OTHER, { id: VISIT, rowKeys: ['pest_control'] })).resolves.toBeUndefined();
+      await expect(address.assertNoMistingRefillMoves(trxWith([stored(VISIT)]), [row(VISIT, OTHER)], OTHER, null)).resolves.toBeUndefined();
     });
 
-    test('the edited visit\'s own stored refill does not count when this save replaces its add-ons without one', async () => {
-      const plan = { propertyId: OTHER, rows: [{ id: VISIT }] };
-      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(VISIT)] }), VISIT, { addressPlan: plan, replaceAddons: [] })).resolves.toBeUndefined();
-    });
-
-    test('an address change with no refill anywhere, or a refill on a visit the plan does not move, is allowed', async () => {
-      const plan = { propertyId: OTHER, rows: [{ id: VISIT }, { id: MOVED }] };
-      await expect(assertRefillPropertyCurrent(trxFor(), VISIT, { addressPlan: plan, replaceAddons: [{ serviceKey: 'pest_control' }] })).resolves.toBeUndefined();
-      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored('elsewhere')] }), VISIT, { addressPlan: plan, replaceAddons: undefined })).resolves.toBeUndefined();
-    });
-
-    test('selecting the visit\'s CURRENT property is not a move: a refill saves, and the freshness check still runs', async () => {
-      const here = { propertyId: HOUSE, rows: [{ id: VISIT }] };
-      await expect(assertRefillPropertyCurrent(trxFor(), VISIT, { addressPlan: here, replaceAddons: [priced(HOUSE)] })).resolves.toBeUndefined();
-      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(VISIT)] }), VISIT, { addressPlan: here, replaceAddons: undefined })).resolves.toBeUndefined();
-      // a house change landing under the lock is still the retryable conflict
-      await expect(assertRefillPropertyCurrent(trxFor({ propertyId: OTHER }), VISIT, { addressPlan: here, replaceAddons: [priced(HOUSE)] }))
-        .rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
-    });
-
-    test('a series move ignores a refill on an occurrence already at the destination, and refuses one on an occurrence that moves', async () => {
-      const plan = { propertyId: HOUSE, rows: [{ id: VISIT }, { id: MOVED }] };
-      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(MOVED)], movedProperty: HOUSE }), VISIT, { addressPlan: plan, replaceAddons: undefined })).resolves.toBeUndefined();
-      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(MOVED)], movedProperty: OTHER }), VISIT, { addressPlan: plan, replaceAddons: undefined }))
-        .rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
-    });
-
-    test('gate off: an address change is not judged', async () => {
+    test('gate off: not judged', async () => {
       process.env.GATE_MOSQUITO_MISTING = 'false';
-      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(VISIT)] }), VISIT, { addressPlan: { propertyId: OTHER, rows: [{ id: VISIT }] }, replaceAddons: undefined })).resolves.toBeUndefined();
+      await expect(address.assertNoMistingRefillMoves(trxWith([stored(VISIT)]), [row(VISIT, HOUSE)], OTHER, null)).resolves.toBeUndefined();
+    });
+
+    test('applyAppointmentAddress hands the mover the rows it re-addresses, computed before the guards', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'appointment-address.js'), 'utf8');
+      const compute = src.indexOf('const addressRows = rowsTheMoveUpdates(locked,');
+      const guard = src.indexOf('await assertNoMistingRefillMoves(trx, addressRows, plan.propertyId');
+      expect(compute).toBeGreaterThan(0);
+      expect(guard).toBeGreaterThan(compute);
     });
   });
 
@@ -487,7 +494,7 @@ describe('Update Details that moves the visit to another house never carries a r
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    expect(src).toContain('await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons, updates });');
+    expect(src).toContain('await assertRefillPropertyCurrent(trx, req.params.id, { replaceAddons, updates });');
     expect(src).toContain('presetEligibilityCheck, propertyId,\n      });');
     expect(src).toContain("propertyId: typeof req.body.propertyId === 'string' ? req.body.propertyId : undefined,");
   });

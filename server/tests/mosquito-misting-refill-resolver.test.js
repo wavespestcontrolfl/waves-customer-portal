@@ -171,6 +171,27 @@ describe('the price must be the pricing row\'s own price for the sold solution, 
     expect(await attach(db([estimate({ estimate_data: mistingData('premium') })]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE', solution: 'premium' });
   });
 
+  test('a sync that fails after applying a row restores the provenance with the constants (Codex #6559 r1 P2)', async () => {
+    config.applyMosquitoMistingPricingConfig(undefined);
+    expect(config.mistingRefillPriceIsFromRow('natural')).toBe(false);
+    const before = config.snapshotMistingRefillProvenance();
+    expect(config.applyMosquitoMistingPricingConfig({ refills: { natural: { price: 500 } } })).toMatchObject({ applied: true });
+    expect(config.mistingRefillPriceIsFromRow('natural')).toBe(true);
+    // ...the sync then fails on a later table and db-bridge restores the in-code prices and this snapshot together
+    config.restoreMistingRefillProvenance(before);
+    expect(config.mistingRefillPriceIsFromRow('natural')).toBe(false);
+    config.rebaseMosquitoMisting();
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE' });
+    config.restoreMistingRefillProvenance(null); // a missing snapshot changes nothing
+    expect(config.mistingRefillPriceIsFromRow('natural')).toBe(false);
+  });
+
+  test('db-bridge snapshots the provenance beside the constants and restores both on a failed sync', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'pricing-engine', 'db-bridge.js'), 'utf8');
+    expect(src).toContain("mistingProvenanceSnapshot = require('./mosquito-misting-config').snapshotMistingRefillProvenance();");
+    expect(src.indexOf("restoreMistingRefillProvenance(mistingProvenanceSnapshot)")).toBeGreaterThan(src.indexOf('restorePricingConstants(constantsSnapshot);'));
+  });
+
   test('a complete valid row prices every solution; the next sync that finds no row withdraws them again', async () => {
     for (const solution of ['standard', 'natural', 'premium']) expect(config.mistingRefillPriceIsFromRow(solution)).toBe(true);
     expect(await attach(db([estimate()]))).toMatchObject({ ok: true, unitPrice: 219 });
