@@ -37,7 +37,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { neighborhoodAccessLive, neighborhoodTechActionsLive } = require('../config/feature-gates');
-const { isKeypadCode, matchKey, visitNeighborhoodIds } = require('../services/neighborhood-access');
+const { isKeypadCode, lockCommunity, matchKey, visitNeighborhoodIds } = require('../services/neighborhood-access');
 const { isTechnicianRequest, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 
@@ -575,17 +575,16 @@ router.put('/properties/:propertyId/neighborhood', async (req, res) => {
       let neighborhoodId = null;
       if (link.create) {
         const { name, county } = link.create;
-        const key = matchKey(county, name);
-        // The same advisory key the county upsert takes, so a racing writer of
-        // this name cannot insert a duplicate.
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`neighborhood:${key}`]);
-        const existing = await trx('neighborhoods').where({ match_key: key }).forUpdate().first('id', 'active');
+        // The same lock and community match the county upsert uses, so a racing
+        // writer of this community (any spelling) cannot insert a duplicate.
+        const same = await lockCommunity(trx, county, name);
+        const existing = same && await trx('neighborhoods').where({ id: same.id }).forUpdate().first('id', 'active');
         if (existing) {
           if (!existing.active) return { status: 409, body: { error: 'That neighborhood is switched off' } };
           neighborhoodId = existing.id;
         } else {
           const [ins] = await trx('neighborhoods').insert({
-            name, county, match_key: key, subdivision_names: JSON.stringify([]), source: 'office',
+            name, county, match_key: matchKey(county, name), subdivision_names: JSON.stringify([]), source: 'office',
           }).returning('id');
           neighborhoodId = ins.id ?? ins;
         }

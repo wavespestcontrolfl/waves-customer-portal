@@ -79,6 +79,16 @@ const spokenName = (words) => String(words || '').toUpperCase().replace(/['’`.
   .replace(/\s+/g, ' ').trim();
 const communityKey = (name) => spokenName(name).replace(/^THE\s+/, '').replace(TRAILING_LABEL, '');
 
+// Every writer that may create a neighborhood (the county and caller upsert,
+// the office's "new neighborhood") takes this lock first: one advisory key per
+// county + community, then the same-county row with that community key, if any.
+async function lockCommunity(conn, county, name) {
+  const community = communityKey(name);
+  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`neighborhood:${String(county || '').toLowerCase()}|${community}`]);
+  const rows = await conn('neighborhoods').whereRaw('county IS NOT DISTINCT FROM ?', [county || null]).select('id', 'match_key', 'name', 'active');
+  return rows.find((n) => communityKey(n.name) === community) || null;
+}
+
 async function upsertNeighborhood(conn, { county, subdivision, source = 'county' }) {
   const name = neighborhoodNameFromSubdivision(subdivision);
   if (!name) return null;
@@ -89,10 +99,7 @@ async function upsertNeighborhood(conn, { county, subdivision, source = 'county'
   // both read "no row" and the loser's alias append would go unjournaled. The
   // lock and the match use the community key, so a county name and a caller's
   // spelling of it (either one first) land on one row.
-  const community = communityKey(name);
-  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`neighborhood:${String(county || '').toLowerCase()}|${community}`]);
-  const sameCommunity = (await conn('neighborhoods').whereRaw('county IS NOT DISTINCT FROM ?', [county || null]).select('match_key', 'name'))
-    .find((n) => communityKey(n.name) === community);
+  const sameCommunity = await lockCommunity(conn, county, name);
   const key = sameCommunity ? sameCommunity.match_key : matchKey(county, name);
   // updated_at as text keeps Postgres's microseconds (a JS Date drops them),
   // so a rollback restores the exact value.
@@ -707,6 +714,7 @@ module.exports = {
   matchKey,
   communityKey,
   spokenName,
+  lockCommunity,
   upsertNeighborhood,
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
