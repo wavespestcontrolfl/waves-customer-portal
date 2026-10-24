@@ -1895,7 +1895,7 @@ export default function EstimateToolViewV2({
       // A one-time service: the only host a same-visit add-on can ride.
       hasOneTimeHost,
     };
-  }, [form, rodentWaveguardPosture, mistingAvailability]);
+  }, [form, rodentWaveguardPosture]);
 
   const [estimate, setEstimateState] = useState(null);
   // Monotonic invalidation version for the generated estimate. Every
