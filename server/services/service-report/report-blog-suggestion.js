@@ -201,7 +201,8 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
   // published topic (GitHub Codex P1 on 45144528b8).
   const { known } = await wordsOnTheSite(knex, phrase);
   if (!known.length || !known.every(Boolean)) return { error: 'not_a_topic' };
-  const covering = (await searchReportBlogPosts(knex, phrase)).filter((post) => post.exact);
+  // The seeder reads every match: town-titled posts can fill the first eight.
+  const covering = (await searchReportBlogPosts(knex, phrase, generalOnly ? { limit: Infinity } : undefined)).filter((post) => post.exact);
   if (covering.some((post) => !(generalOnly && isTownTitled(post.title)))) return { status: 'covered' };
   if (dryRun) return (await standingAnswer(knex, phrase)) || { status: 'would_queue' };
   // One suggestion at a time per person, so the day's cap holds when taps

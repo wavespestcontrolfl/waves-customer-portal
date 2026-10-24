@@ -383,8 +383,10 @@ async function tipBlogPosts(knex, tips) {
  * content registry's verified-live posts (each URL once). When no post holds
  * the last word and it is still being typed, that word matches by its start
  * (wordBeingTyped) and every post says whether it `starts` the search so.
+ * `limit` (eight unless given): the tip seeder's coverage check reads every
+ * match, so a general post ranked behind eight town-titled ones still counts.
  */
-async function searchReportBlogPosts(knex, query) {
+async function searchReportBlogPosts(knex, query, { limit = MAX_RESULTS } = {}) {
   let terms = searchTerms(query);
   if (!terms.length) return [];
   // Every word of the search, not only the first MAX_TERMS the read and the
@@ -422,7 +424,7 @@ async function searchReportBlogPosts(knex, query) {
   // posts holding only the first words (pre-push P1 on d1f230dfa2).
   return entries
     .sort((a, b) => Number(b.exact) - Number(a.exact) || Number(every(b)) - Number(every(a)) || specific(b) - specific(a) || b.placed - a.placed || b.when - a.when)
-    .slice(0, MAX_RESULTS)
+    .slice(0, limit)
     // `exact`: the post holds every word. With none exact, the forms say no
     // post covers the search, show these as the closest, and offer to
     // suggest one (owner mockup approval 2026-10-03). `starts`, on every post

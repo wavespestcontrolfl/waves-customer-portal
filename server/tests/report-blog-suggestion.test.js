@@ -317,6 +317,22 @@ describe('suggestReportBlogPost', () => {
     expect(await suggestReportBlogPost(queueKnex({ registry: [LIVE_STANDING_WATER] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'covered' });
   });
 
+  test('generalOnly reads every match: a general post ranked behind eight newer town-titled ones still covers the topic (pre-push P1 on d753d034e7)', async () => {
+    const towns = ['Bradenton', 'Parrish', 'Palmetto', 'Venice', 'North Port', 'Nokomis', 'Osprey', 'Ellenton'].map((town, i) => ({
+      ...LIVE_STANDING_WATER,
+      id: `9999999${i}-9999-4999-8999-999999999999`,
+      title: `Standing Water Mosquitoes in ${town}, FL`,
+      h1: `Standing Water Mosquitoes in ${town}, FL`,
+      live_url: `https://www.wavespestcontrol.com/mosquito/standing-water-${i}/`,
+      canonical_url: `https://www.wavespestcontrol.com/mosquito/standing-water-${i}/`,
+      canonical_url_normalized: `/mosquito/standing-water-${i}/`,
+      published_at: `2026-09-0${i + 1}T00:00:00Z`,
+    }));
+    const general = { ...LIVE_STANDING_WATER, published_at: '2026-01-01T00:00:00Z' };
+    expect(await suggestReportBlogPost(queueKnex({ registry: [...towns, general] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'covered' });
+    expect(await suggestReportBlogPost(queueKnex({ registry: towns }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'would_queue' });
+  });
+
   test('a seeded topic\'s row names its tip', async () => {
     const knex = queueKnex();
     expect(await suggestReportBlogPost(knex, { phrase: 'standing water', tipId: 'water_gutters' })).toEqual({ status: 'queued' });
