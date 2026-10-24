@@ -4020,6 +4020,18 @@ const LATEST_VISIT_NOTES_CAP = 1200;
 // The latest visit's service_findings as ONE history part ([] when none or the gate is off): title, detail and recommendation,
 // severity/category as a label. Each is a single capped line, injection-screened and compliance-screened like every other
 // tech-authored fact; the aggregator loads them only when the visit's customer-safe notes exist (never raw technician_notes).
+// The words customer copy about a visit never carries (the report writer's rule list in service-report/report-writer-rules and
+// pest-report-voice, and treatment-narrative's FORBIDDEN list): confirmed-diagnosis, over-claim and safety vocabulary.
+const FINDING_COPY_BANNED_RE = /\b(?:infest\w*|infections?|infected|diseased|eliminat\w+|eradicat\w+|exterminat\w+|resolved|solved|gone|cleared|pest-?free|[\w-]+-proof|guarantee[ds]?|bond|cure[sd]?|permanent(?:ly)?|safe|safer|safest|safely|unsafe|non-?toxic|toxic|harmless|poison\w*|dangerous|harmful|chemicals?|epa)\b/i;
+// The full customer-copy screen for a finding row: the report writer's screens (amounts, dates, timeframes, product names ...) AND the
+// word list above. Fails closed: if the screen cannot load, the text is rejected.
+function reportWriterScreenRejects(text) {
+  try {
+    return FINDING_COPY_BANNED_RE.test(text) || Boolean(require('./service-report/report-writer-rules').writerRulesRejection(text));
+  } catch {
+    return true;
+  }
+}
 function latestVisitFindingParts(findings, hasBannedCopy) {
   if (!smsPromptB1Live() || !Array.isArray(findings)) return [];
   const rows = findings.slice(0, 5).map((f) => {
@@ -4029,7 +4041,7 @@ function latestVisitFindingParts(findings, hasBannedCopy) {
       f?.recommendation ? `recommended: ${sanitizeSingleLine(f.recommendation, 200)}` : '',
     ].filter(Boolean).join(' - ');
     const label = [f?.severity, f?.category].map((v) => sanitizeSingleLine(v, 30)).filter(Boolean).join('/');
-    return text && !EXEMPLAR_INJECTION_RE.test(text) && !hasBannedCopy(text) ? `${text}${label ? ` (${label})` : ''}` : '';
+    return text && !EXEMPLAR_INJECTION_RE.test(text) && !hasBannedCopy(text) && !reportWriterScreenRejects(text) ? `${text}${label ? ` (${label})` : ''}` : '';
   }).filter(Boolean);
   return rows.length ? [`findings: "${rows.join(' | ')}"`] : [];
 }

@@ -539,6 +539,17 @@ describe('change A: the latest visit notes and findings', () => {
     expect(facts).toContain('Wasp nest under the eave');
   });
 
+  test('the report writer screen drops a finding row it would reject (infestation, poison, a product, a date)', () => {
+    on();
+    const facts = freshDrafter().buildFactsBlock(ctx([
+      { title: 'Severe infestation at the lanai', detail: 'x', severity: 'high', category: 'activity' },
+      { title: 'Poison bait found in the garage', detail: 'x', severity: 'high', category: 'observation' },
+      { title: 'Wasp nest under the eave', detail: 'Small nest.', severity: 'medium', category: 'activity' },
+    ]), { now: NOW });
+    expect(facts).not.toMatch(/infestation|Poison/i);
+    expect(facts).toContain('findings: "Wasp nest under the eave - Small nest. (medium/activity)"');
+  });
+
   test('raw technician_notes never reaches the facts: only the context notes field is read', () => {
     on();
     const facts = freshDrafter().buildFactsBlock({ ...baseContext, serviceHistory: [{ type: 'Quarterly Pest', date: '2026-06-01', notes: null, technician_notes: 'gate code 4471, owes us money' }] }, { now: NOW });
