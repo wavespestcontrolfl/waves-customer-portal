@@ -82,6 +82,20 @@ const AREA_OPTIONS = [
   'Front landscape', 'Back landscape', 'Side landscapes', 'Entry landscape', 'Foundation beds',
   'Pool / lanai landscape', 'Driveway beds', 'Hedges / screening plants', 'Individual tagged plants', 'Other',
 ];
+// Optional "Palms" block (owner 2026-10-23): the same keys and option lists as
+// the typed form (project-types.js tree_shrub palm_* fields; the server rejects
+// any value outside them, and a test pins the two lists together). Nothing here
+// is required, and a blank entry is simply left out of the body.
+const PALM_TYPE_OPTIONS = [
+  'Sabal / cabbage palm', 'Queen palm', 'Royal palm', 'Foxtail palm', 'Christmas / Adonidia palm', 'Pygmy date palm',
+  'Canary Island date palm', 'Edible / Sylvester (wild) date palm', 'Bismarck palm', 'Washingtonia (Mexican fan) palm',
+  'Coconut palm', 'Areca palm', 'Pindo palm', 'Chinese fan palm', 'Other / not sure',
+];
+const NO_PALM_SYMPTOMS = 'None seen';
+const PALM_SYMPTOM_OPTIONS = [
+  NO_PALM_SYMPTOMS, 'Frizzle-top (new fronds yellow / small / withered)', 'Yellow / orange spotting on older fronds',
+  'Browning / bronzing fronds', 'Spear leaf collapse',
+];
 const CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Declining', 'Recovering'];
 // Never 'No insecticide applied': the server refuses it beside an insect product.
 const POLLINATOR_OPTIONS = ['No blooms or no bees', 'Blooming — no bees active', 'Blooming — bees active'];
@@ -489,6 +503,23 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
 
 const inOptionOrder = (options, set) => options.filter((option) => set.has(option)).join(', ');
 
+// The palm facts ride only on a visit that has palms (the Palms plant group).
+// Counts are digits only (the server takes 0 to 9999); empty stays absent.
+function palmValues(form) {
+  if (!form.plantGroups.has('Palms')) return {};
+  const count = (value) => (/^\d{1,4}$/.test(String(value ?? '').trim()) ? String(value).trim() : '');
+  const total = count(form.palmCount);
+  const large = count(form.palmLarge);
+  const types = inOptionOrder(PALM_TYPE_OPTIONS, form.palmTypes);
+  const symptoms = inOptionOrder(PALM_SYMPTOM_OPTIONS, form.palmSymptoms);
+  return {
+    ...(total ? { palm_count_total: total } : {}),
+    ...(large ? { palm_count_large: large } : {}),
+    ...(types ? { palm_types_seen: types } : {}),
+    ...(symptoms ? { palm_symptoms: symptoms } : {}),
+  };
+}
+
 function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable, watchChoices = {}, customerText }) {
   const active = rows.filter((row) => row.active);
   const applicationArea = inOptionOrder(AREA_OPTIONS, form.areas);
@@ -521,6 +552,8 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
         // hidden stale value must not record spray volume against products
         // that applied no mix (Codex #6398).
         ...(hasLiquidApplication(active) && String(form.sprayGallons ?? '').trim() !== '' ? { spray_mix_gallons: String(form.sprayGallons).trim() } : {}),
+        // Optional internal palm facts (project-types.js palm_*), only with the Palms group on.
+        ...palmValues(form),
       },
     },
     completionPhotos: photos.map((photo, index) => ({
@@ -647,6 +680,8 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     // optional costing fact for the spray-volume material model, never on
     // the customer report.
     sprayGallons: '',
+    // Optional palm facts: counts as typed digits, chips as sets.
+    palmCount: '', palmLarge: '', palmTypes: new Set(), palmSymptoms: new Set(),
     customerHome: DEFAULT_CUSTOMER_HOME,
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
@@ -743,6 +778,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               <Chip disabled={locked} key={label} label={label} pressed={form.plantGroups.has(label)} onClick={() => setField('plantGroups', toggleInSet(form.plantGroups, label))} />
             ))}
           </ChoiceSection>
+          <PalmsSection form={form} setField={setField} locked={locked} />
           <ChoiceSection title="Areas treated" columns={2}>
             {AREA_OPTIONS.map((label) => (
               <Chip disabled={locked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
@@ -1254,6 +1290,78 @@ function ProductEditor({ row, warnings, neonicLine, heldLine, locked, onChange, 
 // Gallons of finished mix used on the visit (owner 2026-10-21): the one
 // number that lets the office re-derive Tree & Shrub material from label
 // carrier volume instead of a per-bed-sqft guess. Optional; office-only.
+// Collapsed by default, nothing required: it only records what the tech sees on
+// the palms (office-only facts for the estimate check and the palm plan).
+// "None seen" clears the other symptoms, and any other symptom clears it.
+function PalmsSection({ form, setField, locked }) {
+  const panelId = useId();
+  const totalId = useId();
+  const largeId = useId();
+  const [open, setOpen] = useState(false);
+  const digits = (value) => value.replace(/\D/g, '').slice(0, 4);
+  const toggleSymptom = (label) => {
+    const next = toggleInSet(form.palmSymptoms, label);
+    if (label === NO_PALM_SYMPTOMS) setField('palmSymptoms', next.has(label) ? new Set([label]) : next);
+    else { next.delete(NO_PALM_SYMPTOMS); setField('palmSymptoms', next); }
+  };
+  if (!form.plantGroups.has('Palms')) return null;
+  return (
+    <section className="tech-visit-choice-section">
+      <Button
+        type="button"
+        variant="secondary"
+        className="tech-visit-action tech-visit-wide"
+        aria-expanded={open}
+        aria-controls={panelId}
+        disabled={locked}
+        onClick={() => setOpen((prev) => !prev)}
+      >
+        {`Palms (optional) ${open ? '−' : '+'}`}
+      </Button>
+      {open && (
+        <div id={panelId}>
+          <div className="tech-visit-section-head">
+            <h3 className="tech-visit-section-title"><label htmlFor={totalId}>Palms on property (all sizes)</label></h3>
+          </div>
+          <input
+            id={totalId}
+            className="ui-control tech-visit-control"
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={form.palmCount}
+            disabled={locked}
+            onChange={(e) => setField('palmCount', digits(e.target.value))}
+          />
+          <div className="tech-visit-section-head">
+            <h3 className="tech-visit-section-title"><label htmlFor={largeId}>Large palms (canopy wider than about 15 ft)</label></h3>
+          </div>
+          <input
+            id={largeId}
+            className="ui-control tech-visit-control"
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={form.palmLarge}
+            disabled={locked}
+            onChange={(e) => setField('palmLarge', digits(e.target.value))}
+          />
+          <ChoiceSection title="Palm types seen" columns={2}>
+            {PALM_TYPE_OPTIONS.map((label) => (
+              <Chip disabled={locked} key={label} label={label} pressed={form.palmTypes.has(label)} onClick={() => setField('palmTypes', toggleInSet(form.palmTypes, label))} />
+            ))}
+          </ChoiceSection>
+          <ChoiceSection title="Palm symptoms seen" columns={1}>
+            {PALM_SYMPTOM_OPTIONS.map((label) => (
+              <Chip disabled={locked} key={label} label={label} pressed={form.palmSymptoms.has(label)} onClick={() => toggleSymptom(label)} />
+            ))}
+          </ChoiceSection>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function SprayGallonsSection({ value, locked, onChange }) {
   const id = useId();
   return (

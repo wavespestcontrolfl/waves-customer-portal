@@ -1124,11 +1124,40 @@ function parseWindow(w) {
   return { start: m[1], end: m[2] };
 }
 
+// Closed days for a series move's projection (GATE_SERIES_MOVE_SKIP_CLOSED_DAYS,
+// owner 2026-10-22 "fix series edit", 2026-10-24 "FIX"), or null when the move
+// keeps its projected dates. Read for:
+//   - a STAFF move (initiatedBy 'admin'): staff moves skip the closed-day
+//     refusal by design (reschedule(): the owner may book his own day off), so
+//     a later visit the re-anchor lands on a closed day was picked by nobody
+//     (10-22: a move to a fifth Thursday put the next visit on Thanksgiving);
+//   - a customer web move that hands its later visits to dispatch (`deferred`
+//     placement): only its anchor is checked against closed days, so a
+//     hand-off took a closed day as its due date (10-23: a move to a Friday
+//     put an untimed visit on Christmas). The page that names the next visit's
+//     date reads them the same way (projectNextVisitDates).
+// Other customer moves refuse a closed projected date (rescheduleSeries).
+// One-off dates are read for SERIES_CLOSED_DAYS_HORIZON_DAYS; weekly days off
+// and closed holidays hold on every date. The range rides along so
+// assertClosedDaysUnchanged re-reads the same range under the move's locks.
+// A failed read projects as before, like every series generator (fail-open).
+async function loadSeriesClosedDays(conn, { initiatedBy = null, deferred = false } = {}) {
+  if (initiatedBy !== 'admin' && !deferred) return null;
+  if (!require('../config/feature-gates').seriesMoveSkipClosedDaysLive()) return null;
+  const range = [etDateString(), etDateString(addETDays(new Date(), SERIES_CLOSED_DAYS_HORIZON_DAYS))];
+  try {
+    return { range, ...await require('./scheduling/blackout-dates').getBlackoutLayers(...range, conn) };
+  } catch (err) {
+    logger.warn(`[rebooker] closed days unreadable; series dates projected without them: ${err.message}`);
+    return null;
+  }
+}
+
 // The per-occurrence date projection a series shift writes — shared by
 // rescheduleSeries (inside its transaction) and previewSeriesMove (read-only
 // counts for the surfaces), so what a surface previews is exactly what the
 // move probes and writes.
-async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn = db, prefersNoWeekends, staffMove = false }) {
+async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn = db, prefersNoWeekends, closedDays = null }) {
   const pattern = parent.recurring_pattern;
   const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
   // Seasonal series keep their seeded weekend/season contract on re-anchor
@@ -1148,28 +1177,10 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
     || (typeof prefersNoWeekends === 'boolean'
       ? prefersNoWeekends
       : await customerPrefersNoWeekends(conn, parent.customer_id));
-  // Closed days (GATE_SERIES_MOVE_SKIP_CLOSED_DAYS, owner 2026-10-22 "fix
-  // series edit"): a STAFF move re-dates the plan's later visits, but the
-  // staffer picked only the anchor. Staff moves skip the closed-day refusal
-  // by design (reschedule(): the owner may book his own day off), so a later
-  // visit the re-anchor lands on a closed day was picked by nobody (10-22: a
-  // move to a fifth Thursday put the next visit on Thanksgiving). Each
-  // projected later visit moves forward off a closed day with the nudge the
-  // Edit appointment cadence rewrite and the seeder share
-  // (scheduling/blackout-nudge.js). The anchor stays as picked; a customer
-  // move still refuses a closed projected date (rescheduleSeries). A failed
-  // read projects as before, like every series generator (fail-open).
-  // The read range rides along so assertClosedDaysUnchanged (below) re-reads
-  // the same range under the caller's locks.
-  let closedDays = null;
-  if (staffMove && require('../config/feature-gates').seriesMoveSkipClosedDaysLive()) {
-    const range = [etDateString(), etDateString(addETDays(new Date(), SERIES_CLOSED_DAYS_HORIZON_DAYS))];
-    try {
-      closedDays = { range, ...await require('./scheduling/blackout-dates').getBlackoutLayers(...range, conn) };
-    } catch (err) {
-      logger.warn(`[rebooker] closed days unreadable; series dates projected without them: ${err.message}`);
-    }
-  }
+  // `closedDays` (loadSeriesClosedDays): each projected later visit moves
+  // forward off a closed day with the nudge the Edit appointment cadence
+  // rewrite and the seeder share (scheduling/blackout-nudge.js); the anchor
+  // stays as picked. Null = projected as before.
   const projectSeriesDate = (raw) => {
     let out = String(raw).split('T')[0];
     // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
@@ -2706,7 +2717,9 @@ class SmartRebooker {
     }
     const {
       isMonthBasedPattern, seriesSkipWeekends, opts, deltaDays, cadenceSlotDate, projectOccurrenceDate, assertClosedDaysUnchanged,
-    } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr, staffMove: initiatedBy === 'admin' });
+    } = await makeSeriesProjector({
+      service, parent, newDate, seriesDateStr, closedDays: await loadSeriesClosedDays(db, { initiatedBy, deferred: deferFuturePlacement }),
+    });
     // The call-created follow-ups this move shifts — planned before the
     // locks (their destination days join rung 1) and handed to the shift
     // as the locked set.
@@ -4516,11 +4529,14 @@ class SmartRebooker {
     const prefersNoWeekends = parent.skip_weekends
       ? true
       : !!(await customerPrefersNoWeekends(conn, parent.customer_id));
+    // …and the closed days a deferred-placement move skips for the later
+    // visits it hands to dispatch, so the date named is the date it writes.
+    const closedDays = await loadSeriesClosedDays(conn, { deferred });
     for (const raw of candidateDates) {
       const seriesDateStr = dateOnly(raw);
       if (!seriesDateStr || seriesDateStr === currentDate || byDate[seriesDateStr]) continue;
       const { cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
-        service, parent, newDate: seriesDateStr, seriesDateStr, conn, prefersNoWeekends,
+        service, parent, newDate: seriesDateStr, seriesDateStr, conn, prefersNoWeekends, closedDays,
       });
       // Walk the rows before it in sweep order, exactly as the move does: a
       // row that does not move still reserves its cadence slot.
@@ -4566,11 +4582,11 @@ class SmartRebooker {
       .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id', 'technician_id');
     const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
     if (droppedIdx === -1) return empty;
-    // staffMove: every caller applies this preview as a staff ('admin') move
-    // (dispatch board, Edit appointment, the call-proposal review card), so
-    // the dates it discloses skip closed days exactly as that move will.
+    // Every caller applies this preview as a staff ('admin') move (dispatch
+    // board, Edit appointment, the call-proposal review card), so the dates it
+    // discloses skip closed days exactly as that move will.
     const { deltaDays, cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
-      service, parent, newDate, seriesDateStr, conn, staffMove: true,
+      service, parent, newDate, seriesDateStr, conn, closedDays: await loadSeriesClosedDays(conn, { initiatedBy: 'admin' }),
     });
     const swept = siblings.slice(droppedIdx);
     // Staff surfaces move a live anchor (allowLive); every other live/skipped

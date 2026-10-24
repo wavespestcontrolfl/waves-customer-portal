@@ -87,11 +87,13 @@ describe('tree & shrub schema', () => {
     // slice is a regression against the 2026-07-21 simplification.
     // spray_mix_gallons + hedge_linear_ft_serviced: owner 2026-10-21
     // spray-volume groundwork, same optional + internal shape as bed sqft.
+    // palm_count_large / palm_types_seen / palm_symptoms: owner 2026-10-23,
+    // the same optional + internal shape (nothing required).
     expect(schema.fields.filter((f) => f.detail).map((f) => f.key).sort()).toEqual([
-      'access_difficulty', 'bed_sqft_serviced', 'hedge_linear_ft_serviced', 'palm_count_total',
-      'shrub_density', 'spray_mix_gallons', 'tree_count_total',
+      'access_difficulty', 'bed_sqft_serviced', 'hedge_linear_ft_serviced', 'palm_count_large', 'palm_count_total',
+      'palm_symptoms', 'palm_types_seen', 'shrub_density', 'spray_mix_gallons', 'tree_count_total',
     ]);
-    for (const key of ['bed_sqft_serviced', 'palm_count_total', 'tree_count_total', 'shrub_density', 'access_difficulty', 'spray_mix_gallons', 'hedge_linear_ft_serviced']) {
+    for (const key of ['bed_sqft_serviced', 'palm_count_total', 'palm_count_large', 'palm_types_seen', 'palm_symptoms', 'tree_count_total', 'shrub_density', 'access_difficulty', 'spray_mix_gallons', 'hedge_linear_ft_serviced']) {
       expect({ key, internal: byKey[key].internal, required: byKey[key].required })
         .toEqual({ key, internal: true, required: false });
     }
@@ -388,6 +390,138 @@ describe('validation', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.errors.join(' ')).toMatch(/Inspection only/);
+  });
+});
+
+describe('palm capture fields (owner 2026-10-23)', () => {
+  const schema = findingsSchemaForType('tree_shrub');
+  const byKey = Object.fromEntries(schema.fields.map((f) => [f.key, f]));
+  const PALM_VALUES = {
+    palm_count_total: '9',
+    palm_count_large: '2',
+    palm_types_seen: 'Queen palm, Sabal / cabbage palm',
+    palm_symptoms: 'Frizzle-top (new fronds yellow / small / withered), Browning / bronzing fronds',
+  };
+  const validate = (extra, enforceRequired = true) => validateTypedFindings({
+    type: 'tree_shrub', expectedType: 'tree_shrub', enforceRequired, values: { ...BASE_VALUES, ...extra },
+  });
+
+  test('count and multi_select types, labels per the owner ruling', () => {
+    expect(byKey.palm_count_total.label).toBe('Palms on property (all sizes)');
+    expect(byKey.palm_count_large).toMatchObject({ type: 'count', label: 'Large palms (canopy wider than about 15 ft)' });
+    expect(byKey.palm_types_seen.type).toBe('multi_select');
+    expect(byKey.palm_symptoms.type).toBe('multi_select');
+    expect(byKey.palm_symptoms.options).toEqual([
+      'None seen', 'Frizzle-top (new fronds yellow / small / withered)', 'Yellow / orange spotting on older fronds',
+      'Browning / bronzing fronds', 'Spear leaf collapse',
+    ]);
+    expect(byKey.palm_types_seen.options).toEqual(
+      require('../config/tree-shrub-field-guide.json').palmTypes.rows.map((row) => row.name),
+    );
+  });
+
+  test('multi_select options hold no comma: storage is comma-joined, a comma would shred the chip', () => {
+    for (const key of ['palm_types_seen', 'palm_symptoms']) {
+      for (const option of byKey[key].options) expect({ key, option, comma: option.includes(',') }).toEqual({ key, option, comma: false });
+    }
+  });
+
+  test('nothing is required: a submission with no palm field passes the required-core check', () => {
+    expect(validate({}).ok).toBe(true);
+    expect(REQUIRED_FINDINGS_FIELDS.tree_shrub).toEqual(['plant_groups', 'landscape_condition']);
+    for (const key of ['palm_count_total', 'palm_count_large', 'palm_types_seen', 'palm_symptoms']) {
+      expect(byKey[key].required).toBe(false);
+      expect(byKey[key].requiredUnless).toBeFalsy();
+    }
+  });
+
+  test('all four palm fields validate together and reject off-list or non-numeric values', () => {
+    expect(validate(PALM_VALUES).ok).toBe(true);
+    expect(validate({ palm_count_large: 'many' }).ok).toBe(false);
+    expect(validate({ palm_types_seen: 'Banana palm' }).ok).toBe(false);
+    expect(validate({ palm_symptoms: 'Wilting' }).ok).toBe(false);
+  });
+
+  // The Fast Complete T&S sheet posts exactly these keys (FastCompleteTreeShrubSheet
+  // completionBody): no treatments_completed, no customer_recommendations. The
+  // route (complete-scheduled-service.js) strips treatments_completed, runs this
+  // validator with enforceRequired, then the banned-copy scan over every string
+  // value, then buildTypedReportSnapshot on the same values.
+  const FAST_COMPLETE_VALUES = {
+    plant_groups: 'Palms, Shrubs',
+    landscape_condition: 'Good',
+    ...PALM_VALUES,
+  };
+
+  test('Fast Complete sheet values (palm keys, no recommendations) pass the route validation; absent palm keys still pass', () => {
+    const run = (values) => validateTypedFindings({ type: 'tree_shrub', expectedType: 'tree_shrub', enforceRequired: true, values });
+    expect(run(FAST_COMPLETE_VALUES).ok).toBe(true);
+    const { palm_count_total, palm_count_large, palm_types_seen, palm_symptoms, ...bare } = FAST_COMPLETE_VALUES;
+    expect([palm_count_total, palm_count_large, palm_types_seen, palm_symptoms]).toHaveLength(4);
+    expect(run(bare).ok).toBe(true);
+  });
+
+  test('no palm option or value trips the customer banned-copy scan the route runs over every string value', () => {
+    for (const key of ['palm_types_seen', 'palm_symptoms']) {
+      for (const option of byKey[key].options) expect({ option, hits: findBannedCustomerCopy(option) }).toEqual({ option, hits: [] });
+    }
+    for (const value of Object.values(FAST_COMPLETE_VALUES)) expect(findBannedCustomerCopy(value)).toEqual([]);
+  });
+
+  test('the frozen snapshot keeps the Fast Complete palm values under the typed keys, and estimate-actuals reads the count', () => {
+    const { buildActualsRow } = require('../services/estimate-actuals')._private;
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'tree_shrub',
+      values: { ...FAST_COMPLETE_VALUES },
+      serviceKey: 'tree_shrub_program',
+      serviceLabel: 'Tree & Shrub Care Program',
+      visitSequence: 1,
+      activity: null,
+    });
+    for (const key of Object.keys(PALM_VALUES)) expect(snapshot.values[key]).toBe(PALM_VALUES[key]);
+    const row = buildActualsRow({
+      serviceRecord: {
+        id: 'sr-palm', customer_id: 'cust-palm', service_line: 'tree_shrub', service_date: '2026-10-23',
+        service_data: JSON.stringify({ typedReportSnapshot: snapshot }),
+      },
+      scheduledService: { id: 'ss-palm' },
+      estimate: { id: 'est-palm', estimate_data: {} },
+      completion: {},
+      productCount: '0',
+    });
+    expect(JSON.parse(row.actual).treeShrub.palmCount).toBe(9);
+  });
+
+  test('customer-facing findings carry no palm label, key or value', () => {
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'tree_shrub',
+      values: { ...FAST_COMPLETE_VALUES },
+      serviceKey: 'tree_shrub_program',
+      serviceLabel: 'Tree & Shrub Care Program',
+      visitSequence: 1,
+      activity: null,
+    });
+    const customerText = JSON.stringify({ findings: snapshot.findings, todaysResult: snapshot.todaysResult });
+    for (const needle of ['palm_count', 'palm_types_seen', 'palm_symptoms', 'Frizzle-top', 'Queen palm', 'Large palms', 'Palm types seen']) {
+      expect(customerText).not.toContain(needle);
+    }
+  });
+
+  test('palm fields persist in the snapshot values but never reach customer findings', () => {
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'tree_shrub',
+      values: { ...BASE_VALUES, ...PALM_VALUES },
+      serviceKey: 'tree_shrub_program',
+      serviceLabel: 'Tree & Shrub Care Program',
+      visitSequence: 1,
+      activity: null,
+    });
+    const findingKeys = snapshot.findings.map((f) => f.fieldKey);
+    for (const key of Object.keys(PALM_VALUES)) {
+      expect(findingKeys).not.toContain(key);
+      expect(snapshot.values[key]).toBe(PALM_VALUES[key]);
+    }
+    expect(findingKeys).toEqual(['plant_groups', 'landscape_condition', 'treatments_completed', 'customer_recommendations']);
   });
 });
 

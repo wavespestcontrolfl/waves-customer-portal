@@ -412,5 +412,7 @@ async function sweepSmsLeadCandidates({ limit = DEFAULT_LIMIT, now = new Date() 
 
 module.exports = {
   sweepSmsLeadCandidates,
+  internalLineDigits,
+  SKIP_SOURCES,
   _test: { readThread, ringOwedBells, findCandidates, processCandidate, knownState, threadText, spamScreened, isLead, toExtracted, claim, EXTRACTION_SCHEMA, QUIET_MINUTES, MIN_CONFIDENCE },
 };

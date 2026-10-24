@@ -95,11 +95,35 @@ describe('models registry — cross-provider routing', () => {
 
   test('lawnVisitAssessment runs Gemini first and GPT-6 Sol second on its own selector (owner 2026-09-29, was Astra)', () => {
     const M = require('../config/models');
-    expect(M.TEXT_POLICIES.lawnVisitAssessment.primary).toEqual({ provider: 'gemini', model: M.GEMINI_VISION_BEST });
+    expect(M.TEXT_POLICIES.lawnVisitAssessment.primary).toEqual({ provider: 'gemini', model: M.GEMINI_LAWN_ASSESSMENT });
     expect(M.TEXT_POLICIES.lawnVisitAssessment.fallback).toEqual({ provider: 'openai', model: M.OPENAI_LAWN_ASSESSMENT });
     expect(M.OPENAI_LAWN_ASSESSMENT).toBe(process.env.MODEL_OPENAI_LAWN_ASSESSMENT || 'gpt-6-sol');
     // The pest identifier's Astra second look is untouched.
     expect(M.TEXT_POLICIES.photoIdVision.fallback).toEqual({ provider: 'openai', model: M.OPENAI_FRONTIER });
+  });
+
+  test('the lawn read and paired recheck run on their own Gemini selector, Flash by default, not the shared photo-lane model (owner 2026-10-24)', () => {
+    const saved = { lawn: process.env.MODEL_GEMINI_LAWN_ASSESSMENT, vision: process.env.MODEL_GEMINI_VISION };
+    jest.resetModules();
+    delete process.env.MODEL_GEMINI_LAWN_ASSESSMENT;
+    process.env.MODEL_GEMINI_VISION = 'gemini-4-argon';
+    try {
+      let M = require('../config/models');
+      expect(M.GEMINI_LAWN_ASSESSMENT).toBe('gemini-3.8-flash');
+      expect(M.TEXT_POLICIES.lawnVisitAssessment.primary).toEqual({ provider: 'gemini', model: 'gemini-3.8-flash' });
+      expect(M.TEXT_POLICIES.lawnPairedRecheck.primary).toEqual({ provider: 'gemini', model: 'gemini-3.8-flash' });
+      // The other photo lanes still follow MODEL_GEMINI_VISION.
+      expect(M.GEMINI_VISION_BEST).toBe('gemini-4-argon');
+      jest.resetModules();
+      process.env.MODEL_GEMINI_LAWN_ASSESSMENT = 'gemini-lawn-canary';
+      M = require('../config/models');
+      expect(M.TEXT_POLICIES.lawnVisitAssessment.primary.model).toBe('gemini-lawn-canary');
+      expect(M.TEXT_POLICIES.lawnPairedRecheck.primary.model).toBe('gemini-lawn-canary');
+    } finally {
+      if (saved.lawn === undefined) delete process.env.MODEL_GEMINI_LAWN_ASSESSMENT; else process.env.MODEL_GEMINI_LAWN_ASSESSMENT = saved.lawn;
+      if (saved.vision === undefined) delete process.env.MODEL_GEMINI_VISION; else process.env.MODEL_GEMINI_VISION = saved.vision;
+      jest.resetModules();
+    }
   });
 
   test('MODEL_OPENAI_LAWN_ASSESSMENT overrides only the lawn backup leg', () => {

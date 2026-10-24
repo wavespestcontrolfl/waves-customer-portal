@@ -22,6 +22,8 @@ const findings = {
   applicator_fdacs_id: 'JF000000',
   warranty_type: 'Builder 1-year, renewable yearly to year 5',
   wdo_target: ['Subterranean termites'],
+  // The dialog opens on a builder lot, which runs from the final treatment.
+  final_exterior_date: '2026-10-20',
 };
 
 function fillOfficeFields() {
@@ -38,11 +40,28 @@ function fillOfficeFields() {
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
+// The consumer-notices list loads when the dialog opens: it answers 404 while
+// GATE_WARRANTY_13692_CHECK is off. `replies` answer the other calls in order.
+function mockApi({ notices = null, replies = [] } = {}) {
+  const queue = [...replies];
+  adminFetch.mockImplementation(async (path) => {
+    if (isNoticeList(path)) {
+      return notices ? { ok: true, json: async () => ({ enabled: true, graceEnd: '2026-11-24', notices }) } : { ok: false, json: async () => ({}) };
+    }
+    return queue.shift();
+  });
+}
+const isNoticeList = (path) => path.endsWith('/consumer-notices');
+const apiCalls = () => adminFetch.mock.calls.filter(([path]) => !isNoticeList(path));
+
 describe('IssueWarrantyDialog', () => {
   it('shows the full text, needs the review tick, then saves a draft with the previewed hash and sends nothing', async () => {
-    adminFetch
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ body: 'WARRANTY TEXT FOR REVIEW', renderHash: 'h1' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ signingUrl: null, contract: { status: 'draft' } }) });
+    mockApi({
+      replies: [
+        { ok: true, json: async () => ({ body: 'WARRANTY TEXT FOR REVIEW', renderHash: 'h1' }) },
+        { ok: true, json: async () => ({ signingUrl: null, contract: { status: 'draft' } }) },
+      ],
+    });
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
     const previewButton = screen.getByRole('button', { name: 'Preview warranty' });
     expect(previewButton).toBeDisabled();
@@ -57,12 +76,12 @@ describe('IssueWarrantyDialog', () => {
     await screen.findByText(/Warranty saved as a draft. Nothing has gone to the owner yet./);
     expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument();
 
-    expect(adminFetch).toHaveBeenCalledTimes(2);
-    expect(adminFetch.mock.calls[0][0]).toBe('/admin/document-templates/service_agreement.termite_new_construction_warranty/issue-preview');
-    const [path, init] = adminFetch.mock.calls[1];
+    expect(apiCalls()).toHaveLength(2);
+    expect(apiCalls()[0][0]).toBe('/admin/document-templates/service_agreement.termite_new_construction_warranty/issue-preview');
+    const [path, init] = apiCalls()[1];
     expect(path).toBe('/admin/document-templates/service_agreement.termite_new_construction_warranty/contracts');
     expect(init.body.confirmedRenderHash).toBe('h1');
-    expect(adminFetch.mock.calls[0][1].body.values).toEqual(init.body.values);
+    expect(apiCalls()[0][1].body.values).toEqual(init.body.values);
     expect(init.body.customerId).toBe('cust-1');
     expect(init.body.projectId).toBe('abcd1234-0000');
     expect(init.body.propertyAddress).toBeUndefined();
@@ -77,6 +96,56 @@ describe('IssueWarrantyDialog', () => {
     });
     expect(init.body.values.basis).toEqual({ kind: 'master', date: '09/01/2026' });
     expect(init.body.values.issuer).toEqual({ name: 'Pat Office', title: 'Office Manager' });
+  });
+
+  it('gate on, notice on file: shows it, hides the typed date and sends none', async () => {
+    mockApi({
+      notices: [{ source: 'paper', id: 'p1', usable: true, signedOn: '08/20/2026' }, { source: 'esign', id: 'e1', usable: true, signedOn: '09/20/2026' }],
+      replies: [{ ok: true, json: async () => ({ body: 'WARRANTY TEXT', renderHash: 'h2', warnings: [] }) }],
+    });
+    render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
+    fillOfficeFields();
+    // The 09/20 notice is after the 09/01 contract basis; the 08/20 paper scan counts.
+    await screen.findByText(/FDACS-13692 on file: paper, signed 08\/20\/2026/);
+    expect(document.getElementById('warranty-notice-date')).toBeNull();
+    expect(screen.getByRole('button', { name: 'View' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview warranty' }));
+    await screen.findByText('WARRANTY TEXT');
+    expect(apiCalls()[0][1].body.values.warranty).not.toHaveProperty('consumer_notice_date');
+  });
+
+  it('gate on, none on file: warns with the grace end, keeps the typed date, shows server warnings, uploads a scan and reloads', async () => {
+    mockApi({
+      notices: [],
+      replies: [
+        { ok: true, json: async () => ({}) },
+        { ok: true, json: async () => ({ body: 'WARRANTY TEXT', renderHash: 'h3', warnings: ['No signed FDACS-13692 consumer notice is on file for this customer.'] }) },
+      ],
+    });
+    render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
+    await screen.findByText(/Until 11\/24\/2026 you can type the date it was signed/);
+    expect(document.getElementById('warranty-notice-date')).not.toBeNull();
+    fillOfficeFields();
+    const file = new File(['%PDF-1.4 test'], 'notice.pdf', { type: 'application/pdf' });
+    fireEvent.change(document.getElementById('warranty-notice-file'), { target: { files: [file] } });
+    fireEvent.change(document.getElementById('warranty-notice-file-date'), { target: { value: '08/20/2026' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload paper FDACS-13692' }));
+    await waitFor(() => expect(apiCalls()).toHaveLength(1));
+    const [path, init] = apiCalls()[0];
+    expect(path).toBe('/admin/customers/cust-1/consumer-notices/paper');
+    expect(init.body).toBeInstanceOf(FormData);
+    expect(init.body.get('signedOn')).toBe('08/20/2026');
+    expect(init.body.get('file')).toBe(file);
+    fireEvent.click(screen.getByRole('button', { name: 'Preview warranty' }));
+    await screen.findByText('No signed FDACS-13692 consumer notice is on file for this customer.');
+    expect(apiCalls()[1][1].body.values.warranty.consumer_notice_date).toBe('09/01/2026');
+  });
+
+  it('gate off: no notice panel, the typed date as before', () => {
+    mockApi();
+    render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
+    expect(document.getElementById('warranty-notice-date')).not.toBeNull();
+    expect(document.getElementById('warranty-notice-file')).toBeNull();
   });
 
   it('keeps Preview disabled while the contract basis date is after treatment', () => {
@@ -94,7 +163,15 @@ describe('IssueWarrantyDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Preview warranty' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The certificate is missing: treatment.product'));
   });
+  it('blocks a builder lot until the final treatment date is recorded, and names the $149.00 cap', () => {
+    render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={{ ...findings, final_exterior_date: '' }} />);
+    fillOfficeFields();
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
+    expect(screen.getByText(/A builder lot warranty runs from the final exterior treatment/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/not more than \$149.00/)).toBeInTheDocument();
+  });
 });
+
 
 
 describe('IssueWarrantyAction', () => {

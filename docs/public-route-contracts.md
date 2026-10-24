@@ -4209,7 +4209,14 @@ the wavespestcontrol.com lead-magnet funnel — no auth, no token. Paid
 dual-model vision per accepted request, so it carries the full abuse triad:
 entire surface 404s unless GATE_LAWN_ASSESSMENT is on, honeypot drop,
 Turnstile verified and enforced with GATE_LEAD_TURNSTILE, 5 req/hour per-IP
-in-route limit plus the shared 40/day photoAssessmentDailyLimiter at mount,
+in-route limit plus the 40/day per-IP photoAssessmentDailyLimiter at mount
+(in-memory, resets on deploy; with GATE_PUBLIC_LLM_SHARED_CAP on, a Postgres
+shared daily cap is consumed inside the handler, once per request, after the
+honeypot, Turnstile and photo validation and the in-route limiter, right before
+the paid vision call: one `photo-assessment` bucket for this route and
+pest-identifier, 300/day by default, env PUBLIC_LLM_DAILY_CAP_PHOTO, counted
+on the America/New_York calendar day, 429 with the same message when over,
+fail-open on a database error, off = no database call),
 ≤5 photos with per-photo size cap. Persists a `lawn_diagnostics` row
 (mode=prospect, source=public_funnel) via the SAME shared analysis ladder as
 the tech flow; the response is a TEASER ONLY — a strict subset of the public
@@ -4262,7 +4269,9 @@ exact mirror of `/api/public/lawn-assessment/analyze` behind
 GATE_PEST_IDENTIFIER, writing `pest_identifications`. Customer-visible copy
 comes ONLY from the fixed PEST_LIBRARY allowlist in
 services/pest-identification.js — model output never reaches a prospect, and
-low-confidence/conflicting IDs degrade to generic category labels.)
+low-confidence/conflicting IDs degrade to generic category labels. Shares the
+`photo-assessment` GATE_PUBLIC_LLM_SHARED_CAP daily bucket with the lawn
+route, consumed at the same point (after validation, before `identifyPest`).)
 `/api/public/pest-identifier/:id/claim` (write; mirror of the lawn claim —
 same one-shot lead+token transaction, 409 on replay, same best-effort
 ad_service_attribution row (lead_source=pest_identifier), typical-home
@@ -4706,7 +4715,14 @@ marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 /message bodies only (paid-LLM surface, same rationale as
 paidEstimatorDailyLimiter; GET /status, non-POST probes, gate-off probes,
 and empty/oversized bodies are all LLM-free — they 503/400 without spending
-the cap, so shared-IP noise can't lock out real chat turns). PII contract:
+the cap, so shared-IP noise can't lock out real chat turns). With
+GATE_PUBLIC_LLM_SHARED_CAP on, a Postgres shared daily cap follows the per-IP
+limiter (bucket `ask-waves`, 1500/day by default, env
+PUBLIC_LLM_DAILY_CAP_ASK_WAVES, counted on the America/New_York calendar day).
+It is consumed inside the `/message` handler, once per turn, after the gate,
+the in-route limiter and body validation, right before `processIntakeMessage`
+(the model fallback inside it does not count again). 429 with the same message
+when over, fail-open on a database error, off = no database call. PII contract:
 requires NO PII and
 asks for none — visitor free-text + client-echoed history (both length- and
 turn-clamped, roles allowlisted) is sent to the LLM and logged best-effort to

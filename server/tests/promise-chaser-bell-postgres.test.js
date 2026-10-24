@@ -157,6 +157,65 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
+  describe('a stated floor time still ahead of the callback is not owed yet (10-23 audit)', () => {
+    test('a visit promised for a later day does not ring when the caller calls before it', async () => {
+      const earlier = callRow(240);
+      const visitAt = new Date(now + 2 * 24 * 3600000);
+      const commitment = commitmentRow(earlier.id, {
+        kind: 'schedule_visit', description: 'Do the roach treatment on the 25th between 12 and 2',
+        due_at: visitAt, due_basis: 'stated', due_type: 'floor',
+      });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test('an untyped stated time is a floor too', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, {
+        kind: 'send_estimate', description: 'Send the quote after the inspection',
+        due_at: new Date(now + 3600000), due_basis: 'stated', due_type: null,
+      });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test('the same floor promise rings once its time has passed before the callback', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, {
+        kind: 'schedule_visit', description: 'Come out this morning',
+        due_at: new Date(now - 60 * 60000), due_basis: 'stated', due_type: 'floor',
+      });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
+    test('a deadline still ahead keeps ringing early, as designed', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, {
+        description: 'Call the lead back by Friday',
+        due_at: new Date(now + 2 * 24 * 3600000), due_basis: 'stated', due_type: 'deadline',
+      });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('caller name on the headline (owner 2026-10-21)', () => {
     async function ringedPayload() {
       const earlier = callRow(240);
@@ -1607,10 +1666,11 @@ const OUR_NUMBER = '+19415550100';
       const customerId = randomUUID();
       await mockConn('customers').insert({ id: customerId, phone: PHONE });
       const earlier = callRow(240, { customer_id: customerId });
-      // The stated slot: 24h from now — far enough ahead that evidenceFrom
-      // (the stated due_at) is later than promisedAt (the call's own end),
-      // which is what makes appointmentSlot return non-null at all.
-      const slotAt = new Date(now + 24 * 60 * 60000);
+      // The stated slot: after promisedAt (the call's own end), which is
+      // what makes appointmentSlot return non-null at all, but before the
+      // callback — a floor slot still ahead of the callback is not owed yet
+      // and never rings (notActionableYet).
+      const slotAt = new Date(now - 50 * 60000);
       const commitment = commitmentRow(earlier.id, {
         kind: 'schedule_visit', description: 'Come out tomorrow afternoon',
         due_at: slotAt, due_basis: 'stated', due_type: 'floor',

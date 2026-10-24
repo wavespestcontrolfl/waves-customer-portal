@@ -1001,3 +1001,90 @@ describe('13-0-13 treated square feet (the county cap needs an area)', () => {
     expect(areaField().value).toBe('900');
   });
 });
+
+describe('optional Palms block (owner 2026-10-23)', () => {
+  const PALM_KEYS = ['palm_count_total', 'palm_count_large', 'palm_types_seen', 'palm_symptoms'];
+  const openPalms = () => fireEvent.click(screen.getByRole('button', { name: /^Palms \(optional\)/ }));
+
+  test('collapsed by default, shown only with the Palms plant group, and Complete is never blocked by it', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    // Palms is on from last time: the block is there but closed.
+    const toggle = screen.getByRole('button', { name: /^Palms \(optional\)/ });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByLabelText('Palms on property (all sizes)')).toBeNull();
+    // Untouched: complete is enabled and the body carries no palm key.
+    const body = await completeBody(request);
+    for (const key of PALM_KEYS) expect(body.structuredFindings.values).not.toHaveProperty(key);
+  });
+
+  test('no block without the Palms group, and typed palm facts are dropped from the body when it is switched off', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    openPalms();
+    fireEvent.change(screen.getByLabelText('Palms on property (all sizes)'), { target: { value: '7' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Palms' }));
+    expect(screen.queryByRole('button', { name: /^Palms \(optional\)/ })).toBeNull();
+    const body = await completeBody(request);
+    expect(body.structuredFindings.values.plant_groups).toBe('Shrubs');
+    for (const key of PALM_KEYS) expect(body.structuredFindings.values).not.toHaveProperty(key);
+  });
+
+  test('counts and chips ride under the typed form keys, in option order', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    openPalms();
+    expect(screen.getByRole('button', { name: /^Palms \(optional\)/ }).getAttribute('aria-expanded')).toBe('true');
+    fireEvent.change(screen.getByLabelText('Palms on property (all sizes)'), { target: { value: '12' } });
+    fireEvent.change(screen.getByLabelText('Large palms (canopy wider than about 15 ft)'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queen palm' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sabal / cabbage palm' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Browning / bronzing fronds' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Frizzle-top/ }));
+    const body = await completeBody(request);
+    expect(body.structuredFindings.values).toMatchObject({
+      palm_count_total: '12',
+      palm_count_large: '3',
+      palm_types_seen: 'Sabal / cabbage palm, Queen palm',
+      palm_symptoms: 'Frizzle-top (new fronds yellow / small / withered), Browning / bronzing fronds',
+    });
+  });
+
+  test('counts take digits only; a blank count stays absent; a zero is a real answer', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    openPalms();
+    const total = screen.getByLabelText('Palms on property (all sizes)');
+    fireEvent.change(total, { target: { value: '4a.5' } });
+    expect(total.value).toBe('45');
+    fireEvent.change(total, { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Large palms (canopy wider than about 15 ft)'), { target: { value: '0' } });
+    const body = await completeBody(request);
+    expect(body.structuredFindings.values).not.toHaveProperty('palm_count_total');
+    expect(body.structuredFindings.values.palm_count_large).toBe('0');
+  });
+
+  test('"None seen" clears the other symptoms and any symptom clears "None seen"', async () => {
+    await readyVisit(makeRequest());
+    openPalms();
+    const none = () => screen.getByRole('button', { name: 'None seen' });
+    const spear = () => screen.getByRole('button', { name: 'Spear leaf collapse' });
+    fireEvent.click(spear());
+    fireEvent.click(none());
+    expect(none().getAttribute('aria-pressed')).toBe('true');
+    expect(spear().getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(spear());
+    expect(none().getAttribute('aria-pressed')).toBe('false');
+    expect(spear().getAttribute('aria-pressed')).toBe('true');
+  });
+
+  test('the option lists equal the typed form fields the server validates against', async () => {
+    const { PROJECT_TYPES } = await import('../../../../server/services/project-types.js');
+    const byKey = Object.fromEntries(PROJECT_TYPES.tree_shrub.findingsFields.map((f) => [f.key, f]));
+    await readyVisit(makeRequest());
+    openPalms();
+    const shown = (title) => within(screen.getByText(title).closest('section')).getAllByRole('button').map((b) => b.textContent);
+    expect(shown('Palm types seen')).toEqual(byKey.palm_types_seen.options);
+    expect(shown('Palm symptoms seen')).toEqual(byKey.palm_symptoms.options);
+  });
+});

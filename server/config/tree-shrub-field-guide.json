@@ -710,5 +710,185 @@
       "width": 20,
       "lb": 3.8
     }
-  ]
+  ],
+  "palmTypes": {
+    "title": "Palm types",
+    "intro": "Use this table to pick which palms to offer the lethal bronzing preventive and which to watch for nutrient deficiency.",
+    "planNote": "Palm type does not change the plan price or the fertilizer. UF says one slow-release 8-2-12+4Mg palm fertilizer (or the 8-0-12+4Mg version) suits all palm species. Dose each palm by canopy width with the palm chart.",
+    "columns": {
+      "lethalBronzing": "Lethal bronzing host (UF list)",
+      "nutrients": "Nutrient problems it is prone to",
+      "selfCleaning": "Drops its own dead fronds",
+      "note": "Tech note"
+    },
+    "selfCleaningNote": "Self-cleaning applies to crownshaft palms that have enough potassium. Half-dead fronds that hang on for weeks point to potassium deficiency (UF).",
+    "rows": [
+      {
+        "key": "sabal",
+        "name": "Sabal / cabbage palm",
+        "scientific": "Sabal palmetto",
+        "lethalBronzing": "yes",
+        "nutrients": "Not listed by UF",
+        "selfCleaning": "no",
+        "note": "UF host. Leave green fronds on; hard pruning thins the trunk."
+      },
+      {
+        "key": "queen",
+        "name": "Queen palm",
+        "scientific": "Syagrus romanzoffiana",
+        "lethalBronzing": "yes",
+        "nutrients": "Potassium, manganese (frizzle-top), boron",
+        "selfCleaning": "no",
+        "note": "Check new fronds first. Frizzled or stub-only new fronds mean manganese; severe cases kill the palm."
+      },
+      {
+        "key": "royal",
+        "name": "Royal palm",
+        "scientific": "Roystonea spp.",
+        "lethalBronzing": "not listed",
+        "nutrients": "Potassium, manganese (frizzle-top)",
+        "selfCleaning": "yes",
+        "note": "Not a UF host. Potassium deficiency is the leading cause of royal palm death in south Florida."
+      },
+      {
+        "key": "foxtail",
+        "name": "Foxtail palm",
+        "scientific": "Wodyetia bifurcata",
+        "lethalBronzing": "not listed",
+        "nutrients": "Potassium, manganese",
+        "selfCleaning": "yes",
+        "note": "Not a UF host. UF rates it highly susceptible to potassium and manganese deficiency."
+      },
+      {
+        "key": "christmas",
+        "name": "Christmas / Adonidia palm",
+        "scientific": "Adonidia merrillii",
+        "lethalBronzing": "yes",
+        "nutrients": "Resistant to potassium deficiency (UF); others not listed",
+        "selfCleaning": "yes",
+        "note": "UF host."
+      },
+      {
+        "key": "pygmy",
+        "name": "Pygmy date palm",
+        "scientific": "Phoenix roebelenii",
+        "lethalBronzing": "yes",
+        "nutrients": "Potassium (orange older fronds), manganese (streaked new fronds)",
+        "selfCleaning": "no",
+        "note": "UF host. Orange older fronds with burned tips mean potassium."
+      },
+      {
+        "key": "canary",
+        "name": "Canary Island date palm",
+        "scientific": "Phoenix canariensis",
+        "lethalBronzing": "yes",
+        "nutrients": "Potassium, magnesium",
+        "selfCleaning": "no",
+        "note": "UF host. Broad yellow bands on old frond edges mean magnesium. Do not cut green fronds."
+      },
+      {
+        "key": "date",
+        "name": "Edible / Sylvester (wild) date palm",
+        "scientific": "Phoenix dactylifera, P. sylvestris",
+        "lethalBronzing": "yes",
+        "nutrients": "Not listed by UF for these two species",
+        "selfCleaning": "no",
+        "note": "UF host."
+      },
+      {
+        "key": "bismarck",
+        "name": "Bismarck palm",
+        "scientific": "Bismarckia nobilis",
+        "lethalBronzing": "yes",
+        "nutrients": "Potassium (dead leaflet tips)",
+        "selfCleaning": "no",
+        "note": "UF host. Potassium shows as dead tips, not burned edges."
+      },
+      {
+        "key": "washingtonia",
+        "name": "Washingtonia (Mexican fan) palm",
+        "scientific": "Washingtonia robusta",
+        "lethalBronzing": "not listed",
+        "nutrients": "Potassium (dead leaflet tips)",
+        "selfCleaning": "partly",
+        "note": "Not a UF host. Under about 30 ft it keeps a skirt of dead fronds; taller palms drop old fronds on their own."
+      },
+      {
+        "key": "coconut",
+        "name": "Coconut palm",
+        "scientific": "Cocos nucifera",
+        "lethalBronzing": "yes",
+        "nutrients": "Potassium, manganese (worse in cold soil)",
+        "selfCleaning": "unknown",
+        "note": "UF host. UF lists no crownshaft. Singed new frond tips mean manganese."
+      },
+      {
+        "key": "areca",
+        "name": "Areca palm",
+        "scientific": "Dypsis lutescens",
+        "lethalBronzing": "not listed",
+        "nutrients": "Nitrogen, potassium (orange stalks, leaf scorch)",
+        "selfCleaning": "yes",
+        "note": "Not a UF host. UF: very high nutrient needs."
+      },
+      {
+        "key": "pindo",
+        "name": "Pindo palm",
+        "scientific": "Butia odorata",
+        "lethalBronzing": "yes",
+        "nutrients": "Not listed by UF",
+        "selfCleaning": "no",
+        "note": "UF host."
+      },
+      {
+        "key": "chinese-fan",
+        "name": "Chinese fan palm",
+        "scientific": "Livistona chinensis",
+        "lethalBronzing": "yes",
+        "nutrients": "Potassium (dead leaflet tips)",
+        "selfCleaning": "no",
+        "note": "UF host. Potassium shows as dead tips, not burned edges."
+      },
+      {
+        "key": "other",
+        "name": "Other / not sure",
+        "scientific": "",
+        "lethalBronzing": "unknown",
+        "nutrients": "unknown",
+        "selfCleaning": "unknown",
+        "note": "Identify the palm before you offer the preventive. Check the UF host list below."
+      }
+    ],
+    "otherHosts": "Other UF-listed lethal bronzing hosts: Mexican palmetto, Carpentaria, Fiji fan, buccaneer, Chinese windmill, needle, dwarf sugar, coyol, yagua and San Jose hesper palms. UF lists 21 hosts in all and says the list could grow. \"Not listed\" means UF does not list the palm as a host today; it does not mean immune.",
+    "sources": [
+      {
+        "label": "UF/IFAS PP163 · Lethal Bronzing Disease (21 host species)",
+        "url": "https://edis.ifas.ufl.edu/publication/PP163"
+      },
+      {
+        "label": "UF/IFAS EP273 · Nutrient Deficiencies of Landscape and Field-Grown Palms in Florida",
+        "url": "https://edis.ifas.ufl.edu/publication/EP273"
+      },
+      {
+        "label": "UF/IFAS EP269 · Potassium Deficiency in Palms",
+        "url": "https://edis.ifas.ufl.edu/publication/EP269"
+      },
+      {
+        "label": "UF/IFAS EP261 · Fertilization of Field-Grown and Landscape Palms in Florida",
+        "url": "https://edis.ifas.ufl.edu/publication/EP261"
+      },
+      {
+        "label": "UF/IFAS EP009 · Ornamental Palms for South Florida (crownshaft and species notes)",
+        "url": "https://edis.ifas.ufl.edu/publication/EP009"
+      },
+      {
+        "label": "UF/IFAS EP443 · Pruning Palms",
+        "url": "https://edis.ifas.ufl.edu/publication/EP443"
+      },
+      {
+        "label": "UF/IFAS EP344 · Normal \"Abnormalities\" in Palms",
+        "url": "https://edis.ifas.ufl.edu/publication/EP344"
+      }
+    ]
+  }
 }

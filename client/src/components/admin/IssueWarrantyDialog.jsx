@@ -1,14 +1,17 @@
 // Issue the New Construction Termite Warranty (Rule 5E-14.105(3)) from a
 // pre-treat certificate. The certificate fills every job value; the office
-// adds the contract basis, prices, the FDACS-13692 date and the issuer.
+// adds the contract basis, prices, the FDACS-13692 date and the issuer. With
+// GATE_WARRANTY_13692_CHECK on, a signed FDACS-13692 on file (e-signed, or an
+// uploaded paper scan) supplies that date.
 // Saves a draft only: nothing is sent to the customer here.
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Dialog, DialogBody, DialogFooter } from "../ui";
 import { adminFetch } from "../../lib/adminFetch";
 import {
   NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY,
   pretreatWarrantyValues,
   sentCertificate,
+  consumerNoticeOnFile,
   daysSinceTreatment,
   warrantyEligible,
   warrantyIssueReadiness,
@@ -27,6 +30,12 @@ const fieldStyle = {
 const labelStyle = { display: "block", fontSize: 14, fontWeight: 500, color: "#18181B", marginBottom: 4 };
 const mutedStyle = { fontSize: 14, color: "#71717A" };
 
+// YYYY-MM-DD → MM/DD/YYYY for the grace end the server names.
+const usDay = (iso) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+  return m ? `${m[2]}/${m[3]}/${m[1]}` : "";
+};
+
 // The server's error, naming any certificate field it found empty.
 function issueError(data, fallback) {
   const missing = data.unresolvedVariables || [];
@@ -37,9 +46,10 @@ function issueError(data, fallback) {
 
 // The full warranty text, read before it is created. Create stays off until
 // the box is ticked; the server refuses text that differs from this preview.
-function WarrantyPreview({ text, reviewed, onReviewed }) {
+function WarrantyPreview({ text, warnings = [], reviewed, onReviewed }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {warnings.map((warning) => <div key={warning} role="status" style={{ fontSize: 14, color: "#18181B" }}>{warning}</div>)}
       <div style={{ fontSize: 14, color: "#18181B" }}>Read the full warranty. This is the exact text the customer signs.</div>
       <pre aria-label="Warranty text" style={{ ...fieldStyle, maxHeight: 360, overflowY: "auto", whiteSpace: "pre-wrap", fontFamily: "inherit", margin: 0 }}>{text}</pre>
       <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, color: "#18181B" }}>
@@ -69,6 +79,113 @@ function IssueFooter({ stage, canPreview, canCreate, busy, onClose, onBack, onPr
   );
 }
 
+// The FDACS-13692 consumer notice (Rule 5E-14.105(1)): the one on file, or
+// the grace-period warning with a paper-scan upload.
+function ConsumerNoticePanel({ customerId, onFile, graceEnd, onUploaded }) {
+  const [file, setFile] = useState(null);
+  const [signedOn, setSignedOn] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState("");
+  const base = `/admin/customers/${encodeURIComponent(customerId)}/consumer-notices`;
+
+  const view = async () => {
+    setProblem("");
+    try {
+      const response = await adminFetch(`${base}/paper/${encodeURIComponent(onFile.id)}/file`);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.url) return setProblem(data.error || "Could not open the scan.");
+      window.open(data.url, "_blank", "noopener");
+    } catch (err) {
+      setProblem(err.message || "Could not open the scan.");
+    }
+  };
+
+  const upload = async () => {
+    setBusy(true);
+    setProblem("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("signedOn", signedOn.trim());
+      const response = await adminFetch(`${base}/paper`, { method: "POST", body: form });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) return setProblem(data.error || "Could not save the scan.");
+      setFile(null);
+      setSignedOn("");
+      await onUploaded();
+    } catch (err) {
+      setProblem(err.message || "Could not save the scan.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (onFile) {
+    return (
+      <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+        FDACS-13692 on file: {onFile.source === "paper" ? `paper, signed ${onFile.signedOn}` : `e-signed ${onFile.signedOn}`}.
+        {onFile.source === "paper" && (
+          <> <button type="button" onClick={view} style={{ background: "none", border: 0, padding: 0, color: "#18181B", textDecoration: "underline", cursor: "pointer", font: "inherit" }}>View</button></>
+        )}
+        {problem && <div role="alert" style={{ color: "#B91C1C" }}>{problem}</div>}
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+        No signed FDACS-13692 is on file for this customer. Until {graceEnd || "the grace end"} you can type the date it was signed.
+        After that, the warranty cannot be issued without one: send it from Document Requests, or upload the paper form.
+      </div>
+      <Field id="warranty-notice-file" label="Upload paper FDACS-13692 (JPG, PNG or PDF, up to 10 MB)">
+        <input id="warranty-notice-file" type="file" accept="image/jpeg,image/png,application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} style={fieldStyle} />
+      </Field>
+      <Field id="warranty-notice-file-date" label="Paper form signed on (MM/DD/YYYY)">
+        <input id="warranty-notice-file-date" value={signedOn} onChange={(e) => setSignedOn(e.target.value)} style={fieldStyle} />
+      </Field>
+      <div>
+        <Button variant="secondary" onClick={upload} disabled={busy || !file || !signedOn.trim()}>{busy ? "Saving…" : "Upload paper FDACS-13692"}</Button>
+      </div>
+      {problem && <div role="alert" style={{ fontSize: 14, color: "#B91C1C" }}>{problem}</div>}
+    </div>
+  );
+}
+
+// The FDACS-13692 section of the form: the notice panel when the check is on,
+// and the typed date unless a notice on file supplies it.
+function ConsumerNoticeFields({ customerId, noticeList, onFile, noticeDate, onNoticeDate, noticeProblem, onUploaded }) {
+  return (
+    <>
+      {noticeList && <ConsumerNoticePanel customerId={customerId} onFile={onFile} graceEnd={usDay(noticeList.graceEnd)} onUploaded={onUploaded} />}
+      {!onFile && (
+        <>
+          <Field id="warranty-notice-date" label="FDACS-13692 consumer notice signed on (MM/DD/YYYY)">
+            <input id="warranty-notice-date" value={noticeDate} onChange={(e) => onNoticeDate(e.target.value)} style={fieldStyle} />
+          </Field>
+          {noticeProblem && <div style={{ fontSize: 14, color: "#B91C1C" }}>{noticeProblem}</div>}
+        </>
+      )}
+    </>
+  );
+}
+
+// The customer's consumer-notices list. null = the check is off (the route
+// answers 404) or not loaded: the typed date, as before.
+function useConsumerNotices(customerId, open) {
+  const [noticeList, setNoticeList] = useState(null);
+  const loadNotices = useCallback(async () => {
+    try {
+      const response = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/consumer-notices`);
+      const data = response.ok ? await response.json().catch(() => null) : null;
+      setNoticeList(data?.enabled ? data : null);
+    } catch {
+      setNoticeList(null);
+    }
+  }, [customerId]);
+  useEffect(() => { if (open) loadNotices(); }, [open, loadNotices]);
+  return { noticeList, loadNotices };
+}
+
 function Field({ id, label, children }) {
   return (
     <div>
@@ -79,8 +196,8 @@ function Field({ id, label, children }) {
 }
 
 export default function IssueWarrantyDialog({ open, onClose, project, findings }) {
-  const base = useMemo(() => pretreatWarrantyValues({ project, findings }), [project, findings]);
   const [basisKind, setBasisKind] = useState("master");
+  const base = useMemo(() => pretreatWarrantyValues({ project, findings, basisKind }), [project, findings, basisKind]);
   const [basisDate, setBasisDate] = useState("");
   const [treatmentPrice, setTreatmentPrice] = useState("");
   const [planPrice, setPlanPrice] = useState(base.warranty.plan_price);
@@ -96,11 +213,13 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [created, setCreated] = useState(false);
   const [preview, setPreview] = useState(null);
   const [reviewed, setReviewed] = useState(false);
+  const { noticeList, loadNotices } = useConsumerNotices(project.customer_id, open);
 
+  const noticeOnFile = noticeList ? consumerNoticeOnFile(noticeList.notices, base.treatment.initial_date, basisDate) : null;
   const { basisProblem, noticeProblem, ready } = warrantyIssueReadiness(base, {
     basisDate, noticeDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures, noticeLocation, payer,
-  });
-  const lateDays = daysSinceTreatment(base.treatment.initial_date, base.warranty.issue_date);
+  }, { noticeOnFile: Boolean(noticeOnFile) });
+  const lateDays = daysSinceTreatment(base.warranty.start_date, base.warranty.issue_date);
 
   // The server builds every job field from the saved certificate and
   // stamps the issue date; only the office's own fields go up.
@@ -113,7 +232,8 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
           treatment_price: treatmentPrice.trim(),
           plan_price: planPrice.trim(),
           renewal_fee: renewalFee.trim(),
-          consumer_notice_date: noticeDate.trim(),
+          // A notice on file prints its own date; the server ignores this one.
+          ...(noticeOnFile ? {} : { consumer_notice_date: noticeDate.trim() }),
         },
         basis: { kind: basisKind, date: basisDate.trim() },
         issuer: { name: issuerName.trim(), title: issuerTitle.trim() },
@@ -142,7 +262,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
     const data = await response.json().catch(() => ({}));
     if (!response.ok) return setError(issueError(data, "Could not build the warranty text."));
     setReviewed(false);
-    setPreview({ text: data.body, hash: data.renderHash });
+    setPreview({ text: data.body, hash: data.renderHash, warnings: data.warnings });
   });
 
   const issue = () => run(async () => {
@@ -162,10 +282,17 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div style={{ fontSize: 16, fontWeight: 600, color: "#18181B" }}>Issue new construction warranty</div>
           <div style={mutedStyle}>
-            {base.warranty.plan || "No plan on the certificate"} · treated {base.treatment.initial_date || "date missing"} · covered
+            {base.warranty.plan || "No plan on the certificate"} · treated {base.treatment.initial_date || "date missing"} · runs
+            from the {base.warranty.start_basis} treatment date {base.warranty.start_date || "—"} · covered
             through {base.warranty.term_end || "—"} · {base.treatment.product || "product missing"}. Florida requires the
-            warranty within 30 days of the treatment date.
+            warranty within 30 days of that date.
           </div>
+          {basisKind === "master" && !base.warranty.start_date && (
+            <div role="status" style={{ fontSize: 14, color: "#B91C1C" }}>
+              A builder lot warranty runs from the final exterior treatment. Record its date on the certificate and send the
+              certificate again first.
+            </div>
+          )}
           {lateDays != null && lateDays > 30 && (
             <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
               Treated {lateDays} days ago: past the 30-day limit in Rule 5E-14.105(3)(a). Send it today.
@@ -179,7 +306,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
             </div>
           ) : preview ? (
             <>
-              <WarrantyPreview text={preview.text} reviewed={reviewed} onReviewed={setReviewed} />
+              <WarrantyPreview text={preview.text} warnings={preview.warnings} reviewed={reviewed} onReviewed={setReviewed} />
               {error && <div role="alert" style={{ fontSize: 14, color: "#B91C1C" }}>{error}</div>}
             </>
           ) : (
@@ -194,10 +321,15 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
                 <input id="warranty-basis-date" value={basisDate} onChange={(e) => setBasisDate(e.target.value)} style={fieldStyle} />
               </Field>
               {basisProblem && <div style={{ fontSize: 14, color: "#B91C1C" }}>{basisProblem}</div>}
-              <Field id="warranty-notice-date" label="FDACS-13692 consumer notice signed on (MM/DD/YYYY)">
-                <input id="warranty-notice-date" value={noticeDate} onChange={(e) => setNoticeDate(e.target.value)} style={fieldStyle} />
-              </Field>
-              {noticeProblem && <div style={{ fontSize: 14, color: "#B91C1C" }}>{noticeProblem}</div>}
+              <ConsumerNoticeFields
+                customerId={project.customer_id}
+                noticeList={noticeList}
+                onFile={noticeOnFile}
+                noticeDate={noticeDate}
+                onNoticeDate={setNoticeDate}
+                noticeProblem={noticeProblem}
+                onUploaded={loadNotices}
+              />
               <Field id="warranty-notice-location" label="Treatment notice posted at (F.S. 482.226(5))">
                 <input id="warranty-notice-location" value={noticeLocation} onChange={(e) => setNoticeLocation(e.target.value)} placeholder="e.g. on the wall beside the electric panel in the garage" style={fieldStyle} />
               </Field>
@@ -213,7 +345,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
               <Field id="warranty-plan-price" label="Plan price">
                 <input id="warranty-plan-price" value={planPrice} onChange={(e) => setPlanPrice(e.target.value)} placeholder="$0.00" style={fieldStyle} />
               </Field>
-              <Field id="warranty-renewal-fee" label="Annual renewal fee (fixed through year 5)">
+              <Field id="warranty-renewal-fee" label={basisKind === "master" ? "Annual renewal fee (fixed through year 5, not more than $149.00)" : "Annual renewal fee (fixed through year 5)"}>
                 <input id="warranty-renewal-fee" value={renewalFee} onChange={(e) => setRenewalFee(e.target.value)} placeholder="$0.00" style={fieldStyle} />
               </Field>
               <Field id="warranty-issuer-name" label="Signed for Waves by">

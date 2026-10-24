@@ -561,3 +561,34 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     }
   });
 });
+
+describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
+  const cf = require('../services/sms-company-facts');
+  const { exactSectionSuffix, knownCompanyFactsRenders, renderCompanyFactsSection } = cf;
+  const label = "LABEL FACTS (none on file for the last visit):\n- No product timing is on file for this customer's last visit. Do not state any rainfast, drying or re-entry time. For a rain question, answer from the COMPANY FACTS rain line, plainly, with no mention of the label.\n";
+  const block = (company, tail = '') => `UPCOMING SERVICES:\n- none\nFOLLOW-UP SLA RIGHT NOW: within the hour\n${company}${tail}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n`;
+
+  test('swaps each known earlier render for today\'s, keeping the label section and everything after it', () => {
+    for (const prior of knownCompanyFactsRenders().slice(1)) {
+      const out = cf.rebaseCompanyFactsToCurrent(block(prior, label));
+      expect(out).toBe(block(renderCompanyFactsSection(), label));
+      expect(cf.hasExactCompanyFacts(out)).toBe(true);
+    }
+  });
+  test('null for a block already on today\'s render, without a company section, or with a render quoted after BILLING', () => {
+    expect(cf.rebaseCompanyFactsToCurrent(block(renderCompanyFactsSection()))).toBeNull();
+    expect(cf.rebaseCompanyFactsToCurrent(block(''))).toBeNull();
+    const quoted = `${block('')}${knownCompanyFactsRenders()[1]}`;
+    expect(cf.rebaseCompanyFactsToCurrent(quoted)).toBeNull();
+    expect(cf.rebaseCompanyFactsToCurrent('no billing line at all')).toBeNull();
+    expect(cf.rebaseCompanyFactsToCurrent(null)).toBeNull();
+  });
+  test('an earlier render with extra typed text after it is not rebased', () => {
+    expect(cf.rebaseCompanyFactsToCurrent(block(knownCompanyFactsRenders()[1], 'Pets: a dog\n'))).toBeNull();
+  });
+  test('the retired-topic filter names the two reworded lines\' topics', () => {
+    for (const t of ['do you take cash', 'can I pay by check', 'do you spray inside', 'the interior too?']) expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test(t)).toBe(true);
+    expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test('when is my next visit?')).toBe(false);
+    expect(exactSectionSuffix().startsWith('\nCOMPANY FACTS')).toBe(true);
+  });
+});

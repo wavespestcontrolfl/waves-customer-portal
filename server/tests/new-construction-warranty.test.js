@@ -60,8 +60,8 @@ describe('supersedeOpenNewConstructionWarranty', () => {
 const mockReadiness = jest.fn(() => ({ missing: [] }));
 jest.mock('../routes/admin-projects', () => ({ _private: { evaluateProjectSendReadiness: (...args) => mockReadiness(...args) } }));
 
-describe('templateIssueValues (server-built warranty)', () => {
-  const { templateIssueValues } = require('../services/new-construction-warranty');
+describe('templateIssueWithWarnings (server-built warranty)', () => {
+  const { templateIssueWithWarnings } = require('../services/new-construction-warranty');
   const KEY = 'service_agreement.termite_new_construction_warranty';
   const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Owner', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' };
   const findings = {
@@ -78,7 +78,7 @@ describe('templateIssueValues (server-built warranty)', () => {
   // sets lockedCustomer to model an edit that committed in between.
   const issue = (body, cust, row, lockedRow = cust) => {
     lockedCustomer = lockedRow;
-    return templateIssueValues(KEY, body, cust, conn(row));
+    return templateIssueWithWarnings(KEY, body, cust, conn(row)).then(({ values }) => values);
   };
   const conn = (row) => (table) => ({
     where() { return this; },
@@ -101,13 +101,42 @@ describe('templateIssueValues (server-built warranty)', () => {
       plan_price: 'Included in the treatment price', renewal_fee: '99', consumer_notice_date: '09/01/2026',
       term_end: '01/01/2099', product: 'FORGED', issue_date: '01/01/2000',
     },
-    basis: { kind: 'master', date: '09/01/2026' },
+    // An owner contract runs from the initial treatment date; the builder
+    // lot (master agreement) cases set their own basis and final date.
+    basis: { kind: 'signed', date: '09/01/2026' },
     issuer: { name: 'Pat Office', title: 'Office Manager' },
   };
 
+  test('a builder lot runs from its final treatment date; an owner contract from the initial one', async () => {
+    const master = { ...office, basis: { kind: 'master', date: '09/01/2026' } };
+    await expect(issue({ projectId: project.id, values: master }, customer, project))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining('final exterior treatment') });
+    const finished = { ...project, findings: { ...findings, final_exterior_date: '2026-10-20' } };
+    const v = await issue({ projectId: project.id, values: master }, customer, finished);
+    expect(v.warranty).toMatchObject({ start_basis: 'final', start_date: '10/20/2026', term_end: '10/20/2027', renewal_due: '10/20/2027' });
+    expect(v.warranty.contract_basis).toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
+    // The certificate's renewal date must match the term that counts from the final date.
+    const initialBased = { ...finished, findings: { ...finished.findings, renewal_due: '2027-10-01' } };
+    await expect(issue({ projectId: project.id, values: master }, customer, initialBased)).rejects.toMatchObject({ status: 409 });
+    const owner = await issue({ projectId: project.id, values: office }, customer, finished);
+    expect(owner.warranty).toMatchObject({ start_basis: 'initial', start_date: '10/01/2026', term_end: '10/01/2027' });
+  });
+
+  test('the master agreement caps a builder lot renewal fee at $149.00', async () => {
+    const finished = { ...project, findings: { ...findings, final_exterior_date: '2026-10-20' } };
+    const at = (renewal_fee, kind = 'master') => ({ ...office, warranty: { ...office.warranty, renewal_fee }, basis: { kind, date: '09/01/2026' } });
+    await expect(issue({ projectId: project.id, values: at('$149.00') }, customer, finished)).resolves.toMatchObject({ warranty: { renewal_fee: '$149.00' } });
+    await expect(issue({ projectId: project.id, values: at('$149.01') }, customer, finished))
+      .rejects.toMatchObject({ status: 400, message: expect.stringContaining('$149.00') });
+    // An owner contract is not under the master agreement.
+    await expect(issue({ projectId: project.id, values: at('$175.00', 'signed') }, customer, finished)).resolves.toMatchObject({ warranty: { renewal_fee: '$175.00' } });
+  });
+
   test('other templates keep their own values', async () => {
     const values = { a: 1 };
-    await expect(templateIssueValues('service_agreement.termite_bond_retreatment', { values }, customer, conn(null))).resolves.toBe(values);
+    const result = await templateIssueWithWarnings('service_agreement.termite_bond_retreatment', { values }, customer, conn(null));
+    expect(result).toEqual({ values, warnings: [] });
+    expect(result.values).toBe(values);
   });
 
   test('builds the job fields from the saved certificate and takes only office fields', async () => {
@@ -118,7 +147,8 @@ describe('templateIssueValues (server-built warranty)', () => {
     expect(v.warranty.number).toBe('NCW-ABCD1234-0000-0000');
     expect(v.warranty.notice_location).toBe('beside the electric panel');
     expect(v.warranty.payer).toBe('Owner Test');
-    expect(v.warranty.contract_basis).toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
+    expect(v.warranty.contract_basis).toBe('Signed by the owner or authorized agent before treatment, on 09/01/2026.');
+    expect(v.warranty).toMatchObject({ start_basis: 'initial', start_date: '10/01/2026' });
     // The server stamps Waves' signing date; a posted one is ignored.
     expect(v.warranty.issue_date).not.toBe('01/01/2000');
     expect(v.warranty.issue_date).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
@@ -237,7 +267,7 @@ describe('templateIssueValues (server-built warranty)', () => {
       const row = { ...project, findings: { ...findings, ...ok } };
       await expect(issue({ projectId: project.id, values: office }, customer, row)).resolves.toBeTruthy();
     }
-    const lateNotice = { ...office, warranty: { ...office.warranty, consumer_notice_date: '09/15/2026' }, basis: { kind: 'master', date: '09/01/2026' } };
+    const lateNotice = { ...office, warranty: { ...office.warranty, consumer_notice_date: '09/15/2026' }, basis: { kind: 'signed', date: '09/01/2026' } };
     await expect(issue({ projectId: project.id, values: lateNotice }, customer, project)).rejects.toMatchObject({ status: 400 });
   });
 
