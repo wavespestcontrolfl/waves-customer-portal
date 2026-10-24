@@ -7,6 +7,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const config = require('../config');
+const { verifyStaffJwt } = require('../utils/jwt-secrets');
 const {
   adminAuthenticate,
   requireAdmin,
@@ -58,7 +59,7 @@ async function terminalAuthenticate(req, res, next) {
     return res.status(401).json({ error: 'Authentication required' });
   }
   try {
-    const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    const decoded = verifyStaffJwt(authHeader.split(' ')[1], config.jwt.secret);
     if (!isStaffAccessToken(decoded)) return res.status(401).json({ error: 'Invalid token type' });
     if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid token' });
     if (decoded.scope && decoded.scope !== 'terminal') {

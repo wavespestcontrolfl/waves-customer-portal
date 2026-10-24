@@ -565,10 +565,17 @@ async function readOneVariable(target, name) {
 
 // A keyed digest, so the commit path can tell "still the same non-boolean
 // value" without the value ever being displayed, pinned or logged.
-function valueDigest(raw) {
+function valueDigest(raw, key = process.env.JWT_SECRET || 'ib-gate-prior-value') {
   return require('crypto')
-    .createHmac('sha256', process.env.JWT_SECRET || 'ib-gate-prior-value')
+    .createHmac('sha256', key)
     .update(String(raw)).digest('hex').slice(0, 16);
+}
+
+// Keys a pinned digest may have been made under: the current JWT_SECRET first,
+// then each JWT_SECRET_PREVIOUS entry, so a card pinned just before a rotation
+// still confirms.
+function valueDigestKeys() {
+  return require('../../utils/jwt-secrets').jwtVerifySecretsOr('ib-gate-prior-value');
 }
 
 // The prior state a card pins and a confirm re-checks: its kind, the value
@@ -718,13 +725,17 @@ async function commitRailwayGate(input) {
   const target = await resolvePortalProductionTarget();
   // Compare-and-swap (best effort): the same service + environment, and the
   // live prior state exactly as the card pinned it.
+  let liveRaw;
   const live = target.service.id === serviceId && target.environment.id === environmentId
-    ? describePrior(await readOneVariable(target, name))
+    ? describePrior(liveRaw = await readOneVariable(target, name))
     : null;
+  const pinnedDigest = input._verified_railway_gate_prior_digest ?? null;
   if (!live
     || live.prior_kind !== input._verified_railway_gate_prior_kind
     || live.prior_value !== (input._verified_railway_gate_prior ?? null)
-    || live.prior_value_digest !== (input._verified_railway_gate_prior_digest ?? null)) {
+    || (live.prior_value_digest !== pinnedDigest
+      && !(live.prior_kind === 'non_boolean'
+        && valueDigestKeys().slice(1).some((key) => valueDigest(liveRaw, key) === pinnedDigest)))) {
     return { error: GATE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
   }
   let upserted;

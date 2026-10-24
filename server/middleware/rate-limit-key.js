@@ -13,8 +13,8 @@
  * same NAT out of the API.
  */
 const { isIP } = require('node:net');
-const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { verifyCustomerJwt } = require('../utils/jwt-secrets');
 
 function ipFallbackKey(ip) {
   if (!ip) return ip;
@@ -38,7 +38,7 @@ function rateLimitKey(req) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ') && config.jwt.secret) {
     try {
-      const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+      const decoded = verifyCustomerJwt(authHeader.split(' ')[1], config.jwt.secret);
       if (decoded.technicianId) {
         if (
           decoded.type !== 'access'

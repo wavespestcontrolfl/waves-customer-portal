@@ -1,5 +1,5 @@
-const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { verifyStaffJwt, verifyCustomerJwt } = require('../utils/jwt-secrets');
 const { isStaffAccessToken } = require('./admin-auth');
 
 // Bytes above which a request body is "large" and must be authenticated before
@@ -40,7 +40,7 @@ function hasValidStaffToken(authorizationHeader) {
   const header = authorizationHeader || '';
   if (!header.startsWith('Bearer ')) return false;
   try {
-    const decoded = jwt.verify(header.slice(7), config.jwt.secret);
+    const decoded = verifyStaffJwt(header.slice(7), config.jwt.secret);
     return isStaffAccessToken(decoded)
       && !!decoded.technicianId
       && decoded.scope !== 'terminal';
@@ -67,7 +67,7 @@ function hasValidCustomerToken(authorizationHeader) {
   const header = authorizationHeader || '';
   if (!header.startsWith('Bearer ')) return false;
   try {
-    const decoded = jwt.verify(header.slice(7), config.jwt.secret);
+    const decoded = verifyCustomerJwt(header.slice(7), config.jwt.secret);
     return decoded.type !== 'refresh' && !!decoded.customerId;
   } catch {
     return false;

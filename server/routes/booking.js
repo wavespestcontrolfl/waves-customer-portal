@@ -8,6 +8,7 @@ const db = require('../models/db');
 const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { jwtVerifySecrets, retiredExpOk } = require('../utils/jwt-secrets');
 const {
   estimateBelongsToCustomerAccount,
   loadEstimateOwnershipSnapshots,
@@ -1013,28 +1014,41 @@ const CAPTURE_TOKEN_TTL_MS = 30 * 60 * 1000;
 // captured token is only usable from the IP that minted it, so reuse is bounded
 // by the same per-IP rate limiter. Hashed so the token never leaks the address.
 // (CGNAT/mobile IP rotation just fails closed → that capture is skipped, no error.)
-function captureIpKey(req) {
+function captureIpKey(req, secret = CAPTURE_TOKEN_SECRET) {
   const xff = req && req.headers && typeof req.headers['x-forwarded-for'] === 'string'
     ? req.headers['x-forwarded-for'].split(',')[0].trim() : '';
   const ip = (req && req.ip) || xff || '';
-  return crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`ip:${ip}`).digest('base64url').slice(0, 16);
+  return crypto.createHmac('sha256', secret).update(`ip:${ip}`).digest('base64url').slice(0, 16);
 }
 function mintCaptureToken(ipKey = '', now = Date.now()) {
   const exp = now + CAPTURE_TOKEN_TTL_MS;
   const sig = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}:${ipKey}`).digest('base64url');
   return `${exp}.${sig}`;
 }
-function verifyCaptureToken(token, ipKey = '', now = Date.now()) {
+// Verify keys: the signing secret first, then (only while JWT_SECRET is the
+// effective secret) each JWT_SECRET_PREVIOUS entry.
+function captureTokenVerifySecrets() {
+  return process.env.JWT_SECRET
+    ? jwtVerifySecrets(CAPTURE_TOKEN_SECRET)
+    : [CAPTURE_TOKEN_SECRET];
+}
+// `req` lets a token minted under a previous secret re-derive the IP key it was
+// bound to (the IP key is itself keyed by the secret).
+function verifyCaptureToken(token, ipKey = '', now = Date.now(), req = null) {
   if (!token || typeof token !== 'string' || !token.includes('.')) return false;
   const [expStr, sig] = token.split('.');
   const exp = parseInt(expStr, 10);
   // Reject expired tokens and any exp implausibly far in the future (forged).
   if (!Number.isFinite(exp) || now > exp || exp > now + CAPTURE_TOKEN_TTL_MS + 60000) return false;
-  const expected = crypto.createHmac('sha256', CAPTURE_TOKEN_SECRET).update(`capture:${exp}:${ipKey}`).digest('base64url');
-  try {
-    return !!sig && sig.length === expected.length
-      && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-  } catch { return false; }
+  return captureTokenVerifySecrets().some((secret, i) => {
+    if (i > 0 && !retiredExpOk(exp / 1000, CAPTURE_TOKEN_TTL_MS / 1000)) return false;
+    const boundIp = i > 0 && req ? captureIpKey(req, secret) : ipKey;
+    const expected = crypto.createHmac('sha256', secret).update(`capture:${exp}:${boundIp}`).digest('base64url');
+    try {
+      return !!sig && sig.length === expected.length
+        && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+    } catch { return false; }
+  });
 }
 
 // A slot counts as "nearby" (route-efficient) when its detour is small enough
@@ -6756,7 +6770,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // contact step), bound to the requesting IP. Without it this public,
     // send-eligible endpoint could be used to seed recovery SMS/email to arbitrary
     // recipients. Fail closed — no/invalid token, no send-eligible row.
-    if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
+    if (!verifyCaptureToken(b.capture_token, captureIpKey(req), Date.now(), req)) {
       return accepted('unverified');
     }
 
@@ -7117,7 +7131,7 @@ router.post('/preferred-time', ...preferredTimePreParserGuard, preferredTimeLimi
     // Honeypot: pretend success, store nothing.
     if (parsed.honeypot) return res.json({ ok: true });
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
-    if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
+    if (!verifyCaptureToken(b.capture_token, captureIpKey(req), Date.now(), req)) {
       return res.status(400).json({ error: 'session_expired' });
     }
     const serviceKey = normalizeBookingServiceKey(b.service_id)

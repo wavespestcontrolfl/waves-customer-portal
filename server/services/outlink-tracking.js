@@ -34,6 +34,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { portalUrl, publicPortalUrl } = require('../utils/portal-url');
 const { outlinkTrackingLive } = require('../config/feature-gates');
+const { jwtVerifySecrets } = require('../utils/jwt-secrets');
 
 // Same shape as email-template-library's MD_LINK_RE and the prep page's:
 // [label](https://…). Links are found in the raw template text.
@@ -80,16 +81,15 @@ function codeForUrl(url) {
   return crypto.createHash('sha256').update(String(url)).digest('hex').slice(0, CODE_LEN);
 }
 
-function signingKey() {
-  const secret = process.env.JWT_SECRET;
+function signingKey(secret = process.env.JWT_SECRET) {
   if (!secret) return null;
   return crypto.createHmac('sha256', secret).update('outlink-context-v1').digest();
 }
 
 // The destination code is part of the signed payload, so a valid context
 // cannot be replayed onto a different registered code.
-function contextSignature({ k = '', c = '', v = '', p = '', s = '' }, code = '') {
-  const key = signingKey();
+function contextSignature({ k = '', c = '', v = '', p = '', s = '' }, code = '', secret = process.env.JWT_SECRET) {
+  const key = signingKey(secret);
   if (!key || !code) return null;
   return crypto.createHmac('sha256', key).update([code, k, c, v, p, s].join('|')).digest('hex').slice(0, 24);
 }
@@ -122,13 +122,17 @@ function verifyContext(query = {}, code = '') {
   const pick = (name) => (typeof query[name] === 'string' ? query[name] : '');
   const parts = { k: pick('k'), c: pick('c'), v: pick('v'), p: pick('p'), s: pick('s') };
   const g = pick('g');
-  const expected = contextSignature(parts, code);
-  if (!expected || !g || g.length !== expected.length) return null;
-  try {
-    if (!crypto.timingSafeEqual(Buffer.from(g), Buffer.from(expected))) return null;
-  } catch {
-    return null;
-  }
+  // Current JWT_SECRET first, then each JWT_SECRET_PREVIOUS entry.
+  const signatureOk = jwtVerifySecrets().some((secret) => {
+    const expected = contextSignature(parts, code, secret);
+    if (!expected || !g || g.length !== expected.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(g), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  });
+  if (!signatureOk) return null;
   const clean = cleanContext({
     templateKey: parts.k, customerId: parts.c, scheduledServiceId: parts.v, projectId: parts.p, surface: parts.s,
   });

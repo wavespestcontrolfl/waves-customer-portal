@@ -2719,9 +2719,14 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
 // the before-values, so a field another writer changed after the card was
 // shown makes the confirmed run refuse instead of overwriting it.
 const PLAN_KEY = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
-const planHash = (updates, current = {}) => require('crypto').createHmac('sha256', PLAN_KEY)
+const planHash = (updates, current = {}, key = PLAN_KEY) => require('crypto').createHmac('sha256', key)
   .update(JSON.stringify(Object.keys(updates || {}).sort().map((k) => [k, updates[k] ?? null, current[k] ?? null])))
   .digest('hex');
+// A card prepared just before a JWT_SECRET rotation still confirms: the current
+// key first, then each JWT_SECRET_PREVIOUS entry (only while JWT_SECRET is the key).
+const planHashMatches = (supplied, updates, current) => (
+  PLAN_KEY === process.env.JWT_SECRET ? require('../../utils/jwt-secrets').jwtVerifySecrets(PLAN_KEY) : [PLAN_KEY]
+).some((key) => supplied === planHash(updates, current, key));
 // What the preview shows: a note field as the line it adds, not the whole note.
 function previewOfPlan(updates, requested) {
   const out = { ...updates };
@@ -2770,7 +2775,7 @@ async function updatePropertyAccess(input) {
       const plan = await planPropertyAccess(trx, customerId, requested, { lock: true });
       // The card the operator approved pinned its plan; a different plan under
       // the lock (another writer got in between) is refused, not done.
-      if (input._ib_property_plan_hash && input._ib_property_plan_hash !== planHash(plan.updates, plan.current)) {
+      if (input._ib_property_plan_hash && !planHashMatches(input._ib_property_plan_hash, plan.updates, plan.current)) {
         const err = new Error('Property access changed since this action was prepared. Review a fresh proposal.');
         err.previewChanged = true;
         throw err;

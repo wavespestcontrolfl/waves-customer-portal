@@ -15,6 +15,7 @@
 // as identity or pricing authority on a money path (the identity≠pricing
 // rule; see estimate-handoff-token.js).
 const crypto = require('crypto');
+const { verifySecretsFor, retiredExpOk } = require('./jwt-secrets');
 
 const TTL_SECONDS = 60 * 60 * 24 * 14; // 14 days — owner decision (scope doc §7)
 
@@ -23,11 +24,17 @@ function secret() {
   return process.env.LEAD_PREFILL_SECRET || process.env.JWT_SECRET || '';
 }
 
-function sign(leadId, exp, channel) {
+// Verify keys: the effective secret first, then each JWT_SECRET_PREVIOUS entry
+// (only while JWT_SECRET is the effective secret).
+function verifySecrets() {
+  return verifySecretsFor(process.env.LEAD_PREFILL_SECRET);
+}
+
+function sign(leadId, exp, channel, key = secret()) {
   const payload = channel
     ? `lead-consultation:${leadId}:${exp}:${channel}`
     : `lead-consultation:${leadId}:${exp}`;
-  return crypto.createHmac('sha256', secret())
+  return crypto.createHmac('sha256', key)
     .update(payload)
     .digest('base64url');
 }
@@ -65,13 +72,17 @@ function verifyLeadConsultationToken(token, nowSec = Math.floor(Date.now() / 100
   const channel = parts.length === 4 ? parts[2] : undefined;
   const sig = parts[parts.length - 1];
   if (!leadId || !Number.isFinite(exp) || exp < nowSec) return null;
-  const expected = sign(leadId, exp, channel);
-  if (sig.length !== expected.length) return null;
-  try {
-    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-  } catch {
-    return null;
-  }
+  const signatureOk = verifySecrets().some((key, i) => {
+    if (i > 0 && !retiredExpOk(exp, TTL_SECONDS)) return false;
+    const expected = sign(leadId, exp, channel, key);
+    if (sig.length !== expected.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  });
+  if (!signatureOk) return null;
   return channel ? { leadId, channel } : { leadId };
 }
 
@@ -88,13 +99,22 @@ function verifyLeadConsultationToken(token, nowSec = Math.floor(Date.now() / 100
 // distinct HMAC key from the same secret the token signature already uses
 // (rather than a new env var) keeps this fail-closed the same way `sign()`
 // is: no secret configured, no channel claim.
-function smsChannelFor(phone) {
+function smsChannelFor(phone, secretOverride) {
   // Full phone identity (Codex #4737 r13 pre-push P0): a US number keys by
   // its ten digits, an international one keeps its country code.
   const last10 = require('./phone').phoneIdentityKey(phone);
-  if (!last10 || !secret()) return null;
-  const key = crypto.createHmac('sha256', secret()).update('sms-channel-key').digest();
+  const base = secretOverride || secret();
+  if (!last10 || !base) return null;
+  const key = crypto.createHmac('sha256', base).update('sms-channel-key').digest();
   return `sms-${crypto.createHmac('sha256', key).update(`lead-consultation-sms:${last10}`).digest('hex').slice(0, 16)}`;
+}
+
+// True when `channel` is the SMS claim for this phone under the current secret
+// or (while JWT_SECRET is the effective secret) a JWT_SECRET_PREVIOUS entry, so
+// a link texted before a rotation keeps its phone-bound proof.
+function smsChannelMatches(channel, phone) {
+  if (!channel) return false;
+  return verifySecrets().some((key) => channel === smsChannelFor(phone, key));
 }
 
 // A short-lived, signed waitlist ticket (Codex #4737 r15 P0): minted ONLY
@@ -102,8 +122,8 @@ function smsChannelFor(phone) {
 // region that answer found, so POST /:token/waitlist never trusts a
 // caller-supplied county or writes for a lead that was never out of area.
 const WAITLIST_TICKET_TTL_SECONDS = 60 * 60;
-function waitlistTicketSig(leadId, payload) {
-  return crypto.createHmac('sha256', secret()).update(`lead-consultation-waitlist:${leadId}:${payload}`).digest('base64url');
+function waitlistTicketSig(leadId, payload, key = secret()) {
+  return crypto.createHmac('sha256', key).update(`lead-consultation-waitlist:${leadId}:${payload}`).digest('base64url');
 }
 function mintWaitlistTicket(leadId, county, nowSec = Math.floor(Date.now() / 1000)) {
   if (!leadId || !secret()) return null;
@@ -117,16 +137,20 @@ function verifyWaitlistTicket(ticket, leadId, nowSec = Math.floor(Date.now() / 1
   const [expStr, countyB64, sig] = parts;
   const exp = Number(expStr);
   if (!Number.isFinite(exp) || exp < nowSec) return null;
-  const expected = waitlistTicketSig(leadId, `${expStr}.${countyB64}`);
-  if (sig.length !== expected.length) return null;
-  try {
-    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-  } catch {
-    return null;
-  }
+  const signatureOk = verifySecrets().some((key, i) => {
+    if (i > 0 && !retiredExpOk(exp, WAITLIST_TICKET_TTL_SECONDS)) return false;
+    const expected = waitlistTicketSig(leadId, `${expStr}.${countyB64}`, key);
+    if (sig.length !== expected.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  });
+  if (!signatureOk) return null;
   return { county: Buffer.from(countyB64, 'base64url').toString() || null };
 }
 
 module.exports = {
   mintWaitlistTicket,
-  verifyWaitlistTicket, mintLeadConsultationToken, verifyLeadConsultationToken, smsChannelFor, TTL_SECONDS };
+  verifyWaitlistTicket, mintLeadConsultationToken, verifyLeadConsultationToken, smsChannelFor, smsChannelMatches, TTL_SECONDS };

@@ -9,6 +9,7 @@
 //
 // Token format: `<expEpochSec>.<base64url(HMAC-SHA256(estimateId:exp))>`.
 const crypto = require('crypto');
+const { verifySecretsFor, retiredExpOk } = require('./jwt-secrets');
 
 const TTL_SECONDS = 60 * 60 * 24 * 14; // 14 days — matches the quote→book window
 
@@ -17,8 +18,14 @@ function secret() {
   return process.env.ESTIMATE_HANDOFF_SECRET || process.env.JWT_SECRET || '';
 }
 
-function sign(estimateId, exp) {
-  return crypto.createHmac('sha256', secret())
+// Verify keys: the effective secret first, then each JWT_SECRET_PREVIOUS entry
+// (only while JWT_SECRET is the effective secret).
+function verifySecrets() {
+  return verifySecretsFor(process.env.ESTIMATE_HANDOFF_SECRET);
+}
+
+function sign(estimateId, exp, key = secret()) {
+  return crypto.createHmac('sha256', key)
     .update(`estimate-handoff:${estimateId}:${exp}`)
     .digest('base64url');
 }
@@ -60,13 +67,19 @@ function verifyEstimateHandoffToken(estimateId, token, nowSec = Math.floor(Date.
   const exp = Number(String(token).slice(0, dot));
   const sig = String(token).slice(dot + 1);
   if (!Number.isFinite(exp) || exp < nowSec) return false;
-  const expected = sign(estimateId, exp);
-  if (sig.length !== expected.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-  } catch {
-    return false;
-  }
+  // A token accepted only by a retired secret must have been minted before the
+  // rotation cutoff: its expiry cannot exceed the cutoff plus the family TTL.
+  const ttl = String(estimateId).startsWith('estimate-accept:') ? ACCEPT_TTL_SECONDS : TTL_SECONDS;
+  return verifySecrets().some((key, i) => {
+    if (i > 0 && !retiredExpOk(exp, ttl)) return false;
+    const expected = sign(estimateId, exp, key);
+    if (sig.length !== expected.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  });
 }
 
 module.exports = {

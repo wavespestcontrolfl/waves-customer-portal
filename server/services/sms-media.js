@@ -3,6 +3,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const crypto = require('crypto');
 const config = require('../config');
 const logger = require('./logger');
+const { jwtVerifySecrets } = require('../utils/jwt-secrets');
 
 const PREFIX = 'sms-media/';
 const OUTBOUND_PREFIX = 'sms-attachments/';
@@ -33,8 +34,7 @@ function parseStoredMedia(value) {
   return [];
 }
 
-function createAttachmentToken({ key, size, mimeType }) {
-  const secret = attachmentTokenSecret();
+function createAttachmentToken({ key, size, mimeType }, secret = attachmentTokenSecret()) {
   if (!secret) throw new Error('SMS attachment token secret is not configured');
   const payload = [key || '', size || '', mimeType || ''].join('|');
   return crypto
@@ -46,19 +46,24 @@ function createAttachmentToken({ key, size, mimeType }) {
 function isValidAttachmentToken(attachment = {}) {
   if (!attachment?.key || !attachment?.attachmentToken) return false;
   if (!attachment.key.startsWith(OUTBOUND_PREFIX)) return false;
-  const expected = createAttachmentToken({
-    key: attachment.key,
-    size: attachment.size,
-    mimeType: attachment.mimeType || attachment.contentType,
+  // JWT_SECRET_PREVIOUS applies only while JWT_SECRET is the effective secret.
+  const secret = attachmentTokenSecret();
+  const secrets = config.jwt?.secret ? jwtVerifySecrets(secret) : [secret];
+  return secrets.some((candidate) => {
+    const expected = createAttachmentToken({
+      key: attachment.key,
+      size: attachment.size,
+      mimeType: attachment.mimeType || attachment.contentType,
+    }, candidate);
+    try {
+      return crypto.timingSafeEqual(
+        Buffer.from(String(attachment.attachmentToken), 'hex'),
+        Buffer.from(expected, 'hex'),
+      );
+    } catch {
+      return false;
+    }
   });
-  try {
-    return crypto.timingSafeEqual(
-      Buffer.from(String(attachment.attachmentToken), 'hex'),
-      Buffer.from(expected, 'hex'),
-    );
-  } catch {
-    return false;
-  }
 }
 
 function isSignableStoredMediaKey(key) {

@@ -191,7 +191,7 @@ const { recordPageView } = require('../services/customer-page-views');
 const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
-const { verifyLeadConsultationToken, smsChannelFor, mintWaitlistTicket, verifyWaitlistTicket } = require('../utils/lead-consultation-token');
+const { verifyLeadConsultationToken, smsChannelMatches, mintWaitlistTicket, verifyWaitlistTicket } = require('../utils/lead-consultation-token');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty, reverseGeocodeLocality } = require('../services/address-validation');
@@ -1118,7 +1118,7 @@ async function createCustomerForLead(dbConn, lead, address, location, account) {
 async function leadContactVerified(lead, token, dbConn = db) {
   if (!lead || !lead.phone) return false;
   const { phoneIdentityKey: last10 } = require('../utils/phone');
-  if (token?.channel && token.channel === smsChannelFor(lead.phone)) return true;
+  if (token?.channel && smsChannelMatches(token.channel, lead.phone)) return true;
   if (lead.first_contact_channel !== 'call' || !lead.twilio_call_sid) return false;
   const call = await dbConn('call_log').where({ twilio_call_sid: lead.twilio_call_sid }).first('from_phone');
   return Boolean(call?.from_phone) && Boolean(last10(lead.phone)) && last10(call.from_phone) === last10(lead.phone);
