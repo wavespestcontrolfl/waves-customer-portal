@@ -835,13 +835,14 @@ const SAME_DAY_STARTS_CAP = 24;
  * (candidateFromSlot, flex admission) and the writer's conflict probe.
  *
  * Nothing is added in capacity mode (GATE_SCHEDULING_CAPACITY already lists
- * every start the route accepts), without the shared route model (the only
+ * every start the route accepts — so does the night arrival search,
+ * findTimeArgs.arrivalSearch), without the shared route model (the only
  * mode this was measured in), for a visit not in overlap, or for a start the
  * first search already returned.
  */
 async function conflictSameDaySlots(service, current, slots, findTimeArgs) {
   if (!current || !current.conflict || current.conflict.kind !== 'overlap' || !service.technician_id) return [];
-  if (!autoDispatchSharedModelLive() || capacityEnabled()) return [];
+  if (!autoDispatchSharedModelLive() || capacityEnabled() || findTimeArgs.arrivalSearch === true) return [];
   const techId = String(service.technician_id);
   const sameDayTech = (slot) => slot.date === current.date && String(slot.technician && slot.technician.id) === techId;
   const offered = new Set(slots.filter(sameDayTech).map((slot) => slot.start_time));
@@ -950,7 +951,9 @@ async function everyFeasibleSlot(findTimeArgs, ctx) {
 // actually searched (`searched_dates`: open, someone working — a closed day
 // or one nobody works is not listed, Codex #6468 r1), how many open starts it
 // returned BEFORE any filter (it offers each free gap's earliest start, so a
-// count is the day's open gaps; a full day reads 0).
+// count is the day's open gaps; a full day reads 0). Under the arrival search
+// (findTimeArgs.arrivalSearch) find-time offers every admitted hour instead,
+// so a count there is the day's open hours.
 function searchSummary(dateFrom, dateTo, slots, searchedDates) {
   const open = {};
   for (const d of searchedDates || []) open[d] = 0;
@@ -996,6 +999,15 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // Owner closed days: an unreadable list must stop the search, not read as
     // "open" (owner 2026-10-09; find-time's default fails open for customers).
     strictBlackout: true,
+    // GATE_AUTO_DISPATCH_ARRIVAL_SEARCH='true' (config.arrivalSearch, carried
+    // on ctx by index.js): find-time's arrival-window engine for this search
+    // alone — every stop on the day still reached inside its 2-hour promise —
+    // instead of one-hour blocks with drive time on both sides. It spends none
+    // of the paid road allowance customer booking shares (providerTravel
+    // false): the run scores on the shared model, and road-check.js still asks
+    // Google about an ordinary move before it is made.
+    arrivalSearch: ctx.arrivalSearch === true,
+    ...(ctx.arrivalSearch === true ? { providerTravel: false } : {}),
     // HARD time preference must enter slot GENERATION, not just post-filtering:
     // find-time emits only each gap's earliest-feasible start, so an empty day
     // with an afternoon preference would yield a single 08:00 candidate that the

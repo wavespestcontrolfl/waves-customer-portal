@@ -1924,3 +1924,69 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     expect(checkMove).not.toHaveBeenCalled();
   });
 });
+
+// GATE_AUTO_DISPATCH_ARRIVAL_SEARCH (owner 2026-10-24; config.arrivalSearch).
+describe('arrival search (GATE_AUTO_DISPATCH_ARRIVAL_SEARCH)', () => {
+  const searches = () => candidateSlots.findValidCandidateSlots.mock.calls.map((c) => c[2]);
+  const withApply = async (fn) => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try { await fn(); } finally {
+      if (prev === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY; else process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  };
+
+  test('true: the run searches with the arrival engine (ctx.arrivalSearch), once per visit; off: today\'s search', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'dry_run', arrivalSearch: 'true' });
+    expect(searches().map((ctx) => ctx.arrivalSearch)).toEqual([true]);
+    expect(lastDecision('recommended').constraints.arrival_search).toBeUndefined();
+    candidateSlots.findValidCandidateSlots.mockClear();
+    await runAutoDispatch({ mode: 'dry_run', arrivalSearch: 'off' });
+    expect(searches().map((ctx) => ctx.arrivalSearch)).toEqual([false]);
+  });
+
+  test('true in apply mode: the re-check before the write searches the same way', async () => {
+    await withApply(async () => {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+      expect(await runAutoDispatch({ mode: 'apply', arrivalSearch: 'true' })).toMatchObject({ changed: 1 });
+      expect(searches().length).toBeGreaterThan(1);
+      expect(searches().every((ctx) => ctx.arrivalSearch === true)).toBe(true);
+    });
+  });
+
+  test('shadow: the visit stays on today\'s decision and its row records what the arrival search would do', async () => {
+    await withApply(async () => {
+      // Today's search: no better slot. The arrival search: a clearly better one.
+      candidateSlots.findValidCandidateSlots.mockImplementation(async (_s, _p, ctx) => (ctx.arrivalSearch
+        ? { current: CURRENT, candidates: [CAND_BIG] }
+        : { current: CURRENT, candidates: [] }));
+      const res = await runAutoDispatch({ mode: 'apply', arrivalSearch: 'shadow' });
+      expect(res).toMatchObject({ changed: 0, evaluated: 1 });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      expect(searches().map((ctx) => [ctx.arrivalSearch, ctx.roadTravel])).toEqual([[false, null], [true, null]]);
+      const row = lastDecision('no_change');
+      expect(row.reason_code).toBe('NO_VALID_SLOT');
+      expect(row.constraints.arrival_search).toEqual({
+        would: 'move', date: CAND_BIG.date, window_start: CAND_BIG.start_time, technician_id: 't1',
+        improvement: expect.any(Number), day_move: true, drive_saving_minutes: expect.any(Number), ms: expect.any(Number),
+      });
+      expect(row.constraints.arrival_search.improvement).toBeGreaterThanOrEqual(15);
+    });
+  });
+
+  test('shadow: a would-not-move names its reason, and a failed arrival search never stops the run', async () => {
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (_s, _p, ctx) => (ctx.arrivalSearch
+      ? { current: CURRENT_GOOD, candidates: [CAND_SMALL] }
+      : { current: CURRENT, candidates: [] }));
+    await runAutoDispatch({ mode: 'dry_run', arrivalSearch: 'shadow' });
+    expect(lastDecision('no_change').constraints.arrival_search).toMatchObject({ would: expect.stringMatching(/^NO_/) });
+
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (_s, _p, ctx) => {
+      if (ctx.arrivalSearch) throw Object.assign(new Error('route read failed'), { code: 'ECONNRESET' });
+      return { current: CURRENT, candidates: [] };
+    });
+    expect(await runAutoDispatch({ mode: 'dry_run', arrivalSearch: 'shadow' })).toMatchObject({ evaluated: 1 });
+    expect(lastDecision('no_change')).toMatchObject({ reason_code: 'NO_VALID_SLOT', constraints: { arrival_search: { would: 'error', error: 'ECONNRESET' } } });
+  });
+});

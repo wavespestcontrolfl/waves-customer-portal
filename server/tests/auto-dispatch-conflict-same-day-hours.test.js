@@ -134,6 +134,28 @@ test('no extra search for a visit not in overlap, on a closed day, in capacity m
   expect(sameDayCalls()).toHaveLength(0);
 });
 
+// GATE_AUTO_DISPATCH_ARRIVAL_SEARCH='true' (owner 2026-10-24, ctx.arrivalSearch
+// from index.js): the night tool asks find-time for the arrival-window engine
+// for its own search and spends none of booking's Google road allowance. That
+// engine already lists every hour the route accepts, so no extra same-day
+// search runs. Without it the request is today's, byte for byte.
+test('the night arrival search: find-time is asked for the arrival engine without Google, and no extra same-day search runs', async () => {
+  const { candidates } = await findValidCandidateSlots(SERVICE, PREFS, ctx({ arrivalSearch: true }));
+  expect(ownDayStarts(candidates)).toEqual(['11:00']);
+  expect(sameDayCalls()).toHaveLength(0);
+  expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+  expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({
+    arrivalSearch: true, providerTravel: false, techStartPoints: true, slotStepMinutes: 60, strictBlackout: true, excludeServiceIds: ['s1'],
+  });
+
+  findAvailableSlots.mockClear();
+  await findValidCandidateSlots(SERVICE, PREFS, ctx());
+  const today = findAvailableSlots.mock.calls[0][0];
+  expect(today.arrivalSearch).toBe(false);
+  expect(today).not.toHaveProperty('providerTravel');
+  expect(sameDayCalls()).toHaveLength(1);
+});
+
 // find-time.js: the option itself. One gap from 08:20 to a latest start of 13:10.
 describe('find-time everyStepStart (legacy path)', () => {
   const { legacyGapStarts } = jest.requireActual('../services/scheduling/find-time')._internals;

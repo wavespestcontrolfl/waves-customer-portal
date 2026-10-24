@@ -231,6 +231,17 @@ async function findCapacitySlots(opts) {
         // loadArrivalRouteContext has always taken this option; capacity
         // generation simply never passed it.
         excludeEstimateId: opts.excludeEstimateId,
+        // The night tool's arrival search (findAvailableSlots below): the
+        // arrival rules for this call alone (preserveCapacity, the per-call
+        // switch older booking holds already use), today's job lengths for
+        // the stops on the route (planningMinutes off: the 04:20 route pass
+        // and the schedule screen plan the same day the same way), and the
+        // day starting at the tech's start point like the shared model it
+        // is scored on (GATE_TECH_START_POINTS; off = the office). Every
+        // other caller keeps the defaults.
+        preserveCapacity: opts.arrivalSearch === true,
+        planningMinutes: opts.arrivalSearch !== true,
+        startPoints: opts.arrivalSearch === true,
         ...(opts.arrivalWindow?.serviceId ? {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
           // Same as the non-capacity path above.
@@ -1417,7 +1428,10 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
  * @returns {Promise<{slots: Array, evaluated: number}>}
  */
 async function findAvailableSlots(opts) {
-  if (capacityEnabled()) return findCapacitySlots(opts);
+  // opts.arrivalSearch: the nightly auto-dispatch search alone
+  // (GATE_AUTO_DISPATCH_ARRIVAL_SEARCH, candidate-slots.js) — the arrival
+  // engine for that call while every booking surface keeps this path.
+  if (capacityEnabled() || opts.arrivalSearch === true) return findCapacitySlots(opts);
   const {
     lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,

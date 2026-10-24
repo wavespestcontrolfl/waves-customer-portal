@@ -429,6 +429,38 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   };
 }
 
+// GATE_AUTO_DISPATCH_ARRIVAL_SEARCH='shadow' (owner 2026-10-24): what the
+// arrival search would do for this visit rides its pass-1 audit row
+// (constraints_checked.arrival_search) beside the decision today's search
+// made — every visit today's search leaves where it is. (A visit today's
+// search moves is audited again at the write, without it.) It reads only and
+// moves nothing. It asks Google nothing: no road check, so the run's one road
+// allowance stays with the real moves, and a would-be day move is judged on
+// the model alone. `ms` is the search's own time: a shadow night runs both
+// searches, so its run time alone overstates a night on the arrival search.
+async function noteArrivalShadow(evalResult, { service, prefs, ctx, config, lockBoundary }) {
+  if (config.arrivalSearch !== 'shadow' || !evalResult.audit) return;
+  const startedAt = Date.now();
+  let summary;
+  try {
+    const arrival = await evaluatePlacement(service, prefs, { ...ctx, arrivalSearch: true, roadTravel: null }, config, lockBoundary);
+    summary = arrivalShadowSummary(arrival);
+  } catch (err) {
+    summary = { would: 'error', error: err.code || err.name || 'error' };
+  }
+  evalResult.audit.constraints = { ...evalResult.audit.constraints, arrival_search: { ...summary, ms: Date.now() - startedAt } };
+}
+
+function arrivalShadowSummary(result) {
+  if (result.kind !== 'move') return { would: result.reason_code };
+  const placed = result.audit.newPlacement || {};
+  const metrics = result.audit.routeMetrics || {};
+  return {
+    would: 'move', date: placed.date, window_start: placed.window_start, technician_id: placed.technician_id,
+    improvement: result.improvement, day_move: metrics.day_move === true, drive_saving_minutes: metrics.drive_saving_minutes,
+  };
+}
+
 // For a visit in conflict that an ordinary optimization would move anyway:
 // the move apply mode makes once the overlapping partner has left, when the
 // visit is evaluated with no conflict — its own slot, gain and audit numbers
@@ -1096,6 +1128,10 @@ async function evaluateServiceForRun(service, run) {
     conflictMoves: config.conflictMovesEnabled === true,
     // GATE_AUTO_DISPATCH_ROAD_CHECK: the run's one road-time reader (null = off).
     roadTravel: run.roadTravel,
+    // GATE_AUTO_DISPATCH_ARRIVAL_SEARCH='true': the candidate search uses
+    // find-time's arrival-window engine (candidate-slots.js); pass 2 reuses
+    // this ctx, so the re-check before a move searches the same way.
+    arrivalSearch: config.arrivalSearch === 'true',
     // ROUTE-TIERS: pre-intersected candidate window (null/absent when the
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
@@ -1105,6 +1141,7 @@ async function evaluateServiceForRun(service, run) {
   if (limited) return logSkip(run, service, limited);
 
   const evalResult = await evaluatePlacement(service, prefs, ctx, config, run.lockBoundary);
+  await noteArrivalShadow(evalResult, { service, prefs, ctx, config, lockBoundary: run.lockBoundary });
   totals.evaluated++;
   noteEvaluation(run, service, evalResult, ctx);
 
@@ -1535,4 +1572,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow } };

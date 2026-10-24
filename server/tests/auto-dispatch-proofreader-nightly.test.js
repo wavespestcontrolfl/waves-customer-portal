@@ -276,6 +276,8 @@ describe('checkMove', () => {
     const late = runOf({ proofreader: nightly.newRunState({ startedAt: Date.now() - 301000, deadlineSeconds: 300 }) });
     expect(await check(late, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_NOT_ASKED', audit: { why: 'deadline' }, broke: false });
     expect(proofreader.buildCustomerRecord).not.toHaveBeenCalled();
+    // Counted for the check-down notice (a night the deadline stopped every check rings it).
+    expect(late.proofreader).toMatchObject({ notAsked: 1, timedOut: 1, broke: 0 });
     const inTime = runOf({ proofreader: nightly.newRunState({ startedAt: Date.now() - 1000, deadlineSeconds: 300 }) });
     expect(await check(inTime, proofreader)).toMatchObject({ allowed: true });
   });
@@ -287,7 +289,7 @@ describe('checkMove', () => {
     proofreader.buildCustomerRecord.mockImplementation(async () => { run.proofreader.deadlineAt = Date.now() - 1; return RECORD; });
     expect(await check(run, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_NOT_ASKED', audit: { why: 'deadline' }, broke: false });
     expect(proofreader.proofreadMove).not.toHaveBeenCalled();
-    expect(run.proofreader).toMatchObject({ calls: 0, notAsked: 1, unsure: 0 });
+    expect(run.proofreader).toMatchObject({ calls: 0, notAsked: 1, timedOut: 1, unsure: 0 });
   });
 
   test.each(['model_failed', 'bad_answer'])('a check that broke (%s) is marked so the run cannot end green; an unsure answer is not', async (why) => {
@@ -356,7 +358,8 @@ describe('checkMove', () => {
     expect(await check(run, proofreader)).toMatchObject({ allowed: true });
     expect(await check(run, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_NOT_ASKED' });
     expect(proofreader.proofreadMove).toHaveBeenCalledTimes(1);
-    expect(run.proofreader).toMatchObject({ calls: 1, notAsked: 1 });
+    // The call cap is a spent allowance, not a stopped clock: not timedOut.
+    expect(run.proofreader).toMatchObject({ calls: 1, notAsked: 1, timedOut: 0 });
   });
 });
 
