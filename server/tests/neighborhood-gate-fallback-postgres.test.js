@@ -106,6 +106,18 @@ postgres('neighborhood gate entries for the day feed', () => {
     expect(map.size).toBe(0);
   });
 
+  test("each entry carries the gate's map point (gate_lat, gate_lng) when the office set one", async () => {
+    const n = await neighborhood('Pinned Grove');
+    await entry(n, { code: '7070', status: 'active', gate_lat: 27.4321, gate_lng: -82.4567 });
+    await entry(n, { code: '7171', status: 'needs_confirm' });
+    const c = await customer([n]);
+    const map = await neighborhoodGateEntriesForVisits(trx, [{ id: 'v', customer_id: c.id, property_id: c.propertyIds[0] }]);
+    expect(map.get('v').map((e) => [e.code, e.gate_lat, e.gate_lng])).toEqual([
+      ['7070', '27.432100', '-82.456700'],
+      ['7171', null, null],
+    ]);
+  });
+
   test('a switched-off neighborhood gives no fallback', async () => {
     const n = await neighborhood('Off Grove');
     await entry(n, { code: '6969', status: 'active' });

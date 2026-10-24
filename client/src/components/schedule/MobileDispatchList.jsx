@@ -20,6 +20,7 @@ import InlineTechPicker from './InlineTechPicker';
 import QuickActionMenu from './QuickActionMenu';
 import DispatchReadinessStrip from './DispatchReadinessStrip';
 import { openHoursForDay, hourToHHMM, formatOpenHour, useHourClock } from './openHours';
+import { directionsHref } from '../../lib/directionsHref';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -34,10 +35,6 @@ function adminFetch(path) {
 
 function serviceDisplayName(service) {
   return service?.serviceTypeDisplay || service?.serviceType || '';
-}
-
-function googleMapsDirectionsUrl(address) {
-  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address || '')}&travelmode=driving`;
 }
 
 // Monday of the ET week that contains `dateStr` ('YYYY-MM-DD'). Returned
@@ -446,7 +443,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             )}
             {showNavigate && (
               <a
-                href={googleMapsDirectionsUrl(service.address)}
+                href={directionsHref(service.address, service.gateWaypoint)}
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={(e) => e.stopPropagation()}

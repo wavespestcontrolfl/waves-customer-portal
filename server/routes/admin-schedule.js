@@ -6635,6 +6635,7 @@ router.get('/', async (req, res, next) => {
         } catch { /* fail toward not-applied — preview still nets the prepaid */ }
       }
 
+      const gateWaypoint = require('../services/neighborhood-access').gateWaypoint(neighborhoodGateByVisit.get(s.id));
       // Compiled by the shared helper (services/nextstop-alerts.js) so the
       // pre-visit brief's deterministic access block and this day feed can
       // never drift — the block moved verbatim, behavior 1:1.
@@ -6933,6 +6934,10 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        // The neighborhood's main gate on the map (owner 2026-10-24): the
+        // Directions link routes through it before the house. Absent = the
+        // plain address, as before.
+        ...(gateWaypoint ? { gateWaypoint } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
         lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,

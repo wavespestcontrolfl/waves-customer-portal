@@ -15,6 +15,10 @@
  *                                     other live codes there then need confirming)
  * PATCH  /entries/:id               — edit an entry (a new value counts as confirmed),
  *                                     or { action: 'confirm' | 'retire' }
+ *                                     Both take gate_location (a Google Maps link or
+ *                                     "lat, lng"; null clears): where the gate is, so
+ *                                     a visit's Directions link routes through it
+ *                                     (owner 2026-10-24). Read back as gateLocation.
  * POST   /visits/:visitId/entries   — from a visit: add a keypad code to that
  *                                     visit's neighborhood ({ code, gateLabel? })
  * POST   /visits/:visitId/entries/:entryId/wrong — from a visit: report a
@@ -37,7 +41,9 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { neighborhoodAccessLive, neighborhoodTechActionsLive } = require('../config/feature-gates');
-const { isKeypadCode, lockCommunity, matchKey, visitNeighborhoodIds } = require('../services/neighborhood-access');
+const {
+  isKeypadCode, lockCommunity, matchKey, visitNeighborhoodIds, parseGateLocation,
+} = require('../services/neighborhood-access');
 const { isTechnicianRequest, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 
@@ -62,6 +68,8 @@ const COUNTIES = ['Manatee', 'Sarasota', 'Charlotte'];
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
 const KEYPAD_CODE_ERROR = 'A keypad code is 3 to 8 digits, with an optional leading or trailing # or *';
+const MAX_GATE_LOCATION = 2048;
+const GATE_LOCATION_ERROR = 'Paste a Google Maps link that shows the gate\'s coordinates, or type them as lat, lng';
 
 function logFailure(what, err) {
   logger.error(`[admin-neighborhood-access] ${what} failed (${(err && (err.code || err.name)) || 'error'})`);
@@ -92,7 +100,15 @@ function serializeEntry(row, { cutoff, conflicted, staffNames }) {
     addedBy: row.source_technician_id ? (staffNames.get(row.source_technician_id) || 'Staff') : null,
     markedWrongAt: row.flagged_wrong_at ? new Date(row.flagged_wrong_at).toISOString() : null,
     markedWrongBy: row.flagged_wrong_at ? (staffNames.get(row.flagged_wrong_by) || 'Staff') : null,
+    // Where the gate is (owner 2026-10-24): a visit's Directions link routes
+    // through it before the house. null = not set.
+    gateLocation: gateLocationOf(row),
   };
+}
+
+function gateLocationOf(row) {
+  if (row.gate_lat == null || row.gate_lng == null) return null;
+  return { lat: Number(row.gate_lat), lng: Number(row.gate_lng) };
 }
 
 function positiveInt(value, fallback, max) {
@@ -118,8 +134,24 @@ function mergeFields(input, current) {
   return { merged };
 }
 
+// The gate's map point, when the request carries one: `gate_location` is a
+// pasted Google Maps link or "lat, lng" (parseGateLocation), or null to clear.
+// Returns { skip: true } when the field is absent (an edit keeps the stored
+// point), { error }, or { value: { gate_lat, gate_lng } }.
+function gateLocationFields(input) {
+  if (!Object.prototype.hasOwnProperty.call(input, 'gate_location')) return { skip: true };
+  const raw = input.gate_location;
+  if (raw === null || (typeof raw === 'string' && !raw.trim())) return { value: { gate_lat: null, gate_lng: null } };
+  if (typeof raw !== 'string') return { error: 'gate_location must be text' };
+  if (raw.length > MAX_GATE_LOCATION) return { error: `gate_location is limited to ${MAX_GATE_LOCATION} characters` };
+  const point = parseGateLocation(raw);
+  if (!point) return { error: GATE_LOCATION_ERROR };
+  return { value: { gate_lat: point.lat, gate_lng: point.lng } };
+}
+
 // Merge the requested fields over the current entry and validate the result.
-// Returns { error } or { value: { gate_label, access_type, code, instructions } }.
+// Returns { error } or { value: { gate_label, access_type, code, instructions } }
+// (plus gate_lat and gate_lng when the request carries gate_location).
 function validateEntry(body, current) {
   const input = body && typeof body === 'object' ? body : {};
   const overlay = mergeFields(input, current);
@@ -150,12 +182,15 @@ function validateEntry(body, current) {
   // A keypad entry is its code alone (as the filer stores it): instructions
   // left over from an entry switched to keypad are cleared, never kept
   // beside the code where the keypad form cannot show or edit them.
+  const location = gateLocationFields(input);
+  if (location.error) return { error: location.error };
   return {
     value: {
       gate_label: label,
       access_type: merged.access_type,
       code,
       instructions: merged.access_type === 'keypad' ? null : (instructions || null),
+      ...(location.skip ? {} : location.value),
     },
   };
 }
@@ -691,6 +726,8 @@ router.patch('/entries/:id', async (req, res) => {
       }
       // The office changing the value vouches for it: the entry is confirmed.
       // A label-only edit keeps its status and confirmation date.
+      // The gate's map point is not the value: moving the pin never confirms
+      // a code.
       const valueChanged = next.access_type !== row.access_type
         || (next.code || null) !== (row.code || null)
         || (next.instructions || null) !== (row.instructions || null);

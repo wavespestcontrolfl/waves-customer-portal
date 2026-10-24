@@ -734,6 +734,52 @@ async function gateActionVisitIds(conn, visits) {
   return new Set([...visitNeighborhood].filter(([, n]) => active.has(n)).map(([visitId]) => visitId));
 }
 
+// ---- gate location (owner 2026-10-24) ---------------------------------------
+// Where a gate is on the map, as the office pastes it on the Gate codes page:
+// "27.4, -82.5" (also with a space or a slash), or a Google Maps link that
+// carries the point (…/@lat,lng,17z…, ?q=lat,lng, ?query=lat,lng, ?ll=lat,lng,
+// destination=lat,lng, or the !3dlat!4dlng pair in a place link). Returns
+// { lat, lng } rounded to six places, or null when no point is found (a
+// shortened maps.app.goo.gl link has none: the office pastes the expanded
+// link or the numbers). Never a place name: nothing here geocodes.
+const COORD = '(-?\\d{1,3}(?:\\.\\d+)?)';
+const GATE_LOCATION_PATTERNS = [
+  new RegExp(`^${COORD}\\s*[,/\\s]\\s*${COORD}$`),
+  new RegExp(`/@${COORD},${COORD}`),
+  new RegExp(`[?&](?:q|query|ll|destination|center)=${COORD}(?:,|%2C)${COORD}`, 'i'),
+  new RegExp(`!3d${COORD}!4d${COORD}`),
+];
+function parseGateLocation(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  for (const re of GATE_LOCATION_PATTERNS) {
+    const m = re.exec(text);
+    if (!m) continue;
+    const lat = Number(m[1]);
+    const lng = Number(m[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+    // (0, 0) is the sea off West Africa, never a gate: a link with an empty point.
+    if (lat === 0 && lng === 0) return null;
+    return { lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6 };
+  }
+  return null;
+}
+
+// The point a visit's Directions link routes through before the house: the
+// first of the neighborhood's shown entries (neighborhoodGateEntriesForVisits
+// order: active first, then by label) that carries a location. null = the
+// link is the plain address, as before.
+function gateWaypoint(entries) {
+  for (const e of entries || []) {
+    if (e?.gate_lat == null || e?.gate_lng == null) continue;
+    const lat = Number(e.gate_lat);
+    const lng = Number(e.gate_lng);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+  }
+  return null;
+}
+
 // ---- admin day-feed fallback (gate-code directory PR 3a) ---------------------
 // The neighborhood's gate entries for each visit, keyed by visit id, so the
 // office's day feed can show "Gate: …" for a customer with no gate code of
@@ -757,7 +803,8 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
     .where((w) => w.where('status', 'active')
       .orWhere((q) => q.where('status', 'needs_confirm').where('access_type', 'keypad').whereNotNull('code')))
     .orderBy([{ column: 'status' }, { column: 'gate_label' }, { column: 'code' }])
-    .select('id', 'neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status', 'flagged_wrong_at');
+    .select('id', 'neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status', 'flagged_wrong_at',
+      'gate_lat', 'gate_lng');
   const byNeighborhood = new Map();
   for (const e of entries) byNeighborhood.set(e.neighborhood_id, [...(byNeighborhood.get(e.neighborhood_id) || []), e]);
   for (const [visitId, n] of visitNeighborhood) {
@@ -788,4 +835,6 @@ module.exports = {
   neighborhoodGateEntriesForVisits,
   visitNeighborhoodIds,
   gateActionVisitIds,
+  parseGateLocation,
+  gateWaypoint,
 };

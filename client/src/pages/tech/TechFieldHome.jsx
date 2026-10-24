@@ -1,5 +1,6 @@
 import { ArrowRight, BookOpen, Camera, ChevronRight, ClipboardList, CloudRain, FileText, Leaf, MapPin, Navigation, RefreshCw, Truck, Wrench } from 'lucide-react';
 import { serviceWindowLabel, stopPropertyAlerts, stopStatusLabel, stopSummaryLabel, stopWindow, stopHasCustomerSentPhotos } from './routeStops';
+import { directionsHref } from '../../lib/directionsHref';
 
 // Today's tool gaps (GATE_TRUCK_KIT, /api/tech/truck-check `gaps`) by the
 // stop's services: the names of the tools a visit's checklist requires that
@@ -45,7 +46,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index, gaps }) {
             {typeof alert === 'string' ? alert : alert.text}
           </div>
         ))}
-        {service.address && <a className="tf-button" href={`https://maps.google.com/?q=${encodeURIComponent(service.address)}`} target="_blank" rel="noopener noreferrer"><Navigation aria-hidden="true" />Directions</a>}
+        {service.address && <a className="tf-button" href={directionsHref(service.address, service.gateWaypoint)} target="_blank" rel="noopener noreferrer"><Navigation aria-hidden="true" />Directions</a>}
         <div className="tf-actions"><button type="button" className="tf-button tf-primary" onClick={() => onOpen(stop)} disabled={disabled}>Open visit <ArrowRight aria-hidden="true" /></button></div>
       </div>
     </article>
