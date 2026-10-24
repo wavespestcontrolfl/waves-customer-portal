@@ -2226,8 +2226,10 @@ function isRepeatFormFromLead(existing) {
 
 // One Leads alert for a form from a row that is still a lead. Before, such a
 // form wrote only a note: from Aug 17 to Oct 18 five leads sent the form again
-// and nobody was told. One open row per lead: a repeat while it is open stays
-// that row. Never throws; the form is already saved.
+// and nobody was told. One open row per lead: each form is a new version, so a
+// form while the row is open rings it again and moves its time to that form;
+// the relevance sweep judges contact against that time. Never throws; the
+// form is already saved.
 async function ringRepeatFormAlert(customer, attachedLeadId = null) {
   if (!isRepeatFormFromLead(customer)) return;
   try {
@@ -2258,6 +2260,9 @@ async function ringRepeatFormAlert(customer, attachedLeadId = null) {
       bell: true,
       dedupeKey: `lead-repeat-form:${customer.id}`,
       dedupeOpenOnly: true,
+      refreshOnDedupe: true,
+      bumpOnRefresh: true,
+      dedupeVersion: new Date().toISOString(),
       metadata: { customerId: customer.id, leadId, source: 'lead_repeat_form' },
     });
   } catch (e) {

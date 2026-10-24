@@ -602,6 +602,10 @@ describe('class rules', () => {
     expect((await reasonFor(repeat())).reason).toBe('Lead was contacted');
     mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'admin-callback', latest_created_at: BEFORE_BELL }];
     expect((await reasonFor(repeat())).reason).toBeNull();
+    // A later form re-rings the alert and moves its time to that form
+    // (bumpOnRefresh): a call from before that form never closes it.
+    mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'admin-click', latest_created_at: AFTER_BELL }];
+    expect((await reasonFor({ ...repeat(), created_at: new Date('2026-09-27T16:00:00Z') })).reason).toBeNull();
     // An automatic bridge ring to the owner's cell is not contact.
     mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'lead-webhook-auto-bridge', latest_created_at: AFTER_BELL }];
     expect((await reasonFor(repeat())).reason).toBeNull();
@@ -632,6 +636,22 @@ describe('class rules', () => {
     expect((await reasonFor(repeat())).reason).toBeNull();
     // Another Leads alert is not this class.
     expect(classify(note({ category: 'lead', metadata: { dedupeKey: `sms-lead:${LEAD}`, customerId: CUST } }))).toBeNull();
+  });
+
+  test('repeat-form alert with no lead row (it opens the customer): a quote, a booking or contact for that customer still closes it', async () => {
+    const customerOnly = () => note({
+      category: 'lead', link: `/admin/customers?customerId=${CUST}`,
+      metadata: { dedupeKey: `lead-repeat-form:${CUST}`, customerId: CUST, leadId: null, source: 'lead_repeat_form' },
+    });
+    expect(await reasonFor(customerOnly())).toEqual({ cls: 'lead_repeat_form', reason: null });
+    mockTables.estimates = [{ id: EST, customer_id: CUST, sent_at: AFTER_BELL }];
+    expect((await reasonFor(customerOnly())).reason).toBe('Estimate was sent');
+    mockTables.estimates = [];
+    mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: AFTER_BELL }];
+    expect((await reasonFor(customerOnly())).reason).toBe('A visit was booked');
+    mockTables.scheduled_services = [];
+    mockTables.sms_log = [{ customer_id: CUST, direction: 'outbound', message_type: 'manual', latest_created_at: AFTER_BELL }];
+    expect((await reasonFor(customerOnly())).reason).toBe('Lead was contacted');
   });
 
   test('customer-contact bells and money-owed alerts are never in the table, whatever their metadata says', () => {

@@ -144,6 +144,11 @@ describe('gate on: a repeat form from a row that is still a lead', () => {
       bell: true,
       dedupeKey: 'lead-repeat-form:cust-1',
       dedupeOpenOnly: true,
+      // Each form is a new version: an open row rings again and its time moves
+      // to this form, so contact before it never closes it.
+      refreshOnDedupe: true,
+      bumpOnRefresh: true,
+      dedupeVersion: expect.any(String),
       link: '/admin/leads?lead=lead-9',
       metadata: { customerId: 'cust-1', leadId: 'lead-9', subject: { type: 'lead', id: 'lead-9' }, doneWhen: 'lead_contacted', who: 'person' },
     });

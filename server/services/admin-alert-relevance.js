@@ -185,6 +185,11 @@ function keepLatestPerCustomer(map, rows, timeKey) {
   }
 }
 
+// The customer a repeat-form alert is about (its own metadata), else null.
+function repeatFormCustomerId(meta) {
+  return String(meta.dedupeKey || '').startsWith(REPEAT_FORM_PREFIX) ? idTextOrNull(meta.customerId) : null;
+}
+
 // The live records for a batch of notification rows: one query per table per
 // batch (a lead's estimate is only known once the lead is loaded, so estimates
 // run second). Plain reads — never a lock.
@@ -251,12 +256,9 @@ async function loadSubjects(rows, conn = db) {
   }
   // The repeat-form alerts' customers: the latest call a person placed to
   // each and the latest staff text that reached each (deliveredTexts, the
-  // one definition of a text that reached the other side). Only this class
-  // reads them, from its own metadata.customerId.
-  const contactCustomerIds = [...new Set(rows
-    .map((row) => parseMeta(row.metadata))
-    .filter((meta) => String(meta.dedupeKey || '').startsWith(REPEAT_FORM_PREFIX))
-    .map((meta) => idTextOrNull(meta.customerId)).filter(Boolean))];
+  // one definition of a text that reached the other side). Their quotes and
+  // bookings load below with the leads' customers, with or without a lead row.
+  const contactCustomerIds = [...new Set(rows.map((row) => repeatFormCustomerId(parseMeta(row.metadata))).filter(Boolean))];
   if (contactCustomerIds.length) {
     const { deliveredTexts } = require('./messaging/auto-text-holds');
     const { HUMAN_REPLY_TYPES } = require('./sms-suggest-mode');
@@ -270,7 +272,7 @@ async function loadSubjects(rows, conn = db) {
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
-  const leadCustomerIds = [...new Set([...data.leads.values()].map((l) => l.customer_id && String(l.customer_id)).filter(Boolean))];
+  const leadCustomerIds = [...new Set([...[...data.leads.values()].map((l) => l.customer_id && String(l.customer_id)), ...contactCustomerIds].filter(Boolean))];
   if (estimateIds.length) {
     data.estimates = byId(await conn('estimates').whereIn('id', estimateIds).select('id', 'sent_at'));
   }
@@ -297,6 +299,9 @@ async function loadSubjects(rows, conn = db) {
 function subjectFor(row, data, todayET) {
   const resolved = resolveRefs(row, data);
   const bellAt = row.created_at ? new Date(row.created_at) : null;
+  // A repeat-form alert is about its own customer, with or without a lead row.
+  const repeatCustomer = repeatFormCustomerId(resolved.refs.meta);
+  const leadCustomer = repeatCustomer || (resolved.lead?.customer_id ? String(resolved.lead.customer_id) : null);
   return {
     ...resolved,
     meta: resolved.refs.meta,
@@ -307,8 +312,8 @@ function subjectFor(row, data, todayET) {
     visitOf: (id) => data.visits.get(id),
     // A promise the row names, by id; loaded ids only, so a miss is a promise gone.
     promiseOf: (id) => data.promises.get(id),
-    leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
-    leadQuotedAt: resolved.lead?.customer_id ? data.leadQuotes.get(String(resolved.lead.customer_id)) : null,
+    leadBookedAt: leadCustomer ? data.leadVisits.get(leadCustomer) : null,
+    leadQuotedAt: leadCustomer ? data.leadQuotes.get(leadCustomer) : null,
     // The latest consent the bell's customer recorded at the current text
     // version (loaded for stale-consent bells only).
     consentRecordedAt: (() => { const id = idTextOrNull(resolved.refs.meta.customerId); return id ? data.consents.get(id) : null; })(),
@@ -317,7 +322,7 @@ function subjectFor(row, data, todayET) {
     chatQuoted: data.chatQuoted.has(String(row.id)),
     // The latest staff call or text to the bell's customer (loaded for
     // repeat-form alerts only).
-    leadContactedAt: (() => { const id = idTextOrNull(resolved.refs.meta.customerId); return id ? data.contacts.get(id) : null; })(),
+    leadContactedAt: repeatCustomer ? data.contacts.get(repeatCustomer) : null,
   };
 }
 
