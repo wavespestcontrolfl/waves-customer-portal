@@ -21,6 +21,8 @@
  *      fixture records the export's GATE_LAWN_PROPERTY_HISTORY setting.
  *        railway run --service Postgres node ops/agents/lawn-visit-assessment-eval.js \
  *          --export --ids <id>,<id> --sample 20 > /tmp/lawn-visit-eval-fixture.json
+ *      --include-runs keeps run-backed rows (their "AI" column is the run's first
+ *      read), to measure repeat-read spread on the current pipeline.
  *
  *   2. RUN (portal env: model keys + S3) — reads photos from S3 by key, makes
  *      LIVE model calls, prints the markdown report on STDOUT (or the full
@@ -77,6 +79,7 @@ const idsList = (raw) => {
 // value is read. Boolean flags take none.
 const ARG_SPECS = {
   '--export': { key: 'export' },
+  '--include-runs': { key: 'includeRuns' },
   '--all': { key: 'all' },
   '--json': { key: 'json' },
   '--force-fallback': { key: 'forceFallback' },
@@ -90,7 +93,7 @@ const ARG_SPECS = {
 };
 
 function parseArgs(argv) {
-  const args = { export: false, run: null, ids: [], sample: null, all: false, json: false, thinking: null, forceFallback: false, repeat: 1, concurrency: 2, limit: Infinity };
+  const args = { export: false, includeRuns: false, run: null, ids: [], sample: null, all: false, json: false, thinking: null, forceFallback: false, repeat: 1, concurrency: 2, limit: Infinity };
   for (let i = 2; i < argv.length; i += 1) {
     const spec = ARG_SPECS[argv[i]];
     if (!spec) { console.error(`unknown argument: ${argv[i]}`); process.exit(2); }
@@ -105,6 +108,7 @@ function parseArgs(argv) {
   // (bounded by --ids / --limit) — accepting it here would look bounded while
   // replaying the whole corpus with paid calls (Codex #4153 r13).
   if (args.run && args.sample) { console.error('--sample is an export option; bound a replay with --ids or --limit'); process.exit(2); }
+  if (args.includeRuns && !args.export) { console.error('--include-runs is an export option'); process.exit(2); }
   return args;
 }
 
@@ -134,7 +138,10 @@ async function exportFixture(args) {
       // A visit with a failed upload (a `pending/` key) was scored on the full
       // set: a partial replay is not comparable, so the case is out.
       .whereNotExists(function () { this.select(1).from('lawn_assessment_photos as p').whereRaw('p.assessment_id = la.id').andWhere('p.s3_key', 'like', 'pending/%'); })
-      .modify((q) => { if (hasRunTable) q.whereNotExists(function () { this.select(1).from('lawn_assessment_runs as r').whereRaw('r.assessment_id = la.id'); }); })
+      // --include-runs (lawn scoring review, owner 2026-10-24) keeps the
+      // run-backed rows: the benchmark is the technician's confirmed scores and
+      // the run's own first read, to measure how far a repeat read moves.
+      .modify((q) => { if (hasRunTable && !args.includeRuns) q.whereNotExists(function () { this.select(1).from('lawn_assessment_runs as r').whereRaw('r.assessment_id = la.id'); }); })
       .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.created_at', 'la.photos', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date')
       .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC, la.created_at DESC');
     // Selection is the library's tested mechanism: the explicit ids plus the
@@ -152,6 +159,22 @@ async function exportFixture(args) {
       // duration cannot prove that a current profile/customer/summary value
       // was read by the original model. Completion turf readings are editable
       // after Analyze too. Omit these fields instead of replaying later data.
+      // A run-backed row (--include-runs) carries its call-time prompt snapshot
+      // (vision_context, never the notes) and its first AI read: the replay uses
+      // that context, and its "AI" baseline is the run's read before any edit.
+      const run = args.includeRuns && hasRunTable
+        ? await knex('lawn_assessment_runs').where({ assessment_id: row.id, status: 'complete' }).first('scores_adjusted', 'vision_context')
+        : null;
+      if (run) {
+        const snapshot = run.vision_context && typeof run.vision_context === 'object' ? run.vision_context : {};
+        const testCase = evalLib.fixtureCase(row, photos, {
+          grassType: snapshot.grassType, irrigation: snapshot.irrigation, turfHeightIn: snapshot.turfHeightIn,
+          omitted: [{ field: 'priorSummary', reason: 'replay_omits_prior_summary' }, { field: 'technicianNotes', reason: 'run_snapshot_has_no_notes' }],
+        });
+        const firstRead = run.scores_adjusted && typeof run.scores_adjusted === 'object' ? run.scores_adjusted : {};
+        cases.push({ ...testCase, legacyAi: Object.fromEntries(SCORE_COLUMNS.map((c) => [c, firstRead[c] == null ? null : Number(firstRead[c])])), baseline: 'run_first_read' });
+        continue;
+      }
       cases.push(evalLib.fixtureCase(row, photos, {
         omitted: ['grassType', 'irrigation', 'turfHeightIn', 'priorSummary', 'technicianNotes'].map((field) => ({ field, reason: 'legacy_assessment_has_no_prompt_snapshot' })),
       }));

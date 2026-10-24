@@ -23,13 +23,18 @@ function deriveLegacyScores(analysis) {
   const stressParts = [fungus, thatch, ...['insect_damage', 'drought_stress', 'mechanical_damage'].map((key) => knownLevel(level(key), FUNGUS_DISPLAY))]
     .filter((value) => value != null);
   const drought = level('drought_stress');
+  // Score scale 2 (GATE_LAWN_SCORE_SCALE_V2, owner 2026-10-24): the model's four
+  // 0-100 ratings are the scores, kept as read. Fungus and thatch still come from
+  // the severity words (the six required columns); Condition is the model's own
+  // rating, so a "moderate" thatch word no longer caps it at 60.
+  const scale2 = analysis.scoreScale === 2;
   return {
     turf_density: scores.turf_density ?? null,
-    weed_suppression: scores.weed_coverage == null ? null : 100 - scores.weed_coverage,
-    color_health: scores.color_health == null ? null : Math.round(scores.color_health * 10),
+    weed_suppression: scale2 ? scores.weed_control ?? null : (scores.weed_coverage == null ? null : 100 - scores.weed_coverage),
+    color_health: scale2 ? scores.color_health ?? null : (scores.color_health == null ? null : Math.round(scores.color_health * 10)),
     fungus_control: fungus,
     thatch_level: thatch,
-    stress_damage: stressParts.length ? Math.min(...stressParts) : null,
+    stress_damage: scale2 ? scores.condition ?? null : (stressParts.length ? Math.min(...stressParts) : null),
     overwatering_signal: level('overwatering_signal') === 'yes',
     drought_stress: drought && drought !== 'unknown' ? drought : null,
     // Model prose stays on the internal run until technician review.
@@ -217,7 +222,9 @@ function calibrationScores(finalScores, synthetic) {
 function scoreVisit(analysis, { seasonAdjust, calculateOverallScore }) {
   const mergedComposite = compositeFor(analysis);
   const displayScores = deriveLegacyScores(analysis);
-  const adjustedScores = adjustAvailableScores(displayScores, seasonAdjust);
+  // A scale-2 read is kept as read: its color is already rated "for the season",
+  // so the cool-week multiplier would count the season twice (owner 2026-10-24).
+  const adjustedScores = analysis?.scoreScale === 2 ? displayScores : adjustAvailableScores(displayScores, seasonAdjust);
   return {
     mergedComposite,
     displayScores,

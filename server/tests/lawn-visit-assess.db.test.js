@@ -105,6 +105,28 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     expect(photoRows.map((row) => row.is_best_photo)).toEqual([true, false, false]);
   });
 
+  test('score scale 2 stamps the row and keeps the four ratings as read, with no season multiplier; scale 1 leaves the stamp NULL', async () => {
+    const visitAssessment = require('../services/lawn-visit-assessment');
+    const real = visitAssessment.analyzeVisit;
+    const rating = (value) => ({ determinable: true, value });
+    const legacy = await request({ customerId: await customer(), photos });
+    expect((await mockKnex('lawn_assessments').where({ id: legacy.body.assessment.id }).first()).score_scale).toBeNull();
+    // GATE_LAWN_SCORE_SCALE_V2 needs GATE_LAWN_PROPERTY_HISTORY, which this suite keeps off: the read is forced to scale 2.
+    const spy = jest.spyOn(visitAssessment, 'analyzeVisit').mockImplementation((args) => real({ ...args, scale2: true }));
+    dispatch.mockResolvedValue({
+      ok: true, provider: 'gemini', model: 'fixture-model', usage: {}, failures: [],
+      json: complete({ scores: { turf_density: rating(82), weed_control: rating(78), color_health: rating(85), condition: rating(90) } }),
+    });
+    try {
+      const { body } = await request({ customerId: await customer(), photos });
+      const stored = await mockKnex('lawn_assessments').where({ id: body.assessment.id }).first();
+      expect(stored).toMatchObject({ score_scale: 2, turf_density: 82, weed_suppression: 78, color_health: 85, stress_damage: 90, confirmed_by_tech: false });
+      expect((await runs.loadRun(body.assessment.id, mockKnex)).prompt_version).toBe('lawn-visit-v1-scale2');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('provider exhaustion stores a pending unavailable assessment with no healthy defaults', async () => {
     dispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'gemini', reason: 'timeout' }] });
     const { body } = await request({ customerId: await customer(), photos });
