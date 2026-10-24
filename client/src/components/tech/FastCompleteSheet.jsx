@@ -103,7 +103,7 @@ import {
 } from '../../lib/typed-findings-rules';
 import {
   AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
-  SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
+  SavedView, SheetHeader, TipSection, formAfterTipPick, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
   useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock, detailsHandler,
 } from './FastCompleteParts';
 
@@ -924,7 +924,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               tipId={form.tipId}
               customTip={form.customTip}
               locked={formLocked}
-              onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
+              onPick={(id) => setForm((prev) => formAfterTipPick(prev, id, { library: tips, blogOffered: false }))}
               onCustom={setCustomTip}
               mic={{ serviceId, onPendingChange: dictating.tip }}
             />
@@ -2444,7 +2444,7 @@ function VisitStep({
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
-              onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
+              onPick={(id) => setForm((prev) => formAfterTipPick(prev, id, { library: tips, blogOffered: blog.available }))}
               onCustom={setCustomTip}
               mic={{ serviceId: service?.id, onPendingChange: dictating.tip, onClip: tipClip.onClip, error: tipClip.error }}
             />

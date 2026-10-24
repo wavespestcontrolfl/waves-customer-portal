@@ -308,6 +308,44 @@ async function linkableEntries(knex, terms) {
 }
 
 /**
+ * The live hub post at each of the given paths (`/{category}/{slug}/`), as a
+ * Map path → { id, title, url }; a path with no live post is absent. The same
+ * registry rows the search reads (liveRegistryRows), judged by registryLink,
+ * matched on the live URL's own path, so a tip's `blog.path` (tip-library)
+ * links only what the sweep verified on the hub — and the path's slug is
+ * never rebuilt into a URL (owner 2026-10-24, tips with facts).
+ */
+async function liveBlogPostsByPath(knex, paths) {
+  const wanted = new Map();
+  for (const raw of Array.isArray(paths) ? paths : []) {
+    const key = pathKey(`https://www.${SITE_HOST}${String(raw || '')}`);
+    if (key && key !== '/') wanted.set(key, String(raw));
+  }
+  if (!wanted.size) return new Map();
+  // Each path, anchored: the normalized canonical (a path for a hub post), or
+  // the live or canonical URL ending in it. Every pattern is a binding.
+  const anchored = [...wanted.keys()].map((key) => `${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`);
+  const rows = await liveRegistryRows(knex)
+    .where(function atPaths() {
+      this.whereIn('canonical_url_normalized', [...wanted.keys()].map((key) => `${key}/`));
+      for (const pattern of anchored) this.orWhereRaw('COALESCE(live_url, \'\') ~* ?', [pattern]).orWhereRaw('COALESCE(canonical_url, \'\') ~* ?', [pattern]);
+    })
+    .select([
+      ...REGISTRY_COLUMNS.filter((column) => column !== 'metadata'),
+      knex.raw("jsonb_build_object('frontmatter', metadata -> 'frontmatter', 'astro', jsonb_build_object('frontmatter', metadata -> 'astro' -> 'frontmatter')) AS metadata"),
+    ])
+    .limit(MAX_READ);
+  const found = new Map();
+  for (const row of rows) {
+    const post = registryLink(row);
+    if (!post) continue;
+    const path = wanted.get(pathKey(post.url));
+    if (path && !found.has(path)) found.set(path, post);
+  }
+  return found;
+}
+
+/**
  * The site's live hub posts that answer a search, best first, at most eight,
  * each marked `exact` when it holds every word:
  * those holding every word first, then those holding the rarest of the
@@ -470,6 +508,7 @@ module.exports = {
   blogPostAllowedFor,
   frozenBlogPostWithImage,
   searchReportBlogPosts,
+  liveBlogPostsByPath,
   resolveReportBlogPostPick,
   frozenBlogPost,
   searchTerms,

@@ -673,6 +673,22 @@ describe('payload flag, PDF key and tips on the real report builder (in-memory r
       expect(data.techNote).toBeNull();
     });
 
+    test('a frozen citation reaches the note only behind GATE_TECH_TIP_SOURCES, re-checked against the host rule (owner 2026-10-24)', async () => {
+      process.env[TECH_TIPS] = 'true';
+      const sourced = { ...tipOf('lawn_sharp_blade'), citation: { label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH025' } };
+      const offHost = { ...tipOf('lawn_water_morning'), citation: { label: 'Anyone', url: 'https://example.com/claim' } };
+      delete process.env.GATE_TECH_TIP_SOURCES;
+      let data = await build(null, [sourced, offHost]);
+      expect(data.techNote.tips.map((t) => t.citation)).toEqual([undefined, undefined]);
+      process.env.GATE_TECH_TIP_SOURCES = 'true';
+      try {
+        data = await build(null, [sourced, offHost]);
+        expect(data.techNote.tips.map((t) => t.citation)).toEqual([{ label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH025' }, undefined]);
+      } finally {
+        delete process.env.GATE_TECH_TIP_SOURCES;
+      }
+    });
+
     test('gate on, nothing on file: the tip stays', async () => {
       process.env[TECH_TIPS] = 'true';
       process.env[POLISH] = 'true';

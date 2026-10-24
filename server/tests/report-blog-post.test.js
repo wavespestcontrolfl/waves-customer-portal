@@ -54,7 +54,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 const fs = require('fs');
 const path = require('path');
 const {
-  blogPostAllowedFor, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, frozenBlogPostWithImage, searchTerms, registryLink, wordsOnTheSite,
+  blogPostAllowedFor, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, frozenBlogPostWithImage, searchTerms, registryLink, wordsOnTheSite, liveBlogPostsByPath,
 } = require('../services/service-report/report-blog-post');
 const router = require('../routes/admin-dispatch');
 
@@ -948,5 +948,48 @@ describe('frozenBlogPostWithImage', () => {
     expect(await frozenBlogPostWithImage(knexWith(null, calls), { ...FROZEN, id: 'post-1' })).toEqual({ title: FROZEN.title, url: FROZEN.url });
     expect(calls).toEqual([]);
     expect(await frozenBlogPostWithImage(knexWith(null, calls), { ...FROZEN, url: 'https://evil.example/' })).toBeNull();
+  });
+});
+
+describe('liveBlogPostsByPath (tips with facts, owner 2026-10-24)', () => {
+  // A knex fake that records the one registry read and answers the rows given.
+  function registryKnex(rows) {
+    const calls = [];
+    const chain = {};
+    for (const m of ['where', 'whereIn', 'whereRaw', 'orWhereRaw', 'select', 'limit']) {
+      chain[m] = (...args) => {
+        calls.push([m, args]);
+        if (m === 'where' && typeof args[0] === 'function') args[0].call(chain);
+        return chain;
+      };
+    }
+    chain.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+    const knex = (table) => { calls.push(['table', [table]]); return chain; };
+    knex.raw = (sql) => ({ toString: () => sql });
+    knex.calls = calls;
+    return knex;
+  }
+
+  test('pairs each path with the live hub post at it, by the live URL\'s own path, and leaves the rest out', async () => {
+    const path = '/pest-control/ghost-ant-control-sarasota/';
+    const other = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-444444444444', live_url: 'https://www.wavespestcontrol.com/pest-control/other/', canonical_url_normalized: '/pest-control/other/' };
+    const dead = { ...REGISTRY_LIVE, id: '55555555-5555-4555-8555-555555555555', live_status: 'missing' };
+    const knex = registryKnex([REGISTRY_LIVE, other, dead]);
+    const found = await liveBlogPostsByPath(knex, [path, '/mosquito/nothing-here/']);
+    expect([...found.entries()]).toEqual([[path, { id: REGISTRY_LIVE.id, title: REGISTRY_LIVE.title, url: REGISTRY_LIVE.live_url }]]);
+    expect(knex.calls.filter(([m]) => m === 'table')).toEqual([['table', ['content_registry']]]);
+    // the paths are bindings, never spliced into the SQL
+    const raw = knex.calls.filter(([m]) => m === 'orWhereRaw');
+    expect(raw.length).toBeGreaterThan(0);
+    for (const [, [sql]] of raw) expect(sql).not.toContain('ghost-ant');
+    expect(raw.some(([, [, bindings]]) => String(bindings[0]).includes('ghost-ant-control-sarasota'))).toBe(true);
+    expect(raw.some(([, [, bindings]]) => String(bindings[0]).includes('nothing-here'))).toBe(true);
+  });
+
+  test('no paths, no read; a malformed path reads nothing', async () => {
+    const knex = registryKnex([REGISTRY_LIVE]);
+    expect((await liveBlogPostsByPath(knex, [])).size).toBe(0);
+    expect((await liveBlogPostsByPath(knex, ['', null, '/'])).size).toBe(0);
+    expect(knex.calls).toEqual([]);
   });
 });

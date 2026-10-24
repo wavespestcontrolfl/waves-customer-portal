@@ -26,6 +26,7 @@ const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = requ
 const { lawnLayoutPayload } = require('./lawn-report-layout');
 const { lawnPolishPayload, polishPdfStamp, polishWaterContext, prefsInchesFor } = require('./lawn-report-polish');
 const { stage1PayloadFlag, stage1KeyStamp, stage1TechTips } = require('./lawn-report-stage1');
+const { printableCitation } = require('./tip-library');
 const { lawnNewSodPayload } = require('../lawn-sod-report-card');
 const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
@@ -2114,6 +2115,12 @@ function buildProtocolPayload(record) {
         ...(tip.aftercare === true ? { aftercare: true } : {}),
         ...(tip.link && typeof tip.link.path === 'string' && tip.link.path.startsWith('/portal')
           ? { link: { label: String(tip.link.label || 'My Property'), path: tip.link.path } }
+          : {}),
+        // The source behind a figure in the copy (GATE_TECH_TIP_SOURCES): the
+        // frozen snapshot, re-checked against the registry's own URL rule
+        // before it prints — never a label without an allowed https URL.
+        ...(featureGates.techTipSourcesLive?.() === true && printableCitation(tip.citation)
+          ? { citation: printableCitation(tip.citation) }
           : {}),
       })),
     visitOutcome: protocol.visitOutcome || structured.visitOutcome || null,

@@ -149,7 +149,9 @@ function phraseProblem(phrase, typed = phrase) {
 }
 
 // The queue row for a phrase.
-function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, now = new Date() } = {}) {
+// `tipId` (tech-tip-blog-seeder, owner 2026-10-24): the registry tip whose
+// `blog.topic` this is, kept on the row so the queue says why it exists.
+function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, tipId = null, now = new Date() } = {}) {
   const { inferServiceFromQuery, extractSpecialtyTopic } = require('../seo/gsc-opportunity-miner');
   return {
     bucket: 'operator_intercept',
@@ -167,6 +169,7 @@ function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, now 
       suggested_at: now.toISOString(),
       suggested_by: actorId,
       scheduled_service_id: scheduledServiceId,
+      ...(tipId ? { tech_tip_id: tipId } : {}),
     },
     status: 'pending',
     expires_at: new Date(now.getTime() + EXPIRES_DAYS * 24 * 60 * 60 * 1000),
@@ -181,7 +184,7 @@ function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, now 
  * holds every word, and { error } for a phrase that is no topic or a person
  * over the day's limit.
  */
-async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, scheduledServiceId = null, customerId = null }) {
+async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, scheduledServiceId = null, customerId = null, tipId = null }) {
   // Only text is a phrase: an object or a list would read as "[object
   // Object]" or a comma list (GitHub Codex P2 on 45144528b8).
   if (typeof raw !== 'string') return { error: 'not_a_topic' };
@@ -199,7 +202,7 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
   // One suggestion at a time per person, so the day's cap holds when taps
   // race: the count, the held check and the write share one transaction
   // under the person's advisory lock (pre-push P1 on 1aaeaa36ab).
-  return knex.transaction((trx) => writeSuggestion(trx, phrase, { actorId, scheduledServiceId }));
+  return knex.transaction((trx) => writeSuggestion(trx, phrase, { actorId, scheduledServiceId, tipId }));
 }
 
 // A new-blog row of any source that holds the phrase as its topic. A row is a
@@ -215,7 +218,7 @@ async function heldTopic(knex, phrase) {
     .first('id');
 }
 
-async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId }) {
+async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId, tipId = null }) {
   if (actorId) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-blog-suggestion:${actorId}`]);
   // A topic held already writes nothing, so it answers already_queued even
   // past the day's cap (GitHub Codex P2 on 45144528b8).
@@ -236,7 +239,7 @@ async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId }) {
       .first();
     if (Number(sent?.n) >= MAX_PER_DAY) return { error: 'too_many_suggestions' };
   }
-  const row = suggestionRow(phrase, { actorId: actorId == null ? null : String(actorId), scheduledServiceId });
+  const row = suggestionRow(phrase, { actorId: actorId == null ? null : String(actorId), scheduledServiceId, tipId });
   const columns = Object.keys(row);
   const values = columns.map((column) => (column === 'score_breakdown' || column === 'signal_metadata' ? JSON.stringify(row[column]) : row[column]));
   // A new key writes the row; an expired suggestion of the same phrase is

@@ -54,7 +54,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
 const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
-const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun } = require('../services/service-report/tip-library');
+const { TIPS, tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun } = require('../services/service-report/tip-library');
 
 const {
   IRRIGATION_SIZING_FIELDS,
@@ -792,11 +792,28 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         .filter((tip) => tip?.id && day)
         .map((tip) => [tip.id, day]);
     }).reverse());
+    // The live Waves post for each tip that names one (tip-library `blog`),
+    // by tip id, so the sheet can fill the empty blog slot on a pick (owner
+    // 2026-10-24, tips with facts). GATE_TECH_TIP_SOURCES only; a path with
+    // no live post is simply absent (the seeder queues its topic), and a
+    // failed read offers none. Read-only, like the rest of this block.
+    const blogPosts = {};
+    if (require('../config/feature-gates').techTipSourcesLive()) {
+      const linking = TIPS.filter((tip) => tip.blog?.path);
+      const live = await require('../services/service-report/report-blog-post')
+        .liveBlogPostsByPath(db, linking.map((tip) => tip.blog.path))
+        .catch(() => new Map());
+      for (const tip of linking) {
+        const post = live.get(tip.blog.path);
+        if (post) blogPosts[tip.id] = post;
+      }
+    }
     res.json({
       available: true,
       completionChoicesEnabled,
       ...library,
       lastSent,
+      blogPosts,
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
       ...(completionChoicesEnabled ? { previousRecommendations } : {}),
     });

@@ -853,6 +853,23 @@ export function techTipsOf({ tipId, customTip }, tipsAvailable) {
   return custom ? { ids: [], custom } : { ids: tipId ? [tipId] : [], custom: null };
 }
 
+// The live Waves post the picker payload pairs with a tip (`blogPosts`, by
+// tip id, GATE_TECH_TIP_SOURCES), or null. A sheet fills its EMPTY blog slot
+// with it when the tech picks the tip and the blog section is offered; the
+// tech can still remove or change it, and un-picking a tip leaves it alone.
+export function blogPostForTip(library, tipId) {
+  const post = tipId ? library?.blogPosts?.[tipId] : null;
+  return post && typeof post === 'object' && post.id && post.title && post.url ? post : null;
+}
+
+// The form after a tip tap (pick, or un-pick the same id): the tip and the
+// blog slot together, so one setState carries both.
+export function formAfterTipPick(prev, id, { library, blogOffered }) {
+  const picking = prev.tipId !== id;
+  const post = picking && blogOffered && !prev.blogPost ? blogPostForTip(library, id) : null;
+  return { ...prev, tipId: picking ? id : '', customTip: '', ...(post ? { blogPost: post } : {}) };
+}
+
 // What the picker says beside a tip: already covered by the customer's
 // saved settings, or when it last went out to this customer.
 function tipMark(tip, library) {

@@ -90,6 +90,28 @@ describe('TechNoteCard', () => {
     expect(document.querySelector('#tech-note')).toHaveAttribute('data-glass', 'card');
   });
 
+  it('prints a sourced tip\'s citation as a labelled link after the sentence, never the raw URL (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+    const sourced = { id: 'seal_door_sweeps', copy: 'The CDC puts a mouse through a hole about a quarter inch wide.', source: 'library', citation: { label: 'CDC', url: 'https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html' } };
+    render(<TechNoteCard data={payload({ techNote: { tips: [sourced, TIPS[2]], technicianFirstName: 'Adam' } })} mode="live" />);
+    const link = screen.getByRole('link', { name: 'Source: CDC' });
+    expect(link).toHaveAttribute('href', 'https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(document.querySelector('#tech-note').textContent).not.toContain('https://');
+    // the link sits inside the tip's own paragraph, within the quote
+    expect(link.closest('p').textContent).toContain('quarter inch wide');
+    expect(link.closest('blockquote')).not.toBeNull();
+  });
+
+  it('a citation missing its label or URL prints nothing extra', () => {
+    const halves = [
+      { id: 'a', copy: 'Tip with a label only here.', source: 'library', citation: { label: 'CDC' } },
+      { id: 'b', copy: 'Tip with a URL only here.', source: 'library', citation: { url: 'https://www.cdc.gov/x' } },
+    ];
+    render(<TechNoteCard data={payload({ techNote: { tips: halves, technicianFirstName: 'Adam' } })} mode="live" />);
+    expect(screen.queryByRole('link', { name: /Source:/ })).toBeNull();
+  });
+
   it('a blank-first-name customer is greeted "Hey there," (customerName is only the surname)', () => {
     render(<TechNoteCard data={payload({ customerName: 'Example', customerFirstName: null })} mode="live" />);
     expect(screen.getByText('Hey there,')).toBeInTheDocument();

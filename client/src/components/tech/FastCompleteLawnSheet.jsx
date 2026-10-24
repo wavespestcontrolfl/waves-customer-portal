@@ -123,7 +123,7 @@ import {
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, MethodSection, OtherProductButton,
-  RecoveredCompletion, SavedView, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
+  RecoveredCompletion, SavedView, TimeOnSite, TipSection, formAfterTipPick, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
@@ -1852,7 +1852,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
-              onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
+              onPick={(id) => setForm((prev) => formAfterTipPick(prev, id, { library: tips, blogOffered: blog.available }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
               mic={{ serviceId: service?.id, onPendingChange: dictating.tip }}
             />

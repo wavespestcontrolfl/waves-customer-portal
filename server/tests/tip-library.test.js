@@ -14,6 +14,11 @@ const {
   SEASONS,
   MAX_TIPS_PER_VISIT,
   MAX_CUSTOM_TIP_CHARS,
+  CITATION_HOSTS,
+  BLOG_PATH_RE,
+  citationUrlAllowed,
+  printableCitation,
+  copyStatesFigure,
   seasonForDate,
   LAWN_FINDINGS,
   lawnFindingsFromAssessment,
@@ -95,6 +100,78 @@ describe('tip-library registry', () => {
       expect(tip.link.path).toMatch(/^\/portal(?:\?|$)/);
       expect(tip.link.label.trim().length).toBeGreaterThan(0);
     }
+  });
+
+  // Tips with facts (owner 2026-10-24): a figure in customer copy stands on a
+  // published source, and a source is a public-health or extension authority
+  // (or the Waves site) over https — never a raw host the customer must trust.
+  describe('citations and blog pairing', () => {
+    // Owner-approved copy that predates the rule: each states a working
+    // instruction (a dryer cycle, a strip width, a settling window, a pruning
+    // line, an example note), not a published statistic. A tip added to this
+    // list needs the same case made.
+    const FIGURE_BEFORE_THE_RULE = new Set(['bb_dryer_heat', 'tick_wood_line', 'rs_give_it_time', 'ts_palm_nine_and_three', 'rt_note_noises', 'ri_listen']);
+
+    test('the figure lint reads any digit: percentages, counts, bulb temperatures; not a number spelled out', () => {
+      expect(copyStatesFigure('settles around 50% humidity')).toBe(true);
+      expect(copyStatesFigure('a raft of 100 to 300 eggs')).toBe(true);
+      expect(copyStatesFigure('a warm white bulb under 3600 K')).toBe(true);
+      expect(copyStatesFigure('about 6 inches between the mulch and the siding')).toBe(true);
+      expect(copyStatesFigure('roughly a week; a quarter inch wide; five to ten days; the A/C line')).toBe(false);
+    });
+
+    test.each(TIPS.map((tip) => [tip.id, tip]))('%s: a figure in the copy carries a citation', (id, tip) => {
+      if (copyStatesFigure(tip.copy) && !FIGURE_BEFORE_THE_RULE.has(id)) expect(tip.citation).toBeDefined();
+    });
+
+    test.each(TIPS.filter((tip) => tip.citation).map((tip) => [tip.id, tip.citation]))('%s: the citation is a labelled https link on an allowed host', (id, citation) => {
+      expect(printableCitation(citation)).toEqual({ label: citation.label, url: citation.url });
+      expect(citation.label).toMatch(/^[A-Za-z][A-Za-z/ .&-]{1,40}$/);
+      expect(citation.url).not.toMatch(/wavespestcontrol\.com\/?$/); // a page, never the homepage
+    });
+
+    test('the host rule: allowlisted authorities and the Waves site over https, nothing else', () => {
+      expect(citationUrlAllowed('https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html')).toBe(true);
+      expect(citationUrlAllowed('https://ask.ifas.ufl.edu/publication/IN651')).toBe(true);
+      expect(citationUrlAllowed('https://blogs.ifas.ufl.edu/sarasotaco/2024/06/21/mosquito-faqs/')).toBe(true);
+      expect(citationUrlAllowed('https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/')).toBe(true);
+      expect(citationUrlAllowed('https://www.wavespestcontrol.com/pest-control/get-rid-of-mice/')).toBe(true);
+      expect(citationUrlAllowed('http://www.cdc.gov/x')).toBe(false); // not https
+      expect(citationUrlAllowed('https://evilcdc.gov/x')).toBe(false); // suffix, not subdomain
+      expect(citationUrlAllowed('https://user:pw@www.cdc.gov/x')).toBe(false);
+      expect(citationUrlAllowed('https://example.com/study')).toBe(false);
+      expect(citationUrlAllowed('javascript:alert(1)')).toBe(false);
+      expect(CITATION_HOSTS).toContain('cdc.gov');
+      expect(printableCitation({ label: '  ', url: 'https://www.cdc.gov/x' })).toBeNull();
+      expect(printableCitation({ label: 'CDC', url: 'https://example.com/x' })).toBeNull();
+      expect(printableCitation(null)).toBeNull();
+    });
+
+    test.each(TIPS.filter((tip) => tip.blog).map((tip) => [tip.id, tip.blog]))('%s: the blog pairing names a hub post path and a queue topic', (id, blog) => {
+      expect(blog.path).toMatch(BLOG_PATH_RE);
+      // The topic is what the suggestion service accepts as a phrase: lowercase
+      // letters and spaces, a few words, no place at anyone's home.
+      expect(blog.topic).toMatch(/^[a-z]+(?: [a-z]+){1,7}$/);
+      expect(blog.topic.length).toBeLessThanOrEqual(80);
+      expect(blog.topic).not.toMatch(/\bnear me\b/);
+    });
+
+    test('the first sourced batch is in: lighting, standing water, humidity, rodent entry and wood-to-soil tips cite and pair', () => {
+      for (const id of ['light_warm_bulbs', 'water_weekly_dump', 'water_lanai_drains', 'seal_door_sweeps', 'ext_mulch_gap', 'termite_wood_soil', 'flea_shady_spots', 'interior_sealed_pantry']) {
+        const tip = TIPS.find((t) => t.id === id);
+        expect(tip.citation).toBeDefined();
+        expect(tip.blog).toBeDefined();
+      }
+      expect(TIPS.filter((tip) => tip.citation).length).toBeGreaterThanOrEqual(15);
+      expect(TIPS.filter((tip) => tip.blog).length).toBeGreaterThanOrEqual(25);
+    });
+
+    test('the rat gap figure is gone until a source says it; the mouse gap cites the CDC', () => {
+      const tip = TIPS.find((t) => t.id === 'seal_door_sweeps');
+      expect(tip.copy).not.toMatch(/half/i);
+      expect(tip.copy).toMatch(/quarter inch/);
+      expect(tip.citation.url).toContain('cdc.gov');
+    });
   });
 });
 
@@ -450,6 +527,19 @@ describe('resolveTipIds', () => {
     const resolved = resolveTipIds(ids);
     expect(resolved.length).toBe(MAX_TIPS_PER_VISIT);
     expect(resolved.map((t) => t.id)).toEqual(['light_warm_bulbs', 'water_bromeliads', 'moisture_ac_drip']);
+  });
+
+  test('carries the citation snapshot for a sourced tip, and a consumer cannot edit the registry through it', () => {
+    const [tip] = resolveTipIds(['seal_door_sweeps']);
+    expect(tip.citation).toEqual({ label: 'CDC', url: 'https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html' });
+    tip.citation.url = 'https://evil.example/';
+    expect(resolveTipIds(['seal_door_sweeps'])[0].citation.url).toContain('cdc.gov');
+    // a tip without a citation freezes none; the blog pairing never freezes
+    // (the blog post is its own frozen pick, structured_notes.blogPost)
+    const [plain] = resolveTipIds(['interior_trash_night']);
+    expect(plain).not.toHaveProperty('citation');
+    expect(plain).not.toHaveProperty('blog');
+    expect(tip).not.toHaveProperty('blog');
   });
 
   test('carries the portal link for a linking tip and nothing for the rest', () => {

@@ -88,7 +88,7 @@ function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1
 // A scripted db: scheduled_services → the visit; service_records → optional
 // recommendation history then prior frozen tips; property_preferences → the
 // irrigation flag.
-function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, addons = [], lawnAssessment = null, lawnRuns = {}, lawnRunError = false, calls }) {
+function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, addons = [], lawnAssessment = null, lawnRuns = {}, lawnRunError = false, registryRows = [], calls }) {
   return (table) => {
     calls.push(table);
     const chain = {};
@@ -96,7 +96,7 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
     let rowLimit = null;
     let rowOffset = 0;
     let recommendationRead = false;
-    const passthrough = ['whereRaw', 'orderBy', 'leftJoin'];
+    const passthrough = ['whereRaw', 'orderBy', 'leftJoin', 'whereIn', 'orWhereRaw'];
     for (const m of passthrough) chain[m] = () => chain;
     chain.limit = (value) => { rowLimit = value; return chain; };
     chain.offset = (value) => { rowOffset = value; return chain; };
@@ -106,6 +106,7 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
     };
     let runAssessmentId = null;
     chain.where = (...args) => {
+      if (typeof args[0] === 'function') args[0].call(chain);
       if (table === 'lawn_assessment_runs') runAssessmentId = args[0]?.assessment_id ?? null;
       if (table === 'service_records' && ['service_date', 'service_records.service_date'].includes(args[0]) && args[1] === '<=') {
         throughDate = args[2];
@@ -121,6 +122,7 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
     };
     chain.then = (resolve) => {
       if (table === 'scheduled_service_addons') return Promise.resolve(addons).then(resolve);
+      if (table === 'content_registry') return Promise.resolve(registryRows).then(resolve);
       if (table !== 'service_records') return Promise.resolve([]).then(resolve);
       // History fixtures are published by default; visibility-negative cases
       // opt out explicitly with report_view_token: null.
@@ -172,6 +174,7 @@ const SERVICE = {
 afterEach(() => {
   mockDbCurrent = null;
   delete process.env.GATE_TECH_TIPS;
+  delete process.env.GATE_TECH_TIP_SOURCES;
   delete process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES;
 });
 
@@ -277,6 +280,43 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body).not.toHaveProperty('previousRecommendations');
     // read-only: three reads, no writes
     expect(calls.sort()).toEqual(['property_preferences', 'scheduled_service_addons', 'scheduled_services', 'service_records']);
+  });
+
+  test('GATE_TECH_TIP_SOURCES: the payload pairs each tip with its LIVE Waves post, read-only, and offers none while the gate is off (owner 2026-10-24)', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    const livePost = (path, id) => ({
+      id, h1: 'Post', live_url: `https://www.wavespestcontrol.com${path}`, canonical_url: `https://www.wavespestcontrol.com${path}`, canonical_url_normalized: path,
+      content_type: 'blog', workflow_status: 'published', astro_status: 'present', live_status: 'live', reconciliation_status: 'matched', noindex_detected: false,
+      metadata: { frontmatter: { title: `Title for ${path}` } }, published_at: '2026-09-01',
+    });
+    const mice = TIPS.find((tip) => tip.id === 'seal_door_sweeps');
+    const registryRows = [
+      livePost(mice.blog.path, '11111111-1111-4111-8111-111111111111'),
+      // a row the sweep no longer calls live pairs nothing
+      { ...livePost(TIPS.find((tip) => tip.id === 'water_weekly_dump').blog.path, '22222222-2222-4222-8222-222222222222'), live_status: 'missing' },
+    ];
+    let calls = [];
+    mockDbCurrent = scriptedDb({ service: SERVICE, registryRows, calls });
+    let res = await invoke({ serviceId: 'svc-1' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.blogPosts).toEqual({});
+    expect(calls).not.toContain('content_registry');
+
+    process.env.GATE_TECH_TIP_SOURCES = 'true';
+    calls = [];
+    mockDbCurrent = scriptedDb({ service: SERVICE, registryRows, calls });
+    res = await invoke({ serviceId: 'svc-1' });
+    expect(res.statusCode).toBe(200);
+    // every tip on the live path pairs with that post; the tip on the dead path pairs nothing
+    const micePost = { id: '11111111-1111-4111-8111-111111111111', title: `Title for ${mice.blog.path}`, url: `https://www.wavespestcontrol.com${mice.blog.path}` };
+    expect(res.body.blogPosts).toEqual(Object.fromEntries(TIPS.filter((tip) => tip.blog?.path === mice.blog.path).map((tip) => [tip.id, micePost])));
+    expect(res.body.blogPosts).not.toHaveProperty('water_weekly_dump');
+    // one registry read for every linking tip, no writes
+    expect(calls.filter((table) => table === 'content_registry')).toHaveLength(1);
+    // the registry entries themselves ride in the payload with their pairing and citation
+    const served = [...res.body.groups.flatMap((g) => g.tips), ...res.body.more].find((tip) => tip.id === 'seal_door_sweeps');
+    expect(served.citation).toEqual(mice.citation);
+    expect(served.blog).toEqual(mice.blog);
   });
 
   test('gate on: the irrigation flag alone never counts as settings on file', async () => {

@@ -63,7 +63,7 @@ import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
-  SheetHeader, TimeOnSite, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
+  SheetHeader, TimeOnSite, TipSection, formAfterTipPick, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
 import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
@@ -761,7 +761,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
-              onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
+              onPick={(id) => setForm((prev) => formAfterTipPick(prev, id, { library: tips, blogOffered: false }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
               mic={{ serviceId: service?.id, onPendingChange: dictating.tip }}
             />
