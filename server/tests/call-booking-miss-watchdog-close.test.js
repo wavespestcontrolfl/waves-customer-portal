@@ -100,6 +100,7 @@ describe('classifyOpenBookingMiss', () => {
   test('booked: a visit booked from the call and later cancelled still counts (provenance rule unchanged)', () => {
     const plan = classify([visit({ status: 'cancelled', sched_date: '2026-11-10', source_call_log_id: CALL_ID })]);
     expect(plan.verdict).toBe('booked');
+    expect(plan.closes).toEqual([{ ids: ['n1'], resolution: 'Visit booked for Tue Nov 10 at 4:00 PM, later cancelled' }]);
   });
 
   test('done_other_day: the call\'s own customer completed a later visit on another day', () => {

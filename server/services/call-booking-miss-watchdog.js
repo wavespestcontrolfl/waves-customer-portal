@@ -343,7 +343,9 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = 
   if (cleared) {
     const booked = cleared.sched_date ? spokenSlot(cleared.sched_date, windowStartMinutes(cleared.window_start)) : null;
     const label = booked ? ` for ${booked.day}${booked.time ? ` at ${booked.time}` : ''}` : '';
-    return result('booked', cleared, { closes: closeAll(`Visit booked${label}`) });
+    // A booking from the call that was later cancelled is handled (owner 2026-10-01); say so.
+    const cancelled = cleared.status === 'cancelled' ? ', later cancelled' : '';
+    return result('booked', cleared, { closes: closeAll(`Visit booked${label}${cancelled}`) });
   }
 
   const later = bookedRows.filter((r) => r.sched_date && rowCreatedAfterCall(r, call) && daysApart(r.sched_date, slot.dateET) <= OTHER_DAY_MATCH_DAYS);
