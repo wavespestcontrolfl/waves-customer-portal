@@ -1,4 +1,4 @@
-// Inbound SMS webhook plumbing for GATE_LEAD_CALL_TEXT_PREFERENCE: when the
+// Inbound SMS webhook plumbing for the lead CALL / TEXT preference: when the
 // intake machine reports a bare CALL / TEXT choice (it consumes nothing), the
 // reply still takes the ordinary known-sender bell path and that bell is told
 // the choice. Without the choice the bell call is exactly as before. Real
@@ -143,7 +143,7 @@ test.each(['call', 'text'])('a %s choice from recordCallTextReply: the bell is t
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });
 
-test('no choice (gate off, or an ordinary reply): the bell is told nothing', async () => {
+test('no choice (an ordinary reply): the bell is told nothing', async () => {
   mockIntake.mockResolvedValue({ handled: false });
   mockRecord.mockResolvedValue(undefined);
   await receive('ants in the kitchen');

@@ -409,8 +409,8 @@ describe('triggerNotification bell outcome', () => {
     expect(took.metadata.payload).toMatchObject({ twilioSid: 'SM-new', textCount: 3 });
   });
 
-  // The bell title always matches the text the row displays: a label belongs to ONE text
-  // (GATE_LEAD_CALL_TEXT_PREFERENCE), the next newer text replaces it, an older late text cannot move it.
+  // The bell title always matches the text the row displays: a label belongs to ONE text,
+  // the next newer text replaces it, an older late text cannot move it.
   describe('lead CALL / TEXT label on a standing thread row', () => {
     const ring = async (payload, keepOlder) => {
       NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'thread-row', deduped: true, refreshed: true });
