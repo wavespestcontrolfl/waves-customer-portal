@@ -1946,7 +1946,7 @@ export default function DispatchPageV2({
             const rp = rainProbability ?? 0;
             const weatherIcon = rp > 40 ? "" : rp > 15 ? "" : "";
             return (
-              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center justify-center gap-2 text-12 text-zinc-700 overflow-x-auto whitespace-nowrap">
+              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center justify-center gap-2 text-13 font-bold text-zinc-700 overflow-x-auto whitespace-nowrap">
                 {" "}
                 <span className="text-16" aria-hidden="true">
                   {weatherIcon}
@@ -2061,7 +2061,6 @@ export default function DispatchPageV2({
                 setShowNewAppt(true);
               } : undefined}
               services={services}
-              rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}
               owesCompletion={completionResumeMarked}
               onRefresh={() => fetchSchedule(date)}
