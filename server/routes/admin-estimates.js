@@ -83,8 +83,8 @@ const {
   previewLeadEstimateAutoSendAudit,
 } = require('../services/lead-estimate-auto-send');
 const {
-  CONTENT_LIBRARY_VERSION,
   PRODUCT_REGISTRY_VERSION,
+  contentLibraryVersion,
   protocolVersion,
   TEMPLATE_VERSION,
 } = require('../services/lawn-service-outline');
@@ -4142,7 +4142,7 @@ router.get('/', async (req, res, next) => {
           if (!row.estimate_id || outlineByEstimateId.has(row.estimate_id)) continue;
           const stats = outlineEventStats.get(row.id) || {};
           const staleReasons = [
-            row.content_library_version !== CONTENT_LIBRARY_VERSION ? 'content library updated' : null,
+            row.content_library_version !== contentLibraryVersion() ? 'content library updated' : null,
             row.protocol_version !== protocolVersion() ? 'protocol updated' : null,
             row.product_registry_version !== PRODUCT_REGISTRY_VERSION ? 'product facts updated' : null,
             row.template_version !== TEMPLATE_VERSION ? 'template updated' : null,
@@ -4166,7 +4166,7 @@ router.get('/', async (req, res, next) => {
             protocolVersion: row.protocol_version,
             productRegistryVersion: row.product_registry_version,
             templateVersion: row.template_version,
-            currentContentLibraryVersion: CONTENT_LIBRARY_VERSION,
+            currentContentLibraryVersion: contentLibraryVersion(),
             currentProtocolVersion: protocolVersion(),
             currentProductRegistryVersion: PRODUCT_REGISTRY_VERSION,
             currentTemplateVersion: TEMPLATE_VERSION,

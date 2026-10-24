@@ -3900,7 +3900,21 @@ excludes pricing, vendor, SKU, dilution, MOA, inventory fields),
 `/api/service-outlines/:token` (approved/sent/viewed packets only,
 43-char base64url token format gate, 60 req/min read limit, 120 req/min
 CTA telemetry limit, privacy headers `no-store`/`noindex`/`no-referrer`,
-generic 404 for missing, draft, revoked, or malformed tokens),
+generic 404 for missing, draft, revoked, or malformed tokens; the payload's
+`content` is the packet's stored `content_json`, frozen when the packet was
+built. A packet built while `GATE_LAWN_OUTLINE_V13` was live (stamped
+`content_library_version` `lawn-v13-copy-1`) may carry a `visual` object on a
+section, beside the unchanged `title`/`body`/`bullets`, which stay the text
+version of the same content: `{ type: 'tiles', items: [{ icon, title, text }] }`,
+`{ type: 'chips', items: [{ key, label, tier: 'main' | 'as_needed' }], note }`,
+`{ type: 'year', months: [{ month, label, main: [key], asNeeded: [key],
+limited }], labels: { key: label }, limitLabel }`, `{ type: 'categories',
+items: [{ key, label, text }] }` and `{ type: 'steps', items: [{ icon, title,
+text }] }`. `icon` and step `key` values are a closed set
+(`server/services/lawn-service-outline.js` `V13_COPY` / `V13_STEP_LABELS`) that
+`client/src/pages/ServiceOutlinePage.jsx` maps to icons; an unknown `type` or key
+renders as text. No PII is added. Unsetting the gate changes only packets built
+after it: a stored packet keeps its content until staff regenerate it),
 `/api/public/estimates/:token/deposit-intent` (RETIRED VERDICT STUB —
 owner ruling 2026-08-10: acceptance deposits are permanently
 not-enforced. Token format gate + deposit rate limit, then an
