@@ -1186,6 +1186,19 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
+    // GATE_LEAD_CALL_REPLY_RING (owner 2026-10-24): a lead's bare CALL in
+    // answer to our lead text rings Adam's cell with the press-1 bridge,
+    // 8 AM-8 PM ET. Keyed on our sent text, not lead_intake_status, so a lead
+    // whose intake state never seeded still counts. Post-ack, never awaited;
+    // the service holds every other rule.
+    if (Body && customer?.id && !smsReaction && !rescheduleAsk) {
+      const ringInput = { customer, body: Body, fromPhone: From, smsLogId: smsLogEntry?.id || null };
+      res.once('finish', () => {
+        void require('../services/lead-call-reply-ring').ringForCallReply(ringInput)
+          .catch((err) => logger.warn(`[lead-call-reply-ring] post-ack ring failed: ${err.code || err.name || 'error'}`));
+      });
+    }
+
     // DOMAIN / VAN TRACKING — first text from an unknown number to a
     // domain-specific or van-wrap line. Owner ruling 2026-09-08: a text is
     // not an identified person, so nothing is created here — no customer

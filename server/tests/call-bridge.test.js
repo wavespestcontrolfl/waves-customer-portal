@@ -98,6 +98,25 @@ test('an ambiguous transport failure keeps the row initiated (flagged), never fa
     .rejects.toMatchObject({ bridgeAmbiguous: false });
 });
 
+test('an event label rides the prompt URL and a ring timeout caps the staff leg; both absent by default', async () => {
+  primeDb();
+  await placeBridgeCall({
+    to: '+19415550100', bridgePhone: '+19415550101', from: '+19413529161',
+    source: 'lead-call-reply-ring', leadName: 'Pat', eventLabel: 'Pat asked for a call back', ringTimeoutSeconds: 20,
+  });
+  const args = mockCallsCreate.mock.calls[0][0];
+  expect(new URL(args.url).searchParams.get('eventLabel')).toBe('Pat asked for a call back');
+  expect(args.timeout).toBe(20);
+
+  mockCallsCreate.mockClear();
+  primeDb();
+  await placeBridgeCall({ to: '+19415550100', bridgePhone: '+19415550101', from: '+19413529161', source: 'tech-click' });
+  const plain = mockCallsCreate.mock.calls[0][0];
+  expect(new URL(plain.url).searchParams.has('eventLabel')).toBe(false);
+  expect(plain).not.toHaveProperty('timeout');
+});
+
+
 // Last on purpose: resets the module registry with an empty config, which
 // every later lazy require('../config') in the bridge would see.
 test('missing Twilio credentials fail before any row is written', async () => {

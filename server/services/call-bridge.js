@@ -23,7 +23,11 @@ const logger = require('./logger');
 // staff cell from four rotating office lines it has never seen (instead of
 // the one main line it always had) is what the cell's unknown-caller
 // silencing / carrier spam screening eats — and then nobody can press 1.
-async function placeBridgeCall({ to, bridgePhone, from, bridgeFrom = from, customer = null, source, adminUserId = null, metadata = null, leadName = '' }) {
+// `eventLabel` is spoken before "Calling {name}" on the staff leg (the
+// prompt sanitizes it). `ringTimeoutSeconds` caps how long the staff phone
+// rings; unset keeps Twilio's 60 s default, which lets a cell's voicemail
+// pick up first.
+async function placeBridgeCall({ to, bridgePhone, from, bridgeFrom = from, customer = null, source, adminUserId = null, metadata = null, leadName = '', eventLabel = '', ringTimeoutSeconds = null }) {
   const twilio = require('twilio');
   const config = require('../config');
   if (!config.twilio.accountSid || !config.twilio.authToken) {
@@ -56,6 +60,7 @@ async function placeBridgeCall({ to, bridgePhone, from, bridgeFrom = from, custo
   });
   if (callLogId) promptParams.set('callLogId', callLogId);
   if (leadName) promptParams.set('leadName', leadName);
+  if (eventLabel) promptParams.set('eventLabel', eventLabel);
 
   // Step 1: ring the staff phone. On press-1 the customer is dialed. A
   // rejected create never produces a status callback, so the row is closed
@@ -72,6 +77,7 @@ async function placeBridgeCall({ to, bridgePhone, from, bridgeFrom = from, custo
       // still adopt its CallSid (codex #4072 r18 P2).
       statusCallback: `https://${domain}/api/webhooks/twilio/call-status${callLogId ? `?callLogId=${encodeURIComponent(callLogId)}` : ''}`,
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+      ...(ringTimeoutSeconds ? { timeout: ringTimeoutSeconds } : {}),
     });
   } catch (err) {
     // An AMBIGUOUS transport failure — timeout, reset, 5xx / 429, the SMS

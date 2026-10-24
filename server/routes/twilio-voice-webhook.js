@@ -3521,6 +3521,9 @@ router.post('/call-status', async (req, res) => {
   try {
     const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage } = req.body;
     const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
+    // The matched row's source, read after the save: a lead call-reply ring
+    // reports its own miss (below) instead of the generic failure bell.
+    let matchedSource = null;
 
     await db.transaction(async (trx) => {
       // Serialize per-CallSid so overlapping Twilio retries can't both
@@ -3542,6 +3545,7 @@ router.post('/call-status', async (req, res) => {
       }
 
       if (existing) {
+        matchedSource = existing.source || null;
         // Never roll a finished call back to an in-flight status on a late
         // or retried non-terminal event (see nextCallStatus) — and when the
         // status is retained, keep its duration too: a delayed busy/failed/
@@ -3669,9 +3673,17 @@ router.post('/call-status', async (req, res) => {
       scheduleRecordingRecovery(CallSid);
     }
 
+    const { LEAD_CALL_REPLY_RING_SOURCE, noteRingEnded } = require('../services/lead-call-reply-ring');
+    const leadCallReplyRing = isOutbound && matchedSource === LEAD_CALL_REPLY_RING_SOURCE;
+    if (leadCallReplyRing) {
+      void noteRingEnded({ callSid: CallSid, callStatus: CallStatus })
+        .catch((err) => logger.warn(`[lead-call-reply-ring] missed check failed for ${maskSid(CallSid)} (${String(err?.code || err?.name || 'error')})`));
+    }
+
     // A failed/busy/no-answer bake-off is its own artifact (the sandbox row),
-    // never an admin bell (codex r14 P2).
-    if (isFailureStatus(CallStatus) && !isSandboxCall(req)) {
+    // never an admin bell (codex r14 P2). A lead call-reply ring that ends
+    // unanswered raises its own "Missed call request" bell instead.
+    if (isFailureStatus(CallStatus) && !isSandboxCall(req) && !leadCallReplyRing) {
       notifyTwilioFailure({
         channel: 'voice',
         direction: isOutbound ? 'outbound' : 'inbound',

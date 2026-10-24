@@ -1821,6 +1821,13 @@ const gates = {
   // bell, legacy SMS only as delivery fallback).
   leadAlertCall: process.env.GATE_LEAD_ALERT_CALL === 'true',
 
+  // Lead Call-Reply Ring — a web lead who answers our lead text with a bare
+  // CALL between 8 AM and 8 PM ET rings Adam's cell with the press-1 bridge
+  // (owner 2026-10-24, "ring my cell, like we had before"). One ring per
+  // phone per 24 h; a ring nobody connects raises a "Missed call request"
+  // bell. Off unless exactly 'true'. See services/lead-call-reply-ring.js.
+  leadCallReplyRing: process.env.GATE_LEAD_CALL_REPLY_RING === 'true',
+
   // Lead Call/Text Preference — a lead still in SMS intake who answers the
   // auto-reply with a bare CALL or TEXT (owner 2026-10-14) gets one note on
   // their newest lead, and the admin bell for that text reads "Wants a call:
