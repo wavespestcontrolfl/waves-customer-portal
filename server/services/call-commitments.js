@@ -3419,6 +3419,9 @@ async function listLapsedAssociationCloses(conn) {
                 OR sw.direction IS DISTINCT FROM 'outbound'
                 OR (${operatorReplySql('sw')} AND ${smsDeliveredSql('sw')}) IS NOT TRUE
                 OR md5(COALESCE(sw.message_body, '')) IS DISTINCT FROM (cc.fulfillment ->> 'witness_md5')))
+          -- ... or on the record the AI check cited (call-promise-ai-close.js): gone,
+          -- another customer's now, or a visit cancelled or skipped since.
+          OR ${require("./call-promise-ai-close").aiCheckLapsedSql("cc", "cl")}
           OR ((cc.fulfillment ->> 'kind') = ?
               AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id))
           -- ISO-Z text both sides (the stored proof's matched_at), so a

@@ -306,6 +306,21 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       expect((await row(w.commitment.id)).status).toBe('open');
     });
 
+    test('the watchdog\'s lapse scan lists the call only once the cited record is gone or a cited visit died, so the refresh can reopen it', async () => {
+      const { w, text } = await closedByText();
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+      await db('sms_log').where({ id: text }).del();
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(w.call.id);
+
+      const booked = await world({ kind: 'schedule_visit' });
+      const visit = await addVisit(booked);
+      say(booked, fulfilledBy(`visit:${visit}`, 'status confirmed'));
+      expect(await run(booked)).toMatchObject({ closed: 1 });
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(booked.call.id);
+      await db('scheduled_services').where({ id: visit }).update({ status: 'skipped' });
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(booked.call.id);
+    });
+
     test('a refresh keeps the close while the cited record stands, with no model call', async () => {
       const { w } = await closedByText();
       const before = dispatchWithFallback.mock.calls.length;

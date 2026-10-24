@@ -208,7 +208,10 @@ function proofOf(row, verdict) {
 // still has that customer). A lost race writes nothing.
 async function closeOnVerdict(conn, row, judged, { now }) {
   const { verdict, current, message } = judged;
-  if (!UUID_RE.test(String(verdict.record_id))) return false;
+  // A close must be one the stand check can read again: no record type outside
+  // RECORD_TABLES closes (a payment cannot be cited here at all — a call promise
+  // never sets money_answerable — and this keeps it that way).
+  if (!UUID_RE.test(String(verdict.record_id)) || !RECORD_TABLES[LEDGER_RECORD_TYPE[verdict.record_type]]) return false;
   return conn.transaction(async (trx) => {
     const snapshot = (q) => q.where({ id: row.id, status: 'open' }).whereNull('human_state')
       .whereRaw(...refreshableVerdictSql()).whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at]);
@@ -238,6 +241,20 @@ async function aiCloseStands(conn, commitment, call, prior) {
   return !!await conn(table).where({ id: prior.record_id })
     .modify((q) => { if (customerColumn) q.where(customerColumn, call.customer_id); })
     .modify((q) => { if (stillCounts) stillCounts(q); }).first('id');
+}
+
+// The watchdog's lapse scan (listLapsedAssociationCloses) asks, per closed row of
+// a call: has the cited record gone, changed owner or died? One CASE over the
+// same table map the stand check reads, with the uuid cast inside the matching
+// branch only (a text cast would defeat the primary-key index). `cc` is the
+// closed row's alias (its fulfillment), `cl` its call.
+function aiCheckLapsedSql(cc = 'cc', cl = 'cl') {
+  const branches = Object.entries(RECORD_TABLES).map(([type, [table, customerColumn, stillCounts]]) => {
+    const dead = stillCounts ? ` AND r.status NOT IN (${DEAD_VISIT_STATUSES.map((status) => `'${status}'`).join(', ')})` : '';
+    const owner = customerColumn ? ` AND r.${customerColumn} = ${cl}.customer_id` : '';
+    return `WHEN '${type}' THEN NOT EXISTS (SELECT 1 FROM ${table} r WHERE r.id = (${cc}.fulfillment ->> 'record_id')::uuid${owner}${dead})`;
+  });
+  return `((${cc}.fulfillment ->> 'basis') = '${AI_CHECK_BASIS}' AND CASE (${cc}.fulfillment ->> 'record_type') ${branches.join(' ')} ELSE TRUE END)`;
 }
 
 // ── The run ─────────────────────────────────────────────────────────────────
@@ -292,5 +309,5 @@ function runInBackground({ conn, callIds }) {
   return backgroundRun;
 }
 
-module.exports = { runCallPromiseAiClose, runInBackground, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
+module.exports = { runCallPromiseAiClose, runInBackground, aiCheckLapsedSql, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
   VERSION, AI_CHECK_KIND, AI_CHECK_BASIS, AGENT, MAX_MODEL_CALLS, QUEUE_MODEL_CALLS };
