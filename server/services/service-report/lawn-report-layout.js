@@ -5,7 +5,10 @@
  * trimmed (client/src/components/report/lawnV2/LawnLayout.jsx). The page does the ordering from data
  * the report already carries; the one thing it needs from the server is this payload key:
  *
- *   lawnLayout: { mowingRange: { minInches, maxInches, grassLabel } | null }
+ *   lawnLayout: { mowingRange: { minInches, maxInches, grassLabel } | null, story?: true }
+ *
+ * story (GATE_LAWN_REPORT_STORY, owner 2026-10-23/24) is present only while that gate is live too: the page then
+ * prints the story order (STORY_LAYOUT_ORDER). Absent = the layout order as before.
  *
  * mowingRange comes ONLY from the per-grass height-of-cut table the Mowing Height chart already
  * uses (turf-height.js HEIGHT_BAND_BY_GRASS). A grass the table does not list (mixed, unknown,
@@ -21,6 +24,11 @@ const { HEIGHT_BAND_BY_GRASS, normalizeGrassKey } = require('./turf-height');
 // A partial feature-gates mock (a test) means off, never a crash in a report build.
 function layoutLive() {
   return typeof featureGates.lawnReportLayoutLive === 'function' && featureGates.lawnReportLayoutLive();
+}
+
+// GATE_LAWN_REPORT_STORY: the story order rides inside the layout key, so it needs the layout gate too.
+function storyLive() {
+  return typeof featureGates.lawnReportStoryLive === 'function' && featureGates.lawnReportStoryLive();
 }
 
 // The grass names the report already prints for the lawn (lawn-report-v2.js GRASS_LABEL), without
@@ -47,7 +55,7 @@ function mowingRangeFor(grassType) {
 function lawnLayoutPayload({ serviceLine, reportV2, lawnAssessment, mowingHeight } = {}) {
   if (serviceLine !== 'lawn' || !reportV2 || !layoutLive()) return {};
   const grass = (mowingHeight && mowingHeight.grassType) || (lawnAssessment && lawnAssessment.turfProfile && lawnAssessment.turfProfile.grassType) || null;
-  return { lawnLayout: { mowingRange: mowingRangeFor(grass) } };
+  return { lawnLayout: { mowingRange: mowingRangeFor(grass), ...(storyLive() ? { story: true } : {}) } };
 }
 
-module.exports = { lawnLayoutPayload, mowingRangeFor, layoutLive, GRASS_NAME };
+module.exports = { lawnLayoutPayload, mowingRangeFor, layoutLive, storyLive, GRASS_NAME };

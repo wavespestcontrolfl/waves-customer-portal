@@ -2872,6 +2872,12 @@ Two changes exist, both only while the gate is live, only for a frozen instructi
 
 The PDF cache key gains `:wir=c` (rain covered it) or `:wir=a` (the amount line) for such a visit only while the gate is live; the stamp reads the location through the frozen identity map center, like the render.
 
+`GATE_LAWN_REPORT_STORY` (dark, strict `true`, read at call time; needs `GATE_LAWN_REPORT_LAYOUT`;
+gate off leaves the payload, the PDF and every cached PDF key byte-identical) adds one optional
+member inside the `lawnLayout` key that `GATE_LAWN_REPORT_LAYOUT` (next paragraph) adds:
+`lawnLayout.story: true` (lawn only, only while that key is present; no new route, token, privacy
+or rate-limit surface). The live web page then prints the story order (`STORY_LAYOUT_ORDER`); the
+PDF document, static and SMS renders ignore it.
 `GATE_LAWN_REPORT_LAYOUT` (dark, strict `true`, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) adds one optional key to the lawn
 `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit
