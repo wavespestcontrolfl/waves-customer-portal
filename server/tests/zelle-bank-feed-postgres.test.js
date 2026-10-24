@@ -103,6 +103,8 @@ postgres('Zelle payments from the bank feed against migrated PostgreSQL', () => 
     await bankRow(bank, { direction: 'debit', original_description: 'Zelle money sent to QUENTIN ZELLEFEEDTEST' }); // money out
     await bankRow(bank, { status: 'ignored' }); // owner said not business
     await bankRow(bank, { original_description: 'Mobile Deposit', description: 'Mobile Deposit' }); // not Zelle
+    await bankRow(bank, { status: 'matched_payout', suggestion: JSON.stringify({ plaidRemoved: true }) }); // the bank withdrew it
+    await bankRow(bank, { suggestion: JSON.stringify({ plaidModified: { amount: 17 } }) }); // a correction waiting on the operator
     const noticed = await bankRow(bank);
     await trx('inbound_payment_notices').insert({
       plaid_transaction_id: noticed.plaid_transaction_id, source: reconciler.BANK_SOURCE, amount_cents: 17329, received_at: new Date(), status: 'ignored',
@@ -155,6 +157,19 @@ postgres('Zelle payments from the bank feed against migrated PostgreSQL', () => 
 
     expect(await reconciler.reconcileZelleBankFeed()).toMatchObject({ read: 0, decided: 0 });
     expect(recordManualPayment).toHaveBeenCalledTimes(1);
+  });
+
+  test('bank evidence: same Plaid transaction, still a credit, same cents, no pending change — and it can be read under FOR SHARE', async () => {
+    const { bank } = await linkAccounts();
+    const row = await bankRow(bank);
+    const notice = { plaid_transaction_id: row.plaid_transaction_id, amount_cents: 17329 };
+    expect(await reconciler.bankEvidenceHolds(trx, notice)).toBe(true);
+    expect(await reconciler.bankEvidenceHolds(trx, notice, { lock: true })).toBe(true);
+    expect(await reconciler.bankEvidenceHolds(trx, { ...notice, amount_cents: 1700 })).toBe(false);
+    expect(await reconciler.bankEvidenceHolds(trx, { ...notice, plaid_transaction_id: `ptx-${randomUUID()}` })).toBe(false);
+    await trx('bank_transactions').where({ id: row.id }).update({ suggestion: JSON.stringify({ plaidRemoved: true }) });
+    expect(await reconciler.bankEvidenceHolds(trx, notice)).toBe(false);
+    expect(await reconciler.bankEvidenceHolds(trx, { plaid_transaction_id: null, amount_cents: 100 })).toBe(true); // an email notice has no bank row
   });
 
   test('one notice per Plaid transaction, and every notice has exactly one source', async () => {

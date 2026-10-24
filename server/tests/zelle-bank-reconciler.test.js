@@ -13,6 +13,9 @@
  *     invoice ⇒ no alert (a personal transfer on a mixed account);
  *   - the time rules: a stale posting day parks; an invoice created after the
  *     money arrived is never auto-matched;
+ *   - a credit the bank corrected or withdrew after it was read never
+ *     settles: the settlement fence checks the bank row before anything is
+ *     retired and again under a bank-row lock right before the paid flip;
  *   - one failing row never stops the next;
  *   - every alert this module raises passes docs/admin-notifications.md;
  *   - the scheduler wiring and the Plaid request option (source pins).
@@ -80,8 +83,12 @@ function builder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn((...args) => { t.calls.push([name, ...args]); return b; }); };
   ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereRaw', 'whereNotExists', 'orWhere', 'join', 'orderBy', 'limit', 'onConflict', 'ignore', 'insert'].forEach(chain);
-  b.forUpdate = jest.fn(() => { t.calls.push(['forUpdate']); return b; });
-  b.first = jest.fn(async (...args) => { t.calls.push(['first', ...args]); return t.firsts.length ? t.firsts.shift() : null; });
+  b.forUpdate = jest.fn(() => { t.calls.push(['forUpdate']); b.locked = true; return b; });
+  b.first = jest.fn(async (...args) => {
+    t.calls.push(['first', ...args]);
+    if (b.locked && t.lockedRow !== undefined) return t.lockedRow;
+    return t.firsts.length ? t.firsts.shift() : (t.fallback ?? null);
+  });
   b.select = jest.fn(async (...args) => { t.calls.push(['select', ...args]); return t.selects.length ? t.selects.shift() : []; });
   b.update = jest.fn(async (patch) => { t.calls.push(['update', patch]); return 1; });
   // A queued function runs at read time (so a queued failure throws there, not at queue time).
@@ -109,8 +116,11 @@ beforeEach(() => {
   jest.spyOn(Date, 'now').mockReturnValue(NOW);
   tables = {
     [BANK]: { firsts: [], returning: [], selects: [], calls: [] },
-    [NOTICES]: { firsts: [], returning: [], selects: [], calls: [] },
+    // The settlement fence's FOR UPDATE read of our claim finds it.
+    [NOTICES]: { firsts: [], returning: [], selects: [], calls: [], lockedRow: { id: 'notice-1' } },
     emails: { firsts: [], returning: [], selects: [], calls: [] },
+    // bankEvidenceHolds' read: by default the bank still lists the credit as read.
+    bank_transactions: { firsts: [], returning: [], selects: [], calls: [], fallback: { amount: '117.00', direction: 'credit', suggestion: null } },
   };
   db.mockImplementation((table) => builder(table));
   delete process.env.GATE_ZELLE_BANK_RECONCILE;
@@ -186,6 +196,7 @@ describe('the scan', () => {
     expect(calls).toContainEqual(['where', 'bt.direction', 'credit']);
     expect(calls).toContainEqual(['where', 'bt.account_type', 'bank']);
     expect(calls).toContainEqual(['whereNot', 'bt.status', 'ignored']);
+    expect(calls).toContainEqual(['whereRaw', "bt.suggestion->'plaidModified' IS NULL AND bt.suggestion->'plaidRemoved' IS NULL"]);
     expect(calls).toContainEqual(['where', 'bt.txn_date', '>=', '2026-10-10']);
     expect(calls).toContainEqual(['whereRaw', expect.stringContaining('pa.created_at'), [2]]);
     expect(calls.some(([m]) => m === 'whereNotExists')).toBe(true);
@@ -318,6 +329,69 @@ describe('parks', () => {
     await reconcileZelleBankFeed({ now: NOW });
     expect(closesOf(NOTICES)[0]).toMatchObject({ status: 'parked', park_reason: 'possible_duplicate' });
     expect(recordManualPayment).not.toHaveBeenCalled();
+  });
+});
+
+describe('the bank must still list the credit as it was read', () => {
+  test.each([
+    ['corrected to another amount', { amount: '17.00', direction: 'credit', suggestion: null }],
+    ['now a debit', { amount: '117.00', direction: 'debit', suggestion: null }],
+    ['withdrawn on a reviewed row', { amount: '117.00', direction: 'credit', suggestion: { plaidRemoved: true } }],
+    ['a correction waiting on the operator', { amount: '117.00', direction: 'credit', suggestion: { plaidModified: { amount: 17 } } }],
+    ['gone', null],
+  ])('%s ⇒ the fence refuses before anything is recorded, and the notice parks apply_failed', async (_label, bankNow) => {
+    feed(bankRow());
+    claimed();
+    tables.bank_transactions.firsts.push(bankNow);
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(exactOnly([openRow()]));
+    // recordManualPayment's contract: the fence runs pre-lock first, and false is a 409 with nothing written.
+    recordManualPayment.mockImplementationOnce(async (_id, opts) => {
+      if (!(await opts.settlementFence(db))) {
+        throw Object.assign(new Error('The settlement claim was lost before the payment could be recorded (the notice was reclaimed, or the bank changed or withdrew the payment) — nothing was recorded'), { statusCode: 409 });
+      }
+      throw new Error('the fence held — this test expects a refusal');
+    });
+    await reconcileZelleBankFeed({ now: NOW });
+    expect(closesOf(NOTICES)[0]).toMatchObject({ status: 'parked', park_reason: 'apply_failed', apply_error: expect.stringMatching(/bank changed or withdrew/) });
+    expect(callsOf('bank_transactions', 'where')).toContainEqual([{ plaid_transaction_id: 'ptx-1' }]);
+  });
+
+  test('the settlement fence re-checks the claim and the bank row, locking the row FOR SHARE under the invoice lock', async () => {
+    feed(bankRow());
+    claimed();
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(exactOnly([openRow()]));
+    await reconcileZelleBankFeed({ now: NOW });
+    const { settlementFence } = recordManualPayment.mock.calls[0][1];
+    // A fake payment connection: the notice claim, then the bank row.
+    const fenceConn = (reads) => {
+      const seen = [];
+      const conn = (table) => {
+        const q = { table, locks: [] };
+        seen.push(q);
+        const b = {
+          where: jest.fn((w) => { q.where = w; return b; }),
+          forUpdate: jest.fn(() => { q.locks.push('update'); return b; }),
+          forShare: jest.fn(() => { q.locks.push('share'); return b; }),
+          first: jest.fn(async () => reads[table]),
+        };
+        return b;
+      };
+      return { conn, seen };
+    };
+    const ok = fenceConn({ inbound_payment_notices: { id: 'notice-1' }, bank_transactions: { amount: '117.00', direction: 'credit', suggestion: null } });
+    expect(await settlementFence(ok.conn, { id: 'inv-1' })).toBe(true);
+    expect(ok.seen.map(({ table, locks }) => [table, locks])).toEqual([['inbound_payment_notices', ['update']], ['bank_transactions', ['share']]]);
+    expect(ok.seen[0].where).toEqual({ id: 'notice-1', status: 'processing', claim_token: 'tok-1' });
+
+    const preLock = fenceConn({ inbound_payment_notices: { id: 'notice-1' }, bank_transactions: { amount: '117.00', direction: 'credit', suggestion: null } });
+    expect(await settlementFence(preLock.conn)).toBe(true);
+    expect(preLock.seen[1].locks).toEqual([]); // the pre-lock read takes no row lock
+
+    const corrected = fenceConn({ inbound_payment_notices: { id: 'notice-1' }, bank_transactions: { amount: '17.00', direction: 'credit', suggestion: null } });
+    expect(await settlementFence(corrected.conn, { id: 'inv-1' })).toBe(false);
+    const lostClaim = fenceConn({ inbound_payment_notices: undefined, bank_transactions: { amount: '117.00', direction: 'credit', suggestion: null } });
+    expect(await settlementFence(lostClaim.conn, { id: 'inv-1' })).toBe(false);
+    expect(lostClaim.seen).toHaveLength(1); // a lost claim never reads the bank row
   });
 });
 

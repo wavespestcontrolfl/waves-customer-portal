@@ -106,6 +106,7 @@ const BANK_LINK_GRACE_DAYS = 2;
 // Rows one hourly pass reads (Zelle credits in the 14-day window): a bound,
 // not a budget — a quiet business sees a handful.
 const BANK_SCAN_LIMIT = 500;
+const BANK_CHANGED_ERROR = 'The bank changed or withdrew this transaction after it was read — check the bank account before applying it';
 
 // Same parser as the feature-gates registry entry (call-time, so unsetting
 // the Railway var is a live kill switch). Prod: explicit 'true' only.
@@ -580,6 +581,27 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
   });
 }
 
+// Step 6 of the decision table: the one invoice to settle and how it was
+// found ({ match, matchMethod }), or the reason to park ({ park }).
+function pickMatch(parsed, exact, { truncated }) {
+  // A full candidate page means invoices may exist beyond it: "exactly one
+  // corroborates" cannot be decided on a partial view.
+  if (truncated) {
+    logger.warn(`[zelle-notice] ${exact.length}+ open invoices at ${parsed.amountCents} cents — candidate page full, parking as ambiguous`);
+    return { park: 'multiple_matches' };
+  }
+  const memoNumbers = new Set(memoInvoiceNumbers(parsed.memo));
+  const byMemo = exact.filter((r) => memoNumbers.has(String(r.invoice_number).toUpperCase()));
+  // The memo names several open invoices at this amount: explicit, ambiguous
+  // identity — never fall through to name matching.
+  if (byMemo.length > 1) return { park: 'multiple_matches' };
+  if (byMemo.length === 1) return { match: byMemo[0], matchMethod: 'memo_invoice_number' };
+  const byName = exact.filter((r) => payerNameCorroborates(parsed.payerName, { first_name: r.customer_first_name, last_name: r.customer_last_name }));
+  if (byName.length === 1) return { match: byName[0], matchMethod: 'amount_name' };
+  if (exact.length === 0) return { park: 'no_match' };
+  return { park: byName.length === 0 ? 'name_mismatch' : 'multiple_matches' };
+}
+
 // The decision both sources share once a notice is claimed and parsed
 // ({ payerName, amountCents, memo }): match, then settle or park. `email` is
 // the source email (null for a bank-feed notice); `cutoffMs` the latest
@@ -610,41 +632,12 @@ async function settleOrPark(notice, email, parsed, { cutoffMs, stale, ageMs, ref
     await finishParked(notice, email, 'stale_notice', { candidates });
     return true;
   }
-  if (truncated) {
-    logger.warn(`[zelle-notice] ${exact.length}+ open invoices at ${parsed.amountCents} cents — candidate page full, parking as ambiguous`);
-    await finishParked(notice, email, 'multiple_matches', { candidates });
+  const pick = pickMatch(parsed, exact, { truncated });
+  if (pick.park) {
+    await finishParked(notice, email, pick.park, { candidates });
     return true;
   }
-
-  let match = null;
-  let matchMethod = null;
-  const memoNumbers = new Set(memoInvoiceNumbers(parsed.memo));
-  const byMemo = exact.filter((r) => memoNumbers.has(String(r.invoice_number).toUpperCase()));
-  if (byMemo.length > 1) {
-    // The memo names several open invoices at this amount: explicit,
-    // ambiguous identity — never fall through to name matching.
-    await finishParked(notice, email, 'multiple_matches', { candidates });
-    return true;
-  }
-  if (byMemo.length === 1) {
-    [match] = byMemo;
-    matchMethod = 'memo_invoice_number';
-  } else {
-    const byName = exact.filter((r) => payerNameCorroborates(parsed.payerName, { first_name: r.customer_first_name, last_name: r.customer_last_name }));
-    if (byName.length === 1) {
-      [match] = byName;
-      matchMethod = 'amount_name';
-    } else if (exact.length === 0) {
-      await finishParked(notice, email, 'no_match', { candidates });
-      return true;
-    } else if (byName.length === 0) {
-      await finishParked(notice, email, 'name_mismatch', { candidates });
-      return true;
-    } else {
-      await finishParked(notice, email, 'multiple_matches', { candidates });
-      return true;
-    }
-  }
+  const { match, matchMethod } = pick;
 
   // COMMIT the match on the claim before settling (see closeIfSettled): a
   // close lost after the ledger commits is then recoverable by the sweep. The
@@ -712,11 +705,15 @@ async function settleOrPark(notice, email, parsed, { cutoffMs, stale, ageMs, ref
       // Pre-lock (before the Stripe retire) and under the invoice lock on
       // the payment connection, where FOR UPDATE holds our claim row
       // through the paid flip: a swept-and-reclaimed claim never commits.
-      settlementFence: (conn) => conn('inbound_payment_notices')
+      // A bank-feed notice also needs the bank row unchanged (the first,
+      // pre-lock call is the check before anything is retired), held FOR
+      // SHARE under the lock (`locked` = the locked invoice, second call);
+      // a refusal parks apply_failed below.
+      settlementFence: async (conn, locked) => Boolean(await conn('inbound_payment_notices')
         .where({ id: notice.id, status: 'processing', claim_token: notice.claim_token })
         .forUpdate()
-        .first('id')
-        .then(Boolean),
+        .first('id'))
+        && bankEvidenceHolds(conn, notice, { lock: !!locked }),
     });
   } catch (err) {
     // A statusCode-shaped refusal settled nothing. Anything else may have
@@ -754,6 +751,22 @@ function amountCentsOf(amount) {
   return cents > 0 ? cents : null;
 }
 
+// The bank still lists the credit as the notice read it: the same Plaid
+// transaction, still a credit, the notice's exact cents, and no withdrawal or
+// correction waiting on the operator (plaid-sync parks those on a reviewed
+// row and replaces an open row under the same Plaid id). An email notice has
+// no bank row and always passes. Both settling paths ask it before settling
+// and again inside the settlement fence, where `lock` holds the bank row
+// (FOR SHARE) through the paid flip so a correction cannot land in between.
+async function bankEvidenceHolds(conn, notice, { lock = false } = {}) {
+  if (!notice.plaid_transaction_id) return true;
+  const q = conn('bank_transactions').where({ plaid_transaction_id: notice.plaid_transaction_id });
+  if (lock) q.forShare();
+  const row = await q.first('amount', 'direction', 'suggestion');
+  const { hasUnresolvedBankChange } = require('./bank-import');
+  return !!row && row.direction === 'credit' && amountCentsOf(row.amount) === notice.amount_cents && !hasUnresolvedBankChange(row);
+}
+
 const etDayStartMs = (day) => parseETDateTime(`${day}T00:00`).getTime();
 function nextDay(day) {
   const [y, m, d] = day.split('-').map(Number);
@@ -772,6 +785,9 @@ function bankRowsToDecide(nowMs) {
     .where('bt.direction', 'credit')
     .where('bt.account_type', 'bank')
     .whereNot('bt.status', 'ignored')
+    // A withdrawal or correction waiting on the operator (bankEvidenceHolds):
+    // the row still shows the old values.
+    .whereRaw("bt.suggestion->'plaidModified' IS NULL AND bt.suggestion->'plaidRemoved' IS NULL")
     .whereNotNull('bt.plaid_transaction_id')
     .where((q) => q.where('bt.original_description', 'ilike', '%zelle%').orWhere('bt.description', 'ilike', '%zelle%'))
     .where('bt.txn_date', '>=', floor)
@@ -883,5 +899,7 @@ module.exports = {
   reconcileZelleBankFeed,
   buildCandidates,
   amountCentsOf,
+  bankEvidenceHolds,
+  BANK_CHANGED_ERROR,
   _private: { parkedAlert, receiptCheckAlert, lateSettlementAlert, bankRowsToDecide },
 };

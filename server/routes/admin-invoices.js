@@ -721,14 +721,13 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
     if (notice.amount_cents == null) {
       return res.status(400).json({ error: 'This notice carries no amount — record the payment from the invoice instead' });
     }
-    // A bank-feed notice settles only money the bank still lists: Plaid can
-    // withdraw a transaction (plaid-sync deletes an open row and flags a
-    // reviewed one; a correction keeps the same Plaid id).
-    if (notice.plaid_transaction_id) {
-      const bankRow = await db('bank_transactions').where({ plaid_transaction_id: notice.plaid_transaction_id }).first('id', 'suggestion');
-      if (!bankRow || bankRow.suggestion?.plaidRemoved) {
-        return res.status(409).json({ error: 'The bank no longer lists this Zelle payment — check the account before recording it, then ignore this notice' });
-      }
+    // A bank-feed notice settles only the credit the bank still lists as it
+    // was read: Plaid can withdraw or correct a transaction (an open row is
+    // replaced under the same Plaid id, a reviewed one carries the change).
+    // Checked again under the bank-row lock in the settlement fence below.
+    const { bankEvidenceHolds, BANK_CHANGED_ERROR } = require('../services/zelle-notice-reconciler');
+    if (!(await bankEvidenceHolds(db, notice))) {
+      return res.status(409).json({ error: BANK_CHANGED_ERROR });
     }
     // LIVE eligibility, never the stored list (which is only the dropdown and
     // deliberately includes ±$5 leads and may be stale): the invoice must be
@@ -803,12 +802,13 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
         // The OPERATOR tapped Apply: the receipt is operator-initiated,
         // exactly like Add payment (automated stays false). Pre-lock and
         // under the invoice lock (FOR UPDATE through the paid flip): our
-        // claim must still be ours.
-        settlementFence: (conn) => conn('inbound_payment_notices')
+        // claim must still be ours, and a bank-feed notice's bank row must
+        // still hold, FOR SHARE under the lock (`locked`, second call).
+        settlementFence: async (conn, locked) => Boolean(await conn('inbound_payment_notices')
           .where({ id, status: 'processing', claim_token: claimToken })
           .forUpdate()
-          .first('id')
-          .then(Boolean),
+          .first('id'))
+          && bankEvidenceHolds(conn, notice, { lock: !!locked }),
       });
     } catch (err) {
       // A statusCode-shaped refusal settled nothing. Anything else may have

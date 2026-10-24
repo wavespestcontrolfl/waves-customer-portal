@@ -13,7 +13,10 @@
  *   - refusals from the settlement path keep their status codes;
  *   - ignore is a CAS: parked → ignored, 409 otherwise, 404 when missing;
  *   - a bank-feed notice (GATE_ZELLE_BANK_RECONCILE) has no email to stamp
- *     and settles only while the bank still lists its transaction;
+ *     and settles only while the bank still lists its credit as it was read
+ *     (same cents, still a credit, no withdrawal or pending correction),
+ *     checked before the claim and again, under a bank-row lock, in the
+ *     settlement fence;
  *   - resolving a notice (apply or ignore) closes its review alert.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -152,28 +155,53 @@ describe('POST /payment-notices/:id/apply', () => {
   });
 
   const bankParked = (over = {}) => parked({ email_id: null, plaid_transaction_id: 'ptx-1', source: 'plaid_zelle', memo: null, ...over });
+  const STILL_LISTED = { amount: '117.00', direction: 'credit', suggestion: null };
 
   test('a bank-feed notice settles the same way, stamps no email and closes its review alert', async () => {
     tables.inbound_payment_notices = { firsts: [bankParked()], selects: [], updates: [], calls: [] };
-    tables.bank_transactions = { firsts: [{ id: 'bt-1', suggestion: null }], selects: [], updates: [], calls: [] };
+    tables.bank_transactions = { firsts: [STILL_LISTED], selects: [], updates: [], calls: [] };
     liveExact();
     await withServer(async (call) => { expect((await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' })).status).toBe(200); });
     expect(tables.bank_transactions.calls).toContainEqual(['where', { plaid_transaction_id: 'ptx-1' }]);
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', expect.objectContaining({ method: 'zelle', reference: 'Pat Doe', note: '', sendReceipt: true, via: 'both', expectedAmountCents: 11700 }));
     expect(tables.emails).toBeUndefined();
     expect(closeAdminAlertKeys).toHaveBeenCalledWith(db, ['zelle-notice:notice-1'], 'zelle notice applied', { resolution: 'Recorded on WPC-2026-0500' });
+
+    // The fence: claim FOR UPDATE, then the bank row FOR SHARE under the invoice lock.
+    const { settlementFence } = recordManualPayment.mock.calls[0][1];
+    // A fake payment connection: the claim reads back, the bank row is `bankRow`.
+    const fenceWith = async (bankRow) => {
+      const seen = [];
+      const conn = (table) => {
+        const q = { table, locks: [] };
+        seen.push(q);
+        const b = {
+          where: () => b,
+          forUpdate: () => { q.locks.push('update'); return b; },
+          forShare: () => { q.locks.push('share'); return b; },
+          first: async () => (table === 'inbound_payment_notices' ? { id: 'notice-1' } : bankRow),
+        };
+        return b;
+      };
+      return { held: await settlementFence(conn, { id: 'inv-1' }), seen: seen.map(({ table, locks }) => [table, locks]) };
+    };
+    expect(await fenceWith(STILL_LISTED)).toEqual({ held: true, seen: [['inbound_payment_notices', ['update']], ['bank_transactions', ['share']]] });
+    expect((await fenceWith({ ...STILL_LISTED, amount: '17.00' })).held).toBe(false);
   });
 
   test.each([
     ['gone (plaid-sync deleted the open row)', null],
-    ['flagged withdrawn on a reviewed row', { id: 'bt-1', suggestion: { plaidRemoved: true } }],
-  ])('a bank-feed notice whose transaction the bank withdrew is refused before any claim: %s', async (_label, bankRow) => {
+    ['flagged withdrawn on a reviewed row', { ...STILL_LISTED, suggestion: { plaidRemoved: true } }],
+    ['a correction waiting on the operator', { ...STILL_LISTED, suggestion: { plaidModified: { amount: 17 } } }],
+    ['corrected to another amount under the same Plaid id', { ...STILL_LISTED, amount: '17.00' }],
+    ['now a debit', { ...STILL_LISTED, direction: 'debit' }],
+  ])('a bank-feed notice the bank no longer lists as read is refused before any claim: %s', async (_label, bankRow) => {
     tables.inbound_payment_notices = { firsts: [bankParked()], selects: [], updates: [], calls: [] };
     tables.bank_transactions = { firsts: [bankRow], selects: [], updates: [], calls: [] };
     await withServer(async (call) => {
       const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
       expect(r.status).toBe(409);
-      expect(r.body.error).toMatch(/no longer lists this Zelle payment/);
+      expect(r.body.error).toMatch(/bank changed or withdrew this transaction/);
     });
     expect(recordManualPayment).not.toHaveBeenCalled();
     expect(OpenBalance.openSelfPayInvoicesByAmountDue).not.toHaveBeenCalled();
