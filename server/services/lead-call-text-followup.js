@@ -280,6 +280,11 @@ async function answerTimeAsk({ customer, request, body, smsLogId, now }) {
     return { action: 'owner_bell' };
   };
 
+  // "tomorrow at 10" sent on the booked day itself means the day after: a
+  // day we did not ask about, so a person picks it.
+  if (/\b(?:tomorrow|tmrw|tmr)\b/i.test(body) && etDateString(now) >= dateText(request.target_date)) {
+    return toOwner(whyWithQuote({ lead: 'Asked for a call; their reply names another day: ', quote: String(body).trim() }));
+  }
   const parsed = parseCallTime(body);
   if (!parsed) return toOwner(whyWithQuote({ lead: 'Asked for a call; their time reply: ', quote: String(body).trim() }));
   const asked = formatETTime(slotInstant(dateText(request.target_date), parsed.minutes));
@@ -347,7 +352,8 @@ async function handleLeadReply({ customer, body, fromPhone, smsLogId = null, now
       .where({ state: 'asked', kind: 'call_request', customer_id: customer.id })
       .whereNull('answer_text')
       .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
-      .whereNot({ send_outcome: 'not_sent' })
+      // NULL = our question is still settling: an answer that fast still counts.
+      .whereRaw("COALESCE(send_outcome, '') <> 'not_sent'")
       .orderBy('created_at', 'desc')
       .first();
     if (!open) return { action: 'none', reason: 'no_open_ask' };

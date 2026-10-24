@@ -109,6 +109,20 @@ jest.setTimeout(30000);
     expect(sentBodies()[1]).toBe("You're all set. We'll call you today at 9:00 AM.");
   });
 
+  test('"tomorrow at 10" sent the next morning goes to the owner, not to a booking', async () => {
+    const c = await lead('+19415550116');
+    await reply(c, 'call', NIGHT);
+    await expect(reply(c, 'tomorrow at 10', new Date('2026-10-21T12:30:00Z'))).resolves.toMatchObject({ action: 'owner_bell' });
+    expect(bellSpecs()[0].why).toContain('another day');
+  });
+
+  test('an answer while our question is still settling still books', async () => {
+    const c = await lead('+19415550117');
+    await reply(c, 'call', NIGHT);
+    await database('lead_callback_requests').where({ customer_id: c.id }).update({ send_outcome: null });
+    await expect(reply(c, '10am', NIGHT)).resolves.toMatchObject({ action: 'booked' });
+  });
+
   test('two leads asking for the same time get 10:00 and 10:15', async () => {
     const a = await lead('+19415550103', { first: 'Ann' });
     const b = await lead('+19415550104', { first: 'Bo' });
