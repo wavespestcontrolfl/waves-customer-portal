@@ -25,9 +25,9 @@ const DEDUPE_KEY = 'access-codes-found';
 const AREA = 'Customers';
 // The page opens on its "Found in messages" view for this marker.
 const LINK = '/admin/customers/gate-codes?view=found';
-// The newest codes the row's words name. The count and the ring check use the
-// id of every waiting code, so a code that only moves into these 50 when a
-// newer one is saved never reads as new.
+// The newest codes the row's words name. The count, the ring check and the
+// oldest day use every waiting code, so a code that only moves into these 50
+// when a newer one is saved never reads as new.
 const LIST_LIMIT = 50;
 const DETAIL_MAX_CHARS = 2000;
 const NAMES_IN_WHY = 3;
@@ -82,14 +82,16 @@ function oneWhy(item) {
   return cutAtWord(`${from}; ${next}.`, MAX_WHY_CHARS);
 }
 
-function manyWhy(items) {
+// `oldestAt`: when the oldest waiting code was sent, over every waiting code.
+// The list is in filing order, and codes filed in one batch (a backfill) can
+// carry older message days than codes filed before them.
+function manyWhy(items, oldestAt) {
   const names = [];
   for (const item of items) {
     const name = senderName(item);
     if (!names.includes(name)) names.push(name);
   }
-  // The list is newest first, so its last row is the oldest the row names.
-  const day = dayOf(items[items.length - 1]);
+  const day = oldestAt ? shortDateET(oldestAt) : '';
   const tail = day ? `; the oldest is from ${day}` : '';
   for (let shown = Math.min(names.length, NAMES_IN_WHY); shown >= 1; shown -= 1) {
     const text = `From ${listWords(names.slice(0, shown), names.length - shown)}${tail}.`;
@@ -117,16 +119,23 @@ function detailOf(items, count) {
   return [lead, ...lines].join('\n').slice(0, DETAIL_MAX_CHARS);
 }
 
-// The row for the waiting codes: `ids` is every waiting code, `items` the
-// newest of them as the page lists them (the words come from these).
-function composeFound(items, ids) {
-  const count = ids.length;
+// The earliest send time among the waiting codes, or null when none has one.
+function oldestSent(waiting) {
+  const times = waiting.map((code) => new Date(code.sentAt).getTime()).filter(Number.isFinite);
+  return times.length ? new Date(Math.min(...times)) : null;
+}
+
+// The row for the waiting codes: `waiting` is every waiting code ({ id,
+// sentAt }), `items` the newest of them as the page lists them (the words
+// come from these).
+function composeFound(items, waiting) {
+  const count = waiting.length;
   const one = count === 1 && items.length === 1;
   return {
     spec: {
       area: AREA,
       action: one ? oneAction(items[0]) : `review ${count} codes found in messages`,
-      why: one ? oneWhy(items[0]) : manyWhy(items),
+      why: one ? oneWhy(items[0]) : manyWhy(items, oldestSent(waiting)),
       severity: 'needs-you',
       link: LINK,
       subject: { type: 'check', id: DEDUPE_KEY },
@@ -134,7 +143,7 @@ function composeFound(items, ids) {
       who: 'person',
     },
     detail: detailOf(items, count),
-    itemKeys: ids.map(String).sort(),
+    itemKeys: waiting.map((code) => String(code.id)).sort(),
     count,
   };
 }
@@ -195,19 +204,19 @@ async function categorySilenced() {
  * closed | clear. A read or write failure throws and never closes the row.
  * One sync runs at a time across instances: it holds the same advisory lock
  * notifyAdmin takes for this row, and reads the codes inside it.
- * `ids`, `list`, `sectionOn` and `dedupeKey` are for tests.
+ * `waitingCodes`, `list`, `sectionOn` and `dedupeKey` are for tests.
  */
-async function syncFoundCodesBell({ now = new Date(), conn = db, gateEnabled, sectionOn, ids, list, dedupeKey = DEDUPE_KEY } = {}) {
+async function syncFoundCodesBell({ now = new Date(), conn = db, gateEnabled, sectionOn, waitingCodes, list, dedupeKey = DEDUPE_KEY } = {}) {
   if (!(gateEnabled ?? accessCodesFoundBellLive())) return { skipped: 'disabled' };
   const capture = require('./access-code-capture');
   const section = sectionOn ?? capture.enabled();
-  const readIds = ids || capture.listFoundIds;
+  const readWaiting = waitingCodes || capture.listFoundWaiting;
   const readList = list || capture.listFound;
   let stop = section ? null : 'section_off';
   if (!stop && await categorySilenced()) stop = 'category_silenced';
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
-    const waiting = stop ? [] : await readIds(trx);
+    const waiting = stop ? [] : await readWaiting(trx);
     if (!waiting.length) {
       const closed = await closeFound(trx, now, stop || 'count_zero', dedupeKey);
       return { count: 0, outcome: closed ? 'closed' : 'clear' };

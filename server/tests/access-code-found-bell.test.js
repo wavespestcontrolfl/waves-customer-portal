@@ -16,7 +16,7 @@ jest.mock('../services/admin-alert-episodes', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n2', deduped: false })),
 }));
-jest.mock('../services/access-code-capture', () => ({ enabled: jest.fn(() => true), listFound: jest.fn(), listFoundIds: jest.fn() }));
+jest.mock('../services/access-code-capture', () => ({ enabled: jest.fn(() => true), listFound: jest.fn(), listFoundWaiting: jest.fn() }));
 jest.mock('../services/notification-bell-policy', () => ({
   isBellPolicyEnabled: jest.fn(() => true),
   bellAllowed: jest.fn(async () => true),
@@ -48,15 +48,18 @@ function fakeConn() {
   return { conn, trx };
 }
 
-// `waiting` is every waiting code's id (default: the listed ones).
+// Every waiting code as listFoundWaiting returns it: its id and when it was sent.
+const waitingOf = (items) => items.map((row) => ({ id: row.id, sentAt: row.sourceAt || row.createdAt }));
+// `waiting` is every waiting code: ids, or { id, sentAt } (default: the listed ones).
 const run = (items, over = {}) => {
   const { conn, trx } = fakeConn();
-  const waiting = over.waiting ?? items.map((row) => row.id);
-  const ids = jest.fn(async () => waiting);
+  const sent = new Map(waitingOf(items).map((code) => [code.id, code.sentAt]));
+  const waiting = (over.waiting ?? items.map((row) => row.id))
+    .map((code) => (typeof code === 'string' ? { id: code, sentAt: sent.get(code) || '2026-10-24T11:00:00.000Z' } : code));
+  const readWaiting = jest.fn(async () => waiting);
   const list = jest.fn(async () => ({ total: waiting.length, items }));
-  return { conn, trx, ids, list, result: Bell.syncFoundCodesBell({ now: NOW, conn, gateEnabled: true, sectionOn: true, ids, list, ...over }) };
+  return { conn, trx, readWaiting, list, result: Bell.syncFoundCodesBell({ now: NOW, conn, gateEnabled: true, sectionOn: true, waitingCodes: readWaiting, list, ...over }) };
 };
-const idsOf = (items) => items.map((row) => row.id);
 
 const neverLeaks = (composed) => {
   const text = [composed.spec.action, composed.spec.why, composed.detail].join('\n');
@@ -75,7 +78,7 @@ beforeEach(() => {
 
 describe('the copy', () => {
   test('one code from a customer names the kind, the customer and the day', () => {
-    const composed = composeFound([item()], ['f1']);
+    const composed = composeFound([item()], waitingOf([item()]));
     const alert = composeAdminAlert(composed.spec);
     expect(alert.headline).toBe('Customers — review the door code from Pat Synthetic');
     expect(alert.why).toBe('From a text on Oct 24; a technician sees it only after the office saves it.');
@@ -86,10 +89,11 @@ describe('the copy', () => {
   });
 
   test('a code from a number with no customer asks for a link first, and the detail names the suggested home', () => {
-    const composed = composeFound([item({
+    const unlinked = item({
       customerId: null, customerName: null, senderPhone: '+19415550123', kind: 'pass', sourceType: 'call',
       suggestedCustomer: { id: 'cust-9', name: 'Sam Example', address: '1 Sample Way' },
-    })], ['f1']);
+    });
+    const composed = composeFound([unlinked], waitingOf([unlinked]));
     const alert = composeAdminAlert(composed.spec);
     expect(alert.headline).toBe('Customers — review a visitor pass from an unknown sender');
     expect(alert.why).toBe('From a call on Oct 24; no customer is linked yet, so link one, then save it.');
@@ -100,7 +104,8 @@ describe('the copy', () => {
   });
 
   test('a one-visit code says to pick the visit', () => {
-    const alert = composeAdminAlert(composeFound([item({ life: 'visit', kind: 'call_box', sourceType: 'email' })], ['f1']).spec);
+    const visitCode = item({ life: 'visit', kind: 'call_box', sourceType: 'email' });
+    const alert = composeAdminAlert(composeFound([visitCode], waitingOf([visitCode])).spec);
     expect(alert.headline).toBe('Customers — review the call box code from Pat Synthetic');
     expect(alert.why).toBe('From an email on Oct 24; it is for one visit, so pick the visit when you save it.');
   });
@@ -112,7 +117,7 @@ describe('the copy', () => {
       item({ id: 'f2', customerId: null, customerName: null, kind: 'neighborhood_gate', sourceAt: '2026-10-23T15:00:00.000Z' }),
       item({ id: 'f1', customerId: 'cust-2', customerName: 'Kim Sample', sourceAt: '2026-10-22T15:00:00.000Z' }),
     ];
-    const composed = composeFound(items, idsOf(items));
+    const composed = composeFound(items, waitingOf(items));
     const alert = composeAdminAlert(composed.spec);
     expect(alert.headline).toBe('Customers — review 4 codes found in messages');
     expect(alert.why).toBe('From Pat Synthetic, an unknown sender and Kim Sample; the oldest is from Oct 22.');
@@ -129,7 +134,8 @@ describe('the copy', () => {
 
   test('a list longer than the names the why can hold says how many more, and a capped list says so in the detail', () => {
     const items = ['Avery', 'Blake', 'Casey', 'Devon', 'Emery'].map((first, i) => item({ id: `f${i}`, customerId: `c${i}`, customerName: `${first} Synthetic` }));
-    const composed = composeFound(items, [...idsOf(items), 'f8', 'f9']);
+    const older = [{ id: 'f8', sentAt: '2026-10-24T10:00:00.000Z' }, { id: 'f9', sentAt: '2026-10-24T09:00:00.000Z' }];
+    const composed = composeFound(items, [...waitingOf(items), ...older]);
     expect(composeAdminAlert(composed.spec).why).toBe('From Avery Synthetic, Blake Synthetic, Casey Synthetic and 2 more; the oldest is from Oct 24.');
     expect(composed.spec.action).toBe('review 7 codes found in messages');
     expect(composed.detail.split('\n').at(-1)).toBe('- and 2 more');
@@ -137,10 +143,30 @@ describe('the copy', () => {
 
   test('long or code-shaped names still pass the rule', () => {
     const long = 'Bartholomew-Alexander Montgomery_Worthington-Smythe the.Third';
-    expect(() => composeAdminAlert(composeFound([item({ customerName: long })], ['f1']).spec)).not.toThrow();
+    const longOne = item({ customerName: long });
+    expect(() => composeAdminAlert(composeFound([longOne], waitingOf([longOne])).spec)).not.toThrow();
     const many = Array.from({ length: 3 }, (_, i) => item({ id: `f${i}`, customerId: `c${i}`, customerName: `${long} ${i}` }));
-    expect(() => composeAdminAlert(composeFound(many, idsOf(many)).spec)).not.toThrow();
-    expect(composeAdminAlert(composeFound(many, idsOf(many)).spec).why.length).toBeLessThanOrEqual(110);
+    expect(() => composeAdminAlert(composeFound(many, waitingOf(many)).spec)).not.toThrow();
+    expect(composeAdminAlert(composeFound(many, waitingOf(many)).spec).why.length).toBeLessThanOrEqual(110);
+  });
+
+  test('codes filed in one batch: the oldest day is the earliest message, not the last listed row', () => {
+    // 10-24 in production: four codes from older texts were filed at 07:16 in one run, so the
+    // list (filing order, newest first) ended on a Sep 21 text while a Sep 2 text was waiting.
+    const items = [
+      item({ id: 'f4', customerId: null, customerName: null, kind: 'pass', sourceAt: '2026-09-24T15:00:00.000Z' }),
+      item({ id: 'f3', customerName: 'Pat Synthetic', sourceAt: '2026-09-02T15:00:00.000Z' }),
+      item({ id: 'f2', customerId: 'cust-2', customerName: 'Kim Sample', kind: 'lockbox', sourceAt: '2026-10-03T15:00:00.000Z' }),
+      item({ id: 'f1', customerId: 'cust-3', customerName: 'Lee Example', sourceAt: '2026-09-21T15:00:00.000Z' }),
+    ];
+    const alert = composeAdminAlert(composeFound(items, waitingOf(items)).spec);
+    expect(alert.why).toBe('From an unknown sender, Pat Synthetic, Kim Sample and 1 more; the oldest is from Sep 2.');
+  });
+
+  test('the oldest day counts a waiting code past the listed ones', () => {
+    const items = [item({ id: 'f2' }), item({ id: 'f1', customerId: 'cust-2', customerName: 'Kim Sample' })];
+    const waiting = [...waitingOf(items), { id: 'f0', sentAt: '2026-08-30T15:00:00.000Z' }];
+    expect(composeAdminAlert(composeFound(items, waiting).spec).why).toBe('From Pat Synthetic and Kim Sample; the oldest is from Aug 30.');
   });
 });
 
@@ -163,11 +189,11 @@ describe('syncFoundCodesBell', () => {
   });
 
   test('waiting codes raise one row under the lock, through the reopen helper, with its item keys and count', async () => {
-    const { trx, ids, list, result } = run([item({ id: 'f2' }), item({ id: 'f1' })]);
+    const { trx, readWaiting, list, result } = run([item({ id: 'f2' }), item({ id: 'f1' })]);
     await expect(result).resolves.toEqual({ count: 2, outcome: 'raised' });
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['admin:access-codes-found']);
-    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(ids.mock.invocationCallOrder[0]);
-    expect(ids).toHaveBeenCalledWith(trx);
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(readWaiting.mock.invocationCallOrder[0]);
+    expect(readWaiting).toHaveBeenCalledWith(trx);
     expect(list).toHaveBeenCalledWith(trx, { limit: 50, offset: 0 });
     const [category, title, why, opts] = episodes.raiseAdminAlertWithReopen.mock.calls[0];
     expect(category).toBe('access_codes');
@@ -226,9 +252,9 @@ describe('syncFoundCodesBell', () => {
   });
 
   test('the access codes section off closes the row without reading the codes', async () => {
-    const { ids, list, result } = run([item()], { sectionOn: false });
+    const { readWaiting, list, result } = run([item()], { sectionOn: false });
     await expect(result).resolves.toEqual({ count: 0, outcome: 'clear' });
-    expect(ids).not.toHaveBeenCalled();
+    expect(readWaiting).not.toHaveBeenCalled();
     expect(list).not.toHaveBeenCalled();
     expect(episodes.closeAdminAlertKeys.mock.calls[0][2]).toBe('section_off');
   });
@@ -236,10 +262,10 @@ describe('syncFoundCodesBell', () => {
   test('a category silenced in Settings reads no codes and closes the row, so a refresh or a reopen never rings', async () => {
     bellPolicy.bellAllowed.mockResolvedValue(false);
     episodes.closeAdminAlertKeys.mockResolvedValueOnce(1);
-    const { trx, ids, list, result } = run([item()]);
+    const { trx, readWaiting, list, result } = run([item()]);
     await expect(result).resolves.toEqual({ count: 0, outcome: 'closed' });
     expect(bellPolicy.bellAllowed).toHaveBeenCalledWith({ category: 'access_codes' });
-    expect(ids).not.toHaveBeenCalled();
+    expect(readWaiting).not.toHaveBeenCalled();
     expect(list).not.toHaveBeenCalled();
     expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(trx, ['access-codes-found'], 'category_silenced', {
@@ -282,12 +308,12 @@ describe('syncFoundCodesBell', () => {
   });
 
   test('by default it reads the Gate codes page list, its waiting ids and its section gate', async () => {
-    capture.listFoundIds.mockResolvedValueOnce(['f1']);
+    capture.listFoundWaiting.mockResolvedValueOnce([{ id: 'f1', sentAt: '2026-10-24T11:16:45.000Z' }]);
     capture.listFound.mockResolvedValueOnce({ total: 1, items: [item()] });
     const { conn, trx } = fakeConn();
     await expect(Bell.syncFoundCodesBell({ now: NOW, conn })).resolves.toMatchObject({ count: 1, outcome: 'raised' });
     expect(capture.enabled).toHaveBeenCalled();
-    expect(capture.listFoundIds).toHaveBeenCalledWith(trx);
+    expect(capture.listFoundWaiting).toHaveBeenCalledWith(trx);
     expect(capture.listFound).toHaveBeenCalledWith(trx, { limit: 50, offset: 0 });
   });
 });
