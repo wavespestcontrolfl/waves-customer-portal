@@ -1071,6 +1071,17 @@ describe('label ladder for clashing products (rule E, Y, H)', () => {
     expect(linesOf(named(GRUBS, TALAK), TUE_9AM, { labelFirst: false })[1]).toBe('After that, water in today’s treatment with about ¼ inch by Thu 9 AM.');
   });
 
+  test('each water-in keeps its own deadline: our own window follows the hold while a label window counts from the application', () => {
+    const twoDay = ['Label72', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 72, label_window: 'directs', source: 'label' }];
+    const long = ['Long', { mode: 'hold', hold_hours: 48, source: 'label' }];
+    // The fertilizer follows the 48-hour hold (Thu 9 AM + 24 h); the label window ends Fri 9 AM from the application.
+    expect(linesOf(named(FERTILIZER, twoDay, long), TUE_9AM)).toEqual([
+      'Skip your turf watering until Thu 9 AM.',
+      'After that, water in today’s treatment with about ¼ inch by Fri 9 AM.',
+      'Run it even if it is not your usual day.',
+    ]);
+  });
+
   test('a label window a hold with no minimum reaches is no claim, naming the hold and the water-in', () => {
     const long = ['Long', { mode: 'hold', hold_hours: 48, source: 'label' }];
     const ins = build(named(GRUBS, long), at(TUE_9AM));

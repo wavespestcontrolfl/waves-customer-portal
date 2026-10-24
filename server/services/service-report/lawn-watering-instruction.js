@@ -437,12 +437,20 @@ function waterInDeadline(at, waterIns, byHours, holdEnd, { timedEnd = null, foll
 // The water-in half of the instruction: amount, deadline and minutes. Fills the
 // water-in fields of `out` and returns the detail the lines are written from,
 // or null when no honest deadline exists (C. see waterInDeadline).
-function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd, timedEnd, follow = true, besideHold = false, lateDay = false }) {
+// Each water-in gets its own deadline and the visit's is the earliest: a label
+// window counts from the application (E; only E2's `followLabel` lets a "for
+// best results" one follow the hold), our own window follows the hold (rule C).
+// One water-in with no honest deadline leaves the visit none.
+function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd, timedEnd, followLabel = false, besideHold = false, labelFirst = false }) {
   const inches = Math.max(...waterIns.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
-  const byHours = Math.min(...waterIns.map((r) => windowHoursOf(r, besideHold)));
-  const detail = { inches, byHours, ...minutesFor(runtime, inches, plainWhenNoSetup) };
-  const by = waterInDeadline(at, waterIns, byHours, holdEnd, { timedEnd, follow, lateDay });
-  if (!by) return null;
+  const detail = { inches, ...minutesFor(runtime, inches, plainWhenNoSetup) };
+  const deadlines = waterIns.map((r) => {
+    const strength = labelFirst ? windowStrength(r) : null;
+    const follow = !strength || (followLabel && strength === 'best_results');
+    return waterInDeadline(at, [r], windowHoursOf(r, besideHold), holdEnd, { timedEnd, follow, lateDay: labelFirst });
+  });
+  if (deadlines.some((deadline) => !deadline)) return null;
+  const by = new Date(Math.min(...deadlines.map((deadline) => deadline.getTime())));
   out.minutes = detail.minutes;
   out.waterInInches = inches;
   out.waterInBy = by.toISOString();
@@ -653,17 +661,17 @@ function lateDayHold(holds, at) {
   }), at, SAME_DAY_DRY_HOURS);
 }
 
-// The hold windows to try, in order, each with whether the water-in may follow
-// the hold (rule C) or counts from the application (E). Gate off, or our own
-// windows only: rule C alone, as before.
+// The hold windows to try, in order (E1-E3 after the hold as it stands);
+// `followLabel` is E2's permission for a "for best results" window to follow the
+// hold. Gate off, or our own windows only: the one hold, rule C, as before.
 function holdTries(holds, waterIns, at, labelFirst) {
   const first = holds.length ? holdWindow(holds, at) : null;
   const strength = labelFirst ? strongestWindow(waterIns) : null;
-  const tries = [{ window: first, follow: !strength }];
+  const tries = [{ window: first, followLabel: false }];
   if (!strength || !first) return tries;
-  tries.push({ window: holdWindow(holds.map((r) => (bendsFor(r, strength) ? toLabelMinimum(r) : r)), at, SAME_DAY_DRY_HOURS), follow: false });
-  if (strength === 'best_results') tries.push({ window: first, follow: true });
-  if (waterIns.some((r) => r.water_in_same_day === true)) tries.push({ window: lateDayHold(holds, at), follow: false });
+  tries.push({ window: holdWindow(holds.map((r) => (bendsFor(r, strength) ? toLabelMinimum(r) : r)), at, SAME_DAY_DRY_HOURS), followLabel: false });
+  if (strength === 'best_results') tries.push({ window: first, followLabel: true });
+  if (waterIns.some((r) => r.water_in_same_day === true)) tries.push({ window: lateDayHold(holds, at), followLabel: false });
   return tries;
 }
 
@@ -674,9 +682,9 @@ function decideShortWaterIn(out, { holds, waterIns, list, resolved, runtime, pla
   const tries = holdTries(holds, waterIns, at, labelFirst);
   if (!waterIns.length) return { hold: tries[0].window, short: null };
   const besideHold = labelFirst && holds.length > 0;
-  for (const { window, follow } of tries) {
+  for (const { window, followLabel } of tries) {
     const short = applyWaterIn(out, {
-      waterIns, runtime, plainWhenNoSetup, at, follow, besideHold, lateDay: labelFirst, holdEnd: window && window.effectiveEnd, timedEnd: window && window.timedEnd,
+      waterIns, runtime, plainWhenNoSetup, at, followLabel, besideHold, labelFirst, holdEnd: window && window.effectiveEnd, timedEnd: window && window.timedEnd,
     });
     if (short) return { hold: window, short };
   }
