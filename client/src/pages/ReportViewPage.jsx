@@ -2938,7 +2938,21 @@ function ServiceStatusCard({ data, mode, resultOverride = null, compact = false 
           <div className="section-eyebrow">Your lawn today</div>
           <div className="lawn-story-score">{Math.round(data.reportV2.snapshot.overallScore)}<span>/100</span></div>
           <p>{data.reportV2.snapshot.statusHeadline || data.reportV2.lead?.headline || 'Lawn condition'}</p>
-          <a href="#lawn-section-score">View lawn details <span aria-hidden="true">↓</span></a>
+          <a
+            href="#lawn-section-score"
+            onClick={(event) => {
+              const section = document.getElementById('lawn-section-score');
+              const details = section?.querySelector('details');
+              if (!details) return;
+              event.preventDefault();
+              details.open = true;
+              if (window.location.hash !== '#lawn-section-score') {
+                window.history.pushState(window.history.state, '', '#lawn-section-score');
+              }
+              section.scrollIntoView({ block: 'start', behavior: 'instant' });
+              details.querySelector('summary')?.focus({ preventScroll: true });
+            }}
+          >View lawn details <span aria-hidden="true">↓</span></a>
         </div>
       )}
     </section>

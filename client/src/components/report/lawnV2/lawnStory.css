@@ -2,7 +2,11 @@
    while the payload's lawnLayout key carries story:true; the status card is one of its sections). Layout
    only: glass-theme.css owns the card materials, depth, highlights and gold actions, as it does for every
    report. */
-.service-report-v1 .lawn-story-layout .service-report-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-bottom: 24px; }
+.service-report-v1 .lawn-story-layout .service-report-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-bottom: 16px; }
+/* Grid gaps own card spacing here; shared glass card margins would add to them. */
+.service-report-v1 .lawn-story-layout .service-report-hero > [data-glass="card"],
+.service-report-v1 .lawn-story-layout .lawn-story-personal > [data-glass="card"],
+.service-report-v1 .lawn-story-layout .lawn-trend-grid > [data-glass="card"] { margin-block: 0 !important; }
 .service-report-v1 .lawn-story-layout .service-status-card { padding: 24px; }
 .service-report-v1 .lawn-story-layout .smart-status-result { font-size: 20px; line-height: 1.45; font-weight: 600; }
 .service-report-v1 .lawn-story-layout .service-status-grid { grid-template-columns: minmax(0, 1fr); margin-top: 18px; }
@@ -12,10 +16,37 @@
 .service-report-v1 .lawn-story-layout .lawn-story-score { font-size: 52px; font-weight: 700; letter-spacing: -.04em; line-height: 1; color: var(--text); }
 .service-report-v1 .lawn-story-layout .lawn-story-score span { font-size: 20px; letter-spacing: 0; font-weight: 400; color: var(--muted); margin-left: 6px; }
 .service-report-v1 .lawn-story-layout .lawn-story-condition p { font-size: 16px; line-height: 1.4; margin: 0; font-weight: 500; }
-.service-report-v1 .lawn-story-layout .lawn-story-condition a { font-size: 14px; font-weight: 600; margin-top: 4px; text-underline-offset: 3px; }
+.service-report-v1 .lawn-story-layout .lawn-story-condition a { display: inline-flex; align-items: center; gap: 8px; min-height: 48px; font-size: 14px; font-weight: 600; text-underline-offset: 3px; }
 .service-report-v1 .lawn-story-layout .lawn-story-section[data-story-section="ask"] > * { position: static !important; }
-.service-report-v1 .lawn-story-layout .treatment-story + [data-glass="card"] { margin-top: 24px; }
+/* Keep each measurement and its label together when the horizontal row wraps. */
+.service-report-v1 .lawn-fact-list.lawn-water-facts { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+.service-report-v1 .lawn-fact-list.lawn-mowing-facts { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+.service-report-v1 .lawn-fact-list .lawn-fact { display: grid; align-content: start; gap: 4px; min-width: 0; }
+.service-report-v1 .lawn-fact-list .lawn-fact > * { text-align: left !important; overflow-wrap: anywhere; }
+.service-report-v1 .lawn-story-layout .plan-visit-row { flex-direction: column; align-items: stretch; gap: 16px; }
+.service-report-v1 .lawn-story-layout .plan-visit-row .plan-visit-label { flex: none; }
+.service-report-v1 .lawn-story-layout .plan-visit-service { font-size: 20px; font-weight: 600; line-height: 1.2; }
+.service-report-v1 .lawn-story-layout .plan-visit-when { margin-top: 4px; font-size: 16px; }
+.service-report-v1 .lawn-story-layout .plan-visit-reschedule {
+  width: 100%;
+  min-height: 48px !important;
+}
+/* Larger hit rows keep the existing native disclosure semantics and one-column layout. */
+.service-report-v1 .lawn-layout .lawn-detail-summary {
+  box-sizing: border-box;
+  min-height: 48px;
+  padding: 12px 8px;
+  border-radius: 8px;
+  line-height: 1.5;
+}
+.service-report-v1 .lawn-layout .lawn-detail-summary:hover { background: rgba(4, 57, 94, 0.05); }
+.service-report-v1 .lawn-layout.lawn-story-layout summary:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+}
+.service-report-v1 .lawn-story-layout p { max-inline-size: 70ch; }
 @media (max-width: 600px) {
+  .service-report-v1 .lawn-fact-list.lawn-water-facts { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .service-report-v1 .lawn-story-layout .service-status-card,
   .service-report-v1 .lawn-story-layout .lawn-story-condition { padding: 20px; }
   .service-report-v1 .lawn-story-layout .lawn-story-score { font-size: 40px; }
@@ -23,6 +54,8 @@
   .service-report-v1 .lawn-story-layout .treatment-story-card { padding: 16px; }
 }
 @media print {
+  .service-report-v1 .lawn-story-layout .plan-visit-reschedule { display: none !important; }
   .service-report-v1 .lawn-story-layout .service-report-hero { display: block; }
   .service-report-v1 .lawn-story-layout .lawn-story-condition { display: none; }
+  .service-report-v1 .lawn-story-layout .lawn-story-personal > [data-glass="card"] { margin-block: 16px !important; }
 }

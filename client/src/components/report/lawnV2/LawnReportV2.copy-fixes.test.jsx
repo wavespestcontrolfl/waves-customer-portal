@@ -15,7 +15,7 @@ describe('the water target source line', () => {
     render(<WaterIntakeBar water={{ ...water, targetNote: 'Based on the weather in your area for the week ending on this visit, your grass type and the time of year.' }} />);
     const note = screen.getByTestId('lawn-water-target-note');
     expect(note).toHaveTextContent('Based on the weather in your area for the week ending on this visit, your grass type and the time of year.');
-    expect(screen.getByText('Target range').parentElement).toContainElement(note);
+    expect(screen.getByRole('group', { name: 'Weekly water readings' })).toContainElement(note);
     expect(screen.getByText('Target range').compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 

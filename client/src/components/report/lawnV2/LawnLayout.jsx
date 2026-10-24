@@ -21,6 +21,7 @@ import { Fragment, cloneElement, useEffect, useState } from 'react';
 import ReportText, { reportSectionsForText } from '../ReportSections';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
+import Icon from '../../Icon';
 import { usePrintRequested } from '../usePrintRequested';
 import {
   Card,
@@ -85,11 +86,11 @@ function LeadBox({ label, testId, children }) {
 function Collapsible({ summary, className, children }) {
   const printRequested = usePrintRequested();
   return (
-    <details open={printRequested} className={`lawn-layout-collapse ${className || ''}`.trim()} style={{ marginBottom: 20 }}>
+    <details open={printRequested} className={`lawn-layout-collapse ${className || ''}`.trim()} style={{ marginBottom: 16 }}>
       <summary data-glass="card" style={{ cursor: 'pointer', listStyle: 'none', WebkitTapHighlightColor: 'transparent', padding: '16px 20px', background: COLORS.white, border: `1px solid ${BORDER}`, borderRadius: 16 }}>
         {summary}
       </summary>
-      <div style={{ marginTop: 12 }}>{children}</div>
+      <div style={{ marginTop: 16 }}>{children}</div>
     </details>
   );
 }
@@ -230,7 +231,7 @@ function StoryWhatWeDid({ data, slots }) {
       {cloneElement(slots.products, { presentation: 'story', intro: applied })}
       <LawnProgramLine snapshot={v2.snapshot} />
       {visitSummary ? (
-        <Collapsible summary={<span className="lawn-story-summary-label">{LAYOUT_COPY.storySummaryToggle} <span aria-hidden="true">▾</span></span>} className="lawn-story-summary">
+        <Collapsible summary={<span className="lawn-story-summary-label">{LAYOUT_COPY.storySummaryToggle} <Icon name="chevronDown" size={20} className="lawn-story-chevron" aria-hidden="true" /></span>} className="lawn-story-summary">
           {visitSummary}
         </Collapsible>
       ) : null}
@@ -258,14 +259,19 @@ function PhotosAndFindings({ data, slots, nowMs, printing }) {
 }
 
 // ── (e) score, collapsed ────────────────────────────────────────────────────
-function ScoreSection({ data }) {
+function ScoreSection({ data, story = false }) {
   const v2 = data.reportV2;
   const { lead } = v2;
   const snapshot = v2.snapshot || {};
   const status = snapshot.status || scoreStatus(snapshot.overallScore);
   const explanation = snapshot.scoreExplanation && snapshot.scoreExplanation !== lead.why ? snapshot.scoreExplanation : null;
   const hasNext = Boolean(snapshot.nextVisit?.label && snapshot.nextVisit.label !== 'Invalid Date');
-  const summary = (
+  const scoreShownAbove = story && Number.isFinite(snapshot.overallScore);
+  const summary = scoreShownAbove ? (
+    <div data-testid="lawn-layout-score" className="lawn-story-summary-label">
+      {LAYOUT_COPY.scoreToggle} <Icon name="chevronDown" size={20} className="lawn-story-chevron" aria-hidden="true" />
+    </div>
+  ) : (
     <div data-testid="lawn-layout-score" className="report-template-column" style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
       <div style={{ flex: 'none' }}><ScoreRing value={snapshot.overallScore} status={status} size={72} stroke={8} /></div>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -439,10 +445,10 @@ const LAYOUT_CSS = `
   .lawn-layout-products .poison-control-note { display: none; }
   .lawn-layout-collapse > summary::-webkit-details-marker { display: none; }
   /* GATE_LAWN_REPORT_STORY: every rule below names a class only the story order prints. */
-  .lawn-story-summary-label { display: flex; justify-content: space-between; font-size: 16px; font-weight: 600; color: ${COLORS.glassNavy}; }
-  .lawn-story-personal { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin: 0 0 24px; }
-  .lawn-story-personal > .sr-section,
-  .lawn-story-personal > .report-card { margin: 0; }
+  .lawn-story-summary-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 16px; font-weight: 600; color: ${COLORS.glassNavy}; }
+  .lawn-story-chevron { flex: none; }
+  .lawn-layout-collapse[open] > summary .lawn-story-chevron { transform: rotate(180deg); }
+  .lawn-story-personal { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin: 0 0 16px; }
   .lawn-story-personal #tech-note .tech-photo { width: 48px !important; height: 48px !important; }
   .lawn-story-personal #tech-note blockquote { padding-left: 22px !important; }
   .lawn-story-personal #tech-note p { font-size: 16px; line-height: 1.6; }
@@ -452,11 +458,10 @@ const LAYOUT_CSS = `
   .lawn-story-section { min-width: 0; scroll-margin-top: 80px; }
   .lawn-story-section:empty { display: none; }
   .lawn-story-section > .sr-section:first-child { margin-top: 0; }
-  .lawn-story-section[data-story-section="whatWeDidStory"] { margin-top: 28px; }
-  .lawn-story-section[data-story-section="ask"] { margin: 24px 0; }
+  .lawn-story-section[data-story-section="ask"] { margin: 16px 0; }
   .lawn-story-section[data-story-section="blog"] .blog-post-image { max-height: 240px; }
-  .lawn-story-section .treatment-story { margin: 0 0 20px; }
-  .lawn-story-section .lawn-layout-collapse { margin: 20px 0; }
+  .lawn-story-section .treatment-story { margin: 0 0 16px; }
+  .lawn-story-section .lawn-layout-collapse { margin: 16px 0; }
   @media (max-width: 600px) {
     .lawn-story-personal .review-request-card { gap: 16px; padding: 20px; }
     .lawn-story-personal .review-request-card h3 { font-size: 20px !important; }
@@ -499,7 +504,7 @@ export function LawnLayoutBody({ data, slots, story = false }) {
       <div className={`lawn-layout${banner}${story ? ' lawn-story-layout' : ''}`} style={{ display: 'contents' }}>
         <style>{LAYOUT_CSS}</style>
         {story
-          ? STORY_LAYOUT_ORDER.map((key) => <div className="lawn-story-section" data-story-section={key} id={`lawn-section-${key}`} key={key}>{SECTIONS[key]({ data, slots, nowMs, printing })}</div>)
+          ? STORY_LAYOUT_ORDER.map((key) => <div className="lawn-story-section" data-story-section={key} id={`lawn-section-${key}`} key={key}>{SECTIONS[key]({ data, slots, nowMs, printing, story })}</div>)
           : LAYOUT_ORDER.map((key) => <Fragment key={key}>{SECTIONS[key]({ data, slots, nowMs, printing })}</Fragment>)}
       </div>
     </PrintContext.Provider>
