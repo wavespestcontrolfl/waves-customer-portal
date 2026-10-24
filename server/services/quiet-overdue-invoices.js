@@ -23,9 +23,14 @@
 // reminder schedule (a customer that engine owns is held and alerted by it,
 // owner rulings D3/D10), when
 //   - its sequence is on Auto Pay hold 7+ days (counted from the later of the
-//     hold's start and the due date): the owner's "an autopay hold alerts the
-//     office after 7 days with no charge"; a held invoice that is paid
-//     normally clears in about 2 days;
+//     row's last change and the due date): the owner's "an autopay hold alerts
+//     the office after 7 days with no charge"; a held invoice that is paid
+//     normally clears in about 2 days. The row's last change is when it
+//     entered the hold: every writer that sets `autopay_hold` stamps
+//     `updated_at` (the follow-up file's rule), and nothing writes a held row
+//     again except a failed Auto Pay charge, which restarts the 7 days.
+//     `created_at` would not do: a paused or stopped row can enter the hold
+//     weeks after it was created (visit-completion-packets.js, a resume);
 //   - or any other quiet state once it is 14+ days past due.
 // Not quiet: an active sequence with a next touch, or a pause whose end date
 // is still ahead (staff chose that wait).
@@ -133,7 +138,7 @@ function candidatesQuery(now = new Date(), database = db) {
       's.status as seq_status', 's.next_touch_at', 's.paused_until', 's.stopped_by_admin_id', 's.stopped_reason',
       's.autopay_failures_observed',
       database.raw(`? - ${dueDay} AS days_late`, [today]),
-      database.raw(`? - GREATEST((s.created_at AT TIME ZONE '${ET}')::date, ${dueDay}) AS hold_days`, [today]),
+      database.raw(`? - GREATEST((s.updated_at AT TIME ZONE '${ET}')::date, ${dueDay}) AS hold_days`, [today]),
     );
 }
 

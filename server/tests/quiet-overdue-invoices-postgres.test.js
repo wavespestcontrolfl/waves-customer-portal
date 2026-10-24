@@ -4,7 +4,8 @@
 // published / homeowner-billed / unarchived / money-due / no-plan /
 // no-open-customer-schedule filters, and the Eastern-calendar ages behind the
 // 7-day Auto Pay hold and 14-day quiet thresholds (a DATE due_date, the hold
-// counted from the later of the sequence's start and the due date).
+// counted from the later of the row's last change, when it entered the hold,
+// and the due date).
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 
@@ -68,6 +69,7 @@ postgres('quiet overdue invoices query (PostgreSQL)', () => {
       t.uuid('stopped_by_admin_id');
       t.integer('autopay_failures_observed').notNullable().defaultTo(0);
       t.timestamp('created_at').defaultTo(app.fn.now());
+      t.timestamp('updated_at').defaultTo(app.fn.now());
     });
     await app.schema.createTable('payment_plans', (t) => { t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()')); t.uuid('invoice_id'); t.string('status'); });
     await app.schema.createTable('customer_dunning_schedules', (t) => { t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()')); t.uuid('customer_id'); t.string('status'); });
@@ -108,7 +110,7 @@ postgres('quiet overdue invoices query (PostgreSQL)', () => {
     await invoice('PAUSED', { dueDate: '2026-07-07', seq: { status: 'paused' } });
     await invoice('NEVER', { dueDate: '2026-08-13', seq: null });
     await invoice('STOPPED', { dueDate: '2026-08-25', seq: { status: 'stopped', stopped_reason: 'Check', stopped_by_admin_id: randomUUID() } });
-    await invoice('HOLD', { dueDate: '2026-10-08', seq: { status: 'autopay_hold', created_at: new Date('2026-10-14T16:00:00Z') } });
+    await invoice('HOLD', { dueDate: '2026-10-08', seq: { status: 'autopay_hold', created_at: new Date('2026-10-14T16:00:00Z'), updated_at: new Date('2026-10-14T16:00:00Z') } });
     const items = await listed();
     expect(items.map((i) => [i.invoiceNumber, i.reason, i.daysLate])).toEqual([
       ['FINISHED', 'finished', 147],
@@ -120,15 +122,16 @@ postgres('quiet overdue invoices query (PostgreSQL)', () => {
     expect(items.find((i) => i.invoiceNumber === 'HOLD').holdDays).toBe(12);
   });
 
-  test('thresholds: 14 days late for a quiet ladder, 7 days on hold for Auto Pay (counted from the later of start and due date)', async () => {
+  test('thresholds: 14 days late for a quiet ladder, 7 days on hold for Auto Pay (from the later of entering the hold and the due date)', async () => {
+    const created = new Date('2026-09-01T15:00:00Z'); // every sequence here is weeks old; only entering the hold counts
     await invoice('LATE-14', { dueDate: '2026-10-12' });
     await invoice('LATE-13', { dueDate: '2026-10-13' });
-    // Due 20 days ago but held only 6 days (the sequence started Oct 20): not yet.
-    await invoice('HOLD-6', { dueDate: '2026-10-06', seq: { status: 'autopay_hold', created_at: new Date('2026-10-20T15:00:00Z') } });
-    // Held since a late-evening Eastern start (Oct 19 23:30 ET is Oct 20 03:30Z): 7 Eastern days.
-    await invoice('HOLD-7', { dueDate: '2026-10-01', seq: { status: 'autopay_hold', created_at: new Date('2026-10-20T03:30:00Z') } });
-    // Started holding before the due date: the clock starts at the due date.
-    await invoice('HOLD-DUE', { dueDate: '2026-10-19', seq: { status: 'autopay_hold', created_at: new Date('2026-10-01T15:00:00Z') } });
+    // Due 20 days ago, but a paused row that entered the hold Oct 20 (6 days): not yet.
+    await invoice('HOLD-6', { dueDate: '2026-10-06', seq: { status: 'autopay_hold', created_at: created, updated_at: new Date('2026-10-20T15:00:00Z') } });
+    // Entered the hold late in the Eastern evening (Oct 19 23:30 ET is Oct 20 03:30Z): 7 Eastern days.
+    await invoice('HOLD-7', { dueDate: '2026-10-01', seq: { status: 'autopay_hold', created_at: created, updated_at: new Date('2026-10-20T03:30:00Z') } });
+    // Held since before the due date: the clock starts at the due date.
+    await invoice('HOLD-DUE', { dueDate: '2026-10-19', seq: { status: 'autopay_hold', created_at: created, updated_at: new Date('2026-10-01T15:00:00Z') } });
     const items = await listed();
     expect(items.map((i) => i.invoiceNumber).sort()).toEqual(['HOLD-7', 'HOLD-DUE', 'LATE-14']);
     expect(items.filter((i) => i.reason === 'autopay_hold').map((i) => i.holdDays)).toEqual([7, 7]);
