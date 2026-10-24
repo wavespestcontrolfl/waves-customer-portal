@@ -980,6 +980,11 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // SMS prompt auto-promote: the drafter's snapshot of the active patch loads here, BEFORE the
+  // cronJobs early return below, so a process with crons disabled still drafts with the live patch
+  // (and its version tag). Only the promote and rollback jobs further down depend on cronJobs.
+  if (isEnabled('smsPromptAutopromote')) require('./sms-prompt-patch').startPatchRefresh();
+
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.
   if (!isEnabled('cronJobs')) {
@@ -3725,14 +3730,14 @@ function initScheduledJobs() {
   // 2026-10-24: the texting AI improves with no human approval step). The gate has
   // modes: unset = off, 'observe' = candidates, exams and decisions only,
   // 'true' = activation and rollback. Off returns before any lock is taken.
-  //   - Boot: keep the drafter's snapshot of the active prompt patch fresh.
+  //   - Boot: keep the drafter's snapshot of the active prompt patch fresh (started EARLY in
+  //     this function, before the cronJobs early return: a live patch must not depend on crons).
   //   - DAILY 6:12AM ET: make a candidate rule from the newest eligible pathology
   //     proposal, then examine it. Exam runs spend real LLM calls, so a candidate
   //     exam starts at most once a week (the interval is in the service).
   //   - DAILY 6:42AM ET: rollback monitor (database reads only), after the 5:10
   //     exam sweep has had time to finish.
   // =========================================================================
-  if (isEnabled('smsPromptAutopromote')) require('./sms-prompt-patch').startPatchRefresh();
 
   cron.schedule('12 6 * * *', async () => {
     if (!isEnabled('smsPromptAutopromote')) return;

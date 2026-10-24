@@ -557,11 +557,12 @@ async function examCheck({ dbi, patch }) {
     .whereIn('r.provider_leg', LIVE_EXAM_LEGS)
     .select('r.id', 'r.provider_leg', 'r.significance', 'r.unsafe_count', 'r.items_judged', 'b.unsafe_count as base_unsafe', 'b.items_judged as base_judged');
   for (const r of runs) {
+    // Both rules need a real sample on both runs (the promotion bar needed MIN_PAIRED_ITEMS too).
+    if (!(r.items_judged >= MIN_PAIRED_ITEMS && r.base_judged >= MIN_PAIRED_ITEMS)) continue;
     const sig = parseScores(r.significance);
-    // The rate rule needs a real sample on both runs and a few unsafe drafts, like the live checks.
-    const enough = r.items_judged >= MIN_PAIRED_ITEMS && r.base_judged >= MIN_PAIRED_ITEMS && r.unsafe_count >= LIVE_MIN_UNSAFE;
-    const rise = enough ? r.unsafe_count / r.items_judged - r.base_unsafe / r.base_judged : null;
-    if ((sig && sig.significant && sig.direction === 'regressed') || (rise !== null && rise >= EXAM_UNSAFE_RISE)) {
+    const regressed = Boolean(sig && sig.significant && sig.direction === 'regressed' && Number(sig.pairedItems) >= MIN_PAIRED_ITEMS);
+    const rise = r.unsafe_count >= LIVE_MIN_UNSAFE ? r.unsafe_count / r.items_judged - r.base_unsafe / r.base_judged : null;
+    if (regressed || (rise !== null && rise >= EXAM_UNSAFE_RISE)) {
       return { reason: 'exam_regression', detail: { runId: r.id, leg: r.provider_leg, rise: rise === null ? null : Number(rise.toFixed(3)) } };
     }
   }

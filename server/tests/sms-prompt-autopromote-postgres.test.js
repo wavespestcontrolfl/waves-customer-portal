@@ -787,6 +787,22 @@ postgres('SMS prompt auto-promote', () => {
       expect(row.decision_detail.rollback).toMatchObject({ runId: bad.id, leg: 'openai' });
     });
 
+    test('a significant McNemar regression rolls back only on a real sample (6 newly unsafe pairs are p=0.03 on a tiny exam)', async () => {
+      const small = await seedItems(10);
+      const smallBase = await insertRun({ items: small, version: baseVersion() });
+      const significance = (pairedItems) => JSON.stringify({ significant: true, direction: 'regressed', pairedItems, newlyUnsafe: 6, newlySafe: 0, pValue: 0.03125 });
+      await insertRun({ items: small, version: active.active_version, baselineId: smallBase.id, over: { significance: significance(10) } });
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
+      await trx('sms_sealed_eval_runs').where({ prompt_version: active.active_version }).del();
+
+      const items = await seedItems(24);
+      const base = await insertRun({ items, version: baseVersion() });
+      const run = await insertRun({ items, version: active.active_version, baselineId: base.id, over: { significance: significance(24) } });
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() });
+      expect(out.rolledBack).toBe(active.id);
+      expect((await rowOf(active.id)).decision_detail.rollback).toMatchObject({ runId: run.id });
+    });
+
     test('a tiny exam never trips the unsafe-rate rollback (the promotion bar needed 20 items; so does the rollback)', async () => {
       const items = await seedItems(10);
       const baseline = await insertRun({ items, version: baseVersion(), unsafe: 0 });
