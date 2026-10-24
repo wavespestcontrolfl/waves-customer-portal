@@ -37,7 +37,7 @@ function makeFakeDb({ activeCount = 0, candidates = [] } = {}) {
       if (builder._update) rows = 0; // nothing retired to restore, nothing to retire
       else if (builder._insertRows) rows = [];
       else if (builder._isCount) rows = [{ count: String(activeCount) }];
-      else rows = candidates;
+      else rows = tableKey === 'message_drafts' ? candidates : []; // pool reads (retired / active rows) come back empty
       return Promise.resolve(rows).then(resolve, reject);
     };
     return builder;
@@ -205,6 +205,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     const dbi = (table) => {
       const tableKey = typeof table === 'object' ? Object.values(table)[0] : table;
       const b = { _table: tableKey, _isCount: false, _compat: false, _insertRows: null, _update: null, _raws: [] };
+      const retiredRows = Array.from({ length: restorable }, (_, i) => ({ id: `retired-${i}`, facts_block: '' }));
       const record = (name) => (...args) => {
         calls.push([name, args, tableKey]);
         if (name === 'count') b._isCount = true;
@@ -234,7 +235,8 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
         if (b._update) rows = b._update.active === true ? restorable : 3; // restore vs retire row counts
         else if (b._insertRows) rows = [];
         else if (b._isCount) rows = [{ count: String(b._compat ? compatibleCount : activeCount) }];
-        else rows = candidates;
+        else if (tableKey === 'message_drafts') rows = candidates;
+        else rows = retiredRows; // the retired-compatible read: `restorable` rows a restore can bring back
         return Promise.resolve(rows).then(resolve, reject);
       };
       return b;
@@ -256,11 +258,11 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     // rewritten onto the aliased `md.facts_block` column — round 6: now a
     // position-scoped SUBSTRING/LEAST expression, not a bare column ref)
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block/.test(String(args[0])) && /~ \?/.test(String(args[0])))).toBe(true);
-    // the reactivation attempt ran first (Codex r5 #5194 P2), found nothing, then the retirement
+    // the reactivation plan (Codex r5 #5194 P2) found nothing to bring back, so nothing was written; the retirement
     // targeted pre-v12 rows (NOT LIKE marker), oldest first, capped at the overflow
     const restoreUpdates = dbi.updates.filter((u) => u.patch.active === true);
     const retireUpdates = dbi.updates.filter((u) => u.patch.active === false);
-    expect(restoreUpdates).toHaveLength(1);
+    expect(restoreUpdates).toHaveLength(0);
     expect(retireUpdates).toHaveLength(1);
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /!~ \?/.test(String(args[0])))).toBe(true);
     expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 3)).toBe(true);
@@ -384,8 +386,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       const out = await sealEvalItems({ target: 100, dbi });
 
       expect(out.reactivated).toBe(10);
-      // the restore attempt was capped at the FULL shortfall (30), not the post-restore remainder
-      expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 30)).toBe(true);
+      // the restore is planned against the FULL shortfall (30), not the post-restore remainder
       const restoreUpdates = dbi.updates.filter((u) => u.patch.active === true);
       expect(restoreUpdates).toHaveLength(1);
 

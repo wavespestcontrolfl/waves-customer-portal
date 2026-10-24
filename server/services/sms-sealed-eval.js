@@ -419,85 +419,26 @@ function compatibleWhereRaw(markers, forbidden = [], { anyCompanyRender = false 
  * incompatible items are retired until they no longer outnumber the compatible ones, which is the bar
  * createExamRun applies. dryRun: true plans the same pass and writes nothing.
  */
-// Retire (active=false, never delete) the OLDEST items outside the current
-// fact contract beyond the target; rows and every historical result stay.
-// Returns the count retired.
-async function retireIncompatibleItems({ dbi, overflow, markers, forbidden, dryRun = false }) {
-  if (!(overflow > 0)) return 0;
-  const compat = compatibleWhereRaw(markers, forbidden);
-  const oldestIncompatible = dbi('sms_sealed_eval_items')
-    .select('id')
-    .where('active', true)
-    .whereRaw(`NOT (${compat.sql})`, compat.bindings)
-    .orderBy('sealed_at', 'asc')
-    .limit(overflow);
-  // dry run: the rows the update would take, nothing written
-  if (dryRun) return ((await oldestIncompatible) || []).length;
-  const retired = await dbi('sms_sealed_eval_items')
-    .whereIn('id', oldestIncompatible)
-    .update({ active: false });
-  if (retired) logger.info(`[sealed-eval] seal: retired ${retired} item(s) outside the current fact contract`);
-  return Number(retired) || 0;
-}
-
-// Rotate the pool toward items the current contract can grade. retireIncompatibleItems only trims the
-// OVERFLOW past the target, so a full pool of items frozen under an earlier contract stayed active next to
-// a few new compatible ones - and createExamRun refuses a run unless at least half the ACTIVE items are
-// compatible. Retire the oldest incompatible items until they no longer outnumber the compatible ones.
-// Only once the compatible items could carry an exam of their own (the auto-run minimum): below that the
-// pool is left as it is and the shortfall stays visible. Rows stay (active=false, never deleted);
-// restoreCompatibleItems brings them back when the contract matches again. Returns the count retired.
+// Rotate the pool toward items the current contract can grade. Trimming the overflow past the target is not
+// enough: a full pool of items frozen under an earlier contract stayed active next to a few new compatible
+// ones, and createExamRun refuses a run unless at least half the ACTIVE items are compatible. So the oldest
+// incompatible items are retired until they no longer outnumber the compatible ones - but only once the
+// compatible items could carry an exam of their own (the auto-run minimum); below that the pool is left as it
+// is and the shortfall stays visible. How many incompatible items that retires, from the pool counts.
 function rotationOverflow(active, compatible) {
   const incompatible = active - compatible;
   return compatible < AUTO_EXAM_MIN_ITEMS || incompatible <= compatible ? 0 : incompatible - compatible;
 }
-async function rotateIncompatibleItems({ dbi, markers, forbidden }) {
-  const compat = compatibleWhereRaw(markers, forbidden);
-  const [{ count: active }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
-  const [{ count: compatible }] = await dbi('sms_sealed_eval_items').where('active', true)
-    .whereRaw(compat.sql, compat.bindings).count('* as count');
-  return retireIncompatibleItems({ dbi, overflow: rotationOverflow(Number(active), Number(compatible)), markers, forbidden });
-}
 
-// Restore (active=true) up to `remaining` RETIRED items the current fact
-// contract matches, newest first (Codex #5194 r5): a category-gate rollback
-// (complaints on, then off) makes the plain-v12 items retired under +c
-// compatible again, and the candidate anti-join never re-seals a row, so
-// without this the pool stays short of compatible items for good. Safe to
-// automate: retireIncompatibleItems is the only writer of active=false,
-// so every retired row was displaced by a contract, never set aside by a
-// person. Returns the count restored.
-async function restoreCompatibleItems({
-  dbi, remaining, markers, forbidden, dryRun = false, planned = new Map(),
-}) {
-  if (!(remaining > 0)) return 0;
-  const compat = compatibleWhereRaw(markers, forbidden);
-  const newestRetired = dbi('sms_sealed_eval_items')
-    .select(dryRun ? ['id', 'facts_block'] : 'id')
-    .where('active', false)
-    .whereRaw(compat.sql, compat.bindings)
-    .orderBy('sealed_at', 'desc')
-    .limit(remaining);
-  if (dryRun) {
-    // nothing is written, so the rows a real pass would bring back are remembered by id (`planned`) for the later steps
-    const rows = (await newestRetired) || [];
-    rows.forEach((r) => planned.set(r.id, r.facts_block));
-    return rows.length;
-  }
-  const restored = await dbi('sms_sealed_eval_items')
-    .whereIn('id', newestRetired)
-    .update({ active: true });
-  if (restored) logger.info(`[sealed-eval] seal: reactivated ${restored} previously-retired item(s) matching the current fact contract`);
-  return Number(restored) || 0;
-}
-
-async function sealEvalItems({
-  target = SEALED_EVAL_TARGET, dbi = db, dryRun = false, minAgeDays = SEALED_EVAL_MIN_AGE_DAYS,
-} = {}) {
+async function sealEvalItems(opts) {
+  const {
+    target, dbi, dryRun, minAgeDays,
+  } = {
+    target: SEALED_EVAL_TARGET, dbi: db, dryRun: false, minAgeDays: SEALED_EVAL_MIN_AGE_DAYS, ...opts,
+  };
   const startedAt = Date.now();
-  const [{ count: activeCount }] = await dbi('sms_sealed_eval_items')
-    .where('active', true)
-    .count('* as count');
+  const pool = () => dbi('sms_sealed_eval_items');
+  const [{ count: activeCount }] = await pool().where('active', true).count('* as count');
   // Compatibility-aware replenishment (pre-push audit P1 on Codex r3): the
   // exam grades under the current prompt version, and examOneItem excludes
   // every item frozen outside that version's fact contract. A pool full of
@@ -511,97 +452,71 @@ async function sealEvalItems({
   const markers = requiredFactMarkers(sealVersion);
   const forbidden = forbiddenFactMarkers(sealVersion);
   const compat = compatibleWhereRaw(markers, forbidden);
-  const [{ count: compatibleCount }] = await dbi('sms_sealed_eval_items')
-    .where('active', true)
-    .whereRaw(compat.sql, compat.bindings)
-    .count('* as count');
-  let remaining = target - Number(compatibleCount);
-  // retired items the current contract matches come back before any new
-  // draft is sealed; only the rest of the shortfall is sourced fresh
-  const plannedRestores = new Map(); // dry run only: id -> facts_block of the retired rows a real pass would reactivate
-  let reactivated = await restoreCompatibleItems({
-    dbi, remaining, markers, forbidden, dryRun, planned: plannedRestores,
-  });
-  remaining -= reactivated;
-  let activeAfterRestore = Number(activeCount) + reactivated;
-  // Real MISSED VISIT cases the version needs (versionNeedsMissedCases) are sealed
-  // first, even past the target, until the pool holds the minimum: they are rare, and
-  // round-robin by intent alone would almost never pick one.
-  let missedShort = 0;
-  if (versionNeedsMissedCases(sealVersion)) {
-    const held = ((await dbi('sms_sealed_eval_items').where('active', true)
-      .whereRaw(compat.sql, compat.bindings).select('facts_block')) || []).filter((i) => hasRenderedMissedCase(i.facts_block)).length
-      + [...plannedRestores.values()].filter((f) => hasRenderedMissedCase(f)).length;
-    missedShort = Math.max(0, SEALED_EVAL_MISSED_CASES_MIN - held);
-    // Retired compatible MISSED VISIT cases come back first (a prompt rollback and
-    // return leaves them inactive, and the candidate anti-join never re-seals a
-    // source): the general restore above is capped by the pool shortfall and may
-    // have had none, or spent it on newer ordinary items (Codex #5839 r3).
-    if (missedShort > 0) {
-      const retiredMissed = ((await dbi('sms_sealed_eval_items').where('active', false)
-        .whereRaw(compat.sql, compat.bindings).orderBy('sealed_at', 'desc').select('id', 'facts_block')) || [])
-        .filter((i) => !plannedRestores.has(i.id) && hasRenderedMissedCase(i.facts_block)).slice(0, missedShort).map((i) => i.id);
-      if (retiredMissed.length) {
-        const back = dryRun ? retiredMissed.length
-          : Number(await dbi('sms_sealed_eval_items').whereIn('id', retiredMissed).where('active', false).update({ active: true })) || 0;
-        if (back) logger.info(`[sealed-eval] seal: reactivated ${back} retired missed-visit case(s)`);
-        missedShort -= back;
-        reactivated += back;
-        activeAfterRestore += back;
-        remaining -= back;
-      }
-    }
-  }
-  if (remaining <= 0 && !missedShort) {
-    // Codex r4: a prior run may have inserted compatible rows and then
-    // failed before retiring the displaced pre-v12 ones, leaving an
-    // oversized active pool that would otherwise never shrink (and trips
-    // the auto-exam spend cap). Prune here too, so the two steps need not
-    // be atomic to converge.
-    const trimmed = await retireIncompatibleItems({ dbi, overflow: activeAfterRestore - target, markers, forbidden, dryRun });
-    // a dry run changed nothing, so the rotation is planned on the counts the real pass would have left
-    const rotated = dryRun
-      ? rotationOverflow(activeAfterRestore - trimmed, Number(compatibleCount) + reactivated)
-      : await rotateIncompatibleItems({ dbi, markers, forbidden });
-    const retired = trimmed + rotated;
-    return { sealed: 0, retired, reactivated, activeCount: activeAfterRestore - retired, ms: Date.now() - startedAt, ...(dryRun ? { dryRun } : {}) };
-  }
+  const [{ count: compatibleCount }] = await pool().where('active', true)
+    .whereRaw(compat.sql, compat.bindings).count('* as count');
+  const needsMissed = versionNeedsMissedCases(sealVersion);
+  const missedOf = (rows) => rows.filter((r) => hasRenderedMissedCase(r.facts_block));
 
+  // ONE plan, from reads only: what to bring back, seal and retire. The writes below apply it, and a dry run
+  // stops before them, so a dry run and a real pass cannot decide differently.
+  //
+  // Restore (active=true): RETIRED items the current contract matches come back before any new draft is
+  // sealed, newest first (Codex #5194 r5): a category-gate rollback (complaints on, then off) makes the
+  // plain-v12 items retired under +c compatible again, and the candidate anti-join never re-seals a row.
+  // Safe to automate: the retire step below is the only writer of active=false, so every retired row was
+  // displaced by a contract, never set aside by a person. The shortfall is the whole gap to the target.
+  let remaining = target - Number(compatibleCount);
+  const retiredCompatible = await pool().where('active', false).whereRaw(compat.sql, compat.bindings)
+    .orderBy('sealed_at', 'desc').select('id', 'facts_block');
+  const restoreRows = retiredCompatible.slice(0, Math.max(0, remaining));
+  // Real MISSED VISIT cases the version needs are sealed first, even past the target, until the pool holds
+  // the minimum: they are rare, and round-robin by intent alone would almost never pick one. Retired
+  // compatible MISSED VISIT cases come back first (a prompt rollback and return leaves them inactive, and
+  // the candidate anti-join never re-seals a source): the restore above is capped by the pool shortfall and
+  // may have had none, or spent it on newer ordinary items (Codex #5839 r3).
+  const activeMissed = await pool().where('active', true).whereRaw(compat.sql, compat.bindings).select('facts_block');
+  let missedShort = needsMissed ? Math.max(0, SEALED_EVAL_MISSED_CASES_MIN - missedOf(activeMissed).length - missedOf(restoreRows).length) : 0;
+  const missedBack = missedOf(retiredCompatible.slice(restoreRows.length)).slice(0, missedShort);
+  restoreRows.push(...missedBack);
+  missedShort -= missedBack.length;
+  remaining -= restoreRows.length;
+
+  // Candidates: only when the plan needs new items.
   const cutoff = new Date(Date.now() - minAgeDays * 86400 * 1000);
-  const candidateQuery = dbi({ md: 'message_drafts' })
-    .join({ j: 'shadow_draft_judgments' }, 'j.draft_id', 'md.id')
-    .leftJoin({ si: 'sms_sealed_eval_items' }, 'si.source_draft_id', 'md.id')
-    .leftJoin({ inbound_sms: 'sms_log' }, 'md.sms_log_id', 'inbound_sms.id')
-    .whereNull('si.id')
-    // Ground truth must exist: the human actually replied, with real text.
-    .where('j.human_replied', true)
-    .whereRaw("TRIM(COALESCE(j.human_reply_text, '')) <> ''")
-    // The day-of snapshot must exist (v8+ drafts persist facts_block)...
-    .whereRaw("TRIM(COALESCE(md.facts_block, '')) <> ''")
-    // ...and must NOT be a backfill row: backfill facts are TODAY's context
-    // pasted onto a months-old inbound — sealing one would freeze the drift.
-    .whereRaw("md.prompt_version NOT LIKE '%backfill'")
-    .whereRaw("TRIM(COALESCE(md.inbound_message, '')) <> ''");
-  // only drafts frozen under the current fact contract are representative
-  // ...where "frozen under the current contract" reads a static COMPANY FACTS section drafted under a known
-  // EARLIER render as current: it is rebased below (a wording edit must not empty the pool for a week).
+  // only drafts frozen under the current fact contract are representative, where "frozen under the current
+  // contract" reads a static COMPANY FACTS section drafted under a known EARLIER render as current: it is
+  // rebased below (a wording edit must not empty the pool for a week).
   const candidateCompat = compatibleWhereRaw(markers, forbidden, { anyCompanyRender: true });
-  const rawCandidates = await candidateQuery
-    .whereRaw(candidateCompat.sql.replace(/COALESCE\(facts_block, ''\)/g, 'md.facts_block'), candidateCompat.bindings)
-    .where('md.created_at', '<', cutoff)
-    .select(
-      'md.id as source_draft_id', 'md.customer_id', 'md.intent',
-      'md.inbound_message', 'md.facts_block', 'md.context_summary',
-      'md.scheduling_intent', 'md.created_at',
-      'j.human_reply_text', 'j.human_reply_sms_id',
-      'inbound_sms.created_at as inbound_at'
-    )
-    .orderBy('md.created_at', 'desc');
+  const rawCandidates = remaining > 0 || missedShort > 0
+    ? await dbi({ md: 'message_drafts' })
+      .join({ j: 'shadow_draft_judgments' }, 'j.draft_id', 'md.id')
+      .leftJoin({ si: 'sms_sealed_eval_items' }, 'si.source_draft_id', 'md.id')
+      .leftJoin({ inbound_sms: 'sms_log' }, 'md.sms_log_id', 'inbound_sms.id')
+      .whereNull('si.id')
+      // Ground truth must exist: the human actually replied, with real text.
+      .where('j.human_replied', true)
+      .whereRaw("TRIM(COALESCE(j.human_reply_text, '')) <> ''")
+      // The day-of snapshot must exist (v8+ drafts persist facts_block)...
+      .whereRaw("TRIM(COALESCE(md.facts_block, '')) <> ''")
+      // ...and must NOT be a backfill row: backfill facts are TODAY's context
+      // pasted onto a months-old inbound — sealing one would freeze the drift.
+      .whereRaw("md.prompt_version NOT LIKE '%backfill'")
+      .whereRaw("TRIM(COALESCE(md.inbound_message, '')) <> ''")
+      .whereRaw(candidateCompat.sql.replace(/COALESCE\(facts_block, ''\)/g, 'md.facts_block'), candidateCompat.bindings)
+      .where('md.created_at', '<', cutoff)
+      .select(
+        'md.id as source_draft_id', 'md.customer_id', 'md.intent',
+        'md.inbound_message', 'md.facts_block', 'md.context_summary',
+        'md.scheduling_intent', 'md.created_at',
+        'j.human_reply_text', 'j.human_reply_sms_id',
+        'inbound_sms.created_at as inbound_at'
+      )
+      .orderBy('md.created_at', 'desc')
+    : [];
 
   // Rebase onto today's static section. Only that section changes; every per-draft fact stays as drafted. The
   // rebased block must pass the exact contract (the SQL twin above is looser by design), and a reply that may
   // restate a reworded policy is left out. A block that already carries today's render is sealed as drafted.
-  let rebased = 0;
   let skippedRetiredTopic = 0;
   const candidates = [];
   for (const c of rawCandidates) {
@@ -613,37 +528,19 @@ async function sealEvalItems({
   }
 
   // Stratify: round-robin across intents, newest first within each.
-  const picked = [];
-  const rest = [];
-  for (const c of candidates) {
-    if (missedShort > 0 && hasRenderedMissedCase(c.facts_block)) { picked.push(c); missedShort -= 1; } else rest.push(c);
-  }
+  const picked = candidates.filter((c) => missedShort > 0 && hasRenderedMissedCase(c.facts_block)).slice(0, missedShort);
   const byIntent = new Map();
-  for (const c of rest) {
+  for (const c of candidates.filter((x) => !picked.includes(x))) {
     const key = c.intent || 'GENERAL';
-    if (!byIntent.has(key)) byIntent.set(key, []);
-    byIntent.get(key).push(c);
+    byIntent.set(key, [...(byIntent.get(key) || []), c]);
   }
-  const queues = [...byIntent.values()];
-  // the regular shortfall still applies; missed-visit cases may push the pool past it
+  // the regular shortfall still applies; missed-visit cases may push the pool past it. Taking the n-th item of
+  // every intent before the (n+1)-th is a stable sort on the position within the intent's queue.
   const regularCap = Math.max(picked.length, remaining);
-  while (picked.length < regularCap && queues.some((q) => q.length)) {
-    for (const q of queues) {
-      if (picked.length >= regularCap) break;
-      const next = q.shift();
-      if (next) picked.push(next);
-    }
-  }
-
-  if (!picked.length) {
-    logger.info('[sealed-eval] seal: no new eligible candidates');
-    const retired = dryRun
-      ? rotationOverflow(activeAfterRestore, Number(compatibleCount) + reactivated)
-      : await rotateIncompatibleItems({ dbi, markers, forbidden });
-    return {
-      sealed: 0, retired, reactivated, activeCount: activeAfterRestore - retired, ms: Date.now() - startedAt, ...(dryRun ? { dryRun, candidates: candidates.length, skippedRetiredTopic } : {}),
-    };
-  }
+  picked.push(...[...byIntent.values()].flatMap((q) => q.map((c, i) => ({ c, i })))
+    .sort((x, y) => x.i - y.i)
+    .slice(0, regularCap - picked.length)
+    .map((x) => x.c));
 
   const rows = picked.map((c) => ({
     source_draft_id: c.source_draft_id,
@@ -659,31 +556,41 @@ async function sealEvalItems({
     // a rebased row says so: its static COMPANY FACTS section was re-rendered, nothing else
     schema_version: c.rebased ? REBASED_SCHEMA_VERSION : SCHEMA_VERSION,
   }));
-  rebased = picked.filter((c) => c.rebased).length;
-  if (dryRun) {
-    const trimmed = await retireIncompatibleItems({ dbi, overflow: activeAfterRestore + rows.length - target, markers, forbidden, dryRun });
-    // what rotateIncompatibleItems would retire once the new rows are in (its rule, on the planned counts)
-    const compatibleAfter = Number(compatibleCount) + reactivated + rows.length;
-    const rotated = rotationOverflow(activeAfterRestore + rows.length - trimmed, compatibleAfter);
-    // never printed with bodies: the plan is counts by intent and by day
-    const byIntentCount = {};
-    for (const c of picked) byIntentCount[c.intent || 'GENERAL'] = (byIntentCount[c.intent || 'GENERAL'] || 0) + 1;
-    return {
-      dryRun, sealed: rows.length, rebased, retired: trimmed + rotated, reactivated, activeCount: activeAfterRestore + rows.length - trimmed - rotated,
-      candidates: candidates.length, skippedRetiredTopic, byIntent: byIntentCount,
-      oldest: picked.reduce((a, c) => (!a || c.created_at < a ? c.created_at : a), null),
-      newest: picked.reduce((a, c) => (!a || c.created_at > a ? c.created_at : a), null),
-      ms: Date.now() - startedAt,
-    };
-  }
-  await dbi('sms_sealed_eval_items').insert(rows).onConflict('source_draft_id').ignore();
-  // Keep the active pool at the target: retire the OLDEST pre-v12 items that
-  // the new compatible ones displaced (never delete — results reference them).
-  const trimmed = await retireIncompatibleItems({ dbi, overflow: activeAfterRestore + rows.length - target, markers, forbidden });
-  const retired = trimmed + await rotateIncompatibleItems({ dbi, markers, forbidden });
 
-  const summary = { sealed: rows.length, rebased, retired, reactivated, activeCount: activeAfterRestore + rows.length - retired, ms: Date.now() - startedAt };
-  logger.info(`[sealed-eval] seal complete: ${JSON.stringify(summary)}`);
+  // Retire (active=false, never delete) the OLDEST incompatible items: first the overflow past the target
+  // (Codex r4: a prior run may have inserted compatible rows and then failed before retiring the displaced
+  // ones, so an oversized pool must shrink even when nothing new is sealed), then the rotation. Both take
+  // the oldest, so they are one count; the new and restored rows are compatible and never among them.
+  const activeAfter = Number(activeCount) + restoreRows.length + rows.length;
+  const compatibleAfter = Number(compatibleCount) + restoreRows.length + rows.length;
+  const trimmed = Math.min(Number(activeCount) - Number(compatibleCount), Math.max(0, activeAfter - target));
+  const retireCount = trimmed + rotationOverflow(activeAfter - trimmed, compatibleAfter);
+
+  const done = { reactivated: restoreRows.length, sealed: rows.length, retired: retireCount };
+  if (!dryRun) {
+    if (restoreRows.length) done.reactivated = Number(await pool().whereIn('id', restoreRows.map((r) => r.id)).where('active', false).update({ active: true }));
+    if (rows.length) await pool().insert(rows).onConflict('source_draft_id').ignore();
+    if (retireCount > 0) {
+      done.retired = Number(await pool()
+        .whereIn('id', pool().select('id').where('active', true).whereRaw(`NOT (${compat.sql})`, compat.bindings).orderBy('sealed_at', 'asc').limit(retireCount))
+        .update({ active: false }));
+    }
+  }
+
+  const summary = {
+    ...done,
+    dryRun,
+    rebased: picked.filter((c) => c.rebased).length,
+    activeCount: Number(activeCount) + done.reactivated + done.sealed - done.retired,
+    // the plan in counts, never message bodies (the reseal script prints this)
+    candidates: candidates.length,
+    skippedRetiredTopic,
+    byIntent: picked.reduce((m, c) => ({ ...m, [c.intent || 'GENERAL']: (m[c.intent || 'GENERAL'] || 0) + 1 }), {}),
+    oldest: picked.reduce((a, c) => (!a || c.created_at < a ? c.created_at : a), null),
+    newest: picked.reduce((a, c) => (!a || c.created_at > a ? c.created_at : a), null),
+    ms: Date.now() - startedAt,
+  };
+  logger.info(`[sealed-eval] seal ${dryRun ? 'plan (dry run)' : 'complete'}: ${JSON.stringify(summary)}`);
   return summary;
 }
 
