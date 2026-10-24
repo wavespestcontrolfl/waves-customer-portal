@@ -80,8 +80,10 @@ function propertyAddressLabel(address) {
  *
  * Each group: { property_id, address, label, lines, discounts, subtotal }.
  * `discounts` are the line-item discount rows whose `discount_for` names a
- * service line in the group. Document-wide discounts (no `discount_for`)
- * belong to the invoice totals, never to a group.
+ * service line in the group (or whose stamped `property_id` is the group's).
+ * A line-item discount that fits no group makes the whole invoice flat (null),
+ * so grouped subtotals always reconcile. Document-wide discounts (no
+ * `discount_for`) belong to the invoice totals, never to a group.
  */
 function groupInvoiceLinesByProperty(lineItems) {
   const items = parseLineItems(lineItems);
@@ -114,10 +116,16 @@ function groupInvoiceLinesByProperty(lineItems) {
   }
   if (groups.length < 2) return null;
 
+  // Every line-item discount must land in a group, or the per-property
+  // subtotals would not reconcile to the total: a discount whose parent line
+  // cannot be found (by discount_for, else by the property stamped on it)
+  // keeps the whole invoice flat, where the totals block carries it.
   for (const item of items) {
     if (!isDiscountLine(item) || !item.discount_for) continue;
-    const parent = groups.find((group) => group.clientIds.has(String(item.discount_for)));
-    if (parent) parent.discounts.push(item);
+    const parent = groups.find((group) => group.clientIds.has(String(item.discount_for)))
+      || (clean(item.property_id) ? byProperty.get(clean(item.property_id)) : null);
+    if (!parent) return null;
+    parent.discounts.push(item);
   }
 
   return groups.map(({ clientIds, ...group }) => ({

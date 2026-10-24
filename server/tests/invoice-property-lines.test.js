@@ -112,6 +112,21 @@ describe('groupInvoiceLinesByProperty (documents)', () => {
     expect(invoicePropertyLabels(twoHomes)).toEqual(['1842 Palm Harbor Dr, Bradenton, FL 34209', '410 Bayshore Rd Unit B, Parrish, FL 34219']);
   });
 
+  test('a line-item discount that fits no group keeps the invoice flat; a stamped property places an orphaned one', () => {
+    // Service lines without client_ids (an API or Intelligence Bar create): the discount's parent cannot be
+    // found by discount_for, so grouping would drop it and the subtotals would overstate the charge → flat.
+    const noIds = [
+      { ...service(undefined, PALM), property_address: addr(PALM) }, { ...service(undefined, BAY), property_address: addr(BAY) },
+      { _kind: 'discount', discount_for: 'gone', description: 'Multi-Home Discount (10%)', quantity: 1, unit_price: -14.9, amount: -14.9 },
+    ];
+    expect(groupInvoiceLinesByProperty(noIds)).toBeNull();
+    // The same orphan stamped with its property (attachInvoiceLineProperties does this from the parent) is placed.
+    const stamped = [...noIds.slice(0, 2), { ...noIds[2], property_id: BAY }];
+    const groups = groupInvoiceLinesByProperty(stamped);
+    expect(groups[1].discounts).toHaveLength(1);
+    expect(groups.map((g) => g.subtotal)).toEqual([149, 134.1]);
+  });
+
   test('flat invoices answer null: no lines, one property, or any line without a property', () => {
     expect(groupInvoiceLinesByProperty([])).toBeNull();
     expect(groupInvoiceLinesByProperty(null)).toBeNull();
