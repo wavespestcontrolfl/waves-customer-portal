@@ -577,7 +577,7 @@ describe('buildDivergenceAlertCopy', () => {
     });
     expect(leadSentence).toBe('Same-trip visits from one estimate landed on different days');
     expect(actionSentence).toBe('The combined first-application invoice still charges for both — split it by hand.');
-    expect(detail).toContain(`visit ${moved.id} now on 2026-10-09 (was ${anchorDate})`);
+    expect(detail).toContain(`visit ${String(moved.id).slice(0, 8)} now on 2026-10-09 (was ${anchorDate})`);
   });
 
   // Tender-neutral (Codex r17 P2 on #5021): 'processing' is not only an ACH
@@ -590,7 +590,7 @@ describe('buildDivergenceAlertCopy', () => {
     });
     expect(leadSentence).toContain('payment is still processing (not yet settled or reconciled)');
     expect(actionSentence).toMatch(/^Wait for that payment to settle, fail, or be reconciled before refunding or crediting/);
-    expect(detail).toContain(`visit ${cancelled.id} was cancelled — its share is part of a payment that is still processing`);
+    expect(detail).toContain(`visit ${String(cancelled.id).slice(0, 8)} was cancelled — its share is part of a payment that is still processing`);
     expect(`${leadSentence} ${actionSentence} ${detail}`).not.toMatch(/\bACH\b/);
     for (const text of [detail, leadSentence, actionSentence]) {
       expect(text).not.toMatch(/refund or credit/);
