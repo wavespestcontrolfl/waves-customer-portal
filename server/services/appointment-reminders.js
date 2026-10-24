@@ -9,6 +9,13 @@
  *
  * Landline detection via Twilio Lookup API — skips SMS for landlines.
  * All dates displayed in America/New_York timezone.
+ *
+ * Booking confirmations for a NEW client (no completed visit) go by text AND
+ * email under GATE_NEW_CLIENT_CONFIRM_EMAIL: resolveConfirmationChannel
+ * promotes the default 'sms' channel to 'both' and the existing 'both' path
+ * delivers it. An explicit portal choice, an unreadable prefs row, an email
+ * opt-out or no usable email keeps today's SMS-led behavior (see
+ * resolve72hChannel for the sibling 72h reminder rule).
  */
 
 const db = require('../models/db');
@@ -287,6 +294,52 @@ async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavail
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('reminder72hEmailFirst')) return 'sms';
   return (await isOneTimeVisit(scheduledServiceId)) ? 'email' : 'sms';
+}
+
+// Effective channel for a booking CONFIRMATION (owner ruling 2026-10-24,
+// GATE_NEW_CLIENT_CONFIRM_EMAIL): a NEW client gets the text AND the email.
+// Under the gate a confirmation whose channel resolves to the default 'sms'
+// is promoted to 'both' — the existing text + email path (Codex #3361,
+// #3588, #3609 hardening), never a parallel send. Same fail-closed order as
+// resolve72hChannel; anything that is not a provable "new client with a
+// usable email, no explicit Text choice" keeps today's SMS-led behavior.
+//   - non-'sms' (an explicit email / both / push choice): returned untouched;
+//   - prefs unreadable: 'sms' (the email leg bypasses sendCustomerMessage's
+//     consent validator, so it must never ride on a fail-open default);
+//   - customer picked the channel in the portal (explicit stamp): 'sms';
+//   - portal-wide email off, or the confirmation toggle off: 'sms';
+//   - gate off: 'sms';
+//   - new client = no scheduled_services row with status 'completed' for this
+//     customer, read at send time; a customer with one keeps SMS-led;
+//   - usable email = the SAME recipient resolution the confirmation email
+//     itself uses (AppointmentEmail resolveRecipients), so a promotion is
+//     only made when the email leg has somewhere to go;
+//   - any thrown lookup: 'sms' with a warn log.
+async function resolveConfirmationChannel(prefs, { customerId, scheduledServiceId = null } = {}) {
+  const ch = apptChannel(prefs?.confirmationChannel);
+  if (ch !== 'sms') return ch;
+  if (!prefs || prefs.unavailable) return 'sms';
+  if (prefs.confirmationChannelExplicit) return 'sms';
+  if (prefs.emailEnabled === false || prefs.appointmentConfirmation === false) return 'sms';
+  if (!customerId) return 'sms';
+  try {
+    // Read inside the try: a gate reader that cannot be read fails closed.
+    if (!require('../config/feature-gates').newClientConfirmEmailLive()) return 'sms';
+    const completed = await db('scheduled_services')
+      .where({ customer_id: customerId, status: 'completed' })
+      .first('id');
+    if (completed) return 'sms';
+    const emailCustomer = await AppointmentEmail._private.loadCustomer(customerId);
+    if (!emailCustomer) return 'sms';
+    const recipients = await AppointmentEmail._private.resolveRecipients(emailCustomer, {
+      scheduledServiceId,
+      eventType: 'appointment.confirmation',
+    });
+    return Array.isArray(recipients) && recipients.length > 0 ? 'both' : 'sms';
+  } catch (err) {
+    logger.warn(`[appt-remind] new-client confirmation channel lookup failed for ${customerId}: ${err.message} — keeping SMS-led channel`);
+    return 'sms';
+  }
 }
 
 // Send-window pre-check for the 72h/24h reminder legs (GATE_SMS_SEND_WINDOW,
@@ -806,7 +859,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   let prefsKnown = false;
   try {
     const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
-    channel = prefs.confirmationChannel;
+    channel = await resolveConfirmationChannel(prefs, { customerId, scheduledServiceId });
     confirmationOn = prefs.appointmentConfirmation;
     prefsKnown = !prefs.unavailable;
   } catch (err) {
@@ -2219,6 +2272,11 @@ async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) 
     serviceReminder72h: prefs?.service_reminder_72h !== false,
     serviceReminder24h: prefs?.service_reminder_24h !== false,
     confirmationChannel: apptChannel(channelPrefs?.appointment_confirmation_channel),
+    // Explicit confirmation-channel choice: stamped by the notifications
+    // route on any customer write of the channel; read from the same
+    // owner-resolved row as the channel itself. The new-client text + email
+    // promotion (GATE_NEW_CLIENT_CONFIRM_EMAIL) skips it.
+    confirmationChannelExplicit: channelPrefs?.appointment_confirmation_channel_explicit === true,
     reminder72hChannel: apptChannel(channelPrefs?.service_reminder_72h_channel, { preserveAppChoice: true }),
     // Explicit delivery-method choice (Codex #3588 P1): stamped by the
     // notifications route on any customer write of the 72h channel. Read
@@ -2349,6 +2407,10 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       logger.info(`[appt-remind] Confirmation skipped by preference for customer ${customerId}`);
       return false;
     }
+    // New-client promotion (GATE_NEW_CLIENT_CONFIRM_EMAIL): every later read
+    // of the channel below uses this value, so the send-window hold, the held
+    // email leg and deliverAppointmentNotice all see the same channel.
+    const confirmationChannel = await resolveConfirmationChannel(prefs, { customerId, scheduledServiceId });
     const { customer } = await getCustomerAndTech(customerId, scheduledServiceId);
     if (customer) {
       // Deferred path only: between sendConfirmation's initial read and this
@@ -2387,7 +2449,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Attempting the send instead would burn the confirmation: the
       // canonical-path block collapses to false here, the email fallback
       // fires at night, and the unconditional mark below ends all retries.
-      if (reminderSendWindowHold(prefs.confirmationChannel, { smsEnabled: prefs.smsEnabled })) {
+      if (reminderSendWindowHold(confirmationChannel, { smsEnabled: prefs.smsEnabled })) {
         // 'both': the customer's requested EMAIL is not subject to the SMS
         // window — send it NOW and defer only the SMS leg via the unmarked
         // row. Idempotent per occurrence, so the sweep's replay (which
@@ -2396,7 +2458,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         // NEITHER leg: the sweep's every-15-min replay stayed held all
         // night, and at 08:00 the past-appointment guard above closes the
         // row before the window ever admits the SMS.
-        if (apptChannel(prefs.confirmationChannel) === 'both') {
+        if (apptChannel(confirmationChannel) === 'both') {
           const heldEmailRes = await sendAppointmentNoticeEmail({ kind: 'confirmation', customerId, scheduledServiceId, apptTime, serviceLabel });
           logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held — email leg ${heldEmailRes?.ok ? 'sent now' : `not sent (${heldEmailRes?.reason || heldEmailRes?.error || 'unknown'})`}, SMS deferred`);
         }
@@ -2420,7 +2482,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Filled at the call below; the render adds templateKey before the send.
       const confirmationMeta = {};
       const sent = await deliverAppointmentNotice({
-        channel: prefs.confirmationChannel,
+        channel: confirmationChannel,
         kind: 'confirmation',
         customerId,
         scheduledServiceId,
@@ -6312,9 +6374,11 @@ AppointmentReminders._test = {
   estimateBackedServiceName,
   apptChannel,
   resolve72hChannel,
+  resolveConfirmationChannel,
   isOneTimeVisit,
   deliverAppointmentNotice,
   withReminderSendFence,
+  deliverConfirmation,
   deliverConfirmationByChannel,
   scheduledServiceApptTime,
   sendAppointmentNoticeEmail,

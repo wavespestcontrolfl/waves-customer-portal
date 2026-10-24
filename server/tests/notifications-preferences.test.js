@@ -146,6 +146,10 @@ describe('notification preference updates', () => {
 
     expect(updates).toEqual({
       appointment_confirmation_channel: 'email',
+      // Same contract for the confirmation channel (GATE_NEW_CLIENT_CONFIRM_EMAIL):
+      // any customer write is a deliberate choice, so the new-client text +
+      // email promotion never overrides it.
+      appointment_confirmation_channel_explicit: true,
       service_reminder_72h_channel: 'both',
       // Any explicit 72h channel write stamps the explicit-choice marker
       // (Codex #3588 P1) — the email-first promotion must never override a
@@ -155,6 +159,18 @@ describe('notification preference updates', () => {
       en_route_channel: 'email',
       tech_arrived_channel: 'both',
     });
+  });
+
+  test('stamps the confirmation channel as an explicit choice for every value, Text included, and only on a channel write', () => {
+    for (const value of ['sms', 'email', 'both']) {
+      expect(notificationPrefsDbUpdates({ appointmentConfirmationChannel: value }, {}))
+        .toEqual({ appointment_confirmation_channel: value, appointment_confirmation_channel_explicit: true });
+    }
+    // An unrelated save never stamps (the default stays provenance-free).
+    expect(notificationPrefsDbUpdates({ serviceReminder24hChannel: 'sms' }, {}))
+      .not.toHaveProperty('appointment_confirmation_channel_explicit');
+    expect(notificationPrefsDbUpdates({ smsEnabled: false }, {}))
+      .not.toHaveProperty('appointment_confirmation_channel_explicit');
   });
 
   test('coerces an unrecognized channel value to sms', () => {
@@ -258,6 +274,9 @@ describe('account-level channel routing', () => {
   test('CHANNEL_DB_COLUMNS lists the account-level channel columns', () => {
     expect(CHANNEL_DB_COLUMNS).toEqual([
       'appointment_confirmation_channel',
+      // The confirmation channel's explicit-choice stamp travels with it to
+      // the primary-profile row (GATE_NEW_CLIENT_CONFIRM_EMAIL).
+      'appointment_confirmation_channel_explicit',
       'service_reminder_72h_channel',
       // The explicit-choice stamp routes to the primary-profile row WITH the
       // channel it describes — the reminder cron reads both from the
