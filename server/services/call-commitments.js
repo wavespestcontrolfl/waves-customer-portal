@@ -3324,6 +3324,9 @@ async function listLapsedEvidenceClosedCallIds(conn) {
     );
     for (const r of direct?.rows || []) if (!ids.includes(r.call_log_id)) ids.push(r.call_log_id);
   }
+  // The AI check's closes (call-promise-ai-close.js) are read again on a bounded schedule rather than by a field
+  // list: the oldest-read few, whose re-judge re-runs the evidence path that admitted them.
+  for (const id of await require("./call-promise-ai-close").listRecheckCallIds(conn)) if (!ids.includes(id)) ids.push(id);
   return ids;
 }
 async function listLapsedAssociationCloses(conn) {
@@ -3423,9 +3426,6 @@ async function listLapsedAssociationCloses(conn) {
                 OR sw.direction IS DISTINCT FROM 'outbound'
                 OR (${operatorReplySql('sw')} AND ${smsDeliveredSql('sw')}) IS NOT TRUE
                 OR md5(COALESCE(sw.message_body, '')) IS DISTINCT FROM (cc.fulfillment ->> 'witness_md5')))
-          -- ... or on the record the AI check cited (call-promise-ai-close.js): gone,
-          -- another customer's now, or a visit cancelled or skipped since.
-          OR ${require("./call-promise-ai-close").aiCheckLapsedSql("cc", "cl")}
           OR ((cc.fulfillment ->> 'kind') = ?
               AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id))
           -- ISO-Z text both sides (the stored proof's matched_at), so a

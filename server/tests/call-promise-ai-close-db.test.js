@@ -256,12 +256,10 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       await db('job_status_history').insert({ job_id: visit, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: later(20) });
       say(w, fulfilledBy(`visit:${visit}`, 'cancelled after the request'));
       expect(await run(w)).toMatchObject({ closed: 1 });
-      expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_type: 'scheduled_service', visit_cancel: true });
-      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+      expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_type: 'scheduled_service' });
       await cc.refreshFulfillment(db, w.call.id);
       expect((await row(w.commitment.id)).status).toBe('fulfilled');
       await db('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
-      expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(w.call.id);
       await cc.refreshFulfillment(db, w.call.id);
       expect((await row(w.commitment.id)).status).toBe('open');
     });
@@ -357,7 +355,6 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
         say(w, fulfilledBy(`estimate:${estimate.id}`, 'Pest Control Estimate'));
         expect(await run(w)).toMatchObject({ closed: 1 });
         expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_type: 'estimate', record_id: estimate.id });
-        expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
         await cc.refreshFulfillment(db, w.call.id);
         expect((await row(w.commitment.id)).status).toBe('fulfilled');
         return { w, lead };
@@ -369,7 +366,6 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
           change.customer_id = other.customerId;
         }
         await db('leads').where({ id: lead.id }).update(change);
-        expect([label, (await cc.listLapsedEvidenceClosedCallIds(db)).includes(w.call.id)]).toEqual([label, true]);
         await cc.refreshFulfillment(db, w.call.id);
         expect([label, (await row(w.commitment.id)).status]).toEqual([label, 'open']);
       }
@@ -395,6 +391,39 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
         say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
         return { id: text, change: () => db('sms_log').where({ id: text }).update({ status: 'failed' }) };
       }],
+      ['a visit moved off the day it was done', async (w) => {
+        const visit = await addVisit(w, { status: 'completed', created_at: new Date(Date.now() - 30 * DAY) });
+        await db('job_status_history').insert({ job_id: visit, from_status: 'on_site', to_status: 'completed', transitioned_at: later(20) });
+        say(w, fulfilledBy(`visit:${visit}`, 'status completed'));
+        return { id: visit, change: () => db('scheduled_services').where({ id: visit }).update({ scheduled_date: '2099-02-20' }) };
+      }],
+      ['a visit reverted from completed', async (w) => {
+        const visit = await addVisit(w, { status: 'completed', created_at: new Date(Date.now() - 30 * DAY) });
+        await db('job_status_history').insert({ job_id: visit, from_status: 'on_site', to_status: 'completed', transitioned_at: later(20) });
+        say(w, fulfilledBy(`visit:${visit}`, 'status completed'));
+        return { id: visit, change: () => db('scheduled_services').where({ id: visit }).update({ status: 'confirmed' }) };
+      }],
+      ['a delivery email whose recipient changed', async (w) => {
+        const other = await world();
+        const [mail] = await db('email_messages').insert({ recipient_type: 'customer', recipient_id: w.customerId, recipient_email_snapshot: `promise${w.n}@example.invalid`,
+          status: 'delivered', sent_at: later(), delivered_at: later(), text_snapshot: 'Your warranty letter is attached.' }).returning('id');
+        say(w, fulfilledBy(`email_delivery:${mail.id}`, 'warranty letter is attached'));
+        return { id: mail.id, change: () => db('email_messages').where({ id: mail.id }).update({ recipient_id: other.customerId }), cleanup: () => db('email_messages').where({ id: mail.id }).del() };
+      }],
+      ['a Gmail reply whose thread was relinked to another customer', async (w) => {
+        process.env.GATE_EMAIL_OPERATIONAL_ACTIONS = 'true';
+        process.env.GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE = new Date(Date.now() - 5 * DAY).toISOString();
+        const other = await world();
+        const thread = `thread-${w.n}`;
+        const base = { from_address: 'x@example.invalid', to_address: 'contact@wavespestcontrol.com', cc_address: '', bcc_address: '', subject: 'Warranty', gmail_thread_id: thread };
+        const [inbound] = await db('emails').insert({ ...base, gmail_id: `in-${w.n}`, body_text: 'Is the retreatment covered?', label_ids: JSON.stringify(['INBOX']), customer_id: w.customerId,
+          classification: 'customer_request', received_at: later(10) }).returning('id');
+        const [reply] = await db('emails').insert({ ...base, gmail_id: `out-${w.n}`, from_address: 'contact@wavespestcontrol.com', to_address: `promise${w.n}@example.invalid`,
+          body_text: 'Yes, the warranty covers the retreatment.', label_ids: JSON.stringify(['SENT']), customer_id: null, classification: null, received_at: later(30) }).returning('id');
+        say(w, fulfilledBy(`email_reply:${reply.id}`, 'warranty covers the retreatment'));
+        return { id: reply.id, change: () => db('emails').where({ id: inbound.id }).update({ customer_id: other.customerId }),
+          cleanup: () => db('emails').whereIn('id', [inbound.id, reply.id]).del() };
+      }],
       ['a visit moved to another service', async (w) => {
         // An "other" promise: the fixed rules never re-close it, so the reopen is the fingerprint's doing.
         const visit = await addVisit(w, { status: 'completed', created_at: new Date(Date.now() - 30 * DAY) });
@@ -405,18 +434,19 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     ];
     test.each(cases)('%s reopens the promise; unchanged, it keeps it with no model call', async (_label, setup, kind = 'other') => {
       const w = await world({ kind });
-      const { change } = await setup(w);
+      const { change, cleanup } = await setup(w);
       expect(await run(w)).toMatchObject({ closed: 1 });
       expect((await row(w.commitment.id)).fulfillment.witness_fp).toMatch(/^[0-9a-f]{32}$/);
       const before = dispatchWithFallback.mock.calls.length;
-      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
       await cc.refreshFulfillment(db, w.call.id);
       expect((await row(w.commitment.id)).status).toBe('fulfilled');
       expect(dispatchWithFallback.mock.calls.length).toBe(before);
       await change();
-      expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(w.call.id);
       await cc.refreshFulfillment(db, w.call.id);
       expect((await row(w.commitment.id)).status).toBe('open');
+      if (cleanup) await cleanup();
+      delete process.env.GATE_EMAIL_OPERATIONAL_ACTIONS;
+      delete process.env.GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE;
     });
   });
 
@@ -479,22 +509,20 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       expect((await row(w.commitment.id)).status).toBe('open');
     });
 
-    test('the watchdog\'s lapse scan lists the call only once the cited record is gone or a cited visit died, so the refresh can reopen it', async () => {
-      const { w, text } = await closedByText();
+    test('the lapse scan\'s AI arm is a bounded recheck: closes not read for 12 hours, oldest first, capped', async () => {
+      const { w } = await closedByText();
+      const other = await closedByText();
+      const now = new Date();
+      expect(await close.listRecheckCallIds(db, { now })).not.toContain(w.call.id);
+      const later13 = new Date(now.getTime() + 13 * 60 * 60 * 1000);
+      expect(await close.listRecheckCallIds(db, { now: later13 })).toEqual(expect.arrayContaining([w.call.id, other.w.call.id]));
       expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
-      await db('sms_log').where({ id: text }).del();
-      expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(w.call.id);
-
-      const booked = await world({ kind: 'schedule_visit' });
-      const visit = await addVisit(booked);
-      say(booked, fulfilledBy(`visit:${visit}`, 'status confirmed'));
-      expect(await run(booked)).toMatchObject({ closed: 1 });
-      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(booked.call.id);
-      // A rescheduled visit still keeps it (the lapse scan's older visit clause does not apply to this proof).
-      await db('scheduled_services').where({ id: visit }).update({ status: 'rescheduled' });
-      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(booked.call.id);
-      await db('scheduled_services').where({ id: visit }).update({ status: 'skipped' });
-      expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(booked.call.id);
+      // The cap holds, and a recheck stamps the close as read.
+      expect((await close.listRecheckCallIds(db, { now: later13, limit: 1 }))).toHaveLength(1);
+      await cc.refreshFulfillment(db, w.call.id);
+      const stamped = (await row(w.commitment.id)).contact_check.ai_close.rechecked_at;
+      expect(new Date(stamped).getTime()).toBeGreaterThan(now.getTime() - 1000);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
     });
 
     test('a refresh keeps the close while the cited record stands, with no model call', async () => {

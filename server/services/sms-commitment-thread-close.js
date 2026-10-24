@@ -180,4 +180,4 @@ async function revalidateThreadCompletion(trx, commitment, message, verdict) {
   return !!cited && normalized(cited.text).includes(normalized(verdict.quote));
 }
 
-module.exports = { BASIS, THREAD_PROMPT_VERSION, THREAD_POLICY, loadThreadMessages, threadFingerprint, groundThreadVerdict, verifyThreadCompletion, revalidateThreadCompletion };
+module.exports = { BASIS, THREAD_PROMPT_VERSION, THREAD_POLICY, THREAD_LIMIT, loadThreadMessages, threadFingerprint, groundThreadVerdict, verifyThreadCompletion, revalidateThreadCompletion };

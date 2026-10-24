@@ -51,7 +51,8 @@ const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive } = require(
 const { etDateString } = require('../utils/datetime-et');
 const commitments = require('./call-commitments');
 const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
-const { verifyThreadCompletion, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
+const { verifyThreadCompletion, loadThreadMessages, THREAD_LIMIT, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
+const { stringifySmsEvidence } = require('./sms-operational-extractor');
 
 const { associationFrom, evidenceBoundary, storedProof, refreshableVerdictSql, staleAiRowSql, speakerTurns, normalizeForMatch } = commitments;
 
@@ -72,25 +73,11 @@ const MAX_RUN_MS = 20 * 60 * 1000;
 const NO_MESSAGE_ID = '00000000-0000-0000-0000-000000000000';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// The checker's record types in the ledger's own record_type spelling (the
-// lapse scan and the Owed tab read these), and the table + customer column
-// each one's stand check reads (a null column: customer ownership is not a
-// plain column there, the record's existence alone is read).
+// The checker's record types in the ledger's own record_type spelling (the Owed tab reads these), and back.
+// The sms_log row of a thread confirmation is cited as a plain text.
 const LEDGER_RECORD_TYPE = { sms: 'sms_log', call: 'call_log', visit: 'scheduled_service', estimate: 'estimate',
   email_reply: 'email', email_delivery: 'email_message' };
-// A visit that was cancelled, skipped or never happened after it kept a promise no longer keeps it (a
-// rescheduled one still does: moving the visit is the booking act). The one exception is a promise TO
-// CANCEL a visit, which the cancellation itself kept: its proof carries visit_cancel and stands only
-// while the visit stays cancelled.
-const CANCELLED_VISIT_STATUSES = ['cancelled', 'canceled'];
-const DEAD_VISIT_STATUSES = [...CANCELLED_VISIT_STATUSES, 'skipped', 'no_show'];
-const sqlList = (values) => values.map((v) => `'${v}'`).join(', ');
-const RECORD_TABLES = { sms_log: ['sms_log', 'customer_id'], call_log: ['call_log', 'customer_id'],
-  scheduled_service: ['scheduled_services', 'customer_id', (q, prior) => (prior?.visit_cancel
-    ? q.whereIn('status', CANCELLED_VISIT_STATUSES) : q.whereNotIn('status', DEAD_VISIT_STATUSES))],
-  // An estimate counts while it is still the customer's: its own row, or an unowned one admitted by a live lead
-  // (call-commitments.js, the one ownership fence the evidence loader reads).
-  estimate: ['estimates', null, (q, _prior, customerId) => commitments.whereEstimateCustomerOwnership(q, customerId)], email: ['emails', null], email_message: ['email_messages', null] };
+const CHECKER_TYPE = Object.fromEntries(Object.entries(LEDGER_RECORD_TYPE).map(([checker, ledger]) => [ledger, checker]));
 
 // What the stored proof may keep of the model's quote. The Owed feed (/commitments/auto-closed) is readable by
 // every active technician, so the proof stores a record type, id and short label, and a quote only when it is
@@ -107,22 +94,6 @@ function safeQuote(recordType, quote) {
   const clean = scrubPans(redactSecrets(quote, newState())).trim().slice(0, QUOTE_CAP);
   return clean || null;
 }
-
-// The words (and the facts) a close rested on, as one md5 per record type, in SQL over the record's own
-// (unqualified) columns: stamped on the proof at close time, read again by the stand check and, in the same
-// expression, by the lapse scan. A transcript re-written by a reprocess, an edited or failed text, an email whose
-// body changed, a visit or estimate moved to another service or property: the fingerprint no longer matches and
-// the promise is owed again; the next run judges the evidence as it is now.
-const FS = "E'\\x1f'";
-const fingerprintSql = (...parts) => `md5(concat_ws(${FS}, ${parts.join(', ')}))`;
-const FINGERPRINT_SQL = {
-  sms_log: fingerprintSql("COALESCE(message_body, '')", "COALESCE(direction, '')", "(COALESCE(status, '') IN ('sent', 'delivered', 'received'))::text", "COALESCE(message_type, '')"),
-  call_log: fingerprintSql("COALESCE(transcription, '')", "COALESCE(direction, '')", "COALESCE(status, '')", "COALESCE(source, '')", "COALESCE(duration_seconds, 0)::text"),
-  email: fingerprintSql("COALESCE(body_text, '')", "COALESCE(subject, '')"),
-  email_message: fingerprintSql("COALESCE(text_snapshot, '')", "COALESCE(subject_snapshot, '')", "(COALESCE(status, '') IN ('delivered', 'opened', 'clicked'))::text", '(bounced_at IS NOT NULL)::text'),
-  scheduled_service: fingerprintSql("COALESCE(service_type, '')", "COALESCE(property_id::text, '')"),
-  estimate: fingerprintSql("COALESCE(service_interest, '')", "COALESCE(property_id::text, '')"),
-};
 
 const callEnd = (call) => require('./call-booking-link-text').callEndFor(call);
 const CALL_TIMING = ['created_at', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'direction', 'metadata'];
@@ -236,16 +207,65 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
 
 // ── The close ───────────────────────────────────────────────────────────────
 
-function proofOf(row, verdict, evidence, witnessFp) {
-  // The cited visit was kept by its cancellation (a promise to cancel it), not by a booking or field progress.
-  const record = verdict.record_type === 'visit' && evidence?.records.find((r) => r.ref === `visit:${verdict.record_id}`);
-  const visitCancel = !!record?.cancelled_at && !record.progressed_at && !record.booked_at && !record.moved_at;
+// What the verifier saw of the cited record, as one md5. The close and the stand check both take it from the
+// same place: the evidence path that admitted the proof (witnessState), serialized the way the prompt was
+// (stringifySmsEvidence). Fields that only move forward on their own (a delivery's opens and clicks, a status
+// that merely progresses, a visit's later field progress) are left out, so a record that is still what it was
+// does not read as changed; admissibleWitness re-decides everything else (ownership, property, recipient,
+// delivery, status), so no per-type column list lives here.
+const VOLATILE = ['status', 'opened_at', 'clicked_at', 'updated_at'];
+const KEEP_KEYS = {
+  // A visit: which visit, on which day and window, for what, and the booking/move stamps (not later progress).
+  visit: ['id', 'scheduled_date', 'window_start', 'service_type', 'property_id', 'booked_at', 'moved_at', 'cancelled_at'],
+  estimate: ['id', 'service_interest', 'address', 'property_id', 'text'],
+};
+function witnessFingerprint(record) {
+  const keep = KEEP_KEYS[record.type];
+  const view = {};
+  for (const key of Object.keys(record).sort()) {
+    if (keep ? keep.includes(key) : !VOLATILE.includes(key)) view[key] = record[key];
+  }
+  return md5(stringifySmsEvidence(view));
+}
+
+// The cited record as the evidence path sees it NOW, for a promise (`row`, with its call's joined fields):
+// { fingerprint } when the record is still an admissible witness, { missing: true } when it is not, { unknown:
+// true } when a truncated source may be hiding it. A source that failed outright throws (nothing is decided on it).
+async function witnessState(conn, row, { ref, thread = false, now = new Date() }) {
+  const call = await conn('call_log').where({ id: row.call_log_id }).first('id', 'customer_id', 'from_phone', 'to_phone', ...CALL_TIMING);
+  if (!call?.customer_id) return { missing: true };
+  const joined = { ...row, call_customer_id: call.customer_id, call_from_phone: call.from_phone, call_to_phone: call.to_phone,
+    ...Object.fromEntries(CALL_TIMING.map((c) => [`call_${c}`, call[c]])) };
+  const after = await evidenceBoundary(conn, joined, callOf(joined), { endOf: callEnd });
+  if (!after) return { missing: true };
+  const from = associationFrom(joined, after);
+  if (from.getTime() >= now.getTime()) return { missing: true };
+  const { current, message } = await subjectOf(conn, joined, from, null);
+  if (thread) {
+    const { records } = await loadThreadMessages(conn, message, null);
+    const found = records.find((r) => r.ref === ref);
+    if (found) return { fingerprint: md5(stringifySmsEvidence({ ref, who: found.who, at: found.created_at, text: found.text })), customerId: call.customer_id };
+    // The thread loader keeps the newest THREAD_LIMIT texts: a full page may have pushed an older one out.
+    return records.length >= THREAD_LIMIT ? { unknown: true } : { missing: true };
+  }
+  const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
+  const hard = evidence.failures.filter((f) => !f.endsWith('_truncated'));
+  if (hard.length) throw Object.assign(new Error('evidence source failed'), { code: 'evidence_source_failed' });
+  const found = evidence.records.find((r) => r.ref === ref);
+  if (!found) return evidence.failures.includes(`${ref.split(':')[0]}_truncated`) ? { unknown: true } : { missing: true };
+  if (!admissibleWitness(found, current, evidence.records)) return { missing: true };
+  return { fingerprint: witnessFingerprint(found), customerId: call.customer_id };
+}
+
+const refOf = (checkerType, id) => `${checkerType}:${id}`;
+
+function proofOf(row, verdict, witnessFp) {
   const matchedAt = verdict.matched_at ? iso(verdict.matched_at) : iso(new Date());
   const recordType = LEDGER_RECORD_TYPE[verdict.record_type] || verdict.record_type;
   return storedProof({ strength: 'association', kind: AI_CHECK_KIND, basis: AI_CHECK_BASIS, closed_agent: AGENT,
     record_type: recordType, record_id: verdict.record_id, label: RECORD_LABEL[recordType] || 'record', matched_at: matchedAt,
     quote: safeQuote(recordType, verdict.quote), check: verdict.basis === THREAD_BASIS ? THREAD_BASIS : 'record', ...(verdict.witness ? { witness: verdict.witness } : {}),
-    promise_md5: promiseMd5(row), witness_fp: witnessFp, evidence_hash: verdict.evidence_hash, extractor_version: VERSION, ...(visitCancel ? { visit_cancel: true } : {}) }, row.call_customer_id);
+    promise_md5: promiseMd5(row), witness_fp: witnessFp, evidence_hash: verdict.evidence_hash, extractor_version: VERSION }, row.call_customer_id);
 }
 
 // One transaction: the promise (never waiting: a busy row fails the close and
@@ -256,10 +276,10 @@ function proofOf(row, verdict, evidence, witnessFp) {
 // still has that customer). A lost race writes nothing.
 async function closeOnVerdict(conn, row, judged, { now }) {
   const { verdict, current, message } = judged;
-  // A close must be one the stand check can read again: no record type outside
-  // RECORD_TABLES closes (a payment cannot be cited here at all — a call promise
-  // never sets money_answerable — and this keeps it that way).
-  if (!UUID_RE.test(String(verdict.record_id)) || !RECORD_TABLES[LEDGER_RECORD_TYPE[verdict.record_type]]) return false;
+  // A close must be one the stand check can read again: only a record type the evidence path returns (a payment
+  // cannot be cited here at all — a call promise never sets money_answerable — and this keeps it that way).
+  const thread = verdict.basis === THREAD_BASIS;
+  if (!UUID_RE.test(String(verdict.record_id)) || !LEDGER_RECORD_TYPE[verdict.record_type]) return false;
   return conn.transaction(async (trx) => {
     const snapshot = (q) => q.where({ id: row.id, status: 'open' }).whereNull('human_state')
       .whereRaw(...refreshableVerdictSql()).whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at]);
@@ -272,10 +292,10 @@ async function closeOnVerdict(conn, row, judged, { now }) {
     const after = await evidenceBoundary(trx, row, lockedCall, { endOf: callEnd });
     if (!after || associationFrom(row, after).getTime() !== new Date(message.created_at).getTime()) return false;
     if (!await revalidateSmsFulfillment(trx, current, message, verdict, now)) return false;
-    const recordType = LEDGER_RECORD_TYPE[verdict.record_type] || verdict.record_type;
-    const cited = await trx(RECORD_TABLES[recordType][0]).where({ id: verdict.record_id }).first(trx.raw(`${FINGERPRINT_SQL[recordType]} AS fp`));
-    if (!cited) return false;
-    const proof = proofOf(row, verdict, judged.evidence, cited.fp);
+    // The same function the stand check uses, so the stamp and the later comparison can never disagree.
+    const state = await witnessState(trx, row, { ref: refOf(verdict.record_type, verdict.record_id), thread, now });
+    if (!state.fingerprint) return false;
+    const proof = proofOf(row, verdict, state.fingerprint);
     const written = await snapshot(trx('call_commitments'))
       .whereExists(function callStillHasThatCustomer() {
         this.select(trx.raw('1')).from('call_log').where({ id: row.call_log_id, customer_id: row.call_customer_id }).forShare();
@@ -285,44 +305,46 @@ async function closeOnVerdict(conn, row, judged, { now }) {
   });
 }
 
-// Whether an ai-check close still stands, with no model call (called by
-// refreshFulfillment's re-judge): the promise is still the one judged, the call
-// still has the customer it was judged for, and the one record it rests on
-// still exists (for that customer where the table says so) and, for a visit,
-// was not cancelled or skipped since.
+// Whether an ai-check close still stands, with no model call (called by refreshFulfillment's re-judge): the
+// promise is still the one judged, the call still has the customer it was judged for, and — by re-running the
+// SAME evidence path that admitted the proof — the cited record is still an admissible witness and still reads
+// as the verifier saw it. A source that cannot answer (a truncated channel hiding an old record) keeps the
+// close; one that failed throws, and the caller leaves the row as it is.
 async function aiCloseStands(conn, commitment, call, prior) {
   if (prior?.basis !== AI_CHECK_BASIS || commitment.party !== 'waves' || commitment.human_state) return false;
   if (prior.promise_md5 !== promiseMd5(commitment) || !call?.customer_id || prior.judged_customer_id !== call.customer_id) return false;
-  const [table, customerColumn, stillCounts] = RECORD_TABLES[prior.record_type] || [];
-  if (!table || !UUID_RE.test(String(prior.record_id))) return false;
-  const cited = await conn(table).where({ id: prior.record_id })
-    .modify((q) => { if (customerColumn) q.where(customerColumn, call.customer_id); })
-    .modify((q) => { if (stillCounts) stillCounts(q, prior, call.customer_id); })
-    .first(conn.raw(`${FINGERPRINT_SQL[prior.record_type]} AS fp`));
-  // A missing stamp never equals the fingerprint computed now.
-  return !!cited && cited.fp === prior.witness_fp;
+  const checkerType = prior.check === THREAD_BASIS ? 'sms' : CHECKER_TYPE[prior.record_type];
+  if (!checkerType || !UUID_RE.test(String(prior.record_id))) return false;
+  const state = await witnessState(conn, commitment, { ref: refOf(checkerType, prior.record_id), thread: prior.check === THREAD_BASIS });
+  const stands = state.unknown === true || (!!state.fingerprint && state.fingerprint === prior.witness_fp);
+  // Bookkeeping only (never bumps updated_at): when this close was last read again, for the recheck selector.
+  if (stands) {
+    await conn('call_commitments').where({ id: commitment.id }).update({
+      contact_check: conn.raw("COALESCE(contact_check, '{}'::jsonb) || jsonb_build_object('ai_close', COALESCE(contact_check -> 'ai_close', '{}'::jsonb) || jsonb_build_object('rechecked_at', ?::text))", [new Date().toISOString()]),
+    }).catch(() => {});
+  }
+  return stands;
 }
 
-// The watchdog's lapse scan (listLapsedAssociationCloses) asks, per closed row of
-// a call: has the cited record gone, changed owner or died? One CASE over the
-// same table map the stand check reads, with the uuid cast inside the matching
-// branch only (a text cast would defeat the primary-key index). `cc` is the
-// closed row's alias (its fulfillment), `cl` its call.
-function aiCheckLapsedSql(cc = 'cc', cl = 'cl') {
-  const record = `(${cc}.fulfillment ->> 'record_id')::uuid`;
-  // Per type: FROM + the conditions under which the cited record still holds. The fingerprint is compared last;
-  // a missing stamp never equals it.
-  const holds = {
-    scheduled_service: ['scheduled_services r', `r.id = ${record} AND r.customer_id = ${cl}.customer_id
-      AND (CASE WHEN (${cc}.fulfillment ->> 'visit_cancel') = 'true' THEN r.status IN (${sqlList(CANCELLED_VISIT_STATUSES)}) ELSE r.status NOT IN (${sqlList(DEAD_VISIT_STATUSES)}) END)`],
-    // The unaliased table name: the shared ownership predicate names its columns `estimates.`.
-    estimate: ['estimates', `estimates.id = ${record} AND ${commitments.estimateOwnershipSql(`${cl}.customer_id`)}`],
-  };
-  const branches = Object.entries(RECORD_TABLES).map(([type, [table, customerColumn]]) => {
-    const [from, where] = holds[type] || [`${table} r`, `r.id = ${record}${customerColumn ? ` AND r.${customerColumn} = ${cl}.customer_id` : ''}`];
-    return `WHEN '${type}' THEN NOT EXISTS (SELECT 1 FROM ${from} WHERE ${where} AND ${FINGERPRINT_SQL[type]} = ${cc}.fulfillment ->> 'witness_fp')`;
-  });
-  return `((${cc}.fulfillment ->> 'basis') = '${AI_CHECK_BASIS}' AND CASE (${cc}.fulfillment ->> 'record_type') ${branches.join(' ')} ELSE TRUE END)`;
+// The lapse scan's AI arm: not a field list but a bounded periodic recheck. The AI-closed promises of the last
+// 30 days that were last read (closed, or rechecked) more than RECHECK_AFTER_MS ago, oldest first, at most
+// `limit` a run; the call goes through refreshFulfillment, whose re-judge asks aiCloseStands. A close that is
+// read on the Owed queue is rechecked at once, whatever this says.
+const RECHECK_AFTER_MS = 12 * 60 * 60 * 1000;
+const RECHECK_LIMIT = 100;
+const LAPSE_DAYS = 30;
+async function listRecheckCallIds(conn, { now = new Date(), limit = RECHECK_LIMIT } = {}) {
+  const rows = await conn.raw(
+    `SELECT DISTINCT call_log_id FROM (
+       SELECT cc.call_log_id, COALESCE(cc.contact_check -> 'ai_close' ->> 'rechecked_at', cc.fulfillment ->> 'closed_at') AS last_read
+         FROM call_commitments cc
+        WHERE cc.human_state IS NULL AND cc.status = 'fulfilled'
+          AND (cc.fulfillment ->> 'closed_by') = 'promise_evidence' AND (cc.fulfillment ->> 'basis') = '${AI_CHECK_BASIS}'
+          AND (cc.fulfillment ->> 'closed_at') > ?
+          AND COALESCE(cc.contact_check -> 'ai_close' ->> 'rechecked_at', cc.fulfillment ->> 'closed_at') < ?
+        ORDER BY last_read ASC LIMIT ?) due`,
+    [new Date(now.getTime() - LAPSE_DAYS * 24 * 60 * 60 * 1000).toISOString(), new Date(now.getTime() - RECHECK_AFTER_MS).toISOString(), limit]);
+  return (rows?.rows || []).map((r) => r.call_log_id);
 }
 
 // ── The run ─────────────────────────────────────────────────────────────────
@@ -389,5 +411,5 @@ function runInBackground({ conn, callIds }) {
   return backgroundRun;
 }
 
-module.exports = { safeQuote, runCallPromiseAiClose, runInBackground, aiCheckLapsedSql, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
+module.exports = { safeQuote, runCallPromiseAiClose, runInBackground, listRecheckCallIds, witnessFingerprint, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
   VERSION, CANDIDATE_LIMIT, AI_CHECK_KIND, AI_CHECK_BASIS, AGENT, MAX_MODEL_CALLS, QUEUE_MODEL_CALLS };
