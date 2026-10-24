@@ -439,7 +439,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
           {viewed.hours.length > 0 && (
             <div style={chipGridStyle}>
               {viewed.hours.map((hour) => (
-                <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={pick} />
+                <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={pick} showRain={showRain} />
               ))}
             </div>
           )}

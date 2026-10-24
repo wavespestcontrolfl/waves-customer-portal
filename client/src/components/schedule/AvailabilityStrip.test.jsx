@@ -126,6 +126,14 @@ describe('AvailabilityStrip', () => {
     expect(screen.getByText('Wed Jan 3: no hour fits.')).toBeTruthy();
   });
 
+  it('browsed-day chips show the rain chance only on a rain surface (showRain)', () => {
+    const days = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 0, { rainChance: 55 })] }];
+    const { rerender } = render(<AvailabilityStrip availability={answer(null, days)} currentDate="2035-01-02" currentStart="12:00" onPick={() => {}} />);
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added drive');
+    rerender(<AvailabilityStrip availability={answer(null, days)} currentDate="2035-01-02" currentStart="12:00" onPick={() => {}} showRain />);
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added drive55% rain');
+  });
+
   it('the hour already in the fields is shown pressed, not offered again', () => {
     const fits = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 11 });
     render(<AvailabilityStrip availability={fits} currentDate="2035-01-02" currentStart="09:00:00" currentTechnicianId="t1" onPick={() => {}} />);

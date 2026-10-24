@@ -34,9 +34,15 @@ beforeEach(() => {
   fetcher = vi.fn(async (url) => ({
     ok: true,
     status: 200,
-    json: async () => (String(url).includes('/find-time')
-      ? { ok: true, slots: [], summary: { days: [{ date: today, status: 'open', hours: [slot(today, '10:00')] }], best: { day: [slot(today, '10:00')], week: [], week_covered: true } } }
-      : {}),
+    json: async () => {
+      if (String(url).includes('/find-time')) {
+        return { ok: true, slots: [], summary: { days: [{ date: today, status: 'open', hours: [slot(today, '10:00')] }], best: { day: [slot(today, '10:00')], week: [], week_covered: true } } };
+      }
+      if (String(url).includes('/customers/quick-add')) {
+        return { customer: { id: 'cust-1', firstName: 'Pat', lastName: 'Example', phone: '9415550100', address: '100 Example Way', city: 'Bradenton', state: 'FL', zip: '34200' } };
+      }
+      return {};
+    },
   }));
   vi.stubGlobal('fetch', fetcher);
 });
@@ -97,6 +103,25 @@ describe('CreateAppointmentModal address-first best times', () => {
     await screen.findAllByTestId('availability-hour');
     fireEvent.click(screen.getByText('+ New customer'));
     await waitFor(() => expect(screen.queryAllByTestId('availability-hour')).toEqual([]));
+  });
+
+  it('after Add customer, a reopened blank New customer block does not search the created customer\'s address (Codex #6655 r1)', async () => {
+    renderModal({ addressFirstTimes: true });
+    pickAddress();
+    await screen.findAllByTestId('availability-hour');
+    const block = screen.getByRole('button', { name: 'Add customer' }).parentElement;
+    const [first, last, phone] = Array.from(block.querySelectorAll('input'));
+    fireEvent.change(first, { target: { value: 'Pat' } });
+    fireEvent.change(last, { target: { value: 'Example' } });
+    fireEvent.change(phone, { target: { value: '9415550100' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add customer' }));
+    await screen.findByLabelText('Clear selected customer');
+    const searchesBefore = findTimeBodies().length;
+    fireEvent.click(screen.getByLabelText('Clear selected customer'));
+    fireEvent.click(screen.getByText('+ New customer'));
+    await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
+    expect(findTimeBodies().slice(searchesBefore).filter((b) => b.lat === 27.5)).toEqual([]);
+    expect(screen.queryAllByTestId('availability-hour')).toEqual([]);
   });
 
   it('gate off: a picked address with no customer searches nothing', async () => {

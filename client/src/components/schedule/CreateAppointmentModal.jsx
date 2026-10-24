@@ -2950,6 +2950,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setPropertyRefresh((n) => n + 1);
         setShowQuickAdd(false);
         setQuickAdd({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
+        // The blank address must not keep the created customer's picked
+        // address as the search subject if New customer is reopened later.
+        setQuickAddTarget(null);
       }
     } catch (e) {
       const conflict = quickAddConflictFromError(e);
