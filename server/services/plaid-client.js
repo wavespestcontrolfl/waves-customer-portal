@@ -86,7 +86,10 @@ async function call(endpoint, body) {
 // New connection: products=['transactions'] with the longest history Plaid
 // offers (the P&L is per tax year). Update mode (re-auth after
 // ITEM_LOGIN_REQUIRED): pass the item's access token and NO products.
-async function createLinkToken({ clientUserId, accessToken } = {}) {
+// `accountSelection` (update mode only) also lets the user change which of
+// the login's accounts the connection shares — "Add accounts". An account
+// left unticked there stops sharing data.
+async function createLinkToken({ clientUserId, accessToken, accountSelection = false } = {}) {
   const body = {
     client_name: 'Waves Pest Control',
     language: 'en',
@@ -95,6 +98,7 @@ async function createLinkToken({ clientUserId, accessToken } = {}) {
   };
   if (accessToken) {
     body.access_token = accessToken;
+    if (accountSelection) body.update = { account_selection_enabled: true };
   } else {
     body.products = ['transactions'];
     body.transactions = { days_requested: 730 };
@@ -117,8 +121,11 @@ async function getAccounts(accessToken) {
   };
 }
 
+// include_original_description: the bank's own wording rides along with
+// Plaid's cleaned `name` — Capital One names a Zelle payer only there
+// (services/zelle-notice.js parseZelleBankPayer).
 async function transactionsSync(accessToken, cursor, count = 500) {
-  const body = { access_token: accessToken, count };
+  const body = { access_token: accessToken, count, options: { include_original_description: true } };
   if (cursor) body.cursor = cursor;
   return call('/transactions/sync', body);
 }

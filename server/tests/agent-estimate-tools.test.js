@@ -3113,6 +3113,28 @@ describe('create_pending_estimate server reprice (P1-8)', () => {
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 
+  test('the per-line price override (linePriceOverrides) is refused by the forbidden-input wall', async () => {
+    // Same operator-only lever as the roach fee override: the estimator UI
+    // sets it, and an LLM-built engine input must never carry it.
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      engineInputs: {
+        homeSqFt: 2000,
+        services: { pest: { frequency: 'quarterly' } },
+        linePriceOverrides: { one_time_pest: { price: 1 } },
+      },
+    });
+
+    expect(result.error).toMatch(/cannot set price, cost, discount, margin, or manager-override/i);
+    expect(result.error).toMatch(/linePriceOverrides/);
+    expect(writes).toEqual([]);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
   test('a lead phone mismatch refuses the write before anything reprices', async () => {
     const { database, writes } = makeDatabase({
       lead: { id: 'lead-1', customer_id: null, estimate_id: null, phone: '9415550100', email: 'road@example.com' },

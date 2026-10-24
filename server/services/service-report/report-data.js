@@ -81,6 +81,7 @@ const {
 } = require('../../utils/technician-name');
 const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
+const { printableCitations } = require('./tip-library');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { buildReserviceReportCard } = require('./reservice-report-card');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
@@ -2114,6 +2115,12 @@ function buildProtocolPayload(record) {
         ...(tip.aftercare === true ? { aftercare: true } : {}),
         ...(tip.link && typeof tip.link.path === 'string' && tip.link.path.startsWith('/portal')
           ? { link: { label: String(tip.link.label || 'My Property'), path: tip.link.path } }
+          : {}),
+        // The sources behind the tip (GATE_TECH_TIP_SOURCES): the frozen
+        // snapshot, re-checked against the registry's host rule before it
+        // prints; never a label without an allowed https URL.
+        ...(featureGates.techTipSourcesLive?.() === true && printableCitations(tip.citations).length
+          ? { citations: printableCitations(tip.citations) }
           : {}),
       })),
     visitOutcome: protocol.visitOutcome || structured.visitOutcome || null,

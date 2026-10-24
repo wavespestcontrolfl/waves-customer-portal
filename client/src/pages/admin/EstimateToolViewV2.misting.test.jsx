@@ -286,6 +286,58 @@ describe("what the result shows", () => {
     expect(screen.queryByText("Recurring Membership")).not.toBeInTheDocument();
   });
 
+  // The misting result plus one row the engine stamped overridable.
+  const WITH_OVERRIDABLE_LINE = {
+    ...MISTING_PRICED,
+    oneTime: {
+      ...MISTING_PRICED.oneTime,
+      items: [
+        ...MISTING_PRICED.oneTime.items,
+        { service: "one_time_pest", name: "One-Time Pest", price: 224, priceOverridable: true },
+      ],
+    },
+  };
+
+  it("offers no price override for the misting installation: no engine line carries its key", async () => {
+    await generateMisting(MISTING_PRICED);
+    expect(screen.queryByRole("button", { name: "Override a line price" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the line price override closed until opened, then sends the typed amount on regenerate", async () => {
+    await generateMisting(WITH_OVERRIDABLE_LINE);
+    // One button on a regular estimate, not a second copy of every line.
+    expect(screen.queryByLabelText("Override ($)")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Override a line price" }));
+    // Only the stamped row: the installation row gets no input.
+    fireEvent.change(screen.getByLabelText("Override ($)"), { target: { value: "400" } });
+    fireEvent.change(screen.getByLabelText("Reason (internal)"), { target: { value: "carpenter ant infestation" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply overrides & regenerate" }));
+    await waitFor(() => expect(calculateBodies()).toHaveLength(2));
+    expect(calculateBodies()[1].options.linePriceOverrides).toEqual({
+      one_time_pest: { price: 400, reason: "carpenter ant infestation" },
+    });
+  });
+
+  it("drops typed, unapplied amounts when a new estimate arrives (another estimate or a plain regenerate)", async () => {
+    await generateMisting(WITH_OVERRIDABLE_LINE);
+    fireEvent.click(screen.getByRole("button", { name: "Override a line price" }));
+    fireEvent.change(screen.getByLabelText("Override ($)"), { target: { value: "400" } });
+    await generate();
+    expect(calculateBodies()[1].options.linePriceOverrides).toBeUndefined();
+    await screen.findByRole("button", { name: "Override a line price" });
+    expect(screen.queryByLabelText("Override ($)")).not.toBeInTheDocument();
+  });
+
+  it("refuses an invalid override amount in place, keeping the estimate and sending nothing", async () => {
+    await generateMisting(WITH_OVERRIDABLE_LINE);
+    fireEvent.click(screen.getByRole("button", { name: "Override a line price" }));
+    fireEvent.change(screen.getByLabelText("Override ($)"), { target: { value: "-5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply overrides & regenerate" }));
+    expect(screen.getByText(/must be a positive dollar amount/)).toHaveAttribute("role", "alert");
+    expect(screen.getByTestId("misting-plan")).toBeInTheDocument();
+    expect(calculateBodies()).toHaveLength(1);
+  });
+
   it("names the reason when the plan priced on a fallback, so the rep corrects the input", async () => {
     const plan = await generateMisting(MISTING_FALLBACK);
     expect(plan).toHaveTextContent("The nozzle count must be a whole number in range");

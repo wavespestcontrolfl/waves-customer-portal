@@ -106,9 +106,18 @@ async function activate(itemId, overrides = {}) {
       '20260813000032_bank_txn_refund_status',
       '20260928020000_plaid_bank_sync',
       '20260928020100_bank_txn_plaid_account_id',
+      // bank_transactions.original_description (the Zelle bank-feed lane);
+      // its inbound_payment_notices half skips here (no such table in SCHEMA)
+      '20261024233000_zelle_bank_feed_notices',
     ]) {
       await require(`../models/migrations/${m}`).up(mockPg);
     }
+    // The one column plaid-sync reads from the Zelle notices
+    // (noticedTransactionIds): a stand-in in SCHEMA, after the migrations.
+    await mockPg.schema.createTable('inbound_payment_notices', t => {
+      t.uuid('id').primary().defaultTo(mockPg.raw('gen_random_uuid()'));
+      t.string('plaid_transaction_id', 100).unique();
+    });
   });
 
   afterAll(async () => {
@@ -124,6 +133,7 @@ async function activate(itemId, overrides = {}) {
     // clearAllMocks keeps queued mockResolvedValueOnce values — a test that
     // queues one it never consumes would hand it to the next test
     for (const fn of [plaid.exchangePublicToken, plaid.getAccounts, plaid.transactionsSync]) fn.mockReset();
+    await mockPg('inbound_payment_notices').del();
     await mockPg('bank_transactions').del();
     await mockPg('plaid_accounts').del();
     await mockPg('plaid_items').del();
@@ -323,6 +333,57 @@ async function activate(itemId, overrides = {}) {
     expect(rows['t-c']).toBeUndefined();
     expect(rows['t-d'].suggestion).toEqual({ plaidRemoved: true });
     expect(rows['t-d'].matched_expense_id).toBe(exp2.id);
+  });
+
+  test('an open row that backs a Zelle payment notice is frozen evidence: a correction parks on it and a withdrawal flags it', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    const zelle = { name: 'Zelle', original_description: 'Zelle money received from PAT DOE' };
+    plaid.transactionsSync.mockResolvedValueOnce(page([
+      txn('t-z', 'acc-chk', -117, '2026-09-05', zelle),
+      txn('t-y', 'acc-chk', -50, '2026-09-05', zelle),
+      txn('t-x', 'acc-chk', -60, '2026-09-05', zelle),
+    ], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    await mockPg('inbound_payment_notices').insert([{ plaid_transaction_id: 't-z' }, { plaid_transaction_id: 't-y' }]);
+
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [
+      txn('t-z', 'acc-chk', -17, '2026-09-05', zelle),
+      txn('t-x', 'acc-chk', -61, '2026-09-05', zelle),
+    ], [{ transaction_id: 't-y' }], 'cursor-2'));
+    const out = await plaidSync.syncItem(itemId);
+    expect(out).toMatchObject({ updated: 1, deleted: 0, flagged: 2 });
+
+    const rows = Object.fromEntries((await mockPg('bank_transactions')).map(r => [r.plaid_transaction_id, r]));
+    expect(rows['t-z'].status).toBe('unmatched'); // still open, yet held like a reviewed row
+    expect(Number(rows['t-z'].amount)).toBe(117);
+    expect(rows['t-z'].suggestion.plaidModified).toMatchObject({ amount: 17, original_description: 'Zelle money received from PAT DOE' });
+    expect(rows['t-y'].suggestion).toEqual({ plaidRemoved: true }); // withdrawn, never deleted under the notice
+    expect(Number(rows['t-x'].amount)).toBe(61); // no notice: rewritten as before
+  });
+
+  test('the bank\'s own wording is stored; a change to it alone is a correction once the row has it, and rows synced without it never churn', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([
+      txn('t-w', 'acc-chk', -40, '2026-09-05', { name: 'Zelle', original_description: 'Zelle money received from PAT DOE' }),
+      txn('t-v', 'acc-chk', -30, '2026-09-05', { name: 'Zelle' }),
+    ], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    let rows = Object.fromEntries((await mockPg('bank_transactions')).map(r => [r.plaid_transaction_id, r]));
+    expect(rows['t-w'].original_description).toBe('Zelle money received from PAT DOE');
+    expect(rows['t-v'].original_description).toBeNull();
+    const vId = rows['t-v'].id;
+
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [
+      txn('t-w', 'acc-chk', -40, '2026-09-05', { name: 'Zelle', original_description: 'Zelle money received from SAM ROE' }),
+      txn('t-v', 'acc-chk', -30, '2026-09-05', { name: 'Zelle', original_description: 'Zelle money received from SAM ROE' }),
+    ], [], 'cursor-2'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ updated: 1 });
+    rows = Object.fromEntries((await mockPg('bank_transactions')).map(r => [r.plaid_transaction_id, r]));
+    expect(rows['t-w'].original_description).toBe('Zelle money received from SAM ROE');
+    expect(rows['t-v'].id).toBe(vId); // NULL before: left alone
+    expect(rows['t-v'].original_description).toBeNull();
   });
 
   test('an open row shelved from the ledger Inbox (Later / Income) is reviewed: a correction parks, a withdrawal flags, the decision stays', async () => {
@@ -804,6 +865,49 @@ async function activate(itemId, overrides = {}) {
     const item = await mockPg('plaid_items').where({ id: itemId }).first();
     expect(item).toMatchObject({ status: 'setup', sync_cursor: null });
     expect(await mockPg('bank_transactions').count('* as n').first()).toEqual({ n: '0' });
+  });
+
+  const SECOND = { account_id: 'acc-second', name: 'Second Checking', mask: '0002', type: 'depository', subtype: 'checking' };
+
+  test('"Add accounts": a newly shared account is registered off and the connection waits for confirmation', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    // Plaid lists the account before it has delivered any of its transactions
+    plaid.getAccounts.mockResolvedValueOnce({ accounts: [...ACCOUNTS, SECOND] });
+    expect(await plaidSync.refreshAccounts(itemId)).toEqual({ added: 1, setup: true, unshared: [] });
+    expect(await mockPg('plaid_items').where({ id: itemId }).first('status')).toEqual({ status: 'setup' });
+    expect(await mockPg('plaid_accounts').where({ account_id: 'acc-second' }).first())
+      .toMatchObject({ plaid_item_id: itemId, enabled: false, mask: '0002' });
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ skipped: 'setup' });
+    expect(plaid.transactionsSync).not.toHaveBeenCalled();
+
+    await activate(itemId, { 'acc-second': { enabled: true } });
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-second', 'acc-second', -107.1, '2026-09-05')], [], [], 'cursor-1'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ inserted: 1 });
+  });
+
+  test('"Add accounts": an imported account left unticked is reported, and update mode re-authenticates', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    await mockPg('plaid_items').where({ id: itemId }).update({ status: 'login_required' });
+    // the card was unticked in the bank's screen (the loan was never imported)
+    plaid.getAccounts.mockResolvedValueOnce({ accounts: ACCOUNTS.filter(a => a.account_id === 'acc-chk') });
+    const out = await plaidSync.refreshAccounts(itemId);
+    expect(out).toMatchObject({ added: 0, setup: false });
+    expect(out.unshared.map(a => a.name)).toEqual(['Spark Card']);
+    expect(await mockPg('plaid_items').where({ id: itemId }).first('status')).toEqual({ status: 'active' });
+  });
+
+  test('"Add accounts" refuses to register when the connection changed while Plaid answered', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.getAccounts.mockImplementationOnce(async () => {
+      await mockPg('plaid_items').where({ id: itemId }).update({ updated_at: mockPg.fn.now() });
+      return { accounts: [...ACCOUNTS, SECOND] };
+    });
+    await expect(plaidSync.refreshAccounts(itemId)).rejects.toMatchObject({ status: 409 });
+    expect(await mockPg('plaid_accounts').where({ account_id: 'acc-second' }).first()).toBeUndefined();
+    expect(await mockPg('plaid_items').where({ id: itemId }).first('status')).toEqual({ status: 'active' });
   });
 
   test('feed setup waits for a ledger import that holds the ledger lock, then judges the rows that import wrote', async () => {

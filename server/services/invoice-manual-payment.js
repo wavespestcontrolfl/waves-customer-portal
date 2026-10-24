@@ -197,7 +197,7 @@ async function recordManualPayment(id, {
     }
   }
   if (settlementFence && !(await settlementFence(db))) {
-    throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed) — nothing was recorded');
+    throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed, or the bank changed or withdrew the payment) — nothing was recorded');
   }
   const triagedPiId = invoice.stripe_payment_intent_id || null;
   const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });
@@ -390,7 +390,7 @@ async function recordManualPayment(id, {
     throw refusal(409, `Invoice amount due is $${(actualCents / 100).toFixed(2)}, not the $${(expectedCents / 100).toFixed(2)} being recorded — nothing was recorded`, { amountMismatch: updatedInvoice.amountMismatch });
   }
   if (updatedInvoice?.fenceLost) {
-    throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed) — nothing was recorded');
+    throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed, or the bank changed or withdrew the payment) — nothing was recorded');
   }
   if (updatedInvoice?.visitNeverRan) {
     throw refusal(409, `This invoice's visit is ${updatedInvoice.visitNeverRan.replace('_', '-')} — nothing was recorded. Void or reissue the invoice, or record the money as account credit.`, { visitNeverRan: updatedInvoice.visitNeverRan });

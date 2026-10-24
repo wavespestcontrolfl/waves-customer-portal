@@ -44,6 +44,8 @@ describe('lawn-grass-context', () => {
       noProgram: false,
       grassType: 'bermuda',
       grassTypeLabel: 'Bermuda',
+      // a profile row from before the source column: who set it is unknown
+      grassTypeSource: null,
       trackKey: 'bermuda',
       sunExposure: 'full_sun',
       irrigationSystem: 'in_ground',
@@ -110,6 +112,19 @@ describe('lawn-grass-context', () => {
     expect(ctx.trackKey).toBe(null);
   });
 
+  test('says who set the grass: the profile\'s own source, or the customer record when there is no profile grass (tips with facts, 2026-10-24)', async () => {
+    const fromProfile = await loadCustomerGrassContext('cust-6', fakeKnex({
+      customer_turf_profiles: { grass_type: 'zoysia', grass_type_source: 'photo_ai' },
+      customers: { lawn_type: 'St. Augustine' },
+    }));
+    expect(fromProfile.grassTypeSource).toBe('photo_ai');
+    const fromCustomer = await loadCustomerGrassContext('cust-7', fakeKnex({
+      customer_turf_profiles: { grass_type: null },
+      customers: { lawn_type: 'St. Augustine' },
+    }));
+    expect(fromCustomer).toMatchObject({ grassType: 'st_augustine', grassTypeSource: 'customer_record' });
+  });
+
   test('returns an all-null context for a missing customerId', async () => {
     const knex = fakeKnex({});
     const ctx = await loadCustomerGrassContext(null, knex);
@@ -117,6 +132,7 @@ describe('lawn-grass-context', () => {
       noProgram: false,
       grassType: null,
       grassTypeLabel: null,
+      grassTypeSource: null,
       trackKey: null,
       sunExposure: null,
       irrigationSystem: null,

@@ -55,6 +55,7 @@ const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first
 const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
 const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun } = require('../services/service-report/tip-library');
+const { loadTechTipYard } = require('../services/service-report/tech-tip-yard');
 
 const {
   IRRIGATION_SIZING_FIELDS,
@@ -746,12 +747,25 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         .first('reviewed_findings', 'added_details')
         .catch(() => null)
       : null;
+    // Tips with facts (GATE_TECH_TIP_SOURCES, read at call time): the picker
+    // shows the words the completion freezes and only the tips that fit this
+    // yard (grass, irrigation, the visit address's county and city).
+    const tipSources = require('../config/feature-gates').techTipSourcesLive?.() === true;
+    const yard = tipSources
+      ? await loadTechTipYard(db, {
+        customerId: svc.customer_id,
+        zip: svc.service_address_zip || svc.current_property_zip,
+        city: svc.service_address_city || svc.current_property_city,
+      })
+      : null;
     const library = tipsForVisit({
       serviceLine,
       serviceKey,
       serviceKeys: addonKeys,
       findings: [...lawnFindingsFromAssessment(lawnAssessment), ...lawnFindingsFromRun(lawnRun)],
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
+      sourced: tipSources,
+      yard,
     });
     // The 90-day window is ET calendar days: the database's own current
     // date follows the session zone (UTC on Railway) and would roll the
@@ -799,6 +813,8 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       lastSent,
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
       ...(completionChoicesEnabled ? { previousRecommendations } : {}),
+      // What the tips were matched to, for the picker's one-line note.
+      ...(yard ? { yard: { grass: yard.grassTrusted ? yard.grassLabel : null, irrigationSystem: yard.irrigationSystem, county: yard.county } } : {}),
     });
   } catch (err) { next(err); }
 });

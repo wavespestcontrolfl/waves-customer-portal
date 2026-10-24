@@ -42,13 +42,34 @@
  * `services`) whose copy names the treatment carries `namesWork: true`, and
  * the sheet never lifts it by a word of the note either.
  *
+ * A tip may carry `sources` (tips with facts, owner 2026-10-24): one or two
+ * `{ fact, label, url }` entries naming the fact-register facts
+ * (email-division/fact-register-data.js) whose quoted words back the copy,
+ * the label the customer reads ("UF/IFAS") and the page the link opens
+ * (one of the fact's sourceUrls; the fact's first when absent). A tip whose
+ * facts change its words also carries `sourcedCopy`. Behind
+ * GATE_TECH_TIP_SOURCES the completion freezes `sourcedCopy` (else `copy`)
+ * and the sources as `citations: [{ label, url }]`, and the live report prints
+ * them as links after the sentence; with the gate off the freeze is exactly
+ * what it was. The lint (tip-library.test.js) holds every figure in the
+ * sourced words to the facts' quotes.
+ *
+ * Behind the same gate a tip may also be matched to the yard (owner
+ * 2026-10-24): `yard: { grass: [...], irrigation: 'system', county: [...],
+ * city: [...] }` and `showMonths: [1-12]`. The picker leaves a tip out when
+ * the yard does not match (yardMatches) or the visit falls outside its
+ * months. Grass, county and city need a known fact (fail closed); an
+ * irrigation tip hides only where the yard is known to have no system. With
+ * the gate off, nothing is filtered.
+ *
  * Search happens on the client (the registry is small and ships whole);
  * `keywords` are the tech's vocabulary so a query typed at the truck hits.
  */
 
-const { etParts } = require('../../utils/datetime-et');
+const { etParts, etDateString } = require('../../utils/datetime-et');
 const { customerCopyViolations } = require('./technician-report-copy');
 const { detectServiceLine } = require('./service-line-configs');
+const { FACTS: REGISTER_FACTS } = require('../email-division/fact-register-data');
 
 const SERVICE_LINES = Object.freeze(['pest', 'lawn', 'mosquito', 'termite', 'rodent', 'tree_shrub']);
 const SEASONS = Object.freeze(['wet', 'dry', 'all']);
@@ -58,6 +79,15 @@ const TIP_PESTS = Object.freeze(['Ants', 'Roaches', 'Spiders', 'Silverfish', 'Wa
 // The "write your own" line: one sentence. The picker enforces the same
 // maxLength; the server rejects, never trims.
 const MAX_CUSTOM_TIP_CHARS = 240;
+// Where a tip's source link may point (owner 2026-10-24): public-health,
+// extension, water-district, wildlife and county authorities, and PubMed for
+// a study. A host matches itself or any subdomain; never add a bare
+// state.fl.us, which would admit every state host.
+const CITATION_HOSTS = Object.freeze([
+  'cdc.gov', 'epa.gov', 'ufl.edu', 'fdacs.gov', 'floridahealth.gov', 'nih.gov', 'usda.gov',
+  'swfwmd.state.fl.us', 'myfwc.com', 'scgov.net', 'mymanatee.org', 'charlottecountyfl.gov', 'flsenate.gov',
+]);
+const MAX_CITATION_LABEL_CHARS = 60;
 
 // SWFL rain season, June–October. This is the rainfall calendar (standing
 // water, humidity), not turf growth — lawn-seasonality's peak/shoulder/dormant
@@ -227,6 +257,8 @@ const TIPS = Object.freeze([
   {
     id: 'moisture_ac_drip', group: 'moisture', label: 'A/C condensate line',
     pests: ['Ants', 'Roaches'], keywords: ['ac', 'condensate', 'drip', 'slab', 'ants'], lines: ['pest'], season: 'all',
+    sources: [{ fact: 'fact-tip-moisture-ac-drip', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
+    sourcedCopy: "Where the A/C condensate line drips, the soil against the slab never dries, and ants and roaches follow that moisture to the foundation. UF/IFAS gives the same advice for termites: point condensate lines away from the house. A short extension into the bed lets that strip dry out.",
     copy: "Your A/C condensate line runs all summer, and where it drips the soil against the slab never dries. Ants and roaches follow that moisture gradient straight to the foundation. If the line ends at the wall, a short extension that carries it a couple of feet into the bed makes that strip dry again.",
   },
   {
@@ -247,6 +279,8 @@ const TIPS = Object.freeze([
   {
     id: 'moisture_ac_auto', group: 'moisture', label: 'A/C fan on Auto, not On',
     pests: ['Roaches', 'Silverfish'], keywords: ['thermostat', 'humidity', 'silverfish', 'booklice'], lines: ['pest'], season: 'wet',
+    sources: [{ fact: 'fact-tip-indoor-humidity-epa', label: 'EPA', url: 'https://www.epa.gov/mold/brief-guide-mold-moisture-and-your-home' }],
+    sourcedCopy: "Roaches, silverfish, and booklice all track indoor humidity. With the thermostat fan set to On, the coil re-evaporates the water it just pulled out, and on Auto the house stays drier. The EPA's guidance is to keep indoor humidity below 60 percent, ideally 30 to 50.",
     copy: "Roaches, silverfish, and booklice all track indoor humidity. With the thermostat fan set to On, the coil re-evaporates the water it just pulled out; on Auto the house settles around 50% humidity, and that takes away the conditions they establish in.",
   },
 
@@ -254,6 +288,7 @@ const TIPS = Object.freeze([
   {
     id: 'light_warm_bulbs', group: 'lighting', label: 'LED porch bulbs',
     pests: ['Spiders', 'Crickets'], keywords: ['porch', 'light', 'bulb', 'led', 'spiders', 'moths'], lines: ['pest', 'mosquito'], season: 'all',
+    sources: [{ fact: 'fact-tip-led-bulbs-insect-attraction', label: 'Ecology and Evolution, 2016', url: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/' }],
     copy: "Go LED on the porch. In a 2016 field study, LED bulbs drew about four times fewer insects than incandescent bulbs and about half as many as compact fluorescents, and warm versus cool white made no difference. Fewer insects at the door means fewer spiders and geckos following them.",
   },
   {
@@ -264,6 +299,7 @@ const TIPS = Object.freeze([
   {
     id: 'light_aim_away', group: 'lighting', label: 'Aim landscape lights away',
     pests: ['Spiders'], keywords: ['landscape', 'uplight', 'spotlight', 'entry'], lines: ['pest'], season: 'all',
+    sources: [{ fact: 'fact-tip-led-bulbs-insect-attraction', label: 'Ecology and Evolution, 2016', url: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/' }],
     copy: "Uplights pointed back at the walls gather insects at the entries every night. Turning them out toward the yard moves that crowd away from the door, and LED bulbs draw fewer insects to begin with.",
   },
 
@@ -271,11 +307,15 @@ const TIPS = Object.freeze([
   {
     id: 'ext_shrub_clearance', group: 'exterior', label: "A hand's width off the wall",
     namesWork: true, keywords: ['shrubs', 'hedge', 'trim', 'branches', 'wall'], lines: ['pest', 'tree_shrub'], season: 'all',
+    sources: [{ fact: 'fact-tip-limbs-highway-roof-rats', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1397' }],
+    sourcedCopy: "Branches touching the house are a bridge over the treated band along the foundation. UF/IFAS calls limbs that touch the house a highway for rodents, and ants and roaches use it too, so the treatment never touches them. Trim to a hand's width of daylight between plant and wall.",
     copy: "Branches touching the house are a bridge over the treated band along the foundation — ants and roaches walk the branch, not the ground, and the treatment never touches them. Trim to a hand's width of daylight between plant and wall and the bridge is closed.",
   },
   {
     id: 'ext_mulch_gap', group: 'exterior', label: 'Pull mulch back from the slab',
     keywords: ['mulch', 'foundation', 'slab', 'termite', 'bed'], lines: ['pest', 'termite'], season: 'all',
+    sources: [{ fact: 'fact-tip-ext-mulch-gap', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN651' }],
+    sourcedCopy: "Mulch piled against the block holds moisture and hides the base of the wall. UF/IFAS advises keeping about a 6-inch inspection space there and a mulch layer under 2 inches thick within a foot of the foundation, so termites lose a covered route up the wall.",
     copy: "Mulch piled against the block holds moisture and hides the base of the wall where I need to see. Pull it back a few inches and keep it below the top of the slab — that strip dries out, and termites lose a covered route up the wall.",
   },
   {
@@ -291,6 +331,8 @@ const TIPS = Object.freeze([
   {
     id: 'ext_palm_roof', group: 'exterior', label: 'Palm fronds off the roof',
     pests: ['Ants', 'Roaches'], keywords: ['palm', 'fronds', 'roof', 'rats', 'branches'], lines: ['rodent', 'pest', 'tree_shrub'], season: 'all',
+    sources: [{ fact: 'fact-tip-limbs-highway-roof-rats', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1397' }],
+    sourcedCopy: "Fronds and branches touching the roofline are a highway, UF/IFAS says, and a roof rat can jump about three feet straight up and more than four feet across. Several feet of clearance is exclusion without a single trap, and ants and roaches lose the same route into the soffit.",
     copy: "Fronds and branches touching the roofline are a highway. Roof rats climb better than they burrow, and ants and roaches use the same route into the soffit. A few feet of clearance is exclusion without a single trap.",
   },
   {
@@ -303,26 +345,36 @@ const TIPS = Object.freeze([
   {
     id: 'water_weekly_dump', group: 'water', label: 'Tip out standing water weekly',
     keywords: ['water', 'buckets', 'saucers', 'toys', 'tarp', 'mosquito'], lines: ['mosquito'], season: 'wet',
+    sources: [{ fact: 'fact-tip-water-weekly-dump', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN594' }],
+    sourcedCopy: "Mosquitos need very little water and not much time. UF/IFAS puts the Asian tiger mosquito at five to ten days from larva to pupa and two more to adult, and its eggs can survive drying out for up to a year. A weekend walk-around to tip out and scrub saucers, buckets, toys, and tarps breaks the cycle.",
     copy: "Mosquitos need about a bottle cap of water and roughly a week to go from egg to adult. One walk-around every weekend to tip out saucers, buckets, toys, and tarps breaks the cycle on your own property before they ever fly.",
   },
   {
     id: 'water_bromeliads', group: 'water', label: 'Flush bromeliads weekly',
     keywords: ['bromeliad', 'plants', 'cups', 'water', 'larvae'], lines: ['mosquito'], season: 'all',
+    sources: [{ fact: 'fact-tip-water-bromeliads', label: 'UF/IFAS', url: 'https://blogs.ifas.ufl.edu/sarasotaco/2024/06/21/mosquito-faqs/' }],
+    sourcedCopy: "Bromeliad cups hold water, and UF/IFAS Extension in Sarasota County notes it takes only a bottle cap's worth to breed mosquitos. They're the most productive breeding site I find in SWFL yards, so flush the cups with the hose once a week before the larvae can mature.",
     copy: "If you have bromeliads, the cup of each plant holds water, and they're the most productive mosquito breeding site I find in SWFL yards. Flush the cups with the hose once a week so the larvae wash out before they can mature.",
   },
   {
     id: 'water_bird_bath', group: 'water', label: 'Change bird bath water every 3 days',
     keywords: ['bird bath', 'fountain', 'water'], lines: ['mosquito'], season: 'all',
+    sources: [{ fact: 'fact-tip-water-bird-bath', label: 'Florida Dept. of Health', url: 'https://www.floridahealth.gov/2024/10/08/fdoh-urges-floridians-to-drain-and-cover-to-prevent-mosquito-bites/' }],
+    sourcedCopy: "The Florida Department of Health's rule for birdbaths and pet bowls is to empty and clean them at least twice a week, so the water never sits long enough to carry larvae through to adults. Fountains and bubblers do the same job on their own, since larvae don't develop in moving water.",
     copy: "Water changed every few days never reaches the pupal stage. Fountains and bubblers do the same job on their own — larvae can't develop in moving water.",
   },
   {
     id: 'water_gutters', group: 'water', label: 'Keep gutters draining',
     keywords: ['gutters', 'downspout', 'roof', 'storm'], lines: ['mosquito', 'pest'], season: 'wet',
+    sources: [{ fact: 'fact-tip-water-gutters', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1045' }],
+    sourcedCopy: "A clogged gutter holds water for days after a storm, a nursery right above the entry, and cleaning out eaves and gutters is the first item on UF/IFAS's mosquito control list for homeowners. Downspouts should carry water a few feet from the foundation, not dump it at the slab.",
     copy: "A clogged gutter holds water for days after a storm — a nursery right above the entry. Downspouts should carry water a few feet from the foundation, not dump it at the slab.",
   },
   {
     id: 'water_lanai_drains', group: 'water', label: 'Flush lanai and patio drains',
     keywords: ['drain', 'lanai', 'patio', 'catch basin'], lines: ['mosquito'], season: 'wet',
+    sources: [{ fact: 'fact-tip-water-lanai-drains', label: 'CDC', url: 'https://www.cdc.gov/mosquitoes/about/life-cycle-of-culex-mosquitoes.html' }],
+    sourcedCopy: "Floor drains and catch basins on the lanai hold a few inches of still water between rains. The CDC says a Culex mosquito lays a raft of 100 to 300 eggs on still water like that, and an egg becomes an adult in 7 to 10 days. A bucket of water down each one weekly flushes the larvae before then.",
     copy: "Floor drains and catch basins on the lanai hold a few inches of still water between rains. A bucket of water down each one weekly flushes the larvae before they mature.",
   },
   {
@@ -335,6 +387,8 @@ const TIPS = Object.freeze([
   {
     id: 'interior_pet_bowls', group: 'kitchen', label: 'Pet bowls up overnight',
     pests: ['Ants'], keywords: ['pet', 'dog', 'cat', 'bowl', 'food', 'ants'], lines: ['pest'], season: 'all',
+    sources: [{ fact: 'fact-tip-interior-pet-bowls', label: 'EPA', url: 'https://www.epa.gov/safepestcontrol/dos-and-donts-pest-control' }],
+    sourcedCopy: "A bowl left down is an open food and water source all night, and it's the most common thing I trace an ant trail back to. The EPA's pest-control advice says not to leave pet food and water out overnight. Up at bedtime, down at breakfast.",
     copy: "A bowl left down is an open food and water source all night, and it's the most common thing I trace an ant trail back to. Up at bedtime, down at breakfast.",
   },
   {
@@ -345,11 +399,15 @@ const TIPS = Object.freeze([
   {
     id: 'interior_sealed_pantry', group: 'kitchen', label: 'Seal flour, rice, cereal, pet food',
     keywords: ['pantry', 'flour', 'rice', 'cereal', 'moths', 'weevils'], lines: ['pest'], season: 'all',
+    sources: [{ fact: 'fact-tip-interior-sealed-pantry', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN153' }],
+    sourcedCopy: "Pantry pests usually arrive inside a bag from the store, and UF/IFAS says dog food and bird seed are the spots people usually overlook. Sealed containers keep one bad bag from spreading to the whole shelf, and they let you spot which one it was.",
     copy: "Pantry pests usually arrive inside the bag from the store. Sealed containers keep one bad bag from spreading to the whole shelf, and they let you spot which one it was.",
   },
   {
     id: 'interior_range_grease', group: 'kitchen', label: 'Degrease behind the range',
     pests: ['Roaches'], keywords: ['stove', 'range', 'grease', 'oven', 'german roach'], lines: ['pest'], season: 'all',
+    sources: [{ fact: 'fact-tip-german-cockroach-sanitation', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1190' }],
+    sourcedCopy: "The grease film behind and under a range is a calorie source that can sustain a German roach population on its own, which is why UF/IFAS puts sanitation beside treatment in its German cockroach program. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
     copy: "The grease film behind and under a range is a calorie source that can sustain a German roach population on its own. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
   },
   {
@@ -362,6 +420,8 @@ const TIPS = Object.freeze([
   {
     id: 'seal_door_sweeps', group: 'sealing', label: 'Replace worn door sweeps',
     keywords: ['door', 'sweep', 'gap', 'daylight', 'garage', 'mice'], lines: ['pest', 'rodent'], season: 'all',
+    sources: [{ fact: 'fact-tip-seal-door-sweeps', label: 'CDC', url: 'https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html' }],
+    sourcedCopy: "If you can see daylight under a door, that's the gap. The CDC puts a mouse through a hole about a quarter inch wide, the width of a pencil. The bottom corners of the garage door are the entry I find most often, and a new sweep closes it.",
     copy: "If you can see daylight under a door, that's the gap. A mouse fits through about a quarter inch, a rat through a half. The bottom corners of the garage door are the entry I find most often, and a new sweep closes it.",
   },
   {
@@ -401,11 +461,15 @@ const TIPS = Object.freeze([
   {
     id: 'termite_wood_soil', group: 'termite', label: 'Break wood-to-soil contact',
     keywords: ['fence', 'post', 'deck', 'trellis', 'soil', 'termite'], lines: ['termite'], season: 'all',
+    sources: [{ fact: 'fact-tip-termite-wood-soil', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
+    sourcedCopy: "Fence posts, deck supports and trellises sitting in soil are a subterranean termite's easiest route into wood, and removing wood-to-ground contact is the first step UF/IFAS lists for keeping them out. A concrete or metal footing breaks that contact.",
     copy: "Fence posts, deck supports, and trellises in direct contact with soil are a subterranean termite's easiest route into wood. Where you can, a concrete or metal footing breaks that contact and puts the wood back where I can inspect it.",
   },
   {
     id: 'termite_slab_edge', group: 'termite', label: 'Keep the slab edge visible',
     keywords: ['slab', 'grade', 'soil', 'stucco', 'mud tube'], lines: ['termite'], season: 'all',
+    sources: [{ fact: 'fact-tip-termite-slab-edge', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
+    sourcedCopy: "Soil or mulch above the slab covers the inspection gap and lets termites tube into the wall unseen. UF/IFAS calls for at least 6 inches between the soil or mulch line and the bottom of the siding. A visible slab edge is your early warning: a mud tube there is easy to spot.",
     copy: "Soil or mulch above the top of the slab covers the inspection gap and lets termites tube straight into the wall unseen. Keeping a few inches of slab edge visible all the way around is your early warning — a mud tube there is easy to spot.",
   },
   {
@@ -421,6 +485,7 @@ const TIPS = Object.freeze([
     findings: ['gray_leaf_spot', 'large_patch'],
     // The order sentence is dated: revisit when SWFWMD's Modified Phase III
     // one-day watering order ends (through 2027-03-31 as of 2026-10-24).
+    sources: [{ fact: 'fact-tip-lawn-water-morning', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH040' }, { fact: 'fact-swfwmd-modified-phase-iii-water-shortage', label: 'SWFWMD' }],
     copy: "Water in the early-morning hours. UF/IFAS says dew is already on the grass from about 2 to 8 a.m., so a run then adds the least wet time, while evening watering invites disease. Under the water-shortage order through March 31, 2027, lawn watering has to end by 4 a.m.",
   },
   {
@@ -433,12 +498,14 @@ const TIPS = Object.freeze([
     // (migration 20260828000002). The live note renders the My Property link.
     condition: 'irrigation_on_file',
     link: { label: 'My Property', path: '/portal?tab=property' },
+    yard: { irrigation: 'system' },
     copy: "If you add your irrigation settings to your Waves portal — the watering days, run minutes per zone, and whether you have a rain sensor — under My Property, I can compare what the lawn is actually getting against what it needs each season and adjust the program to match. It takes about two minutes and makes every lawn report after it more accurate.",
   },
   {
     id: 'lawn_sharp_blade', group: 'lawn', label: 'Sharpen the mower blade',
     keywords: ['mower', 'blade', 'mow', 'brown tips'], lines: ['lawn'], season: 'all',
     findings: ['scalping'],
+    sources: [{ fact: 'fact-tip-lawn-sharp-blade', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/lawns/maintenance-and-care/best-care-practices/' }],
     copy: "A dull blade tears the grass instead of cutting it. UF/IFAS says the ragged cut gives the lawn a brownish cast and leaves it more open to pests and disease, so sharpen the blade monthly while the grass is growing.",
   },
 
@@ -451,48 +518,64 @@ const TIPS = Object.freeze([
     id: 'lawn_bag_clippings', group: 'lawn', label: 'Mow the sick spot last',
     keywords: ['clippings', 'bag', 'mulch', 'fungus', 'leaf spot', 'mower'], lines: ['lawn'], season: 'all',
     findings: ['gray_leaf_spot', 'large_patch'], months: [10],
+    sources: [{ fact: 'fact-tip-lawn-bag-clippings', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH040' }],
     copy: "Mowing can carry leaf disease from sick grass to healthy grass. UF/IFAS says to mow a diseased area last and wash the mower off afterward to clear the infected clippings. If a crew mows for you, ask them to do the same.",
   },
   {
     id: 'lawn_shade_dry_between', group: 'lawn', label: 'Let shaded areas dry between waterings',
     keywords: ['shade', 'wet', 'patch', 'fungus', 'large patch', 'irrigation'], lines: ['lawn'], season: 'all',
     findings: ['large_patch', 'shade'], months: [10],
+    showMonths: [11, 12, 1, 2, 3, 4, 5],
+    sources: [{ fact: 'fact-large-patch', label: 'UF/IFAS' }],
+    sourcedCopy: "Large patch is a cool-weather fungus. UF/IFAS sees it mostly from November through May, below 80°F, and infection starts when leaves stay wet for 48 hours or more. Letting shaded spots dry out between waterings takes that away.",
     copy: "Turf in the shade stays wet much longer than turf in full sun, and wet shaded turf is where large patch and other fungus get started. If one sprinkler zone covers both sun and shade, check that the shaded part is not still soggy when the sunny part is dry.",
   },
   {
     id: 'lawn_skip_extra_nitrogen', group: 'lawn', label: 'Skip the extra nitrogen on a weak lawn',
     keywords: ['fertilizer', 'nitrogen', 'yellow', 'weak', 'root rot', 'take-all'], lines: ['lawn'], season: 'all',
     findings: ['take_all', 'large_patch'], months: [10],
+    sources: [{ fact: 'fact-turf-disease-nitrogen-balance', label: 'UF/IFAS' }],
+    sourcedCopy: "When a lawn looks yellow and thin, the first thought is to feed it. UF/IFAS warns that too much nitrogen encourages brown patch and gray leaf spot. Check with me before adding fertilizer of your own, and I'll tell you what the lawn needs.",
     copy: "When a lawn looks yellow and thin, the first thought is to feed it. If the roots are the problem, extra nitrogen pushes leaf growth the roots cannot keep up with. Check with me before adding fertilizer of your own, and I will tell you what the lawn needs.",
   },
   {
     id: 'lawn_dont_pull_sedge', group: 'lawn', label: "Don't pull sedge",
     keywords: ['sedge', 'nutsedge', 'kyllinga', 'pull', 'tubers', 'weeds'], lines: ['lawn'], season: 'all',
     findings: ['sedges'], months: [10],
+    sources: [{ fact: 'fact-tip-lawn-dont-pull-sedge', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP569' }],
+    sourcedCopy: "Sedge grows from small underground tubers, and UF/IFAS says yellow and purple nutsedge can make 4 to 12 million of them per acre. Pulling takes the top and leaves the tubers to sprout again, so leave it in place and point it out to me.",
     copy: "Sedge grows from small underground tubers, and pulling the plant usually leaves the tubers behind to send up new ones. Pulling can leave you with more sedge than you started with. Leave it in place and point it out to me.",
   },
   {
     id: 'lawn_dollarweed_wet_soil', group: 'lawn', label: 'Dollarweed likes soil that stays wet',
     keywords: ['dollarweed', 'pennywort', 'wet', 'sprinkler', 'drainage', 'weeds'], lines: ['lawn'], season: 'all',
     findings: ['dollarweed'], months: [10],
+    sources: [{ fact: 'fact-tip-lawn-dollarweed-wet-soil', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP634' }],
+    sourcedCopy: "UF/IFAS calls dollarweed a reliable sign of wet ground. If it keeps coming back in one spot, look for a sprinkler head that overlaps its neighbor, a small leak, or a low spot that holds water. Fixing the wet spot is usually the first step.",
     copy: "Dollarweed thrives where the soil stays wet. If it keeps coming back in one spot, look for a sprinkler head that overlaps its neighbor, a small leak, or a low spot that holds water. Correcting the wet spot is usually the first step.",
   },
   {
     id: 'lawn_chinch_hot_edge', group: 'lawn', label: 'Watch the hot strip by the driveway',
     keywords: ['chinch', 'chinch bugs', 'driveway', 'sidewalk', 'edge', 'hot', 'dry'], lines: ['lawn'], season: 'all',
     findings: ['chinch_bugs', 'drought'], months: [10],
+    sources: [{ fact: 'fact-southern-chinch-bug', label: 'UF/IFAS' }],
+    sourcedCopy: "UF/IFAS says chinch bug damage shows up first in water-stressed spots along the edges of the lawn and in full sun, and their numbers peak in early July. Make sure the sprinklers reach the strip by the driveway, and tell me if it yellows while the rest stays green.",
     copy: "The strip of lawn along a driveway, sidewalk, or street heats up first and dries out first, and that is where chinch bugs like to settle. Make sure the sprinklers reach that strip, and let me know if it starts to yellow while the rest of the lawn stays green.",
   },
   {
     id: 'lawn_moths_at_dusk', group: 'lawn', label: 'Moths at dusk can mean caterpillars',
     keywords: ['moths', 'webworm', 'sod webworm', 'armyworm', 'chewed', 'caterpillar', 'dusk'], lines: ['lawn'], season: 'all',
     findings: ['sod_webworm', 'armyworm'], months: [10],
+    sources: [{ fact: 'fact-tip-lawn-moths-at-dusk', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/care/pests-and-diseases/pests/tropical-sod-webworm/' }],
+    sourcedCopy: "Webworm damage that seems to show up overnight usually isn't. UF/IFAS says by then the caterpillars have likely been feeding for several days, and in South Florida they peak from September to November. Small tan moths flying up from the grass are the early clue.",
     copy: "Small tan moths flying up from the grass as you walk across it, or around the yard at dusk, can be an early sign that sod webworm or armyworm caterpillars will follow. If you see them, let me know so I can take a closer look at the lawn.",
   },
   {
     id: 'lawn_digging_animals', group: 'lawn', label: 'Digging animals can be a grub clue',
     keywords: ['grubs', 'white grubs', 'digging', 'armadillo', 'raccoon', 'holes', 'birds'], lines: ['lawn'], season: 'all',
     findings: ['white_grubs'], months: [10],
+    sources: [{ fact: 'fact-tip-lawn-digging-animals', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/UW456' }],
+    sourcedCopy: "Armadillos dig shallow holes hunting grubs, beetles, worms and ants. UF/IFAS suggests watering and fertilizing sparingly so there's less for them to find, and notes that, contrary to popular belief, they can't curl into a tight ball. Tell me where the digging is.",
     copy: "Armadillos, raccoons, and birds dig up lawns looking for grubs and other insects in the soil. If something keeps digging in the same area, tell me where. It can point to what is living in the root zone, and it is worth a look.",
   },
   {
@@ -505,6 +588,8 @@ const TIPS = Object.freeze([
     id: 'lawn_mow_one_third', group: 'lawn', label: 'Never take more than a third off',
     keywords: ['mow', 'mowing', 'height', 'third', 'scalp', 'scalping', 'tall'], lines: ['lawn'], season: 'all',
     findings: ['scalping'],
+    sources: [{ fact: 'fact-tip-lawn-mow-one-third', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH028' }],
+    sourcedCopy: "UF/IFAS's rule is to never take more than a third of the blade in one mow. If the lawn has gotten tall, raise the mower for the first cut and bring it back down over the next few mows. If a crew mows for you, pass this along.",
     copy: "Cutting more than a third of the blade in one mow shocks the grass and can leave a scalped, stressed lawn. If the lawn has gotten tall, raise the mower for the first cut and bring it back down over the next few mows. If a crew mows for you, pass this along.",
   },
   {
@@ -517,24 +602,30 @@ const TIPS = Object.freeze([
     id: 'lawn_check_heads_after_mow', group: 'lawn', label: 'Check the sprinkler heads after a mow',
     keywords: ['heads', 'coverage', 'dry spot', 'sprinkler', 'irrigation', 'mow crew', 'broken'], lines: ['lawn'], season: 'all',
     findings: ['drought'],
+    yard: { irrigation: 'system' },
     copy: "Mowers and edgers knock sprinkler heads out of line and sometimes crack them. That leaves a dry spot in one place and a soggy spot in another. Run each zone once after the lawn is mowed and watch for heads that spray the wrong way, spray weakly, or sit buried in grass.",
   },
   {
     id: 'lawn_deep_water', group: 'lawn', label: 'Water deeper, not more often',
     keywords: ['deep', 'shallow', 'roots', 'irrigation', 'sprinkler', 'timer', 'frequency'], lines: ['lawn'], season: 'all',
     findings: ['drought', 'take_all'],
+    sources: [{ fact: 'fact-tip-lawn-deep-water', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH025' }],
+    sourcedCopy: "Florida's sandy soil holds about an inch of water in its top foot, UF/IFAS says, so ½ to ¾ inch per watering soaks the root zone without running past it. Short, frequent runs keep the roots shallow.",
     copy: "Short, frequent runs keep the top of the soil wet and the roots shallow. Longer runs on fewer days, within your area's watering rules, send water deeper and give the roots a reason to follow it.",
   },
   {
     id: 'lawn_shade_thin_turf', group: 'lawn', label: 'Thin turf under trees is often a light problem',
     keywords: ['shade', 'thin', 'trees', 'canopy', 'light', 'groundcover'], lines: ['lawn'], season: 'all',
     findings: ['shade'],
+    sources: [{ fact: 'fact-tip-lawn-shade-thin-turf', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP457' }],
+    sourcedCopy: "Grass under a tree canopy often thins because it isn't getting enough light. UF/IFAS says lawn grasses typically need at least 6 hours of sun. Trimming up the lower branches lets more through; under heavy shade, mulch or a groundcover can look better than struggling grass.",
     copy: "Grass under a tree canopy often thins out because it is not getting enough light. Trimming up the lower branches lets more light through. Where the shade is heavy, mulch or a shade groundcover under the tree can look better than grass that struggles.",
   },
   {
     id: 'lawn_thatch_half_inch', group: 'lawn', label: 'Thatch past an inch',
     keywords: ['thatch', 'spongy', 'inch', 'water', 'insects', 'fertilizer'], lines: ['lawn'], season: 'all',
     findings: ['thatch'],
+    sources: [{ fact: 'fact-tip-lawn-thatch-half-inch', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH010' }],
     copy: "Thatch is the layer of stems between the grass and the soil. UF/IFAS says it builds fastest in grass that's overfertilized or overwatered, and once it passes about an inch it's worth removing. Keeping to one-third per mow and going easy on nitrogen keeps it down.",
   },
   {
@@ -560,6 +651,8 @@ const TIPS = Object.freeze([
   {
     id: 'ts_ants_on_trunk', group: 'tree_shrub', label: 'Ants on the trunk = scale or aphids',
     keywords: ['ants', 'trunk', 'scale', 'aphids', 'sooty mold', 'honeydew'], lines: ['tree_shrub', 'pest'], season: 'all', watchKeys: ['scale', 'sooty_mold', 'aphids'],
+    sources: [{ fact: 'fact-tip-ts-ants-on-trunk', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN436' }],
+    sourcedCopy: "Ants running up a trunk are usually tending scale or aphids for their honeydew. UF/IFAS notes the ants even guard the scale from lady beetles, and the black sooty mold on the leaves grows on that honeydew. Tell me where you see the traffic.",
     copy: "Ants running up and down a trunk are usually farming scale or aphids for their honeydew, and the black sooty mold on the leaves is growing on that honeydew. If you see the ant traffic, let me know — it tells me exactly where the scale is.",
   },
   {
@@ -570,11 +663,14 @@ const TIPS = Object.freeze([
   {
     id: 'ts_mulch_trunk', group: 'tree_shrub', label: 'Keep mulch off the trunk',
     keywords: ['mulch', 'trunk', 'volcano', 'bark'], lines: ['tree_shrub'], season: 'all',
+    sources: [{ fact: 'fact-tip-ts-mulch-trunk', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/care/planting/mulch/' }],
     copy: "Mulch piled against the trunk keeps the bark wet, and UF/IFAS says that encourages rot. Keep it about a foot back from trees and large shrubs, 2 to 3 inches deep: a donut, not a volcano.",
   },
   {
     id: 'ts_black_film', group: 'tree_shrub', label: 'Black film on leaves comes from insects',
     keywords: ['sooty mold', 'black', 'sticky', 'scale'], lines: ['tree_shrub'], season: 'all', watchKeys: ['scale', 'sooty_mold'],
+    sources: [{ fact: 'fact-tip-ts-black-film', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1046' }],
+    sourcedCopy: "That black film on the leaves is sooty mold growing on the honeydew insects leave behind. UF/IFAS says that once the insects are under control, it eventually flakes off on its own.",
     copy: "That black film on leaves usually grows on the sticky honeydew insects leave behind, and it fades once the insects are under control.",
   },
   {
@@ -585,6 +681,8 @@ const TIPS = Object.freeze([
   {
     id: 'ts_dusty_leaves_dry', group: 'tree_shrub', label: 'Dusty leaves in dry weeks',
     keywords: ['mites', 'dusty', 'dry', 'rinse'], lines: ['tree_shrub'], season: 'dry', watchKeys: ['spider_mites'],
+    sources: [{ fact: 'fact-tip-ts-dusty-leaves-dry', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/camellias/' }],
+    sourcedCopy: "Spider mites do best in hot, dry weather, UF/IFAS says, and a strong spray from the garden hose a few times knocks them back. Rinse dusty shrubs during dry spells.",
     copy: "Rinsing dusty shrubs with plain water during dry spells helps keep mites from building up.",
   },
   {
@@ -595,21 +693,28 @@ const TIPS = Object.freeze([
   {
     id: 'ts_yellow_new_leaves', group: 'tree_shrub', label: 'Yellow new leaves with green veins',
     keywords: ['yellow', 'chlorosis', 'iron', 'veins'], lines: ['tree_shrub'], season: 'all', watchKeys: ['chlorosis'],
+    sources: [{ fact: 'fact-tip-ts-yellow-new-leaves', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP362' }],
     copy: "Yellow new leaves with green veins usually point to iron or manganese, which UF/IFAS says show first on the newest leaves, while magnesium and potassium show on the oldest. Where the yellow starts tells me what the plant is missing.",
   },
   {
     id: 'ts_palm_dont_trim_yellow', group: 'tree_shrub', label: "Don't trim yellow palm fronds",
     keywords: ['palm', 'yellow fronds', 'trim', 'prune'], lines: ['tree_shrub'], season: 'all', watchKeys: ['palm_potassium_deficiency', 'palm_magnesium_deficiency'],
+    sources: [{ fact: 'fact-tip-ts-palm-dont-trim-yellow', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP443' }],
+    sourcedCopy: "Leave yellowing lower fronds on. UF/IFAS says a palm pulls potassium out of its oldest leaves to feed new growth, and cutting them off has been shown to speed the decline and can lead to an early death for the palm.",
     copy: "Leave yellowing lower palm fronds on; the palm pulls nutrients from them, and cutting them speeds the decline.",
   },
   {
     id: 'ts_palm_nine_and_three', group: 'tree_shrub', label: "Never prune above 9 and 3 o'clock",
     keywords: ['palm', 'prune', 'hurricane cut'], lines: ['tree_shrub'], season: 'all',
+    sources: [{ fact: 'fact-tip-ts-palm-nine-and-three', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP443' }],
+    sourcedCopy: "UF/IFAS's line for palms is never to remove fronds above the 9 and 3 o'clock positions, and it calls that the limit, not the goal. Its rule of thumb is to take only the fully brown fronds.",
     copy: "When fronds are trimmed, keep everything above the 9-to-3 o'clock line on the palm.",
   },
   {
     id: 'ts_palm_fertilizer_canopy', group: 'tree_shrub', label: 'Keep fertilizer off the trunk',
     keywords: ['palm', 'fertilizer', 'trunk'], lines: ['tree_shrub'], season: 'all', watchKeys: ['palm_potassium_deficiency', 'palm_magnesium_deficiency'],
+    sources: [{ fact: 'fact-tip-ts-palm-fertilizer-canopy', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP261' }],
+    sourcedCopy: "Palm fertilizer works best spread evenly under the whole canopy. UF/IFAS says holes, spikes, or a band around the trunk do less than the same amount spread under the canopy.",
     copy: "Palm fertilizer works spread under the whole canopy, not piled against the trunk.",
   },
   {
@@ -625,16 +730,21 @@ const TIPS = Object.freeze([
   {
     id: 'ts_new_plantings_water', group: 'tree_shrub', label: 'New plantings need extra water the first summer',
     keywords: ['new plants', 'heat', 'wilt'], lines: ['tree_shrub'], season: 'all', watchKeys: ['heat_stress', 'heat_drought_decline'],
+    sources: [{ fact: 'fact-tip-ts-new-plantings-water', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP110' }, { fact: 'fact-swfwmd-modified-phase-iii-water-shortage', label: 'SWFWMD' }],
+    sourcedCopy: "New trees and shrubs need extra water at first. UF/IFAS says a small new tree needs daily water for its first 2 weeks, and full establishment takes 3 to 4 months per inch of trunk thickness. The watering rules allow new plants extra days for their first 60.",
     copy: "Shrubs planted in the last year need more water than established ones through their first summer.",
   },
   {
     id: 'ts_wait_prune_cold', group: 'tree_shrub', label: 'Wait to prune cold damage',
     keywords: ['cold', 'freeze', 'brown', 'prune'], lines: ['tree_shrub'], season: 'dry', watchKeys: ['cold_freeze_damage'],
+    sources: [{ fact: 'fact-tip-ts-wait-prune-cold', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/care/weather/treating-cold-damaged-plants/' }],
+    sourcedCopy: "After a cold snap, UF/IFAS says to wait until the plant puts out new growth before cutting back, so you can see where the live wood starts.",
     copy: "After a cold snap, wait until spring growth starts before cutting back damaged branches.",
   },
   {
     id: 'ts_fresh_mulch_weeds', group: 'tree_shrub', label: 'Weeds in fresh mulch',
     keywords: ['weeds', 'mulch', 'beds'], lines: ['tree_shrub'], season: 'all', watchKeys: ['bed_weeds'],
+    sources: [{ fact: 'fact-tip-ts-fresh-mulch-weeds', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP523' }],
     copy: "UF/IFAS says 2 to 3 inches of mulch controls weeds without smothering the roots, and more than 3 inches can hurt the plants. Topping up the thin spots in the beds helps between visits.",
   },
   {
@@ -654,6 +764,7 @@ const TIPS = Object.freeze([
     id: 'bb_dryer_heat', group: 'bed_bugs', label: "Dryer on high, 30 minutes",
     keywords: ["laundry", "dryer", "bedding", "clothes", "heat"], lines: ["pest"], season: 'all',
     services: ["bed_bug_treatment"],
+    sources: [{ fact: 'fact-tip-bb-dryer-heat', label: 'EPA', url: 'https://www.epa.gov/bedbugs/preparing-treatment-against-bed-bugs' }],
     copy: "Heat is what bed bugs can't take. Run bedding, clothes, and anything else that can handle it through the dryer on high for at least 30 minutes; the dryer does the work, not the wash. Bag it at the bed and carry the bag to the machine so nothing drops on the way.",
   },
   {
@@ -666,12 +777,16 @@ const TIPS = Object.freeze([
     id: 'bb_no_foggers', group: 'bed_bugs', label: "Skip store-bought foggers",
     keywords: ["fogger", "bug bomb", "spray", "store", "over the counter"], lines: ["pest"], season: 'all',
     services: ["bed_bug_treatment"],
+    sources: [{ fact: 'fact-tip-bb-no-foggers', label: 'EPA', url: 'https://www.epa.gov/bedbugs/should-i-use-fogger' }],
+    sourcedCopy: "Foggers and store sprays don't reach the cracks and crevices where bed bugs hide, and the EPA says a fogger that misses them doesn't kill them. If you want to help, vacuum the mattress seams and the bed frame, then empty the vacuum outside.",
     copy: "Foggers and store sprays don't reach where bed bugs hide, and they push them deeper into the walls and into the next room. If you want to help, vacuum the mattress seams and the bed frame, then empty the vacuum outside.",
   },
   {
     id: 'bb_encasements', group: 'bed_bugs', label: "Zippered mattress encasements",
     keywords: ["encasement", "mattress", "box spring", "cover", "zipper"], lines: ["pest"], season: 'all',
     services: ["bed_bug_treatment"],
+    sources: [{ fact: 'fact-tip-bb-encasements', label: 'EPA', url: 'https://www.epa.gov/bedbugs/top-ten-tips-prevent-or-control-bed-bugs' }],
+    sourcedCopy: "A zippered encasement made for bed bugs closes in any inside the mattress and box spring, and its smooth outside leaves them nowhere to hide. The EPA says to leave it on for a year, because bed bugs can survive several months to a year without feeding.",
     copy: "A zippered encasement made for bed bugs closes in any that are inside the mattress and box spring, and its smooth outside leaves them nowhere to hide. Leave it on for at least a year; they can go many months without feeding.",
   },
   {
@@ -695,12 +810,15 @@ const TIPS = Object.freeze([
     id: 'gr_bait_spots', group: 'roaches', label: "Clean around the bait spots",
     aftercare: true, keywords: ["bait", "gel", "cabinet", "wipe", "cleaner"], lines: ["pest"], season: 'all',
     services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
+    sources: [{ fact: 'fact-tip-gr-bait-spots', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1190' }],
     copy: "The small dots of bait in the cabinet corners and hinges are doing the work. UF/IFAS says a repellent product used near bait makes it ineffective, so for the next few weeks clean around those spots instead of over them, and skip the spray can.",
   },
   {
     id: 'gr_no_store_spray', group: 'roaches', label: "No store-bought roach spray",
     keywords: ["spray", "fogger", "raid", "store", "over the counter"], lines: ["pest"], season: 'all',
     services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
+    sources: [{ fact: 'fact-tip-gr-no-store-spray', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1190' }],
+    sourcedCopy: "Store sprays and foggers don't reach German roaches in the walls. UF/IFAS calls fogging generally ineffective, and liquid sprays near the bait repel roaches from it. If you see one, a paper towel and the trash is the better move while the bait works.",
     copy: "Store sprays and foggers scatter German roaches into the walls and teach them to avoid the bait. If you see one, a paper towel and the trash is the better move while the bait works through the colony.",
   },
   {
@@ -713,6 +831,8 @@ const TIPS = Object.freeze([
     id: 'gr_hitchhikers', group: 'roaches', label: "Unpack deliveries outside",
     pests: ['Roaches'], keywords: ["delivery", "grocery", "appliance", "secondhand", "moving"], lines: ["pest"], season: 'all',
     services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
+    sources: [{ fact: 'fact-tip-gr-hitchhikers', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1190' }],
+    sourcedCopy: "German roaches don't come in from outdoors. UF/IFAS says they're spread entirely by people, riding in on grocery bags and the other things we carry inside. Unpack deliveries in the garage or outside, and get the cardboard out of the house the same day.",
     copy: "German roaches usually ride in: grocery boxes, used appliances, and secondhand furniture. Unpack deliveries in the garage or outside, and get the cardboard out of the house the same day.",
   },
 
@@ -732,6 +852,8 @@ const TIPS = Object.freeze([
     id: 'flea_keep_vacuuming', group: 'fleas', label: "Keep vacuuming after the treatment",
     aftercare: true, keywords: ["vacuum", "carpet", "after treatment", "still seeing fleas", "cocoon"], lines: ["pest"], season: 'all',
     services: ["flea_tick"],
+    sources: [{ fact: 'fact-tip-flea-keep-vacuuming', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN137' }],
+    sourcedCopy: "Flea pupae sit in cocoons the treatment can't reach, and UF/IFAS says they can wait there for up to five months. Vibration or carbon dioxide brings the adults out, so vacuuming every day brings them out sooner, onto the treated carpet.",
     copy: "Flea pupae sit in cocoons the treatment can't reach and hatch when something moves nearby, so you may still see a few for a couple of weeks. Vacuuming every day brings them out sooner, onto the treated carpet.",
   },
   {
@@ -744,6 +866,8 @@ const TIPS = Object.freeze([
     id: 'flea_shady_spots', group: 'fleas', label: "Open up where pets rest outside",
     pests: ['Fleas'], keywords: ["yard", "shade", "deck", "fence", "dog run"], lines: ["pest"], season: 'all',
     services: ["flea_tick"],
+    sources: [{ fact: 'fact-tip-flea-shady-spots', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN137' }],
+    sourcedCopy: "Outside, fleas develop in shady, sheltered spots where pets lie down. UF/IFAS puts the larvae where they're protected from rain, irrigation and sun, at humidity of at least 75% and 70 to 90 degrees. Keeping those spots raked and open to the sun takes that away.",
     copy: "Outside, fleas develop in the shady, sheltered spots where pets lie down: under decks, along fences, beneath shrubs. Keeping those spots raked and open to the sun makes them a poor place for fleas to grow.",
   },
   {
@@ -759,12 +883,15 @@ const TIPS = Object.freeze([
     id: 'tick_wood_line', group: 'fleas', label: "A dry strip at the wood line",
     keywords: ["woods", "wood chips", "gravel", "border", "play set"], lines: ["pest"], season: 'all',
     services: ["tick_control"],
+    sources: [{ fact: 'fact-tip-cdc-tick-prevention', label: 'CDC', url: 'https://www.cdc.gov/ticks/prevention/index.html' }],
     copy: "Where the lawn meets woods or brush, a 3-foot strip of wood chips or gravel makes a dry border ticks don't like to cross. Keep play sets and seating on the lawn side of it.",
   },
   {
     id: 'tick_check', group: 'fleas', label: "Check for ticks after yard work",
     keywords: ["check", "kids", "pets", "after yard work", "bite"], lines: ["pest"], season: 'all',
     services: ["tick_control"],
+    sources: [{ fact: 'fact-tip-cdc-tick-prevention', label: 'CDC', url: 'https://www.cdc.gov/ticks/prevention/index.html' }],
+    sourcedCopy: "After time at the edges of the yard, check yourself, the kids, and the pets: behind the knees, the waistband, the hairline, and the ears. The CDC's advice is to shower within two hours of coming in, which makes the check easy too.",
     copy: "After time at the edges of the yard, check yourself, the kids, and the pets: behind the knees, the waistband, the hairline, and the ears. Checking soon after you come in finds a tick before it settles in.",
   },
 
@@ -773,12 +900,16 @@ const TIPS = Object.freeze([
     id: 'fa_leave_mounds', group: 'fire_ants', label: "Leave the mounds alone",
     aftercare: true, keywords: ["mound", "dig", "kick", "drench", "bait"], lines: ["pest"], season: 'all',
     services: ["fire_ant"],
+    sources: [{ fact: 'fact-tip-fa-leave-mounds', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN352' }],
+    sourcedCopy: "After a fire ant treatment, leave the mounds alone. A typical colony holds about 80,000 workers, UF/IFAS says, and digging or drenching a mound mostly makes the colony move. Let the workers carry the bait back to the queen.",
     copy: "After a fire ant treatment, digging, kicking, or drenching a mound sends the colony to start over a few feet away. Leave the mounds alone and let the workers carry the bait back to the queen; it works through the colony over the next few weeks.",
   },
   {
     id: 'fa_bait_dry', group: 'fire_ants', label: "Skip the next sprinkler cycle",
     keywords: ["sprinkler", "irrigation", "rain", "bait", "dry"], lines: ["pest"], season: 'all',
     services: ["fire_ant"],
+    sources: [{ fact: 'fact-tip-fa-bait-dry', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IG080' }],
+    sourcedCopy: "Fire ant bait only works while it is dry enough for the workers to pick up. UF/IFAS says to bait once dew, rain or irrigation has dried, and to turn the sprinklers off around the treatment, so skip the next morning's cycle.",
     copy: "Fire ant bait only works while it's dry enough for the workers to pick it up. If your sprinklers are set to run the morning after a treatment, skipping that one cycle gives the bait its chance.",
   },
   {
@@ -791,6 +922,8 @@ const TIPS = Object.freeze([
     id: 'fa_spot_a_mound', group: 'fire_ants', label: "Show the kids what a mound looks like",
     keywords: ["kids", "stings", "pets", "mound", "yard"], lines: ["pest"], season: 'all',
     services: ["fire_ant"],
+    sources: [{ fact: 'fact-fire-ant-mating-flights', label: 'UF/IFAS' }],
+    sourcedCopy: "New fire ant mounds pop up after a rain for a reason. UF/IFAS says mating flights happen midday on warm, sunny days after rain, and new queens often land at the edge of a sidewalk, driveway or street. Show the kids what a mound looks like.",
     copy: "A fire ant mound is a loose pile of soil with no opening on top, and new ones pop up after a rain. Showing the kids what one looks like, and keeping pet bowls off the lawn, keeps stings down while the treatment works.",
   },
 
@@ -799,12 +932,16 @@ const TIPS = Object.freeze([
     id: 'bw_dont_seal_active', group: 'stinging', label: "Don't seal a gap bees are using",
     keywords: ["bees", "gap", "wall", "soffit", "seal"], lines: ["pest"], season: 'all',
     services: ["bee_wasp_removal"],
+    sources: [{ fact: 'fact-tip-bw-dont-seal-active', label: 'Florida Dept. of Agriculture', url: 'https://www.fdacs.gov/Consumer-Resources/Consumer-Rights-and-Responsibilities/Pest-Control/Honey-Bee-Removal-or-Eradication-in-Florida' }, { fact: 'fact-tip-bw-dont-seal-active-2', label: 'UF/IFAS', url: 'https://sfyl.ifas.ufl.edu/natural-resources/africanized-honey-bees/' }],
+    sourcedCopy: "If bees are flying in and out of a gap in the wall or soffit, don't seal it or try to remove them. Florida's Department of Agriculture says never to remove a honey bee colony yourself, and UF/IFAS says a large share of wild colonies in South Florida are Africanized. Let me know first.",
     copy: "If bees are flying in and out of a gap in the wall or soffit, sealing it from outside traps them, and they look for another way out, sometimes into the house. Let me know first; the gap gets sealed once the colony is handled.",
   },
   {
     id: 'bw_cover_sweets', group: 'stinging', label: "Lids on drinks and trash outside",
     pests: ['Wasps'], keywords: ["yellowjacket", "soda", "juice", "lanai", "trash"], lines: ["pest"], season: 'wet',
     services: ["bee_wasp_removal"],
+    sources: [{ fact: 'fact-tip-bw-cover-sweets', label: 'UF/IFAS', url: 'https://blogs.ifas.ufl.edu/news/1999/10/27/as-yellow-jacket-population-peaks-so-does-danger-of-stings/' }],
+    sourcedCopy: "Late summer into fall is yellowjacket season. UF/IFAS says their numbers run particularly high in the fall after a summer of breeding, when they go after open cans, juice boxes and fruit on the lanai. Cups with lids and closed trash cans keep them from settling in.",
     copy: "Late in the summer, yellowjackets go after sweets and come to open cans, juice boxes, and fruit on the lanai. Cups with lids and trash cans that close keep them from settling in around where you sit.",
   },
   {
@@ -817,12 +954,15 @@ const TIPS = Object.freeze([
     id: 'md_rarely_sting', group: 'stinging', label: "Wash off old mud tubes",
     pests: ['Wasps'], keywords: ["mud dauber", "mud tubes", "eaves", "hose", "lanai"], lines: ["pest"], season: 'all',
     services: ["mud_dauber_removal"],
+    sources: [{ fact: 'fact-tip-md-rarely-sting', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1478' }],
+    sourcedCopy: "Mud daubers are solitary wasps that don't defend their nests, and UF/IFAS says they sting only when handled roughly. Each mud cell gets stocked with up to twenty-five paralyzed spiders. Once the tubes are empty, hose them off the eaves.",
     copy: "Mud daubers are solitary wasps and rarely sting; the mud tubes on the eaves and the lanai are their nurseries. Once the tubes are empty, washing them off with the hose keeps the eaves clean and shows you right away if new building starts.",
   },
   {
     id: 'md_fewer_spiders', group: 'stinging', label: "Fewer spiders, fewer mud daubers",
     pests: ['Spiders'], keywords: ["spiders", "porch light", "bulbs", "eaves", "webs"], lines: ["pest"], season: 'all',
     services: ["mud_dauber_removal"],
+    sources: [{ fact: 'fact-tip-led-bulbs-insect-attraction', label: 'Ecology and Evolution, 2016', url: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/' }],
     copy: "Mud daubers stock their nests with spiders, so a house with fewer spiders draws fewer daubers. LED porch bulbs and swept eaves cut down the insects the spiders live on.",
   },
 
@@ -930,6 +1070,8 @@ const TIPS = Object.freeze([
     id: 'tb_save_swarmers', group: 'termite', label: "Save a few swarmers and call",
     keywords: ["swarmers", "winged", "flying", "window", "spring"], lines: ["termite"], season: 'all',
     services: ["termite_bait", "termite_active_bait_quarterly", "termite_monitoring", "termite_cartridge_replacement", "pest_termite_bait_quarterly", "termite_installation_setup", "termite_active_annual"],
+    sources: [{ fact: 'fact-termite-swarmers-vs-ants', label: 'UF/IFAS' }],
+    sourcedCopy: "Winged termites at a window in spring are swarmers from a mature colony. UF/IFAS's quick check: most people can see the waist on an ant, and termite swarmers run about ¼ to 3/8 inch. Save a few in a zip bag or on tape and call me.",
     copy: "Winged termites at a window or a light in spring are swarmers, a mature colony sending out new ones. Save a few in a zip bag or on tape and call me; they show exactly which termite it is and where to look.",
   },
   {
@@ -998,6 +1140,8 @@ const TIPS = Object.freeze([
     id: 'wl_feed_inside', group: 'wildlife', label: "Feed pets inside",
     keywords: ["pet food", "lanai", "raccoon", "bowl", "night"], lines: ["pest"], season: 'all',
     services: ["wildlife_trapping"],
+    sources: [{ fact: 'fact-tip-wl-feed-inside', label: 'FWC', url: 'https://myfwc.com/conservation/you-conserve/wildlife/tips/' }],
+    sourcedCopy: "Pet food left outside overnight brings raccoons, opossums and rats to the lanai, and FWC says wildlife comes back to an unsecured food source after just one visit. Florida rules also bar putting food out in a way that attracts raccoons. Feed inside, or pick the bowl up at dusk.",
     copy: "Pet food left outside overnight is the meal that brings raccoons, opossums, and rats to the lanai. Feeding inside, or picking the bowl up at dusk, takes away the reason to come back.",
   },
   // ── Service tips, second batch (owner-approved 2026-10-09: things the
@@ -1071,6 +1215,7 @@ const TIPS = Object.freeze([
     id: 'plug_light_water', group: 'lawn', label: "Light water every day at first",
     aftercare: true, keywords: ["plugs", "watering", "new plugs", "roots", "daily"], lines: ["lawn"], season: 'all',
     services: ["plugging"],
+    sources: [{ fact: 'fact-tip-plug-light-water', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH013' }, { fact: 'fact-swfwmd-modified-phase-iii-water-shortage', label: 'SWFWMD' }],
     copy: "New plugs have short roots and dry out fast. UF/IFAS says to water lightly once or twice a day for a week or two after planting. The watering rules allow new lawns any day for the first 30 days and three days a week for the next 30, then your assigned day.",
   },
   {
@@ -1107,6 +1252,7 @@ const TIPS = Object.freeze([
     id: 'lk_fills_from_edges', group: 'lawn', label: "Brown spots fill in from the edges",
     aftercare: true, keywords: ["brown spots", "dead grass", "runners", "chinch", "recovery"], lines: ["lawn"], season: 'all',
     services: ["lawn_pest_knockdown"],
+    yard: { grass: ['st_augustine', 'zoysia'] },
     copy: "Grass that the insects already killed stays brown; it does not turn green again. St. Augustine and Zoysia fill those spots by sending runners in from the healthy edges over several weeks. Regular watering and a normal mowing height help it cover faster.",
   },
   {
@@ -1119,12 +1265,16 @@ const TIPS = Object.freeze([
     id: 'pi_new_fronds', group: 'tree_shrub', label: "Watch the new fronds",
     aftercare: true, keywords: ["palm", "injection", "new fronds", "results", "yellow"], lines: ["tree_shrub"], season: 'all',
     services: ["palm_injection", "palm_injection_semiannual"],
+    sources: [{ fact: 'fact-tip-pi-new-fronds', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP269' }],
+    sourcedCopy: "What goes into the palm shows in the fronds that open after it. UF/IFAS says leaves already showing a deficiency never recover and are replaced by new ones, which for potassium can take one to two years or longer.",
     copy: "What I put into the palm reaches the growth that comes after it. Older fronds that are already yellow or spotted will not change. Look at the new fronds that open over the coming months, sometimes a year or more, for the difference.",
   },
   {
     id: 'pi_trunk_wounds', group: 'tree_shrub', label: "Keep nails and trimmers off the trunk",
     keywords: ["palm", "trunk", "nails", "string trimmer", "wound"], lines: ["tree_shrub"], season: 'all',
     services: ["palm_injection", "palm_injection_semiannual"],
+    sources: [{ fact: 'fact-tip-pi-trunk-wounds', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP261' }],
+    sourcedCopy: "A palm can't heal a wound in its trunk. UF/IFAS says palms lack the growth layer trees use to grow over wounds, so every nail hole, light hook, or trimmer cut stays a permanent scar. Keep them off the trunk.",
     copy: "A palm cannot close a wound in its trunk the way an oak can. Keep nails, screws, light hooks, and the string trimmer away from the trunk, because every cut or hole stays open for the life of the palm.",
   },
   {
@@ -1171,6 +1321,8 @@ const TIPS = Object.freeze([
   {
     id: 'ant_lanai_pots', group: 'exterior', label: "Let lanai pots dry between waterings",
     pests: ['Ants'], keywords: ["potted plants", "lanai", "saucer", "soil", "ghost ants"], lines: ["pest"], season: 'all',
+    sources: [{ fact: 'fact-ghost-ants-florida', label: 'UF/IFAS' }],
+    sourcedCopy: "UF/IFAS notes ghost ants, one of Florida's most common pest ants, nest in potted plants as well as wall voids. Let the pots on the lanai dry on top between waterings, and lift them off the floor so the trail has nowhere to hide.",
     copy: "Ghost ants and other small ants nest in the soil of potted plants on the lanai and walk in from there. Let the pots dry on top between waterings, and lift the saucers so water does not sit under them.",
   },
   {
@@ -1225,6 +1377,7 @@ const TIPS = Object.freeze([
     id: 'mq_lanai_fan', group: 'water', label: "Run a fan where you sit",
     keywords: ["fan", "lanai", "patio", "biting", "sitting outside"], lines: ["mosquito"], season: 'all',
     services: ["mosquito_monthly", "mosquito_recurring", "mosquito_seasonal", "mosquito", "mosquito_one_time", "mosquito_onetime", "mosquito_event"],
+    sources: [{ fact: 'fact-tip-mq-lanai-fan', label: 'J. Medical Entomology, 2003', url: 'https://pubmed.ncbi.nlm.nih.gov/14596273/' }],
     copy: "A ceiling fan or box fan aimed across the chairs on the lanai cuts down the mosquitos that find you. In a 2003 study, fan wind sharply reduced how many reached a trap, mostly by spreading out the scent they follow.",
   },
   {
@@ -1284,6 +1437,8 @@ const TIPS = Object.freeze([
   {
     id: 'ts_trimmer_guard', group: 'tree_shrub', label: "Keep the string trimmer off the bark",
     keywords: ["string trimmer", "weed eater", "bark", "girdle", "guard"], lines: ["tree_shrub"], season: 'all',
+    sources: [{ fact: 'fact-tip-ts-trimmer-guard', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/FR485' }],
+    sourcedCopy: "String trimmer nicks at the base of a young tree or shrub add up. UF/IFAS says a ring of mulch, kept about 12 inches back from the trunk, cuts down damage from mowers and string trimmers.",
     copy: "String trimmer line cuts the bark at the base of a young tree or shrub, and a ring of cuts starves the plant from the bottom up. A bare ring of soil or a plastic guard around the base keeps the trimmer away from it.",
   },
 ]);
@@ -1303,6 +1458,9 @@ deepFreeze(TIPS);
 deepFreeze(TIP_GROUPS);
 
 const TIPS_BY_ID = new Map(TIPS.map((tip) => [tip.id, tip]));
+// A sourced tip as the picker shows it with GATE_TECH_TIP_SOURCES on: the
+// same entry carrying its sourced words, frozen like the registry.
+const SOURCED_VIEWS = new Map(TIPS.filter((tip) => tip.sourcedCopy).map((tip) => [tip.id, deepFreeze({ ...tip, copy: tip.sourcedCopy })]));
 
 // An exact registry line passes through; anything else — a service key
 // ('wdo_inspection'), a display name ('Palm Injection'), a companion
@@ -1329,9 +1487,14 @@ function registryLineFor(serviceLine) {
  * visit that finds roaches or fleas can reach that advice. It is never listed
  * unasked, so a tip that names work still leads only its own services.
  */
-function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [] } = {}) {
+function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [], sourced = false, yard = null } = {}) {
   const line = registryLineFor(serviceLine);
   const season = seasonForDate(date);
+  // Behind GATE_TECH_TIP_SOURCES a tip that does not fit this yard, or this
+  // visit's month, is left out of every list, search included.
+  const month = monthForDate(date);
+  const fits = (tip) => !sourced || (yardMatches(tip.yard, yard) && (!tip.showMonths || tip.showMonths.includes(month)));
+  const TIPS_HERE = TIPS.filter(fits);
   // Within a group the best fit leads: this visit's confirmed findings, then
   // the month, then the season; ties keep registry order (the sort is stable).
   const rankCtx = { season, month: monthForDate(date), findings: new Set(Array.isArray(findings) ? findings : []) };
@@ -1339,7 +1502,7 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
   const groups = GROUP_ORDER[season]
     .map((groupId) => {
       const group = TIP_GROUPS.find((g) => g.id === groupId);
-      const tips = TIPS.filter((tip) => tip.group === groupId && tip.lines.includes(line) && !tip.services)
+      const tips = TIPS_HERE.filter((tip) => tip.group === groupId && tip.lines.includes(line) && !tip.services)
         .sort(bySeason);
       return { ...group, primary: tips.some((tip) => tip.lines.includes(line)), tips };
     })
@@ -1347,22 +1510,84 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
   // Every service on the visit (the primary and its add-on lines) leads with
   // its own tips (Codex #5582).
   const keys = new Set([serviceKey, ...serviceKeys].filter(Boolean));
-  const forService = keys.size ? TIPS.filter((tip) => tip.services?.some((key) => keys.has(key))).sort(bySeason) : [];
+  const forService = keys.size ? TIPS_HERE.filter((tip) => tip.services?.some((key) => keys.has(key))).sort(bySeason) : [];
   const listed = new Set([...forService, ...groups.flatMap((group) => group.tips)]);
+  // Behind GATE_TECH_TIP_SOURCES the picker shows the words the completion
+  // will freeze (a sourced tip's sourcedCopy), so the technician approves
+  // exactly what the customer reads; off, the registry's own entries.
+  const shown = (tip) => (sourced && SOURCED_VIEWS.get(tip.id)) || tip;
+  const allGroups = forService.length ? [{ ...FOR_SERVICE_GROUP, primary: true, tips: forService }, ...groups] : groups;
   return {
     line,
     season,
-    groups: forService.length ? [{ ...FOR_SERVICE_GROUP, primary: true, tips: forService }, ...groups] : groups,
-    more: TIPS.filter((tip) => !listed.has(tip)),
+    groups: allGroups.map((group) => ({ ...group, tips: group.tips.map(shown) })),
+    more: TIPS_HERE.filter((tip) => !listed.has(tip)).map(shown),
   };
+}
+
+// Whether a tip's `yard` filter fits this yard (tips with facts, owner
+// 2026-10-24). No filter fits every yard. Grass, county and city need a known
+// fact that matches; a grass counts only when it can be trusted (staff or the
+// estimate set it). An irrigation tip fits unless the yard is known to have
+// no system.
+function yardMatches(filter, yard) {
+  if (!filter) return true;
+  const known = yard || {};
+  if (filter.grass && !(known.grassTrusted && filter.grass.includes(known.grass))) return false;
+  if (filter.county && !filter.county.includes(known.county)) return false;
+  if (filter.city && !filter.city.includes(known.city)) return false;
+  if (filter.irrigation === 'system' && known.irrigationSystem === false) return false;
+  return true;
+}
+
+// The one shape a source link may take: https, on an allowed host, nothing in
+// the userinfo. Shared by the lint and by report-data, which re-checks every
+// frozen citation before it prints.
+function citationUrlAllowed(url) {
+  let parsed;
+  try { parsed = new URL(String(url || '')); } catch { return false; }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return false;
+  const host = parsed.hostname.toLowerCase();
+  return CITATION_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
+}
+
+// The citations a report may print from a frozen snapshot: each a non-empty
+// label of at most MAX_CITATION_LABEL_CHARS and an allowed URL; anything
+// else is dropped, never repaired.
+function printableCitations(citations) {
+  if (!Array.isArray(citations)) return [];
+  return citations.flatMap((citation) => {
+    if (!citation || typeof citation !== 'object') return [];
+    const label = String(citation.label || '').trim();
+    const url = String(citation.url || '').trim();
+    return label && label.length <= MAX_CITATION_LABEL_CHARS && citationUrlAllowed(url) ? [{ label, url }] : [];
+  });
+}
+
+const FACTS_BY_SLUG = new Map(REGISTER_FACTS.map((fact) => [fact.slug, fact]));
+
+// A tip's sources as frozen citations: the named fact must exist and be
+// unexpired on `day` (YYYY-MM-DD, ET; expiresOn is the first day it is not,
+// as the register reads it), the link defaults to the fact's first page.
+// The lint keeps the registry clean; this is the runtime guard.
+function citationsFor(tip, day) {
+  return printableCitations((tip.sources || []).flatMap((source) => {
+    const fact = FACTS_BY_SLUG.get(source.fact);
+    if (!fact || (fact.expiresOn && fact.expiresOn <= day)) return [];
+    return [{ label: source.label, url: source.url || (fact.sourceUrls || [])[0] }];
+  }));
 }
 
 /**
  * Resolve picked ids to frozen entries. Unknown ids are dropped — the client
  * never supplies copy, so an unrecognised id has nothing to print. Duplicates
- * collapse and the result is capped at MAX_TIPS_PER_VISIT.
+ * collapse and the result is capped at MAX_TIPS_PER_VISIT. With `sourced`
+ * (GATE_TECH_TIP_SOURCES, read by the caller) a sourced tip freezes its
+ * sourced words and its citations; without it the result is unchanged.
  */
-function resolveTipIds(ids) {
+function resolveTipIds(ids, { sourced = false, date = new Date() } = {}) {
+  // A schedule day stays that calendar day; a Date is read in ET.
+  const day = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date.trim()) ? date.trim() : etDateString(date);
   const seen = new Set();
   const resolved = [];
   for (const raw of Array.isArray(ids) ? ids : []) {
@@ -1372,7 +1597,15 @@ function resolveTipIds(ids) {
     seen.add(id);
     // The link is a snapshot, never the registry's own object — a caller
     // that edits its payload must not edit the registry for every later call.
-    resolved.push({ id, copy: tip.copy, source: 'library', ...(tip.aftercare ? { aftercare: true } : {}), ...(tip.link ? { link: { ...tip.link } } : {}) });
+    const citations = sourced ? citationsFor(tip, day) : [];
+    resolved.push({
+      id,
+      copy: sourced && tip.sourcedCopy ? tip.sourcedCopy : tip.copy,
+      source: 'library',
+      ...(tip.aftercare ? { aftercare: true } : {}),
+      ...(tip.link ? { link: { ...tip.link } } : {}),
+      ...(citations.length ? { citations } : {}),
+    });
     if (resolved.length >= MAX_TIPS_PER_VISIT) break;
   }
   return resolved;
@@ -1401,9 +1634,9 @@ function sentenceCount(text) {
   return (t.match(/[.!?]+(?:["')\]]+)?(?=\s+\S)/g) || []).length + 1;
 }
 
-function freezeTechTips(input) {
+function freezeTechTips(input, { sourced = false, date = new Date() } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { tips: [], dropped: [] };
-  const tips = resolveTipIds(input.ids);
+  const tips = resolveTipIds(input.ids, { sourced, date });
   const dropped = [];
   // Nothing the tech was told would print may vanish silently: an id the
   // library no longer has (retired between picker load and completion, or
@@ -1440,6 +1673,10 @@ function freezeTechTips(input) {
 }
 
 module.exports = {
+  yardMatches,
+  CITATION_HOSTS,
+  citationUrlAllowed,
+  printableCitations,
   TIPS,
   TIP_GROUPS,
   SERVICE_LINES,

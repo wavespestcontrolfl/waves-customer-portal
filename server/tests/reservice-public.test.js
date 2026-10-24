@@ -1344,3 +1344,55 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
     expect(build).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('reserviceOpeningsFor (GATE_SMS_PROMPT_B1: the texting AI offers the page\'s own openings)', () => {
+  const oldCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+  let build;
+  let config;
+  beforeEach(() => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    firstResults.customers = { id: CUST_ID, latitude: 27.4, longitude: -82.4 };
+    listResults.services = [
+      { id: 'pest-service', service_key: 'pest_re_service', default_duration_minutes: 20 },
+      { id: 'lawn-service', service_key: 'lawn_re_service', default_duration_minutes: 30 },
+    ];
+    listResults['scheduled_services as s'] = [{ category: 'pest_control', service_type: 'General Pest Control' }];
+    const booking = require('../routes/booking')._internals;
+    config = jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({});
+    build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({ slots: [], days: [{ date: '2027-05-20', slots: [{ start_time: '09:00' }] }] });
+  });
+  afterEach(() => {
+    config.mockRestore(); build.mockRestore();
+    if (oldCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = oldCapacity;
+  });
+
+  test('builds the page\'s own availability for the customer\'s bookable lane, by customer id', async () => {
+    const out = await reservicePublicRouter._internals.reserviceOpeningsFor(CUST_ID);
+    expect(out).toEqual({ days: [{ date: '2027-05-20', slots: [{ start_time: '09:00' }] }] });
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({ serviceKey: 'pest_control', duration: 20, selfServeNotice: true, rankProfile: 'reservice' }));
+  });
+
+  test('the reported lane narrows a two-lane customer; with capacity booking a two-lane browse offers nothing', async () => {
+    listResults['scheduled_services as s'] = [
+      { category: 'pest_control', service_type: 'General Pest Control' },
+      { category: 'lawn_care', service_type: 'Monthly Lawn Care Program' },
+    ];
+    await reservicePublicRouter._internals.reserviceOpeningsFor(CUST_ID, { lanes: ['lawn'] });
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({ serviceKey: 'lawn_care', duration: 30 }));
+    build.mockClear();
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    expect(await reservicePublicRouter._internals.reserviceOpeningsFor(CUST_ID)).toBeNull();
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  test('null when the page would show nothing: surface off, lane not bookable, no customer, address review', async () => {
+    gateState.reserviceSelfServe = false;
+    expect(await reservicePublicRouter._internals.reserviceOpeningsFor(CUST_ID)).toBeNull();
+    gateState.reserviceSelfServe = true;
+    expect(await reservicePublicRouter._internals.reserviceOpeningsFor(CUST_ID, { lanes: ['lawn'] })).toBeNull();
+    delete firstResults.customers;
+    expect(await reservicePublicRouter._internals.reserviceOpeningsFor(CUST_ID)).toBeNull();
+    expect(build).not.toHaveBeenCalled();
+  });
+});

@@ -78,7 +78,7 @@
   "services/procurement/auto-reorder.js": 2,
   "services/procurement/order-dispatch.js": 2,
   "services/purchase-receipts/inventory-agent.js": 3,
-  "services/purchase-receipts/sweep.js": 3,
+  "services/purchase-receipts/sweep.js": 2,
   "services/purchase-receipts/undelivered-shipments.js": 1,
   "services/rain-out.js": 1,
   "services/recurring-appointment-seeder.js": 1,
@@ -105,6 +105,5 @@
   "services/voice-agent/relay-reservice.js": 1,
   "services/voice-agent/relay-transfer.js": 1,
   "services/voice-profile-distiller.js": 1,
-  "services/wdo-report-attention.js": 1,
-  "services/zelle-notice-reconciler.js": 1
+  "services/wdo-report-attention.js": 1
 }

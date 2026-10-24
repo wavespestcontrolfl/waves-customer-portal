@@ -334,7 +334,7 @@ ${faqFormatInstruction([post.category, post.tag])}
 - Include the target keyword naturally 3-5 times
 - End with a practical takeaway + soft Waves mention`;
 
-    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.websiteContent, {
       laneId: 'blog_draft',
       maxTokens: 3000,
       jsonMode: false,
@@ -574,7 +574,7 @@ Return JSON: {
     // the target count.
     const requestCount = Math.min(Math.ceil(count * 1.4), 60);
 
-    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.websiteContent, {
       laneId: 'blog_draft',
       maxTokens: 6000,
       jsonMode: true,

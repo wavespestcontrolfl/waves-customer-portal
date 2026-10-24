@@ -140,12 +140,16 @@ function mapTransaction(txn, account, { correction = false } = {}) {
   const failed = SKIP_RULES.find(([, fails]) => fails(ctx));
   if (failed) return { skip: failed[0] };
   const description = String(txn.name || txn.merchant_name || 'Plaid transaction').replace(/\s+/g, ' ').trim().slice(0, 500) || 'Plaid transaction';
+  // The bank's own wording (where Capital One names a Zelle payer); not a
+  // money field, so a change to it alone never rewrites a staged row.
+  const originalDescription = String(txn.original_description || '').replace(/\s+/g, ' ').trim().slice(0, 500) || null;
   return {
     row: {
       account_label: account ? account.account_label : null,
       account_type: account ? account.account_type : null,
       txn_date: txn.date,
       description,
+      original_description: originalDescription,
       amount: ctx.amount,
       direction: n > 0 ? 'debit' : 'credit',
       source: 'plaid',
@@ -290,7 +294,9 @@ async function getStatus() {
 
 // ── connect / setup / disconnect ────────────────────────────────────────────
 
-async function createLinkToken({ clientUserId, itemId } = {}) {
+// itemId = update mode for that connection: a re-login, or (addAccounts)
+// changing which of the login's accounts it shares.
+async function createLinkToken({ clientUserId, itemId, addAccounts = false } = {}) {
   if (!itemId) return plaid.createLinkToken({ clientUserId });
   const item = await db('plaid_items').where({ id: itemId }).first();
   if (!item || item.status === 'removed') {
@@ -300,7 +306,7 @@ async function createLinkToken({ clientUserId, itemId } = {}) {
   if (!accessToken) {
     const e = new Error('stored bank token cannot be read — disconnect and connect again'); e.status = 409; throw e;
   }
-  return plaid.createLinkToken({ clientUserId, accessToken });
+  return plaid.createLinkToken({ clientUserId, accessToken, accountSelection: addAccounts });
 }
 
 // Link's onSuccess → exchange, store the (encrypted) token, list accounts.
@@ -512,6 +518,37 @@ async function markReconnected(itemId) {
   return n > 0;
 }
 
+// After an "Add accounts" Link session (update mode with account selection).
+// Plaid fetches a newly shared account's history in the background, so the
+// sync can miss it for a while: the account list is read now, and a new
+// account goes to the operator at once (registerNewAccounts: off until
+// confirmed, connection back in setup). An imported account Plaid no longer
+// lists was unticked in the bank's screen and gets no more data — it is
+// reported, never dropped silently. Update mode re-authenticates as well.
+async function refreshAccounts(itemId) {
+  await markReconnected(itemId);
+  const item = await db('plaid_items').where({ id: itemId }).first('*', db.raw('updated_at::text as row_version'));
+  if (!item || item.status === 'removed') { const e = new Error('connection not found'); e.status = 404; throw e; }
+  const accessToken = await decryptToken(db, item.access_token_enc);
+  if (!accessToken) {
+    const e = new Error('stored bank token cannot be read — disconnect and connect again'); e.status = 409; throw e;
+  }
+  const { accounts } = await plaid.getAccounts(accessToken);
+  const stored = await db('plaid_accounts').where({ plaid_item_id: itemId });
+  const storedIds = new Set(stored.map(a => a.account_id));
+  const listedIds = new Set(accounts.map(a => a.account_id));
+  const newIds = [...listedIds].filter(id => !storedIds.has(id));
+  if (newIds.length && !(await registerNewAccounts(item, accounts, newIds))) {
+    const e = new Error('the connection changed while its accounts were read — try again'); e.status = 409; throw e;
+  }
+  return {
+    added: newIds.length,
+    // an hourly run that registered the account first left it waiting too
+    setup: newIds.length > 0 || item.status === 'setup',
+    unshared: stored.filter(a => a.enabled && !listedIds.has(a.account_id)).map(publicAccount),
+  };
+}
+
 // `confirmedRemovedAtPlaid`: the stored token can't be read (key missing or
 // rotated), so this app cannot revoke the connection itself. Without the
 // operator's explicit confirmation that it was removed on Plaid's side, the
@@ -587,7 +624,25 @@ async function fetchAllChanges(accessToken, startCursor) {
 
 function sameMoneyFields(row, r) {
   return toDateOnly(row.txn_date) === r.txn_date && Number(row.amount) === r.amount
-    && row.direction === r.direction && row.description === r.description;
+    && row.direction === r.direction && row.description === r.description
+    // The bank's own wording names a Zelle payer, so a change to it is a
+    // correction too — once the row has it (rows synced before the column
+    // hold NULL and never churn when Plaid starts sending it).
+    && (row.original_description == null || row.original_description === r.original_description);
+}
+
+// Rows that back a Zelle payment notice (services/zelle-notice-reconciler.js):
+// the evidence of money the reconciler recorded or may record. Read AFTER the
+// rows are locked — the reconciler claims a notice under the same row lock,
+// so a notice either exists here or its claim waits for this sync and then
+// sees the bank's latest values.
+async function noticedTransactionIds(trx, transactionIds, into = new Set()) {
+  const ids = [...new Set(transactionIds.filter(Boolean))];
+  for (let i = 0; i < ids.length; i += 500) {
+    const rows = await trx('inbound_payment_notices').whereIn('plaid_transaction_id', ids.slice(i, i + 500)).select('plaid_transaction_id');
+    for (const r of rows) into.add(r.plaid_transaction_id);
+  }
+  return into;
 }
 
 async function applyChanges(trx, accountsById, changes) {
@@ -619,9 +674,10 @@ async function applyChanges(trx, accountsById, changes) {
     const rows = await trx('bank_transactions')
       .whereIn('plaid_transaction_id', ids.slice(i, i + 500))
       .forUpdate()
-      .select('id', 'status', 'plaid_transaction_id', 'txn_date', 'amount', 'direction', 'description', 'suggestion');
+      .select('id', 'status', 'plaid_transaction_id', 'txn_date', 'amount', 'direction', 'description', 'original_description', 'suggestion');
     for (const row of rows) existingById.set(row.plaid_transaction_id, row);
   }
+  const noticed = await noticedTransactionIds(trx, [...existingById.keys()]);
 
   const toInsert = [];
   // a correction that makes a STAGED transaction unstageable (zeroed out,
@@ -630,8 +686,10 @@ async function applyChanges(trx, accountsById, changes) {
   const withdrawnByCorrection = [];
   // reviewed = linked or ignored, or still open but shelved from the ledger
   // Inbox (a Later or Income decision): the owner judged the row, so the
-  // bank's change parks on it instead of replacing or deleting it
-  const reviewedRow = (r) => r.status !== 'unmatched' || taxLedgerRules.hasOpenDecision(r.suggestion);
+  // bank's change parks on it instead of replacing or deleting it. A row that
+  // backs a Zelle payment notice is held the same way: it is the evidence of
+  // that payment, never rewritten or deleted under it.
+  const reviewedRow = (r) => r.status !== 'unmatched' || taxLedgerRules.hasOpenDecision(r.suggestion) || noticed.has(r.plaid_transaction_id);
   for (const txn of changes.upserts) {
     const existing = existingById.get(txn.transaction_id);
     const m = mapTransaction(txn, accountsById.get(txn.account_id), { correction: !!existing });
@@ -663,7 +721,7 @@ async function applyChanges(trx, accountsById, changes) {
       await trx('bank_transactions').where({ id: existing.id }).update({
         // a valid version supersedes an earlier withdrawal (e.g. zeroed, then restored)
         suggestion: trx.raw("(coalesce(suggestion, '{}'::jsonb) - 'plaidRemoved') || ?::jsonb", [JSON.stringify({
-          plaidModified: { txn_date: r.txn_date, amount: r.amount, direction: r.direction, description: r.description },
+          plaidModified: { txn_date: r.txn_date, amount: r.amount, direction: r.direction, description: r.description, original_description: r.original_description },
         })]),
         updated_at: trx.fn.now(),
       });
@@ -688,7 +746,8 @@ async function applyChanges(trx, accountsById, changes) {
     const locked = await trx('bank_transactions')
       .whereIn('plaid_transaction_id', removedIds.slice(i, i + 500))
       .forUpdate()
-      .select('id', 'status', 'suggestion');
+      .select('id', 'status', 'suggestion', 'plaid_transaction_id');
+    await noticedTransactionIds(trx, locked.map(r => r.plaid_transaction_id), noticed);
     const unmatched = locked.filter(r => !reviewedRow(r)).map(r => r.id);
     // a withdrawal the operator already dismissed is not raised again, and a
     // correction parked since it is obsolete (the bank's latest = withdrawn)
@@ -747,13 +806,16 @@ async function supersedeUnmatchedRow(trx, rowId, values) {
     amount: values.amount,
     direction: values.direction,
     description: String(values.description).slice(0, 500),
+    // A parked correction the operator accepts (admin-tax.js) carries only the
+    // money fields: the row keeps the bank wording it had.
+    original_description: values.original_description !== undefined ? values.original_description : (old.original_description || null),
     suggestion: Object.keys(carried).length ? carried : null,
   }).returning(['id']);
   return row.id;
 }
 
-async function registerNewAccounts(item, accessToken, unknownIds) {
-  const { accounts } = await plaid.getAccounts(accessToken);
+// `accounts` = Plaid's current /accounts/get list for the item.
+async function registerNewAccounts(item, accounts, unknownIds) {
   const existing = await db('plaid_accounts').where({ plaid_item_id: item.id }).select('account_label');
   const used = new Set(existing.map(r => String(r.account_label).trim().toUpperCase()));
   const rows = [];
@@ -841,7 +903,8 @@ async function syncItem(itemId, { runMatching = true } = {}) {
     const known = new Set((await db('plaid_accounts').where({ plaid_item_id: itemId }).select('account_id')).map(r => r.account_id));
     const unknownIds = [...new Set(changes.upserts.map(t => t.account_id).filter(id => id && !known.has(id)))];
     if (unknownIds.length) {
-      const paused = await registerNewAccounts(item, accessToken, unknownIds);
+      const { accounts } = await plaid.getAccounts(accessToken);
+      const paused = await registerNewAccounts(item, accounts, unknownIds);
       return { itemId, skipped: paused ? 'new_accounts' : 'concurrent' };
     }
     result = await db.transaction(async (trx) => {
@@ -935,6 +998,7 @@ module.exports = {
   connectItem,
   setupItem,
   markReconnected,
+  refreshAccounts,
   disconnectItem,
   syncItem,
   syncAllItems,

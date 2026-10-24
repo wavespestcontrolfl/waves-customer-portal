@@ -11,14 +11,17 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const mockState = { outcomes: [], emails: [], whereCalls: [], siteOneEmails: [], siteOneInvoice: null, otherCopy: undefined, copyBeforeCutoff: undefined };
+const mockState = { outcomes: [], emails: [], whereCalls: [], siteOneEmails: [], siteOneInvoice: null, otherCopy: undefined, copyBeforeCutoff: undefined, closePassError: null };
 // Like the real processor, a recorded outcome's bell is rung through the
 // ringBell callback on the line's transaction ('trx-stub' here).
 // raiseAdminAlert (the unmatched-unverified bell) rings through the real
 // notification service, required at call time; every other bell here goes
 // through the notifier each test injects.
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'n1' }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: (...args) => mockNotifyAdmin(...args),
+  _private: { openToCloser: (query) => query, doneColumns: (args) => args },
+}));
 jest.mock('../services/purchase-receipts/receipt-processor', () => ({
   // The pure title parsers the sweep's own unit check reads stay real.
   parseMultipack: jest.requireActual('../services/purchase-receipts/receipt-processor').parseMultipack,
@@ -50,7 +53,14 @@ jest.mock('../models/db', () => {
   q.where = (...args) => { mockState.whereCalls.push(args); return q; };
   q.first = async () => mockState.otherCopy; // another copy of a SiteOne invoice already recorded
   q.then = (resolve, reject) => Promise.resolve(mockState.emails).then(resolve, reject);
-  return jest.fn(() => q);
+  // The close pass's read of open logged bells (its SQL runs against
+  // Postgres in purchase-receipts-postgres.test.js): none open, or it fails.
+  const bells = {};
+  for (const m of ['where', 'whereNull', 'whereRaw']) bells[m] = () => bells;
+  bells.select = () => (mockState.closePassError ? Promise.reject(mockState.closePassError) : Promise.resolve([]));
+  const fn = jest.fn((table) => (table === 'notifications' ? bells : q));
+  fn.raw = (sql) => sql;
+  return fn;
 });
 
 const { processReceiptEmail, runPurchaseReceiptRestockSweep, amazonEmailLines } = require('../services/purchase-receipts/sweep');
@@ -85,6 +95,7 @@ beforeEach(() => {
   mockState.siteOneInvoice = null;
   mockState.otherCopy = undefined;
   mockState.copyBeforeCutoff = undefined;
+  mockState.closePassError = null;
   processReceiptLine.mockClear();
   alertUndeliveredShipments.mockClear();
   logger.warn.mockClear();
@@ -184,31 +195,50 @@ describe('sender authentication (P0: from/subject are spoofable)', () => {
 describe('processReceiptEmail', () => {
   beforeEach(openGates);
 
-  test('a logged line rings one bell; an unmatched line rings none', async () => {
+  test('a plain logged line writes no notification at all; an unmatched line writes none either', async () => {
     mockState.outcomes = [loggedTaurus(), unmatched];
     const notify = jest.fn(async () => ({}));
     const result = await processReceiptEmail(deliveredEmail, { notify });
 
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ orderNumber: '900-1000001-1000001', shipmentKey: 'e1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 });
     expect(processReceiptLine.mock.calls[1][0]).toMatchObject({ shipmentKey: 'e1', item: { title: 'Chromebook', quantity: 1 }, lineNo: 2 });
+    // The stock change still lands in the result (and, for real, the line and the movement).
     expect(result.logged).toEqual([{ title: 'Taurus SC Termiticide 78 oz', productId: 'p1', receivedQty: 156, receivedUnit: 'fl_oz' }]);
     expect(result.unmatched).toEqual([{ title: 'Chromebook', productId: null, receivedQty: null, receivedUnit: null }]);
-
-    expect(notify).toHaveBeenCalledTimes(1);
-    const [category, title, body, opts] = notify.mock.calls[0];
-    expect(category).toBe('inventory');
-    expect(title).toBe('Amazon delivery logged');
-    expect(body).toBe('Amazon delivery logged: Taurus SC +156 fl oz (2 × 78 fl oz)');
-    // Written on the line's own transaction, keyed by the recorded line.
-    expect(opts).toMatchObject({ bell: true, link: '/admin/inventory?tab=products', dedupeKey: 'purchase-receipt:line-1', trx: 'trx-stub' });
+    expect(notify).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('a live restock request adds a read-only note to the logged bell', async () => {
+  test('a logged line with an open restock request raises a needs-you alert to cancel the request, keyed by the line', async () => {
     mockState.outcomes = [loggedTaurus({ hasOpenRestockRequest: true }), unmatched];
     const notify = jest.fn(async () => ({}));
     await processReceiptEmail(deliveredEmail, { notify });
-    // Cancel, never receive: receiving the request would add the delivery a second time.
-    expect(notify.mock.calls[0][2]).toContain('A restock request for Taurus SC is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.');
+    // Raised through raiseAdminAlert, not the lane's injected notifier.
+    expect(notify).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, body, options] = mockNotifyAdmin.mock.calls[0];
+    expect([category, title]).toEqual(['inventory', 'Inventory — check the restock request for Taurus SC']);
+    expect(body).toBe('Amazon delivery added Taurus SC; an open restock request may cover it.');
+    expect(options).toMatchObject({
+      bell: true, dedupeKey: 'purchase-receipt:line-1', trx: 'trx-stub', link: '/admin/inventory?tab=products',
+      // Cancel, never receive: receiving the request would add the delivery a second time.
+      detail: 'Amazon delivery logged: Taurus SC +156 fl oz (2 × 78 fl oz) A restock request for Taurus SC is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.',
+      metadata: {
+        emailId: 'e1', productId: 'p1', receivedQty: 156, receivedUnit: 'fl_oz', area: 'Inventory', severity: 'needs-you', who: 'person',
+        subject: { type: 'check', id: 'purchase-receipt:line-1' }, doneWhen: 'restock_request_closed',
+      },
+    });
+  });
+
+  test('a long product name is cut to fit the headline, and the whole name stays in detail', async () => {
+    const long = { id: 'p2', name: 'Gentrol IGR Insect Growth Regulator Concentrate' };
+    mockState.outcomes = [loggedTaurus({ product: long, hasOpenRestockRequest: true }), unmatched];
+    await processReceiptEmail(deliveredEmail, { notify: jest.fn() });
+    const [, title, body, options] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toBe('Inventory — check the restock request for Gentrol IGR…');
+    expect(title.length).toBeLessThanOrEqual(60);
+    expect(body.length).toBeLessThanOrEqual(110);
+    expect(options.detail).toContain('Gentrol IGR Insect Growth Regulator Concentrate +156 fl oz');
   });
 
   test.each([
@@ -230,7 +260,7 @@ describe('processReceiptEmail', () => {
   });
 
   test('a bell that can\'t be saved fails its line: recorded as an error, and (rolled back) retried next sweep', async () => {
-    mockState.outcomes = [loggedTaurus(), unmatched];
+    mockState.outcomes = [{ status: 'possible_duplicate', product: taurus, inserted: true, lineId: 'line-9' }, unmatched];
     const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn(async () => { throw new Error('admin notification insert failed'); }) });
     expect(result.logged).toEqual([]);
     expect(result.errors).toEqual([{ title: 'Taurus SC Termiticide 78 oz', message: 'admin notification insert failed' }]);
@@ -310,6 +340,16 @@ describe('runPurchaseReceiptRestockSweep', () => {
     expect(result.unmatched.map((row) => row.emailId)).toEqual(['e1', 'e2']);
   });
 
+  test('a close pass that fails is logged and never fails the sweep or changes what it returns', async () => {
+    mockState.emails = [deliveredEmail];
+    mockState.outcomes = [loggedTaurus(), unmatched];
+    mockState.closePassError = new Error('notifications read timed out');
+    const result = await runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
+    expect(logger.warn).toHaveBeenCalledWith('[purchase-receipts] close pass failed: notifications read timed out');
+    expect(result.emailsScanned).toBe(1);
+    expect(result.logged).toHaveLength(1);
+  });
+
   test('after the Delivered pass, runs the undelivered-shipment check and folds its results in', async () => {
     mockState.emails = [deliveredEmail];
     mockState.outcomes = [loggedTaurus(), unmatched];
@@ -360,7 +400,9 @@ describe('SiteOne invoices in the sweep', () => {
       { vendor: 'siteone', orderNumber: '900000001-001', shipmentKey: '900000001-001', lineNo: 1, holdAs: undefined },
       { vendor: 'siteone', orderNumber: '900000001-001', shipmentKey: '900000001-001', lineNo: 3, holdAs: 'returned' },
     ]);
-    expect(notify.mock.calls[0].slice(1, 3)).toEqual(['SiteOne invoice logged', 'SiteOne invoice 900000001-001 logged: Taurus SC +78 fl oz (1 × 78 fl oz)']);
+    // A plain logged line is information only: no notification.
+    expect(notify).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(result.logged).toEqual([expect.objectContaining({ productId: 'p1', emailId: 's1' })]);
   });
 

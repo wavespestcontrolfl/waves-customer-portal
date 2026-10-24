@@ -151,14 +151,16 @@ const findSlotsLimiter = rateLimit({
   message: { error: 'Too many searches. Please try again in a minute.' },
 });
 
+const CUSTOMER_COLUMNS = [
+  'id', 'first_name', 'last_name', 'active', 'waveguard_tier', 'monthly_rate',
+  'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'phone',
+];
+
 async function loadByToken(token, database = db) {
   return database('customers')
     .where('reservice_token', token)
     .whereNull('deleted_at')
-    .first(
-      'id', 'first_name', 'last_name', 'active', 'waveguard_tier', 'monthly_rate',
-      'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'phone'
-    );
+    .first(...CUSTOMER_COLUMNS);
 }
 
 // createSelfBooking consults the address-bound staff review only when a
@@ -981,7 +983,27 @@ router.post(
 );
 
 // For the portal assistant's re-service offer: the page's own verdict.
-router._internals = { TOKEN_RE, pageLaneState, reserviceLocationReviewRequired, ringReserviceBooked };
+// The openings this customer's re-service page would list right now: the same lane verdict, booking window, address-review
+// rule, duration and route-aware builder as GET /:token, read by customer id for the texting AI's pest-report offer
+// (GATE_SMS_PROMPT_B1: a suggestion card lists them, a person books the pick). `lanes` narrows the page's lanes to the
+// reported one(s). null when the page would show none (self-serve off, no bookable lane, several lanes while capacity
+// booking is on, address review, no resolvable pin). A build failure throws: the caller fails closed.
+async function reserviceOpeningsFor(customerId, { lanes: wanted = null, database = db } = {}) {
+  if (!reserviceSelfServeEnabled()) return null;
+  const customer = await database('customers').where({ id: customerId }).whereNull('deleted_at').first(...CUSTOMER_COLUMNS);
+  if (!customer) return null;
+  const laneCatalog = await loadLaneCatalog(database);
+  const { bookableLanes } = await resolveLaneState(customer, laneCatalog, database);
+  const browseLanes = bookableLanes.filter((lane) => !wanted || wanted.includes(lane));
+  if (!browseLanes.length || (capacityEnabled() && browseLanes.length > 1)) return null;
+  if (await reserviceLocationReviewRequired(customer, database)) return null;
+  const config = await require('./booking')._internals.loadBookingConfig();
+  const duration = Math.max(...browseLanes.map((lane) => laneCatalog[lane].durationMinutes));
+  const availability = await buildAvailabilityForCustomer(customer, { ...bookingRange(config), config, duration, lanes: browseLanes });
+  return availability ? { days: availability.days || [] } : null;
+}
+
+router._internals = { TOKEN_RE, pageLaneState, reserviceLocationReviewRequired, ringReserviceBooked, reserviceOpeningsFor };
 
 router._test = {
   TOKEN_RE,

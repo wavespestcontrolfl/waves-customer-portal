@@ -1089,6 +1089,37 @@ describe('optional Palms block (owner 2026-10-23)', () => {
     expect(spear().getAttribute('aria-pressed')).toBe('true');
   });
 
+  // Palm follow-up C (owner 2026-10-24): the next visit shows the last count, and the tech keeps it or types a new one.
+  test('the last count shows on the toggle and in the block; "Same as last visit" fills counts and types, never symptoms', async () => {
+    const lastPalms = { serviceDate: '2026-10-25', count: 8, large: 3, types: ['Queen palm', 'Royal palm', 'Banana palm'] };
+    const request = makeRequest({ context: { ...CONTEXT, lastPalms } });
+    await readyVisit(request);
+    expect(screen.getByRole('button', { name: /^Palms \(optional\) · last count 8/ })).toBeTruthy();
+    openPalms();
+    // A type no longer on the chip list drops out.
+    expect(screen.getByText('Last count (Oct 25): 8 palms, 3 large · Queen palm, Royal palm')).toBeTruthy();
+    // Nothing is filled until the tech taps it.
+    expect(screen.getByLabelText('Palms on property (all sizes)').value).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Spear leaf collapse' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Same as last visit' }));
+    expect(screen.getByLabelText('Palms on property (all sizes)').value).toBe('8');
+    expect(screen.getByLabelText('Large palms (canopy wider than about 15 ft)').value).toBe('3');
+    // The tech can still change a value.
+    fireEvent.change(screen.getByLabelText('Palms on property (all sizes)'), { target: { value: '9' } });
+    const body = await completeBody(request);
+    expect(body.structuredFindings.values).toMatchObject({
+      palm_count_total: '9', palm_count_large: '3', palm_types_seen: 'Queen palm, Royal palm', palm_symptoms: 'Spear leaf collapse',
+    });
+  });
+
+  test('no last count: the toggle keeps its plain name and the block has no keep button', async () => {
+    await readyVisit(makeRequest({ context: { ...CONTEXT, lastPalms: null } }));
+    expect(screen.getByRole('button', { name: /^Palms \(optional\) \+$/ })).toBeTruthy();
+    openPalms();
+    expect(screen.queryByRole('button', { name: 'Same as last visit' })).toBeNull();
+    expect(screen.queryByText(/^Last count/)).toBeNull();
+  });
+
   test('the option lists equal the typed form fields the server validates against', async () => {
     const { PROJECT_TYPES } = await import('../../../../server/services/project-types.js');
     const byKey = Object.fromEntries(PROJECT_TYPES.tree_shrub.findingsFields.map((f) => [f.key, f]));

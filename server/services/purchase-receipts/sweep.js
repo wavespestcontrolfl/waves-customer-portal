@@ -19,12 +19,15 @@
  * and email-sync.js's customer bell use; see inbox-hygiene.js). A spoofed
  * receipt is refused before any purchase_receipt_lines row is written.
  *
- * Bells: a logged line rings one ("Amazon delivery logged: ...", "SiteOne
- * invoice N logged: ..."). A line held for a person — possible_duplicate,
- * size_mismatch, needs_size, no_order_number, returned, unverified, or a
- * no_items / unreadable placeholder — rings one saying why; that bell is the
- * office's to-do. unmatched lines (personal purchases, equipment) ring
- * nothing. Each bell is written on its line's own transaction
+ * Bells: a logged line rings only when an open restock request may cover it
+ * ("Inventory — check the restock request for ..."); otherwise the stock
+ * change is on its line and movement alone, and closeLoggedDeliveryBells
+ * closes the plain "logged" rows an earlier version wrote. A line held for
+ * a person — possible_duplicate, size_mismatch, needs_size,
+ * no_order_number, returned, unverified, or a no_items / unreadable
+ * placeholder — rings one saying why; that bell is the office's to-do.
+ * unmatched lines (personal purchases, equipment) ring nothing. Each bell
+ * is written on its line's own transaction
  * (receipt-processor.js), so a bell that can't be saved rolls the line back
  * and the next sweep retries it — never a silent stock change.
  *
@@ -51,6 +54,7 @@ const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require('./amazon-de
 const { processReceiptLine, parseMultipack, PACK_CLAIM_RE } = require('./receipt-processor');
 const { alertUndeliveredShipments } = require('./undelivered-shipments');
 const siteOne = require('./siteone-invoices');
+const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { raiseAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
 
 const GATE = 'GATE_PURCHASE_RECEIPT_RESTOCK';
@@ -120,20 +124,32 @@ function openRestockRequestNote(productName) {
   return `A restock request for ${productName} is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.`;
 }
 
-async function ringLoggedBell(notifyAdmin, { receipt, email, item, outcome, trx }) {
+// A logged line is information only: the stock change lives in
+// purchase_receipt_lines and the stock movement, so it writes nothing (the
+// FYI rule, docs/admin-notifications.md). Only a live restock request makes
+// it actionable: cancel that request or the stock is added twice. Read-only
+// note: this lane never writes a restock request (see receipt-processor.js's
+// header); a person decides whether this delivery covers it.
+const RESTOCK_HEADLINE_NAME_CHARS = 18;
+const RESTOCK_WHY_NAME_CHARS = 30;
+
+async function ringLoggedBell({ receipt, email, item, outcome, trx }) {
+  if (!outcome.hasOpenRestockRequest) return;
   const unit = displayUnit(outcome.receivedUnit);
-  let body = `${receipt.label} logged: ${outcome.product.name} +${outcome.receivedQty} ${unit} `
-    + `(${item.quantity} × ${round(outcome.receivedQty / item.quantity)} ${unit})`;
-  // Read-only note: this lane never writes a restock request (see
-  // receipt-processor.js's header); a person decides whether this covers it.
-  // Cancel is the stock-neutral close — receiving the request would add
-  // this delivery a second time.
-  if (outcome.hasOpenRestockRequest) body += ` ${openRestockRequestNote(outcome.product.name)}`;
-  await notifyAdmin('inventory', `${receipt.noun} logged`, body, {
-    link: INVENTORY_LINK,
+  const body = `${receipt.label} logged: ${outcome.product.name} +${outcome.receivedQty} ${unit} `
+    + `(${item.quantity} × ${round(outcome.receivedQty / item.quantity)} ${unit}) ${openRestockRequestNote(outcome.product.name)}`;
+  const named = `${receipt.noun} added ${cutAtWord(outcome.product.name, RESTOCK_WHY_NAME_CHARS)}; an open restock request may cover it.`;
+  await raiseAdminAlert('inventory', {
+    area: 'Inventory', action: `check the restock request for ${cutAtWord(outcome.product.name, RESTOCK_HEADLINE_NAME_CHARS)}`,
+    // A product name can end a sentence or run long: name the delivery alone instead.
+    why: named.length > MAX_WHY_CHARS || breaksAlertRules(named) ? `${receipt.noun} added stock; an open restock request may cover it.` : named,
+    severity: 'needs-you', who: 'person', link: INVENTORY_LINK,
+    subject: { type: 'check', id: `purchase-receipt:${outcome.lineId}` }, doneWhen: 'restock_request_closed',
+  }, {
     bell: true,
     dedupeKey: `purchase-receipt:${outcome.lineId}`,
     trx,
+    detail: body,
     metadata: { emailId: email.id, productId: outcome.product.id, receivedQty: outcome.receivedQty, receivedUnit: outcome.receivedUnit },
   });
 }
@@ -190,7 +206,7 @@ async function ringHeldBell(notifyAdmin, { receipt, email, item, outcome, trx })
 // trx option): a bell that can't be saved throws, rolling the line back.
 function lineBell(notifyAdmin, receipt, email, item) {
   return async (outcome, trx) => {
-    if (outcome.status === 'logged') await ringLoggedBell(notifyAdmin, { receipt, email, item, outcome, trx });
+    if (outcome.status === 'logged') await ringLoggedBell({ receipt, email, item, outcome, trx });
     else if (HELD_REASONS[outcome.status]) await ringHeldBell(notifyAdmin, { receipt, email, item, outcome, trx });
     // SiteOne only: an Amazon order is mostly not stock, and an unmatched
     // item on one stays silent whatever its quantity read as.
@@ -349,6 +365,40 @@ async function processSiteOneInvoices({ floor, since, now, notifyAdmin, totals }
   }
 }
 
+// The emitter clears its own rows (docs/admin-notifications.md): the logged
+// bells an earlier version rang for every restock ("Amazon delivery logged:
+// ...") are information only and never closed. Of the open ones, only a row
+// that warns about a restock request stays, and only while that product still
+// has a live request (the warning is in `detail` once the brevity guard cut
+// the body). `receivedQty` in metadata marks this bell: no held, unmatched or
+// inventory-agent bell writes it. Failure is logged and never fails the sweep.
+const RESTOCK_WARNING_RE = /A restock request for /;
+const LOGGED_CLOSER = 'purchase-receipts';
+
+async function closeLoggedDeliveryBells() {
+  const { openToCloser, doneColumns } = require('../notification-service')._private;
+  const open = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereNull('done_at')
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", ['purchase-receipt:%'])
+    .whereRaw("metadata->>'receivedQty' IS NOT NULL")
+    .select('id', 'body', 'detail', db.raw("metadata->>'productId' AS product_id"), db.raw("metadata->>'doneWhen' AS done_when"));
+  const warned = open.filter((row) => row.done_when === 'restock_request_closed' || RESTOCK_WARNING_RE.test(`${row.body} ${row.detail}`));
+  const live = warned.length
+    ? await db('product_restock_requests').whereIn('product_id', warned.map((row) => row.product_id)).whereIn('status', LIVE_RESTOCK_STATUSES).distinct('product_id')
+    : [];
+  const stillLive = new Set(live.map((row) => String(row.product_id)));
+  const groups = [
+    ['Stock added automatically; nothing to do', open.filter((row) => !warned.includes(row))],
+    ['The restock request is closed', warned.filter((row) => !stillLive.has(String(row.product_id)))],
+  ];
+  for (const [resolution, rows] of groups) {
+    if (!rows.length) continue;
+    await openToCloser(db('notifications').where({ recipient_type: 'admin' }).whereIn('id', rows.map((row) => row.id)), LOGGED_CLOSER)
+      .update(doneColumns({ by: LOGGED_CLOSER, resolution, keepExisting: true, conn: db }));
+  }
+}
+
 /**
  * The ~15-minute scheduler sweep (see the header). Idempotent: anything
  * already recorded contributes nothing new.
@@ -382,6 +432,7 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
   totals.undelivered = undelivered;
   totals.errors.push(...errors);
   await processSiteOneInvoices({ floor, since, now, notifyAdmin, totals });
+  await closeLoggedDeliveryBells().catch((err) => logger.warn(`[purchase-receipts] close pass failed: ${err.message}`));
   return totals;
 }
 

@@ -133,6 +133,25 @@ opens "Here is what to expect after this visit:"). Tips frozen before this
 change carry no key and render as before. Auth, headers and routes are
 unchanged.
 
+Tips with facts, citations (owner 2026-10-24): on the same payload
+(`/api/reports/:token/data` and the renders that share `buildReportV1Data`),
+an entry of `techNote.tips` may carry the optional key
+`citations: [{ label, url }]` (one or two entries), present only while
+`GATE_TECH_TIP_SOURCES` is exactly `true` (dark; read at call time). The
+server freezes them at completion from the tip registry's `sources` (facts in
+`server/services/email-division/fact-register-data.js`), together with the
+tip's sourced words, in `structured_notes.techTips`; the client never
+supplies them. Before a citation is sent, report-data re-checks it with
+`printableCitations` (`tip-library.js`): a non-empty label of at most 60
+characters and an `https` URL on an allowed host (`CITATION_HOSTS`, the host
+or a subdomain, no userinfo). Anything else is dropped, never repaired. The
+web report prints each label as a link after the tip's sentence, inside the
+quote, and never prints the raw URL. Rollback: unset
+`GATE_TECH_TIP_SOURCES`. The payload then carries no `citations`, frozen ones
+included, and new completions freeze the registry copy exactly as before. A
+tip frozen while the gate was on keeps its sourced words. Auth, headers and
+routes are unchanged.
+
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
@@ -3644,6 +3663,8 @@ before receipt persistence remains ambiguous and can repeat a provider handoff.
 
 `GATE_LEAD_CALL_TEXT_PREFERENCE` (dark; owner 2026-10-14): on `POST /api/webhooks/twilio/sms`, a sender in lead intake (`lead_intake_status` set, not `estimate_drafted`, re-read under a row lock) whose whole text is a bare CALL or TEXT (`parseCallTextReply`) gets one note on their newest lead (`lead_activities`). The text is not consumed: it takes the ordinary inbox path and the `sms_reply` bell title for that text leads with "Wants a call:" or "Prefers text:". Stores no preference, sends nothing and leaves `lead_intake_status` alone. Gate off = inbound handling as before, except that `classifyServiceIntent` returns no service for a bare CALL / TEXT reply (no paid model call) whatever the gate.
 
+`GATE_LEAD_CALL_REPLY_RING` (dark; owner 2026-10-24): on `POST /api/webhooks/twilio/sms`, after the TwiML ack, a known sender whose whole text is a bare CALL (`parseCallTextReply`) and that the intake machine did not consume is checked by `ringForCallReply` (`server/services/lead-call-reply-ring.js`). It places ONE outbound call, never a text: between 8 AM and 8 PM ET, for a `+1` ten-digit sender, when this phone got a "Reply CALL" text from us in the last 7 days (real Twilio sid, not failed / undelivered / canceled), the customer row is not `active_customer` / `won` / `at_risk`, no ring went to the phone in 24 h and no outbound call in 10 min (all read under a per-phone advisory lock), Twilio rings Adam's cell (not the sender) for 20 s from the lead-alert line through the shared press-1 bridge (`placeBridgeCall`, `call_log.source` `lead-call-reply-ring`, `metadata.type` `lead_call_reply_ring`). The sender's phone rings only after Adam presses 1. `lead_intake_status` is not read or changed, and the inbound text still takes its ordinary path and bell. On `POST /api/webhooks/twilio/call-status`, a terminal status on such a row without `bridged_at` raises one `lead` needs-you bell (claimed by `metadata.missed_bell_at`, released if the bell never lands) in place of the generic Twilio failure bell. A connected ring counts as a staff call back (`STAFF_CALL_SOURCES`). Gate off = no call, no bell, and every response byte-identical.
+
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared
@@ -3921,8 +3942,11 @@ version of the same content: `{ type: 'tiles', items: [{ icon, title, text }] }`
 `{ type: 'chips', items: [{ key, label, tier: 'main' | 'as_needed' }], note }`,
 `{ type: 'year', months: [{ month, label, main: [key], asNeeded: [key],
 limited }], labels: { key: label }, limitLabel }`, `{ type: 'categories',
-items: [{ key, label, text }] }` and `{ type: 'steps', items: [{ icon, title,
-text }] }`. `icon` and step `key` values are a closed set
+items: [{ key, label, text }] }`, `{ type: 'steps', items: [{ icon, title,
+text }] }` and `{ type: 'tags', items: [string], note }`. Such a packet's
+`property` carries `programLabel` (a fixed program name the page shows in
+place of the grass) and `turfType: null`; the gate-off packet keeps
+`turfType` and has no `programLabel`. `icon` and step `key` values are a closed set
 (`server/services/lawn-service-outline.js` `V13_COPY` / `V13_STEP_LABELS`) that
 `client/src/pages/ServiceOutlinePage.jsx` maps to icons; an unknown `type` or key
 renders as text. No PII is added. Unsetting the gate changes only packets built
@@ -6878,13 +6902,16 @@ is unset (that IS the kill switch), then 120/15-min per-IP limiter
 409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
 a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
 reporting stays on email), 503 when no row landed; the caller emails on
-any non-2xx so nothing is lost. A failure observed at or before this key's
-latest clean observation returns 200 `{ ok: true, stale: true }` without a
-bell or email fallback. `/resolve` shares the 404 → limiter → 401
+any non-2xx so nothing is lost. A failure observed strictly before this
+key's latest clean observation returns 200 `{ ok: true, stale: true }`
+without a bell or email fallback; one observed at the same instant (the same
+ops-crons run, which stamps every post and resolve with one runStartedAt)
+still posts. `/resolve` shares the 404 → limiter → 401
 → 400 layers but deliberately has NO 409: retiring history must never
 depend on the ingest lane being on. Under the same per-key advisory lock
-as ingest, it atomically retires rows by observation time (using created_at
-only when no observation stamp exists) and advances a durable clean watermark
+as ingest, it atomically retires rows observed strictly before the clean
+observation (using created_at only when no observation stamp exists; a row
+from the same run is kept) and advances a durable clean watermark
 even when no rows stand; success answers 200 `{ resolved: N }` (N may be 0),
 and a DB failure answers retryable 503, never false success. Writes exactly
 one admin `ops_digest` row

@@ -1298,6 +1298,11 @@ function initScheduledJobs() {
         const out = await require('./plaid-sync').syncAllItems();
         const failed = (out.results || []).filter(r => r.error);
         if (failed.length) logger.warn(`[plaid-sync] hourly sync: ${failed.length}/${out.items} connection(s) failed`);
+        // Zelle credits the sync just staged → their invoices
+        // (GATE_ZELLE_BANK_RECONCILE, read inside). Its own failure never
+        // fails the sync job.
+        await require('./zelle-notice-reconciler').reconcileZelleBankFeed()
+          .catch((err) => logger.error(`[zelle-notice] hourly bank-feed pass failed: ${err.message}`));
       });
     } catch (err) {
       logger.error(`[plaid-sync] hourly sync failed: ${err.message}`);
@@ -2389,6 +2394,23 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[access-codes] sweep tick failed (${err.code || err.name || 'error'})${err.tally ? ` ${JSON.stringify(err.tally)}` : ''}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // The found-codes bell (owner ruling 2026-10-24): one standing admin row for
+  // the codes waiting on Customers → Gate codes, 90 seconds after each sweep
+  // tick so a code the sweep just filed is listed. It rings when a code joins,
+  // refreshes quietly when one leaves and closes itself when none wait. Dark
+  // behind GATE_ACCESS_CODES_FOUND_BELL, read at each tick. No cron lease: the
+  // sync holds the row's own advisory lock in one transaction (one pooled
+  // connection). Logs the outcome and count only, never a code.
+  cron.schedule('30 4,9,14,19,24,29,34,39,44,49,54,59 * * * *', async () => {
+    try {
+      if (!require('../config/feature-gates').accessCodesFoundBellLive()) return;
+      const result = await require('./access-code-found-bell').syncFoundCodesBell();
+      if (!['unchanged', 'clear'].includes(result?.outcome)) logger.info(`[access-codes] found bell: ${result?.outcome} (${result?.count ?? 0})`);
+    } catch (err) {
+      logger.error(`[access-codes] found bell failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 

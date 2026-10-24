@@ -681,5 +681,21 @@ describe('payload flag, PDF key and tips on the real report builder (in-memory r
       expect(data.reportV2.water.scheduleKind).toBe('none');
       expect(data.techNote.tips.map((t) => t.id)).toEqual(['lawn_irrigation_portal']);
     });
+
+    test('frozen citations reach the note only behind GATE_TECH_TIP_SOURCES, re-checked against the host rule (owner 2026-10-24)', async () => {
+      process.env[TECH_TIPS] = 'true';
+      const sourced = { ...tipOf('lawn_sharp_blade'), citations: [{ label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH010' }, { label: 'Anyone', url: 'https://example.com/claim' }] };
+      const offHost = { ...tipOf('lawn_water_morning'), citations: [{ label: 'Anyone', url: 'https://example.com/claim' }] };
+      delete process.env.GATE_TECH_TIP_SOURCES;
+      let data = await build(null, [sourced, offHost]);
+      expect(data.techNote.tips.map((t) => t.citations)).toEqual([undefined, undefined]);
+      process.env.GATE_TECH_TIP_SOURCES = 'true';
+      try {
+        data = await build(null, [sourced, offHost]);
+        expect(data.techNote.tips.map((t) => t.citations)).toEqual([[{ label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH010' }], undefined]);
+      } finally {
+        delete process.env.GATE_TECH_TIP_SOURCES;
+      }
+    });
   });
 });

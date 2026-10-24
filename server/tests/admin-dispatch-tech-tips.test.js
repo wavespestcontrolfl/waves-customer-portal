@@ -40,6 +40,7 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/service-report/tech-tip-yard', () => ({ loadTechTipYard: jest.fn(async () => null) }));
 jest.mock('../services/job-costing', () => ({
   calculateJobCost: jest.fn(async () => ({})),
   resolveServiceRecord: jest.requireActual('../services/job-costing').resolveServiceRecord,
@@ -845,12 +846,41 @@ describe('GET /:serviceId/tech-tips', () => {
   });
 });
 
+describe('tips with facts on the picker (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  const { loadTechTipYard } = require('../services/service-report/tech-tip-yard');
+  afterEach(() => { delete process.env.GATE_TECH_TIP_SOURCES; loadTechTipYard.mockClear(); });
+
+  test('gate on: the yard is read from the visit address, matched, and summed up in one line; a sourced tip shows its sourced words', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    process.env.GATE_TECH_TIP_SOURCES = 'true';
+    loadTechTipYard.mockResolvedValueOnce({ grass: 'st_augustine', grassTrusted: true, grassLabel: 'St. Augustine', irrigationSystem: false, county: 'Sarasota', city: 'venice' });
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(loadTechTipYard).toHaveBeenCalledWith(expect.anything(), { customerId: 'cust-1', zip: '34205-1234', city: 'Sarasota' });
+    expect(res.body.yard).toEqual({ grass: 'St. Augustine', irrigationSystem: false, county: 'Sarasota' });
+    const served = [...res.body.groups.flatMap((group) => group.tips), ...res.body.more].find((tip) => tip.id === 'water_gutters');
+    expect(served.copy).toBe(TIPS.find((tip) => tip.id === 'water_gutters').sourcedCopy);
+  });
+
+  test('gate off: no yard read, no summary, the registry copy', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(loadTechTipYard).not.toHaveBeenCalled();
+    expect(res.body).not.toHaveProperty('yard');
+    const served = [...res.body.groups.flatMap((group) => group.tips), ...res.body.more].find((tip) => tip.id === 'water_gutters');
+    expect(served.copy).toBe(TIPS.find((tip) => tip.id === 'water_gutters').copy);
+  });
+});
+
 describe('completion freeze contract', () => {
   test('the complete route freezes the picks through freezeTechTips into structured_notes.techTips', () => {
     const start = completionSource.indexOf('async function completeScheduledService(');
     expect(start).toBeGreaterThan(-1);
     const block = completionSource.slice(start);
-    expect(block).toContain('freezeTechTips(completionInput.body?.techTips)');
+    // the sourced words and citations freeze only behind GATE_TECH_TIP_SOURCES,
+    // read at the freeze (owner 2026-10-24)
+    expect(block).toContain('freezeTechTips(completionInput.body?.techTips, { sourced: techTipSourcesOn() })');
     expect(block).toMatch(/techTips: techTipsFreeze\.tips/);
     // a rejected pick is an actionable 400 for a FRESH attempt, never a silent drop —
     // deferred past replay/conflict handling so a same-key retry keeps replaying

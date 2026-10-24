@@ -136,10 +136,11 @@ describe('listFacts', () => {
 
     test("the register's own expiry applies even when the stored row predates it", () => {
       const swfwmd = bySlug('fact-swfwmd-modified-phase-iii-water-shortage');
-      expect(swfwmd.expiresOn).toBe('2026-10-02');
+      // extended through 2027-03-31 (SWFWMD fact sheet revised 2026-10-12)
+      expect(swfwmd.expiresOn).toBe('2027-04-01');
       const r = withMeta(swfwmd, { expires_on: undefined });
-      expect(hasProvenance(r, '2026-10-01')).toBe(true);
-      expect(hasProvenance(r, '2026-10-02')).toBe(false);
+      expect(hasProvenance(r, '2027-03-31')).toBe(true);
+      expect(hasProvenance(r, '2027-04-01')).toBe(false);
     });
   });
 });

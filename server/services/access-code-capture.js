@@ -29,8 +29,10 @@
  *
  * Dark behind GATE_ACCESS_CODES_SECTION (read at call time); the sweep also
  * needs GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) so turning the
- * gate on never reads history. Nothing here rings a bell or sends a message
- * (owner ruling 2026-10-03: gate-code upkeep is logged, never a bell).
+ * gate on never reads history. Nothing here rings a bell or sends a message.
+ * The one admin row for the codes waiting on the office lives in
+ * access-code-found-bell.js (owner ruling 2026-10-24); differing codes in one
+ * neighborhood still never ring (owner ruling 2026-10-03).
  *
  * Call transcripts feed the same list (owner 2026-10-23: a customer gave the
  * community gate code to a technician on a 19-second outbound call and nothing
@@ -2063,10 +2065,10 @@ async function neighborPasses(conn, customerId, hoodId, visitHomeId) {
   return out;
 }
 
-// Every code waiting for a decision. A row with no customer yet carries the
-// sender's phone and, when the text named exactly one home, that customer.
-async function listFound(conn, { limit = 50, offset = 0 } = {}) {
-  const base = () => conn('customer_access_codes as a')
+// Every code waiting for a decision: the rows the Found in messages list
+// (listFound) and the found-codes bell (listFoundIds) both read.
+function foundRows(conn) {
+  return conn('customer_access_codes as a')
     .leftJoin('customers as c', 'c.id', 'a.customer_id')
     .where((w) => w.whereNull('a.customer_id').orWhereNull('c.deleted_at'))
     .where('a.status', 'found').whereRaw(OWNED_SOURCE_SQL)
@@ -2075,6 +2077,18 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
       this.where('a.life', 'standing')
         .orWhereRaw('COALESCE(a.source_at, a.created_at) >= ?', [new Date(Date.now() - VISIT_WINDOW_DAYS * 86400000)]);
     });
+}
+
+// The id of every code waiting for a decision, whatever the list's page size:
+// the found-codes bell compares them from one run to the next.
+async function listFoundIds(conn) {
+  return (await foundRows(conn).select('a.id')).map((row) => String(row.id));
+}
+
+// Every code waiting for a decision. A row with no customer yet carries the
+// sender's phone and, when the text named exactly one home, that customer.
+async function listFound(conn, { limit = 50, offset = 0 } = {}) {
+  const base = () => foundRows(conn);
   const [{ count }] = await base().count({ count: '*' });
   const rows = await base()
     .leftJoin('customers as sc', function suggested() {
@@ -2584,6 +2598,7 @@ module.exports = {
   mirrorProfileCodes,
   listForCustomer,
   listFound,
+  listFoundIds,
   accept,
   link,
   dismiss,

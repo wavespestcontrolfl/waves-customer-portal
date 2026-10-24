@@ -647,7 +647,11 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
 // is being resolved" nor "fresh failure resolved by the clean run" (codex
 // P1 r6 on #4392). Without it the update runs on the shared connection.
 // `notAfter`: the clean observation's timestamp. Only rows whose own
-// observation is not newer than it retire — the advisory lock serializes
+// observation is strictly older than it retire. Strict, because one ops-crons
+// run stamps every post and resolve with the same runStartedAt: when two
+// latch keys cut to one opsKey, the run's resolve must not close the finding
+// that same run just posted (b07 10-23: posted 11:10:46, closed 11:11:01).
+// Rows observed before it retire — the advisory lock serializes
 // requests, not observations, so a later failure whose ingest won the lock
 // first must survive an earlier clean run's resolve (codex P1 r7 on #4392).
 // `source` scoping: a string matches rows that seam wrote (the ingest route
@@ -677,7 +681,7 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
       .whereRaw("metadata->>'opsKey' = ?", [opsKey]);
     if (source === null) q = q.whereRaw("metadata->>'source' IS NULL");
     else if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
-    if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", [notAfter]);
+    if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) < ?::timestamptz", [notAfter]);
     return q.update({
       ...notificationService()._private.doneColumns({ by: resolvedBy, resolution: 'The check that raised this finding has run clean', at: new Date(stamp), keepExisting: true, conn }),
       // Drop the dedupeKey with the resolve stamp: a resolved row must never
@@ -704,7 +708,7 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
     });
     if (source === null) q = q.whereRaw("metadata->>'source' IS NULL");
     else if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
-    if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", [notAfter]);
+    if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) < ?::timestamptz", [notAfter]);
     return q.update({
       ...notificationService()._private.doneColumns({ by: resolvedBy, resolution: 'The check that raised this finding has run clean', at: new Date(stamp), keepExisting: true, conn }),
       metadata: conn.raw("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),

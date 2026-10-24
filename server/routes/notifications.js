@@ -153,6 +153,10 @@ function appPreferencesAvailable(req) {
 // the column itself drops in a follow-up deploy.)
 const CHANNEL_DB_COLUMNS = [
   'appointment_confirmation_channel',
+  // Same rule for the confirmation channel's stamp (GATE_NEW_CLIENT_CONFIRM_EMAIL):
+  // the confirmation sender reads it from the owner-resolved row with the
+  // channel it describes, so it routes to the account's primary profile too.
+  'appointment_confirmation_channel_explicit',
   'service_reminder_72h_channel',
   // The explicit-choice stamp must travel WITH the channel it describes
   // (pre-push #3588 P1): the PUT handler routes CHANNEL_DB_COLUMNS to the
@@ -292,6 +296,13 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
     if (effectiveBillingEmail) {
       dbUpdates.billing_contact_name = updates.billingContactName || null;
     }
+  }
+  if (updates.appointmentConfirmationChannel !== undefined) {
+    // Explicit-choice stamp, same contract as the 72h one below: a customer
+    // write of the confirmation channel is a deliberate delivery-method
+    // choice, Text included — the new-client text + email promotion
+    // (GATE_NEW_CLIENT_CONFIRM_EMAIL) must never override it.
+    dbUpdates.appointment_confirmation_channel_explicit = true;
   }
   if (updates.serviceReminder72hChannel !== undefined) {
     // Explicit-choice stamp (Codex #3588 P1): a customer write of this field

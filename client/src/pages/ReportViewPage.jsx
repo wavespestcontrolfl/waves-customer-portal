@@ -2589,6 +2589,24 @@ export function TechNoteCard({ data, mode = 'live' }) {
                 <a href={tip.link.path}>{tip.link.label || 'My Property'}</a>
               </>
             ) : null}
+            {/* The sources behind the tip (GATE_TECH_TIP_SOURCES, owner
+                2026-10-24): each label a link after the sentence, inside the
+                quote, never the raw URL. The server sends them only with an
+                https URL on an allowed host. */}
+            {Array.isArray(tip.citations) && tip.citations.length ? (
+              <>
+                {' '}
+                <span className="tech-note-source" style={{ fontSize: 14, color: 'var(--muted, #475569)' }}>
+                  {tip.citations.length > 1 ? 'Sources: ' : 'Source: '}
+                  {tip.citations.map((citation, j) => (
+                    <Fragment key={`${citation.url}-${j}`}>
+                      {j ? ', ' : ''}
+                      <a href={citation.url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>{citation.label}</a>
+                    </Fragment>
+                  ))}
+                </span>
+              </>
+            ) : null}
             {i === tips.length - 1 ? <span aria-hidden="true" style={{ fontFamily: 'Georgia, serif', fontSize: 22, lineHeight: 0, verticalAlign: -6, marginLeft: 3, color: 'var(--line-strong, rgba(4,57,94,0.55))' }}>”</span> : null}
           </p>
         ))}

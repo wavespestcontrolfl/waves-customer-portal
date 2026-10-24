@@ -22,7 +22,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
 const notifications = require('../services/notification-service');
 const { alertUndeliveredShipments } = require('../services/purchase-receipts/undelivered-shipments');
-const { runPurchaseReceiptRestockSweep } = require('../services/purchase-receipts/sweep');
+const { runPurchaseReceiptRestockSweep, processReceiptEmail } = require('../services/purchase-receipts/sweep');
 
 const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
@@ -368,8 +368,8 @@ jest.setTimeout(30000);
       expect(rows.map((row) => [row.line_no, row.status])).toEqual([[1, 'logged'], [2, 'unmatched']]);
       const [movement] = await mockConn('product_inventory_movements').where({ product_id: taurus.id });
       expect(movement.metadata).toMatchObject({ source: 'siteone_invoice', orderNumber: INVOICE });
-      const [bell] = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`purchase-receipt:${rows[0].id}`]);
-      expect(bell.body).toBe(`SiteOne invoice ${INVOICE} logged: Taurus SC +78 fl oz (1 × 78 fl oz)`);
+      // A plain logged line is information only: it writes no notification.
+      expect(await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`purchase-receipt:${rows[0].id}`])).toEqual([]);
 
       await billingCopy(lines, 390.54);
       await runPurchaseReceiptRestockSweep({ notify });
@@ -425,6 +425,79 @@ jest.setTimeout(30000);
       await runPurchaseReceiptRestockSweep({ notify });
       expect(await stock()).toBe(0);
       expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' }).first()).toMatchObject({ status: 'unverified' });
+    });
+  });
+
+  describe('logged-delivery bells close themselves', () => {
+    const savedEnv = {};
+    beforeAll(() => {
+      for (const key of ['GATE_PURCHASE_RECEIPT_RESTOCK', 'PURCHASE_RECEIPT_SINCE']) savedEnv[key] = process.env[key];
+      process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
+      process.env.PURCHASE_RECEIPT_SINCE = new Date(Date.now() - 2 * DAY).toISOString();
+    });
+    afterAll(() => {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    });
+
+    const NOTE = 'A restock request for Taurus SC is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.';
+    // The shape the earlier sweep wrote: the long body cut to 110 characters, the whole text in detail.
+    const legacyLogged = (metadata, note = '') => mockConn('notifications').insert({
+      recipient_type: 'admin', category: 'inventory', title: 'Amazon delivery logged',
+      body: 'Amazon delivery logged: Taurus SC +156 fl oz (2 × 78 fl oz)', detail: `Amazon delivery logged: Taurus SC +156 fl oz (2 × 78 fl oz)${note && ` ${note}`}`,
+      metadata: JSON.stringify({ dedupeKey: `purchase-receipt:${randomUUID()}`, emailId: 'e1', productId: taurus.id, receivedQty: 156, receivedUnit: 'fl_oz', ...metadata }),
+    }).returning('*').then(([row]) => row);
+    const sweep = () => runPurchaseReceiptRestockSweep({ notify: (...args) => notifications.notifyAdmin(...args) });
+    const reload = (row) => mockConn('notifications').where({ id: row.id }).first();
+
+    test('a plain logged row closes; a warned row stays while its product has a live request and closes once it is gone', async () => {
+      const plain = await legacyLogged();
+      const warnedLive = await legacyLogged({}, NOTE);
+      const warnedGone = await legacyLogged({ productId: randomUUID() }, NOTE);
+      const alertLive = await legacyLogged({ doneWhen: 'restock_request_closed' });
+      const [request] = await mockConn('product_restock_requests').insert({ product_id: taurus.id, status: 'ordered', requested_quantity: 78 }).returning('*');
+
+      await sweep();
+      expect(await reload(plain)).toMatchObject({ done_by: 'purchase-receipts', resolution: 'Stock added automatically; nothing to do' });
+      expect((await reload(plain)).done_at).not.toBeNull();
+      expect((await reload(warnedLive)).done_at).toBeNull();
+      expect((await reload(alertLive)).done_at).toBeNull();
+      expect(await reload(warnedGone)).toMatchObject({ done_by: 'purchase-receipts', resolution: 'The restock request is closed' });
+
+      await mockConn('product_restock_requests').where({ id: request.id }).update({ status: 'cancelled' });
+      await sweep();
+      expect(await reload(warnedLive)).toMatchObject({ done_by: 'purchase-receipts', resolution: 'The restock request is closed' });
+      expect(await reload(alertLive)).toMatchObject({ done_by: 'purchase-receipts', resolution: 'The restock request is closed' });
+    });
+
+    test('held-line rows, the inventory agent\'s rows and rows already done are left alone', async () => {
+      const held = await legacyLogged({ receivedQty: undefined, productId: taurus.id, status: 'size_mismatch' });
+      const agent = await legacyLogged({ receivedQty: undefined, status: 'logged' });
+      const person = await legacyLogged();
+      await mockConn('notifications').where({ id: person.id }).update({ done_at: new Date('2026-10-20T12:00:00Z'), done_by: '42', resolution: 'Checked by hand' });
+
+      await sweep();
+      expect((await reload(held)).done_at).toBeNull();
+      expect((await reload(agent)).done_at).toBeNull();
+      expect(await reload(person)).toMatchObject({ done_by: '42', resolution: 'Checked by hand' });
+    });
+
+    test('a delivery that a live restock request may cover raises one needs-you alert, which the next sweep leaves open', async () => {
+      await mockConn('product_restock_requests').insert({ product_id: taurus.id, status: 'open', requested_quantity: 78 });
+      const email = {
+        id: randomUUID(), from_address: 'order-update@amazon.com', subject: 'Delivered: 2 "Taurus SC..."', received_at: new Date(),
+        body_text: `Order # 900-1000001-1000001\n\n* ${TITLE} Quantity: 2\n`, authentication_results: ALIGNED_AMAZON_AUTH,
+      };
+      const result = await processReceiptEmail(email, { notify: (...args) => notifications.notifyAdmin(...args) });
+      expect(result.logged).toHaveLength(1);
+      const [row] = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' LIKE ?", ['purchase-receipt:%']);
+      expect(row).toMatchObject({ title: 'Inventory — check the restock request for Taurus SC', body: 'Amazon delivery added Taurus SC; an open restock request may cover it.', done_at: null });
+      expect(row.detail).toContain('cancel that request in the Intelligence Bar');
+      expect(row.metadata).toMatchObject({ doneWhen: 'restock_request_closed', productId: taurus.id, receivedQty: 156 });
+
+      await sweep();
+      expect((await reload(row)).done_at).toBeNull();
     });
   });
 });

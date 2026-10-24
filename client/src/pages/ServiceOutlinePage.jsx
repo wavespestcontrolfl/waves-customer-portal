@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
+  BadgeCheck,
   Bell,
   Bug,
   CalendarDays,
@@ -8,14 +9,18 @@ import {
   Clover,
   Droplets,
   FileText,
+  Footprints,
   Leaf,
+  ListChecks,
   MapPin,
   Microscope,
+  RefreshCw,
   Search,
   ShieldCheck,
   Smartphone,
   SprayCan,
   Sprout,
+  Tag,
   Target,
 } from "lucide-react";
 import DocumentActionBar from "../components/DocumentActionBar";
@@ -71,9 +76,15 @@ const VISUAL_ICONS = {
   report: FileText,
   whole_lawn: SprayCan,
   spots: Target,
-  prevent: ShieldCheck,
+  count: ListChecks,
+  rotate: RefreshCw,
   decide: ClipboardCheck,
   treat: SprayCan,
+  area: MapPin,
+  calendar: CalendarDays,
+  label: Tag,
+  reentry: Footprints,
+  epa: BadgeCheck,
   reminders: Bell,
   portal: Smartphone,
   arrival: MapPin,
@@ -225,12 +236,28 @@ function CategoriesVisual({ items = [] }) {
   );
 }
 
+function TagsVisual({ items = [], note }) {
+  return (
+    <div className="mt-4">
+      <ul className="flex list-none flex-wrap gap-2 pl-0">
+        {items.map((tag) => (
+          <li key={tag} className="rounded-full border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-slate-700">
+            {tag}
+          </li>
+        ))}
+      </ul>
+      {note && <p className="mt-3 text-sm leading-6 text-slate-500">{note}</p>}
+    </div>
+  );
+}
+
 const SECTION_VISUALS = {
   tiles: TilesVisual,
   chips: ChipsVisual,
   year: YearVisual,
   steps: StepsVisual,
   categories: CategoriesVisual,
+  tags: TagsVisual,
 };
 
 function Section({ section }) {
@@ -385,10 +412,18 @@ export default function ServiceOutlinePage() {
                 </div>
                 <div className="flex gap-3">
                   <Sprout size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
-                  <div>
-                    <dt className="text-zinc-500">Turf type</dt>
-                    <dd className="font-medium text-waves-blue-deeper">{content.property?.turfType || "To be confirmed"}</dd>
-                  </div>
+                  {/* The v13 outline names its one program, not a grass (GATE_LAWN_OUTLINE_V13). */}
+                  {content.property?.programLabel ? (
+                    <div>
+                      <dt className="text-zinc-500">Program</dt>
+                      <dd className="font-medium text-waves-blue-deeper">{content.property.programLabel}</dd>
+                    </div>
+                  ) : (
+                    <div>
+                      <dt className="text-zinc-500">Turf type</dt>
+                      <dd className="font-medium text-waves-blue-deeper">{content.property?.turfType || "To be confirmed"}</dd>
+                    </div>
+                  )}
                 </div>
                 <div className="flex gap-3">
                   <CalendarDays size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />

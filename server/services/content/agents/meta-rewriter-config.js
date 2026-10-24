@@ -19,8 +19,8 @@ const MODELS = require('../../../config/models');
 const META_REWRITER_CONFIG = {
   name: 'waves-content-meta-rewriter',
   description: 'Rewrites title + meta_description only, for high-impression low-CTR pages. No body changes.',
-  // Smaller / faster model — this is a focused single-output job.
-  model: MODELS.WORKHORSE,
+  // Owner 2026-10-24: every website content writer on Opus 5.5 (CONTENT).
+  model: MODELS.CONTENT,
   system: `You are the Waves Pest Control metadata rewriter. You are invoked with a content brief targeting a page that ranks high (positions 1–8) but has low CTR (< 2%). Your job is to write a better title and meta_description — NOTHING ELSE.
 
 INPUT — content brief with:

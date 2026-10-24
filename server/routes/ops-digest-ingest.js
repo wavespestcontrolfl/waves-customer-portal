@@ -355,7 +355,9 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       // Resolve removes the standing dedupe key. A durable clean watermark
       // still suppresses an older failure even when no bell row ever stood.
       const cleanAt = await readCleanWatermark(trx, dedupeKey);
-      if (cleanAt && Date.parse(observedAt) <= Date.parse(cleanAt)) return { stale: true };
+      // Strict: a finding from the same run as the clean watermark (same
+      // runStartedAt) is not older than it and must still post.
+      if (cleanAt && Date.parse(observedAt) < Date.parse(cleanAt)) return { stale: true };
       // An older report must not reach notifyAdmin at all: its refresh path
       // also compares title/body/link, so clamping only dedupeVersion could
       // replace a newer finding's content and re-bell it. The standing
@@ -469,7 +471,7 @@ router.post('/resolve', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const successes = Number.isInteger(body.successes) && body.successes > 0 ? body.successes : null;
   // lockKey = the dedupeKey the ingest writes for this key, so resolve and a
   // concurrent recurrence serialize under one advisory lock; notAfter = the
-  // clean run's observation time, so only findings observed at or before it
+  // clean run's observation time, so only findings observed before it
   // retire (a newer failure that landed first survives).
   const notAfter = observedAtFrom(body.observedAt);
   try {

@@ -160,6 +160,33 @@ async function loadTreeShrubHistory(svc, knex, visitDate) {
   }));
 }
 
+// A count a typed snapshot froze: a whole number 0 to 9999 (the typed form's
+// count field), else null. Zero is an answer ("no palms").
+const countOrNull = (value) => (/^\d{1,4}$/.test(String(value ?? '').trim()) ? Number(String(value).trim()) : null);
+
+/**
+ * The palm count a technician recorded on the newest completed visit at this
+ * property that recorded one (owner 2026-10-24, palm follow-up C): the next
+ * visit shows it, and the tech confirms it or types a new one. It comes from
+ * the same property-scoped history as the last visit; symptoms belong to one
+ * visit and are never carried. Nothing prices from it.
+ */
+function buildLastPalms(history) {
+  for (const record of history) {
+    if (record.status !== 'completed') continue;
+    const typed = record.typed_values && typeof record.typed_values === 'object' ? record.typed_values : {};
+    const count = countOrNull(typed.palm_count_total);
+    if (count === null) continue;
+    return {
+      serviceDate: etCalendarDayOf(record.service_date),
+      count,
+      large: countOrNull(typed.palm_count_large),
+      types: splitChips(typed.palm_types_seen),
+    };
+  }
+  return null;
+}
+
 function buildLastVisit(history) {
   const last = history.find((record) => record.status === 'completed');
   if (!last) return null;
@@ -547,6 +574,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     bedSqft: await loadBedSqft(svc, knex),
     ...(monthProductHolds.length && { monthProductHolds }),
     lastVisit: buildLastVisit(history),
+    lastPalms: buildLastPalms(history),
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),
     jointMosquitoAccount: await loadJointMosquitoAccount(svc, knex, serviceId),
     warnings,
@@ -586,5 +614,6 @@ module.exports = {
   treeShrubProductFlags,
   buildTreeShrubWarnings,
   buildLastVisit,
+  buildLastPalms,
   lastAmountsByProduct,
 };

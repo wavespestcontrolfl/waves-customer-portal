@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_NEW_CLIENT_CONFIRM_EMAIL=true (owner 2026-10-24: a booking confirmation for a NEW client goes by text AND email. When the confirmation channel resolves to the default 'sms', the customer has no completed visit and became a customer (member_since) within the last 90 days or not yet, the channel is promoted to 'both' (the existing text + email path). Kept as today when the customer picked a confirmation channel in the portal (every customer whose settings row predates this change counts as having picked), the notification settings cannot be read, portal-wide email or the confirmation toggle is off, no usable email is on file, or any lookup fails. Reminders, en-route, reschedule and cancellation notices are unchanged. Strict opt-in, read at call time via newClientConfirmEmailLive(); dark by default; off = SMS-led confirmation exactly as before. Sends a customer email when on.)
  *   GATE_PUBLIC_LLM_SHARED_CAP=true (security audit run 2, 2026-10-22 #13: the public paid-LLM routes (Ask Waves chat, lawn-assessment and pest-identifier photo analysis) also share one daily ceiling across all IPs and processes, counted in Postgres (public_llm_daily_usage, Eastern calendar day), on top of the per-IP in-memory limiters. Each route counts once, right before the paid call, after its own limiter, honeypot, Turnstile and validation; 1500/day Ask Waves (PUBLIC_LLM_DAILY_CAP_ASK_WAVES), 300/day photo (PUBLIC_LLM_DAILY_CAP_PHOTO); over the cap = the same 429 message. A database error fails open. Read at call time via publicLlmSharedCapLive(), strict 'true', dark by default; off = unchanged, no database call. Sends nothing to a customer.)
  *   GATE_BID_KIT=true (Bid kit, admin only: one page for the documents and company facts every government bid asks for (business license copy, certified operator certificate and notarized full-time statement, employee ID cards, product list, insurance certificate, W-9, Sunbiz status, tax receipt, E-Verify, references and the company fact sheet), each with its file, limits, source document, checked-on date, expiry and the owner's sign-off, plus a facts sheet the owner copies from while filling agency forms by hand. Files sit in private storage and open only by a short signed link. Never public, never on the website, never sent to anyone, no AI. Once a day at 6:05 AM ET (the compliance slot) a job posts one admin notification per item that expired or expires within 30 days (once a week per item). Read at call time via bidKitLive(), strict 'true', dark by default; off = every /api/admin/bid-kit route answers 404, the nav entry is hidden and the daily job does nothing.)
  *   GATE_REVIEW_ASK_AFTER_REPORT=true (owner 2026-10-22: the same-day (Day 0) review-ask text goes out about 10 minutes after the service report text, for every service line, instead of the smart send window. Only a report sent as a text at completion anchors it: 10 minutes after that text, or 10 minutes after payment for a paid invoice. A report held for the morning moves the ask to 10 minutes after its 8 AM replay goes out as a text. A report sent by the Waves app, failed, blocked, skipped or unknown keeps the smart window. Cadence mode only (needs GATE_REVIEW_SEQUENCES): the legacy path ignores this gate. Covers a completion, a paid invoice and combined-visit packets; the ask goes at the first :14/:44 review send after the 10 minutes. The 8 AM-8 PM window, 72 h ask spacing, click guard, holds, opt-outs and explicit operator timing are unchanged. Read at call time; off unless exactly 'true'; off = today's smart window for new enrollments (an ask already planned keeps its time, at most ~10 minutes out).)
@@ -22,6 +23,7 @@
  *   GATE_SMS_SHARED_PHONE_LINK=true (owner 2026-10-10, "link text": when two or more customer rows share the sender's phone, an inbound text attaches to ONE account instead of being filed as an unknown sender. Only when staff marked exactly one of them customers.sms_primary_for_shared_phone (admin PUT smsPrimaryForSharedPhone); no mark or two marks = left unlinked, no guessing (a guessed link would let one person on a shared phone reply for the other account). Strict opt-in via gateEnvValue, read at call time by server/routes/twilio-webhook.js findSingleCustomerByPhone(); SMS only (the voice webhook is unchanged); dark by default; off = a shared phone is not auto-linked, as before. Links a text to an account; sends nothing.)
  *   GATE_SMS_VOICE_PROFILE_PIN=<voice_profiles.version integer> (owner 2026-10-24 "do all": the texting AI's drafter uses THAT voice profile version instead of the newest approved one. Only a version that was once approved (status approved, or superseded with an approval row in activity_log) counts; a missing, pending or rejected version, or a value that is not a whole number, falls back to the newest approved profile and logs once, with no customer data. The nightly distiller keeps running and approving as before: only the drafter's reading is pinned. The same pin is what graduation, the sealed exam and auto-send read as the effective profile. The phone agent and the email reply style keep reading the newest approved profile. Each draft's intended_actions.voice_profile_version already carries the version used. Read at call time by server/services/sms-shadow-drafter.js via smsVoiceProfilePinVersion(); dark by default (unset = byte-identical); a set pin adds the prompt-version tag v. Sends nothing to a customer.)
  *   GATE_SMS_EDIT_LEARNING=true (owner 2026-10-24 "do all": the texting AI learns from the owner's edits to its suggestions. The nightly voice-corpus miner also mines legacy ai_revised sends and stops mining a composer send that sent a suggestion unchanged (that would train the drafter on its own text), and the drafter's few-shot examples rank edited-suggestion replies and replies the judge scored human_better first, then newest, instead of newest only. The sealed-exam, opt-out and complaint exclusions stay. Strict opt-in via gateEnvValue, read at call time by server/services/sms-voice-corpus-miner.js and server/services/sms-shadow-drafter.js via smsEditLearningLive(); dark by default (off = byte-identical); on adds the prompt-version tag e. Sends nothing to a customer.)
+ *   GATE_SMS_PROMPT_B1=true (owner 2026-10-24 "go b1", "yes all": the texting AI's suggestion drafter stops stalling and stops making false promises, in one prompt change. A missed-visit text gets 2-3 real open times to rebook (with no times it keeps the apology and the follow-up wording); a covered pest re-service text gets 2-3 of the re-service booking page's own openings; a reply never says a link, text, email, report, quote, proposal or photo "is being sent" unless the reply carries it, never promises that the office or a teammate will confirm, cancel, add, move, call or email something, never lets the follow-up timing promise more than a reply, and never opens a reply in an ongoing thread with Hi, Hello or Hey and a name; the latest finished visit's customer-safe notes (up to about 1,200 characters) and its findings reach the facts. Needs GATE_SMS_REAL_ANSWERS. Strict opt-in via gateEnvValue, read at call time by server/services/sms-shadow-drafter.js and server/services/context-aggregator.js via smsPromptB1Live(); dark by default (off = byte-identical prompt, facts and checks); on stamps a fresh prompt version (real_answers27_n, 28_n with GATE_SMS_OFFERS_SCHEDULER). Drafts are suggestion cards only: staff send them; sends, schedules and books nothing.)
  *   GATE_SMS_JUDGE_V2=true (owner 2026-10-24 "yes all": the grader of the texting AI drafts also answers the owner's question, could the person who replied have sent the AI draft instead (yes, yes with an edit, no), and counts a false promise as unsafe: a link, text, email, report, quote, proposal or photo "being sent", the office or a teammate "will confirm/cancel/add/move/call/email", or "within the hour" turned into a promise that a quote, proposal, photo, report or visit arrives by then. Rows carry judge_version j2 and could_send; the autonomy safety backstop then counts j2 rows only, so the stricter ruler never mixes with the old one; the sealed exam summary also counts could_send. Strict opt-in via gateEnvValue, read at call time by smsJudgeV2Live() in server/services/sms-shadow-judge.js and sms-graduation.js; dark by default; off = byte-identical prompt, parser output and rows. Measurement only: sends, holds and changes nothing, and the drafter prompt and its prompt_version are untouched.)
  *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
@@ -169,6 +171,7 @@
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_REPORT_WRITER_RULES=true (owner rules for the AI service report, owner "go" 2026-09-30, four-section report owner "ok go" 2026-10-01: WHAT WE FOUND / WHAT WE DID AND WHY / WHAT TO EXPECT / WHAT'S NEXT, length by the record, timeframes only from approved expectation wording, the reach-out date on one-time services and re-services, no booking state in the text (the report shows the next visit live); four-section notes are read only while this switch is on; one OWNER RULES block, no product/active names, amounts, footage, "safe", "per visit" or other company names in the copy, the technician note sorted by provenance, customer messages labeled and scrubbed, and output screens that reject what slips through. Every writer EXCEPT lawn and tree/shrub/palm, which stay byte-identical (owner: another lane owns them). Also the promise check at completion (owner "ok yes add these" 2026-10-01): the completion form lists the customer's open technician promises (GET /admin/dispatch/:id/promises), the report says only what the tech marked, Done closes the promise and Partly adds a still-left note (visit-promises.js). Off unless exactly 'true', read at call time via reportWriterRulesLive(); off = byte-identical prompts, inputs and screens, and no promise check)
  *   GATE_REPORT_BLOG_POST=true (Waves blog post on the service report, owner "ok go" 2026-10-01: the completion forms search the live Waves blog (GET /admin/dispatch/:id/blog-posts), the picked post is frozen on the record at completion (structured_notes.blogPost: title and live URL on the site's own host) and the customer's report shows it at the bottom as "From the Waves blog". Strict opt-in: exactly 'true' in every environment, read at call time via reportBlogPostLive(). Ships DARK; off = the search answers {available:false}, a picked post is ignored at completion and the report shows none, frozen ones included.)
+ *   GATE_TECH_TIP_SOURCES=true (tips with facts, owner 2026-10-24: a library tip that names fact-register sources freezes its sourced words and its citations at completion, and the live report prints each citation's label as a link after the sentence, inside the quote, never the raw URL. Read at call time via techTipSourcesLive(); report-data re-checks every frozen citation against the host rule before it prints. Strict opt-in: exactly 'true'. Ships DARK; off = the freeze and the report are byte-identical to before, and frozen citations do not print.)
  *   GATE_REPORT_ASK_AI=true (service report "Ask Waves" answers written by AI, owner 2026-10-05, "use sonnet 5.5": POST /api/reports/:token/ask builds a short fact sheet from the report (service, date, technician first name, weather, pest pressure label, the customer's concern and the reviewed report sections, each applied product's approved plain wording, label precaution and re-entry text with inside or outside from the recorded area, the re-entry status; never the appointment, amounts, rates, totals, EPA numbers, prices or the per-product target pests) and has Claude Sonnet 5.5 (TEXT_POLICIES.reportAsk, OpenAI backup, MODEL_REPORT_ASK) answer the question in one to four plain sentences, screened by the report copy guards (no "safe", guarantees, prices, amounts). Pest, lawn and tree & shrub reports only (ruleAnswerReason): termite, rodent, mosquito and specialty reports, typed reports and reports with a visible companion section keep the fixed-rule answer. The recorded instructions the fixed-rule answer states are sent as required lines; a system-written line (watering aftercare, pet precaution, rinse caution) must stand as its own whole sentence of the AI answer word for word, and an answer that carries required lines may hold no dismissal anywhere (ignore, disregard, not true, no longer, outdated, you can skip; before or after the line), else the fixed-rule answer is used; next-visit and schedule questions keep the fixed-rule answer; any technician-sourced required line (recommendations, primary next step, finding recommendations) skips the model and keeps the fixed-rule answer. A miss, a timeout (about 8 s), an empty or rejected answer returns the old fixed-rule answer. The stored event stays question_length and topic; the question text is never stored or logged. Strict opt-in: exactly 'true', read at call time via reportAskAiLive(). Ships DARK; off = the fixed-rule answer alone, byte-identical, no model call.)
  *   GATE_STANDARD_WORDING_PREVIEW=true (owner mockup approval 2026-10-03: when a typed visit's record says nothing was found, the office Complete Service form, which greys out Generate AI report for it, shows the exact standard sentences the customer's report will use: POST /admin/dispatch/:id/standard-wording { values, activityScore } builds the report's own Today's Result as /complete builds it (the visit's own form, the score the completion keeps, the visit number and trend from the customer's earlier scores) and answers them only when the report would keep its standard wording (service-report/standard-wording-preview.js). Read-only, display-only. Strict opt-in: exactly 'true', read at call time via standardWordingPreviewLive(). Ships DARK; off = the route answers { available: false } and the form shows no card.)
  *   GATE_BLOG_SEARCH_SUGGEST=true (Suggest a post from the completion forms' blog search, owner mockup approval 2026-10-03; owner ruling 2026-10-02: straight into the autonomous blog queue, written and published automatically, no approval step. With GATE_REPORT_BLOG_POST on, a search no live post holds every word of says so, shows the closest posts and offers "Suggest a post about …" to the office (an admin login only): POST /admin/dispatch/:id/blog-suggestions writes one operator-pinned new_supporting_blog row into opportunity_queue (bucket operator_intercept, score 79, no city, service and specialty topic inferred from the phrase, signal_metadata.source tech_blog_search; unlike a manifest intercept it is SERP-profiled, the router's public-health, navigational and do_not_publish demotions apply to it, and the quality gate waives only GSC evidence), refusing a near-me, out-of-area or personal-data phrase (a customer's name in our records included), one with a letter outside a-z, a search a live post now covers, a topic the chain tried and skipped (declined), or more than 10 a person a day; the same phrase from any source answers already_queued. The phrase is never logged. Strict opt-in: exactly 'true', read at call time via blogSearchSuggestLive(). Ships DARK; off = the search answers suggest:false, the forms show no button, the route answers 404 { enabled: false }, and suggestions already queued are not claimed (opportunity-queue fences source tech_blog_search; they wait, and expire unclaimed after 45 days).)
@@ -239,7 +242,7 @@
  *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the lawn program v13 focuses on this month (lawn-program-line.js PROGRAM_LINES_V13, claims proven against server/config/lawn-protocol-v13.json), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note), and only a visit whose plan resolved the staged v13 version with GATE_LAWN_V13 on: a visit with no recorded version or an older one keeps the old note (the retired per-grass sentences were removed, so no past report is rewritten); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES=true (lawn report: no Lawn Coverage section when the visit's coverage zones were only the schematic defaults (no technician-marked zone) AT COMPLETION; owner 2026-10-06; the verdict is frozen once at completion by the lawn write gate into service_records.structured_notes.lawnCoverageVerdict { v: 1, defaultsOnly, frozenAt }, first writer wins, only while the gate is live and the zone / geometry reads succeeded; a render and the PDF key (':covhide=1' only for a frozen defaultsOnly true) read that frozen value and never the live zone rows; a visit with no frozen verdict, such as an older visit, renders exactly as with the gate off; ships DARK, read at call time via lawnCoverageHideDefaultZonesLive(); off = byte-identical payload)
  *   GATE_LAWN_PROGRAM_DETAIL=true (lawn report: under the v13 month sentence, the month's "Why now" line from lawn-program-line.js PROGRAM_DETAIL_V13: seasonal facts and the step by category, no product names, rates, watering advice or outcome timing; needs GATE_LAWN_EXPECTATIONS; strict 'true' only; owner 2026-10-06; ships DARK, read at call time via lawnProgramDetailLive(); off = byte-identical payload)
- *   GATE_LAWN_OUTLINE_V13=true (lawn service outline, the program overview staff send from an estimate: every section describes the v13 program, owner 2026-10-22 "lawn service outline ... updated with the new protocols, check other sections"; server/services/lawn-service-outline.js: the grass is the one the estimate recorded (inputs.grassType, the composer pick first; never a scan of the whole estimate, which read the bermudaSuppression flag as Bermuda), one program section in place of the per-grass section, the month's "why now" text from service-report/lawn-program-line.js, month bullets that cover every v13 line and plan-size variant, a drawn year chart, month chips, program tiles, treatment cards and visit steps on the customer page (section.visual, text bullets kept), the v13 treatment categories, no tier line, no "restricted-season logic" line, a bahia lawn blocked (no v13 program), packets stamped content lawn-v13-copy-1; needs GATE_LAWN_V13 (fails closed); ships DARK, read at call time via lawnOutlineV13Live(); off = byte-identical outline; sends nothing to a customer)
+ *   GATE_LAWN_OUTLINE_V13=true (lawn service outline, the program overview staff send from an estimate: every section describes the v13 program, owner 2026-10-22 "lawn service outline ... updated with the new protocols, check other sections"; server/services/lawn-service-outline.js: the grass is the one the estimate recorded (inputs.grassType, the composer pick first; never a scan of the whole estimate, which read the bermudaSuppression flag as Bermuda), the same customer page for every lawn the program covers with no grass named on it (owner 2026-10-24 "i dont think we make this for spefic lawn types"; the program section says it is built around St. Augustine, and the side panel reads property.programLabel), the month's "why now" text from service-report/lawn-program-line.js, month bullets that cover every v13 line and plan-size variant, every section boxed on the customer page (section.visual tiles, chips, year chart, treatment cards, visit steps, exclusion tags; text bullets kept), the v13 treatment categories, no tier line, no "restricted-season logic" line, a bahia lawn blocked (no v13 program), packets stamped content lawn-v13-copy-1; needs GATE_LAWN_V13 (fails closed); ships DARK, read at call time via lawnOutlineV13Live(); off = byte-identical outline; sends nothing to a customer)
  *   GATE_LAWN_VISIT_MEMORY=true (lawn report treatment memory: freezes this visit's "what we applied / what we said we would watch" entry into service_records.structured_notes.lawnVisitMemory[assessmentId], first writer wins, no migration, and attaches reportV2.sinceLast built from the PRIOR visit's frozen entry (same property, strictly earlier date); data only, no customer render yet (the progress engine and copy writer read it later); ships DARK, read at call time via lawnVisitMemoryLive(); off = no reads, no writes, byte-identical report payload; the same gate builds the server-internal progress block, in-process only and never in the payload)
  *   GATE_LAWN_RAINFAST_WATCH=true (lawn rainfast breach watch, P31, needs GATE_LAWN_VISIT_MEMORY: on the LIVE web view only, once a product's stated rainfast interval (products_catalog.rainfast_minutes; no interval = never judged) has ended plus an hour, the property's hourly weather-model rain (Open-Meteo, past hours; not a gauge) is read for the whole hours inside [completion, completion + interval]; a total of at least 0.25 inch records ONE retreatCheck item on the frozen visit memory (first writer wins, compare-and-set, never creates an entry) and adds ONE fixed sentence to the lead's Watching line; any missing hour, failed fetch or missing completion time = no item and no sentence; the PDF, static builds, SMS and email never change; sends nothing to a customer; ships DARK, read at call time via lawnRainfastWatchLive(); off = byte-identical payload, no fetch, no write)
  *   GATE_LAWN_DIAGNOSTIC_EVIDENCE=true (prospect lawn report "why we think so": GET /api/public/lawn-diagnostic/:token adds a `basis` line ("Based on 4 photos.", plus a fixed note when photo quality limited the read) and, per finding, `evidence` { why, certainty, confirm }: what the condition looks like, how sure the read is, and the on-site check that would settle it. Every string is fixed copy in lawn-diagnostic-evidence.js selected by the finding's allowlisted condition label and clamped confidence; the stored observed_evidence / inferred_context / confirmation_step free text is still never published. One extra read (a photo count) per report view while live. The lawn-assessment teaser is unchanged. Ships DARK, read at call time via lawnDiagnosticEvidenceLive(); off = byte-identical payload and page)
@@ -1367,6 +1370,12 @@ const gates = {
   // time in services/access-code-capture.js; this entry is for logGateStatus only.
   accessCodesEmails: process.env.GATE_ACCESS_CODES_EMAILS === 'true',
 
+  // The found-codes bell (owner ruling 2026-10-24): one standing admin row lists
+  // the access codes waiting on Customers → Gate codes, rings when a code joins
+  // and closes itself when none wait. Exactly `true`. Read at call time in
+  // services/access-code-found-bell.js; this entry is for logGateStatus only.
+  accessCodesFoundBell: process.env.GATE_ACCESS_CODES_FOUND_BELL === 'true',
+
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
   // email-operational-actions.js; this entry is for logGateStatus only.
@@ -1410,6 +1419,9 @@ const gates = {
   // Learn from the owner's edited suggestions (owner 2026-10-24): miner + exemplar ranking. Read at call time by
   // sms-voice-corpus-miner.js and sms-shadow-drafter.js smsEditLearningLive() — this entry is for logGateStatus only.
   smsEditLearning: gateEnvValue('GATE_SMS_EDIT_LEARNING'),
+  // Prompt change B1 for the texting AI's suggestion drafter (owner 2026-10-24). Read at call time by
+  // sms-shadow-drafter.js and context-aggregator.js smsPromptB1Live() — this entry is for logGateStatus only.
+  smsPromptB1: gateEnvValue('GATE_SMS_PROMPT_B1'),
   // Stricter SMS draft judge (owner 2026-10-24): the could-send question + false-promise rule. Read at call time by
   // sms-shadow-judge.js and sms-graduation.js smsJudgeV2Live() — this entry is for logGateStatus only.
   smsJudgeV2: gateEnvValue('GATE_SMS_JUDGE_V2'),
@@ -1842,6 +1854,13 @@ const gates = {
   // bell, legacy SMS only as delivery fallback).
   leadAlertCall: process.env.GATE_LEAD_ALERT_CALL === 'true',
 
+  // Lead Call-Reply Ring — a web lead who answers our lead text with a bare
+  // CALL between 8 AM and 8 PM ET rings Adam's cell with the press-1 bridge
+  // (owner 2026-10-24, "ring my cell, like we had before"). One ring per
+  // phone per 24 h; a ring nobody connects raises a "Missed call request"
+  // bell. Off unless exactly 'true'. See services/lead-call-reply-ring.js.
+  leadCallReplyRing: process.env.GATE_LEAD_CALL_REPLY_RING === 'true',
+
   // Lead Call/Text Preference — a lead still in SMS intake who answers the
   // auto-reply with a bare CALL or TEXT (owner 2026-10-14) gets one note on
   // their newest lead, and the admin bell for that text reads "Wants a call:
@@ -1934,6 +1953,8 @@ const gates = {
   // untouched. Customer-facing channel change: explicit opt-in in EVERY
   // environment; unset = SMS-led 72h reminders (today's behavior).
   reminder72hEmailFirst: process.env.GATE_REMINDER_72H_EMAIL_FIRST === 'true',
+  // GATE_NEW_CLIENT_CONFIRM_EMAIL (new client's booking confirmation by text AND email, dark). Boot-log entry only; the call-time reader is newClientConfirmEmailLive().
+  newClientConfirmEmail: process.env.GATE_NEW_CLIENT_CONFIRM_EMAIL === 'true',
 
   // Estimate Deposit-Abandonment SMS — texts customers who started the
   // deposit payment step on a public estimate (a pending Stripe
@@ -3578,6 +3599,19 @@ const gates = {
   // keep using this same parser.
   zelleNoticeReconcile: isProd ? gateEnvValue('GATE_ZELLE_NOTICE_RECONCILE') : process.env.GATE_ZELLE_NOTICE_RECONCILE !== 'false',
 
+  // Zelle payments from the Plaid bank feed — the same decision table and
+  // money path as zelleNoticeReconcile, fed by bank_transactions instead of
+  // email: after each hourly Plaid sync, a new "Zelle money received from
+  // <payer>" credit on a bank account settles the ONE open self-pay invoice
+  // that matches it to the cent with a corroborating payer name, receipt
+  // email + SMS included (owner ruling 2026-09-02); everything else parks on
+  // the Invoices page. Money + a customer comm, so it ships dark in prod; the
+  // owner flips it. OFF = the feed is never scanned (stale-claim recovery
+  // still runs). Read at CALL time (gateEnvValue) by
+  // services/zelle-notice-reconciler.js, so unsetting
+  // GATE_ZELLE_BANK_RECONCILE is a live kill switch.
+  zelleBankReconcile: isProd ? gateEnvValue('GATE_ZELLE_BANK_RECONCILE') : process.env.GATE_ZELLE_BANK_RECONCILE !== 'false',
+
   // Treatment Zone Mapper — tech traces the treated perimeter over a satellite
   // photo of the property; the traced path + snapshot replace the generic
   // schematic on the customer's service report. Gates BOTH the tech capture
@@ -5030,6 +5064,13 @@ function smsEditLearningLive() {
   return gateEnvValue('GATE_SMS_EDIT_LEARNING');
 }
 
+// GATE_SMS_PROMPT_B1 read at CALL time — strict opt-in via gateEnvValue, dark. Owner 2026-10-24. The change is part of the
+// real-answers prompt, so it applies only while GATE_SMS_REAL_ANSWERS is also on. Read by sms-shadow-drafter.js (prompt,
+// facts, checks, prompt version) and context-aggregator.js (the latest visit's notes and findings). Suggestion cards only.
+function smsPromptB1Live() {
+  return gateEnvValue('GATE_SMS_PROMPT_B1') && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+}
+
 // GATE_SMS_JUDGE_V2 read at CALL time — strict opt-in via gateEnvValue, dark. Owner 2026-10-24. Measurement only.
 function smsJudgeV2Live() {
   return gateEnvValue('GATE_SMS_JUDGE_V2');
@@ -5797,6 +5838,14 @@ function reportBlogPostLive() {
   return process.env.GATE_REPORT_BLOG_POST === 'true';
 }
 
+// GATE_TECH_TIP_SOURCES read at CALL time — strict `=== 'true'`, dark in
+// every environment (owner 2026-10-24, "tips with facts"). On: a sourced tip
+// freezes its sourced words and citations, and the live report prints the
+// citations as links. Off: the freeze and the report are unchanged.
+function techTipSourcesLive() {
+  return process.env.GATE_TECH_TIP_SOURCES === 'true';
+}
+
 // GATE_REPORT_ASK_AI read at CALL time — strict `=== 'true'`, dark in every
 // environment. Off, POST /api/reports/:token/ask answers with the fixed-rule
 // text alone and makes no model call.
@@ -6497,6 +6546,11 @@ function adminAlertRelevanceLive() {
 // before: no close pass, no reopen, the same notifyAdmin calls.
 function alertEpisodesLive() {
   return !['off', 'false', '0'].includes(String(process.env.ALERT_EPISODES ?? '').trim().toLowerCase());
+}
+
+// GATE_ACCESS_CODES_FOUND_BELL read at CALL time (so a flip needs no redeploy); strict 'true'.
+function accessCodesFoundBellLive() {
+  return process.env.GATE_ACCESS_CODES_FOUND_BELL === 'true';
 }
 
 // GATE_QUIET_OVERDUE_LIST read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -7260,6 +7314,7 @@ module.exports.portalActivityLive = portalActivityLive;
 module.exports.emailSendLaterLive = emailSendLaterLive;
 module.exports.smsVoiceProfilePinVersion = smsVoiceProfilePinVersion;
 module.exports.smsEditLearningLive = smsEditLearningLive;
+module.exports.smsPromptB1Live = smsPromptB1Live;
 module.exports.smsJudgeV2Live = smsJudgeV2Live;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.signupSingleEmailLive = signupSingleEmailLive;
@@ -7323,6 +7378,7 @@ module.exports.pestReportVoiceLive = pestReportVoiceLive;
 module.exports.completionTextPlainLive = completionTextPlainLive;
 // GATE_REPORT_BLOG_POST reader, on its own line beside the writer rules'.
 module.exports.reportBlogPostLive = reportBlogPostLive;
+module.exports.techTipSourcesLive = techTipSourcesLive;
 module.exports.reportAskAiLive = reportAskAiLive;
 module.exports.standardWordingPreviewLive = standardWordingPreviewLive;
 module.exports.blogSearchSuggestLive = blogSearchSuggestLive;
@@ -7644,6 +7700,16 @@ function alertRingOnceLive() {
 // GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
 module.exports.alertRingOnceLive = alertRingOnceLive;
 
+// GATE_NEW_CLIENT_CONFIRM_EMAIL read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader for
+// the new-client confirmation promotion: services/appointment-reminders.js resolveConfirmationChannel. Off: a booking confirmation
+// keeps today's channel (text first, email only when the text fails). On: a confirmation that would go by text alone goes by text
+// AND email when the customer has no completed visit and a member_since unset or within 90 days (see the gate doc line at the top of this file). Kill: unset.
+function newClientConfirmEmailLive() {
+  return process.env.GATE_NEW_CLIENT_CONFIRM_EMAIL === 'true';
+}
+// GATE_NEW_CLIENT_CONFIRM_EMAIL reader, on its own line so gate PRs never conflict.
+module.exports.newClientConfirmEmailLive = newClientConfirmEmailLive;
+
 // GATE_REPORT_CLEANUP_1020 read at CALL time, strict `=== 'true'` (customer report copy), dark in every environment.
 // The one reader for the 2026-10-20 service report cleanup: one clear water-in line, no spray method on a granular
 // product, a clean follow-up sentence, a trouble-spot note, and the stock lines the report no longer repeats.
@@ -7795,3 +7861,5 @@ module.exports.callPromiseAiCloseLive = callPromiseAiCloseLive;
 module.exports.satellitePalmCountTypedLive = satellitePalmCountTypedLive;
 // GATE_CALL_ADDRESS_FAMILY_CARD reader, on its own line so gate PRs never conflict.
 module.exports.callAddressFamilyCardLive = callAddressFamilyCardLive;
+// GATE_ACCESS_CODES_FOUND_BELL reader, on its own line so gate PRs never conflict.
+module.exports.accessCodesFoundBellLive = accessCodesFoundBellLive;
