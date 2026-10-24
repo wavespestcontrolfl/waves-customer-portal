@@ -23,6 +23,7 @@ jest.mock('../config/feature-gates', () => ({
   // gateEnvValue's own always-false mock above.
   termiteAnnualPlanSelectionEnabled: jest.fn(() => false),
   commercialProposalSignLive: () => false,
+  satellitePalmCountTypedLive: jest.fn(() => false),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
 jest.mock('../services/sendgrid-mail', () => ({
@@ -753,6 +754,21 @@ describe('group publication navigation', () => {
     return { older, sibling };
   }
 
+  test('a grouped sibling priced from the satellite needs its own typed palm count: the anchor\'s count never clears it', async () => {
+    const gates = require('../config/feature-gates');
+    const { sibling } = prepareGroup();
+    sibling.estimate_data = { ...sibling.estimate_data, engineResult: { lineItems: [{ service: 'tree_shrub', palmCount: 9, palmCountFromLookup: true }] } };
+    gates.satellitePalmCountTypedLive.mockReturnValue(true);
+    try {
+      await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true, confirmedPalmCount: 9 }))
+        .rejects.toMatchObject({ code: 'PALM_COUNT_REQUIRED', message: expect.stringContaining('Grouped property') });
+    } finally {
+      gates.satellitePalmCountTypedLive.mockReturnValue(false);
+    }
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sibling.status).toBe('draft');
+  });
+
   function failReconciliation() {
     db.mockImplementation((table) => {
       const builder = groupDatabase(table);
@@ -1314,6 +1330,51 @@ describe('annual provider delivery receipts', () => {
       expect(sibling.status).toBe('draft');
       expect(row.status).not.toBe('sent');
     });
+  });
+});
+
+describe('satellite palm count typed before the first send (GATE_SATELLITE_PALM_COUNT_TYPED)', () => {
+  const gates = require('../config/feature-gates');
+  const satelliteLine = (palmCount) => ({ engineResult: { lineItems: [{ service: 'tree_shrub', palmCount, palmCountFromLookup: true }] } });
+  beforeEach(() => {
+    gates.satellitePalmCountTypedLive.mockReturnValue(true);
+    row.status = 'draft';
+    row.estimate_data = satelliteLine(14);
+  });
+  afterEach(() => gates.satellitePalmCountTypedLive.mockReturnValue(false));
+
+  test('the preview asks for the count without blocking; the send needs exactly the priced count', async () => {
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.satellitePalmCount).toBe(14);
+    expect(preview.body.blockReason).toBeUndefined();
+    const { body } = scheduledAttempt();
+    const missing = await invoke('/:id/send', 'post', body);
+    expect(missing.statusCode).toBe(409);
+    expect(missing.body.code).toBe('PALM_COUNT_REQUIRED');
+    const wrong = await invoke('/:id/send', 'post', { ...body, confirmedPalmCount: 6 });
+    expect(wrong.statusCode).toBe(409);
+    expect(wrong.body).toMatchObject({ code: 'PALM_COUNT_MISMATCH', error: expect.stringContaining('this quote priced 14') });
+    expect(mutations).toEqual([]);
+    const typed = await invoke('/:id/send', 'post', { ...body, confirmedPalmCount: 14 });
+    expect(typed.statusCode).toBe(200);
+    expect(typed.body.scheduled).toBe(true);
+    expect(row.status).toBe('scheduled');
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('the scheduled leg sends without asking again: the count was typed when it was scheduled', async () => {
+    row.status = 'sending';
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a row already sent and a row with no satellite count are never asked', async () => {
+    row.sent_at = new Date('2026-01-01T12:00:00.000Z');
+    expect((await invoke('/:id/send-preview', 'get')).body.satellitePalmCount).toBeUndefined();
+    row.sent_at = null;
+    row.estimate_data = {};
+    expect((await invoke('/:id/send-preview', 'get')).body.satellitePalmCount).toBeUndefined();
   });
 });
 

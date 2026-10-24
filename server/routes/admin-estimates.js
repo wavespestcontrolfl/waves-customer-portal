@@ -5,6 +5,7 @@ const { estimateOfferVersion, annualPlanOfferFingerprint } = require('../service
 const { gateEnvValue } = require('../config/feature-gates');
 const { estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
+const { satellitePalmCountToConfirm } = require('../services/estimator-engine/lookup-palm-review');
 const router = express.Router();
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callSideBlocksForEstimates, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
@@ -577,7 +578,37 @@ function blockingSiblingMessage(blockingSibling, beforeWhat) {
   return `Grouped estimate ${id} has no engine-verified price — re-save it from the estimate tool before ${beforeWhat}.`;
 }
 
-function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
+// Follow-up B to #6562 (owner 2026-10-24 "ok go"; GATE_SATELLITE_PALM_COUNT_TYPED):
+// the palm count a never-sent estimate still prices from the satellite read,
+// which an admin types from the aerial photo before the first send. Null when
+// nothing is asked (gate off, already sent, or no satellite palm line).
+function satellitePalmCountAwaitingSend(estimate) {
+  if (estimate.sent_at || require('../config/feature-gates').satellitePalmCountTypedLive?.() !== true) return null;
+  return satellitePalmCountToConfirm(parseEstimateData(estimate.estimate_data || estimate.estimateData));
+}
+
+const palmsLabel = (count) => `${count} palm${count === 1 ? '' : 's'}`;
+
+// The satellite palm gate of assertEstimateSendable. A satellite palm count is
+// a suggestion until an admin counts the palms on the aerial photo and types
+// the number: acknowledging the AI review is not enough. A typed count other
+// than the priced one refuses the send, so the quote is rebuilt with the real
+// count. A scheduled or sending row cleared it at request time
+// (palmCountCleared, like the review acknowledgment).
+function assertSatellitePalmCountTyped(estimate, { confirmedPalmCount, palmCountCleared }) {
+  const pricedPalms = palmCountCleared ? null : satellitePalmCountAwaitingSend(estimate);
+  if (pricedPalms == null) return;
+  const typed = Number.isInteger(confirmedPalmCount) && confirmedPalmCount >= 0 ? confirmedPalmCount : null;
+  if (typed === pricedPalms) return;
+  const err = new Error(typed == null
+    ? `This quote priced ${palmsLabel(pricedPalms)} from the satellite image, which can count too many. Count the palms on the aerial photo, then type the number when you send.`
+    : `You counted ${palmsLabel(typed)}, but this quote priced ${pricedPalms}. Rebuild the quote with ${palmsLabel(typed)} in the estimate builder, then send it.`);
+  err.statusCode = 409;
+  err.code = typed == null ? 'PALM_COUNT_REQUIRED' : 'PALM_COUNT_MISMATCH';
+  throw err;
+}
+
+function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ...palmCountGate } = {}) {
   assertBidSendDate(estimate);
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
@@ -658,6 +689,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
       throw err;
     }
   }
+  assertSatellitePalmCountTyped(estimate, palmCountGate);
   // Some rows have no share token (quote-wizard mirrors, legacy imports).
   // Without this gate the customer link is built by template literal and the
   // SMS/email ships a literal /estimate/null — a dead link — while the
@@ -1404,11 +1436,15 @@ router.get('/:id/send-preview', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const preview = await buildEstimateSendPreview(estimate);
     try {
-      assertEstimateSendable(estimate);
+      assertEstimateSendable(estimate, { palmCountCleared: true });
     } catch (err) {
       preview.blockReason = err.message;
       preview.requiresEngineReview = err.code === 'ENGINE_REVIEW_REQUIRED';
     }
+    // The dialog asks for the typed palm count; it never blocks the preview.
+    // The priced count lets it refuse a different number before an attempt.
+    const satellitePalmCount = satellitePalmCountAwaitingSend(estimate);
+    if (satellitePalmCount != null) preview.satellitePalmCount = satellitePalmCount;
     res.set('Cache-Control', 'private, no-store').json(preview);
   } catch (err) { next(err); }
 });
@@ -1422,6 +1458,9 @@ router.post('/:id/send', async (req, res, next) => {
     const scheduledAt = req.body?.scheduledAt || null;
     const idempotencyKey = req.body?.idempotencyKey || req.body?.idempotency_key || req.body?.sendAttemptId || null;
     const engineReviewAcknowledged = req.body?.acknowledgeEngineReview === true;
+    // The admin's own palm count from the aerial photo (satellite palm gate);
+    // the gate reads only a whole number, anything else counts as not typed.
+    const confirmedPalmCount = req.body?.confirmedPalmCount;
 
     if (!['sms', 'email', 'both'].includes(sendMethod)) {
       return res.status(400).json({ error: 'Invalid sendMethod' });
@@ -1457,7 +1496,7 @@ router.post('/:id/send', async (req, res, next) => {
       if (preview.messageVersion !== req.body.messageVersion) return res.status(409).json({ error: 'The delivery message changed. Close this dialog and review it again.', code: 'ESTIMATE_REVIEW_STALE' });
       reviewedMessages = preview.messages;
     }
-    assertEstimateSendable(estimate, { engineReviewAcknowledged });
+    assertEstimateSendable(estimate, { engineReviewAcknowledged, confirmedPalmCount });
     // An impossible US number refuses the WHOLE send (400, nothing leaves, no
     // claim taken) rather than letting the email go and the text fail at the
     // provider: a resend after the fix would deliver the email twice.
@@ -1664,7 +1703,7 @@ router.post('/:id/send', async (req, res, next) => {
         estimate.estimate_group_id ? estimate : { ...estimate, status: 'sending' },
         sendMethod,
         {
-          idempotencyKey, engineReviewAcknowledged, claimState,
+          idempotencyKey, engineReviewAcknowledged, confirmedPalmCount, claimState,
           manualAttempt: idempotencyKey ? { key: idempotencyKey, binding: attemptBinding } : null,
           reviewedMessages,
           reviewedOffer: req.body?.expectedEditVersion ? estimateOfferVersion(estimate) : null,
@@ -2186,8 +2225,12 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       // reviewed. A sibling only carries its own implicit ack when it was
       // itself scheduled (it cleared its own request-time gate then); an
       // unacknowledged yellow draft aborts the whole group send.
+      // The typed satellite palm count is per estimate too: the anchor's count
+      // says nothing about a sibling's palms.
+      const siblingCleared = ['scheduled', 'sending'].includes(String(sibling.status || ''));
       assertEstimateSendable(sibling, {
-        engineReviewAcknowledged: ['scheduled', 'sending'].includes(String(sibling.status || '')),
+        engineReviewAcknowledged: siblingCleared,
+        palmCountCleared: siblingCleared,
       });
       // A sibling under a clarify re-price hold is not publishable either
       // — the anchor's verdict never inspects sibling markers (codex r1 P1
@@ -2619,11 +2662,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // A row in 'scheduled'/'sending' already cleared the request-time gate
   // (the operator acknowledged the engine review when scheduling/clicking) —
   // the cron leg must not bounce it at execution time.
-  const engineReviewAcknowledgedResolved = options.engineReviewAcknowledged === true
-    || ['scheduled', 'sending'].includes(String(estimate.status || ''));
-  assertEstimateSendable(estimate, {
+  const clearedAtRequest = ['scheduled', 'sending'].includes(String(estimate.status || ''));
+  const engineReviewAcknowledgedResolved = options.engineReviewAcknowledged === true || clearedAtRequest;
+  // The typed satellite palm count follows the same request-time rule.
+  const sendGateOptions = {
     engineReviewAcknowledged: engineReviewAcknowledgedResolved,
-  });
+    confirmedPalmCount: options.confirmedPalmCount,
+    palmCountCleared: clearedAtRequest,
+  };
+  assertEstimateSendable(estimate, sendGateOptions);
 
   // Send-time lead-with-one-service (GATE_ESTIMATE_LEAD_SERVICE_SEND): parks
   // the non-lead recurring lines as staff opt-out events BEFORE any delivery
@@ -2643,7 +2690,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // review-only output falls back to the full bundle (GH codex r9 P1).
     let shapedSendable = true;
     try {
-      assertEstimateSendable(estimate, { engineReviewAcknowledged: engineReviewAcknowledgedResolved });
+      assertEstimateSendable(estimate, sendGateOptions);
       let shapedData = {};
       try { shapedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); } catch { shapedData = {}; }
       const lines = Array.isArray(shapedData?.engineResult?.lineItems) ? shapedData.engineResult.lineItems : [];
