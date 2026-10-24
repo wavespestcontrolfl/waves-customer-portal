@@ -660,20 +660,22 @@ async function cancellationStillOwned(svc, scheduledServiceId, { token, restorat
 }
 
 // One email per notice. A reschedule:
-// `appointment.rescheduled:<visit>:<slot ms, or 'na' for no known window>:<notice stamp>`.
+// `appointment.rescheduled:<visit>:<slot ms, or 'na' for no known window>:<notice stamp>[:stop]`.
 // The slot segment is where every appointment email key keeps the promised
-// slot, and the no-show detector reads it there (its email recovery and
-// recall); the notice's own stamp (the sender's write time, carried on the
-// text's audit rows as move_notice_at, so a carrier bounce of any recipient's
-// text rebuilds the same key) keeps an A → B → A move from deduping into the
-// first A notice. A cancellation: its restoration count
-// (cancellationNoticeStamp), so a retried cancellation text (the sweep
-// re-claims with a new token) keeps its key and a cancel after a restore gets
-// a new one.
-function moveNoticeEmailKey(kind, scheduledServiceId, { apptTime, windowUnknown, noticeAt, cancellation }) {
+// slot ('na' as apptStamp writes it), and the no-show detector reads it there
+// (its email recovery and recall); the notice's own stamp (the sender's write
+// time, carried on the text's audit rows as move_notice_at, so a carrier
+// bounce of any recipient's text rebuilds the same key) keeps an A → B → A
+// move from deduping into the first A notice. `:stop` marks a notice that
+// spoke for a grouped stop (its text's notificationEventKey), which the
+// detector's recovery reads when the attempt row is missing. A cancellation:
+// its restoration count (cancellationNoticeStamp), so a retried cancellation
+// text (the sweep re-claims with a new token) keeps its key and a cancel
+// after a restore gets a new one.
+function moveNoticeEmailKey(kind, scheduledServiceId, { apptTime, windowUnknown, notificationEventKey, noticeAt, cancellation }) {
   if (kind === 'cancelled') return `appointment.cancelled:${scheduledServiceId}:r${cancellation?.restorations}`;
   const slot = windowUnknown ? 'na' : apptTime.getTime();
-  return `appointment.rescheduled:${scheduledServiceId}:${slot}:${new Date(noticeAt).getTime()}`;
+  return `appointment.rescheduled:${scheduledServiceId}:${slot}:${new Date(noticeAt).getTime()}${notificationEventKey ? ':stop' : ''}`;
 }
 
 // The cancellation a cancellation text belongs to, stamped on its audit rows:
@@ -701,7 +703,7 @@ function cancellationBinding(stamp) {
 // (MOVE_NOTICE_REFUSALS). `cancellation` binds a cancellation email to its own
 // notice (cancellationNoticeStamp). Returns true when the email went out.
 // Never throws.
-async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, arrivalWindow, windowUnknown, noticeAt, cancellation, sendOutcome }) {
+async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, noticeAt, cancellation, sendOutcome }) {
   try {
     if (!require('../config/feature-gates').moveNoticeEmailLive() || !customerId || !scheduledServiceId) return false;
     if (MOVE_NOTICE_REFUSALS.has(sendOutcome?.blockedCode)) return false;
@@ -712,8 +714,8 @@ async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, ap
       return false;
     }
     const res = await MOVE_NOTICE_SENDERS[kind]({
-      customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, arrivalWindow, windowUnknown, stillCurrent,
-      idempotencyKey: moveNoticeEmailKey(kind, scheduledServiceId, { apptTime, windowUnknown, noticeAt, cancellation }),
+      customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, stillCurrent,
+      idempotencyKey: moveNoticeEmailKey(kind, scheduledServiceId, { apptTime, windowUnknown, notificationEventKey, noticeAt, cancellation }),
     });
     if (res?.ok) {
       logger.info(`[appt-remind] ${kind} email sent for ${scheduledServiceId} (the text reached nobody)`);
@@ -745,19 +747,37 @@ function bouncedNoticeKind(audit) {
 // A carrier bounced a reschedule or cancellation text: email the notice that
 // text carried, from the visit's reminder row and the text's own audit row
 // (the slot it quoted, its move stamp, an unknown-window note).
+// The time a bounced notice's email quotes. A reschedule: the slot its text
+// quoted, as the text's audit row records it (rendered_slot_ms, or
+// move_notice_slot_ms for a windowless notice, whose promised slot safeSend
+// leaves out). With neither, no email: the reminder row's current time may
+// belong to a later move that sent no notice, and the freshness check would
+// pass it against itself. A cancellation quotes no slot; its date is the
+// reminder row's, which its claim binding (cancellationStillOwned) proves is
+// still the same cancellation.
+function bouncedNoticeTime(kind, meta, row) {
+  const quoted = [meta.rendered_slot_ms, meta.move_notice_slot_ms]
+    .filter((ms) => ms != null).map(Number).find(Number.isFinite);
+  if (quoted !== undefined) return new Date(quoted);
+  return kind === 'cancelled' && row?.appointment_time ? new Date(row.appointment_time) : null;
+}
+
 async function deliverBouncedMoveNoticeEmail({ kind, audit, customerId, scheduledServiceId }) {
   const meta = audit.metadata || {};
   const row = scheduledServiceId
     ? await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).first('appointment_time', 'service_type').catch(() => null)
     : null;
-  if (!row?.appointment_time) return;
-  const slotMs = Number(meta.rendered_slot_ms);
-  const apptTime = new Date(Number.isFinite(slotMs) ? slotMs : row.appointment_time);
+  const apptTime = row ? bouncedNoticeTime(kind, meta, row) : null;
+  if (!apptTime) {
+    logger.info(`[appt-remind] bounced ${kind} notice for ${scheduledServiceId}: no quoted time on record, no email`);
+    return;
+  }
   await deliverMoveNoticeEmail({
     kind, customerId, scheduledServiceId, apptTime,
     serviceLabel: smsServiceLabelStored(row.service_type),
     arrivalWindow: meta.window_unknown === true ? require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW : formatArrivalWindow(apptTime),
     windowUnknown: meta.window_unknown === true,
+    notificationEventKey: meta.notificationEventKey,
     noticeAt: meta.move_notice_at || audit.created_at,
     cancellation: cancellationBinding(meta),
   });
@@ -5398,6 +5418,9 @@ const AppointmentReminders = {
             templateKey: 'appointment_rescheduled',
             // The move's own stamp: the email key a carrier bounce rebuilds (deliverMoveNoticeEmail).
             move_notice_at: now.toISOString(),
+            // The slot this text quotes, kept for its email version when safeSend leaves out the
+            // promised slot (window_unknown): a bounce must not quote a later move's time.
+            move_notice_slot_ms: newApptTime.getTime(),
           }, { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
@@ -6624,6 +6647,7 @@ AppointmentReminders._test = {
   rescheduleWindowPhrase,
   rescheduleEmailWindow,
   bouncedNoticeKind,
+  bouncedNoticeTime,
   cancellationNoticeReport,
 };
 

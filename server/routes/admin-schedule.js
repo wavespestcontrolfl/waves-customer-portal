@@ -1394,13 +1394,6 @@ function noticeOptions(options = {}, dateStr, startHHMM) {
   return { expectedPhone: options.expectedPhone, stopWide: stopWideMeta(options.stopWideFor, dateStr, startHHMM) };
 }
 
-// `stopWideFor`: the service_visits id when this ONE notice speaks for a
-// whole grouped stop (admin-dispatch moves a stop as a unit and quotes the
-// stop's landed start). It rides into the message metadata as the
-// notification event key, which is how no-show-detector.js tells copy that
-// supersedes every member's own promise from copy about one service — without
-// it, each sibling kept its pre-move window and could raise a false alert
-// against it (codex P1, PR #4403 round 26).
 // The operator's line for a reschedule text that reached nobody. The email
 // version goes first (GATE_MOVE_NOTICE_EMAIL): an email that went out is said
 // plainly, so staff do not chase a customer who was told.
@@ -1413,6 +1406,13 @@ async function rescheduleTextNotSentError(noticeOutcome, emailArgs) {
     : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
 }
 
+// `stopWideFor`: the service_visits id when this ONE notice speaks for a
+// whole grouped stop (admin-dispatch moves a stop as a unit and quotes the
+// stop's landed start). It rides into the message metadata as the
+// notification event key, which is how no-show-detector.js tells copy that
+// supersedes every member's own promise from copy about one service — without
+// it, each sibling kept its pre-move window and could raise a false alert
+// against it (codex P1, PR #4403 round 26).
 async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, options = {}) {
   const { expectedPhone, stopWide } = noticeOptions(options, dateStr, startHHMM);
   // Shared belt for every notice path (update-details, bulk reschedule, IB
@@ -1535,7 +1535,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
       if (!sent) {
         error = await rescheduleTextNotSentError(noticeOutcome, {
           kind: 'rescheduled', customerId: customer.id, scheduledServiceId: serviceId, apptTime, serviceLabel,
-          arrivalWindow: spokenArrivalWindow(start), noticeAt, sendOutcome: noticeOutcome,
+          arrivalWindow: spokenArrivalWindow(start), notificationEventKey: stopWide.notificationEventKey, noticeAt, sendOutcome: noticeOutcome,
         });
       }
     }

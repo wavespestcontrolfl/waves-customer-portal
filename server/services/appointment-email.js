@@ -245,9 +245,11 @@ async function resolveRecipients(customer, { scheduledServiceId = null, eventTyp
 // and is not always the same id a future caller might pass; messaging/audit.js
 // gates the identical field the same way, off appointmentId (codex P1). Its
 // own function so the already-oversized sender gains no decisions from it
-// (codex P2 round 13).
+// (codex P2 round 13). window_unknown (a windowless reschedule email) records
+// no slot: the copy promises none, though the slot still guards the send, as
+// on the text side (appointment-reminders.js safeSend).
 function withPromisedSlot(metadata, { renderedSlotMs, scheduledServiceId }) {
-  return Number.isFinite(renderedSlotMs) && scheduledServiceId
+  return Number.isFinite(renderedSlotMs) && scheduledServiceId && metadata.window_unknown !== true
     ? { ...metadata, rendered_slot_ms: renderedSlotMs } : metadata;
 }
 
@@ -718,7 +720,10 @@ async function sendAppointmentNoShowEmail({
 // MOVE_NOTICE_CATEGORY, so no stored-copy rail re-sends them. The reschedule
 // email records the slot it promises (the no-show detector's evidence),
 // except for a windowless visit (`windowUnknown`), whose notice promises none.
-async function sendAppointmentRescheduledEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, arrivalWindow, windowUnknown, idempotencyKey, stillCurrent } = {}) {
+// `notificationEventKey`: the text's stop-wide key when one notice spoke for a
+// grouped stop (admin-schedule.js stopWideMeta); recorded as the text records
+// it, so the detector reads this email as speaking for every member too.
+async function sendAppointmentRescheduledEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, idempotencyKey, stillCurrent } = {}) {
   const apptTime = toDate(appointmentTime);
   if (!apptTime) return { ok: false, reason: 'no_appointment_time' };
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
@@ -737,9 +742,13 @@ async function sendAppointmentRescheduledEmail({ customerId, scheduledServiceId,
     idempotencyKey,
     categories: ['appointment_rescheduled', MOVE_NOTICE_CATEGORY],
     triggerEventId: `appointment.rescheduled:${scheduledServiceId}`,
-    metadata: { scheduled_service_id: scheduledServiceId },
+    metadata: {
+      scheduled_service_id: scheduledServiceId,
+      ...(windowUnknown ? { window_unknown: true } : {}),
+      ...(notificationEventKey ? { notificationEventKey } : {}),
+    },
     moveHoldServiceId: scheduledServiceId,
-    renderedSlotMs: windowUnknown ? null : apptTime.getTime(),
+    renderedSlotMs: apptTime.getTime(),
     stillCurrent,
   });
 }

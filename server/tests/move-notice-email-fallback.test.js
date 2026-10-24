@@ -324,14 +324,39 @@ describe('handleUndeliveredSms: a carrier bounced a reschedule or cancellation t
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
   });
 
-  test('gate on: a bounced windowless reschedule text emails the unknown-window phrase and promises no slot', async () => {
+  test('gate on: a bounced windowless reschedule text emails the unknown-window phrase for the day its text quoted', async () => {
     const { UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+    // safeSend leaves the promised slot off a windowless text's audit row; the text keeps its quoted slot apart.
+    const quoted = Date.parse('2099-11-04T13:00:00.000Z');
     const { rendered_slot_ms: _dropped, ...meta } = rescheduleAudit.metadata;
-    mockDb.first.messaging_audit_log = { ...rescheduleAudit, metadata: { ...meta, window_unknown: true } };
-    mockDb.first.appointment_reminders = { appointment_time: '2099-11-04T13:00:00.000Z', service_type: 'Pest Control', cancelled: false };
+    mockDb.first.messaging_audit_log = { ...rescheduleAudit, metadata: { ...meta, window_unknown: true, move_notice_slot_ms: quoted } };
+    // The visit moved again since, with no notice: the email must not announce that later day.
+    mockDb.first.appointment_reminders = { appointment_time: '2099-11-06T13:00:00.000Z', service_type: 'Pest Control', cancelled: false };
     await bounce();
     expect(AppointmentEmail.sendAppointmentRescheduledEmail).toHaveBeenCalledWith(expect.objectContaining({
-      arrivalWindow: UNKNOWN_ARRIVAL_WINDOW, windowUnknown: true, idempotencyKey: `appointment.rescheduled:svc-1:na:${NOTICE_AT.getTime()}`,
+      appointmentTime: new Date(quoted), arrivalWindow: UNKNOWN_ARRIVAL_WINDOW, windowUnknown: true,
+      idempotencyKey: `appointment.rescheduled:svc-1:na:${NOTICE_AT.getTime()}`,
+    }));
+    // The shared guard judges the quoted slot, so that later move holds the email.
+    expect(appointmentSendHeld).toHaveBeenCalledWith('svc-1', quoted);
+  });
+
+  test('gate on: a bounced reschedule text with no quoted slot on record sends no email (never the reminder row\'s time)', async () => {
+    const { rendered_slot_ms: _dropped, ...meta } = rescheduleAudit.metadata;
+    mockDb.first.messaging_audit_log = { ...rescheduleAudit, metadata: { ...meta, window_unknown: true } };
+    mockDb.first.appointment_reminders = { appointment_time: '2099-11-06T13:00:00.000Z', service_type: 'Pest Control', cancelled: false };
+    await bounce();
+    expect(AppointmentEmail.sendAppointmentRescheduledEmail).not.toHaveBeenCalled();
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a bounced stop-wide text\'s email speaks for the stop too (its key and its stop identity)', async () => {
+    mockDb.first.messaging_audit_log = { ...rescheduleAudit, metadata: { ...rescheduleAudit.metadata, notificationEventKey: 'visit:stop-9:2099-11-04:16:00' } };
+    mockDb.first.appointment_reminders = { appointment_time: '2099-11-04T21:00:00.000Z', service_type: 'Pest Control', cancelled: false };
+    await bounce();
+    expect(AppointmentEmail.sendAppointmentRescheduledEmail).toHaveBeenCalledWith(expect.objectContaining({
+      notificationEventKey: 'visit:stop-9:2099-11-04:16:00',
+      idempotencyKey: `appointment.rescheduled:svc-1:${SLOT.getTime()}:${NOTICE_AT.getTime()}:stop`,
     }));
   });
 
@@ -458,14 +483,29 @@ describe('handleReschedule: the reschedule text reached nobody', () => {
     expect(sent.idempotencyKey).toMatch(/^appointment\.rescheduled:svc-1:na:\d+$/);
   });
 
-  test('a delivered text: no email, and the text carries the move stamp for a later bounce', async () => {
+  test('a delivered text: no email, and the text carries the move stamp and its quoted slot for a later bounce', async () => {
     mockDb.first.customers = { ...CUSTOMER, line_type: 'mobile' };
+    mockDb.first.scheduled_services = { status: 'confirmed', visit_id: null, scheduled_date: '2099-11-04', window_start: '16:00:00' };
     mockDb.first.appointment_reminders = reminder;
     sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM-ok' });
     await reschedule();
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(sendCustomerMessage.mock.calls[0][0].metadata).toEqual(expect.objectContaining({ move_notice_at: expect.any(String) }));
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toEqual(expect.objectContaining({
+      move_notice_at: expect.any(String),
+      rendered_slot_ms: Date.parse('2099-11-04T21:00:00.000Z'), move_notice_slot_ms: Date.parse('2099-11-04T21:00:00.000Z'),
+    }));
     expect(AppointmentEmail.sendAppointmentRescheduledEmail).not.toHaveBeenCalled();
+  });
+
+  test('a delivered windowless text records no promised slot but keeps its quoted slot for its email version', async () => {
+    mockDb.first.customers = { ...CUSTOMER, line_type: 'mobile' };
+    mockDb.first.scheduled_services = { status: 'confirmed', visit_id: null, scheduled_date: '2099-11-04', window_start: null };
+    mockDb.first.appointment_reminders = reminder;
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM-ok' });
+    await reschedule();
+    const meta = sendCustomerMessage.mock.calls[0][0].metadata;
+    expect(meta).not.toHaveProperty('rendered_slot_ms');
+    expect(meta).toMatchObject({ window_unknown: true, move_notice_slot_ms: expect.any(Number) });
   });
 
   test('gate off: a landline primary gets nothing, as today', async () => {

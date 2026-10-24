@@ -77,6 +77,14 @@ test('no email went out either: today\'s lines, unchanged', async () => {
   });
 });
 
+test('a grouped stop moved as one: its email carries the text\'s stop identity', async () => {
+  await sendRescheduleNoticeForVisit('svc-1', '2099-11-04', '16:00', { stopWideFor: 'stop-9' });
+  const textMeta = AppointmentReminders.safeSendAppointment.mock.calls[0][5];
+  const emailArgs = AppointmentReminders.deliverMoveNoticeEmail.mock.calls[0][0];
+  expect(textMeta.notificationEventKey).toBe('visit:stop-9:2099-11-04:16:00');
+  expect(emailArgs.notificationEventKey).toBe(textMeta.notificationEventKey);
+});
+
 test('a delivered text sends no email', async () => {
   AppointmentReminders.safeSendAppointment.mockResolvedValueOnce(true);
   const notice = await sendRescheduleNoticeForVisit('svc-1', '2099-11-04', '16:00');

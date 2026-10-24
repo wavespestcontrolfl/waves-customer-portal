@@ -163,14 +163,28 @@ describe('move-notice email senders', () => {
     expect(interactions[0]).toMatchObject({ event_type: 'appointment.rescheduled', scheduled_service_id: 'ss1', rendered_slot_ms: Date.parse(APPT) });
   });
 
-  test('a windowless reschedule email records no promised slot', async () => {
+  test('a windowless reschedule email records no promised slot, while the shared guard still judges its slot', async () => {
+    const guard = jest.spyOn(require('../services/visit-groups'), 'appointmentSendHeld').mockResolvedValue(false);
+    EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
+      if (opts.onQueued && (await opts.onQueued()) === false) return { aborted: true };
+      return { sent: true, message: { provider_message_id: 'sg-3' } };
+    });
     await AppointmentEmail.sendAppointmentRescheduledEmail({
       customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: APPT, serviceLabel: 'Pest Control',
       arrivalWindow: "at a time we'll confirm", windowUnknown: true, idempotencyKey: 'appointment.rescheduled:ss1:na:123',
     });
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
-    expect(interactions[0]).toMatchObject({ event_type: 'appointment.rescheduled' });
+    expect(guard).toHaveBeenCalledWith('ss1', Date.parse(APPT));
+    expect(interactions[0]).toMatchObject({ event_type: 'appointment.rescheduled', window_unknown: true });
     expect(interactions[0]).not.toHaveProperty('rendered_slot_ms');
+    guard.mockRestore();
+  });
+
+  test('a stop-wide reschedule email records the stop identity its text carries', async () => {
+    await AppointmentEmail.sendAppointmentRescheduledEmail({
+      customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: APPT, serviceLabel: 'Pest Control',
+      arrivalWindow: 'between 10:00 AM and 12:00 PM', notificationEventKey: 'visit:stop-9:2026-06-22:10:00', idempotencyKey: 'appointment.rescheduled:ss1:123:456:stop',
+    });
+    expect(interactions[0]).toMatchObject({ notificationEventKey: 'visit:stop-9:2026-06-22:10:00', rendered_slot_ms: Date.parse(APPT) });
   });
 
   test('the cancellation email carries the cancelled day and date and no window', async () => {

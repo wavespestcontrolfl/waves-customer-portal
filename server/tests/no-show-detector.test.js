@@ -2,7 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn().mockResolvedValue({ id: 'resolved' }) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn().mockResolvedValue({ id: 'audit' }) }));
-const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, loadPromiseEvents, noticeStillCurrent } = require('../services/no-show-detector');
+const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, loadPromiseEvents, noticeStillCurrent, stopPromise, byVisit } = require('../services/no-show-detector');
 const { resolveAlert } = require('../services/dispatch-alerts');
 const { replay } = require('../../ops/agents/replay-no-show-detector');
 
@@ -1341,6 +1341,26 @@ describe('an appointment email with no interaction row still yields its promise 
       ["split_part(idempotency_key, ':', 2)", ['visit-1']],
       ['status', ['sent', 'processed', 'delivered', 'complained', 'spam_report', 'unsubscribed']],
     ]));
+  });
+
+  test('a stop-wide reschedule email (key segment 5 `stop`) is recovered as speaking for the whole stop', async () => {
+    // GATE_MOVE_NOTICE_EMAIL: one notice moved a grouped stop. Recovered as a
+    // per-service window only, the moved member would hold the new time while
+    // its sibling kept the old one, and the stop is held to the earlier.
+    const oldSlot = Date.parse('2026-09-12T13:00:00.000Z');
+    const newSlot = Date.parse('2026-09-12T18:00:00.000Z');
+    const sibling = { visit_id: 'visit-2', start_at: new Date(oldSlot).toISOString(), communicated_at: '2026-09-01T12:00:00.000Z', source: 'message', source_id: 'm-1' };
+    const members = [{ id: 'visit-1', status: 'confirmed' }, { id: 'visit-2', status: 'confirmed' }];
+    const now = new Date('2026-09-12T12:00:00.000Z');
+    const promiseFor = async (stopWide) => {
+      const { conn } = fakeConn([{ id: 'em-2', sent_at: '2026-09-10T12:00:00.000Z', visit_id: 'visit-1', slot_ms: String(newSlot), stop_wide: stopWide }]);
+      const [email] = await loadPromiseEvents(conn, ['visit-1', 'visit-2']);
+      expect(email.grouped).toBe(stopWide);
+      return stopPromise(members, byVisit([email, sibling]), now);
+    };
+    expect((await promiseFor(true)).start_at).toBe(new Date(newSlot).toISOString());
+    // A per-service email keeps today's rule: the stop meets the earliest window any member holds.
+    expect((await promiseFor(false)).start_at).toBe(new Date(oldSlot).toISOString());
   });
 });
 
