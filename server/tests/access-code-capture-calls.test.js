@@ -107,6 +107,20 @@ describe('verifyCallItems', () => {
     });
   });
 
+  describe('a spoken symbol beside written digits', () => {
+    test.each([
+      ['Caller: The gate code is pound 3394.', 'The gate code is pound 3394.', '#3394'],
+      ['Caller: Gate code 3394 pound.', 'Gate code 3394 pound.', '3394#'],
+      ['Caller: The gate code is star 1234.', 'The gate code is star 1234.', '*1234'],
+    ])('%s keeps the symbol: the bare digits are refused', (transcript, quote, full) => {
+      expect(verify(transcript, [item({ code: full.replace(/[#*]/g, ''), quote })])).toEqual([]);
+      expect(verify(transcript, [item({ code: full, quote })])).toHaveLength(1);
+    });
+    test('written digits with no symbol still verify', () => {
+      expect(verify('Caller: The gate code is 3394.', [item({ code: '3394', quote: 'The gate code is 3394.' })])).toHaveLength(1);
+    });
+  });
+
   describe('who is staff on an outbound call', () => {
     const TRANSCRIPT = "Agent: Hi, I'm at the gate.\nCaller: Are you from Waves? The gate code is four eight two one.\nAgent: Four eight two one, thanks.";
     test('a customer who asks "Are you from Waves?" is still the customer', () => {

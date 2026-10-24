@@ -599,7 +599,11 @@ function callCodeStands(code, quote, quoted, ctx) {
   // nine four" is #3394, so 3394 alone fails), and never against staff's words.
   const quoteShows = NUMERIC_CODE.test(code) ? digitsOf(spokenQuote).includes(digitsOf(code))
     : codeIsWholeTokenIn(code, quote);
-  const inTurn = ({ t }) => codeIsWholeTokenIn(code, t.text) || codeIsWholeTokenIn(code, normalizeText(spokenNormalize(t.text).text));
+  // A numeric code is judged on the normalized turn only: the raw text would let
+  // "pound 3394" pass a bare 3394.
+  const spokenTurn = (t) => normalizeText(spokenNormalize(t.text).text);
+  const inTurn = NUMERIC_CODE.test(code) ? ({ t }) => codeIsWholeTokenIn(code, spokenTurn(t))
+    : ({ t }) => codeIsWholeTokenIn(code, t.text) || codeIsWholeTokenIn(code, spokenTurn(t));
   if (!quoteShows || !quoted.some(inTurn)) return false;
   const digits = digitsOf(code);
   if (digits.length >= 10) return false;
