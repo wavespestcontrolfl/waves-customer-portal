@@ -452,11 +452,18 @@ describe('annual prepay path: a refill on a covered occurrence is the add-on owe
   const VISIT = 'occ-2';
   // The covered occurrence: base 59 stamped as the term's slice, no refill yet.
   const row = (over = {}) => ({ id: VISIT, estimated_price: '59.00', primary_line_price: '59.00', annual_prepay_term_id: 'term-1', prepaid_method: 'annual_prepay_invoice', prepaid_amount: '59.00', ...over });
-  const trxWith = (storedNets = []) => (table) => {
-    const rows = table === 'scheduled_service_addons' ? storedNets.map((estimated_price) => ({ estimated_price })) : [];
+  // storedNets are the visit's stored refill lines; otherAddons any other stored add-on lines
+  const trxWith = (storedNets = [], otherAddons = []) => (table) => {
+    const rows = table === 'scheduled_service_addons'
+      ? [...storedNets.map((estimated_price) => ({ service_key_snapshot: 'mosquito_misting_refill', estimated_price })),
+        ...otherAddons.map((estimated_price) => ({ service_key_snapshot: 'pest_control', estimated_price }))]
+      : [];
     return { where: () => ({ select: async () => rows }) };
   };
   const refillLine = (price) => ({ serviceKey: 'mosquito_misting_refill', price });
+  const savedBilling = process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING;
+  beforeEach(() => { process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true'; });
+  afterEach(() => { if (savedBilling === undefined) delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING; else process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = savedBilling; });
   const run = (over = {}) => refillOnlyPriceChange(over.trx || trxWith(), VISIT, {
     row: over.row || row(), updates: over.updates || { estimated_price: 278 }, replaceAddons: over.replaceAddons || [refillLine(219)],
   });
@@ -483,6 +490,21 @@ describe('annual prepay path: a refill on a covered occurrence is the add-on owe
     await expect(refillOnlyPriceChange(trxWith(), VISIT, { row: row(), updates: { estimated_price: 278 }, replaceAddons: undefined })).resolves.toBe(false);
     await expect(run({ updates: { primary_line_price: 59 } })).resolves.toBe(false);
     await expect(refillOnlyPriceChange(trxWith(), VISIT, { row: null, updates: { estimated_price: 278 }, replaceAddons: [refillLine(219)] })).resolves.toBe(false);
+  });
+
+  test('an estimate-converted visit with no primary_line_price: the base is the total less its stored add-ons, so an unchanged base still qualifies', async () => {
+    // total 59 = base 59, no add-ons: the Update Details save materializes primary_line_price 59
+    await expect(run({ row: row({ primary_line_price: null }), updates: { estimated_price: 278, primary_line_price: 59 } })).resolves.toBe(true);
+    // total 79 = base 59 + a stored 20 add-on: the posted base 59 is unchanged; the base 79 is not
+    await expect(run({ trx: trxWith([], [20]), row: row({ primary_line_price: null, estimated_price: '79.00' }), updates: { estimated_price: 298, primary_line_price: 59 } })).resolves.toBe(true);
+    await expect(run({ trx: trxWith([], [20]), row: row({ primary_line_price: null, estimated_price: '79.00' }), updates: { estimated_price: 298, primary_line_price: 79 } })).resolves.toBe(false);
+  });
+
+  test('the add-on billing gate dark: never exempt, since the completion would not bill the refill', async () => {
+    process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'false';
+    await expect(run()).resolves.toBe(false);
+    delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING;
+    await expect(run()).resolves.toBe(false);
   });
 
   test('gate off: never exempt', async () => {

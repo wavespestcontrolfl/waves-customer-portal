@@ -2122,6 +2122,12 @@ async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceA
   }
 }
 
+// Read at call time, like the completion that bills the add-on does. A partial test mock of the gates module reads as off.
+const addonBillingLive = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.gateEnvValue === 'function' && !!gates.gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING');
+};
+
 // Adding or repricing a misting refill on a visit raises its estimated_price, which the repricing guard reads as a price change on money
 // that is already committed. For a visit covered by an ANNUAL PREPAY that is wrong: the covered base stays as it was and the refill is
 // owed on top, billed once on that visit by annual-prepay-addon-billing. So the guard may skip the annual-prepay coverage reasons for
@@ -2131,11 +2137,20 @@ async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceA
 // loses the annual-prepay term link and the annual-prepay stamp for this one judgement.
 async function refillOnlyPriceChange(trx, visitId, { row, updates, replaceAddons }) {
   if (!mistingRefill.refillLive() || !row || !updates || !Array.isArray(replaceAddons) || updates.estimated_price === undefined) return false;
-  if (updates.primary_line_price !== undefined && moneyValuesDiffer(row.primary_line_price, updates.primary_line_price)) return false;
+  // The exemption exists only where the refill is billed on top of the coverage; with that billing dark it would go uncollected.
+  if (!addonBillingLive()) return false;
   const cents = (value) => Math.round((Number(value) || 0) * 100);
   const postedNet = replaceAddons.filter((line) => line && mistingRefill.isRefillKey(line.serviceKey)).reduce((sum, line) => sum + cents(line.price), 0);
-  const stored = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId, service_key_snapshot: MISTING_REFILL_KEY }).select('estimated_price');
-  const storedNet = (Array.isArray(stored) ? stored : []).reduce((sum, line) => sum + cents(line.estimated_price), 0);
+  const stored = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).select('service_key_snapshot', 'estimated_price');
+  const storedRows = Array.isArray(stored) ? stored : [];
+  const storedNet = storedRows.filter((line) => line.service_key_snapshot === MISTING_REFILL_KEY).reduce((sum, line) => sum + cents(line.estimated_price), 0);
+  // An estimate-converted visit can carry no primary_line_price: its effective primary is the total less its stored add-ons.
+  if (updates.primary_line_price !== undefined) {
+    const storedPrimary = row.primary_line_price != null && row.primary_line_price !== ''
+      ? cents(row.primary_line_price)
+      : cents(row.estimated_price) - storedRows.reduce((sum, line) => sum + cents(line.estimated_price), 0);
+    if (Math.abs(cents(updates.primary_line_price) - storedPrimary) > 1) return false;
+  }
   const refillDelta = postedNet - storedNet;
   return refillDelta !== 0 && Math.abs((cents(updates.estimated_price) - cents(row.estimated_price)) - refillDelta) <= 1;
 }
