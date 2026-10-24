@@ -129,7 +129,7 @@ const REPORT_PRODUCT_COPY = [
     epaReg: '499-561',
     names: ['alpine wsg'],
     mainPests: ['ants', 'roaches'],
-    howItWorks: 'A fast-acting non-repellent. Pests don’t avoid it, so we use it on ant trails, entry points and the cracks where roaches hide.',
+    howItWorks: 'A non-repellent. Pests don’t avoid it, so we use it on ant trails, entry points and the cracks where roaches hide.',
     // 30 distinct pests — EPA PPLS, accepted 05/01/2019 (BASF Alpine WSG,
     // EPA Reg. No. 499-561; no later PPLS version found). -> floors to 25+.
     alsoLabeledForPestCount: 30,
@@ -196,7 +196,7 @@ const REPORT_PRODUCT_COPY = [
   {
     epaReg: '432-772',
     names: ['delta dust'],
-    howItWorks: 'A waterproof dust puffed into wall voids, weep holes and outlets, where pests travel and hide. It keeps working there for months.',
+    howItWorks: 'A dust that does not clump or absorb moisture, puffed into wall voids, weep holes and outlets, where pests travel and hide. It keeps working there for months.',
     // 66 distinct pests — registrant specimen label (AgrEvo -> Bayer ->
     // Envu lineage, unchanged 0.05% deltamethrin dust formulation), 1999
     // print, read in full. VERIFIED 2026-09-29 against Envu's current live
