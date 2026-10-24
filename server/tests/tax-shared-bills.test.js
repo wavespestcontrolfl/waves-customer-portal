@@ -8,7 +8,9 @@
  *     not "VERIZONWRLS"; a glued name ("SPECTRUM855 707 7328MO") needs its
  *     glued pattern. The longest pattern wins, a tie goes to the lowest id.
  *  3. shareOf rounds half up to cents and never leaves [0, amount].
- *  4. homeOfficeDeduction is $5 x sq ft (300 max) x months / 12.
+ *  4. homeOfficeDeduction: simplified is $5 x sq ft (300 max) x months / 12;
+ *     actual (Form 8829) is the year's home costs x office sq ft / home sq ft,
+ *     with no 300 sq ft limit and no proration by months.
  *  5. a business percent is a strict number from 0 to 100; a pattern is 3 to
  *     60 characters after normalizing; a year is 2020 to next year (ET).
  */
@@ -117,6 +119,23 @@ describe('homeOfficeDeduction', () => {
   });
 });
 
+describe('homeOfficeDeduction, actual method', () => {
+  const actual = { method: 'actual', sq_ft: 300, home_sq_ft: 1000, rent: 1200, utilities: 300, insurance: 0, other: 100 };
+  test('home costs x office share, no cap and no months', () => {
+    expect(svc.homeOfficeDeduction(actual)).toBe(480); // 1,600 x 300/1000
+    expect(svc.homeOfficeDeduction({ ...actual, sq_ft: 500, months: 3 })).toBe(800); // over 300 sq ft, months ignored
+    expect(svc.homeOfficeDeduction({ ...actual, sq_ft: 100, home_sq_ft: 300, rent: '1000.01', utilities: 0, other: 0 })).toBe(333.34);
+  });
+  test('an office bigger than the home counts as the whole home; missing sizes read as 0', () => {
+    expect(svc.homeOfficeDeduction({ ...actual, sq_ft: 2000 })).toBe(1600);
+    expect(svc.homeOfficeDeduction({ method: 'actual', sq_ft: 300, rent: 1000 })).toBe(0);
+    expect(svc.homeOfficeDeduction({ method: 'actual', home_sq_ft: 900, rent: 1000 })).toBe(0);
+  });
+  test('simplified keeps its answers when the new fields are present but unused', () => {
+    expect(svc.homeOfficeDeduction({ method: 'simplified', sq_ft: 300, months: 12, home_sq_ft: null, rent: null })).toBe(1500);
+  });
+});
+
 describe('bill validation', () => {
   const ok = { pattern: 'Verizon', label: ' Phone plan ', business_pct: '50' };
   test('creates with a normalized pattern, trimmed label and numeric percent', async () => {
@@ -187,6 +206,51 @@ describe('home office validation', () => {
     await expect(svc.upsertHomeOffice('abc', { sq_ft: 100 })).rejects.toMatchObject({ status: 400 });
     await expect(svc.upsertHomeOffice(year + 1, { sq_ft: 100 })).resolves.toBeTruthy();
     await expect(svc.getHomeOffice(2019)).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe('home office, actual method validation', () => {
+  const year = etParts().year;
+  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_RETURN_ENGINE = 'true'; });
+  afterEach(() => { delete process.env.GATE_BANK_IMPORT; delete process.env.GATE_TAX_RETURN_ENGINE; });
+  const ok = { method: 'actual', sq_ft: '350', home_sq_ft: '1000', rent: '1200', utilities: 300.5 };
+  test('saves the actual method with money rounded to cents and the unused amounts at 0', async () => {
+    await svc.upsertHomeOffice(year, { ...ok, rent: '1200.005', notes: ' n ' });
+    expect(state.upserted[0]).toMatchObject({ tax_year: year, method: 'actual', sq_ft: 350, months: 12, home_sq_ft: 1000, rent: 1200.01, utilities: 300.5, insurance: 0, other: 0, notes: 'n' });
+  });
+  test('writing the actual method needs the return engine, and simplified never does', async () => {
+    delete process.env.GATE_TAX_RETURN_ENGINE;
+    await expect(svc.upsertHomeOffice(year, ok)).rejects.toMatchObject({ status: 400, message: 'the actual method needs the return engine' });
+    process.env.GATE_TAX_RETURN_ENGINE = 'true';
+    delete process.env.GATE_BANK_IMPORT; // the engine gate is nested under Bank Import
+    await expect(svc.upsertHomeOffice(year, ok)).rejects.toMatchObject({ status: 400 });
+    expect(state.upserted).toEqual([]);
+    delete process.env.GATE_TAX_RETURN_ENGINE;
+    await expect(svc.upsertHomeOffice(year, { sq_ft: 120 })).resolves.toBeTruthy();
+    expect(state.upserted[0].method).toBe('simplified');
+  });
+  test('an actual row still computes while the engine is off (the tax package reads it)', () => {
+    delete process.env.GATE_TAX_RETURN_ENGINE;
+    expect(svc.homeOfficeDeduction({ method: 'actual', sq_ft: 300, home_sq_ft: 1000, rent: 1000 })).toBe(300);
+  });
+  test('the simplified method clears the actual fields', async () => {
+    await svc.upsertHomeOffice(year, { sq_ft: 120 });
+    expect(state.upserted[0]).toMatchObject({ method: 'simplified', home_sq_ft: null, rent: null, utilities: null, insurance: null, other: null });
+  });
+  test('the home must be given and at least as big as the office', async () => {
+    await expect(svc.upsertHomeOffice(year, { ...ok, home_sq_ft: undefined })).rejects.toMatchObject({ status: 400 });
+    await expect(svc.upsertHomeOffice(year, { ...ok, home_sq_ft: '349' })).rejects.toMatchObject({ status: 400 });
+    await expect(svc.upsertHomeOffice(year, { ...ok, home_sq_ft: '350' })).resolves.toBeTruthy();
+    await expect(svc.upsertHomeOffice(year, { ...ok, sq_ft: 0 })).rejects.toMatchObject({ status: 400 });
+  });
+  test.each([['50junk'], [-1], [true], [[]], ['1e12']])('refuses a rent of %p', async (v) => {
+    await expect(svc.upsertHomeOffice(year, { ...ok, rent: v })).rejects.toMatchObject({ status: 400 });
+  });
+  test('refuses an unknown method', async () => {
+    await expect(svc.upsertHomeOffice(year, { ...ok, method: 'both' })).rejects.toMatchObject({ status: 400 });
+  });
+  test('the 300 sq ft limit still holds for simplified', async () => {
+    await expect(svc.upsertHomeOffice(year, { method: 'simplified', sq_ft: 301 })).rejects.toMatchObject({ status: 400 });
   });
 });
 

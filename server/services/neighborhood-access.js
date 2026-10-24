@@ -14,7 +14,9 @@
  */
 
 const db = require('../models/db');
-const { lookupCountyParcelByPoint, lookupSarasotaPlatNames, subdivisionBaseName } = require('./property-lookup/county-parcel-gis');
+const {
+  lookupCountyParcelByPoint, lookupSarasotaPlatNames, lookupCountyParcelsByAddress, subdivisionBaseName,
+} = require('./property-lookup/county-parcel-gis');
 const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 const { TECH_DEAD_ASSIGNMENT_STATUSES } = require('./technician-visit-scope');
 
@@ -153,8 +155,15 @@ const ABBREVIATIONS = {
   TURNPIKE: 'TPKE', VALLEY: 'VLY', VIEW: 'VW', VILLAGE: 'VLG', VILLE: 'VL', VISTA: 'VIS',
   WALKS: 'WALK', WELLS: 'WLS', TERR: 'TER', CRT: 'CT', CRCL: 'CIR', CIRC: 'CIR',
 };
-function streetLine(line, cities = []) {
-  let s = ` ${String(line || '').toUpperCase().replace(/[^A-Z0-9,\s]/g, ' ').replace(/\s+/g, ' ').trim()} `;
+// A '#' tail ("500 Sample Loop #201") is a unit too, read before the '#' is
+// spaced out (GATE_NEIGHBORHOOD_ADDRESS_LOOKUP; off, the number stays a street word).
+const HASH_UNIT_TAIL = /\s*#\s*[A-Za-z0-9-]+\s*(?=,|$)/;
+// The street's words as written: house number, unit tail and any city/state/ZIP
+// tail removed, nothing abbreviated yet.
+function streetWords(line, cities = []) {
+  const raw = require('../config/feature-gates').neighborhoodAddressLookupLive()
+    ? String(line || '').replace(HASH_UNIT_TAIL, ' ') : String(line || '');
+  let s = ` ${raw.toUpperCase().replace(/[^A-Z0-9,\s]/g, ' ').replace(/\s+/g, ' ').trim()} `;
   s = s.replace(/,.*$/, ' '); // ", FL 34285" / ", SARASOTA FL"
   s = s.replace(/\s(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|LOT)\s.*$/, ' ');
   s = s.replace(/\s\d{5}(?:\s\d{4})?\s*$/, ' ').replace(/\s(?:FL|FLORIDA)\s*$/, ' ');
@@ -162,8 +171,12 @@ function streetLine(line, cities = []) {
     const c = String(city || '').toUpperCase().replace(/[^A-Z\s]/g, ' ').replace(/\s+/g, ' ').trim();
     if (c && s.trimEnd().endsWith(` ${c}`)) s = `${s.trimEnd().slice(0, -c.length)} `;
   }
-  const tokens = s.trim().split(/\s+/).filter(Boolean).map((t) => ABBREVIATIONS[t] || t);
+  const tokens = s.trim().split(/\s+/).filter(Boolean);
   if (tokens.length && /^\d+$/.test(tokens[0])) tokens.shift();
+  return tokens;
+}
+function streetLine(line, cities = []) {
+  const tokens = streetWords(line, cities).map((t) => ABBREVIATIONS[t] || t);
   return tokens.length ? tokens.join(' ') : null;
 }
 
@@ -218,6 +231,49 @@ async function withPlatName(parcel, platLookup = lookupSarasotaPlatNames) {
   const named = (await platLookup(number)).filter((n) => neighborhoodNameFromSubdivision(n));
   const communities = new Set(named.map(neighborhoodNameFromSubdivision));
   return communities.size === 1 ? { ...parcel, platName: named[0] } : parcel;
+}
+
+// GATE_NEIGHBORHOOD_ADDRESS_LOOKUP. A stored pin is often on another lot: a ZIP
+// centre, or a few doors off (29 of the first 40 never-checked homes, 10-24).
+// Then the county roll is asked for the home's own address, and a lot counts
+// only under the pin path's own proof, parcelMatchesProperty (the home's house
+// number, full street and ZIP). Every lot that passes must name one community
+// (one building's units do; a Sarasota plat by its number), else nothing.
+// Resolves to the lot to link by, or null; THROWS when the county cannot answer.
+// The search term is the street's longest NAME word, as written. The roll spells
+// street names out but abbreviates the suffix, while a home's address may do
+// either ("104 Lake Drive" vs "104 LAKE DR"), and streetLine abbreviates every
+// word it knows ("LAKE" → "LK"). So the term is never canonical, never the last
+// word (the suffix) unless it is the only one, never a directional or a bare
+// number ("US 41"). The proof still compares canonical forms.
+const DIRECTIONAL_WORD = /^(?:[NSEW]|NE|NW|SE|SW|NORTH|SOUTH|EAST|WEST|NORTHEAST|NORTHWEST|SOUTHEAST|SOUTHWEST)$/;
+function streetSearchWord(line) {
+  const words = streetWords(line).filter((w) => !/^\d+$/.test(w));
+  if (words.length && DIRECTIONAL_WORD.test(words[words.length - 1])) words.pop();
+  if (words.length > 1) words.pop();
+  return words.filter((w) => !DIRECTIONAL_WORD.test(w)).reduce((best, w) => (w.length > best.length ? w : best), '');
+}
+async function parcelByAddress(property, { county, addressLookup = lookupCountyParcelsByAddress } = {}) {
+  const houseNumber = leadingNumber(property.address_line1);
+  const streetWord = streetSearchWord(property.address_line1);
+  if (!county || !houseNumber || !streetWord) return null;
+  const lots = (await addressLookup(county, { houseNumber, streetWord })).filter((lot) => parcelMatchesProperty(lot, property));
+  const communities = new Set(lots.map((lot) => {
+    const roll = String(lot.subdivision || '').trim();
+    return PLAT_NUMBER.test(roll) ? `plat:${roll}` : `name:${neighborhoodNameFromSubdivision(roll) || ''}`;
+  }));
+  return communities.size === 1 ? lots[0] : null;
+}
+
+// The lot a home is linked by: the pin's when it is the home's own; else, with
+// GATE_NEIGHBORHOOD_ADDRESS_LOOKUP, the home's own lot found by its address;
+// else the pin's, so the caller still reads the miss. THROWS when the address
+// search cannot answer (the naming pass then waits an hour, never "no name").
+async function homeParcel(property, pinParcel, { addressLookup } = {}) {
+  if (pinParcel && parcelMatchesProperty(pinParcel, property)) return pinParcel;
+  if (!require('../config/feature-gates').neighborhoodAddressLookupLive()) return pinParcel;
+  const county = countyHint(property.zip) || pinParcel?.county;
+  return (await parcelByAddress(property, { county, addressLookup })) || pinParcel;
 }
 
 // Link one property to its neighborhood from the county roll. An office pick
@@ -439,7 +495,7 @@ async function unfiledGateCodeCustomers(conn) {
 // File one customer's current code. Lock order matches every preference
 // writer (customer preference advisory lock → customer → properties →
 // preferences), then the neighborhood row inside fileNeighborhoodCode.
-async function fileOneSavedCode(customerId, lookup, platLookup) {
+async function fileOneSavedCode(customerId, lookup, platLookup, addressLookup) {
   // County lookup (network) runs outside any transaction, only for a single
   // active property that was never checked.
   const props = await db('customer_properties').where({ customer_id: customerId, active: true })
@@ -451,9 +507,12 @@ async function fileOneSavedCode(customerId, lookup, platLookup) {
   // 0 is the placeholder customer-geocode-review.js also treats as no pin).
   const hasPin = [snapshot.latitude, snapshot.longitude].every((v) => v !== null && v !== undefined && String(v).trim() !== ''
     && Number.isFinite(Number(v)) && Number(v) !== 0);
-  let parcel = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office' && hasPin
-    ? await lookup(Number(snapshot.latitude), Number(snapshot.longitude), { county: countyHint(snapshot.zip) })
-    : null;
+  const lookUp = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office' && hasPin;
+  let parcel = lookUp ? await lookup(Number(snapshot.latitude), Number(snapshot.longitude), { county: countyHint(snapshot.zip) }) : null;
+  // Address gate: a pin on another lot asks the county by the home's own
+  // address (network, so before the transaction). A failed search leaves the
+  // pin's answer, and the home is looked up again next pass.
+  if (lookUp) parcel = await homeParcel(snapshot, parcel, { addressLookup }).catch(() => parcel);
   // Naming gate: a Sarasota plat number gets its plat name (network, so before
   // the transaction). The plat layer failing leaves the home unchecked, to be
   // tried again next pass — never stamped "checked, no name".
@@ -565,7 +624,9 @@ async function settleConflicts(touched, logger) {
   return { failed, conflicts };
 }
 
-async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint, platLookup = lookupSarasotaPlatNames } = {}) {
+async function sweepSavedGateCodes({
+  lookup = lookupCountyParcelByPoint, platLookup = lookupSarasotaPlatNames, addressLookup = lookupCountyParcelsByAddress,
+} = {}) {
   const { neighborhoodAccessLive } = require('../config/feature-gates');
   if (!neighborhoodAccessLive()) return { skipped: 'gate_off' };
   const logger = require('./logger');
@@ -583,7 +644,7 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint, platLoo
   let naming = null;
   if (require('../config/feature-gates').neighborhoodNamingLive()) {
     try {
-      naming = await require('./neighborhood-naming').runNamingPass({ lookup, platLookup });
+      naming = await require('./neighborhood-naming').runNamingPass({ lookup, platLookup, addressLookup });
     } catch (err) {
       failed += 1;
       logger.warn(`[neighborhood-access] naming pass failed (${err.code || err.name || 'error'})`);
@@ -596,7 +657,7 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint, platLoo
   const touched = new Set();
   for (const customerId of customerIds) {
     try {
-      const r = await fileOneSavedCode(customerId, lookup, platLookup);
+      const r = await fileOneSavedCode(customerId, lookup, platLookup, addressLookup);
       tally[r.status] = (tally[r.status] || 0) + 1;
       if (r.status === 'filed_conflict' || (r.status === 'duplicate' && r.flagged?.length)) touched.add(r.neighborhoodId);
     } catch (err) {
@@ -718,6 +779,7 @@ module.exports = {
   upsertNeighborhood,
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
+  homeParcel,
   withPlatName,
   sameHouse,
   fileNeighborhoodCode,

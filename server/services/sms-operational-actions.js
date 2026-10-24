@@ -928,6 +928,39 @@ async function settleCommitmentAlert(trx, initial, id, { action, reviewedBy }) {
   else await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${id}`]).update(update);
 }
 
+// GATE_SMS_FOLLOWUP_WITNESS_FIX (docs/admin-notifications.md: the emitter that
+// raises a row owns clearing it). A person's Done on a text follow-up bell
+// used to write only the notifications row, so the next sweep tick saw the
+// commitment still open and rang again. Done now also marks every open
+// promise the bell speaks for as done, by that person, through the same
+// writer as the profile panel's Mark done (human_state, reviewed_by,
+// reviewed_at, audit event). Returns the number of commitments settled.
+// Best effort per commitment: one that changed since (already closed, source
+// moved) is skipped and logged, never a failure for the Done click.
+const SMS_ALERT_KEY = /^sms-commitment(?:-source)?:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+async function settleCommitmentsForDoneAlert(conn, notificationId, { reviewedBy }) {
+  if (!require('../config/feature-gates').smsFollowupWitnessFixLive() || !reviewedBy) return 0;
+  const alert = await conn('notifications').where({ id: notificationId, recipient_type: 'admin' }).first('metadata');
+  let metadata = alert?.metadata;
+  if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch (_) { metadata = null; } }
+  const key = String(metadata?.dedupeKey || '');
+  const match = SMS_ALERT_KEY.exec(key);
+  if (!match || !metadata.customerId) return 0;
+  const ids = key.startsWith('sms-commitment-source:')
+    ? await openSourceCommitments(conn, match[1]).pluck('id')
+    : [match[1]];
+  let settled = 0;
+  for (const id of ids) {
+    try {
+      await applySmsCommitmentUpdate(conn, id, { customerId: metadata.customerId, action: 'fulfill', note: 'Marked done from the alert', reviewedBy });
+      settled += 1;
+    } catch (err) {
+      logger.warn(`[sms-operations] Done on alert ${notificationId} left commitment ${id} as is: ${err.message}`);
+    }
+  }
+  return settled;
+}
+
 async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, reviewedBy }) {
   if (!['fulfill', 'dismiss'].includes(action)) throw Object.assign(new Error('SMS follow-up supports Mark done or Dismiss'), { status: 400 });
   if (note !== undefined && typeof note !== 'string') throw Object.assign(new Error('note must be text'), { status: 400 });
@@ -1598,4 +1631,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { isQuietTemporaryFact, reviewBellCopy, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { isQuietTemporaryFact, reviewBellCopy, smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

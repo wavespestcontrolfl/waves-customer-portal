@@ -7,7 +7,7 @@ const {
 } = require('./lawn-visit-input');
 const { validateAssessmentJson, normalizeAssessment, emptyAnalysis } = require('./lawn-visit-result');
 const { withoutNoteInfluencedProse } = require('./lawn-visit-customer-copy');
-const { lawnAssessmentRefereeLive, lawnLightingLive } = require('../config/feature-gates');
+const { lawnAssessmentRefereeLive, lawnLightingLive, lawnScoreScaleV2Live } = require('../config/feature-gates');
 const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 
 // Invalid input fails before a paid call. Provider misses return an explicit
@@ -24,7 +24,7 @@ const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 // timeoutMs (optional): the caller's remaining wall-clock budget for both legs
 // together (floored at a second: this is the visit's first and only read, so
 // it always runs); absent, the dispatcher's default chain budget applies.
-async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false, lighting = lawnLightingLive(), timeoutMs } = {}) {
+async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false, lighting = lawnLightingLive(), scale2 = lawnScoreScaleV2Live(), timeoutMs } = {}) {
   const { error, zones } = validateVisitPhotos(photos, { shotList });
   if (error) throw Object.assign(new Error(error), { code: 'INVALID_VISIT_PHOTOS', statusCode: 400 });
   const context = visionContext || {};
@@ -33,7 +33,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     mimeType: (photo.mimeType || 'image/jpeg').toLowerCase(),
     label: photoLabel(index, zones[index]),
   }));
-  const prompt = promptFor({ shotList, lighting });
+  const prompt = promptFor({ shotList, lighting, scale2 });
   const started = Date.now();
   const policy = MODELS.TEXT_POLICIES.lawnVisitAssessment;
   const payload = {
@@ -50,7 +50,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     promptVersion: prompt.version,
   };
   const outcome = await dispatchWithFallback(policy, payload, {
-    validate: (result) => validateAssessmentJson(result, photos.length, { lighting }),
+    validate: (result) => validateAssessmentJson(result, photos.length, { lighting, scale2 }),
     // Under a caller budget (POST /assess) each leg gets its share, so a
     // stalled Gemini leaves the OpenAI backup time to answer.
     reserveFallbackBudget: true,
@@ -60,7 +60,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
   const refereeOn = lawnAssessmentRefereeLive();
   const base = {
     promptVersion: prompt.version,
-    contextHash: contextHash({ photos, photoZones: zones, visionContext: context, shotList, lighting }),
+    contextHash: contextHash({ photos, photoZones: zones, visionContext: context, shotList, lighting, scale2 }),
     // The stored snapshot intentionally omits notes. The run writer uses this
     // marker to make such a replay ineligible for exact-input comparisons.
     visionContext: contextSnapshot(context),
@@ -74,6 +74,9 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
       ...base, status: 'unavailable', reason: outcome.reason || 'error',
       provider: null, model: null, fallbackUsed: false, usage: null, raw: null,
       ...emptyAnalysis(photos.length),
+      // The scale the visit was read under, so the technician's own scores on an
+      // unavailable read are stamped and compared on it too (GATE_LAWN_SCORE_SCALE_V2).
+      ...(scale2 ? { scoreScale: 2 } : {}),
       ...(refereeOn ? { referee: skippedReferee('gemini_unavailable') } : {}),
     };
   }
@@ -86,7 +89,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
       referee = skippedReferee('gemini_fallback');
     } else {
       ({ json: assessed, referee } = await refereeVisit({
-        policy, payload, geminiJson: outcome.json, visit: { photoCount: photos.length, images, context, lighting },
+        policy, payload, geminiJson: outcome.json, visit: { photoCount: photos.length, images, context, lighting, scale2 },
         deadline: timeoutMs != null ? started + Math.max(1000, timeoutMs) : null,
       }));
       // The model-claimed findings after a settled tie-break (pre-normalization,
@@ -103,7 +106,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     // `raw` stays the provider's own untouched answer; a settled name tie-break
     // changes only the normalized fields, and `referee` records what moved.
     usage: outcome.usage || null, raw: outcome.json,
-    ...withoutNoteInfluencedProse(normalizeAssessment(assessed, photos.length, zones, { shotList, lighting }), context.technicianNotes),
+    ...withoutNoteInfluencedProse(normalizeAssessment(assessed, photos.length, zones, { shotList, lighting, scale2 }), context.technicianNotes),
     // Gate on: latency covers the second opinion and referee calls too.
     ...(refereeOn ? { referee, latencyMs: Date.now() - started } : {}),
   };

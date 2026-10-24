@@ -1055,6 +1055,8 @@ describe('optional Palms block (owner 2026-10-23)', () => {
     await readyVisit(request);
     openPalms();
     const total = screen.getByLabelText('Palms on property (all sizes)');
+    // The counting rule is the field's description: a clump is one palm.
+    expect(document.getElementById(total.getAttribute('aria-describedby')).textContent).toBe('Count a clump or a multi-trunk palm as one palm.');
     fireEvent.change(total, { target: { value: '4a.5' } });
     expect(total.value).toBe('45');
     fireEvent.change(total, { target: { value: '' } });
@@ -1069,12 +1071,21 @@ describe('optional Palms block (owner 2026-10-23)', () => {
     openPalms();
     const none = () => screen.getByRole('button', { name: 'None seen' });
     const spear = () => screen.getByRole('button', { name: 'Spear leaf collapse' });
+    const unsure = () => screen.getByRole('button', { name: 'Unsure (something looks wrong)' });
     fireEvent.click(spear());
     fireEvent.click(none());
     expect(none().getAttribute('aria-pressed')).toBe('true');
     expect(spear().getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(spear());
     expect(none().getAttribute('aria-pressed')).toBe('false');
+    expect(spear().getAttribute('aria-pressed')).toBe('true');
+    // "Unsure" is an observation like any symptom: it sits beside a named one
+    // and clears "None seen" (Codex memo review 2026-10-24).
+    fireEvent.click(none());
+    fireEvent.click(unsure());
+    fireEvent.click(spear());
+    expect(none().getAttribute('aria-pressed')).toBe('false');
+    expect(unsure().getAttribute('aria-pressed')).toBe('true');
     expect(spear().getAttribute('aria-pressed')).toBe('true');
   });
 

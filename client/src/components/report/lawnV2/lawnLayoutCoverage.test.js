@@ -9,7 +9,7 @@ import { parse } from '@babel/parser';
 import { describe, expect, it } from 'vitest';
 import { STANDARD_BODY_COVERAGE } from './lawnLayoutCoverage';
 import { INSTRUCTION_SOURCES, INVITATIONS, LAYOUT_DECLINES, SLOT_CLASS } from './lawnLayoutRules';
-import { LAYOUT_ORDER } from './LawnLayout';
+import { LAYOUT_ORDER, STORY_LAYOUT_ORDER } from './LawnLayout';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (rel) => fs.readFileSync(path.join(here, rel), 'utf8');
@@ -89,9 +89,9 @@ describe('the standard lawn page body against the lawn layout', () => {
     });
   });
 
-  it('every slot the page passes is printed by the layout, and every section in LAYOUT_ORDER exists', () => {
+  it('every slot the page passes is printed by the layout, and every section in LAYOUT_ORDER and STORY_LAYOUT_ORDER exists', () => {
     slotKeys.forEach((key) => expect(new RegExp(`slots\\.${key}\\b`).test(layoutSource), `slots.${key}`).toBe(true));
-    LAYOUT_ORDER.forEach((section) => expect(layoutSource).toMatch(new RegExp(`\\b${section}:`)));
+    [...LAYOUT_ORDER, ...STORY_LAYOUT_ORDER].forEach((section) => expect(layoutSource).toMatch(new RegExp(`\\b${section}:`)));
   });
 
   it('a declined mount names a real decline rule', () => {

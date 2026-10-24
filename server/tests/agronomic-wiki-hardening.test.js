@@ -930,6 +930,39 @@ describe('linkTreatmentOutcome pairing windows', () => {
   });
 });
 
+describe('linkTreatmentOutcome score scale (GATE_LAWN_SCORE_SCALE_V2)', () => {
+  const run = async (post, pre) => {
+    const state = useDb({
+      treatment_outcomes: [],
+      service_records: [{ id: 'sr-1', customer_id: 'c-1', service_date: '2026-11-10', service_type: 'lawn', scheduled_service_id: null, visit_number: 1 }],
+      lawn_assessments: (rec, idx) => (idx === 0 ? [post] : (pre ? [pre] : [])),
+      service_products: [],
+      customers: [{ id: 'c-1' }],
+      knowledge_update_log: [],
+    });
+    const spies = ['updateProductPage', 'updateTrackPage', 'updateSeasonalPage'].map((m) => jest.spyOn(wiki, m).mockResolvedValue(null));
+    await wiki.linkTreatmentOutcome('sr-1');
+    await new Promise((resolve) => setImmediate(resolve));
+    spies.forEach((spy) => spy.mockRestore());
+    const scaleFilter = state.calls.lawn_assessments[1].ops.find(([m, a]) => m === 'whereRaw' && /score_scale/.test(a[0]));
+    return { state, scaleFilter };
+  };
+  const scores = { turf_density: 80, weed_suppression: 78, color_health: 85, fungus_control: 95, thatch_level: 60 };
+
+  test('the pre-assessment must be on the post-assessment\'s scale; with none, the outcome has no deltas', async () => {
+    const { state, scaleFilter } = await run({ id: 'post-2', service_date: '2026-11-10', score_scale: 2, ...scores }, null);
+    expect(scaleFilter[1]).toEqual(['COALESCE(score_scale, 1) = ?', [2]]);
+    expect(state.inserts.treatment_outcomes[0].delta_weed_suppression).toBeNull();
+    const one = await run({ id: 'post-1', service_date: '2026-11-10', score_scale: null, ...scores }, null);
+    expect(one.scaleFilter[1]).toEqual(['COALESCE(score_scale, 1) = ?', [1]]);
+  });
+
+  test('before the column exists (no score_scale key on the row), nothing is filtered', async () => {
+    const { scaleFilter } = await run({ id: 'post-0', service_date: '2026-11-10', ...scores }, { id: 'pre-0', service_date: '2026-10-10', ...scores });
+    expect(scaleFilter).toBeUndefined();
+  });
+});
+
 // ── linkTreatmentOutcome weather-enrichment retry ──────────────────────────
 
 describe('linkTreatmentOutcome weather-enrichment retry', () => {

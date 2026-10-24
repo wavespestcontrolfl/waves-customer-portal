@@ -738,5 +738,44 @@ describe('pre-treat final exterior fields: customer copy screen (GATE_PRETREAT_S
       expect(res.status).toBe(200);
     });
   });
+
+  // The Bora-Care record prints on the certificate and the warranty (owner 10-24 Q6).
+  test.each([
+    ['a future framing inspection', { framing_inspection_date: '2099-01-01' }, 'framing_inspection_date_invalid'],
+    ['an impossible framing inspection', { framing_inspection_date: '2026-02-30' }, 'framing_inspection_date_invalid'],
+    ['a Bora-Care date before the initial treatment', { borate_treatment_date: '2026-06-09' }, 'borate_treatment_date_invalid'],
+    ['a future Bora-Care date', { borate_treatment_date: '2099-01-01' }, 'borate_treatment_date_invalid'],
+    ['a base plate share that is not a percent', { wood_base_plate_pct: 'mostly wood' }, 'wood_base_plate_pct_invalid'],
+    ['a base plate share over 100', { wood_base_plate_pct: '120' }, 'wood_base_plate_pct_invalid'],
+  ])('PUT refuses %s (422)', async (_label, borate, code) => {
+    const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings: { treatment_date: '2026-06-10', ...borate } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body).toMatchObject({ code, field: Object.keys(borate)[0] });
+    });
+    expect(projects.update).not.toHaveBeenCalled();
+  });
+
+  test('PUT accepts a Bora-Care record: an earlier framing inspection, a later application, a percent', async () => {
+    const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          findings: { treatment_date: '2026-06-10', framing_inspection_date: '2026-06-01', borate_treatment_date: '2026-06-20', wood_base_plate_pct: '85%' },
+        }),
+      });
+      expect(res.status).toBe(200);
+    });
+  });
 });
 

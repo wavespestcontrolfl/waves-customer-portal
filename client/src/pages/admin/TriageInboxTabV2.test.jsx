@@ -641,6 +641,85 @@ describe('FamilyEvidence — the caller\'s own account', () => {
   });
 });
 
+// GATE_CALL_ADDRESS_FAMILY_CARD: the address-basis card asks the question and offers the two actions.
+describe('FamilyEvidence — stated address on an account (Attach as contact / New customer)', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  const payload = {
+    flag: 'family_account_candidates', match_basis: 'stated_address_on_account',
+    caller_name: 'Dana Bronner', caller_phone: '+19415550101', caller_role: 'family_member',
+    question: "Dana Bronner called about Angelina Testerson's home. Add as a contact?",
+    holder_candidates: [{ id: A, name: 'Angelina Testerson', city: 'Parrish', address_matches: true }],
+    customer_ids: [A], reason: 'The caller gave the address of an existing account.',
+  };
+  const open = { canAttach: true, canNewCustomer: true };
+
+  it('asks "<caller> called about <customer>\'s home. Add as a contact?" and files the role the call gave', () => {
+    const onAttach = vi.fn();
+    render(<FamilyEvidence payload={payload} {...open} onAttach={onAttach} />);
+    expect(screen.getByText("Dana Bronner called about Angelina Testerson's home. Add as a contact?")).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toHaveValue('family_member');
+    fireEvent.click(screen.getByRole('button', { name: 'Attach as contact' }));
+    expect(onAttach).toHaveBeenCalledWith(A, 'family_member');
+  });
+  it('sends the role the office picked', () => {
+    const onAttach = vi.fn();
+    render(<FamilyEvidence payload={payload} {...open} onAttach={onAttach} />);
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'tenant' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Attach as contact' }));
+    expect(onAttach).toHaveBeenCalledWith(A, 'tenant');
+  });
+  it('New customer is its own button', () => {
+    const onNewCustomer = vi.fn();
+    render(<FamilyEvidence payload={payload} {...open} onNewCustomer={onNewCustomer} />);
+    fireEvent.click(screen.getByRole('button', { name: 'New customer' }));
+    expect(onNewCustomer).toHaveBeenCalledTimes(1);
+  });
+  it('shows no action when the server offers none (closed card, non-admin or gate off)', () => {
+    render(<FamilyEvidence payload={payload} />);
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+  it('an older-basis card keeps its text and gains only New customer when the server offers it', () => {
+    render(<FamilyEvidence payload={{ ...payload, match_basis: 'caller_full_name', question: undefined }} {...open} canAttach={false} />);
+    expect(screen.queryByText(/Add as a contact\?/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Attach/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'New customer' })).toBeInTheDocument();
+  });
+});
+
+describe('family card actions on the page', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  const familyCard = { ...ordinary, id: 'fam', first_name: 'Family', last_name: 'Card', reason_code: 'family_account_candidates',
+    feedback_verdict: null, can_attach_contact: true, can_new_customer: true,
+    payload: { match_basis: 'stated_address_on_account', caller_name: 'Dana Bronner', caller_role: 'family_member',
+      holder_candidates: [{ id: A, name: 'Angelina Testerson', city: 'Parrish', address_matches: true }], customer_ids: [A] } };
+  const listWith = (actionResult) => adminFetch.mockImplementation(async (url) => (
+    url.startsWith('/admin/triage?') ? { items: [familyCard], counts: { open: 1, resolved: 0, dismissed: 0 } } : actionResult));
+
+  it('Attach posts the chosen account, the role and the card version', async () => {
+    listWith({ ok: true });
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Family Card');
+    fireEvent.click(screen.getByRole('button', { name: 'Attach as contact' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/fam/attach-contact', {
+      method: 'POST', body: JSON.stringify({ customer_id: A, role: 'family_member', expected_updated_at: familyCard.updated_at }),
+    }));
+  });
+  it('says so when New customer closed the card but the call was not reprocessed', async () => {
+    listWith({ ok: true, reprocess: { started: false, customer_created: false, reason: 'already_processing' } });
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Family Card');
+    fireEvent.click(screen.getByRole('button', { name: 'New customer' }));
+    expect(await screen.findByText(/no customer was created: the call was not reprocessed, or the pass found nothing/)).toBeInTheDocument();
+  });
+  it('says so too when the pass ran but created no customer', async () => {
+    listWith({ ok: true, reprocess: { started: true, customer_created: false } });
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Family Card');
+    fireEvent.click(screen.getByRole('button', { name: 'New customer' }));
+    expect(await screen.findByText(/no customer was created: the call was not reprocessed, or the pass found nothing/)).toBeInTheDocument();
+  });
+});
+
 describe('ConfirmEvidence — dispute recovery task', () => {
   it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{

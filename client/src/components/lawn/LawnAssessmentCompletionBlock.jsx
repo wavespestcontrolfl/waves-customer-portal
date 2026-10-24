@@ -123,11 +123,14 @@ function parseAssessmentScores(row = {}) {
   // override and persists an artificially low score. Instead derive it exactly the
   // way the server's confirm fallback does — min(fungus, thatch, AI-floor) with the
   // legacy 95 floor — so posting the seeded chip value is a no-op, not an override.
+  // Score scale 2 (GATE_LAWN_SCORE_SCALE_V2): Condition is a rating the server never
+  // derives, so a blank one stays blank here until the technician enters it.
   const rawStress = lawnScores.lawnScoreValue(row.stress_damage ?? row.stressDamage);
   const components = [fungus_control, thatch_level].filter((value) => value != null);
+  const derivable = Number(row.score_scale ?? row.scoreScale) !== 2;
   const stress_damage = rawStress != null
     ? rawStress
-    : (components.length ? Math.min(...components, 95) : null);
+    : (derivable && components.length ? Math.min(...components, 95) : null);
   return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
@@ -452,6 +455,9 @@ function LawnAssessmentCompletionBlock({
         return;
       }
       const scores = response.adjustedScores || response.displayScores || {};
+      // The Last visit row on this read's score scale: a retake can change the scale
+      // (GATE_LAWN_SCORE_SCALE_V2), so the earlier lookup's row is replaced.
+      if (Object.prototype.hasOwnProperty.call(response, "lastVisit")) setLastVisit(response.lastVisit ?? null);
       setResult({ ...response, aiScores: resolveAiScores(response.assessment, response.visitAssessment) });
       setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations !== undefined ? response.assessment.observations : response.observations));
       setTechScores({ ...scores });

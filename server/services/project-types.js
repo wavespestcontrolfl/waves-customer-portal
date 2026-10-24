@@ -49,6 +49,16 @@ const WDO_CONSTRUCTION_OPTIONS = [
   'Manufactured / Mobile Home',
 ];
 
+const BORATE_SECTION = 'Borate wood treatment (Bora-Care jobs only)';
+
+// The certificate's wood base plate share (the Bora-Care label's 60% test):
+// a plain percent from 0 to 100, "85" or "85%". Anything else is null.
+function woodBasePlatePct(value) {
+  const match = /^(\d{1,3}(?:\.\d+)?)\s*%?$/.exec(String(value ?? '').trim());
+  const pct = match ? Number(match[1]) : NaN;
+  return pct >= 0 && pct <= 100 ? pct : null;
+}
+
 const PROJECT_TYPES = {
   wdo_inspection: {
     label: 'WDO Inspection',
@@ -934,7 +944,7 @@ const PROJECT_TYPES = {
       { key: 'palm_types_seen', label: 'Palm types seen', type: 'multi_select', section: 'Property measurements', detail: true, internal: true, options: TREE_SHRUB_PALM_TYPE_OPTIONS },
       { key: 'palm_symptoms', label: 'Palm symptoms seen', type: 'multi_select', section: 'Property measurements', detail: true, internal: true, options: [
         'None seen', 'Frizzle-top (new fronds yellow / small / withered)', 'Yellow / orange spotting on older fronds',
-        'Browning / bronzing fronds', 'Spear leaf collapse',
+        'Browning / bronzing fronds', 'Spear leaf collapse', 'Unsure (something looks wrong)',
       ] },
       { key: 'tree_count_total', label: 'Trees on property (non-palm)', type: 'count', section: 'Property measurements', detail: true, internal: true },
       { key: 'shrub_density', label: 'Shrub density', type: 'select', section: 'Property measurements', detail: true, internal: true, options: ['Light', 'Moderate', 'Heavy'] },
@@ -1179,6 +1189,14 @@ const PROJECT_TYPES = {
           { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text', disableDictation: true },
         ],
       },
+      // Bora-Care jobs only (owner 10-24 Q6). As the only treatment, the
+      // label applies it after the final framing inspection, and never on
+      // new construction with wood base plates under 60% of all base plates.
+      // On a soil job it is a later secondary application with its own date.
+      // Optional here and never in the send gate; the warranty checks them.
+      { key: 'framing_inspection_date', label: 'Date of final framing inspection (Bora-Care only job)', type: 'date', section: BORATE_SECTION },
+      { key: 'wood_base_plate_pct', label: 'Wood base plates, % of all base plate linear feet (Bora-Care only job)', type: 'text', section: BORATE_SECTION, placeholder: 'e.g. 85', disableDictation: true },
+      { key: 'borate_treatment_date', label: 'Date of the Bora-Care application (soil + Bora-Care job)', type: 'date', section: BORATE_SECTION },
       // Sticker blank "Date of Final Ext. Treatment" (owner 2026-10-22). The
       // final exterior is a later visit after grading, so these stay optional
       // and never gate the send; they fill the notice's reference blank, and
@@ -1464,6 +1482,7 @@ function isValidProjectType(key) {
 
 module.exports = {
   PROJECT_TYPES,
+  woodBasePlatePct,
   PROJECT_TYPE_KEYS,
   WDO_CONSTRUCTION_OPTIONS,
   TERMITE_LIQUID_DILUTION_METHODS,

@@ -569,8 +569,10 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/sms-templates/preview` | admin-sms-templates |
 | GET | `/api/admin/triage` | admin-triage |
 | POST | `/api/admin/triage/:id/apply-property-roles` | admin-triage |
+| POST | `/api/admin/triage/:id/attach-contact` | admin-triage |
 | POST | `/api/admin/triage/:id/confirm-email` | admin-triage |
 | PUT | `/api/admin/triage/:id/dismiss` | admin-triage |
+| POST | `/api/admin/triage/:id/new-customer` | admin-triage |
 | PUT | `/api/admin/triage/:id/resolve` | admin-triage |
 | POST | `/api/admin/triage/:id/save-contact-note` | admin-triage |
 | POST | `/api/admin/triage/:id/verdict` | admin-triage |

@@ -4,6 +4,7 @@ import { COLORS, FONTS } from '../theme-brand';
 import { DOC_EYEBROW } from '../theme-doc';
 import { estimateCard, estimateInnerBox, ESTIMATE_CARD_BORDER } from '../components/estimate/cardStyles';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
+import CustomerReportHeader from '../components/report/CustomerReportHeader';
 import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
@@ -27,9 +28,9 @@ const fmtCents = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigit
 
 const SEVERITY_DOT = { mild: COLORS.green, moderate: COLORS.orange, severe: COLORS.red };
 
-function Page({ children }) {
+function Page({ children, template = false }) {
   return (
-    <div className="lawn-report-page" style={{ flex: 1, background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
+    <div className={`lawn-report-page${template ? ' customer-report-template' : ''}`} style={{ flex: 1, background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
       {/* ---------- liquid glass ----------
           useGlassSurface sets html[data-glass-theme]; every rule below is
           scoped under it so the non-glass page stays pixel-identical. Card
@@ -175,6 +176,8 @@ function tierPerApplication(tier = {}) {
 export default function LawnReportViewPage() {
   const { token } = useParams();
   const [report, setReport] = useState(null);
+  // GATE_REPORT_SHARED_TEMPLATE: the server sends reportTemplate:true beside the report while the gate is on.
+  const [sharedTemplate, setSharedTemplate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -194,6 +197,7 @@ export default function LawnReportViewPage() {
       if (!res.ok) throw new Error(`lawn report fetch failed: ${res.status}`);
       const body = await res.json();
       setReport(body.report || null);
+      setSharedTemplate(body.reportTemplate === true);
     } catch {
       setLoadError(true);
     } finally {
@@ -235,15 +239,30 @@ export default function LawnReportViewPage() {
   const expectationItems = Object.entries(report.expectations || {}).filter(([, v]) => v);
   const watchItems = (report.watch_items || []).filter(Boolean);
 
+  // GATE_REPORT_SHARED_TEMPLATE: the heading prints once, as the shared customer header above the
+  // first card or as the page's own eyebrow and title inside it.
+  const title = `Here's what we saw at ${placeLabel}`;
+  const heading = sharedTemplate
+    ? { above: <CustomerReportHeader eyebrow="Your lawn report" title={title} customerName={report.first_name} address={report.city} />, inCard: null }
+    : {
+      above: null,
+      inCard: (
+        <>
+          {/* Eyebrow → h1 → intro (owner 2026-09-04: no status chips on customer pages). */}
+          <div data-gt="eyebrow" style={DOC_EYEBROW}>Your lawn report</div>
+          <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
+            {title}
+          </h1>
+        </>
+      ),
+    };
+
   return (
-    <Page>
+    <Page template={sharedTemplate}>
+      {heading.above}
       {/* Hero */}
       <SectionCard>
-        {/* Eyebrow → h1 → intro (owner 2026-09-04: no status chips on customer pages). */}
-        <div data-gt="eyebrow" style={DOC_EYEBROW}>Your lawn report</div>
-        <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
-          Here&apos;s what we saw at {placeLabel}
-        </h1>
+        {heading.inCard}
         {/* The server's overall assessment stays, as text (no chip). */}
         <p style={{ margin: '0 0 8px', color: TEXT, fontSize: 15, fontWeight: 600, lineHeight: 1.5 }}>
           Overall: {report.overall_status || 'Reviewed'}
@@ -323,7 +342,7 @@ export default function LawnReportViewPage() {
           <SectionTitle>{report.pricing.service_label || 'Your lawn program'}</SectionTitle>
           <div style={{ display: 'grid', gap: 10 }}>
             {report.pricing.tiers.map((tier, i) => (
-              <div key={`${tier.label}-${i}`} style={estimateInnerBox({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', ...(tier.recommended ? { border: `1px solid ${COLORS.glassNavy}` } : {}) })}>
+              <div key={`${tier.label}-${i}`} className="report-template-price" style={estimateInnerBox({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', ...(tier.recommended ? { border: `1px solid ${COLORS.glassNavy}` } : {}) })}>
                 <div>
                   <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT }}>
                     {tier.label}{tier.recommended ? ' · Most popular' : ''}

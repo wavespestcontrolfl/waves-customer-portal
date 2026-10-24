@@ -19,7 +19,7 @@ jest.mock('../services/notification-service', () => ({
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
-const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, closeSmsCommitmentAlerts } = require('../services/sms-operational-actions');
+const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, closeSmsCommitmentAlerts, settleCommitmentsForDoneAlert } = require('../services/sms-operational-actions');
 const numbers = require('../config/twilio-numbers');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY } = require('../services/sms-commitment-fulfillment');
@@ -3879,6 +3879,152 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(refreshed.detail).not.toContain('only after the promised');
       await applySmsCommitmentUpdate(mockPg, second.id, { customerId: message.customer_id, action: 'dismiss', reviewedBy: randomUUID() });
       expect((await mockPg('notifications').where({ id: shared }).first()).done_at).not.toBeNull();
+    });
+  });
+
+
+  describe('GATE_SMS_FOLLOWUP_WITNESS_FIX: three false alarms on the text follow-up alert (owner audit 2026-10-24)', () => {
+    const STAFF = '00000000-0000-4000-8000-000000000104';
+    const OTHER_PHONE = '+12025550177';
+    afterEach(() => { delete process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX; });
+    const after = () => new Date(message.created_at.getTime() + 1000);
+    const callbackCommitment = () => ({ kind: 'callback', party: 'waves', evidence: [{ quote: 'Call' }],
+      sms_context: { basis: 'request', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at.toISOString() } });
+
+    test('1. a staff call to another phone on the same customer answers a callback; gate off keeps the exact-number rule', async () => {
+      await mockPg('customers').where({ id: message.customer_id }).update({ secondary_phone: OTHER_PHONE });
+      const [call] = await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+        from_phone: numbers.locations.parrish.number, to_phone: OTHER_PHONE, status: 'completed', duration_seconds: 178,
+        created_at: new Date(after().getTime() + 18 * 60000) }).returning('id');
+      const now = new Date(after().getTime() + 3600000);
+      const commitment = callbackCommitment();
+
+      const off = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+      expect(off.records.filter((r) => r.type === 'call')).toEqual([]);
+
+      process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+      const on = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+      const witness = on.records.find((r) => r.type === 'call');
+      expect(witness.id).toBe(call.id);
+      expect(admissibleWitness(witness, commitment, on.records)).toBe(true);
+    });
+
+    test('1b. a call to the number that texted still counts with the gate off (unchanged)', async () => {
+      const [call] = await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+        from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
+        created_at: new Date(after().getTime() + 60000) }).returning('id');
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, callbackCommitment(), message, new Date(after().getTime() + 3600000));
+      expect(evidence.records.find((r) => r.type === 'call').id).toBe(call.id);
+    });
+
+    test('1c. another customer\'s call never counts', async () => {
+      process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+      const strangerId = randomUUID();
+      await mockPg('customers').insert({ id: strangerId, first_name: 'Other', last_name: 'Fixture', phone: OTHER_PHONE });
+      await mockPg('call_log').insert({ customer_id: strangerId, direction: 'outbound', from_phone: numbers.locations.parrish.number,
+        to_phone: OTHER_PHONE, status: 'completed', duration_seconds: 178, created_at: new Date(after().getTime() + 60000) });
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, callbackCommitment(), message, new Date(after().getTime() + 3600000));
+      expect(evidence.records.filter((r) => r.type === 'call')).toEqual([]);
+    });
+
+    describe('2. an estimate for a customer whose request names no property', () => {
+      const estimateRequest = () => ({ kind: 'send_estimate', party: 'waves', evidence: [{ quote: 'Can I get a mosquito estimate' }],
+        sms_context: { basis: 'request', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at.toISOString() } });
+      const sendEstimate = async () => {
+        const sentAt = new Date(after().getTime() + 77 * 60000);
+        const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: null,
+          status: 'accepted', service_interest: 'Mosquito', accepted_at: new Date(sentAt.getTime() + 60000),
+          estimate_data: { deliveryState: { lastDeliveredAt: sentAt.toISOString() } } }).returning('id');
+        return { estimate, now: new Date(sentAt.getTime() + 3600000) };
+      };
+
+      test('gate off: the estimate is refused as an invalid witness (old behavior)', async () => {
+        const { estimate, now } = await sendEstimate();
+        const commitment = estimateRequest();
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+        const witness = evidence.records.find((r) => r.id === estimate.id);
+        expect(admissibleWitness(witness, commitment, evidence.records)).toBe(false);
+        expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'Mosquito' }, evidence, commitment))
+          .toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+      });
+
+      test('gate on: it grounds a fulfilled verdict', async () => {
+        process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+        const { estimate, now } = await sendEstimate();
+        const commitment = estimateRequest();
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+        const witness = evidence.records.find((r) => r.id === estimate.id);
+        expect(admissibleWitness(witness, commitment, evidence.records)).toBe(true);
+        expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'Mosquito' }, evidence, commitment))
+          .toMatchObject({ verdict: 'fulfilled', record_type: 'estimate', record_id: estimate.id });
+      });
+
+      test('gate on: an estimate sent BEFORE the request, or one for a request that names a property, is still refused', async () => {
+        process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+        const before = new Date(message.created_at.getTime() - 3600000);
+        const [early] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: null, status: 'sent',
+          service_interest: 'Mosquito', estimate_data: { deliveryState: { lastDeliveredAt: before.toISOString() } } }).returning('id');
+        const evidence = await loadSmsFulfillmentEvidence(mockPg, estimateRequest(), message, new Date(after().getTime() + 3600000));
+        expect(evidence.records.find((r) => r.id === early.id)).toBeUndefined();
+        // A scoped request keeps the property rule: an estimate with no property is not proof.
+        const { estimate, now } = await sendEstimate();
+        const scoped = { ...estimateRequest(), sms_context: { ...estimateRequest().sms_context, property_id: context.properties[0].id, property_ambiguous: false } };
+        const later = await loadSmsFulfillmentEvidence(mockPg, scoped, message, now);
+        expect(admissibleWitness(later.records.find((r) => r.id === estimate.id), scoped, later.records)).toBe(false);
+      });
+    });
+
+    describe('3. Done on the alert settles the follow-up, so the next tick does not ring it again', () => {
+      const ringThenDone = async () => {
+        const due = new Date(message.created_at.getTime() + 60000);
+        result.facts = [];
+        result.obligations[0] = { ...result.obligations[0], due_at: due.toISOString(), due_text: 'in a minute' };
+        await recordMessageOperations(mockPg, message, result, context);
+        const commitment = await mockPg('call_commitments').first();
+        const tick = (ms) => refreshSmsCommitments({ conn: mockPg, now: new Date(due.getTime() + ms), verify: async () => ({ verdict: 'open' }) });
+        NotificationService.notifyAdmin.mockClear();
+        await tick(1000);
+        expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+        const [, , , options] = NotificationService.notifyAdmin.mock.calls[0];
+        // The bell row the first tick would have created, then a person's Done on it.
+        const [alert] = await mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
+          title: 'Comms — send the estimate', body: 'old', metadata: JSON.stringify(options.metadata ? { ...options.metadata, dedupeKey: options.dedupeKey } : {}),
+          done_at: new Date(), done_by: STAFF, read_at: new Date() }).returning('id');
+        return { commitment, tick, alert };
+      };
+
+      test('gate off: Done writes only the bell and the next tick rings again (old behavior)', async () => {
+        const { commitment, tick, alert } = await ringThenDone();
+        expect(await settleCommitmentsForDoneAlert(mockPg, alert.id, { reviewedBy: STAFF })).toBe(0);
+        expect((await mockPg('call_commitments').where({ id: commitment.id }).first()).status).toBe('open');
+        NotificationService.notifyAdmin.mockClear();
+        await tick(300000);
+        expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      });
+
+      test('gate on: the follow-up is marked done by that person, and the next tick stays quiet', async () => {
+        process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+        const { commitment, tick, alert } = await ringThenDone();
+        expect(await settleCommitmentsForDoneAlert(mockPg, alert.id, { reviewedBy: STAFF })).toBe(1);
+        const settled = await mockPg('call_commitments').where({ id: commitment.id }).first();
+        expect(settled).toMatchObject({ status: 'fulfilled', reviewed_by: STAFF });
+        expect(settled.reviewed_at).toBeInstanceOf(Date);
+        NotificationService.notifyAdmin.mockClear();
+        await tick(300000);
+        expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      });
+
+      test('gate on: a Done on an alert of another kind, or on an already-settled follow-up, changes nothing and never throws', async () => {
+        process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+        const { commitment, alert } = await ringThenDone();
+        const [other] = await mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
+          title: 'Unrelated', body: 'x', metadata: JSON.stringify({ dedupeKey: 'something-else:1', customerId: message.customer_id }),
+          done_at: new Date(), done_by: STAFF }).returning('id');
+        expect(await settleCommitmentsForDoneAlert(mockPg, other.id, { reviewedBy: STAFF })).toBe(0);
+        expect((await mockPg('call_commitments').where({ id: commitment.id }).first()).status).toBe('open');
+        await applySmsCommitmentUpdate(mockPg, commitment.id, { customerId: message.customer_id, action: 'dismiss', reviewedBy: randomUUID() });
+        expect(await settleCommitmentsForDoneAlert(mockPg, alert.id, { reviewedBy: STAFF })).toBe(0);
+      });
     });
   });
 

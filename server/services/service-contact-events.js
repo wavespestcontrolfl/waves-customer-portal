@@ -231,6 +231,7 @@ async function recordServiceContactChanges({
   actorCustomerId = null,
   adminUserId = null,
   occurredAt = null,
+  conn = db,
 } = {}) {
   try {
     const events = diffServiceContacts(before, after);
@@ -251,7 +252,7 @@ async function recordServiceContactChanges({
         // keep the generic label
       }
     }
-    await db('activity_log').insert(events.map((event) => ({
+    await conn('activity_log').insert(events.map((event) => ({
       customer_id: customerId,
       admin_user_id: adminUserId || null,
       action: event.action,
