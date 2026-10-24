@@ -3830,7 +3830,16 @@ default), no call goes out at any hour: the lead takes the after-hours path
 (the `new_lead` bell; the legacy lead SMS to the owner only if that bell
 fails). The gate never changes the response, the lead's one automated text,
 or the estimate draft. A diff that places the call with the gate off is a
-P0. An enforced Turnstile failure answers 403
+P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
+2026-10-24): a submission whose phone matches a live customers row still
+takes the existing-customer branch (its note; no leads row, no automated
+text, no draft, no new-lead bell) and the response is unchanged. When that
+row is still a lead (`pipeline_stage` new_lead, contacted, estimate_sent,
+estimate_viewed, follow_up or lost), an open `lead_intake_status`
+(`awaiting_service`, `awaiting_address`) is kept instead of cleared, and
+one Leads admin alert rings (`ringRepeatFormAlert`; none inside the
+5-minute duplicate window). Any other row is unchanged, nothing is sent to
+the submitter, and gate off = as before. An enforced Turnstile failure answers 403
 `{ error: 'Verification failed. Please try again.' }` with no write, with
 ONE exception, the unverified hold (`GATE_LEAD_UNVERIFIED_HOLD`, default
 on, `false` = no exception): when the verdict is `missing_token` AND

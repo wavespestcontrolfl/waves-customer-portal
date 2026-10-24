@@ -650,7 +650,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // Customer record + interaction note are written above so we still have an
       // audit trail. Existing customers must not continue into lead acquisition:
       // no new-lead notifications, lead auto-replies, lead intake state, draft
-      // estimates, leads rows, or lead-agent processing.
+      // estimates, leads rows, or lead-agent processing. A row that is still a
+      // lead is the one exception under GATE_LEAD_REPEAT_FORM: it keeps an open
+      // intake state (buildExistingCustomerLeadUpdates) and rings one Leads
+      // alert (ringRepeatFormAlert); still no text, lead row or draft here.
       //
       // The voicemail text-back prefill attach DOES still run here: the open
       // call-pipeline lead predates this customers row (voicemail recovery
@@ -686,6 +689,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       } catch (attachErr) {
         logger.warn(`[lead-webhook] existing-customer prefill attach failed: ${attachErr.message}`);
       }
+      // A double submit inside the 5-minute window rings nothing more.
+      if (!isDuplicateSubmission) await ringRepeatFormAlert(customer, attachedLead?.id || null);
       return res.json({
         success: true,
         customerId: customer.id,
@@ -2197,8 +2202,72 @@ function buildExistingCustomerLeadUpdates({ existing, leadSource }) {
   const updates = { last_contact_date: new Date(), last_contact_type: 'form_submission' };
   if (!existing.lead_source) updates.lead_source = leadSource.source;
   if (!existing.lead_source_detail) updates.lead_source_detail = leadSource.detail;
-  if (existing.lead_intake_status) updates.lead_intake_status = null;
+  // A repeat form from a lead keeps an open intake state: clearing it dropped
+  // the lead's next CALL / TEXT note and its draft quote (2026-10-15: a lead
+  // sent the form again 29 s before replying TEXT).
+  const keepsIntake = isRepeatFormFromLead(existing) && OPEN_INTAKE_STATUSES.includes(existing.lead_intake_status);
+  if (existing.lead_intake_status && !keepsIntake) updates.lead_intake_status = null;
   return updates;
+}
+
+// Pipeline stages a row holds before it is a customer (the stageMap in
+// services/pipeline-manager.js). Any other stage, or none, is a customer.
+const LEAD_PIPELINE_STAGES = ['new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'lost'];
+// The intake states our lead text opens; lead-intake.js answers the lead's
+// next text from them.
+const OPEN_INTAKE_STATUSES = ['awaiting_service', 'awaiting_address'];
+
+// GATE_LEAD_REPEAT_FORM (owner 2026-10-24, "A: both parts"): a form whose
+// phone matches a row that is still a lead comes from that same lead, whose
+// texts still answer our lead text.
+function isRepeatFormFromLead(existing) {
+  return isEnabled('leadRepeatForm') && LEAD_PIPELINE_STAGES.includes(existing?.pipeline_stage);
+}
+
+// One Leads alert for a form from a row that is still a lead. Before, such a
+// form wrote only a note: from Aug 17 to Oct 18 five leads sent the form again
+// and nobody was told. One open row per lead: each form is a new version, so a
+// form while the row is open rings it again and moves its time to that form;
+// the relevance sweep judges contact against that time. Never throws; the
+// form is already saved.
+async function ringRepeatFormAlert(customer, attachedLeadId = null) {
+  if (!isRepeatFormFromLead(customer)) return;
+  try {
+    const { raiseAdminAlert } = require('../services/admin-alert-compose');
+    const { fitAction, fullName, shortDateET, tidyName } = require('../services/admin-alert-names');
+    const leadId = attachedLeadId || (await db('leads')
+      .where({ customer_id: customer.id })
+      .whereNull('deleted_at')
+      .orderBy('created_at', 'desc')
+      .first('id'))?.id || null;
+    const first = tidyName(customer.first_name) || 'The lead';
+    const since = shortDateET(customer.created_at);
+    await raiseAdminAlert('lead', {
+      area: 'Leads',
+      action: fitAction('Leads', fullName(customer) || 'a lead', [
+        (who) => `call ${who} about the quote form`,
+        (who) => `call ${who}`,
+      ]),
+      why: since
+        ? `${first} sent the quote form; on file as a lead since ${since}.`
+        : `${first} sent the quote form and is still a lead.`,
+      severity: 'needs-you',
+      link: leadId ? `/admin/leads?lead=${leadId}` : `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+      subject: leadId ? { type: 'lead', id: String(leadId) } : { type: 'customer', id: String(customer.id) },
+      doneWhen: 'lead_contacted',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `lead-repeat-form:${customer.id}`,
+      dedupeOpenOnly: true,
+      refreshOnDedupe: true,
+      bumpOnRefresh: true,
+      dedupeVersion: new Date().toISOString(),
+      metadata: { customerId: customer.id, leadId, source: 'lead_repeat_form' },
+    });
+  } catch (e) {
+    logger.error(`[lead-webhook] repeat-form alert failed for customer ${customer.id}: ${e.code || e.name || 'error'}`);
+  }
 }
 
 module.exports = router;
@@ -2208,6 +2277,7 @@ module.exports._test = {
   leadCommercialSignalFromReadiness,
   commercialLeadFields,
   buildExistingCustomerLeadUpdates,
+  ringRepeatFormAlert,
   attachVoicemailPrefillLead,
   attachOpenCallLeadByPhone,
   scrubLeadAlertProviderError,
