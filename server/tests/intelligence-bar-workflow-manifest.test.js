@@ -539,7 +539,9 @@ describe('write calls', () => {
 
   test('the policy check sees a wrong card flag', () => {
     const owner = { actor: 'owner', mode: 'owner_direct_on' };
-    expect(matrix.expectedCard(owner, [{ tool: 'update_customer', input: { updates: { phone: 'x' } } }], ownerDirect)).toBe(false);
+    expect(matrix.expectedCard(owner, [{ tool: 'update_customer', input: { updates: { first_name: 'x' } } }], ownerDirect)).toBe(false);
+    // The phone is the customer's portal sign-in key: always a card (owner 2026-10-24).
+    expect(matrix.expectedCard(owner, [{ tool: 'update_customer', input: { updates: { phone: 'x' } } }], ownerDirect)).toBe(true);
     expect(matrix.expectedCard(owner, [{ tool: 'update_customer', input: { updates: { email: 'x' } } }], ownerDirect)).toBe(true);
     expect(matrix.expectedCard(owner, [{ tool: 'add_customer_property', input: { label: 'rental' } }], ownerDirect)).toBe(true);
     expect(matrix.expectedCard(owner, [{ tool: 'add_customer_property', input: { address_line1: '100 Example Way' } }], ownerDirect)).toBe(true);

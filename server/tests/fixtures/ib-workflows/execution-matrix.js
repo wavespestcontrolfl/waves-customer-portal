@@ -85,7 +85,7 @@ const KNOWN_DIFFERENCES = [
 // the input or the proposal preview.
 const OWNER_DIRECT_CONDITIONS = {
   update_lead_contact: 'lead_id alone',
-  update_customer: 'only name, phone, lead source and note fields (notes only over empty notes)',
+  update_customer: 'only name, lead source and note fields (notes only over empty notes)',
   update_customer_property: 'no label',
   reschedule_appointment: 'the pinned visit is ungrouped',
 };
@@ -94,7 +94,7 @@ const OWNER_DIRECT_CONDITIONS = {
 // some probe executes without a card and another does not.
 const PROBE_INPUTS = [
   {}, { lead_id: 'lead-x', first_name: 'Sample' }, { lead_name: 'Sample', first_name: 'Sample' },
-  { customer_id: 'cust-x', updates: { phone: '555-0100', notes: 'x' } }, { customer_id: 'cust-x', updates: { email: 'a@example.invalid' } },
+  { customer_id: 'cust-x', updates: { last_name: 'Sample', notes: 'x' } }, { customer_id: 'cust-x', updates: { phone: '555-0100' } }, { customer_id: 'cust-x', updates: { email: 'a@example.invalid' } },
   { label: null }, { label: 'rental' }, { appointment_id: 'appt-x', new_date: '2030-01-01' },
 ];
 const PROBE_PREVIEWS = [null, { pinned_appointment: { id: 'appt-x' } }, { pinned_appointment: { id: 'appt-x', visit_id: 'visit-x' } },

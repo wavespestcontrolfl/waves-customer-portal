@@ -97,9 +97,13 @@ const OWNER_DIRECT_TOOL_NAMES = new Set([
 //     (pre-push P0), and a live stage on a churned or inactive row
 //     reactivates the account and clears its churn history (Codex r1) —
 //     every stage change keeps the card
+//   - phone: the customer's portal sign-in key (the one-time code goes to
+//     it), so a changed number changes who can open the account. Every
+//     phone change keeps the card, named customer or not (owner 2026-10-24;
+//     #6463's always-card half)
 // No address field: a change to any part of a street address always keeps
 // its card (#6297; changesAddress below covers the other address writers).
-const DIRECT_CUSTOMER_FIELDS = new Set(['first_name', 'last_name', 'phone', 'lead_source', 'notes']);
+const DIRECT_CUSTOMER_FIELDS = new Set(['first_name', 'last_name', 'lead_source', 'notes']);
 
 // Read at call time: a flip or an unset needs no redeploy.
 function ownerDirectLive(req) {
@@ -679,7 +683,7 @@ const OWNER_DIRECT_PROMPT = `
 
 OWNER MODE (overrides the sections above where they differ):
 You are talking to the owner. Do what they ask.
-- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, lead source, and notes when the customer has none yet; any address field (street, unit, city, state, ZIP) on a customer, property or lead always shows a card with the exact address — notes REPLACE the existing notes, so over existing notes it shows a card naming what is deleted: include the existing text if the owner asked to add a line; an email, tier, rate, active or pipeline-stage change still shows a card. Lead edits execute directly when you pass lead_id alone — never lead_id with lead_name. A property edit (label, occupancy, relationship; it takes no address) executes directly unless it sets a label; add_customer_property is not on this list: a property add always shows its card with the exact address. assign_technician executes directly for one ungrouped stop when technician_name is the technician's full name; reschedule_appointment for one ungrouped stop; grouped visits, several stops and a partial name show a card. Three or more edits with the same tool in one request are refused as a set: for three or more records use the bulk tool, which shows one card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
+- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, lead source, and notes when the customer has none yet; any address field (street, unit, city, state, ZIP) on a customer, property or lead always shows a card with the exact address — notes REPLACE the existing notes, so over existing notes it shows a card naming what is deleted: include the existing text if the owner asked to add a line; a phone, email, tier, rate, active or pipeline-stage change still shows a card. Lead edits execute directly when you pass lead_id alone — never lead_id with lead_name. A property edit (label, occupancy, relationship; it takes no address) executes directly unless it sets a label; add_customer_property is not on this list: a property add always shows its card with the exact address. assign_technician executes directly for one ungrouped stop when technician_name is the technician's full name; reschedule_appointment for one ungrouped stop; grouped visits, several stops and a partial name show a card. Three or more edits with the same tool in one request are refused as a set: for three or more records use the bulk tool, which shows one card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
 - Customer messages, money and bulk changes still show a one-tap card. Prepare it and say "tap Confirm" — nothing more.
 - Pick the record yourself from fresh lookups and pass its id: "the Murphy lead that came in today" is the Murphy lead created today. Use the phone, email, date, status or page record the owner gave to choose. Only when two records fit equally, ask ONE short question that lists the choices in a few words each.
 - A second name in a request (a technician, a spouse, a neighbor) is context, not a second target.
