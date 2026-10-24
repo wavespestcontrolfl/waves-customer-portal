@@ -56,7 +56,11 @@ jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'leadCallReplyRing' && mockState.gate }));
 const mockBridge = jest.fn(async () => ({ callSid: 'CA-ring', callLogId: 'log-1' }));
-jest.mock('../services/call-bridge', () => ({ placeBridgeCall: (...args) => mockBridge(...args) }));
+const mockInsertRow = jest.fn(async () => 'log-1');
+jest.mock('../services/call-bridge', () => ({
+  placeBridgeCall: (...args) => mockBridge(...args),
+  insertBridgeRow: (...args) => mockInsertRow(...args),
+}));
 jest.mock('../services/home-line', () => ({ homeLineCallerId: () => '+19415550111' }));
 jest.mock('../config/twilio-numbers', () => ({ internalAlertCallerId: () => '+19415550122' }));
 // The real composer runs (it throws on a rule break under NODE_ENV=test);
@@ -82,7 +86,12 @@ test('a CALL reply to our lead text in the day rings the cell with the press-1 b
   const out = await ring();
   expect(out).toMatchObject({ rang: true, callLogId: 'log-1' });
   expect(mockState.locks).toEqual([['lead-call-reply-ring:9415550100']]);
+  // The row is claimed inside the locked transaction; Twilio is called after.
+  expect(mockInsertRow).toHaveBeenCalledTimes(1);
+  expect(mockInsertRow.mock.calls[0][0]).toMatchObject({ to: PHONE, from: '+19415550111', source: 'lead-call-reply-ring' });
+  expect(typeof mockInsertRow.mock.calls[0][1]).toBe('function');
   expect(mockBridge).toHaveBeenCalledTimes(1);
+  expect(mockBridge.mock.calls[0][0].reservedCallLogId).toBe('log-1');
   expect(mockBridge.mock.calls[0][0]).toMatchObject({
     to: PHONE,
     bridgePhone: '+19415993489',
@@ -114,6 +123,7 @@ test.each([
   arrange();
   const out = await ring(overrides);
   expect(out).toEqual({ rang: false, reason });
+  expect(mockInsertRow).not.toHaveBeenCalled();
   expect(mockBridge).not.toHaveBeenCalled();
   expect(mockBell).not.toHaveBeenCalled();
 });
@@ -122,6 +132,8 @@ test('a definite ring failure raises the missed bell at once', async () => {
   mockBridge.mockRejectedValueOnce(Object.assign(new Error('rejected'), { bridgeAmbiguous: false }));
   const out = await ring();
   expect(out).toEqual({ rang: false, reason: 'ring_failed' });
+  // The claimed row closes as failed so it never reads as ringing.
+  expect(mockState.updates).toEqual([expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ status: 'failed' }) })]);
   expect(mockBell).toHaveBeenCalledTimes(1);
   const [category, headline, why, opts] = mockBell.mock.calls[0];
   expect(category).toBe('lead');
@@ -130,7 +142,7 @@ test('a definite ring failure raises the missed bell at once', async () => {
   expect(opts).toMatchObject({
     bell: true,
     link: '/admin/leads?lead=lead-1',
-    dedupeKey: 'lead-call-reply-missed:sms:in-1',
+    dedupeKey: 'lead-call-reply-missed:log-1',
     metadata: { area: 'Leads', severity: 'needs-you', subject: { type: 'lead', id: 'lead-1' }, doneWhen: 'lead_contacted', who: 'person' },
   });
 });
@@ -139,6 +151,7 @@ test('an ambiguous ring failure leaves the miss to the status callback', async (
   mockBridge.mockRejectedValueOnce(Object.assign(new Error('timeout'), { bridgeAmbiguous: true }));
   const out = await ring();
   expect(out).toEqual({ rang: false, reason: 'ring_failed' });
+  expect(mockState.updates).toHaveLength(0);
   expect(mockBell).not.toHaveBeenCalled();
 });
 

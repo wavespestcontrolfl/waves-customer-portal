@@ -161,52 +161,61 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
     if (!/^\+1\d{10}$/.test(String(fromPhone || ''))) return { rang: false, reason: 'bad_phone' };
     const digits = phoneDigits(fromPhone);
 
-    // The lock is held until the bridge's call_log row exists (placeBridgeCall
-    // inserts it on its own connection before this transaction commits), so
-    // a duplicate webhook waits here and then finds that row.
-    const outcome = await db.transaction(async (trx) => {
+    // The per-phone lock covers only the checks and the claim: the ring's
+    // call_log row is inserted and committed here, so a duplicate webhook
+    // waits, then finds it. The Twilio request runs after the commit, with
+    // no connection held across it.
+    const TWILIO_NUMBERS = require('../config/twilio-numbers');
+    const { homeLineCallerId } = require('./home-line');
+    const { placeBridgeCall, insertBridgeRow } = require('./call-bridge');
+    const firstName = String(customer.first_name || '').trim() || 'The lead';
+    const name = displayName(customer);
+    const from = homeLineCallerId(customer);
+    const claim = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${SOURCE}:${digits}`]);
       const blocker = await ringBlocker({ customer, digits, now }, trx);
-      if (blocker) {
-        logger.info(`[lead-call-reply-ring] no ring for customer ${customer.id}: ${blocker}`);
-        return { rang: false, reason: blocker };
-      }
-
-      const TWILIO_NUMBERS = require('../config/twilio-numbers');
-      const { homeLineCallerId } = require('./home-line');
-      const { placeBridgeCall } = require('./call-bridge');
+      if (blocker) return { blocker };
       const leadId = await newestLeadId(customer.id, trx);
-      const firstName = String(customer.first_name || '').trim() || 'The lead';
-      const name = displayName(customer);
-      try {
-        const { callLogId } = await placeBridgeCall({
-          to: fromPhone,
-          bridgePhone: ADAM_CELL,
-          from: homeLineCallerId(customer),
-          bridgeFrom: TWILIO_NUMBERS.internalAlertCallerId(),
-          customer,
-          source: SOURCE,
-          metadata: { type: 'lead_call_reply_ring', leadId, leadName: name, leadFirstName: firstName, leadPhone: fromPhone, smsLogId },
-          leadName: firstName,
-          eventLabel: `${firstName} asked for a call back`,
-          ringTimeoutSeconds: RING_TIMEOUT_SECONDS,
-        });
-        logger.info(`[lead-call-reply-ring] rang for customer ${customer.id} (call_log ${callLogId})`);
-        return { rang: true, reason: 'rang', callLogId };
-      } catch (err) {
-        // An ambiguous create may still be ringing: its status callback
-        // decides. A definite failure never rings, so the bell goes now.
-        logger.error(`[lead-call-reply-ring] ring failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
-        return { rang: false, reason: 'ring_failed', missed: err?.bridgeAmbiguous ? null : {
-            // One bell per CALL text: retries of this alert share the key,
-            // a later request gets its own.
-            customerId: customer.id, name, firstName, leadId, callLogId: null, attemptKey: `sms:${smsLogId || `${customer.id}:${now.getTime()}`}`,
-          } };
-      }
+      const metadata = { type: 'lead_call_reply_ring', leadId, leadName: name, leadFirstName: firstName, leadPhone: fromPhone, smsLogId };
+      const callLogId = await insertBridgeRow({ to: fromPhone, from, customer, source: SOURCE, metadata }, trx);
+      return { leadId, metadata, callLogId };
     });
-    // Raised after the lock is released: the bell's retries can take seconds.
-    if (outcome.missed) await raiseMissedBell(outcome.missed);
-    return { rang: outcome.rang, reason: outcome.reason, ...(outcome.callLogId ? { callLogId: outcome.callLogId } : {}) };
+    if (claim.blocker) {
+      logger.info(`[lead-call-reply-ring] no ring for customer ${customer.id}: ${claim.blocker}`);
+      return { rang: false, reason: claim.blocker };
+    }
+
+    try {
+      await placeBridgeCall({
+        to: fromPhone,
+        bridgePhone: ADAM_CELL,
+        from,
+        bridgeFrom: TWILIO_NUMBERS.internalAlertCallerId(),
+        customer,
+        source: SOURCE,
+        metadata: claim.metadata,
+        leadName: firstName,
+        eventLabel: `${firstName} asked for a call back`,
+        ringTimeoutSeconds: RING_TIMEOUT_SECONDS,
+        reservedCallLogId: claim.callLogId,
+      });
+      logger.info(`[lead-call-reply-ring] rang for customer ${customer.id} (call_log ${claim.callLogId})`);
+      return { rang: true, reason: 'rang', callLogId: claim.callLogId };
+    } catch (err) {
+      // An ambiguous create may still be ringing: its status callback
+      // decides. A definite failure never rings: the claimed row closes as
+      // failed (it still holds the 24 h limit) and the bell goes now.
+      logger.error(`[lead-call-reply-ring] ring failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
+      if (err?.bridgeAmbiguous) return { rang: false, reason: 'ring_failed' };
+      await db('call_log').where({ id: claim.callLogId }).whereNull('twilio_call_sid')
+        .update({ status: 'failed', updated_at: new Date() })
+        .catch((markErr) => logger.warn(`[lead-call-reply-ring] failed-mark skipped for ${claim.callLogId} (${String(markErr?.code || markErr?.name || 'error')})`));
+      // One bell per CALL text: retries of this alert share the key.
+      await raiseMissedBell({
+        customerId: customer.id, name, firstName, leadId: claim.leadId, callLogId: claim.callLogId, attemptKey: claim.callLogId,
+      });
+      return { rang: false, reason: 'ring_failed' };
+    }
   } catch (err) {
     // Code only: a knex message carries the bindings (the phone digits).
     logger.error(`[lead-call-reply-ring] check failed for customer ${customer?.id} (${String(err?.code || err?.name || 'error')})`);

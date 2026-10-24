@@ -26,8 +26,10 @@ const logger = require('./logger');
 // `eventLabel` is spoken before "Calling {name}" on the staff leg (the
 // prompt sanitizes it). `ringTimeoutSeconds` caps how long the staff phone
 // rings; unset keeps Twilio's 60 s default, which lets a cell's voicemail
-// pick up first.
-async function placeBridgeCall({ to, bridgePhone, from, bridgeFrom = from, customer = null, source, adminUserId = null, metadata = null, leadName = '', eventLabel = '', ringTimeoutSeconds = null }) {
+// pick up first. `reservedCallLogId` is a row the caller already inserted
+// (and committed) with the same columns, so a caller can claim the call under
+// its own short lock without holding a connection across the Twilio request.
+async function placeBridgeCall({ to, bridgePhone, from, bridgeFrom = from, customer = null, source, adminUserId = null, metadata = null, leadName = '', eventLabel = '', ringTimeoutSeconds = null, reservedCallLogId = null }) {
   const twilio = require('twilio');
   const config = require('../config');
   if (!config.twilio.accountSid || !config.twilio.authToken) {
@@ -41,18 +43,7 @@ async function placeBridgeCall({ to, bridgePhone, from, bridgeFrom = from, custo
   // Insert call_log FIRST so outbound-admin-prompt / outbound-connect can
   // update the row reliably. Twilio typically fires those webhooks 2–5s
   // after calls.create() returns, but racing the insert is cheap to avoid.
-  const [callLogRow] = await db('call_log')
-    .insert({
-      customer_id: customer?.id || null,
-      direction: 'outbound',
-      from_phone: from,
-      to_phone: to,
-      status: 'initiated',
-      source,
-      metadata: metadata ? JSON.stringify(metadata) : null,
-    })
-    .returning(['id']);
-  const callLogId = callLogRow?.id;
+  const callLogId = reservedCallLogId || (await insertBridgeRow({ to, from, customer, source, metadata }));
 
   const promptParams = new URLSearchParams({
     customerNumber: to,
@@ -119,6 +110,22 @@ async function placeBridgeCall({ to, bridgePhone, from, bridgeFrom = from, custo
   return { callSid: call.sid, callLogId };
 }
 
+// The call_log row a bridge starts from: 'initiated', before any Twilio call.
+async function insertBridgeRow({ to, from, customer = null, source, metadata = null }, connection = db) {
+  const [row] = await connection('call_log')
+    .insert({
+      customer_id: customer?.id || null,
+      direction: 'outbound',
+      from_phone: from,
+      to_phone: to,
+      status: 'initiated',
+      source,
+      metadata: metadata ? JSON.stringify(metadata) : null,
+    })
+    .returning(['id']);
+  return row?.id;
+}
+
 // Twilio's terminal call statuses — the same absorbing set /call-status
 // applies. A bridge row outside it may still be ringing the staff phone or
 // connected to the customer.
@@ -175,4 +182,4 @@ async function backfillCallSid(callLogId, sid, delaysMs = SID_BACKFILL_DELAYS_MS
   return false;
 }
 
-module.exports = { placeBridgeCall, activeBridgeCall, backfillCallSid };
+module.exports = { placeBridgeCall, insertBridgeRow, activeBridgeCall, backfillCallSid };

@@ -117,6 +117,16 @@ test('an event label rides the prompt URL and a ring timeout caps the staff leg;
 });
 
 
+test('a reserved row is used as-is: no second insert, its id rides the prompt URL', async () => {
+  const { inserted } = primeDb();
+  const out = await placeBridgeCall({
+    to: '+19415550100', bridgePhone: '+19415550101', from: '+19413529161', source: 'lead-call-reply-ring', reservedCallLogId: 'reserved-1',
+  });
+  expect(inserted).toHaveLength(0);
+  expect(out.callLogId).toBe('reserved-1');
+  expect(new URL(mockCallsCreate.mock.calls[0][0].url).searchParams.get('callLogId')).toBe('reserved-1');
+});
+
 // Last on purpose: resets the module registry with an empty config, which
 // every later lazy require('../config') in the bridge would see.
 test('missing Twilio credentials fail before any row is written', async () => {
