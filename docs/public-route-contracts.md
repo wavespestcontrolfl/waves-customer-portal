@@ -6897,13 +6897,16 @@ is unset (that IS the kill switch), then 120/15-min per-IP limiter
 409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
 a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
 reporting stays on email), 503 when no row landed; the caller emails on
-any non-2xx so nothing is lost. A failure observed at or before this key's
-latest clean observation returns 200 `{ ok: true, stale: true }` without a
-bell or email fallback. `/resolve` shares the 404 → limiter → 401
+any non-2xx so nothing is lost. A failure observed strictly before this
+key's latest clean observation returns 200 `{ ok: true, stale: true }`
+without a bell or email fallback; one observed at the same instant (the same
+ops-crons run, which stamps every post and resolve with one runStartedAt)
+still posts. `/resolve` shares the 404 → limiter → 401
 → 400 layers but deliberately has NO 409: retiring history must never
 depend on the ingest lane being on. Under the same per-key advisory lock
-as ingest, it atomically retires rows by observation time (using created_at
-only when no observation stamp exists) and advances a durable clean watermark
+as ingest, it atomically retires rows observed strictly before the clean
+observation (using created_at only when no observation stamp exists; a row
+from the same run is kept) and advances a durable clean watermark
 even when no rows stand; success answers 200 `{ resolved: N }` (N may be 0),
 and a DB failure answers retryable 503, never false success. Writes exactly
 one admin `ops_digest` row

@@ -101,13 +101,16 @@ test('no lockKey: no transaction, no lock', async () => {
   expect(mockTrxRaw).not.toHaveBeenCalled();
 });
 
-test('notAfter: only rows observed at or before the clean run retire (metadata.observedAt, else created_at)', async () => {
+test('notAfter: only rows observed before the clean run retire (metadata.observedAt, else created_at)', async () => {
   const q = chain(1);
   mockDb.mockReturnValue(q);
   await resolveOpsDigest({ key: 'k', source: 'ops-crons', notAfter: '2026-09-11T11:10:00.000Z' });
   // Event time wins over insertion time: a 10:00 failure ingested at 10:20
   // must clear under a delayed 10:10 clean run. Legacy rows use created_at.
-  expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", ['2026-09-11T11:10:00.000Z']);
+  // Strictly before: a row the same run posted carries the same runStartedAt
+  // as that run's resolve and must survive it (b07 draft invoices, 10-23).
+  expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) < ?::timestamptz", ['2026-09-11T11:10:00.000Z']);
+  expect(q.whereRaw.mock.calls.map((c) => c[0]).join('\n')).not.toContain('<= ?::timestamptz');
 });
 
 test('alsoRetire: digest and opened/unread companion bells retire atomically within the same source scope', async () => {
