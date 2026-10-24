@@ -627,6 +627,17 @@ describe('bell write', () => {
     expect(Date.now() - Date.parse(metadata.rungAt)).toBeLessThan(60_000);
   });
 
+  test('a finding from the same run as the clean watermark still posts (same runStartedAt)', async () => {
+    // One ops-crons run stamps its posts and resolves with one runStartedAt.
+    // When two latch keys cut to one opsKey, the run's resolve can land first;
+    // the equal-time finding is not older than it and must still ring.
+    mockClean.row = { value: '2026-09-11T12:00:00.000Z' };
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-same-run', deduped: false });
+    const same = await post({ ...good(), observedAt: '2026-09-11T12:00:00.000Z' });
+    expect(same).toEqual({ status: 201, json: { ok: true, id: 'n-same-run', deduped: false } });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   test('T2 clean with zero standing rows suppresses delayed T1 but permits later T3', async () => {
     mockClean.row = { value: '2026-09-11T12:00:00.000Z' };
     const stale = await post({ ...good(), observedAt: '2026-09-11T11:00:00Z' });
