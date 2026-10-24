@@ -14,7 +14,8 @@ const { fetchPropertyForecast } = require('../services/service-report/applicatio
 const {
   capturePestRainOutlook,
   buildRainOutlookSummary,
-  buildRainOutlookCardCopy,
+  buildRainOutlookLine,
+  DRY_LINE,
   FIPRONIL_LINE,
   PYRETHROID_LINE,
 } = require('../services/service-report/pest-rain-outlook');
@@ -32,6 +33,8 @@ const at = (hoursAfter) => new Date(Date.parse(COMPLETED) + hoursAfter * HOUR).t
 
 const CONDITIONS = { temp_f: 82, humidity_pct: 64, wind_mph: 8, rain_24h_in: 0.04, source: 'FAWN' };
 const BASE_CARD = { headline: 'Good treatment window.', body: 'Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.' };
+// The outlook adds its text after the card's own body; the headline stays.
+const withLine = (line) => `${BASE_CARD.body} ${line}`;
 
 const outlook = (overrides = {}) => ({
   v: 1,
@@ -76,30 +79,35 @@ const unchanged = (rec, applications) => {
 };
 
 describe('Weather call card with the frozen rain outlook', () => {
-  test('dry window: "Dry days ahead", no application needed', () => {
+  test('dry window: the dry sentence after the card\'s own text, no application needed', () => {
     const c = card(record(outlook({ totalIn: 0.04, firstRainAt: null })), []);
+    expect(DRY_LINE).toBe('When we finished, the forecast showed dry weather for the next two days.');
     expect(c).toMatchObject({
-      headline: 'Dry days ahead',
-      body: 'When we finished, the forecast showed dry weather for the next two days.',
+      headline: 'Good treatment window.',
+      body: withLine(DRY_LINE),
       factsLine: '82°F · 64% humidity · 8 mph wind · 0.04 in rain',
       sourceLabel: 'FAWN',
       sourceKeys: ['condition'],
     });
-    expect(card(record(outlook({ totalIn: 0, firstRainAt: null })), [FIPRONIL]).headline).toBe('Dry days ahead');
+    expect(card(record(outlook({ totalIn: 0, firstRainAt: null })), [FIPRONIL]).body).toBe(withLine(DRY_LINE));
+  });
+
+  test('a dry total with rain in the hour that holds the completion: today\'s card, never "dry"', () => {
+    unchanged(record(outlook({ totalIn: 0.02, firstRainAt: COMPLETED })), [FIPRONIL]);
   });
 
   test('rain with a fipronil outside spray: soil-binding line', () => {
     const c = card(record(outlook({ firstRainAt: at(20) })), [FIPRONIL]);
-    expect(c.headline).toBe('Rain in the forecast');
+    expect(c.headline).toBe('Good treatment window.');
     // 2026-10-25 10:00 EDT (a Sunday), the next ET day.
-    expect(c.body).toBe(`When we finished, the forecast showed rain on Sunday morning. ${FIPRONIL_LINE}`);
+    expect(c.body).toBe(withLine(`When we finished, the forecast showed rain on Sunday morning. ${FIPRONIL_LINE}`));
     expect(FIPRONIL_LINE).toBe('Once dry, the spray around the outside of the house binds to the soil, so a storm moves only a small part of it.');
     expect(c.sourceKeys).toEqual(['condition']);
   });
 
   test('rain with pyrethroid-only outside sprays: tighter binding line', () => {
     const c = card(record(outlook({ firstRainAt: at(20) })), [BIFENTHRIN, app('Lambda-cyhalothrin'), app('Beta-cyfluthrin')]);
-    expect(c.body).toBe(`When we finished, the forecast showed rain on Sunday morning. ${PYRETHROID_LINE}`);
+    expect(c.body).toBe(withLine(`When we finished, the forecast showed rain on Sunday morning. ${PYRETHROID_LINE}`));
     expect(PYRETHROID_LINE).toBe('Once dry, the spray around the outside of the house binds tightly to soil, mulch and plants, so a storm moves only a small part of it.');
   });
 
@@ -121,11 +129,30 @@ describe('Weather call card with the frozen rain outlook', () => {
     unchanged(record(outlook()), [BIFENTHRIN, app('', 'perimeter_spray', 'Test product')]);
   });
 
+  test('a dust is not a spray, whatever method the fallback recorded', () => {
+    const dust = app('Deltamethrin 0.05%', 'perimeter_spray', 'Delta Dust');
+    unchanged(record(outlook()), [dust]);
+    expect(card(record(outlook()), [FIPRONIL, dust]).body).toContain(FIPRONIL_LINE);
+  });
+
+  test('a spray recorded only inside is not an outside spray', () => {
+    const sprayed = (area) => ({ ...BIFENTHRIN, area });
+    unchanged(record(outlook()), [sprayed('Kitchen, Bathrooms')]);
+    unchanged(record(outlook()), [sprayed('Garage')]);
+    unchanged(record(outlook()), [sprayed('Kitchen, Garage, Entry points')]);
+    unchanged(record(outlook()), [sprayed('Inside')]);
+    unchanged(record(outlook()), [{ ...BIFENTHRIN, application_area: 'Bedrooms' }]);
+    // An outside place, an entry point alone, free text or no area keeps it an outside spray.
+    for (const area of ['Perimeter, Garage, Yard', 'Entry points', 'Outside', 'Kitchen, Perimeter', 'by the shed', null]) {
+      expect(card(record(outlook()), [sprayed(area)]).body).toContain(PYRETHROID_LINE);
+    }
+  });
+
   test('rain inside the 4-hour drying time: today\'s card', () => {
     unchanged(record(outlook({ firstRainAt: at(3.5) })), [FIPRONIL]);
     unchanged(record(outlook({ firstRainAt: at(0) })), [FIPRONIL]);
     // Exactly 4 hours is enough.
-    expect(card(record(outlook({ firstRainAt: at(4) })), [FIPRONIL]).headline).toBe('Rain in the forecast');
+    expect(card(record(outlook({ firstRainAt: at(4) })), [FIPRONIL]).body).toContain('the forecast showed rain');
   });
 
   test('any soluble outside spray: today\'s card', () => {
@@ -152,7 +179,7 @@ describe('Weather call card with the frozen rain outlook', () => {
   test('light rain (0.05 to under 0.25 in): today\'s card', () => {
     unchanged(record(outlook({ totalIn: 0.05, firstRainAt: at(20) })), [FIPRONIL]);
     unchanged(record(outlook({ totalIn: 0.24, firstRainAt: at(20) })), [FIPRONIL]);
-    expect(card(record(outlook({ totalIn: 0.25, firstRainAt: at(20) })), [FIPRONIL]).headline).toBe('Rain in the forecast');
+    expect(card(record(outlook({ totalIn: 0.25, firstRainAt: at(20) })), [FIPRONIL]).body).toContain('the forecast showed rain');
   });
 
   test('wet total with no first rain hour on record: today\'s card', () => {
@@ -173,7 +200,7 @@ describe('Weather call card with the frozen rain outlook', () => {
 
   test('a record whose structured_notes arrives as a JSON string reads the same', () => {
     const rec = record(undefined, { structured_notes: JSON.stringify({ rainOutlook: outlook({ totalIn: 0, firstRainAt: null }) }) });
-    expect(card(rec, []).headline).toBe('Dry days ahead');
+    expect(card(rec, []).body).toBe(withLine(DRY_LINE));
   });
 
   test('gate off (unset, "1", "on", "false", "TRUE"): today\'s card, same keys and values', () => {
@@ -255,8 +282,10 @@ describe('the "when" phrase, in Eastern time', () => {
   });
 
   test('across ET midnight, not UTC midnight', () => {
-    // Completed Sat 22:00 EDT (02:00Z Sunday); rain Sun 03:00 EDT (07:00Z) is the next ET day.
-    expect(when('2026-10-25T02:00:00.000Z', '2026-10-25T07:00:00.000Z')).toBe('on Sunday night');
+    // Completed Sat 12:00 EDT (16:00Z); rain Sun 06:00 EDT (10:00Z) is the next ET day.
+    expect(when('2026-10-24T16:00:00.000Z', '2026-10-25T10:00:00.000Z')).toBe('on Sunday morning');
+    // Completed Sat 22:00 EDT (02:00Z Sunday); rain Sun 03:00 EDT (07:00Z) is still Saturday night.
+    expect(when('2026-10-25T02:00:00.000Z', '2026-10-25T07:00:00.000Z')).toBe('that night');
     // Completed Sat 12:00 EDT (16:00Z); rain Sat 21:30 EDT is 01:30Z Sunday, still Saturday in ET.
     expect(when('2026-10-24T16:00:00.000Z', '2026-10-25T01:30:00.000Z')).toBe('that night');
     // Completed 00:30 EDT Saturday (04:30Z); rain 05:00 EDT the same ET day.
@@ -266,7 +295,8 @@ describe('the "when" phrase, in Eastern time', () => {
   test('part-of-day boundaries (morning 5:00-11:59, afternoon 12:00-16:59, evening 17:00-20:59, else night)', () => {
     // Completed Fri 2026-10-23 10:00 EDT; all rains fall on Saturday 10-24 (EDT = UTC-4).
     const done = '2026-10-23T14:00:00.000Z';
-    expect(when(done, '2026-10-24T08:59:00.000Z')).toBe('on Saturday night'); // 04:59
+    expect(when(done, '2026-10-24T08:59:00.000Z')).toBe('that night'); // 04:59 Saturday is Friday night, the visit's own night
+    expect(when(done, '2026-10-25T07:00:00.000Z')).toBe('on Saturday night'); // 03:00 Sunday
     expect(when(done, '2026-10-24T09:00:00.000Z')).toBe('on Saturday morning'); // 05:00
     expect(when(done, '2026-10-24T15:59:00.000Z')).toBe('on Saturday morning'); // 11:59
     expect(when(done, '2026-10-24T16:00:00.000Z')).toBe('on Saturday afternoon'); // 12:00
@@ -277,13 +307,20 @@ describe('the "when" phrase, in Eastern time', () => {
   });
 });
 
-describe('buildRainOutlookCardCopy', () => {
+describe('buildRainOutlookLine', () => {
   test('is null for the gate off and for a non-pest line, whatever the outlook', () => {
-    expect(buildRainOutlookCardCopy({ outlook: outlook(), serviceLine: 'pest', applications: [FIPRONIL] })).not.toBeNull();
-    expect(buildRainOutlookCardCopy({ outlook: outlook(), serviceLine: 'lawn', applications: [FIPRONIL] })).toBeNull();
+    expect(buildRainOutlookLine({ outlook: outlook(), serviceLine: 'pest', applications: [FIPRONIL] })).not.toBeNull();
+    expect(buildRainOutlookLine({ outlook: outlook(), serviceLine: 'lawn', applications: [FIPRONIL] })).toBeNull();
     process.env.GATE_PEST_RAIN_OUTLOOK = 'false';
-    expect(buildRainOutlookCardCopy({ outlook: outlook(), serviceLine: 'pest', applications: [FIPRONIL] })).toBeNull();
-    expect(buildRainOutlookCardCopy()).toBeNull();
+    expect(buildRainOutlookLine({ outlook: outlook(), serviceLine: 'pest', applications: [FIPRONIL] })).toBeNull();
+    expect(buildRainOutlookLine()).toBeNull();
+  });
+
+  test('every other card headline stays, with the text after its own body', () => {
+    const windy = { ...CONDITIONS, wind_mph: 16 };
+    const c = card(record(outlook(), { conditions: JSON.stringify(windy) }), [FIPRONIL]);
+    expect(c.headline).toBe('Wind was elevated.');
+    expect(c.body).toBe(`Elevated wind was recorded at application time and noted with today’s service record. When we finished, the forecast showed rain on Sunday morning. ${FIPRONIL_LINE}`);
   });
 });
 
@@ -310,15 +347,21 @@ describe('buildRainOutlookSummary', () => {
     });
   });
 
-  test('the hour that ends after completion but began before it is not counted', () => {
+  test('rain in the hour that holds the completion starts at the completion', () => {
     // Completed 14:30 EDT: the row stamped 15:00 is the 14:00-15:00 hour, partly before completion.
     const half = new Date(Date.parse(COMPLETED) + 30 * 60000);
     const summary = buildRainOutlookSummary({
       status: 'ok',
-      precipitationInTotal: 0.5,
+      precipitationInTotal: 0.1,
       hourly: [row(1, 0.4), row(2, 0.1)],
     }, half);
-    expect(summary.firstRainAt).toBe(at(1));
+    expect(summary.firstRainAt).toBe(half.toISOString());
+    // A dry hour holding the completion is passed over.
+    expect(buildRainOutlookSummary({
+      status: 'ok',
+      precipitationInTotal: 0.1,
+      hourly: [row(1, 0), row(2, 0.1)],
+    }, half).firstRainAt).toBe(at(1));
   });
 
   test('a missing hour (null total) is complete false with no total', () => {

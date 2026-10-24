@@ -421,11 +421,13 @@ function returns, the same "server-internal, never on `data`" contract
 Pest rain outlook (owner 2026-10-24, `GATE_PEST_RAIN_OUTLOOK` — dark, off
 unless exactly `'true'`, read at call time; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
-(`/api/reports/:token/data` and the PDF) the existing `weatherCall.headline` and
-`weatherCall.body` (inside `premiumExperience` and the `pestReportV2.weatherCall`
-copy) may carry the frozen rain outlook while the gate is on: `Dry days ahead` or
-`Rain in the forecast`, each with one fixed sentence. `factsLine`, `sourceLabel`
-and `sourceKeys` are unchanged. The frozen summary itself,
+(`/api/reports/:token/data` and the PDF) the existing `weatherCall.body` (inside
+`premiumExperience` and the `pestReportV2.weatherCall` copy) may end with the
+frozen rain outlook while the gate is on: one fixed sentence for dry weather
+ahead, or a fixed rain sentence plus one fixed sentence on dried spray.
+`headline`, `factsLine`, `sourceLabel` and `sourceKeys` are unchanged (the
+report page picks its weather icon from the headline, which still reads the
+visit's own weather). The frozen summary itself,
 `service_records.structured_notes.rainOutlook`, is never in any public payload:
 `structured_notes` is read server side only and no public route returns it. Gate
 off, or any state the card does not cover (light rain, rain inside four hours,

@@ -5,7 +5,7 @@ const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { resolveLabel } = require('../pest-pressure/label');
 const { DEFAULT_CONFIG } = require('../pest-pressure/config');
 const { detectServiceLine } = require('./service-line-configs');
-const { buildRainOutlookCardCopy } = require('./pest-rain-outlook');
+const { buildRainOutlookLine } = require('./pest-rain-outlook');
 
 // Legacy service_records rows can have a null service_line while
 // service_type still identifies a lawn visit — defaulting them to 'pest'
@@ -653,17 +653,17 @@ function buildWeatherCallContext({ record, applications = [] } = {}) {
     // would contradict a wet week (codex P2 #3093 r7).
     body = 'Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
   }
-  // GATE_PEST_RAIN_OUTLOOK: the frozen 48-hour outlook replaces the headline
-  // and body when it has something supported to say; null leaves today's card.
-  const rainOutlookCopy = buildRainOutlookCardCopy({
+  // GATE_PEST_RAIN_OUTLOOK: the frozen 48-hour outlook adds its text after the
+  // body when it has something supported to say; null leaves today's card. The
+  // headline stays: it reads the visit's weather, and the page's icon reads it.
+  const rainOutlookLine = buildRainOutlookLine({
     outlook: parseJsonObject(record?.structured_notes).rainOutlook,
     serviceLine: resolveServiceLine(record),
     applications,
   });
   return {
     headline,
-    body,
-    ...rainOutlookCopy,
+    body: rainOutlookLine ? `${body} ${rainOutlookLine}` : body,
     factsLine: formatWeatherFacts(conditions),
     sourceLabel: cleanText(conditions.source),
     sourceKeys: ['condition'],
