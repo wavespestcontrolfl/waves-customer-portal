@@ -34,13 +34,14 @@
 //      same-day rule (Dylox, water_in_same_day) or a label_window, counts
 //      from the application and never follows a hold (owner 2026-10-24:
 //      when products clash, check the labels; no office alert). When a hold
-//      leaves it no honest deadline:
-//      E1. a hold whose rule carries a label_minimum (the owner's 24-hour
-//          herbicide hold, a "for best results" line) shortens to that
-//          minimum. A label direction (every same-day rule, label_window
-//          'directs') shortens any such hold; a 'best_results' window (T-Storm
-//          2G) shortens only our own rule, never a hold whose part above the
-//          minimum is the label's own "for best results" line
+//      leaves it no honest deadline (judged by the windows that clash, never
+//      by a label window that already fits):
+//      E1. as few holds as the clash needs, latest-ending first, shorten to
+//          their label_minimum (the owner's 24-hour herbicide hold, a "for
+//          best results" line). A label direction (every same-day rule,
+//          label_window 'directs') shortens any such hold; a 'best_results'
+//          window (T-Storm 2G) shortens only our own rule, never a hold whose
+//          part above the minimum is the label's own "for best results" line
 //          (label_best_results). A hold with no minimum is the label's own
 //          direction and stays. Drying is then judged with SAME_DAY_DRY_HOURS
 //          instead of the six-hour floor (a spray on turf dries well inside
@@ -669,17 +670,39 @@ function lateDayHold(holds, at) {
   }), at, SAME_DAY_DRY_HOURS);
 }
 
-// The hold windows to try, in order (E1-E3 after the hold as it stands);
-// `followLabel` is E2's permission for a "for best results" window to follow the
-// hold. Gate off, or our own windows only: the one hold, rule C, as before.
-function holdTries(holds, waterIns, at, labelFirst) {
-  const first = holds.length ? holdWindow(holds, at) : null;
-  const strength = labelFirst ? strongestWindow(waterIns) : null;
-  const tries = [{ window: first, followLabel: false }];
-  if (!strength || !first) return tries;
-  tries.push({ window: holdWindow(holds.map((r) => (bendsFor(r, strength) ? toLabelMinimum(r) : r)), at, SAME_DAY_DRY_HOURS), followLabel: false });
+// The label windows the hold as it stands leaves with no deadline: only they
+// may shorten a hold, by their own strength (E1, E2), and only a same-day one
+// among them reaches E3.
+function clashingWindows(first, waterIns, at, besideHold) {
+  return waterIns.filter((r) => windowStrength(r)
+    && !waterInDeadline(at, [r], windowHoursOf(r, besideHold), first.effectiveEnd, { timedEnd: first.timedEnd, follow: false, lateDay: true }));
+}
+
+// E1. As few holds as the clash needs shorten to their label minimum: the
+// latest-ending hold the strength may shorten first, then the next. The first
+// window shortens none (the 2-hour drying allowance alone).
+function bentWindows(holds, at, strength) {
+  const endOf = (rule) => holdWindow([rule], at).effectiveEnd.getTime();
+  const order = holds.filter((r) => bendsFor(r, strength)).sort((a, b) => endOf(b) - endOf(a));
+  const windows = [holdWindow(holds, at, SAME_DAY_DRY_HOURS)];
+  let current = holds;
+  order.forEach((rule) => {
+    current = current.map((r) => (r === rule ? toLabelMinimum(r) : r));
+    windows.push(holdWindow(current, at, SAME_DAY_DRY_HOURS));
+  });
+  return windows;
+}
+
+// The hold windows to try after the hold as it stands (E1-E3); `followLabel` is
+// E2's permission for a "for best results" window to follow the hold.
+function clashTries(holds, waterIns, at, besideHold) {
+  const first = holdWindow(holds, at);
+  const clashing = clashingWindows(first, waterIns, at, besideHold);
+  const strength = strongestWindow(clashing);
+  if (!strength) return [];
+  const tries = bentWindows(holds, at, strength).map((window) => ({ window, followLabel: false }));
   if (strength === 'best_results') tries.push({ window: first, followLabel: true });
-  if (waterIns.some((r) => r.water_in_same_day === true)) tries.push({ window: lateDayHold(holds, at), followLabel: false });
+  if (clashing.some((r) => r.water_in_same_day === true)) tries.push({ window: lateDayHold(holds, at), followLabel: false });
   return tries;
 }
 
@@ -687,9 +710,11 @@ function holdTries(holds, waterIns, at, labelFirst) {
 // or { noClaim, products, holdProducts, waterInProducts } when no honest
 // deadline exists (see waterInDeadline and the header).
 function decideShortWaterIn(out, { holds, waterIns, list, resolved, runtime, plainWhenNoSetup, at, labelFirst }) {
-  const tries = holdTries(holds, waterIns, at, labelFirst);
-  if (!waterIns.length) return { hold: tries[0].window, short: null };
+  const first = holds.length ? holdWindow(holds, at) : null;
+  if (!waterIns.length) return { hold: first, short: null };
   const besideHold = labelFirst && holds.length > 0;
+  // The hold as it stands first (rule C for our own windows); then, label first, E1-E3.
+  const tries = [{ window: first, followLabel: false }, ...(labelFirst && first ? clashTries(holds, waterIns, at, besideHold) : [])];
   for (const { window, followLabel } of tries) {
     const short = applyWaterIn(out, {
       waterIns, runtime, plainWhenNoSetup, at, followLabel, besideHold, labelFirst, holdEnd: window && window.effectiveEnd, timedEnd: window && window.timedEnd,

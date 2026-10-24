@@ -2606,15 +2606,29 @@ UNFROZEN build (a completion, or a visit that froze nothing); a frozen visit
 replays what it froze in either gate state. (1) A catalog rule with `by_target`
 entries picks the direction per logged target (`service_products.targets`), so
 one product can add a hold and a water-in; no covered target reads the product's
-top-level rule, or the first entry of a target-only rule. (2) A same-day water-in
-the label requires beside a hold that leaves it no deadline shortens each hold
-that carries a `label_minimum` to that minimum ("Skip your turf watering until
+top-level rule, or the first entry of a target-only rule. (2) A water-in whose
+window the label writes (a same-day rule, or a catalog `label_window`, since
+2026-10-24) counts from the application and never follows a hold. When a hold
+leaves it no deadline, as few holds as it needs that carry a `label_minimum`
+shorten to that minimum, latest-ending first ("Skip your turf watering until
 today’s treatment has dried." or a nearer clock time), judged with a 2-hour
-drying allowance; a hold without one stays and the visit is no claim, as before.
-(3) A hold's `then_water_in` adds the long-window sentences ("Today’s treatment
-then needs about ½ inch of water by <date>." / "Rain and your regular watering
-both count.") whatever the window's length. No new key, state or route; the
-no-claim reason the office alert uses never enters the payload. The unfrozen PDF
+drying allowance: a label direction shortens any such hold, a "for best
+results" window (`label_window: 'best_results'`) only our own rule. A hold
+whose part above the minimum is the label's own "for best results" line
+(`label_best_results`) then goes first and that window follows it (a
+hold-then-water-in, the deadline counted from the printed hold end). Late in
+the day a same-day deadline may read "by 11:59 PM tonight", and a minimum
+marked `advisory` may end by 9 PM to leave a 3-hour run. A hold that still
+leaves no deadline keeps the visit no claim, as before. (3) A hold's
+`then_water_in` adds the long-window sentences ("Today’s treatment then needs
+about ½ inch of water by <date>." / "Rain and your regular watering both
+count.") whatever the window's length. (4) A bait hold marked
+`yields_to_label_water_in` gives way to a water-in the label directs: the
+banner is that water-in with no hold line. (5) Beside any hold, a water-in with
+`beside_hold_by_hours` (a humectant's one-day root-zone step) takes that window
+instead of its own one- or two-hour one. No new key, state or route; the
+no-claim reason the office alert uses, and the frozen instruction's `yielded`
+(for the staff note), never enter the payload. The unfrozen PDF
 cache key adds the gate state and the logged targets (`:wr=1e:`); off, it is the
 same key as before. Rollback: unset the variable (frozen visits keep their text).
 `reportV2.aftercare` is a record of the visit and never changes by the clock

@@ -1087,6 +1087,23 @@ describe('label ladder for clashing products (rule E, Y, H)', () => {
     expect(linesOf(named(FERTILIZER, own36, thirty), TUE_9AM)[1]).toBe('After that, water in today’s treatment with about ¼ inch by Wed 9 PM.');
   });
 
+  test('only the window that clashes may shorten a hold, and only as many holds as it needs', () => {
+    // The 72-hour label direction fits as it stands; only T-Storm's best-results window clashes, so Drive's own
+    // best-results hold is not shortened: it goes first and T-Storm follows it.
+    const threeDay = ['Label72', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 72, label_window: 'directs', source: 'label' }];
+    const drive = ['Drive', TALAK[1]];
+    expect(linesOf(named(threeDay, T_STORM, drive), TUE_9AM).slice(0, 2)).toEqual([
+      'Skip your turf watering until Wed 9 AM.',
+      'After that, water in today’s treatment with about ¼ inch by Thu 9 AM.',
+    ]);
+    // Talak's 24 hours shortens for the grub window; the colorant's own 8 hours already ends in time and stays.
+    const colorant = ['Colorant', { mode: 'hold', hold_hours: 8, hold_until: 'dry', label_minimum: { hold_until: 'dry' }, source: 'owner' }];
+    expect(linesOf(named(GRUBS, TALAK, colorant), TUE_9AM).slice(0, 2)).toEqual([
+      'Skip your turf watering until 5 PM tonight, and not before today’s treatment has dried.',
+      'After that, water in today’s treatment with about ¼ inch by Wed 9 AM.',
+    ]);
+  });
+
   test('a label window a hold with no minimum reaches is no claim, naming the hold and the water-in', () => {
     const long = ['Long', { mode: 'hold', hold_hours: 48, source: 'label' }];
     const ins = build(named(GRUBS, long), at(TUE_9AM));
