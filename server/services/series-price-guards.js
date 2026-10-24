@@ -42,7 +42,8 @@ const positiveAmount = (value) => {
   return value != null && value !== '' && Number.isFinite(n) && n > 0 ? n : null;
 };
 
-// What the series last collected: the PAID invoice (pre-tax) tied to its most
+// What the series last collected: the PAID invoice (pre-tax, deposit credit
+// added back) tied to its most
 // recent completed BASE visit (is_recurring, not a callback — boosters share
 // recurring_parent_id with is_recurring false, as latestLiveSeriesVisit in
 // admin-schedule.js excludes them; a free re-service is no price evidence),
@@ -63,9 +64,14 @@ async function lastPaidSeriesVisitAmount(conn, rootId) {
     .where((q) => q.where('scheduled_service_id', visit.id)
       .orWhereIn('service_record_id', conn('service_records').select('id').where('scheduled_service_id', visit.id)))
     .orderBy('created_at', 'desc')
-    .first('total', 'tax_amount');
+    .first('total', 'tax_amount', 'line_items');
   if (!invoice) return null;
-  return positiveAmount(Math.round((Number(invoice.total) - (Number(invoice.tax_amount) || 0)) * 100) / 100);
+  // `total` already nets out an applied estimate deposit (a prior payment,
+  // not a discount — InvoiceService.create), so add it back.
+  const { invoiceDepositCreditCents } = require('./invoice-helpers');
+  const cents = Math.round(Number(invoice.total) * 100) + invoiceDepositCreditCents(invoice)
+    - Math.round((Number(invoice.tax_amount) || 0) * 100);
+  return positiveAmount(cents / 100);
 }
 
 // Any annual-prepay term link on any visit of the series. The link can sit

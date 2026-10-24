@@ -61,6 +61,16 @@ describe('lastPaidSeriesVisitAmount', () => {
     expect(conn.seen).toContainEqual(['scheduled_services', 'orWhere', 'is_callback', false]);
     expect(conn.seen).toContainEqual(['invoices', 'where', 'status', 'paid']);
   });
+  test('an applied estimate deposit is a prior payment: added back to the baseline', async () => {
+    const conn = fakeConn({
+      scheduled_services: { id: 'visit-9' },
+      invoices: {
+        total: '57.00', tax_amount: '7.00',
+        line_items: JSON.stringify([{ category: 'service', amount: 100 }, { category: 'deposit_credit', amount: -50 }]),
+      },
+    });
+    await expect(guards.lastPaidSeriesVisitAmount(conn, 'root-1')).resolves.toBe(100);
+  });
   test('null with no completed visit or no paid invoice', async () => {
     await expect(guards.lastPaidSeriesVisitAmount(fakeConn({}), 'root-1')).resolves.toBeNull();
     await expect(guards.lastPaidSeriesVisitAmount(lastPaidConn(null), 'root-1')).resolves.toBeNull();
