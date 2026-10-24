@@ -163,6 +163,8 @@ describe('the detector behind the alert and the completion hold', () => {
     ['a void invoice settles nothing', [{ id: 'i', status: 'void', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 99 }] }]],
     ['a voided annual-prepay bundle ("setup fee waived") settles nothing', [{ id: 'i', status: 'void', created_at: recent, line_items: [{ description: 'WaveGuard Membership — 12 months prepaid (setup fee waived)', amount: 388 }] }]],
     ['an annual prepay paid long ago is stale', [{ id: 'i', status: 'paid', created_at: '2024-01-01T00:00:00Z', line_items: [{ description: 'Prepaid', category: 'Annual prepay', amount: 400 }] }]],
+    ['a paid rodent bait-station setup fee is not the WaveGuard fee', [{ id: 'i', status: 'paid', created_at: recent, line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 150 }] }]],
+    ['a $0 bait-station setup line is not a waived WaveGuard fee', [{ id: 'i', status: 'sent', created_at: recent, line_items: [{ description: 'Bait Station Setup — one-time setup fee (waived)', amount: 0 }] }]],
     ['a monthly membership-named line is not the one-time fee', [{ id: 'i', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership — Gold monthly', amount: 120 }] }]],
   ])('gate ON, %s', async (_name, invoices) => {
     process.env[GATE] = 'true';

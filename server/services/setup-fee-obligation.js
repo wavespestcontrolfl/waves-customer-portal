@@ -436,9 +436,18 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
 // a transaction to read the invoices FOR UPDATE (the reconcile does).
 const SETUP_FEE_SETTLED_PREPAY_WINDOW_MS = 400 * 24 * 60 * 60 * 1000;
 
+// Other services' own one-time fees (the rodent "Bait Station Setup — one-time
+// setup fee", a termite install) are not the WaveGuard fee and never settle it.
+const NON_WAVEGUARD_FEE_RE = /\b(?:bait|rodent|station|termite|install)/i;
+
+function waveguardFeeLine(li) {
+  return !NON_WAVEGUARD_FEE_RE.test(String(li?.description || '')) && !NON_WAVEGUARD_FEE_RE.test(String(li?.category || ''));
+}
+
 function settledFeeLineName(li) {
   const desc = String(li?.description || '').trim();
   const cat = String(li?.category || '').trim();
+  if (!waveguardFeeLine(li)) return false;
   return /(?:setup|membership) fee/i.test(desc)
     || /^waveguard membership$/i.test(desc)
     || /^waveguard membership$/i.test(cat);
@@ -485,7 +494,7 @@ async function setupFeeSettledElsewhere(conn, {
       const cents = settledLineCents(li);
       if (cents === null) continue;
       const desc = String(li?.description || '');
-      const waived = /(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0);
+      const waived = waveguardFeeLine(li) && /(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0);
       if (status === 'refunded') {
         if (cents > 0 && !waived && settledFeeLineName(li)) {
           paidFeeCents += cents;
