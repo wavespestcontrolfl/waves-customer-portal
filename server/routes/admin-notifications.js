@@ -522,6 +522,12 @@ router.put('/:id/done', async (req, res, next) => {
       const state = await NotificationService.getAdminNotificationState(id, { role: req.techRole });
       if (state && !state.done && state.version !== version.toLowerCase()) return res.status(409).json({ error: 'changed' });
     }
+    // GATE_SMS_FOLLOWUP_WITNESS_FIX: Done on a text follow-up bell also settles
+    // the follow-up it speaks for, so the sweep does not ring it again.
+    if (updated > 0) {
+      try { await require('../services/sms-operational-actions').settleCommitmentsForDoneAlert(db, id, { reviewedBy: req.technicianId }); }
+      catch (err) { logger.warn(`[admin-notifications] follow-up not settled for done alert ${id}: ${err.message}`); }
+    }
     res.json({ success: true, updated: updated > 0 });
   } catch (err) { next(err); }
 });

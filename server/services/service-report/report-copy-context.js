@@ -262,7 +262,7 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessm
 function lawnAssessmentEntries(row) {
   return [
     ['turf density', lawnScoreValue(row?.turf_density)],
-    ['weed suppression', lawnScoreValue(row?.weed_suppression)],
+    ['weed control', lawnScoreValue(row?.weed_suppression)],
     ['color health', lawnScoreValue(row?.color_health)],
     ['stress/damage control', resolveStressDamage(row || {})],
   ];

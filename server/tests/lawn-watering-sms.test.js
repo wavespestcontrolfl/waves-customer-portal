@@ -532,6 +532,8 @@ describe('every lawn visit gets a watering text or an office alert', () => {
 
   test.each([
     ['unruled_product', [LONG_NAME], /T-Storm.*has no watering rule/],
+    // A guessed rule (label first): the alert names the guessed product.
+    ['unchecked_rules', ['LESCO 24-0-10 Turfgrass Granular Fertilizer'], /LESCO 24-0-10.*has no checked watering rule/],
     ['water_in_conflict', ['Dylox 6.2 G Granular Insecticide', 'LESCO Three-Way Selective Herbicide'], /Dylox.*and LESCO Three-Way.*need opposite watering/],
     ['same_day_too_late', ['Dylox 6.2 G Granular Insecticide'], /Dylox.*must be watered in today/],
     ['inputs_unreadable', [], /watering settings could not be read/],

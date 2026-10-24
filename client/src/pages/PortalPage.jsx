@@ -2082,7 +2082,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
 
   const metrics = [
     { label: 'Density / Coverage', key: 'turfDensity', initialKey: 'turfDensity' },
-    { label: 'Weed Cleanliness', key: 'weedSuppression', initialKey: 'weedSuppression' },
+    { label: 'Weed control', key: 'weedSuppression', initialKey: 'weedSuppression' },
     { label: 'Color / Nutrients', key: 'colorHealth', initialKey: 'colorHealth' },
     { label: 'Stress / Damage', key: 'stressDamage', initialKey: 'stressDamage' },
   ];
