@@ -45,6 +45,7 @@
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_SETUP_FEE_SETTLED_ANYWHERE=true (owner 2026-10-24 setup-fee alert audit: the "setup fee never invoiced, bill BOTH" admin alert, the completion hold it starts and the alert reconcile also treat the setup fee as settled when the customer's own invoices show it paid, waived or prepaid even though no invoice cites the accepted estimate: a paid line named setup fee or WaveGuard Membership for at least the frozen fee, a live $0 or waived setup-fee line, or a covered non-termite annual-prepay term or paid annual-prepay invoice. Settled = no alert, no hold, the normal visit invoice is made, and a standing alert is closed instead of reopened when the visit is billed. Read at call time via setupFeeSettledAnywhereLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_NEIGHBORHOOD_NAMING=true (the neighborhood sweep names every live home's community: it looks up homes never checked, names Sarasota homes from the plat number on the county's plat layer, and for a home the county cannot name uses the community the customer said on a call, linked as unconfirmed and kept out of the shared directory (no code filed from it, no entries read for its visits, no shared visitor pass) until the county or the office confirms it; read at call time via neighborhoodNamingLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_ACCESS is live; off = the sweep is byte-identical to before. No message, no bell.)
+ *   GATE_NEIGHBORHOOD_ADDRESS_LOOKUP=true (when a home's stored pin sits on another lot, the neighborhood naming asks the county roll for the home's own address and links it only when the lots at that house number, full street and ZIP all name one community; also reads a '#201' unit tail as a unit; read at call time via neighborhoodAddressLookupLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_NAMING is live; off = the pin-only match as before. No message, no bell.)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer.)
@@ -5254,6 +5255,14 @@ function neighborhoodNamingLive() {
   return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_NAMING === 'true';
 }
 
+// GATE_NEIGHBORHOOD_ADDRESS_LOOKUP read at CALL time — strict `=== 'true'`;
+// unset = kill. The county search by a home's own address when its pin sits on
+// another lot (services/neighborhood-access.js homeParcel). Needs the naming
+// pass live.
+function neighborhoodAddressLookupLive() {
+  return neighborhoodNamingLive() && process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP === 'true';
+}
+
 // GATE_SETUP_FEE_SETTLED_ANYWHERE read at CALL time — strict `=== 'true'`; unset = kill.
 // setup-fee-obligation.js setupFeeSettledElsewhere() is the ONE predicate behind the
 // unminted-setup-fee alert, its completion hold and setup-fee-alert-reconcile.js.
@@ -7327,6 +7336,8 @@ module.exports.smsUnansweredReplyLive = smsUnansweredReplyLive;
 module.exports.neighborhoodAccessLive = neighborhoodAccessLive;
 // GATE_NEIGHBORHOOD_NAMING reader, on its own line.
 module.exports.neighborhoodNamingLive = neighborhoodNamingLive;
+// GATE_NEIGHBORHOOD_ADDRESS_LOOKUP reader, on its own line.
+module.exports.neighborhoodAddressLookupLive = neighborhoodAddressLookupLive;
 // GATE_NEIGHBORHOOD_TECH_ACTIONS reader, on its own line.
 module.exports.neighborhoodTechActionsLive = neighborhoodTechActionsLive;
 // GATE_CONTACT_REPORT_TEXT reader, on its own line.
