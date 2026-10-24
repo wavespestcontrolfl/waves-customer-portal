@@ -435,8 +435,10 @@ describe('Blue Book ONETEAM invites', () => {
   test('a forged Blue Book email is read like any plain email and may pass Gmail Spam only when verified', () => {
     const forged = bbInvite({ provider_verified: false });
     expect(parseBidEmail(forged)).toMatchObject({ template: null, source: 'email_subject', gc_or_agency: null, due_at: null, group_key: null });
-    expect(passesGmailSpam(forged)).toBe(false);
-    expect(passesGmailSpam(bbInvite())).toBe(true);
-    expect(passesGmailSpam(bcInvite())).toBe(false);
+    expect(passesGmailSpam({ ...forged, gmail_spam_verified: true })).toBe(false);
+    // Past Gmail Spam only on the STRICT signature check, not the loose one alone.
+    expect(passesGmailSpam(bbInvite())).toBe(false);
+    expect(passesGmailSpam(bbInvite({ gmail_spam_verified: true }))).toBe(true);
+    expect(passesGmailSpam(bcInvite({ gmail_spam_verified: true }))).toBe(false);
   });
 });

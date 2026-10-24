@@ -318,6 +318,12 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       });
       // Not signed by the Blue Book domain: Gmail's SPAM label holds.
       await bluebook({ authentication_results: 'mx.google.com; dkim=fail header.i=@bbbid.thebluebook.com; spf=softfail smtp.mailfrom=x@elsewhere.example', received_at: new Date(NOW.getTime() - 25 * 60000) });
+      // A sender-typed MAIL FROM that fakes a DKIM pass fools only the loose reader (GATE_EMAIL_AUTH_STRICT is off
+      // here): it never passes Gmail Spam.
+      await bluebook({
+        authentication_results: 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=bbbid.thebluebook.com y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=bbbid.thebluebook.com y"@evil.example',
+        received_at: new Date(NOW.getTime() - 22 * 60000),
+      });
       // Our own spam classification (a blocked sender) holds even when signed.
       await bluebook({ classification: 'spam', received_at: new Date(NOW.getTime() - 20 * 60000) });
       // Any other sender in Gmail Spam still holds.

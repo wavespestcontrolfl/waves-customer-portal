@@ -44,6 +44,14 @@ describe('hasAlignedAuth, gate off', () => {
   });
 });
 
+describe('hasAlignedAuth { strict: true }, gate off', () => {
+  test('uses the strict reader anyway: the forgery is rejected, real passes pass', () => {
+    expect(hasAlignedAuth(FORGED, 'victim.example', { strict: true })).toBe(false);
+    expect(hasAlignedAuth(REAL_DKIM, 'victim.example', { strict: true })).toBe(true);
+    expect(hasAlignedAuth(REAL_SPF, 'victim.example', { strict: true })).toBe(true);
+  });
+});
+
 describe('hasAlignedAuth, gate on', () => {
   beforeEach(() => { process.env[GATE] = 'true'; });
 

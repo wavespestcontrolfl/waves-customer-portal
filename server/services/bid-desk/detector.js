@@ -442,9 +442,10 @@ function parseBidEmail(email = {}) {
   };
 }
 
-// Gmail files Blue Book invites as spam (every one through Oct 2026). Only a verified Blue Book email may be read
-// past Gmail's SPAM label; the detector still decides whether it is a bid.
-const passesGmailSpam = (email = {}) => senderKind(email) === 'bluebook';
+// Gmail files Blue Book invites as spam (every one through Oct 2026). Only a Blue Book email whose signature passes
+// the STRICT check (`gmail_spam_verified`, set by the intake) may be read past Gmail's SPAM label: the loose check
+// can be fooled by a sender-typed MAIL FROM. The detector still decides whether it is a bid.
+const passesGmailSpam = (email = {}) => email.gmail_spam_verified === true && senderKind(email) === 'bluebook';
 
 module.exports = {
   detectBidEmail, passesGmailSpam, parseBidEmail, parseDateET, htmlToText, normalizeTitle, classifyKind, domainOf,

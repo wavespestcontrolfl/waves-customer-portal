@@ -25,8 +25,15 @@ const { domainFromAddress } = require('../email/spam-blocker');
 // The email with `provider_verified` set: aligned SPF or DKIM for its own From domain in the stored
 // Authentication-Results (the same check the receipts sweep and spam rescue use). The detector trusts a provider
 // template only when this is true.
+// `gmail_spam_verified` is the strict reading (resinfo clauses from Google's own authserv-id only, whatever
+// GATE_EMAIL_AUTH_STRICT says): it alone may carry an email past Gmail's SPAM label.
 function withProviderCheck(email) {
-  return { ...email, provider_verified: hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address)) };
+  const domain = domainFromAddress(email.from_address);
+  return {
+    ...email,
+    provider_verified: hasAlignedAuth(email.authentication_results, domain),
+    gmail_spam_verified: hasAlignedAuth(email.authentication_results, domain, { strict: true }),
+  };
 }
 
 const LOG = '[bid-desk]';
@@ -59,7 +66,7 @@ const NOT_SPAM_SQL = "COALESCE(classification, '') <> 'spam' AND (NOT jsonb_exis
   + " OR from_address ~* '[@.]thebluebook\\.com>{0,1}\\s*$')";
 const NOT_SPAM_SQL_E = NOT_SPAM_SQL.replace(/classification/g, 'e.classification').replace(/label_ids/g, 'e.label_ids')
   .replace(/from_address/g, 'e.from_address');
-// `email` carries provider_verified (withProviderCheck).
+// `email` carries provider_verified and gmail_spam_verified (withProviderCheck).
 function isSpam(email) {
   if (String(email.classification || '') === 'spam') return true;
   let labels = email.label_ids;
