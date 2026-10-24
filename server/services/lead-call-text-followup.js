@@ -72,7 +72,7 @@ function parseCallTime(text) {
   if (!s || s.length > 60) return null;
   if (RANGE.test(s)) return null;
   s = s.replace(/\b12\s*noon\b|\bnoon\b|\bmidday\b/g, '12:00 pm');
-  s = s.replace(/\bin the (?:morning)\b|\bmorning\b/g, ' am ').replace(/\bin the (?:afternoon|evening)\b|\bafternoon\b|\bevening\b|\btonight\b/g, ' pm ');
+  s = s.replace(/\bin the (?:morning)\b|\bmorning\b/g, ' am ').replace(/\bin the (?:afternoon|evening)\b|\bafternoon\b|\bevening\b/g, ' pm ');
   s = s.replace(/\ba\s*m\b/g, 'am').replace(/\bp\s*m\b/g, 'pm');
   s = s.replace(FILLER, ' ').replace(/\s+/g, ' ').trim();
   const m = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(am|pm))?$/.exec(s);
