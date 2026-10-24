@@ -7,6 +7,7 @@ import { etDatetimeLocalToISO } from "../../lib/timezone";
 const SendContext = createContext(null);
 const headers = () => ({ "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` });
 const CHANNEL_LABELS = { sms: "Text message", email: "Email", both: "Text message and email" };
+const palmsLabel = (count) => `${count} palm${count === 1 ? "" : "s"}`;
 
 export function useEstimateSend() {
   return useContext(SendContext);
@@ -41,6 +42,7 @@ export default function EstimateSendDialog({ request, onClose }) {
   const [method, setMethod] = useState("");
   const [scheduledAt, setScheduledAt] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
+  const [palmCount, setPalmCount] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [outcome, setOutcome] = useState(null);
@@ -72,6 +74,19 @@ export default function EstimateSendDialog({ request, onClose }) {
       if (!Number.isFinite(when.getTime()) || when <= new Date()) { setError("Choose a future send time in Eastern time."); return; }
       scheduled = when.toISOString();
     }
+    // A satellite palm count is a suggestion until the admin types the real
+    // count (GATE_SATELLITE_PALM_COUNT_TYPED). A different count means the quote
+    // is rebuilt first; it is refused here, before an attempt is recorded.
+    const palmsToCount = preview.satellitePalmCount;
+    let confirmedPalmCount = null;
+    if (palmsToCount != null && !attempt.current) {
+      if (!palmCount) { setError("Type the number of palms you counted on the aerial photo."); return; }
+      confirmedPalmCount = Number(palmCount);
+      if (confirmedPalmCount !== palmsToCount) {
+        setError(`You counted ${palmsLabel(confirmedPalmCount)}, but this quote priced ${palmsToCount}. Rebuild the quote with ${palmsLabel(confirmedPalmCount)} in the estimate builder, then send it.`);
+        return;
+      }
+    }
     inFlight.current = true;
     sendingLabel.current = submitLabel;
     setBusy(true);
@@ -84,6 +99,7 @@ export default function EstimateSendDialog({ request, onClose }) {
       groupVersions: preview.groupVersions,
       idempotencyKey: crypto.randomUUID(), acknowledgeEngineReview: acknowledged,
       acknowledgeUncertainSend: acknowledged,
+      ...(confirmedPalmCount != null ? { confirmedPalmCount } : {}),
     };
     try {
       const response = await fetch(`/api/admin/estimates/${request.id}/send`, {
@@ -144,6 +160,7 @@ export default function EstimateSendDialog({ request, onClose }) {
             <p className="text-14 text-ink-secondary">Delivery replaces the full estimate URL with a tracked secure link to the same offer.</p>
           </div>}
           <Field label="Send later (Eastern time, optional)"><Input aria-label="Send later in Eastern time" type="datetime-local" disabled={locked} value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)} /></Field>
+          {preview.satellitePalmCount != null && <Field label="Palms you counted on the aerial photo" help="The satellite count can be too high. Count a clump or a multi-trunk palm as one palm." required><Input type="text" inputMode="numeric" autoComplete="off" disabled={locked} value={palmCount} onChange={(e) => { setPalmCount(e.target.value.replace(/\D/g, "").slice(0, 4)); setError(""); }} /></Field>}
           {needsAcknowledgment && <label className="ui-choice-label flex items-start gap-3 text-14"><Checkbox className="mt-1 shrink-0" disabled={locked} checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} /><span>{notice} I reviewed this warning and authorize this send.</span></label>}
           {outcome && <div role="status" className="border-t border-zinc-200 pt-4 space-y-2">
             {outcome.scheduled && <p>Scheduled for {new Date(outcome.scheduledAt).toLocaleString("en-US", { timeZone: "America/New_York" })} Eastern. No provider handoff yet.</p>}

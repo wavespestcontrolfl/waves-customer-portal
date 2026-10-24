@@ -21,22 +21,22 @@ const call = (transcript, { direction = 'outbound', customerId = null } = {}) =>
   id: 'c1', customer_id: customerId, direction, from_phone: direction === 'outbound' ? OUR : CUSTOMER,
   to_phone: direction === 'outbound' ? CUSTOMER : OUR, transcription: transcript, created_at: new Date('2040-03-10T15:00:00Z'),
 }, customerId);
-const item = (extra = {}) => ({ kind: 'neighborhood_gate', code: '#3394', instructions: null, life: 'standing', quote: '', ...extra });
+const item = (extra = {}) => ({ kind: 'neighborhood_gate', code: '#4417', instructions: null, life: 'standing', quote: '', ...extra });
 const verify = (transcript, items, opts = {}, ctx = {}) => verifyCallItems(items, call(transcript, opts), ctx);
 
 // The owner's real case (2026-10-23), with synthetic names: a 19-second outbound call.
-const BOBBY_LABELS = [
-  ["Agent: Hey, Bobby, it's Adam with Waves. I'm at your gate.\nCaller: Hi, yeah, it's pound, three three nine four.\nAgent: Three three nine four. Awesome"],
+const GATE_CALL_LABELS = [
+  ["Agent: Hey, Sam, it's Adam with Waves. I'm at your gate.\nCaller: Hi, yeah, it's pound, four four one seven.\nAgent: Four four one seven. Awesome"],
   // outbound labels can be swapped: the technician is "Caller"
-  ["Caller: Hey, Bobby, it's Adam with Waves. I'm at your gate.\nAgent: Hi, yeah, it's pound, three three nine four.\nCaller: Three three nine four. Awesome"],
+  ["Caller: Hey, Sam, it's Adam with Waves. I'm at your gate.\nAgent: Hi, yeah, it's pound, four four one seven.\nCaller: Four four one seven. Awesome"],
 ];
 
 describe('spokenNormalize', () => {
   test.each([
-    ["it's pound, three three nine four.", "it's #3394."],
-    ['three-three-nine-four pound', '3394#'],
-    ['three three nine four pound sign', '3394#'],
-    ['pound sign three three nine four, thanks', '#3394, thanks'],
+    ["it's pound, four four one seven.", "it's #4417."],
+    ['four-four-one-seven pound', '4417#'],
+    ['four four one seven pound sign', '4417#'],
+    ['pound sign four four one seven, thanks', '#4417, thanks'],
     ['star 7 7 1 2', '*7712'],
     ['hash four five six', '#456'],
     ['double five three nine', '5539'],
@@ -44,20 +44,20 @@ describe('spokenNormalize', () => {
     ['two oh four five', '2045'],
     ['it is four four five oh.', 'it is 4450.'],
     ['one two three four', '1234'],
-    ['3 3 9 4', '3394'],
+    ['4 4 1 7', '4417'],
     ['niner niner seven', '997'],
   ])('%s -> %s', (spoken, digits) => {
     expect(spokenNormalize(spoken).text).toBe(digits);
   });
 
   test('"oh" is zero only inside a digit run; elsewhere it is a word', () => {
-    expect(spokenNormalize('oh, three three nine four').text).toBe('oh, 3394');
-    expect(spokenNormalize('oh I see, it is 3394').text).toBe('oh I see, it is 3394');
+    expect(spokenNormalize('oh, four four one seven').text).toBe('oh, 4417');
+    expect(spokenNormalize('oh I see, it is 4417').text).toBe('oh I see, it is 4417');
     expect(spokenNormalize('three three oh nine').text).toBe('3309');
   });
 
   test('a run never crosses the end of a clause or a turn', () => {
-    expect(spokenNormalize('it is 3394. 12 people').runs).toEqual(['3394', '12']);
+    expect(spokenNormalize('it is 4417. 12 people').runs).toEqual(['4417', '12']);
     expect(spokenNormalize('one two\nthree four').runs).toEqual(['12', '34']);
     expect(spokenNormalize('I have 2 dogs and 3 cats').text).toBe('I have 2 dogs and 3 cats');
   });
@@ -70,7 +70,7 @@ describe('spokenNormalize', () => {
 });
 
 describe('callFlagsAccess', () => {
-  test.each(BOBBY_LABELS)('the owner case flags', (text) => {
+  test.each(GATE_CALL_LABELS)('the owner case flags', (text) => {
     expect(callFlagsAccess(text)).toBe(true);
   });
   test('a technician at the entrance and spoken digits flag; a call about nothing does not', () => {
@@ -82,35 +82,35 @@ describe('callFlagsAccess', () => {
 });
 
 describe('verifyCallItems', () => {
-  describe.each(BOBBY_LABELS)('the owner case', (transcript) => {
-    test('a code spoken as "pound, three three nine four" verifies against #3394', () => {
-      const out = verify(transcript, [item({ quote: "Hi, yeah, it's pound, three three nine four." })]);
+  describe.each(GATE_CALL_LABELS)('the owner case', (transcript) => {
+    test('a code spoken as "pound, four four one seven" verifies against #4417', () => {
+      const out = verify(transcript, [item({ quote: "Hi, yeah, it's pound, four four one seven." })]);
       expect(out).toHaveLength(1);
-      expect(out[0]).toMatchObject({ kind: 'neighborhood_gate', code: '#3394', life: 'standing' });
-      expect(out[0].value_hash).toBe(access.valueHash('#3394', null));
+      expect(out[0]).toMatchObject({ kind: 'neighborhood_gate', code: '#4417', life: 'standing' });
+      expect(out[0].value_hash).toBe(access.valueHash('#4417', null));
     });
     test('a shorter quote of the customer words verifies; the staff read-back does not', () => {
-      expect(verify(transcript, [item({ quote: "it's pound, three three nine four." })])).toHaveLength(1);
-      expect(verify(transcript, [item({ quote: 'Three three nine four. Awesome' })])).toEqual([]);
+      expect(verify(transcript, [item({ quote: "it's pound, four four one seven." })])).toHaveLength(1);
+      expect(verify(transcript, [item({ quote: 'Four four one seven. Awesome' })])).toEqual([]);
     });
     test('the code is judged against the customer\'s whole turn: the bare digits of a "pound" code are refused, even from a cropped quote', () => {
       // staff reads back the bare digits, but a staff word never satisfies the check
-      expect(verify(transcript, [item({ code: '3394', quote: 'three three nine four' })])).toEqual([]);
-      expect(verify(transcript, [item({ code: '3394', quote: "Hi, yeah, it's pound, three three nine four." })])).toEqual([]);
-      // the complete code, #3394, is kept from the same cropped quote
-      expect(verify(transcript, [item({ code: '#3394', quote: 'three three nine four' })])).toHaveLength(1);
-      expect(verify(transcript, [item({ code: '#3394', quote: 'three three nine four' })])[0].code).toBe('#3394');
+      expect(verify(transcript, [item({ code: '4417', quote: 'four four one seven' })])).toEqual([]);
+      expect(verify(transcript, [item({ code: '4417', quote: "Hi, yeah, it's pound, four four one seven." })])).toEqual([]);
+      // the complete code, #4417, is kept from the same cropped quote
+      expect(verify(transcript, [item({ code: '#4417', quote: 'four four one seven' })])).toHaveLength(1);
+      expect(verify(transcript, [item({ code: '#4417', quote: 'four four one seven' })])[0].code).toBe('#4417');
     });
     test('the code without its symbol, or a different code, is refused', () => {
-      expect(verify(transcript, [item({ code: '3394', quote: "it's pound, three three nine four." })])).toEqual([]);
-      expect(verify(transcript, [item({ code: '#3395', quote: "it's pound, three three nine four." })])).toEqual([]);
+      expect(verify(transcript, [item({ code: '4417', quote: "it's pound, four four one seven." })])).toEqual([]);
+      expect(verify(transcript, [item({ code: '#4418', quote: "it's pound, four four one seven." })])).toEqual([]);
     });
   });
 
   describe('a spoken symbol beside written digits', () => {
     test.each([
-      ['Caller: The gate code is pound 3394.', 'The gate code is pound 3394.', '#3394'],
-      ['Caller: Gate code 3394 pound.', 'Gate code 3394 pound.', '3394#'],
+      ['Caller: The gate code is pound 4417.', 'The gate code is pound 4417.', '#4417'],
+      ['Caller: Gate code 4417 pound.', 'Gate code 4417 pound.', '4417#'],
       ['Caller: The gate code is star 1234.', 'The gate code is star 1234.', '*1234'],
     ])('%s keeps the symbol: the bare digits are refused', (transcript, quote, full) => {
       expect(verify(transcript, [item({ code: full.replace(/[#*]/g, ''), quote })])).toEqual([]);
@@ -122,7 +122,7 @@ describe('verifyCallItems', () => {
       expect(verify(transcript, [item({ code: '445', quote })])).toEqual([]);
     });
     test('written digits with no symbol still verify', () => {
-      expect(verify('Caller: The gate code is 3394.', [item({ code: '3394', quote: 'The gate code is 3394.' })])).toHaveLength(1);
+      expect(verify('Caller: The gate code is 4417.', [item({ code: '4417', quote: 'The gate code is 4417.' })])).toHaveLength(1);
     });
   });
 
@@ -154,9 +154,9 @@ describe('verifyCallItems', () => {
   });
 
   test('a quote that is not in the call, or runs across two turns, is refused', () => {
-    const [transcript] = BOBBY_LABELS[0];
-    expect(verify(transcript, [item({ quote: "it's pound, three three nine five" })])).toEqual([]);
-    expect(verify(transcript, [item({ quote: "I'm at your gate. Caller: Hi, yeah, it's pound, three three nine four." })])).toEqual([]);
+    const [transcript] = GATE_CALL_LABELS[0];
+    expect(verify(transcript, [item({ quote: "it's pound, four four one eight" })])).toEqual([]);
+    expect(verify(transcript, [item({ quote: "I'm at your gate. Caller: Hi, yeah, it's pound, four four one seven." })])).toEqual([]);
   });
 
   test('a code only staff says is refused, and a customer echo of staff words is a read-back', () => {
@@ -185,13 +185,13 @@ describe('verifyCallItems', () => {
   describe('card, security and sign-in codes', () => {
     test('a card number read on the call refuses everything on it', () => {
       const transcript = "Agent: What's the card number?\nCaller: four one one one, one one one one, one one one one, one one one one.\n"
-        + 'Caller: And the gate code is pound three three nine four.';
-      expect(verify(transcript, [item({ quote: 'And the gate code is pound three three nine four.' })], { direction: 'inbound' })).toEqual([]);
+        + 'Caller: And the gate code is pound four four one seven.';
+      expect(verify(transcript, [item({ quote: 'And the gate code is pound four four one seven.' })], { direction: 'inbound' })).toEqual([]);
     });
     test('card and CVV context near the code refuses it', () => {
-      expect(verify('Agent: Your security code?\nCaller: It is three three nine four.', [item({ code: '3394', quote: 'It is three three nine four.' })], { direction: 'inbound' })).toEqual([]);
-      expect(verify('Agent: Expiration date?\nCaller: The code on the back is three three nine.', [item({ code: '339', quote: 'The code on the back is three three nine.' })], { direction: 'inbound' })).toEqual([]);
-      expect(verify('Caller: The CVV is 3394 for the card.', [item({ code: '3394', quote: 'The CVV is 3394 for the card.' })], { direction: 'inbound' })).toEqual([]);
+      expect(verify('Agent: Your security code?\nCaller: It is four four one seven.', [item({ code: '4417', quote: 'It is four four one seven.' })], { direction: 'inbound' })).toEqual([]);
+      expect(verify('Agent: Expiration date?\nCaller: The code on the back is four four one.', [item({ code: '441', quote: 'The code on the back is four four one.' })], { direction: 'inbound' })).toEqual([]);
+      expect(verify('Caller: The CVV is 4417 for the card.', [item({ code: '4417', quote: 'The CVV is 4417 for the card.' })], { direction: 'inbound' })).toEqual([]);
     });
     test('a Google, Bing or bank verification code is refused', () => {
       expect(verify('Caller: Google just texted me a verification code, it is four eight one two one five.',
@@ -257,23 +257,23 @@ describe('verifyCallItems', () => {
   test('empty or over-long transcripts, and a non-array answer, keep nothing', () => {
     expect(verify('', [item({ quote: 'x' })])).toEqual([]);
     expect(verify(`Caller: ${'word '.repeat(9000)}`, [item({ quote: 'word' })])).toEqual([]);
-    expect(verify('Caller: pound three three nine four', null, { direction: 'inbound' })).toEqual([]);
+    expect(verify('Caller: pound four four one seven', null, { direction: 'inbound' })).toEqual([]);
   });
 });
 
 describe('call prompt and read', () => {
-  const [transcript] = BOBBY_LABELS[0];
+  const [transcript] = GATE_CALL_LABELS[0];
   test('the prompt names the labels, the staff rule and the spoken numbers, and carries the transcript as data', () => {
     const prompt = buildCallPrompt({ message: call(transcript) });
     expect(prompt).toContain('"Agent:" and "Caller:"');
     expect(prompt).toContain('The labels may be swapped on outbound calls.');
     expect(prompt).toMatch(/Only a code the CUSTOMER states counts/);
     expect(prompt).toMatch(/read-back, never a source/);
-    expect(prompt).toContain('#3394');
+    expect(prompt).toContain('#4417');
     expect(prompt).toContain('untrusted conversation data');
     expect(prompt).toContain("I'm at your gate");
     // the scrubber leaves a spoken gate code alone
-    expect(prompt).toContain("it's pound, three three nine four.");
+    expect(prompt).toContain("it's pound, four four one seven.");
   });
 
   test('a card number in the transcript never reaches the prompt', () => {

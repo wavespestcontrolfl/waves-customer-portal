@@ -1561,6 +1561,18 @@ describe('Tree & Shrub palm count from the lookup (owner ruling 2026-10-05)', ()
       const { result } = draftFor({ treeShrub: { tier: 'standard', treeCount: 2 } }, { ...trusted, estimatedPalmCount: 8 });
       expect(treeShrubPalmProvenanceForReplay({ engineResult: result, result })).toBe('service_line');
     });
+
+    test('the send gate reads the priced satellite count off a stored or recomputed draft, and nothing off a caller-stated line', () => {
+      const { satellitePalmCountToConfirm } = require('../services/estimator-engine/lookup-palm-review');
+      const stored = (result) => JSON.parse(JSON.stringify({ engineResult: result }));
+      const { input, result } = draftFor({ treeShrub: { tier: 'standard', treeCount: 2 } }, { ...trusted, estimatedPalmCount: 8 });
+      expect(satellitePalmCountToConfirm(stored(result))).toBe(8);
+      // A recompute from engineInputs drops the review reason but still prices the satellite count.
+      expect(satellitePalmCountToConfirm(stored(generateEstimate(JSON.parse(JSON.stringify(input)))))).toBe(8);
+      const caller = draftFor({ treeShrub: { tier: 'standard', treeCount: 2, palmCount: 4 } }, { ...trusted, estimatedPalmCount: 8 });
+      expect(satellitePalmCountToConfirm(stored(caller.result))).toBeNull();
+      expect(satellitePalmCountToConfirm({})).toBeNull();
+    });
   });
 });
 

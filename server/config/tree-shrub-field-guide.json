@@ -713,8 +713,10 @@
   ],
   "palmTypes": {
     "title": "Palm types",
-    "intro": "Use this table to pick which palms to offer the lethal bronzing preventive and which to watch for nutrient deficiency.",
+    "intro": "Use this table to decide which palms to assess for the lethal bronzing preventive and which to watch for nutrient deficiency. A host species or a bronzed frond calls for an assessment. Neither one alone is a reason to recommend the preventive.",
     "planNote": "Palm type does not change the plan price or the fertilizer. UF says one slow-release 8-2-12+4Mg palm fertilizer (or the 8-0-12+4Mg version) suits all palm species. Dose each palm by canopy width with the palm chart.",
+    "countNote": "How to count: one palm for each planting spot. A clump or a multi-trunk palm (an areca clump, a double or triple Christmas palm) counts as one palm, whatever the number of trunks. Judge its size by the canopy of the whole clump. Palms planted apart count one each, even when their fronds touch.",
+    "feedingNote": "Correct a nutrient problem by feeding through the soil first. UF does not recommend nutrient trunk injections for palms, except for a chronic deficiency that soil feeding did not correct. A palm cannot heal a trunk wound, so every injection hole stays as a permanent scar where disease or insects can enter (UF EP261).",
     "columns": {
       "lethalBronzing": "Lethal bronzing host (UF list)",
       "nutrients": "Nutrient problems it is prone to",
@@ -748,7 +750,7 @@
         "lethalBronzing": "not listed",
         "nutrients": "Potassium, manganese (frizzle-top)",
         "selfCleaning": "yes",
-        "note": "Not a UF host. Potassium deficiency is the leading cause of royal palm death in south Florida."
+        "note": "Not currently listed as a confirmed host (UF). Potassium deficiency is the leading cause of royal palm death in south Florida."
       },
       {
         "key": "foxtail",
@@ -757,7 +759,7 @@
         "lethalBronzing": "not listed",
         "nutrients": "Potassium, manganese",
         "selfCleaning": "yes",
-        "note": "Not a UF host. UF rates it highly susceptible to potassium and manganese deficiency."
+        "note": "Not currently listed as a confirmed host (UF). UF rates it highly susceptible to potassium and manganese deficiency."
       },
       {
         "key": "christmas",
@@ -811,7 +813,7 @@
         "lethalBronzing": "not listed",
         "nutrients": "Potassium (dead leaflet tips)",
         "selfCleaning": "partly",
-        "note": "Not a UF host. Under about 30 ft it keeps a skirt of dead fronds; taller palms drop old fronds on their own."
+        "note": "Not currently listed as a confirmed host (UF). Under about 30 ft it keeps a skirt of dead fronds; taller palms drop old fronds on their own."
       },
       {
         "key": "coconut",
@@ -829,7 +831,7 @@
         "lethalBronzing": "not listed",
         "nutrients": "Nitrogen, potassium (orange stalks, leaf scorch)",
         "selfCleaning": "yes",
-        "note": "Not a UF host. UF: very high nutrient needs."
+        "note": "Not currently listed as a confirmed host (UF). UF: very high nutrient needs."
       },
       {
         "key": "pindo",
@@ -856,7 +858,7 @@
         "lethalBronzing": "unknown",
         "nutrients": "unknown",
         "selfCleaning": "unknown",
-        "note": "Identify the palm before you offer the preventive. Check the UF host list below."
+        "note": "Identify the palm before you assess it for the preventive. Check the UF host list below."
       }
     ],
     "otherHosts": "Other UF-listed lethal bronzing hosts: Mexican palmetto, Carpentaria, Fiji fan, buccaneer, Chinese windmill, needle, dwarf sugar, coyol, yagua and San Jose hesper palms. UF lists 21 hosts in all and says the list could grow. \"Not listed\" means UF does not list the palm as a host today; it does not mean immune.",

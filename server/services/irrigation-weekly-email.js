@@ -74,6 +74,18 @@ const TEMPLATE_ON_TRACK = 'irrigation.weekly_on_track';
 // just the handful who filled in the portal form).
 const TEMPLATE_SETUP_SCHEDULE = 'irrigation.weekly_setup_schedule';
 const TEMPLATE_SETUP_SYSTEM = 'irrigation.weekly_setup_system';
+// GATE_IRRIGATION_SETUP_ASK_CADENCE (owner 2026-10-24): 18 customers got the
+// same setup ask 12 Mondays running and never answered. With the gate on, a
+// customer gets the ask on their first SETUP_ASK_FREE_SENDS setup emails, then
+// at most once every SETUP_ASK_SPACING_DAYS; the weeks between get this
+// variant: the same rain report with no callout and no button.
+const TEMPLATE_RAIN_REPORT = 'irrigation.weekly_rain_report';
+const SETUP_ASK_TEMPLATES = [TEMPLATE_SETUP_SCHEDULE, TEMPLATE_SETUP_SYSTEM];
+const SETUP_ASK_FREE_SENDS = 3;
+// 27, not 28: four Mondays apart is 28 days give or take the sweep's start
+// time, and a later send last time must not push the ask a fifth week.
+const SETUP_ASK_SPACING_DAYS = 27;
+const DAY_MS = 24 * 60 * 60 * 1000;
 // GATE_IRRIGATION_WEEK_PLAN: one template whose subject/heading/action come
 // from THIS week's legal-first plan (irrigation-week-plan.js).
 const TEMPLATE_WEEK_PLAN = 'irrigation.weekly_plan';
@@ -136,6 +148,42 @@ function roundHundredth(value) {
 // isn't complete until the day ends).
 const PORTAL_IRRIGATION_ASK = 'under Irrigation in your portal';
 const SETUP_CLOSER = "and these check-ins become real recommendations — ease back this week, add a few minutes, or you're right on track.";
+
+// Strict opt-in, read at call time: the gate changes customer copy.
+function irrigationSetupAskCadenceLive() {
+  return process.env.GATE_IRRIGATION_SETUP_ASK_CADENCE === 'true';
+}
+
+// Is the setup ask due this week? `history` is loadSetupAskHistory's result;
+// null (unreadable) keeps the ask, which is today's behavior.
+function setupAskDue(history, now = new Date()) {
+  if (!history) return true;
+  const count = Number(history.count) || 0;
+  if (count < SETUP_ASK_FREE_SENDS) return true;
+  if (!history.lastAskAt) return true;
+  const last = new Date(history.lastAskAt).getTime();
+  if (!Number.isFinite(last)) return true;
+  return now.getTime() - last >= SETUP_ASK_SPACING_DAYS * DAY_MS;
+}
+
+// Setup asks this customer was SENT before this week. This week's own
+// trigger is excluded so a retry inside the week decides the same way.
+async function loadSetupAskHistory({ customerId, weekEnding, conn = db }) {
+  try {
+    const row = await conn('email_messages')
+      .where({ recipient_type: 'customer', recipient_id: String(customerId) })
+      .whereIn('template_key', SETUP_ASK_TEMPLATES)
+      .whereNotNull('sent_at')
+      .whereNot('trigger_event_id', `irrigation.weekly:${customerId}:${weekEnding}`)
+      .count({ count: '*' })
+      .max({ lastAskAt: 'sent_at' })
+      .first();
+    return { count: Number(row?.count) || 0, lastAskAt: row?.lastAskAt || null };
+  } catch (err) {
+    logger.warn(`[irrigation-weekly-email] setup ask history unreadable for ${customerId}: ${err.message}`);
+    return null;
+  }
+}
 
 function joinList(parts) {
   if (parts.length <= 1) return parts.join('');
@@ -431,6 +479,9 @@ function decideWeeklyEmail({
   waterSaved = undefined,
   // Phase 2: the portal's water-source answer ('county' | 'reclaimed' | 'well' | null), withheld after a move until re-saved.
   waterSource = null,
+  // GATE_IRRIGATION_SETUP_ASK_CADENCE: the sweep found the setup ask is not
+  // due this week, so a setup email goes out as the plain rain report.
+  setupAskQuiet = false,
   now = new Date(),
 } = {}, rawArgs = {}) {
   const table = resolveRateTable(rateTable);
@@ -549,10 +600,11 @@ function decideWeeklyEmail({
     const setupWaterSaved = hasSystem ? waterSavedSetupSentence(askWaterSaved()) : null;
     const rainSetup = formatInches(rainfallInches7d);
     const targetSetup = formatInches(advice.recommendedInchesPerWeek);
+    const quiet = setupAskQuiet === true;
     return {
       shouldSend: true,
-      templateKey: hasSystem ? TEMPLATE_SETUP_SCHEDULE : TEMPLATE_SETUP_SYSTEM,
-      reason: hasSystem ? 'setup_schedule' : 'setup_system',
+      templateKey: quiet ? TEMPLATE_RAIN_REPORT : (hasSystem ? TEMPLATE_SETUP_SCHEDULE : TEMPLATE_SETUP_SYSTEM),
+      reason: quiet ? 'rain_report' : (hasSystem ? 'setup_schedule' : 'setup_system'),
       advice,
       payload: {
         first_name: String(firstName || '').trim() || 'there',
@@ -563,7 +615,7 @@ function decideWeeklyEmail({
         // setup_schedule's callout ({{schedule_ask}}): what is on file and
         // the one input still missing. setup_system has no such block, and
         // an empty optional variable renders nothing.
-        schedule_ask: hasSystem ? [movedPreface + buildScheduleAsk({ derived: askDerived, inputs: askInputs, toggleOff: irrigationSystem === false, explicitInches: askExplicit }), setupWaterSaved].filter(Boolean).join(' ') : '',
+        schedule_ask: hasSystem && !quiet ? [movedPreface + buildScheduleAsk({ derived: askDerived, inputs: askInputs, toggleOff: irrigationSystem === false, explicitInches: askExplicit }), setupWaterSaved].filter(Boolean).join(' ') : '',
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,
@@ -1176,7 +1228,7 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
 // the sweep pins the live one once per customer. Omitted = a NEW decision: the live gate is read ONCE here, and that one
 // table feeds both the move guard below and (through the returned `rateTable`) the decision, so the two can never
 // disagree about a runtime near the plausibility ceiling.
-function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now, rateTable = undefined, waterSaved = undefined }) {
+function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now, rateTable = undefined, waterSaved = undefined, setupAskQuiet = false }) {
   const table = resolveRateTable(rateTable);
   // After a move, every NON-NULL sizing field must have been re-saved
   // (irrigation_confirmed_fields, reset by the move, accrues one field
@@ -1239,6 +1291,9 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
     // A replay or a published row's re-decide carries the snapshot's frozen "water you saved" block (null for a row
     // without one); a NEW decision leaves the key out so decideWeekPlan reads the live gate once.
     ...(waterSaved !== undefined ? { waterSaved } : {}),
+    // Key present only when the ask is held back, so a gate-off decision
+    // (and any snapshot hash built from it) stays byte-identical.
+    ...(setupAskQuiet === true ? { setupAskQuiet: true } : {}),
     now,
   };
 }
@@ -1445,7 +1500,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         const currentDecision = snapshotArgs
           ? replayWeekPlanForCustomer(snapshotArgs, current)
           : buildWeeklyEmailDecision({
-            ...weeklyInputsForCustomer(current, { weekEnding, weekWeather, priorWeek, weekPlanEnabled: false, planWeekEnd, now: decisionInputs.now, rateTable: decisionInputs.rateTable }),
+            ...weeklyInputsForCustomer(current, { weekEnding, weekWeather, priorWeek, weekPlanEnabled: false, planWeekEnd, now: decisionInputs.now, rateTable: decisionInputs.rateTable, setupAskQuiet: decisionInputs.setupAskQuiet === true }),
             forecastRainInches, forecastEt0Inches,
           });
         if (!currentDecision || !isDeepStrictEqual(currentDecision.payload, decision.payload)) {
@@ -1742,6 +1797,9 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         rateTable: frozen ? storedRateTable(frozen) : resolveRateTable(),
         // Likewise the frozen "water you saved" block (null for a published row without one).
         waterSaved: frozen ? (frozen.waterSaved ?? null) : undefined,
+        // A published row keeps its own answer; a new decision asks the history once.
+        setupAskQuiet: frozen ? frozen.setupAskQuiet === true
+          : (irrigationSetupAskCadenceLive() && !setupAskDue(await loadSetupAskHistory({ customerId: customer.id, weekEnding }), tick())),
       });
       // Replay already validated this premise and the current settings. Keep
       // its saved spelling so a formatting edit cannot change the claim hash.
@@ -2170,6 +2228,12 @@ module.exports = {
   TEMPLATE_ON_TRACK,
   TEMPLATE_SETUP_SCHEDULE,
   TEMPLATE_SETUP_SYSTEM,
+  TEMPLATE_RAIN_REPORT,
+  SETUP_ASK_FREE_SENDS,
+  SETUP_ASK_SPACING_DAYS,
+  irrigationSetupAskCadenceLive,
+  setupAskDue,
+  loadSetupAskHistory,
   TEMPLATE_CONFIRM_SCHEDULE,
   TEMPLATE_WEEK_PLAN,
   IRRIGATION_EMAIL_OPT_IN_TAG,

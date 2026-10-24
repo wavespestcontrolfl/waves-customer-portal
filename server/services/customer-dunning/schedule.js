@@ -95,7 +95,10 @@ async function alertStaff({ verb, generic, why, doneWhen, dedupeKey, customerId,
     const action = candidates.find((candidate) => {
       try { composeAdminAlert(spec(candidate)); return true; } catch { return false; }
     }) || generic;
-    await raiseAdminAlert('alert', spec(action), { dedupeKey, metadata: { customer_id: customerId || null, ...metadata } });
+    // bellDefault: GATE_ADMIN_BELL_POLICY (on in production) drops an 'alert' row that does not ask to
+    // ring, so these owner-approved office alerts (D3/D10, the credit ruling) never reached the bell.
+    // Asking rings them unless the owner silences the category.
+    await raiseAdminAlert('alert', spec(action), { dedupeKey, bellDefault: true, metadata: { customer_id: customerId || null, ...metadata } });
     return true;
   } catch (err) {
     logger.warn(`[customer-dunning] staff alert failed (${dedupeKey}): ${redactContact(err.message)}`);
