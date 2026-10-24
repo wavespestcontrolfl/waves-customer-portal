@@ -373,6 +373,21 @@ describe('buildRainOutlookSummary', () => {
     }, half).firstRainAt).toBe(at(1));
   });
 
+  test('a missing or empty reading for the hour that holds the completion is complete false', () => {
+    // Completed 14:30 EDT: the 14:00-15:00 hour (stamped 15:00) is outside the window total.
+    const half = new Date(Date.parse(COMPLETED) + 30 * 60000);
+    const rest = [row(2, 0), row(3, 0)];
+    for (const hourly of [rest, [row(1, null), ...rest], [{ at: at(1) }, ...rest], [row(1, Number.NaN), ...rest]]) {
+      expect(buildRainOutlookSummary({ status: 'ok', precipitationInTotal: 0, hourly }, half))
+        .toMatchObject({ complete: false, totalIn: null });
+    }
+    expect(buildRainOutlookSummary({ status: 'ok', precipitationInTotal: 0, hourly: [row(1, 0), ...rest] }, half))
+      .toMatchObject({ complete: true, totalIn: 0, firstRainAt: null });
+    // On the hour, no hour holds the completion: the total alone decides.
+    expect(buildRainOutlookSummary({ status: 'ok', precipitationInTotal: 0, hourly: rest }, done))
+      .toMatchObject({ complete: true, totalIn: 0 });
+  });
+
   test('a missing hour (null total) is complete false with no total', () => {
     const summary = buildRainOutlookSummary({ status: 'ok', precipitationInTotal: null, hourly: [row(2, 0.4)] }, done);
     expect(summary).toMatchObject({ complete: false, totalIn: null });

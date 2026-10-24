@@ -91,13 +91,20 @@ function pestRainOutlookGateOn() {
 // wholly after completion. The first rain hour also looks at the hour that
 // holds the completion: rain in it starts at the completion, so the card reads
 // it as rain inside the drying time and never as dry weather.
-// precipitationInTotal is null when any needed hour is missing: that is
-// complete false, and the card then says nothing.
+// precipitationInTotal is null when any needed hour is missing, and the hour
+// that holds the completion is outside that total, so its reading must be
+// there too. Either one missing is complete false, and the card says nothing.
 function buildRainOutlookSummary(forecast, completedAt) {
   if (!forecast || forecast.status !== 'ok') return null;
   const completedMs = completedAt.getTime();
-  const complete = typeof forecast.precipitationInTotal === 'number' && Number.isFinite(forecast.precipitationInTotal);
-  const firstHour = (Array.isArray(forecast.hourly) ? forecast.hourly : []).find((row) => {
+  const hourly = Array.isArray(forecast.hourly) ? forecast.hourly : [];
+  const holdingStampMs = Math.ceil(completedMs / HOUR_MS) * HOUR_MS;
+  const holdingHourRead = holdingStampMs === completedMs || hourly.some((row) => (
+    Date.parse(row?.at) === holdingStampMs && typeof row.precipitation_in === 'number' && Number.isFinite(row.precipitation_in)
+  ));
+  const complete = holdingHourRead
+    && typeof forecast.precipitationInTotal === 'number' && Number.isFinite(forecast.precipitationInTotal);
+  const firstHour = hourly.find((row) => {
     const stampMs = Date.parse(row?.at);
     return Number.isFinite(stampMs) && stampMs > completedMs && row.precipitation_in >= RAIN_HOUR_MIN_IN;
   });
