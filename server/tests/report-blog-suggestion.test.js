@@ -18,6 +18,7 @@
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 let mockDbCurrent = null;
+jest.mock('../services/content/terminal-writer', () => ({ waitingBriefId: jest.fn(async () => null) }));
 jest.mock('../models/db', () => {
   const proxy = (...args) => (mockDbCurrent ? mockDbCurrent(...args) : {});
   proxy.raw = (...args) => (mockDbCurrent?.raw ? mockDbCurrent.raw(...args) : { toString: () => args[0] });
@@ -62,7 +63,7 @@ const router = require('../routes/admin-dispatch');
 // count, the held-topic lookup, the insert, and the phrase's standing row when
 // the insert wrote nothing; it records every call.
 function queueKnex({
-  registry = [], sentToday = 0, held = null, inserted = true, standing = null,
+  registry = [], sentToday = 0, held = null, inserted = true, standing = null, updated = 1,
   ownCustomer = null, customerByName = null, customersFail = false,
 } = {}) {
   const calls = [];
@@ -80,6 +81,7 @@ function queueKnex({
       };
     }
     chain.select = async () => (table === 'content_registry' ? registry : []);
+    chain.update = async (patch) => { calls.push([`${table} update`, patch, wheres]); return updated; };
     chain.count = () => ({ first: async () => ({ n: String(sentToday) }) });
     chain.first = async () => {
       if (table === 'customers') {
@@ -337,6 +339,64 @@ describe('suggestReportBlogPost', () => {
     const general = { ...LIVE_STANDING_WATER, published_at: '2026-01-01T00:00:00Z' };
     expect(await suggestReportBlogPost(queueKnex({ registry: [...towns, general] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'covered' });
     expect(await suggestReportBlogPost(queueKnex({ registry: towns }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'would_queue' });
+  });
+
+  test('generalOnly in the queue: only a general-title row holds the subject; a plain pending row is upgraded in place, one in flight waits, one done or skipped is passed by (local Codex P2 on 6fbfefdcc8)', async () => {
+    const keyReads = (knex) => knex.calls.filter(([name, arg]) => name === 'opportunity_queue where' && arg && 'dedupe_key' in arg).map(([, arg]) => arg.dedupe_key);
+    // The held-topic read asks for the general-title ask, so a plain row of any source does not hold it.
+    const filtered = queueKnex();
+    await suggestReportBlogPost(filtered, { phrase: 'standing water', dryRun: true, generalOnly: true });
+    expect(filtered.calls).toContainEqual(['opportunity_queue whereRaw', "signal_metadata->>'general_title' = 'true'"]);
+    expect(keyReads(filtered)).toEqual(['techsuggest:v1:standing-water:general', 'techsuggest:v1:standing-water']);
+    // A plain row that is done (its post was a town's) or skipped: the general row is written beside it, on its own key.
+    for (const status of ['done', 'skipped']) {
+      expect(await suggestReportBlogPost(queueKnex({ standing: [null, { id: 'plain', status }] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'would_queue' });
+      const written = queueKnex({ standing: [null, { id: 'plain', status }] });
+      expect(await suggestReportBlogPost(written, { phrase: 'standing water', tipId: 'water_gutters', generalOnly: true })).toEqual({ status: 'queued' });
+      expect(queueWrites(written)[0][2]).toContain('techsuggest:v1:standing-water:general');
+    }
+    // A plain row still pending takes the general-title ask and the tip instead of a second row.
+    expect(await suggestReportBlogPost(queueKnex({ standing: [null, { id: 'plain', status: 'pending' }] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'would_queue' });
+    const upgraded = queueKnex({ standing: [null, { id: 'plain', status: 'pending' }] });
+    expect(await suggestReportBlogPost(upgraded, { phrase: 'standing water', tipId: 'water_gutters', generalOnly: true })).toEqual({ status: 'queued' });
+    expect(queueWrites(upgraded)).toEqual([]);
+    const [[, patch, wheres]] = upgraded.calls.filter(([name]) => name === 'opportunity_queue update');
+    expect(wheres).toContainEqual(['where', { id: 'plain', status: 'pending' }]);
+    expect(upgraded.raw).toHaveBeenCalledWith('signal_metadata || ?::jsonb', [JSON.stringify({ general_title: true, tech_tip_id: 'water_gutters' })]);
+    expect(patch).toHaveProperty('signal_metadata');
+    // A pending row whose brief the terminal writer already holds is written from as it is: in flight, not upgraded (GitHub Codex P2 on de16ea947b).
+    const { waitingBriefId } = require('../services/content/terminal-writer');
+    waitingBriefId.mockResolvedValueOnce('brief-1');
+    const handed = queueKnex({ standing: [null, { id: 'plain', status: 'pending' }] });
+    expect(await suggestReportBlogPost(handed, { phrase: 'standing water', tipId: 'water_gutters', generalOnly: true })).toEqual({ status: 'already_queued' });
+    expect(waitingBriefId).toHaveBeenCalledWith('plain', { conn: handed });
+    expect(handed.calls.filter(([name]) => name === 'opportunity_queue update')).toEqual([]);
+    expect(queueWrites(handed)).toEqual([]);
+    waitingBriefId.mockRejectedValueOnce(new Error('runs read failed'));
+    expect(await suggestReportBlogPost(queueKnex({ standing: [null, { id: 'plain', status: 'pending' }] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'already_queued' });
+    // A plain row upgraded before that the chain then skipped keeps its final no (GitHub Codex P2 on de16ea947b).
+    for (const status of ['skipped', 'failed']) {
+      expect(await suggestReportBlogPost(queueKnex({ standing: [null, { id: 'plain', status, general_title: 'true' }] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'declined' });
+      const refused = queueKnex({ standing: [null, { id: 'plain', status, general_title: 'true' }] });
+      expect(await suggestReportBlogPost(refused, { phrase: 'standing water', tipId: 'water_gutters', generalOnly: true })).toEqual({ status: 'declined' });
+      expect(queueWrites(refused)).toEqual([]);
+    }
+    // One the chain claimed between the read and the update: nothing upgraded, so the general row is written.
+    const raced = queueKnex({ standing: [null, { id: 'plain', status: 'pending' }], updated: 0 });
+    expect(await suggestReportBlogPost(raced, { phrase: 'standing water', generalOnly: true })).toEqual({ status: 'queued' });
+    expect(queueWrites(raced)).toHaveLength(1);
+    // A plain row the chain is writing waits for its post.
+    for (const status of ['claimed', 'pending_review']) {
+      expect(await suggestReportBlogPost(queueKnex({ standing: [null, { id: 'plain', status }] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'already_queued' });
+    }
+    // The general row itself, held or ended, answers as any own row does.
+    expect(await suggestReportBlogPost(queueKnex({ standing: [{ status: 'pending' }] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'already_queued' });
+    expect(await suggestReportBlogPost(queueKnex({ standing: [{ status: 'skipped' }] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'declined' });
+    // An office suggestion reads only its own plain key.
+    const office = queueKnex();
+    await suggestReportBlogPost(office, { phrase: 'standing water', dryRun: true });
+    expect(keyReads(office)).toEqual(['techsuggest:v1:standing-water']);
+    expect(office.calls).not.toContainEqual(['opportunity_queue whereRaw', "signal_metadata->>'general_title' = 'true'"]);
   });
 
   test('a seeded topic\'s row names its tip', async () => {

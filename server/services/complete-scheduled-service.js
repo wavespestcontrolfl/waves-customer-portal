@@ -89,6 +89,7 @@ const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
 const TurfHeightOcr = require('../services/turf-height-ocr');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
+const { capturePestRainOutlook } = require('../services/service-report/pest-rain-outlook');
 const {
   buildServiceReportV1DeliveryContext,
   shouldSendServiceReportV1Delivery,
@@ -2540,6 +2541,7 @@ function shouldCaptureApplicationConditions({
 // All coverage guards still apply, and autopayCoversVisit already requires
 // !hasVisitPrice, so a price-free autopay-covered visit is never billed here.
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const SeriesPriceGuards = require('../services/series-price-guards');
 
 function completionSavedCardFallbackPolicy({
   suppressAlternateCollection,
@@ -4562,6 +4564,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const activityScoresAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_activity_scores'), false);
     const useServiceReportV1 = true;
     let conditionsAtApplication = null;
+    // GATE_PEST_RAIN_OUTLOOK: the frozen 48-hour forecast summary, or null (gate off, not pest, unavailable).
+    let rainOutlookAtCompletion = null;
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit
       && await failSoftRead(db, (k) => k.schema.hasColumn('lawn_assessments', 'service_record_id'), false);
@@ -6047,10 +6051,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // stays honestly unknown. See the helper's comment.
           isBackfillCompletion,
         })
-          ? await fetchApplicationConditions({
-            latitude: svc.customer_latitude,
-            longitude: svc.customer_longitude,
-          }).catch(() => null)
+          // The pest rain outlook rides the same predicate and runs beside the
+          // weather fetch (completion waits for the slower one, not both). Its
+          // summary goes to structured_notes.rainOutlook, never into
+          // `conditions`, which the FDACS application ledger copies verbatim.
+          ? await Promise.all([
+            fetchApplicationConditions({
+              latitude: svc.customer_latitude,
+              longitude: svc.customer_longitude,
+            }).catch(() => null),
+            capturePestRainOutlook({ svc }),
+          ]).then(([captured, rainOutlook]) => {
+            rainOutlookAtCompletion = rainOutlook;
+            return captured;
+          })
           : null;
 
         // Auto-generate the customer-facing report summary from the tech's notes
@@ -6932,6 +6946,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // original completed visit, not whatever the mutable schedule
             // row may describe when a failed photo upload is retried.
             servicePhotoVisit,
+            ...(rainOutlookAtCompletion ? { rainOutlook: rainOutlookAtCompletion } : {}),
             // The trace the report flow judged this record against (its
             // updated_at, or null for none): the report shows only that one
             // (treatment-zone-maps.js traceJudgedAllows).
@@ -12879,6 +12894,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
           ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
           serviceRecordId: record.id,
         } });
+      }
+    }
+
+    // A performed visit that billed nothing, on ANY lane, with no prepay,
+    // dues, paid or minted invoice behind it rings the office once per visit
+    // (GATE_SERIES_PRICE_GUARDS; off = the two log lines above only).
+    // Non-blocking: the closeout is already committed.
+    if (!packetEffects && !recapReviewOnly && !systemQuietCloseout && !isBackfillCompletion
+      && SeriesPriceGuards.seriesPriceGuardsLive()
+      && SeriesPriceGuards.unbilledCompletionAlertDue({
+        visitPerformed, isCallback: svc.is_callback, serviceType: svc.service_type, reviewedVisitPrice,
+        authoritativeZeroPrice: hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price),
+        invoiceAmount: mintInvoiceAmount, prepaidCovered, autopayCoversVisit, alreadyPaid, invoice, invoiceCreated,
+      })) {
+      try {
+        const created = await SeriesPriceGuards.raiseUnbilledCompletionAlert(svc);
+        if (!created) logger.error(`[dispatch] unbilled-completion alert NOT recorded for visit ${svc.id}`);
+      } catch (alertErr) {
+        logger.error(`[dispatch] unbilled-completion alert failed for visit ${svc.id} (non-blocking): ${alertErr.message}`);
       }
     }
 

@@ -18,7 +18,7 @@ const HANDOFF_PHASE_REJECTED = 'rejected';
 // Stamped on a row addressed to an email the office replaced (see
 // stopRetriesForReplacedEmail): such a row never gets a provider retry.
 const REPLACED_RECIPIENT_CATEGORY = 'recipient_replaced';
-const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY } = require('../constants/email-replay-exclusions');
+const { NO_STORED_COPY_REPLAY, staleStoredCopyReason } = require('../constants/email-replay-exclusions');
 
 function asArray(value) {
   if (Array.isArray(value)) return value;
@@ -48,9 +48,10 @@ function isTransactionalRetryEligible(message) {
   if (group.startsWith('marketing_')) return false;
   const categories = asArray(message.categories).map((v) => String(v).toLowerCase());
   if (categories.includes('bounce_recovery') || categories.includes(REPLACED_RECIPIENT_CATEGORY)) return false;
-  // A follow-up carrying the monthly average is never re-sent from its stored copy: the
-  // price may have changed since. The sender releases its stage and re-sends fresh copy.
-  if (categories.includes(ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY)) return false;
+  // A follow-up carrying the monthly average, or a reschedule or cancellation notice, is
+  // never re-sent from its stored copy: the price or the visit may have changed since
+  // (constants/email-replay-exclusions.js).
+  if (staleStoredCopyReason(categories)) return false;
   return !!message.recipient_email_snapshot && !!message.subject_snapshot;
 }
 
@@ -95,7 +96,7 @@ async function claimDueRetries(limit = CLAIM_LIMIT, now = new Date()) {
   return db.transaction(async (trx) => {
     const rows = await retryEvidence(trx('email_messages'), [HANDOFF_PHASE_PENDING, HANDOFF_PHASE_REJECTED])
       .where({ status: 'failed', has_attachments: false })
-      .whereRaw("NOT jsonb_exists(COALESCE(categories, '[]'::jsonb), ?)", [ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY])
+      .whereRaw("NOT jsonb_exists_any(COALESCE(categories, '[]'::jsonb), ?::text[])", [[...NO_STORED_COPY_REPLAY.keys()]])
       .whereNotNull('provider_retry_next_at')
       .where('provider_retry_next_at', '<=', now)
       .where('provider_retry_count', '<', MAX_RETRIES)
@@ -813,9 +814,8 @@ async function retryOne(message) {
     return stopRetry(message, { status: 'failed', reason: EMAIL_REPLACED_REASON, requote, reissue: replay && !requote });
   }
   // A row scheduled by an older build, or marked after scheduling, settles the same way.
-  if (asArray(message.categories).includes(ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY)) {
-    return stopRetry(message, { status: 'failed', reason: 'Not re-sent from stored copy (monthly average may be stale).' });
-  }
+  const staleCopy = staleStoredCopyReason(asArray(message.categories));
+  if (staleCopy) return stopRetry(message, { status: 'failed', reason: staleCopy });
   let suppression;
   try {
     suppression = await activeSuppressionForMessage(message);

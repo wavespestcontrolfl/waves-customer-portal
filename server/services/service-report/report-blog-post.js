@@ -354,16 +354,21 @@ async function liveBlogPostsByPath(knex, paths) {
 // A served town anywhere in the title counts: every locality the offices
 // serve (locations.js, south Hillsborough and the neighborhoods included)
 // and every whole-county city, and so does a county by name. A town that is
-// also an ordinary word ("palmetto bugs", an osprey, laurel wilt, the Myakka
-// River) counts only as a place: "in <town>", "near <town>" or "<town>, FL".
+// also an ordinary word (Palmetto, Osprey, Laurel, Myakka) counts as a place
+// too, unless the title uses it as that word: a palmetto bug or a saw
+// palmetto, an osprey's nest or ospreys, laurel wilt or a laurel oak, the
+// Myakka River or its state park. "Palmetto Mosquito Prevention Guide" is a
+// town title with no "in", "near" or ", FL" (local Codex P2 on 6fbfefdcc8).
 const TOWN_NAMES = [...new Set([...Object.keys(CITY_COUNTY), ...Object.keys(CITY_TO_LOCATION), ...Object.keys(REVIEW_CITY_EXTRAS)])];
 const WORD_TOWNS = new Set(['palmetto', 'osprey', 'laurel', 'myakka']);
+const WORD_TOWN_AS_WORD_RE = /\b(?:(?:saw|dwarf|scrub|cabbage)\s+palmettos?|palmettos?\s+(?:bugs?|berr(?:y|ies)|fronds?|palms?|weevils?)|ospreys|osprey'?s?\s+(?:nests?|chicks?|platforms?|eggs?)|laurel\s+(?:wilt|oaks?|trees?)|(?:bay|cherry|mountain|carolina)\s+laurels?|myakka\s+(?:river|state|head|prairie))\b/gi;
 const alternation = (names) => names.map((town) => town.replace(/\s+/g, '\\s+')).join('|');
 const PLAIN_TOWN_RE = new RegExp(`\\b(?:${alternation(TOWN_NAMES.filter((town) => !WORD_TOWNS.has(town)))})\\b`, 'i');
+const WORD_TOWN_RE = new RegExp(`\\b(?:${alternation([...WORD_TOWNS])})\\b`, 'i');
 const PLACED_TOWN_RE = new RegExp(`\\b(?:in|near)\\s+(?:${alternation(TOWN_NAMES)})\\b|\\b(?:${alternation(TOWN_NAMES)}),?\\s+(?:fl|florida)\\b|\\b(?:manatee|sarasota|charlotte)\\s+county\\b`, 'i');
 const isTownTitled = (title) => {
   const text = String(title || '');
-  return PLAIN_TOWN_RE.test(text) || PLACED_TOWN_RE.test(text);
+  return PLAIN_TOWN_RE.test(text) || PLACED_TOWN_RE.test(text) || WORD_TOWN_RE.test(text.replace(WORD_TOWN_AS_WORD_RE, ' '));
 };
 
 /**

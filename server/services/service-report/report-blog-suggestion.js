@@ -59,9 +59,13 @@ function normalizePhrase(phrase) {
 }
 
 // The queue's dedupe key for a suggested phrase (at most 200 characters).
-function dedupeKeyFor(phrase) {
+// A general-title row (the tip seeder's) keys apart from the plain
+// suggestion of the same phrase: a phrase whose plain row ended in a
+// town-titled post, or was skipped, can still get its general post (local
+// Codex P2 on 6fbfefdcc8).
+function dedupeKeyFor(phrase, { general = false } = {}) {
   const slug = phrase.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 150);
-  return `techsuggest:v1:${slug}`;
+  return `techsuggest:v1:${slug}${general ? ':general' : ''}`;
 }
 
 // A phrase that places a topic at someone's home or with someone ("ants at
@@ -175,7 +179,7 @@ function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, tipI
     },
     status: 'pending',
     expires_at: new Date(now.getTime() + EXPIRES_DAYS * 24 * 60 * 60 * 1000),
-    dedupe_key: dedupeKeyFor(phrase),
+    dedupe_key: dedupeKeyFor(phrase, { general: generalTitle }),
   };
 }
 
@@ -209,7 +213,10 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
   // c407c7b700): a generic title over a town H1 is still a town post.
   const covering = (await searchReportBlogPosts(knex, phrase, generalOnly ? { limit: Infinity, withHeadline: true } : undefined)).filter((post) => post.exact);
   if (covering.some((post) => !(generalOnly && (isTownTitled(post.title) || isTownTitled(post.headline))))) return { status: 'covered' };
-  if (dryRun) return (await standingAnswer(knex, phrase)) || { status: 'would_queue' };
+  if (dryRun) {
+    const standing = await standingAnswer(knex, phrase, { generalOnly });
+    return standing && !standing.upgrade ? standing : { status: 'would_queue' };
+  }
   // One suggestion at a time per person, so the day's cap holds when taps
   // race: the count, the held check and the write share one transaction
   // under the person's advisory lock (pre-push P1 on 1aaeaa36ab).
@@ -220,13 +227,17 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
 // new blog by its routed action (the latest run's, else the latest brief's,
 // else the queue column): a topic mined as another action and rerouted to a
 // blog holds it too (GitHub Codex P2 on 930cb1077e).
-async function heldTopic(knex, phrase) {
+// `generalOnly` (the tip seeder): only a row that asks for a general title
+// holds the tip's general subject; a plain row of the phrase may end in a
+// town-titled post (local Codex P2 on 6fbfefdcc8).
+async function heldTopic(knex, phrase, { generalOnly = false } = {}) {
   const effectiveAction = require('../content/opportunity-action-sql');
-  return knex('opportunity_queue')
+  const query = knex('opportunity_queue')
     .whereRaw(`${effectiveAction} = ?`, ['new_supporting_blog'])
     .whereRaw('lower(query) = ?', [phrase])
-    .whereIn('status', HELD_STATUSES)
-    .first('id');
+    .whereIn('status', HELD_STATUSES);
+  if (generalOnly) query.whereRaw("signal_metadata->>'general_title' = 'true'");
+  return query.first('id');
 }
 
 // What a phrase meets in the queue before any write, or null when a row
@@ -235,18 +246,55 @@ async function heldTopic(knex, phrase) {
 // row that ended without a post (skipped, failed) is a final no, answered
 // before the day's cap since nothing would be written (GitHub Codex P2 on
 // 930cb1077e); an expired one is revived and counts as a suggestion.
-async function standingAnswer(knex, phrase) {
-  if (await heldTopic(knex, phrase)) return { status: 'already_queued' };
-  const own = await knex('opportunity_queue').where({ dedupe_key: dedupeKeyFor(phrase) }).first('status');
+//
+// `generalOnly`: the general row's own key is read; the phrase's plain row is
+// then read too. One still pending, with no brief handed to the terminal
+// writer yet, is upgraded in place ({ upgrade: id }: it gets the
+// general-title ask instead of a second row on the same phrase); one the
+// chain is writing (claimed, pending_review, or pending on a brief the
+// terminal already holds, which is written from as it is) answers
+// already_queued until its post is out; one upgraded before that the chain
+// then refused keeps that final no (declined); one that is done or skipped
+// without the ask is left alone, so the general row is written beside it
+// (local Codex P2 on 6fbfefdcc8; GitHub Codex P2s on de16ea947b).
+async function standingAnswer(knex, phrase, { generalOnly = false } = {}) {
+  if (await heldTopic(knex, phrase, { generalOnly })) return { status: 'already_queued' };
+  const own = await knex('opportunity_queue').where({ dedupe_key: dedupeKeyFor(phrase, { general: generalOnly }) }).first('status');
   if (own && HELD_STATUSES.includes(own.status)) return { status: 'already_queued' };
   if (own && own.status !== 'expired') return { status: 'declined' };
+  if (generalOnly) {
+    const plain = await knex('opportunity_queue').where({ dedupe_key: dedupeKeyFor(phrase) })
+      .first('id', 'status', knex.raw("signal_metadata->>'general_title' AS general_title"));
+    if (plain && ['claimed', 'pending_review'].includes(plain.status)) return { status: 'already_queued' };
+    if (plain && plain.general_title === 'true' && plain.status !== 'expired') return { status: 'declined' };
+    if (plain && plain.status === 'pending') {
+      // The runner's own read: a brief the terminal writer holds for this
+      // row is the one its draft is written from, so a metadata upgrade
+      // would not reach it. A failed read counts as in flight (never an
+      // upgrade the draft cannot see).
+      const { waitingBriefId } = require('../content/terminal-writer');
+      const handed = await waitingBriefId(plain.id, { conn: knex }).catch(() => 'unknown');
+      return handed ? { status: 'already_queued' } : { upgrade: plain.id };
+    }
+  }
   return null;
 }
 
 async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId, tipId = null, generalTitle = false }) {
   if (actorId) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-blog-suggestion:${actorId}`]);
-  const answered = await standingAnswer(trx, phrase);
-  if (answered) return answered;
+  const answered = await standingAnswer(trx, phrase, { generalOnly: generalTitle });
+  if (answered?.upgrade) {
+    // The phrase's plain pending row takes the general-title ask (and the
+    // tip) instead of a second row; a row the chain claimed meanwhile is
+    // left as it is and the general row is written below.
+    const upgraded = await trx('opportunity_queue')
+      .where({ id: answered.upgrade, status: 'pending' })
+      .update({
+        signal_metadata: trx.raw('signal_metadata || ?::jsonb', [JSON.stringify({ general_title: true, ...(tipId ? { tech_tip_id: tipId } : {}) })]),
+        updated_at: trx.raw('now()'),
+      });
+    if (upgraded) return { status: 'queued' };
+  } else if (answered) return answered;
   if (actorId) {
     const sent = await trx('opportunity_queue')
       .whereRaw("signal_metadata->>'source' = ?", [SOURCE])

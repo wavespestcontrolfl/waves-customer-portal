@@ -6,6 +6,7 @@ const path = require('path');
 const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
 const {
   PEST_REPORT_VOICE_PROMPT, PEST_REPORT_VOICE_VERSION, PEST_VOICE_EXAMPLES, pestReportVoicePrompt,
+  PEST_REPORT_VOICE_V2_PROMPT, PEST_REPORT_VOICE_V2_VERSION, PEST_VOICE_V2_EXAMPLES,
 } = require('../services/service-report/pest-report-voice');
 const {
   OWNER_RULES, groundedTimeframePhrases, noteAbsenceHint, writerRulesRejection,
@@ -164,7 +165,8 @@ describe('the one-voice prompt', () => {
     else process.env.GATE_REPORT_WRITER_RULES = savedRules;
   });
 
-  test.each(PEST_VOICE_EXAMPLES.map((example, i) => [i + 1, example]))(
+  // v1's examples, then v2's quiet-visit example (its other two are v1's).
+  test.each([...PEST_VOICE_EXAMPLES, PEST_VOICE_V2_EXAMPLES[0]].map((example, i) => [i + 1, example]))(
     'example %i passes the writer screen and the report parser with its own EXPECTATIONS',
     (_n, example) => {
       expect(writerRulesRejection(example.report, { allowedPhrases: groundedTimeframePhrases(example.expectations) })).toBeNull();
@@ -174,4 +176,39 @@ describe('the one-voice prompt', () => {
       expect(example.report).not.toMatch(/\brecorded\b|\bnoted\b|\btechnician\b|\bas promised\b/i);
     },
   );
+});
+
+// GATE_PEST_QUIET_VISIT (owner 2026-10-24): v1's first example modeled "you
+// didn't mention anything new when we talked" on a quiet visit; v2 opens it on
+// what we saw and where we worked, and never claims a talk.
+describe('pest_report_voice_v2', () => {
+  const context = { serviceKey: 'pest_general_quarterly', findingsType: null, writerRules: true, pestVoice: true };
+
+  test('the selector serves v2 only on the voice prompt with the quiet-visit flag', () => {
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, pestQuietVisit: true })).toBe(PEST_REPORT_VOICE_V2_PROMPT);
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', context)).toBe(PEST_REPORT_VOICE_PROMPT);
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey: 'pest_re_service', findingsType: null, writerRules: true, pestVoice: true, pestQuietVisit: true }))
+      .toBe(pestReportVoicePrompt({ reservice: true, quietVisit: true }));
+    const stacked = { ...context, pestVoice: false };
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...stacked, pestQuietVisit: true })).toBe(selectReportCopyPrompt(V4_SHARED, 'Old label', stacked));
+  });
+
+  test('v2 keeps every v1 rule and adds the two quiet-visit rules', () => {
+    const rules = (prompt) => prompt.slice(0, prompt.indexOf('THREE GOOD REPORTS'));
+    const quietFound = 'When the customer told us nothing, start with what we saw today or with where we worked, never with what they did not say. ';
+    expect(PEST_REPORT_VOICE_V2_PROMPT).toContain(`# ${PEST_REPORT_VOICE_V2_VERSION}`);
+    expect(PEST_REPORT_VOICE_V2_PROMPT).toContain('- Never say we talked with, spoke with or met the customer unless the note says so, and never say what the customer did not mention, report or ask about.');
+    expect(PEST_REPORT_VOICE_V2_PROMPT).toContain(quietFound);
+    const v2Lines = new Set(rules(PEST_REPORT_VOICE_V2_PROMPT).replace(quietFound, '').split('\n'));
+    for (const line of rules(PEST_REPORT_VOICE_PROMPT).split('\n')) {
+      if (line !== `# ${PEST_REPORT_VOICE_VERSION}`) expect(v2Lines.has(line)).toBe(true);
+    }
+  });
+
+  test('no v2 example opens on what the customer did not say or claims a talk', () => {
+    for (const example of PEST_VOICE_V2_EXAMPLES) {
+      expect(example.report).not.toMatch(/didn['’]t mention|did not mention|didn['’]t report|when we talked|when we spoke|spoke with|talked with/i);
+    }
+    expect(PEST_REPORT_VOICE_V2_PROMPT).not.toContain("you didn't mention anything new");
+  });
 });

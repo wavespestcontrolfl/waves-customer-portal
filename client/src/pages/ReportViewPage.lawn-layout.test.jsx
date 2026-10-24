@@ -589,7 +589,7 @@ describe('GATE_LAWN_REPORT_STORY (lawnLayout.story): the story order', () => {
     await waitForReport();
     const markers = [
       "Today's result", 'How did Alex do today', 'A note from Alex', 'Your part', 'Your treatment, explained', 'Lawn photos', 'Priority findings',
-      'Overall Lawn Status', 'What to expect', 'Water This Week', 'Ideal range', 'Ask Waves', 'Your plan', 'When to call us',
+      'Score details', 'What to expect', 'Water This Week', 'Ideal range', 'Ask Waves', 'Your plan', 'When to call us',
     ];
     const at = positions(container, markers);
     at.forEach((index, i) => expect(index, markers[i]).toBeGreaterThan(-1));
@@ -637,7 +637,7 @@ describe('GATE_LAWN_REPORT_STORY (lawnLayout.story): the story order', () => {
     expect(products).toHaveTextContent('Why we used it');
   });
 
-  it('the status card names the lawn service plainly and adds the lawn score', async () => {
+  it('the status card names the lawn service plainly and shows the score once, with its breakdown below', async () => {
     const payload = story(spotOn);
     const { container } = renderReport(payload);
     await waitForReport();
@@ -646,7 +646,20 @@ describe('GATE_LAWN_REPORT_STORY (lawnLayout.story): the story order', () => {
     expect(condition).toHaveTextContent('Your lawn today');
     expect(condition).toHaveTextContent(`${Math.round(payload.reportV2.snapshot.overallScore)}/100`);
     expect(condition.querySelector('a').getAttribute('href')).toBe('#lawn-section-score');
-    expect(container.querySelector('#lawn-section-score')).not.toBeNull();
+    const scoreSection = container.querySelector('#lawn-section-score');
+    expect(scoreSection.querySelector('summary')).toHaveTextContent('Score details');
+    expect(scoreSection.querySelector('summary')).not.toHaveTextContent(String(Math.round(payload.reportV2.snapshot.overallScore)));
+    expect(count(container, payload.reportV2.lead.headline)).toBe(1);
+    expect(scoreSection).toHaveTextContent('Turf Health Analysis');
+    // The hero shortcut should reveal its destination in one action and carry keyboard focus there.
+    const breakdown = scoreSection.querySelector('details');
+    scoreSection.scrollIntoView = vi.fn();
+    expect(breakdown.open).toBe(false);
+    fireEvent.click(condition.querySelector('a'));
+    expect(breakdown.open).toBe(true);
+    expect(scoreSection.querySelector('summary')).toHaveFocus();
+    expect(scoreSection.scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'instant' });
+    expect(window.location.hash).toBe('#lawn-section-score');
   });
 
   it('without the story key the layout order, the floating Ask Waves and the status card are as before', async () => {
