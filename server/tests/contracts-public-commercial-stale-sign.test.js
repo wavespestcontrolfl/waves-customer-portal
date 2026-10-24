@@ -3,7 +3,7 @@
  * signature is only good for the quote the contract shows. The agreement is issued by the real service, the proposal
  * is then edited, and the customer signs with the original link: 409, the stale contract is cancelled, nothing is
  * signed, no signed-copy email, no office alert. The control (unedited quote) signs and rings the office once.
- * The estimate row is locked before the customer row, the order the agreement issuer holds.
+ * The comms fence, then the customer row, then the estimate row: the order the agreement issuer holds.
  * Synthetic data only.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'stale-sign-test-secret';
@@ -168,6 +168,19 @@ test('the customer row is locked before the estimate row, and the estimate befor
   // The contract row's own lock (the second customer_contracts read) comes after the estimate lock.
   const contractLocks = order.map((t, i) => (t === 'customer_contracts' ? i : -1)).filter((i) => i >= 0);
   expect(contractLocks[1]).toBeGreaterThan(order.indexOf('estimates'));
+});
+
+test('the customer-comms fence is taken before the customer row (the fence the manual commercial win holds), so signing and marking won serialize', async () => {
+  const { token } = await issueAndWire();
+  const { lockCustomerComms } = require('../utils/customer-comms-lock');
+  lockCustomerComms.mockClear();
+  lockCustomerComms.mockImplementation(async () => { mockTableOrder.push('comms'); });
+  mockTableOrder.length = 0;
+  await sign(token);
+  expect(lockCustomerComms).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+  expect(mockTableOrder.indexOf('comms')).toBeGreaterThan(-1);
+  expect(mockTableOrder.indexOf('comms')).toBeLessThan(mockTableOrder.indexOf('customers'));
+  lockCustomerComms.mockImplementation(async () => undefined);
 });
 
 test('the estimate moved to another customer before the lock: the signature is refused, the contract cancelled, nothing signed', async () => {
