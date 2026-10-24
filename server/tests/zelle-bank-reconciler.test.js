@@ -13,9 +13,14 @@
  *     invoice ⇒ no alert (a personal transfer on a mixed account);
  *   - the time rules: a stale posting day parks; an invoice created after the
  *     money arrived is never auto-matched;
+ *   - the claim runs under the bank row's lock and refuses a row the bank
+ *     changed since the scan;
  *   - a credit the bank corrected or withdrew after it was read never
- *     settles: the settlement fence checks the bank row before anything is
+ *     settles: the settlement fence checks the full evidence (cents, posting
+ *     day, payer, still a credit, no pending change) before anything is
  *     retired and again under a bank-row lock right before the paid flip;
+ *   - a recorded payment whose bank row later carries a change raises one
+ *     "check the bank change" alert, gate on or off;
  *   - one failing row never stops the next;
  *   - every alert this module raises passes docs/admin-notifications.md;
  *   - the scheduler wiring and the Plaid request option (source pins).
@@ -29,6 +34,8 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.fn = { now: jest.fn(() => 'NOW()') };
   fn.raw = jest.fn((sql) => sql);
+  // The claim's short transaction reuses the per-table recorder.
+  fn.transaction = jest.fn(async (work) => { const trx = (table) => fn(table); trx.raw = fn.raw; trx.fn = fn.fn; return work(trx); });
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -71,6 +78,8 @@ const bankRow = (over = {}) => ({
   created_at: new Date('2026-10-24T16:30:00Z'),
   ...over,
 });
+// The bank row as stored, matching bankRow(): what the claim and the fence read.
+const STORED = { txn_date: '2026-10-24', amount: '117.00', direction: 'credit', description: 'Zelle', original_description: 'Zelle money received from PAT DOE', suggestion: null };
 const openRow = (over = {}) => ({
   id: 'inv-1', invoice_number: 'WPC-2026-0600', status: 'sent', customer_id: 'cust-1', total: '117.00', credit_applied: 0,
   service_date: '2026-10-20', created_at: new Date('2026-10-20T12:00:00Z'), customer_first_name: 'Pat', customer_last_name: 'Doe', ...over,
@@ -81,13 +90,17 @@ let tables;
 function builder(table) {
   const t = tables[table] || (tables[table] = { firsts: [], returning: [], selects: [], calls: [] });
   const b = {};
-  const chain = (name) => { b[name] = jest.fn((...args) => { t.calls.push([name, ...args]); return b; }); };
+  const chain = (name) => { b[name] = jest.fn((...args) => { t.calls.push([name, ...args]); if (name === 'where' && args[0] && typeof args[0] === 'object') b.whereArg = args[0]; return b; }); };
   ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereRaw', 'whereNotExists', 'orWhere', 'join', 'orderBy', 'limit', 'onConflict', 'ignore', 'insert'].forEach(chain);
   b.forUpdate = jest.fn(() => { t.calls.push(['forUpdate']); b.locked = true; return b; });
+  b.forShare = jest.fn(() => { t.calls.push(['forShare']); return b; });
   b.first = jest.fn(async (...args) => {
     t.calls.push(['first', ...args]);
     if (b.locked && t.lockedRow !== undefined) return t.lockedRow;
-    return t.firsts.length ? t.firsts.shift() : (t.fallback ?? null);
+    const queued = t.firsts.length ? t.firsts.shift() : AS_FED;
+    // A bank row read (the claim's lock, the fence) sees the row as the scan fed it.
+    if (queued === AS_FED) return table === 'bank_transactions' ? asStored(b.whereArg?.plaid_transaction_id) : null;
+    return queued;
   });
   b.select = jest.fn(async (...args) => { t.calls.push(['select', ...args]); return t.selects.length ? t.selects.shift() : []; });
   b.update = jest.fn(async (patch) => { t.calls.push(['update', patch]); return 1; });
@@ -97,11 +110,14 @@ function builder(table) {
 }
 const BANK = 'bank_transactions as bt';
 const NOTICES = 'inbound_payment_notices';
-const feed = (...rows) => { tables[BANK].selects.push(rows); };
+const AS_FED = Symbol('as fed');
+let fed;
+const asStored = (txnId) => (fed.has(txnId) ? { ...fed.get(txnId), direction: 'credit', suggestion: null } : null);
+const feed = (...rows) => { for (const r of rows) fed.set(r.plaid_transaction_id, r); tables[BANK].selects.push(rows); };
 // The claim insert's RETURNING row: what the database would hand back.
 const claimed = (over = {}) => {
   tables[NOTICES].returning.push([{
-    id: 'notice-1', plaid_transaction_id: 'ptx-1', source: BANK_SOURCE, payer_name: 'Pat Doe', amount_cents: 11700, claim_token: 'tok-1', ...over,
+    id: 'notice-1', plaid_transaction_id: 'ptx-1', source: BANK_SOURCE, payer_name: 'Pat Doe', amount_cents: 11700, received_at: TODAY_START_ET, claim_token: 'tok-1', ...over,
   }]);
 };
 const callsOf = (table, method) => (tables[table]?.calls || []).filter(([m]) => m === method).map(([, ...args]) => args);
@@ -119,9 +135,10 @@ beforeEach(() => {
     // The settlement fence's FOR UPDATE read of our claim finds it.
     [NOTICES]: { firsts: [], returning: [], selects: [], calls: [], lockedRow: { id: 'notice-1' } },
     emails: { firsts: [], returning: [], selects: [], calls: [] },
-    // bankEvidenceHolds' read: by default the bank still lists the credit as read.
-    bank_transactions: { firsts: [], returning: [], selects: [], calls: [], fallback: { amount: '117.00', direction: 'credit', suggestion: null } },
+    // Bank row reads default to the row as the scan fed it (AS_FED).
+    bank_transactions: { firsts: [], returning: [], selects: [], calls: [] },
   };
+  fed = new Map();
   db.mockImplementation((table) => builder(table));
   delete process.env.GATE_ZELLE_BANK_RECONCILE;
   OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async () => []);
@@ -334,15 +351,17 @@ describe('parks', () => {
 
 describe('the bank must still list the credit as it was read', () => {
   test.each([
-    ['corrected to another amount', { amount: '17.00', direction: 'credit', suggestion: null }],
-    ['now a debit', { amount: '117.00', direction: 'debit', suggestion: null }],
-    ['withdrawn on a reviewed row', { amount: '117.00', direction: 'credit', suggestion: { plaidRemoved: true } }],
-    ['a correction waiting on the operator', { amount: '117.00', direction: 'credit', suggestion: { plaidModified: { amount: 17 } } }],
+    ['corrected to another amount', { ...STORED, amount: '17.00' }],
+    ['now a debit', { ...STORED, direction: 'debit' }],
+    ['naming another payer', { ...STORED, original_description: 'Zelle money received from SAM ROE' }],
+    ['moved to another posting day', { ...STORED, txn_date: '2026-10-23' }],
+    ['withdrawn on a frozen row', { ...STORED, suggestion: { plaidRemoved: true } }],
+    ['a correction waiting on the operator', { ...STORED, suggestion: { plaidModified: { amount: 17 } } }],
     ['gone', null],
   ])('%s ⇒ the fence refuses before anything is recorded, and the notice parks apply_failed', async (_label, bankNow) => {
     feed(bankRow());
     claimed();
-    tables.bank_transactions.firsts.push(bankNow);
+    tables.bank_transactions.firsts.push(AS_FED, bankNow); // the claim's read, then the fence's
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(exactOnly([openRow()]));
     // recordManualPayment's contract: the fence runs pre-lock first, and false is a 409 with nothing written.
     recordManualPayment.mockImplementationOnce(async (_id, opts) => {
@@ -376,22 +395,49 @@ describe('the bank must still list the credit as it was read', () => {
         };
         return b;
       };
+      conn.raw = (sql) => sql;
       return { conn, seen };
     };
-    const ok = fenceConn({ inbound_payment_notices: { id: 'notice-1' }, bank_transactions: { amount: '117.00', direction: 'credit', suggestion: null } });
+    const ok = fenceConn({ inbound_payment_notices: { id: 'notice-1' }, bank_transactions: STORED });
     expect(await settlementFence(ok.conn, { id: 'inv-1' })).toBe(true);
     expect(ok.seen.map(({ table, locks }) => [table, locks])).toEqual([['inbound_payment_notices', ['update']], ['bank_transactions', ['share']]]);
     expect(ok.seen[0].where).toEqual({ id: 'notice-1', status: 'processing', claim_token: 'tok-1' });
 
-    const preLock = fenceConn({ inbound_payment_notices: { id: 'notice-1' }, bank_transactions: { amount: '117.00', direction: 'credit', suggestion: null } });
+    const preLock = fenceConn({ inbound_payment_notices: { id: 'notice-1' }, bank_transactions: STORED });
     expect(await settlementFence(preLock.conn)).toBe(true);
     expect(preLock.seen[1].locks).toEqual([]); // the pre-lock read takes no row lock
 
-    const corrected = fenceConn({ inbound_payment_notices: { id: 'notice-1' }, bank_transactions: { amount: '17.00', direction: 'credit', suggestion: null } });
+    const corrected = fenceConn({ inbound_payment_notices: { id: 'notice-1' }, bank_transactions: { ...STORED, amount: '17.00' } });
     expect(await settlementFence(corrected.conn, { id: 'inv-1' })).toBe(false);
-    const lostClaim = fenceConn({ inbound_payment_notices: undefined, bank_transactions: { amount: '117.00', direction: 'credit', suggestion: null } });
+    const lostClaim = fenceConn({ inbound_payment_notices: undefined, bank_transactions: STORED });
     expect(await settlementFence(lostClaim.conn, { id: 'inv-1' })).toBe(false);
     expect(lostClaim.seen).toHaveLength(1); // a lost claim never reads the bank row
+  });
+});
+
+describe('the claim and money already recorded', () => {
+  test('the claim locks the bank row and refuses a row the bank changed since the scan', async () => {
+    feed(bankRow());
+    tables.bank_transactions.firsts.push({ ...STORED, amount: '17.00' });
+    OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(exactOnly([openRow()]));
+    expect(await reconcileZelleBankFeed({ now: NOW })).toMatchObject({ owned: 1, decided: 0 });
+    expect(callsOf('bank_transactions', 'forUpdate')).toHaveLength(1);
+    expect(insertsOf(NOTICES)).toEqual([]);
+    expect(recordManualPayment).not.toHaveBeenCalled();
+  });
+
+  test('a recorded payment whose bank row now carries a change raises one check alert per notice — even with the gate off', async () => {
+    process.env.GATE_ZELLE_BANK_RECONCILE = 'false';
+    tables['inbound_payment_notices as n'] = { firsts: [], returning: [], selects: [[
+      { id: 'notice-9', source: BANK_SOURCE, payer_name: 'Pat Doe', amount_cents: 11700, matched_invoice_id: 'inv-9' },
+    ]], calls: [] };
+    expect(await reconcileZelleBankFeed({ now: NOW })).toEqual({ skipped: 'gate_off' });
+    const calls = tables['inbound_payment_notices as n'].calls;
+    expect(calls).toContainEqual(['join', 'bank_transactions as bt', 'bt.plaid_transaction_id', 'n.plaid_transaction_id']);
+    expect(calls).toContainEqual(['whereIn', 'n.status', ['auto_applied', 'applied']]);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — check the bank change on Pat Doe's $117.00 Zelle",
+      'The bank changed or withdrew this Zelle after the portal recorded it on the invoice.',
+      expect.objectContaining({ dedupeKey: 'zelle-notice:notice-9:bank-changed', bellDefault: true, link: '/admin/invoices?invoice=inv-9' }));
   });
 });
 
@@ -441,10 +487,10 @@ describe('alerts follow docs/admin-notifications.md', () => {
     expect(parkedAlert({ ...bank, source: 'capitalone_zelle' }, 'no_match', { candidates: [] })).not.toBeNull();
   });
 
-  test('the receipt-check and late-settlement alerts compose and open the invoice', () => {
-    const notice = { id: 'n-1', source: BANK_SOURCE, payer_name: 'Pat Doe', amount_cents: 11700 };
+  test('the receipt-check, late-settlement and bank-change alerts compose and open the invoice', () => {
+    const notice = { id: 'n-1', source: BANK_SOURCE, payer_name: 'Pat Doe', amount_cents: 11700, matched_invoice_id: 'inv-1' };
     const invoice = { id: 'inv-1', invoice_number: 'WPC-2026-0600' };
-    for (const alert of [receiptCheckAlert(notice, invoice), lateSettlementAlert(notice, invoice)]) {
+    for (const alert of [receiptCheckAlert(notice, invoice), lateSettlementAlert(notice, invoice), _private.bankChangedAlert(notice)]) {
       const composed = composeAdminAlert(alert.spec);
       expect(composed.link).toBe('/admin/invoices?invoice=inv-1');
       expect(composed.metadata.subject).toEqual({ type: 'invoice', id: 'inv-1' });

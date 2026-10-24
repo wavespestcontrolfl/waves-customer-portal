@@ -591,7 +591,25 @@ async function fetchAllChanges(accessToken, startCursor) {
 
 function sameMoneyFields(row, r) {
   return toDateOnly(row.txn_date) === r.txn_date && Number(row.amount) === r.amount
-    && row.direction === r.direction && row.description === r.description;
+    && row.direction === r.direction && row.description === r.description
+    // The bank's own wording names a Zelle payer, so a change to it is a
+    // correction too — once the row has it (rows synced before the column
+    // hold NULL and never churn when Plaid starts sending it).
+    && (row.original_description == null || row.original_description === r.original_description);
+}
+
+// Rows that back a Zelle payment notice (services/zelle-notice-reconciler.js):
+// the evidence of money the reconciler recorded or may record. Read AFTER the
+// rows are locked — the reconciler claims a notice under the same row lock,
+// so a notice either exists here or its claim waits for this sync and then
+// sees the bank's latest values.
+async function noticedTransactionIds(trx, transactionIds, into = new Set()) {
+  const ids = [...new Set(transactionIds.filter(Boolean))];
+  for (let i = 0; i < ids.length; i += 500) {
+    const rows = await trx('inbound_payment_notices').whereIn('plaid_transaction_id', ids.slice(i, i + 500)).select('plaid_transaction_id');
+    for (const r of rows) into.add(r.plaid_transaction_id);
+  }
+  return into;
 }
 
 async function applyChanges(trx, accountsById, changes) {
@@ -623,9 +641,10 @@ async function applyChanges(trx, accountsById, changes) {
     const rows = await trx('bank_transactions')
       .whereIn('plaid_transaction_id', ids.slice(i, i + 500))
       .forUpdate()
-      .select('id', 'status', 'plaid_transaction_id', 'txn_date', 'amount', 'direction', 'description', 'suggestion');
+      .select('id', 'status', 'plaid_transaction_id', 'txn_date', 'amount', 'direction', 'description', 'original_description', 'suggestion');
     for (const row of rows) existingById.set(row.plaid_transaction_id, row);
   }
+  const noticed = await noticedTransactionIds(trx, [...existingById.keys()]);
 
   const toInsert = [];
   // a correction that makes a STAGED transaction unstageable (zeroed out,
@@ -634,8 +653,10 @@ async function applyChanges(trx, accountsById, changes) {
   const withdrawnByCorrection = [];
   // reviewed = linked or ignored, or still open but shelved from the ledger
   // Inbox (a Later or Income decision): the owner judged the row, so the
-  // bank's change parks on it instead of replacing or deleting it
-  const reviewedRow = (r) => r.status !== 'unmatched' || taxLedgerRules.hasOpenDecision(r.suggestion);
+  // bank's change parks on it instead of replacing or deleting it. A row that
+  // backs a Zelle payment notice is held the same way: it is the evidence of
+  // that payment, never rewritten or deleted under it.
+  const reviewedRow = (r) => r.status !== 'unmatched' || taxLedgerRules.hasOpenDecision(r.suggestion) || noticed.has(r.plaid_transaction_id);
   for (const txn of changes.upserts) {
     const existing = existingById.get(txn.transaction_id);
     const m = mapTransaction(txn, accountsById.get(txn.account_id), { correction: !!existing });
@@ -667,7 +688,7 @@ async function applyChanges(trx, accountsById, changes) {
       await trx('bank_transactions').where({ id: existing.id }).update({
         // a valid version supersedes an earlier withdrawal (e.g. zeroed, then restored)
         suggestion: trx.raw("(coalesce(suggestion, '{}'::jsonb) - 'plaidRemoved') || ?::jsonb", [JSON.stringify({
-          plaidModified: { txn_date: r.txn_date, amount: r.amount, direction: r.direction, description: r.description },
+          plaidModified: { txn_date: r.txn_date, amount: r.amount, direction: r.direction, description: r.description, original_description: r.original_description },
         })]),
         updated_at: trx.fn.now(),
       });
@@ -692,7 +713,8 @@ async function applyChanges(trx, accountsById, changes) {
     const locked = await trx('bank_transactions')
       .whereIn('plaid_transaction_id', removedIds.slice(i, i + 500))
       .forUpdate()
-      .select('id', 'status', 'suggestion');
+      .select('id', 'status', 'suggestion', 'plaid_transaction_id');
+    await noticedTransactionIds(trx, locked.map(r => r.plaid_transaction_id), noticed);
     const unmatched = locked.filter(r => !reviewedRow(r)).map(r => r.id);
     // a withdrawal the operator already dismissed is not raised again, and a
     // correction parked since it is obsolete (the bank's latest = withdrawn)

@@ -112,6 +112,12 @@ async function activate(itemId, overrides = {}) {
     ]) {
       await require(`../models/migrations/${m}`).up(mockPg);
     }
+    // The one column plaid-sync reads from the Zelle notices
+    // (noticedTransactionIds): a stand-in in SCHEMA, after the migrations.
+    await mockPg.schema.createTable('inbound_payment_notices', t => {
+      t.uuid('id').primary().defaultTo(mockPg.raw('gen_random_uuid()'));
+      t.string('plaid_transaction_id', 100).unique();
+    });
   });
 
   afterAll(async () => {
@@ -127,6 +133,7 @@ async function activate(itemId, overrides = {}) {
     // clearAllMocks keeps queued mockResolvedValueOnce values — a test that
     // queues one it never consumes would hand it to the next test
     for (const fn of [plaid.exchangePublicToken, plaid.getAccounts, plaid.transactionsSync]) fn.mockReset();
+    await mockPg('inbound_payment_notices').del();
     await mockPg('bank_transactions').del();
     await mockPg('plaid_accounts').del();
     await mockPg('plaid_items').del();
@@ -326,6 +333,57 @@ async function activate(itemId, overrides = {}) {
     expect(rows['t-c']).toBeUndefined();
     expect(rows['t-d'].suggestion).toEqual({ plaidRemoved: true });
     expect(rows['t-d'].matched_expense_id).toBe(exp2.id);
+  });
+
+  test('an open row that backs a Zelle payment notice is frozen evidence: a correction parks on it and a withdrawal flags it', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    const zelle = { name: 'Zelle', original_description: 'Zelle money received from PAT DOE' };
+    plaid.transactionsSync.mockResolvedValueOnce(page([
+      txn('t-z', 'acc-chk', -117, '2026-09-05', zelle),
+      txn('t-y', 'acc-chk', -50, '2026-09-05', zelle),
+      txn('t-x', 'acc-chk', -60, '2026-09-05', zelle),
+    ], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    await mockPg('inbound_payment_notices').insert([{ plaid_transaction_id: 't-z' }, { plaid_transaction_id: 't-y' }]);
+
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [
+      txn('t-z', 'acc-chk', -17, '2026-09-05', zelle),
+      txn('t-x', 'acc-chk', -61, '2026-09-05', zelle),
+    ], [{ transaction_id: 't-y' }], 'cursor-2'));
+    const out = await plaidSync.syncItem(itemId);
+    expect(out).toMatchObject({ updated: 1, deleted: 0, flagged: 2 });
+
+    const rows = Object.fromEntries((await mockPg('bank_transactions')).map(r => [r.plaid_transaction_id, r]));
+    expect(rows['t-z'].status).toBe('unmatched'); // still open, yet held like a reviewed row
+    expect(Number(rows['t-z'].amount)).toBe(117);
+    expect(rows['t-z'].suggestion.plaidModified).toMatchObject({ amount: 17, original_description: 'Zelle money received from PAT DOE' });
+    expect(rows['t-y'].suggestion).toEqual({ plaidRemoved: true }); // withdrawn, never deleted under the notice
+    expect(Number(rows['t-x'].amount)).toBe(61); // no notice: rewritten as before
+  });
+
+  test('the bank\'s own wording is stored; a change to it alone is a correction once the row has it, and rows synced without it never churn', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([
+      txn('t-w', 'acc-chk', -40, '2026-09-05', { name: 'Zelle', original_description: 'Zelle money received from PAT DOE' }),
+      txn('t-v', 'acc-chk', -30, '2026-09-05', { name: 'Zelle' }),
+    ], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    let rows = Object.fromEntries((await mockPg('bank_transactions')).map(r => [r.plaid_transaction_id, r]));
+    expect(rows['t-w'].original_description).toBe('Zelle money received from PAT DOE');
+    expect(rows['t-v'].original_description).toBeNull();
+    const vId = rows['t-v'].id;
+
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [
+      txn('t-w', 'acc-chk', -40, '2026-09-05', { name: 'Zelle', original_description: 'Zelle money received from SAM ROE' }),
+      txn('t-v', 'acc-chk', -30, '2026-09-05', { name: 'Zelle', original_description: 'Zelle money received from SAM ROE' }),
+    ], [], 'cursor-2'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ updated: 1 });
+    rows = Object.fromEntries((await mockPg('bank_transactions')).map(r => [r.plaid_transaction_id, r]));
+    expect(rows['t-w'].original_description).toBe('Zelle money received from SAM ROE');
+    expect(rows['t-v'].id).toBe(vId); // NULL before: left alone
+    expect(rows['t-v'].original_description).toBeNull();
   });
 
   test('an open row shelved from the ledger Inbox (Later / Income) is reviewed: a correction parks, a withdrawal flags, the decision stays', async () => {

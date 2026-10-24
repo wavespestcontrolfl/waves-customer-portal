@@ -25,10 +25,12 @@ jest.mock('../services/invoice-manual-payment', () => ({ recordManualPayment: je
 const { randomUUID } = require('node:crypto');
 const { recordManualPayment } = require('../services/invoice-manual-payment');
 const NotificationService = require('../services/notification-service');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const MIGRATION = '20261024233000_zelle_bank_feed_notices';
 const HOUR = 3600 * 1000;
+// What a claimed bank notice carries for today's synthetic credit.
+const todayStartET = () => parseETDateTime(`${etDateString(new Date())}T00:00`);
 
 postgres('Zelle payments from the bank feed against migrated PostgreSQL', () => {
   let database;
@@ -159,17 +161,64 @@ postgres('Zelle payments from the bank feed against migrated PostgreSQL', () => 
     expect(recordManualPayment).toHaveBeenCalledTimes(1);
   });
 
-  test('bank evidence: same Plaid transaction, still a credit, same cents, no pending change — and it can be read under FOR SHARE', async () => {
+  test('bank evidence: same Plaid transaction, still a credit, same cents, day and payer, no pending change — and it can be read under FOR SHARE', async () => {
     const { bank } = await linkAccounts();
     const row = await bankRow(bank);
-    const notice = { plaid_transaction_id: row.plaid_transaction_id, amount_cents: 17329 };
+    const notice = { plaid_transaction_id: row.plaid_transaction_id, amount_cents: 17329, payer_name: 'Quentin Zellefeedtest', received_at: todayStartET() };
     expect(await reconciler.bankEvidenceHolds(trx, notice)).toBe(true);
     expect(await reconciler.bankEvidenceHolds(trx, notice, { lock: true })).toBe(true);
     expect(await reconciler.bankEvidenceHolds(trx, { ...notice, amount_cents: 1700 })).toBe(false);
+    expect(await reconciler.bankEvidenceHolds(trx, { ...notice, payer_name: 'Sam Roe' })).toBe(false);
+    expect(await reconciler.bankEvidenceHolds(trx, { ...notice, received_at: new Date(todayStartET().getTime() - 24 * HOUR) })).toBe(false);
     expect(await reconciler.bankEvidenceHolds(trx, { ...notice, plaid_transaction_id: `ptx-${randomUUID()}` })).toBe(false);
     await trx('bank_transactions').where({ id: row.id }).update({ suggestion: JSON.stringify({ plaidRemoved: true }) });
     expect(await reconciler.bankEvidenceHolds(trx, notice)).toBe(false);
     expect(await reconciler.bankEvidenceHolds(trx, { plaid_transaction_id: null, amount_cents: 100 })).toBe(true); // an email notice has no bank row
+  });
+
+  test('the claim holds the bank row\'s lock and refuses a row the bank changed since the scan', async () => {
+    const { bank } = await linkAccounts();
+    const row = await bankRow(bank);
+    const [scanned] = await reconciler._private.bankRowsToDecide(Date.now());
+    const parsed = { payerName: 'Quentin Zellefeedtest', amountCents: 17329 };
+    // The bank corrected the amount between the scan and the claim.
+    await trx('bank_transactions').where({ id: row.id }).update({ amount: '17.29' });
+    expect(await reconciler._private.claimBankNotice(scanned, parsed)).toBeNull();
+    await trx('bank_transactions').where({ id: row.id }).update({ amount: '173.29' });
+    const notice = await reconciler._private.claimBankNotice(scanned, parsed);
+    expect(notice).toMatchObject({ plaid_transaction_id: row.plaid_transaction_id, status: 'processing', received_at: todayStartET() });
+  });
+
+  test('frozen evidence end to end: once a notice backs the row, a Plaid correction parks on it and a recorded payment raises the bank-change alert', async () => {
+    const { bank } = await linkAccounts();
+    const row = await bankRow(bank);
+    const [noticeRow] = await trx('inbound_payment_notices').insert({
+      plaid_transaction_id: row.plaid_transaction_id, source: reconciler.BANK_SOURCE, payer_name: 'Quentin Zellefeedtest', amount_cents: 17329,
+      received_at: todayStartET(), status: 'auto_applied', applied_at: new Date(), applied_by: reconciler.RECORDED_BY,
+    }).returning('id');
+    const account = await trx('plaid_accounts').where({ account_id: bank }).first();
+    const plaidSync = require('../services/plaid-sync');
+    const corrected = {
+      transaction_id: row.plaid_transaction_id, account_id: bank, amount: -17.29, date: etDateString(new Date()), pending: false, iso_currency_code: 'USD',
+      name: 'Zelle', original_description: 'Zelle money received from QUENTIN ZELLEFEEDTEST',
+    };
+    expect(await plaidSync._private.applyChanges(trx, new Map([[bank, account]]), { upserts: [corrected], removedIds: [] }))
+      .toMatchObject({ updated: 0, flagged: 1 });
+    const kept = await trx('bank_transactions').where({ plaid_transaction_id: row.plaid_transaction_id });
+    expect(kept).toHaveLength(1);
+    expect(kept[0].id).toBe(row.id); // never replaced under the notice
+    expect(Number(kept[0].amount)).toBe(173.29);
+    expect(kept[0].suggestion.plaidModified).toMatchObject({ amount: 17.29 });
+
+    expect(await reconciler._private.alertChangedSettlements()).toBe(1);
+    // A long payer name is shortened to fit the headline; the amount stays.
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — check the bank change on Quentin…'s $173.29 Zelle",
+      expect.any(String), expect.objectContaining({ dedupeKey: `zelle-notice:${noticeRow.id}:bank-changed` }));
+
+    // A withdrawal flags the row; it is never deleted under the notice.
+    expect(await plaidSync._private.applyChanges(trx, new Map([[bank, account]]), { upserts: [], removedIds: [row.plaid_transaction_id] }))
+      .toMatchObject({ deleted: 0, flagged: 1 });
+    expect(await trx('bank_transactions').where({ id: row.id }).first('id')).toBeTruthy();
   });
 
   test('one notice per Plaid transaction, and every notice has exactly one source', async () => {

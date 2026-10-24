@@ -180,14 +180,12 @@ const noticeAmount = (notice) => (notice.amount_cents != null ? usd(notice.amoun
 const noticeAlertKey = (noticeId) => `zelle-notice:${noticeId}`;
 
 // "review Pat Doe's $117.00 Zelle": the payer and the amount lead the
-// headline; fitAction keeps a long payer name inside the 60 characters.
+// headline; fitAction shortens a long payer name (never the amount) to keep
+// it inside the 60 characters.
 function zelleAction(notice, verb) {
   const amount = noticeAmount(notice);
   if (!notice.payer_name) return amount ? `${verb} a ${amount} Zelle payment` : `${verb} a Zelle payment`;
-  return fitAction('Billing', notice.payer_name, [
-    ...(amount ? [(name) => `${verb} ${name}'s ${amount} Zelle`] : []),
-    (name) => `${verb} ${name}'s Zelle`,
-  ]);
+  return fitAction('Billing', notice.payer_name, [amount ? (name) => `${verb} ${name}'s ${amount} Zelle` : (name) => `${verb} ${name}'s Zelle`]);
 }
 
 const PARK_WHY = {
@@ -263,6 +261,29 @@ function lateSettlementAlert(notice, invoice) {
       who: 'person',
     },
     opts: { dedupeKey: `${noticeAlertKey(notice.id)}:late`, bellDefault: true, metadata: { noticeId: notice.id, invoiceId: invoice.id } },
+  };
+}
+
+// Pure: the bank changed or withdrew a payment after it was recorded.
+function bankChangedAlert(notice) {
+  const invoiceId = notice.matched_invoice_id || null;
+  return {
+    spec: {
+      area: 'Billing',
+      action: zelleAction(notice, 'check the bank change on'),
+      why: 'The bank changed or withdrew this Zelle after the portal recorded it on the invoice.',
+      severity: 'needs-you',
+      link: invoiceId ? `/admin/invoices?invoice=${invoiceId}` : '/admin/invoices',
+      subject: invoiceId ? { type: 'invoice', id: String(invoiceId) } : { type: 'check', id: String(notice.id) },
+      doneWhen: 'bank_change_checked',
+      who: 'person',
+    },
+    opts: {
+      dedupeKey: `${noticeAlertKey(notice.id)}:bank-changed`,
+      bellDefault: true,
+      metadata: { noticeId: notice.id, invoiceId },
+      detail: 'The change waits on the bank row in Taxes, Bank Import. If the money was withdrawn, the invoice is not paid.',
+    },
   };
 }
 
@@ -751,20 +772,35 @@ function amountCentsOf(amount) {
   return cents > 0 ? cents : null;
 }
 
-// The bank still lists the credit as the notice read it: the same Plaid
-// transaction, still a credit, the notice's exact cents, and no withdrawal or
-// correction waiting on the operator (plaid-sync parks those on a reviewed
-// row and replaces an open row under the same Plaid id). An email notice has
-// no bank row and always passes. Both settling paths ask it before settling
-// and again inside the settlement fence, where `lock` holds the bank row
-// (FOR SHARE) through the paid flip so a correction cannot land in between.
+// The bank row as a notice reads it: posting day, cents, still a credit,
+// the payer the bank's wording names, and no withdrawal or correction
+// waiting on the operator.
+const BANK_EVIDENCE_COLUMNS = ['amount', 'direction', 'description', 'original_description', 'suggestion'];
+function bankEvidenceOf(row) {
+  const { hasUnresolvedBankChange } = require('./bank-import');
+  return {
+    day: String(row.txn_date || '').slice(0, 10),
+    cents: amountCentsOf(row.amount),
+    payer: parseZelleBankPayer(bankZelleText(row)),
+    settled: row.direction === 'credit' && !hasUnresolvedBankChange(row),
+  };
+}
+
+// The bank still lists the credit exactly as the notice recorded it. Once a
+// notice exists, plaid-sync never rewrites or deletes its row (a change parks
+// on it), so a correction or withdrawal shows as a pending change here. An
+// email notice has no bank row and always passes. Both settling paths ask it
+// before claiming or settling and again inside the settlement fence, where
+// `lock` holds the bank row (FOR SHARE) through the paid flip.
 async function bankEvidenceHolds(conn, notice, { lock = false } = {}) {
   if (!notice.plaid_transaction_id) return true;
   const q = conn('bank_transactions').where({ plaid_transaction_id: notice.plaid_transaction_id });
   if (lock) q.forShare();
-  const row = await q.first('amount', 'direction', 'suggestion');
-  const { hasUnresolvedBankChange } = require('./bank-import');
-  return !!row && row.direction === 'credit' && amountCentsOf(row.amount) === notice.amount_cents && !hasUnresolvedBankChange(row);
+  const row = await q.first(conn.raw('txn_date::text as txn_date'), ...BANK_EVIDENCE_COLUMNS);
+  if (!row) return false;
+  const now = bankEvidenceOf(row);
+  return now.settled && now.cents === notice.amount_cents && (now.payer || null) === (notice.payer_name || null)
+    && etDayStartMs(now.day) === new Date(notice.received_at).getTime();
 }
 
 const etDayStartMs = (day) => parseETDateTime(`${day}T00:00`).getTime();
@@ -800,11 +836,22 @@ function bankRowsToDecide(nowMs) {
     .select('bt.plaid_transaction_id', 'bt.account_label', db.raw('bt.txn_date::text as txn_date'), 'bt.amount', 'bt.description', 'bt.original_description', 'bt.created_at');
 }
 
-// Claim the notice row for this transaction. Returns null when another pass
-// already owns it (plaid_transaction_id UNIQUE).
+// Claim the notice row for this transaction, under the bank row's lock:
+// plaid-sync takes the same lock before it replaces or deletes a row and only
+// then looks for notices, so once this claim commits the row is frozen
+// evidence; a sync that ran first left the bank's latest values, which must
+// still be what this pass read. Returns null when another pass owns the
+// transaction (plaid_transaction_id UNIQUE) or the bank changed it since the
+// scan (the next pass reads it again).
 async function claimBankNotice(row, { payerName, amountCents }) {
-  const [notice] = await db('inbound_payment_notices')
-    .insert({
+  return db.transaction(async (trx) => {
+    const current = await trx('bank_transactions').where({ plaid_transaction_id: row.plaid_transaction_id }).forUpdate()
+      .first(trx.raw('txn_date::text as txn_date'), ...BANK_EVIDENCE_COLUMNS);
+    const read = bankEvidenceOf({ ...row, direction: 'credit', suggestion: null });
+    const now = current && bankEvidenceOf(current);
+    if (!now || !now.settled || now.day !== read.day || now.cents !== read.cents || now.payer !== read.payer) return null;
+    const [notice] = await trx('inbound_payment_notices')
+      .insert({
       plaid_transaction_id: row.plaid_transaction_id,
       source: BANK_SOURCE,
       payer_name: payerName,
@@ -817,10 +864,25 @@ async function claimBankNotice(row, { payerName, amountCents }) {
       claim_token: randomUUID(),
       candidates: null,
     })
-    .onConflict('plaid_transaction_id')
-    .ignore()
-    .returning('*');
-  return notice || null;
+      .onConflict('plaid_transaction_id')
+      .ignore()
+      .returning('*');
+    return notice || null;
+  });
+}
+
+// A recorded bank-feed payment whose transaction the bank changed or
+// withdrew afterwards: plaid-sync parked the change on the row (it backs a
+// notice) while the invoice still says paid. One alert per notice (the
+// dedupe key holds it to one ring); a person checks the invoice.
+async function alertChangedSettlements() {
+  const rows = await db('inbound_payment_notices as n')
+    .join('bank_transactions as bt', 'bt.plaid_transaction_id', 'n.plaid_transaction_id')
+    .whereIn('n.status', ['auto_applied', 'applied'])
+    .whereRaw("(bt.suggestion->'plaidModified' IS NOT NULL OR bt.suggestion->'plaidRemoved' IS NOT NULL)")
+    .select('n.id', 'n.source', 'n.payer_name', 'n.amount_cents', 'n.matched_invoice_id');
+  for (const notice of rows) await raise(bankChangedAlert(notice), notice.id);
+  return rows.length;
 }
 
 async function decideBankRow(row, nowMs) {
@@ -857,6 +919,8 @@ async function decideBankRow(row, nowMs) {
 // parked by the sweep.
 async function reconcileZelleBankFeed({ now = Date.now() } = {}) {
   await recoverStaleClaims().catch((err) => logger.warn(`[zelle-notice] stale-claim recovery failed: ${err.message}`));
+  // Money already recorded is checked against the bank whatever the gate says.
+  await alertChangedSettlements().catch((err) => logger.warn(`[zelle-notice] changed-settlement check failed: ${err.message}`));
   if (!isZelleBankReconcileEnabled()) return { skipped: 'gate_off' };
   const rows = await bankRowsToDecide(now);
   const counts = { read: rows.length, decided: 0, owned: 0, skipped: 0, failed: 0 };
@@ -901,5 +965,5 @@ module.exports = {
   amountCentsOf,
   bankEvidenceHolds,
   BANK_CHANGED_ERROR,
-  _private: { parkedAlert, receiptCheckAlert, lateSettlementAlert, bankRowsToDecide },
+  _private: { parkedAlert, receiptCheckAlert, lateSettlementAlert, bankChangedAlert, bankRowsToDecide, claimBankNotice, alertChangedSettlements },
 };
