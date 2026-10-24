@@ -336,9 +336,10 @@ function protocolVersion() {
 }
 
 // The same for the outline's own words: the v13 outline (GATE_LAWN_OUTLINE_V13) stamps
-// its own content version, so a flip shows outlines built before it as updated.
+// its own content version, so a flip shows outlines built before it as updated. The
+// Estimates list's stale check reads it, so it reads the gate and the two constants only.
 function contentLibraryVersion() {
-  return outlineVariant().contentLibraryVersion;
+  return outlineV13Live() ? V13_CONTENT_LIBRARY_VERSION : CONTENT_LIBRARY_VERSION;
 }
 
 function protocolVisitForMonth(turfType, month) {
@@ -869,6 +870,7 @@ const OUTLINES = Object.freeze({
     treatmentCategories: ({ turf, visit, seasonBand }) => buildTreatmentCategories({ turfType: turf.turfType, visit, seasonBand }),
     productCardReason: (name, visit, turfType) => `${name} appears in the ${visit.month} ${TURF_LABELS[turfType]} protocol as a conditional or seasonal option.`,
     noProgram: () => false,
+    regenerationTurfType: (packet, snapshot) => packet?.turf_type || snapshot.turfType || null,
   }),
   v13: Object.freeze({
     contentLibraryVersion: V13_CONTENT_LIBRARY_VERSION,
@@ -880,11 +882,20 @@ const OUTLINES = Object.freeze({
     treatmentCategories: () => V13_TREATMENT_CATEGORIES.map((item) => ({ ...item })),
     productCardReason: (name, visit) => `${name} appears in the ${visit.month} lawn program as a conditional or seasonal option.`,
     noProgram: (turf) => bahiaHasNoProgram(turf.turfType),
+    // Only the staff's own pick: the packet's turf_type may be a grass the old outline guessed.
+    regenerationTurfType: (_packet, snapshot) => snapshot.turfType || null,
   }),
 });
 
 function outlineVariant() {
   return outlineV13Live() ? OUTLINES.v13 : OUTLINES.legacy;
+}
+
+// The grass a regenerated outline starts from. The v13 outline keeps only a grass staff picked (the
+// packet's input snapshot) and otherwise re-reads the estimate, so a grass an older outline guessed
+// (the bermudaSuppression flag read as Bermuda) is never carried forward as a pick.
+function regenerationTurfType(packet) {
+  return outlineVariant().regenerationTurfType(packet, packet?.input_snapshot_json || {});
 }
 
 async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
@@ -1019,6 +1030,7 @@ module.exports = {
   hashNullable,
   hashToken,
   normalizeTurfType,
+  regenerationTurfType,
   renderOutlineHtml,
   resolveJurisdictionId,
   resolveSeasonBand,

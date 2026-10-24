@@ -16,6 +16,7 @@ const {
   buildOutline,
   createPublicToken,
   hashToken,
+  regenerationTurfType,
 } = require('../services/lawn-service-outline');
 
 const router = express.Router();
@@ -219,7 +220,7 @@ async function insertPacket(trx, { estimate, outline, input, req, rawToken, stat
 function inputFromPacket(packet) {
   const snapshot = packet?.input_snapshot_json || {};
   return {
-    turfType: packet?.turf_type || snapshot.turfType || null,
+    turfType: regenerationTurfType(packet),
     detailLevel: snapshot.detailLevel || 'standard',
     includeProductCards: Array.isArray(packet?.content_json?.productCards) && packet.content_json.productCards.length > 0,
     includeProductCategories: true,

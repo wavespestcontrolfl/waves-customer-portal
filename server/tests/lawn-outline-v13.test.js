@@ -210,6 +210,26 @@ describe('the grass is the one the estimate recorded', () => {
   });
 });
 
+describe('regenerating an older outline', () => {
+  // A packet the old outline built for a St. Augustine estimate: it guessed Bermuda, and staff picked nothing.
+  const guessedPacket = { turf_type: 'bermuda', input_snapshot_json: { turfType: null, month: 10 } };
+  const pickedPacket = { turf_type: 'zoysia', input_snapshot_json: { turfType: 'zoysia', month: 10 } };
+
+  test('gate off keeps the packet grass; the v13 outline keeps only a staff pick and re-reads the estimate', async () => {
+    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+      expect(outline.regenerationTurfType(guessedPacket)).toBe('bermuda');
+      expect(outline.regenerationTurfType(pickedPacket)).toBe('zoysia');
+    });
+    await withGates(BOTH, async () => {
+      expect(outline.regenerationTurfType(guessedPacket)).toBeNull();
+      expect(outline.regenerationTurfType(pickedPacket)).toBe('zoysia');
+      const regenerated = await build(ST_AUG_ESTIMATE, { month: 10, turfType: outline.regenerationTurfType(guessedPacket) });
+      expect(regenerated.meta.turf.turfType).toBe('st_augustine');
+      expect(regenerated.meta.contentLibraryVersion).toBe('lawn-v13-copy-1');
+    });
+  });
+});
+
 describe('the sections', () => {
   test('one program section, the report month text, the year, no tier line and no restricted-season line', async () => {
     await withGates(BOTH, async () => {
