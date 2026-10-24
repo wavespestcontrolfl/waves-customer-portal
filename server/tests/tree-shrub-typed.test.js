@@ -442,6 +442,71 @@ describe('palm capture fields (owner 2026-10-23)', () => {
     expect(validate({ palm_symptoms: 'Wilting' }).ok).toBe(false);
   });
 
+  // The Fast Complete T&S sheet posts exactly these keys (FastCompleteTreeShrubSheet
+  // completionBody): no treatments_completed, no customer_recommendations. The
+  // route (complete-scheduled-service.js) strips treatments_completed, runs this
+  // validator with enforceRequired, then the banned-copy scan over every string
+  // value, then buildTypedReportSnapshot on the same values.
+  const FAST_COMPLETE_VALUES = {
+    plant_groups: 'Palms, Shrubs',
+    landscape_condition: 'Good',
+    ...PALM_VALUES,
+  };
+
+  test('Fast Complete sheet values (palm keys, no recommendations) pass the route validation; absent palm keys still pass', () => {
+    const run = (values) => validateTypedFindings({ type: 'tree_shrub', expectedType: 'tree_shrub', enforceRequired: true, values });
+    expect(run(FAST_COMPLETE_VALUES).ok).toBe(true);
+    const { palm_count_total, palm_count_large, palm_types_seen, palm_symptoms, ...bare } = FAST_COMPLETE_VALUES;
+    expect([palm_count_total, palm_count_large, palm_types_seen, palm_symptoms]).toHaveLength(4);
+    expect(run(bare).ok).toBe(true);
+  });
+
+  test('no palm option or value trips the customer banned-copy scan the route runs over every string value', () => {
+    for (const key of ['palm_types_seen', 'palm_symptoms']) {
+      for (const option of byKey[key].options) expect({ option, hits: findBannedCustomerCopy(option) }).toEqual({ option, hits: [] });
+    }
+    for (const value of Object.values(FAST_COMPLETE_VALUES)) expect(findBannedCustomerCopy(value)).toEqual([]);
+  });
+
+  test('the frozen snapshot keeps the Fast Complete palm values under the typed keys, and estimate-actuals reads the count', () => {
+    const { buildActualsRow } = require('../services/estimate-actuals')._private;
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'tree_shrub',
+      values: { ...FAST_COMPLETE_VALUES },
+      serviceKey: 'tree_shrub_program',
+      serviceLabel: 'Tree & Shrub Care Program',
+      visitSequence: 1,
+      activity: null,
+    });
+    for (const key of Object.keys(PALM_VALUES)) expect(snapshot.values[key]).toBe(PALM_VALUES[key]);
+    const row = buildActualsRow({
+      serviceRecord: {
+        id: 'sr-palm', customer_id: 'cust-palm', service_line: 'tree_shrub', service_date: '2026-10-23',
+        service_data: JSON.stringify({ typedReportSnapshot: snapshot }),
+      },
+      scheduledService: { id: 'ss-palm' },
+      estimate: { id: 'est-palm', estimate_data: {} },
+      completion: {},
+      productCount: '0',
+    });
+    expect(JSON.parse(row.actual).treeShrub.palmCount).toBe(9);
+  });
+
+  test('customer-facing findings carry no palm label, key or value', () => {
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'tree_shrub',
+      values: { ...FAST_COMPLETE_VALUES },
+      serviceKey: 'tree_shrub_program',
+      serviceLabel: 'Tree & Shrub Care Program',
+      visitSequence: 1,
+      activity: null,
+    });
+    const customerText = JSON.stringify({ findings: snapshot.findings, todaysResult: snapshot.todaysResult });
+    for (const needle of ['palm_count', 'palm_types_seen', 'palm_symptoms', 'Frizzle-top', 'Queen palm', 'Large palms', 'Palm types seen']) {
+      expect(customerText).not.toContain(needle);
+    }
+  });
+
   test('palm fields persist in the snapshot values but never reach customer findings', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'tree_shrub',
