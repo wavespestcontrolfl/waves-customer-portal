@@ -9,24 +9,24 @@ import ServiceOutlinePage from './ServiceOutlinePage';
 // The v13 outline sections carry a `visual` (GATE_LAWN_OUTLINE_V13, server/services/lawn-service-outline.js);
 // their bullets are the text for readers that draw none. Shapes below mirror what the builder writes.
 const LABELS = {
-  inspection: 'Inspection', feeding: 'Feeding', barrier: 'Weed barrier', micros: 'Micronutrients',
-  weeds: 'Weed spots', insects: 'Insect control', disease: 'Disease control', dry_spots: 'Dry spots',
+  inspection: 'Inspection', feeding: 'Fertilizer', barrier: 'Pre-emergent', micros: 'Micronutrients',
+  weeds: 'Weed control', insects: 'Insect control', disease: 'Disease control', dry_spots: 'Wetting agent',
 };
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function v13Content() {
   return {
     title: 'Your Waves Lawn Care Program Overview',
-    intro: 'Based on your estimate, this outline explains how Waves approaches your lawn care program.',
-    property: { addressSummary: '100 Test Way, Sarasota', turfType: 'St. Augustine' },
+    intro: 'Based on your estimate for Test Customer. One program covers every lawn we treat.',
+    property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One program for every lawn' },
     season: { monthName: 'Oct' },
     sections: [
       {
         key: 'lawn_program',
-        title: 'One Program For Your Lawn',
-        body: 'Waves runs one lawn program for every grass type we treat.',
-        bullets: ['One whole-lawn treatment: At most visits, by hose or spreader'],
-        visual: { type: 'tiles', items: [{ icon: 'whole_lawn', title: 'One whole-lawn treatment', text: 'At most visits, by hose or spreader' }] },
+        title: 'One Program For Every Lawn',
+        body: 'Most of the lawns we treat are St. Augustine, so the program is built around it.',
+        bullets: ['Threshold counts first: Chinch bugs are counted before any curative treatment'],
+        visual: { type: 'tiles', items: [{ icon: 'count', title: 'Threshold counts first', text: 'Chinch bugs are counted before any curative treatment' }] },
       },
       {
         key: 'season_focus',
@@ -36,8 +36,8 @@ function v13Content() {
         visual: {
           type: 'chips',
           items: [
-            { key: 'feeding', label: 'Feeding', tier: 'main' },
-            { key: 'barrier', label: 'Weed barrier', tier: 'main' },
+            { key: 'feeding', label: 'Fertilizer', tier: 'main' },
+            { key: 'barrier', label: 'Pre-emergent', tier: 'main' },
             { key: 'disease', label: 'Disease control', tier: 'as_needed' },
           ],
           note: 'Each step depends on turf condition, weather, label directions, and local rules.',
@@ -47,11 +47,11 @@ function v13Content() {
         key: 'program_year',
         title: 'Your Year At A Glance',
         body: 'Each visit follows the step for the month it falls in.',
-        bullets: ['January: Weed barrier, Micronutrients; as needed: Disease control, Weed spots'],
+        bullets: ['January: Pre-emergent, Micronutrients; as needed: Disease control, Weed control'],
         visual: {
           type: 'year',
           labels: LABELS,
-          limitLabel: 'Local summer fertilizer limits',
+          limitLabel: 'Local summer limits on nitrogen and phosphorus',
           months: MONTHS.map((label, index) => ({
             month: index + 1,
             label,
@@ -72,9 +72,36 @@ function v13Content() {
         key: 'treatment_categories',
         title: 'Treatments That May Be Used',
         body: 'Which ones a visit uses depends on the season.',
-        bullets: ['Dry spots: A wetting agent helps water soak into dry spots.'],
-        visual: { type: 'categories', items: [{ key: 'dry_spots', label: 'Dry spots', text: 'A wetting agent helps water soak into dry spots.' }] },
+        bullets: ['Wetting agent: A soil surfactant that helps water soak into dry, water-repellent spots.'],
+        visual: { type: 'categories', items: [{ key: 'dry_spots', label: 'Wetting agent', text: 'A soil surfactant that helps water soak into dry, water-repellent spots.' }] },
       },
+      {
+        key: 'local_rules',
+        title: 'Local Fertilizer Rules',
+        body: '',
+        bullets: ['Your rule area: Sarasota County, FL'],
+        visual: { type: 'tiles', items: [{ icon: 'area', title: 'Your rule area', text: 'Sarasota County, FL' }] },
+      },
+      {
+        key: 'not_included',
+        title: 'Not Included Unless Quoted',
+        body: '',
+        bullets: ['Irrigation repairs', 'Mowing'],
+        visual: { type: 'tags', items: ['Irrigation repairs', 'Mowing'], note: 'Some lawn problems need separate work.' },
+      },
+    ],
+    cta: { estimatePath: '/estimate/test-token' },
+  };
+}
+
+// The gate-off outline: a grass in the side panel and sections with no drawing.
+function legacyContent() {
+  return {
+    title: 'Your Waves Lawn Care Program Overview for St. Augustine',
+    intro: 'Based on your estimate, this outline explains how Waves approaches your lawn care program.',
+    property: { addressSummary: '100 Test Way, Sarasota', turfType: 'St. Augustine' },
+    season: { monthName: 'Oct' },
+    sections: [
       {
         key: 'local_rules',
         title: 'Local Fertilizer-Rule Note',
@@ -114,7 +141,7 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(cells.filter((cell) => cell.dataset.limited === 'true').map((cell) => cell.querySelector('p').textContent)).toEqual(['Jun', 'Jul', 'Aug', 'Sep']);
     expect(within(cells[6]).getByText('Inspection')).toBeInTheDocument();
     expect(within(cells[6]).getByText('Insect control')).toHaveClass('sr-only');
-    expect(within(year).getByText('Local summer fertilizer limits')).toBeInTheDocument();
+    expect(within(year).getByText('Local summer limits on nitrogen and phosphorus')).toBeInTheDocument();
     // The text lines are for readers that draw nothing: the page shows the chart instead.
     expect(within(year).queryByText(/^January: /)).not.toBeInTheDocument();
   });
@@ -125,22 +152,37 @@ describe('ServiceOutlinePage drawn sections', () => {
     const focus = sectionOf('Oct Service Focus');
     expect(within(focus).getByText("This month's step")).toBeInTheDocument();
     expect(within(focus).getByText('As needed')).toBeInTheDocument();
-    expect(within(focus).getByText('Weed barrier')).toBeInTheDocument();
+    expect(within(focus).getByText('Pre-emergent')).toBeInTheDocument();
     expect(within(focus).queryByText(/may be relevant/)).not.toBeInTheDocument();
-    expect(within(sectionOf('One Program For Your Lawn')).getByText('One whole-lawn treatment')).toBeInTheDocument();
+    expect(within(sectionOf('One Program For Every Lawn')).getByText('Threshold counts first')).toBeInTheDocument();
+    expect(within(sectionOf('Local Fertilizer Rules')).getByText('Sarasota County, FL')).toBeInTheDocument();
     const visit = sectionOf('What A Typical Visit Includes');
     expect(within(visit).getByText('1')).toBeInTheDocument();
     expect(within(visit).getByText('Report')).toBeInTheDocument();
     // An empty body under a drawing leaves no empty paragraph.
     expect([...visit.querySelectorAll('p')].some((p) => p.textContent === '')).toBe(false);
-    expect(within(sectionOf('Treatments That May Be Used')).getByText('A wetting agent helps water soak into dry spots.')).toBeInTheDocument();
+    expect(within(sectionOf('Treatments That May Be Used')).getByText('A soil surfactant that helps water soak into dry, water-repellent spots.')).toBeInTheDocument();
   });
 
-  it('a section with no drawing keeps its body and bullet cards (the gate-off outline)', async () => {
+  it('draws the exclusions as tags with their note, and the side panel names the program, not a grass', async () => {
     renderWith(v13Content());
+    await screen.findByRole('heading', { level: 2, name: 'Not Included Unless Quoted' });
+    const excluded = sectionOf('Not Included Unless Quoted');
+    expect(within(excluded).getAllByRole('listitem').map((item) => item.textContent)).toEqual(['Irrigation repairs', 'Mowing']);
+    expect(within(excluded).getByText('Some lawn problems need separate work.')).toBeInTheDocument();
+    expect(screen.getByText('Program')).toBeInTheDocument();
+    expect(screen.getByText('One program for every lawn')).toBeInTheDocument();
+    expect(screen.queryByText('Turf type')).not.toBeInTheDocument();
+  });
+
+  it('a section with no drawing keeps its body and bullet cards, and the side panel keeps the grass (the gate-off outline)', async () => {
+    renderWith(legacyContent());
     await screen.findByRole('heading', { level: 2, name: 'Local Fertilizer-Rule Note' });
     const rules = sectionOf('Local Fertilizer-Rule Note');
     expect(within(rules).getByText('Local fertilizer rules may affect what can be applied.')).toBeInTheDocument();
     expect(within(rules).getByText('Rule area: Sarasota County, FL')).toBeInTheDocument();
+    expect(screen.getByText('Turf type')).toBeInTheDocument();
+    expect(screen.getByText('St. Augustine')).toBeInTheDocument();
+    expect(screen.queryByText('Program')).not.toBeInTheDocument();
   });
 });
