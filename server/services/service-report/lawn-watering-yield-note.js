@@ -70,7 +70,8 @@ async function storeLawnWateringYieldNote({ svc, instruction }, deps = {}) {
     return await database.transaction(async (trx) => {
       const nextVisitId = await findNextLawnVisitId(trx, completed);
       if (!nextVisitId) return { status: 'no_lawn_visit' };
-      return storeNote(trx, { completed, note, nextVisitId, actor: {} });
+      // The lawn visit or nothing: never the helper's any-visit fallback.
+      return storeNote(trx, { completed, note, nextVisitId, actor: {}, fallback: false });
     });
   } catch (err) {
     logger.warn(`[completion] watering yield note not stored for service ${svc && svc.id}: ${(err && (err.code || err.name)) || 'error'}`);

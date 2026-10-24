@@ -102,12 +102,14 @@ async function findFallbackTargetId(k, { completed, actor }) {
   return row ? row.id : null;
 }
 
-async function candidateTargetId(k, { completed, nextVisitId, actor }) {
+// `fallback` false: only the posted visit may take the note (a caller that
+// chose it for a reason, such as its service line, never gets another one).
+async function candidateTargetId(k, { completed, nextVisitId, actor, fallback = true }) {
   if (typeof nextVisitId === 'string' && UUID_RE.test(nextVisitId)) {
     const posted = await readVisit(k, nextVisitId);
     if (isLiveNextVisitTarget({ target: posted, completed, actor })) return posted.id;
   }
-  return findFallbackTargetId(k, { completed, actor });
+  return fallback ? findFallbackTargetId(k, { completed, actor }) : null;
 }
 
 // The write, on the completion's transaction. The target is locked SKIP LOCKED:
@@ -132,14 +134,15 @@ async function writeLockedNote(k, { completed, line, actor, targetId }) {
  * @param {*} args.note         body.nextVisitAdjustmentNote
  * @param {*} args.nextVisitId  body.nextVisitId (the visit the card showed)
  * @param {object} args.actor   { techRole, technicianId }
+ * @param {boolean} [args.fallback] false: the posted visit or nothing
  * @returns {Promise<{status: string, targetId?: string}>} never throws
  */
-async function storeNextVisitNote(trx, { completed, note, nextVisitId = null, actor = {} }) {
+async function storeNextVisitNote(trx, { completed, note, nextVisitId = null, actor = {}, fallback = true }) {
   const line = nextVisitNoteLine(completed && completed.date, note);
   if (!line) return { status: 'skipped' };
   try {
     const result = await savepointScope(trx, async (k) => {
-      const targetId = await candidateTargetId(k, { completed, nextVisitId, actor });
+      const targetId = await candidateTargetId(k, { completed, nextVisitId, actor, fallback });
       if (!targetId) return { status: 'no_target' };
       return writeLockedNote(k, { completed, line, actor, targetId });
     });

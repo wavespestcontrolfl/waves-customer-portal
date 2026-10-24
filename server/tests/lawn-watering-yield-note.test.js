@@ -44,6 +44,7 @@ describe('lawn watering yield note', () => {
       note: NOTE,
       nextVisitId: 'v-lawn',
       actor: {},
+      fallback: false,
     });
   });
 
