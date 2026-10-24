@@ -52,7 +52,7 @@ const taxYears = require('../services/tax-years');
 const pnlReport = require('../services/pnl-report');
 const { getYearConstants, YEARS } = require('../services/tax-year-constants');
 
-const { computeReturn, bracketTax, dueDate, reserve, splitDepreciation } = engine;
+const { computeReturn, bracketTax, incomeTaxFor, taxTableRow, dueDate, reserve, splitDepreciation } = engine;
 const TODAY = '2026-10-24';
 
 // a year that is over, nothing else going on
@@ -107,6 +107,55 @@ describe('tax constants', () => {
     expect(() => getYearConstants(2023)).toThrow('tax constants for 2023 are not loaded');
     try { computeReturn(inputs({ year: 2027 })); } catch (e) { expect(e.status).toBe(400); expect(e.message).toBe('tax constants for 2027 are not loaded'); }
     expect.assertions(3);
+  });
+});
+
+describe('the IRS Tax Table (taxable income under $100,000)', () => {
+  const tax = (year, status, taxable) => incomeTaxFor(taxable, getYearConstants(year).brackets[status]);
+  // Published values: Tax Table in the Form 1040 instructions, the "Your tax is"
+  // columns Single / Married filing jointly / Head of household.
+  //   2024: https://www.irs.gov/pub/irs-prior/i1040tt--2024.pdf
+  //   2025: https://www.irs.gov/pub/irs-pdf/i1040tt.pdf
+  test.each([
+    // [year, taxable (inside the row), row, single, mfj, hoh]
+    [2025, 14926.31, '14,900-14,950', 1553, 1493, 1493],
+    [2025, 60010, '60,000-60,050', 8120, 6726, 6863],
+    [2025, 2980.5, '2,975-3,000 (a $25 row)', 299, 299, 299],
+    [2025, 99975.5, '99,950-100,000', 16909, 11823, 15170],
+    [2024, 14926.31, '14,900-14,950', 1559, 1493, 1493],
+    [2024, 60010, '60,000-60,050', 8259, 6739, 6872],
+    [2024, 2980.5, '2,975-3,000 (a $25 row)', 299, 299, 299],
+    [2024, 99975.5, '99,950-100,000', 17048, 12101, 15354],
+  ])('%i taxable %f, row %s: single %i, MFJ %i, HOH %i', (year, taxable, _row, single, mfj, hoh) => {
+    expect(tax(year, 'single', taxable)).toBe(single);
+    expect(tax(year, 'mfj', taxable)).toBe(mfj);
+    expect(tax(year, 'hoh', taxable)).toBe(hoh);
+  });
+  test('rows that straddle a bracket boundary use the midpoint, as published', () => {
+    expect(tax(2024, 'single', 47120)).toBe(5423); // row 47,100-47,150, wholly in the 12% bracket
+    expect(tax(2024, 'single', 47160)).toBe(5432); // row 47,150-47,200, midpoint 47,175: 5,426 + 22% x 25 = 5,431.50 -> 5,432
+    expect(tax(2025, 'mfj', 25320)).toBe(2562); // the IRS's own example: $25,300-25,350, married filing jointly
+  });
+  test('the smallest rows: $0-5, $5-15, $15-25, then $25 wide', () => {
+    expect([0, 4.99, 5, 14.99, 15, 24.99, 25, 49.99, 50, 74.99].map((t) => tax(2025, 'single', t)))
+      .toEqual([0, 0, 1, 1, 2, 2, 4, 4, 6, 6]); // published: 0, 1, 2, 4, 6
+    expect(taxTableRow(25)).toEqual([25, 50]);
+    expect(taxTableRow(2999.99)).toEqual([2975, 3000]);
+    expect(taxTableRow(3000)).toEqual([3000, 3050]);
+    expect(taxTableRow(99999.99)).toEqual([99950, 100000]);
+  });
+  test('a row edge belongs to the row above it, and $100,000 up is bracket arithmetic', () => {
+    expect(taxTableRow(14950)).toEqual([14950, 15000]);
+    expect(tax(2025, 'single', 14950)).toBe(1559); // published row 14,950-15,000
+    // from $100,000 the Tax Computation Worksheet is the bracket formula, and cents stay
+    expect(tax(2025, 'single', 100000)).toBe(16914); // 1,192.50 + 12% x 36,550 + 22% x 51,525
+    expect(tax(2025, 'single', 100000.5)).toBe(16914.11); // + 22% x 0.50
+  });
+  test('2026: no table is published yet; the same rule on the Rev. Proc. 2025-32 rates', () => {
+    // row 60,000-60,050 midpoint 60,025: 5,800 + 22% x (60,025 - 50,400) = 7,917.50 -> 7,918
+    expect(tax(2026, 'single', 60010)).toBe(7918);
+    // row 14,900-14,950 midpoint 14,925: 1,240 + 12% x (14,925 - 12,400) = 1,543
+    expect(tax(2026, 'single', 14926.31)).toBe(1543);
   });
 });
 
@@ -216,6 +265,23 @@ describe('section 179', () => {
   });
 });
 
+describe('section 179 and wages', () => {
+  test('other income with a section 179 pool warns that wages can raise the limit; no number changes', () => {
+    const d = { regular: 0, sec179_elected: 5000 };
+    const base = { gross_receipts: 20000, depreciation: d };
+    const withWages = computeReturn(inputs({ ...base, other_income: 40000 }));
+    const without = computeReturn(inputs(base));
+    const w = withWages.warnings.find((x) => x.code === 'sec179_wages');
+    expect(w.message).toBe("Section 179's income limit can include wages; this engine counts business income only. Check Form 4562 line 11 by hand.");
+    expect(codes(without)).not.toContain('sec179_wages');
+    expect(withWages.lines.sec179_allowed).toBe(without.lines.sec179_allowed);
+    expect(withWages.sec179.income_limit).toBe(20000);
+  });
+  test('no section 179 pool, no warning', () => {
+    expect(codes(computeReturn(inputs({ gross_receipts: 20000, other_income: 40000 })))).not.toContain('sec179_wages');
+  });
+});
+
 describe('NOL and QBI', () => {
   test('the NOL takes at most 80% of taxable income, the rest carries out', () => {
     // profit 60,000: SE 55,410 x 15.3% = 8,477.73; half 4,238.87 (half cent up)
@@ -230,7 +296,7 @@ describe('NOL and QBI', () => {
     // taxable after NOL 8,002.23; QBI 20% of 55,761.13 = 11,152.23 vs 20% of 8,002.23 = 1,600.45
     expect(r.qbi_deduction).toBe(1600.45);
     expect(r.taxable_income).toBe(6401.78);
-    expect(r.income_tax).toBe(640.18);
+    expect(r.income_tax).toBe(643); // Tax Table row 6,400-6,450: 10% of the midpoint 6,425 = 642.50, a half rounds up
   });
   test('a small NOL is used in full', () => {
     const r = computeReturn(inputs({ gross_receipts: 60000, carry_in: { nol: 10000 } }));
@@ -371,9 +437,12 @@ describe('cross-check against the structure of the 2025 working script', () => {
   //   AGI on the return is after the NOL: 60,407.89 - 26,000 = 34,407.89
   //   QBI: (60,407.89 - 3,000 loss) = 57,407.89 x 20% = 11,481.58 vs 20% x 18,657.89 = 3,731.58 -> 3,731.58
   //   taxable 18,657.89 - 3,731.58 = 14,926.31
-  //   income tax 10% x 11,925 = 1,192.50 + 12% x 3,001.31 = 360.16 -> 1,552.66
-  //   total 1,552.66 + 9,184.21 = 10,736.87; less 2,000 estimates = 8,736.87
-  // (the script itself, unrounded, gives 10,736.87)
+  //   income tax from the Tax Table (under $100,000): taxable 14,926.31 is in the
+  //     14,900-14,950 row, midpoint 14,925: 1,192.50 + 12% x 3,000 = 1,552.50 -> 1,553
+  //     (the published 2025 table shows 1,553 for single on that row)
+  //   total 1,553 + 9,184.21 = 10,737.21; less 2,000 estimates = 8,737.21
+  // (the script itself, with bracket arithmetic unrounded, gives 10,736.87: the
+  // 34 cents is the table's whole-dollar rounding)
   const cross = {
     year: 2025, filing_status: 'single', other_income: 0, estimates_paid: 2000, gross_receipts: 150000,
     carry_in: { nol: 26000, qbi_loss: 3000, sec179: 20000, home_office: 1150 },
@@ -386,7 +455,7 @@ describe('cross-check against the structure of the 2025 working script', () => {
     const r = computeReturn(cross);
     expect(r).toMatchObject({
       net_profit: 65000, se_tax: 9184.21, half_se_deduction: 4592.11, agi_before_nol: 60407.89, agi: 34407.89, nol_used: 26000,
-      qbi_deduction: 3731.58, taxable_income: 14926.31, income_tax: 1552.66, total_tax: 10736.87, owed: 8736.87,
+      qbi_deduction: 3731.58, taxable_income: 14926.31, income_tax: 1553, total_tax: 10737.21, owed: 8737.21,
     });
     expect(r.lines).toMatchObject({ home_office_deduction: 7000, sec179_allowed: 61000, total_expenses: 85000 });
     expect(r.carry_out).toEqual({ nol: 0, qbi_loss: 0, sec179: 0, home_office: 0 });

@@ -41,8 +41,10 @@
  *   5. NOL deduction (Schedule 1 line 8a, so AGI is after it) = the smaller of
  *      the NOL carried in and 80% of taxable income before the NOL and QBI; QBI deduction = 20% of (profit - half SE
  *      - QBI loss carried in), at most 20% of taxable income after the NOL
- *   6. income tax from the brackets; total tax = income tax + SE tax (+ the
- *      Additional Medicare Tax on SE earnings above its threshold)
+ *   6. income tax: the IRS Tax Table under $100,000 of taxable income
+ *      (midpoint of the row, whole dollars), the bracket formula above that;
+ *      total tax = income tax + SE tax (+ the Additional Medicare Tax on SE
+ *      earnings above its threshold)
  *
  * Simplifications, on purpose (each also surfaces as a warning where it bites):
  *   - A loss year's NOL = the loss less other income (all of it treated as
@@ -110,6 +112,31 @@ function bracketTax(taxable, brackets) {
     lower = top;
   }
   return round2(tax);
+}
+
+// The IRS Tax Table (Form 1040 instructions) for taxable income under $100,000:
+// the tax is the bracket formula at the MIDPOINT of the row the income falls
+// in, rounded to the nearest whole dollar (a half rounds up). Rows: $0-5, 5-15
+// and 15-25, then $25 wide up to $3,000, then $50 wide up to $100,000.
+// Verified against the 2024 and 2025 published tables. From $100,000 up the Tax
+// Computation Worksheet is the bracket formula itself, so bracketTax is used.
+const TAX_TABLE_LIMIT = 100000;
+function taxTableRow(taxable) {
+  if (taxable < 5) return [0, 5];
+  if (taxable < 15) return [5, 15];
+  if (taxable < 25) return [15, 25];
+  if (taxable < 3000) {
+    const lo = 25 + Math.floor((taxable - 25) / 25) * 25;
+    return [lo, lo + 25];
+  }
+  const lo = 3000 + Math.floor((taxable - 3000) / 50) * 50;
+  return [lo, lo + 50];
+}
+function incomeTaxFor(taxable, brackets) {
+  if (taxable >= TAX_TABLE_LIMIT) return bracketTax(taxable, brackets);
+  const [lo, hi] = taxTableRow(taxable);
+  const cents = Math.round(bracketTax((lo + hi) / 2, brackets) * 100);
+  return Math.floor((cents + 50) / 100);
 }
 
 // April 15 of the next year; a weekend moves it to Monday. Emancipation Day
@@ -213,6 +240,9 @@ function computeReturn(inputs = {}) {
   const incomeLimit179 = room;
   const allowed179 = round2(Math.max(0, Math.min(pool179, K.sec179_limit, incomeLimit179)));
   const carryOut179 = round2(pool179 - allowed179);
+  if (otherIncome > 0 && pool179 > 0) {
+    warnings.push(warn('sec179_wages', "Section 179's income limit can include wages; this engine counts business income only. Check Form 4562 line 11 by hand."));
+  }
   if (elected > K.sec179_limit) warnings.push(warn('sec179_over_limit', `Section 179 elected for ${year} (${fmt(elected)}) is over the ${fmt(K.sec179_limit)} limit. The phase-out for large purchases is not modeled: ask a tax preparer.`));
 
   // 3. home office, capped at what is left after other expenses, depreciation
@@ -275,7 +305,7 @@ function computeReturn(inputs = {}) {
   const qbiLossOut = round2(Math.max(-qbiNet, 0));
 
   // 6. tax
-  const incomeTax = bracketTax(taxable, K.brackets[filing]);
+  const incomeTax = incomeTaxFor(taxable, K.brackets[filing]);
   const totalTax = round2(incomeTax + seTax + addlMedicare);
   const owed = round2(totalTax - estimatesPaid);
 
@@ -467,6 +497,6 @@ async function fileYear(year, { filed_on: filedOn } = {}) {
 }
 
 module.exports = {
-  computeReturn, gatherInputs, computeYear, fileYear, splitDepreciation, bracketTax, dueDate, reserve,
+  computeReturn, gatherInputs, computeYear, fileYear, splitDepreciation, bracketTax, incomeTaxFor, taxTableRow, dueDate, reserve,
   SCHEDULE_C_LABELS,
 };
