@@ -69,7 +69,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { whereLiveCustomer } = require('./customer-stages');
 const { sameHouseNumberStreet } = require('./call-triage-flags');
-const { unitAnywhereOnLine, splitUnitFirstLine } = require('../utils/address-normalizer');
+const { unitAnywhereOnLine } = require('../utils/address-normalizer');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
@@ -352,38 +352,42 @@ const STATED_ADDRESS_SKIPPED_NATURES = new Set(['job_applicant', 'vendor_or_part
  * action files (name, number, role). Never one of this pass's own customer or the call's linked one.
  */
 async function matchStatedAddressAccounts({ call, extracted, v2CanonicalExtraction, statedAddress, isOutbound = false, phone = null, conn = db }) {
-  if (!require('../config/feature-gates').callAddressFamilyCardLive()) return null;
-  if (isOutbound || extracted.is_voicemail) return null;
-  if (STATED_ADDRESS_SKIPPED_NATURES.has(String(v2CanonicalExtraction?.call_nature || ''))) return null;
-  const callerFirst = String(extracted.first_name || '').trim();
-  const street = String((statedAddress && statedAddress.street_line_1) || '').trim();
-  if (!callerFirst || !street) return null;
-  // The house number, read the way sameHouseNumberStreet reads a street line (a legacy unit-first line is peeled).
-  const house = (String((splitUnitFirstLine(street) || {}).rest || street).match(/^\s*(\d+)/) || [])[1];
-  if (!house) return null;
+  const text = (v) => String(v ?? '').trim();
+  const stated = { ...statedAddress };
+  const callerFirst = text(extracted.first_name);
+  const street = text(stated.street_line_1);
+  // The house number; sameHouseNumberStreet below judges the whole line, so a bare number is enough to narrow the query.
+  const house = (street.match(/\d+/) || [])[0];
+  const skip = [
+    !require('../config/feature-gates').callAddressFamilyCardLive(), isOutbound, extracted.is_voicemail,
+    STATED_ADDRESS_SKIPPED_NATURES.has(text(v2CanonicalExtraction?.call_nature)), !callerFirst, !house,
+  ];
+  if (skip.some(Boolean)) return null;
   const own = createdCustomerId(call);
-  const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
-  const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
-  const placeAgrees = (c) => (zip5(statedAddress.postal_code) !== '' && zip5(statedAddress.postal_code) === zip5(c.zip))
-    || (cityKey(statedAddress.city) !== '' && cityKey(statedAddress.city) === cityKey(c.city));
+  // The stated place must AGREE with the account on ZIP or city (statedAddressCorroborates only rejects a disagreement).
+  const zipKey = (v) => text(v).replace(/\D/g, '').slice(0, 5);
+  const cityKey = (v) => text(v).toLowerCase().replace(/[^a-z]/g, '');
+  const placeAgrees = (c) => [[stated.postal_code, c.zip, zipKey], [stated.city, c.city, cityKey]].some(([a, b, key]) => key(a) && key(a) === key(b));
   const rows = await conn('customers')
     .modify(whereLiveCustomer)
     // Digit-bounded anywhere in the line: a legacy unit-first line ("Apt 4B 100 Example Loop") carries the house number
-    // after the unit. sameHouseNumberStreet below is the precise judge.
+    // after the unit.
     .whereRaw('address_line1 ~ ?', [`(^|[^0-9])${house}([^0-9]|$)`])
     .orderBy('created_at', 'asc').orderBy('id', 'asc').limit(500)
     .select('id', 'first_name', 'last_name', 'city', 'address_line1', 'address_line2', 'zip');
-  const found = rows.filter((r) => String(r.id) !== own && String(r.id) !== String(call.customer_id || '')
-    && statedAddressCorroborates(statedAddress, r) && placeAgrees(r));
+  const found = rows.filter((r) => ![own, text(call.customer_id)].includes(String(r.id))
+    && statedAddressCorroborates(stated, r) && placeAgrees(r));
   if (!found.length || found.length > MAX_OWN_CANDIDATES) return null;
-  const relationship = String(v2CanonicalExtraction?.caller?.relationship_to_property || '').trim().toLowerCase();
+  const relationship = text(v2CanonicalExtraction?.caller?.relationship_to_property).toLowerCase();
   return {
     basis: 'stated_address_on_account',
     more_accounts: false,
     candidates: found.map((m) => ({ ...ownCandidate(m), address_matches: true })),
     attach: {
+      // Shown on the card as the question the office answers; the screen holds no copy of the wording.
+      question: `${[extracted.first_name, extracted.last_name].map(text).filter(Boolean).join(' ') || 'The caller'} called about ${found.length === 1 ? `${displayName(found[0])}'s` : "an existing account's"} home. Add as a contact?`,
       caller_first_name: callerFirst,
-      caller_last_name: String(extracted.last_name || '').trim() || null,
+      caller_last_name: text(extracted.last_name) || null,
       caller_role: ATTACH_ROLES.includes(relationship) ? relationship : 'other',
       contact_phone: phone || call.from_phone || null,
     },

@@ -5,6 +5,8 @@
 const SERVER_OWNED_PREF_KEYS = [
   'consent_covered_phone_keys',
   'unconsented_slot_phone_keys',
+  // The office's confirmation of an Attach-filed contact (GATE_CALL_ADDRESS_FAMILY_CARD): never client-writable.
+  'office_confirmed_slot_phones',
 ];
 
 // `next` with every server-owned key carried over from `raw` (the stored blob).

@@ -647,10 +647,11 @@ describe('FamilyEvidence — stated address on an account (Attach as contact / N
   const payload = {
     flag: 'family_account_candidates', match_basis: 'stated_address_on_account',
     caller_name: 'Dana Bronner', caller_phone: '+19415550101', caller_role: 'family_member',
+    question: "Dana Bronner called about Angelina Testerson's home. Add as a contact?",
     holder_candidates: [{ id: A, name: 'Angelina Testerson', city: 'Parrish', address_matches: true }],
     customer_ids: [A], reason: 'The caller gave the address of an existing account.',
   };
-  const open = { isOpenView: true, isAdmin: true, canAttach: true, canNewCustomer: true };
+  const open = { canAttach: true, canNewCustomer: true };
 
   it('asks "<caller> called about <customer>\'s home. Add as a contact?" and files the role the call gave', () => {
     const onAttach = vi.fn();
@@ -673,15 +674,12 @@ describe('FamilyEvidence — stated address on an account (Attach as contact / N
     fireEvent.click(screen.getByRole('button', { name: 'New customer' }));
     expect(onNewCustomer).toHaveBeenCalledTimes(1);
   });
-  it('shows no action on a closed card, to a non-admin, or when the server offers none (gate off)', () => {
-    for (const props of [{ ...open, isOpenView: false }, { ...open, isAdmin: false }, { isOpenView: true, isAdmin: true }]) {
-      cleanup();
-      render(<FamilyEvidence payload={payload} {...props} />);
-      expect(screen.queryByRole('button')).toBeNull();
-    }
+  it('shows no action when the server offers none (closed card, non-admin or gate off)', () => {
+    render(<FamilyEvidence payload={payload} />);
+    expect(screen.queryByRole('button')).toBeNull();
   });
   it('an older-basis card keeps its text and gains only New customer when the server offers it', () => {
-    render(<FamilyEvidence payload={{ ...payload, match_basis: 'caller_full_name' }} {...open} canAttach={false} />);
+    render(<FamilyEvidence payload={{ ...payload, match_basis: 'caller_full_name', question: undefined }} {...open} canAttach={false} />);
     expect(screen.queryByText(/Add as a contact\?/)).toBeNull();
     expect(screen.queryByRole('button', { name: /Attach/ })).toBeNull();
     expect(screen.getByRole('button', { name: 'New customer' })).toBeInTheDocument();
@@ -707,7 +705,7 @@ describe('family card actions on the page', () => {
     }));
   });
   it('says so when New customer closed the card but the call was not reprocessed', async () => {
-    listWith({ ok: true, reprocess: { started: false, reason: 'already_processing' } });
+    listWith({ ok: true, reprocess: { started: false, customer_created: false, reason: 'already_processing' } });
     render(<TriageInboxTabV2 isAdmin />);
     await screen.findByText('Family Card');
     fireEvent.click(screen.getByRole('button', { name: 'New customer' }));

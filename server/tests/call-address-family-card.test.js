@@ -44,6 +44,7 @@ const {
 } = require('../services/call-family-name-link');
 
 const GATE = 'GATE_CALL_ADDRESS_FAMILY_CARD';
+const processor = require('../services/call-recording-processor');
 const processorSource = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
 describe('GATE_CALL_ADDRESS_FAMILY_CARD reader', () => {
@@ -71,21 +72,47 @@ describe('which cards offer the two actions (the server decides; the screen hold
   const { stampFamilyCardActions } = require('../routes/admin-triage').__private;
   const saved = process.env[GATE];
   afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
-  const card = (payload) => ({ reason_code: 'family_account_candidates', payload });
-  const address = card({ match_basis: 'stated_address_on_account', caller_first_name: 'Dana', contact_phone: '+19415550101' });
-  test('gate off: no card is stamped', () => {
+  const card = (payload, status = 'open') => ({ reason_code: 'family_account_candidates', status, payload });
+  const address = () => card({ match_basis: 'stated_address_on_account', caller_first_name: 'Dana', contact_phone: '+19415550101' });
+  test('gate off, or not an admin: no card is stamped', () => {
     delete process.env[GATE];
-    const items = [address];
-    stampFamilyCardActions(items);
-    expect(items[0].can_attach_contact).toBeUndefined();
-    expect(items[0].can_new_customer).toBeUndefined();
-  });
-  test('gate on: Attach only on an address card that carries the caller; New customer on every basis but the callback voicemail one', () => {
+    const off = [address()];
+    stampFamilyCardActions(off, true);
     process.env[GATE] = 'true';
-    const items = [address, card({ match_basis: 'caller_full_name' }), card({ match_basis: 'callback_spoken_number' }), card(JSON.stringify({ match_basis: 'stated_address_on_account' })), { reason_code: 'ambiguous_scheduling', payload: {} }];
-    stampFamilyCardActions(items);
-    expect(items.map((i) => i.can_attach_contact)).toEqual([true, false, false, false, undefined]);
-    expect(items.map((i) => i.can_new_customer)).toEqual([true, true, false, true, undefined]);
+    const tech = [address()];
+    stampFamilyCardActions(tech, false);
+    for (const [item] of [off, tech]) expect(item.can_attach_contact).toBeUndefined();
+  });
+  test('gate on, admin: Attach only on an open address card that carries the caller; New customer on every basis but the callback voicemail one', () => {
+    process.env[GATE] = 'true';
+    const items = [address(), card({ match_basis: 'caller_full_name' }), card({ match_basis: 'callback_spoken_number' }),
+      card(JSON.stringify({ match_basis: 'stated_address_on_account' })), { reason_code: 'ambiguous_scheduling', status: 'open', payload: {} }, { ...address(), status: 'resolved' }];
+    stampFamilyCardActions(items, true);
+    expect(items.map((i) => i.can_attach_contact)).toEqual([true, false, false, false, undefined, undefined]);
+    expect(items.map((i) => i.can_new_customer)).toEqual([true, true, false, true, undefined, undefined]);
+  });
+});
+
+describe('an Attach-filed slot is identity only on the office confirmation (owner 2026-10-24)', () => {
+  const identity = processor._test;
+  const saved = process.env[GATE];
+  afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
+  const customer = (entry) => ({
+    phone: '+19415550102', service_contact_name: 'Dana Bronner', service_contact_phone: '+19415550101', service_contact_role: 'family_member',
+    service_preferences: { unconsented_slot_phone_keys: ['9415550101'], office_confirmed_slot_phones: entry ? [entry] : [] },
+  });
+  const confirmed = { phone_key: '9415550101', by: 'admin-1', at: '2026-10-24T12:00:00Z', source: 'family_card_attach' };
+  test('a confirmed Attach slot links the caller\'s next call; one with no confirmation named does not (gate on)', () => {
+    process.env[GATE] = 'true';
+    expect(identity.slotOnlyLinkAllowed(customer(confirmed), '+19415550101', {})).toBe(true);
+    expect(identity.slotOnlyLinkAllowed(customer({ ...confirmed, by: null }), '+19415550101', {})).toBe(false);
+    expect(identity.slotOnlyLinkAllowed(customer({ ...confirmed, at: undefined }), '+19415550101', {})).toBe(false);
+  });
+  test('every other slot, and the gate off, are untouched: no entry links as before', () => {
+    process.env[GATE] = 'true';
+    expect(identity.slotOnlyLinkAllowed(customer(null), '+19415550101', {})).toBe(true);
+    delete process.env[GATE];
+    expect(identity.slotOnlyLinkAllowed(customer({ ...confirmed, by: null }), '+19415550101', {})).toBe(true);
   });
 });
 
@@ -304,6 +331,11 @@ const SKIP = !process.env.DATABASE_URL;
       expect(row).toMatchObject({ service_contact2_name: 'Dana Bronner', service_contact2_phone: '+19415550101', service_contact2_role: 'family_member', service_contact3_name: null });
       // The number is held out of every text until that person's own YES, and no opt-in or message exists.
       expect(row.service_preferences.unconsented_slot_phone_keys).toContain('9415550101');
+      // The office confirmation is its own record (who and when), separate from texting consent.
+      expect(row.service_preferences.office_confirmed_slot_phones).toEqual([
+        expect.objectContaining({ phone_key: '9415550101', source: 'family_card_attach', by: 'admin', at: expect.any(String) }),
+      ]);
+      expect(await processor.findCustomerForCallContact('+19415550101', { first_name: 'Dana' }, { db: trx })).toMatchObject({ id: mom });
       expect(await trx('recipient_optin').where({ customer_id: mom })).toHaveLength(0);
       // The call is relinked with the operator override, and the card is a person's resolution.
       const callRow = await trx('call_log').where({ id: callLogId }).first();
@@ -365,7 +397,6 @@ const SKIP = !process.env.DATABASE_URL;
 
     test('New customer closes the card as a person\'s decision and reprocesses the call, so the pass creates the customer the old way', async () => {
       const { callLogId, card } = await filed();
-      const processor = require('../services/call-recording-processor');
       const spy = jest.spyOn(processor, 'processRecording').mockResolvedValue({ success: true });
       const out = await post(`${card.id}/new-customer`, { expected_updated_at: card.updated_at });
       expect(out.status).toBe(200);
@@ -384,7 +415,6 @@ const SKIP = !process.env.DATABASE_URL;
     });
 
     test('New customer reports a pass that failed or skipped as not started, so the screen can say no customer was created', async () => {
-      const processor = require('../services/call-recording-processor');
       for (const outcome of [{ success: false, error: 'extraction failed' }, { skipped: true, reason: 'already_processing' }]) {
         const { card } = await filed();
         const spy = jest.spyOn(processor, 'processRecording').mockResolvedValueOnce(outcome);

@@ -3983,7 +3983,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp, operatorAttach = false, conn = db } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp, operatorAttach = false, officeConfirmedBy = null, conn = db } = {}) {
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
@@ -4167,12 +4167,21 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // A kept stamp also records the phones it covers right now (grandfathered
     // contacts often have no opt-in row): if a later edit clears the stamp,
     // the held person's YES can still restore it.
+    //
+    // officeConfirmedBy (the family-account card's Attach as contact, GATE_CALL_ADDRESS_FAMILY_CARD): the office
+    // tapping Attach IS the human confirmation that this person belongs to the account, so their next call may
+    // link (owner 2026-10-24; that is how the duplicate stops). That is recorded as an explicit, separate fact,
+    // service_preferences.office_confirmed_slot_phones [{ phone_key, by, at, source }], read by
+    // slotOnlyLinkAllowed. It is NOT texting consent: the phone stays on the unconsented list above.
     ...((contact.phone && holdPhone) ? {
       service_preferences: conn.raw(
-        "jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb)",
+        officeConfirmedBy
+          ? "jsonb_set(jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb), '{office_confirmed_slot_phones}', COALESCE(service_preferences -> 'office_confirmed_slot_phones', '[]'::jsonb) || ?::jsonb)"
+          : "jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb)",
         [last10(contact.phone), JSON.stringify(customer.service_contacts_consent_at
           ? SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean)
-          : [])],
+          : []),
+        ...(officeConfirmedBy ? [JSON.stringify([{ phone_key: last10(contact.phone), by: String(officeConfirmedBy), at: new Date().toISOString(), source: 'family_card_attach' }])] : [])],
       ),
     } : {}),
     ...((contact.phone && !smsConsentExplicit && !keepConsentStamp && customer.service_contacts_consent_at) ? {
@@ -4529,6 +4538,7 @@ function decideOnSiteOptinAsk(contact, { doNotContact = false, optinRailLive = f
 // unconditional link would book the new visit on the old customer. Household
 // role or a first-name agreement with the slot's OWN name links.
 function slotOnlyLinkAllowed(customer, phone, extracted = {}) {
+  if (!attachSlotOfficeConfirmed(customer, phone)) return false;
   const slotEntry = matchedSlotEntry(customer, phone);
   const slotRole = String(slotEntry?.contactRole || '').toLowerCase();
   if (AGENT_TYPE_SLOT_ROLES.has(slotRole)) return false;
@@ -4536,6 +4546,20 @@ function slotOnlyLinkAllowed(customer, phone, extracted = {}) {
   const extractedFirst = normalizeNamePart(extracted.first_name);
   const slotFirst = normalizeNamePart(String(slotEntry?.name || '').split(/\s+/)[0]);
   return !!extractedFirst && !!slotFirst && sameFirstName(extractedFirst, slotFirst);
+}
+
+// A slot the family-account card's Attach filed (GATE_CALL_ADDRESS_FAMILY_CARD) is identity only on the office's own
+// confirmation: its service_preferences.office_confirmed_slot_phones entry must name who confirmed it and when. A
+// slot with no such entry (every pre-existing slot) and the gate off are untouched.
+function attachSlotOfficeConfirmed(customer, phone) {
+  if (!require('../config/feature-gates').callAddressFamilyCardLive()) return true;
+  let prefs = customer.service_preferences;
+  if (typeof prefs === 'string') {
+    try { prefs = JSON.parse(prefs); } catch { prefs = null; }
+  }
+  const key = phoneKey(phone).slice(-10);
+  const entry = ((prefs && prefs.office_confirmed_slot_phones) || []).find((e) => e && e.source === 'family_card_attach' && e.phone_key === key);
+  return !entry || Boolean(entry.by && entry.at);
 }
 
 function matchedSlotEntry(customer, phone) {

@@ -355,38 +355,27 @@ const ATTACH_ROLE_OPTIONS = [
   ["real_estate_agent", "Real estate agent"], ["other", "Other"],
 ];
 
-export function FamilyEvidence({ payload, openCustomerIds = null, isOpenView = false, isAdmin = false, canAttach = false, canNewCustomer = false, busy = false, onAttach = null, onNewCustomer = null }) {
+export function FamilyEvidence({ payload, openCustomerIds = null, canAttach = false, canNewCustomer = false, busy = false, onAttach, onNewCustomer }) {
   const p = parsePayload(payload);
   const [role, setRole] = useState(null);
   if (!p) return null;
-  const ids = [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds : Array.isArray(p.customer_ids) ? p.customer_ids : [])
-    .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))];
-  const candidates = Array.isArray(p.holder_candidates) ? p.holder_candidates : [];
-  // stated_address_on_account: the question the office answers, with the role the call gave.
-  const addressCard = p.match_basis === "stated_address_on_account";
-  const callerLabel = p.caller_name || "The caller";
-  const question = addressCard
-    ? `${callerLabel} called about ${candidates.length === 1 ? `${candidates[0].name}'s` : "an existing account's"} home. Add as a contact?`
-    : null;
+  const ids = [...new Set((openCustomerIds || p.customer_ids || []).map(String).filter((id) => UUID_PATTERN.test(id)))];
+  const candidates = p.holder_candidates || [];
   const chosenRole = role || p.caller_role || "other";
-  const showActions = isOpenView && isAdmin && (canAttach || canNewCustomer);
   const rows = [
-    p.caller_name && { label: "Caller", value: [p.caller_name, p.caller_phone && `calling from ${p.caller_phone}`, p.caller_callback_phone && `callback ${p.caller_callback_phone}`].filter(Boolean).join(" · ") },
-    p.account_holder_name && { label: "Named", value: p.account_holder_name },
-    ...candidates.map((c, i) => ({
-      label: i === 0 ? "Account" : `Account (${i + 1})`,
-      value: [c.name, c.city, c.matched_phone ? `has the number ${c.matched_phone}` : null, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
-    })),
-    p.more_accounts === true && { label: "More", value: "more accounts share this name — search by name" },
-    p.reason && { label: "Next", value: p.reason },
-  ].filter(Boolean);
+    ["Caller", p.caller_name && [p.caller_name, p.caller_phone && `calling from ${p.caller_phone}`, p.caller_callback_phone && `callback ${p.caller_callback_phone}`]],
+    ["Named", [p.account_holder_name]],
+    ...candidates.map((c, i) => [i ? `Account (${i + 1})` : "Account", [c.name, c.city, c.matched_phone && `has the number ${c.matched_phone}`, c.address_matches === true && "address matches"]]),
+    ["More", [p.more_accounts === true && "more accounts share this name — search by name"]],
+    ["Next", [p.reason]],
+  ].map(([label, parts]) => [label, [].concat(parts || []).filter(Boolean).join(" · ")]).filter(([, value]) => value);
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
       <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before linking</div>
-      {question && <div className="text-14 font-medium text-zinc-900 mb-1">{question}</div>}
-      {rows.map((r) => (
-        <div key={`${r.label}-${r.value}`} className="text-14 text-ink-secondary">
-          <span className="text-ink-tertiary">{r.label}:</span> {r.value}
+      {p.question && <div className="text-14 font-medium text-zinc-900 mb-1">{p.question}</div>}
+      {rows.map(([label, value]) => (
+        <div key={`${label}-${value}`} className="text-14 text-ink-secondary">
+          <span className="text-ink-tertiary">{label}:</span> {value}
         </div>
       ))}
       {ids.map((id, i) => (
@@ -394,36 +383,30 @@ export function FamilyEvidence({ payload, openCustomerIds = null, isOpenView = f
           {ids.length > 1 ? `Open customer ${i + 1}` : "Open customer"}
         </a>
       ))}
-      {showActions && (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          {canAttach && (
-            <label className="flex items-center gap-1.5 text-13 text-ink-secondary">
-              Role
-              <select
-                value={chosenRole}
-                onChange={(e) => setRole(e.target.value)}
-                className="h-8 px-2 rounded-md border-hairline text-13 bg-white"
-              >
-                {ATTACH_ROLE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-            </label>
-          )}
-          {canAttach && candidates.map((c) => (
-            <Button key={c.id} size="sm" variant="primary" disabled={busy}
-              title="Adds the caller to this customer's contacts and links the call. Nothing is sent to them."
-              onClick={() => onAttach && onAttach(c.id, chosenRole)}>
-              {candidates.length > 1 ? `Attach as contact to ${c.name}` : "Attach as contact"}
-            </Button>
-          ))}
-          {canNewCustomer && (
-            <Button size="sm" variant="secondary" disabled={busy}
-              title="Closes this card and reprocesses the call, which creates the customer record."
-              onClick={() => onNewCustomer && onNewCustomer()}>
-              New customer
-            </Button>
-          )}
-        </div>
-      )}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {canAttach && (
+          <label className="flex items-center gap-1.5 text-13 text-ink-secondary">
+            Role
+            <select value={chosenRole} onChange={(e) => setRole(e.target.value)} className="h-8 px-2 rounded-md border-hairline text-13 bg-white">
+              {ATTACH_ROLE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </label>
+        )}
+        {canAttach && candidates.map((c) => (
+          <Button key={c.id} size="sm" variant="primary" disabled={busy}
+            title="Adds the caller to this customer's contacts and links the call. Nothing is sent to them."
+            onClick={() => onAttach(c.id, chosenRole)}>
+            {candidates.length > 1 ? `Attach as contact to ${c.name}` : "Attach as contact"}
+          </Button>
+        ))}
+        {canNewCustomer && (
+          <Button size="sm" variant="secondary" disabled={busy}
+            title="Closes this card and reprocesses the call, which creates the customer record."
+            onClick={onNewCustomer}>
+            New customer
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1114,7 +1097,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
         load(mode, status);
         // New customer closes the card first, then reprocesses the call: say so when the reprocess did not run, or
         // nobody knows the customer was not created.
-        if (res?.reprocess && (res.reprocess.started === false || res.reprocess.customer_created === false)) {
+        if (res?.reprocess && !res.reprocess.customer_created) {
           setError("The card is closed, but no customer was created: the call was not reprocessed, or the pass found nothing to create one from. Reprocess the call from its recording, or add the customer by hand.");
         }
       })
