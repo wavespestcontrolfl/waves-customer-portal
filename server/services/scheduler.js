@@ -8666,6 +8666,43 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:47AM — Plan-rate ledger invariant reconcile
+  // (services/plan-rate-ledger-reconcile.js). For every live customer whose
+  // customer_plan_rates lines no longer add up to customers.monthly_rate:
+  // a shortfall is parked in the 'unattributed' line and an overshoot is left
+  // alone, each with one Billing alert per distinct gap. Never changes the
+  // billed rate, never charges, never messages a customer. Before the 8:00
+  // dues run, so a gap is in front of the owner before that day bills.
+  // Minute 47 of the 6am hour has no other fixed or hourly job (#3208 rule:
+  // only the every-minute jobs and the every-5-minute visit-closeout resume
+  // share it). Dark: planRateLedgerReconcileLive() is read BEFORE the cron
+  // lock, so off (or GATE_PLAN_RATE_LEDGER off) = no lock, no query, no
+  // job_health row. runExclusive: a deploy-overlap tick must not run twice.
+  // A deploy that kills the run re-runs it (a second run the same day is
+  // harmless: every gap is judged again under the locks and alerts dedupe).
+  // =========================================================================
+  const runPlanRateLedgerReconcileTick = async () => {
+    if (!require('../config/feature-gates').planRateLedgerReconcileLive()) return;
+    const tickStartedAt = Date.now();
+    try {
+      // The body returns nothing: a run result that said `skipped` must not
+      // read as a lock skip below.
+      const lockRes = await runExclusive('plan-rate-ledger-reconcile', async () => {
+        const result = await require('./plan-rate-ledger-reconcile').runPlanRateLedgerReconcile();
+        logger.info(`[plan-rate-reconcile] cron run: ${JSON.stringify(result)}`);
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('plan-rate-ledger-reconcile', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`plan-rate ledger reconcile tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Plan-rate ledger reconcile failed: ${err.message}`);
+    }
+  };
+  cron.schedule('47 6 * * *', runPlanRateLedgerReconcileTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('plan-rate-ledger-reconcile', runPlanRateLedgerReconcileTick);
+
+  // =========================================================================
   // DAILY 6:55AM — Lead-to-cash invariants sweep (read-only registry over
   // existing detectors; emails contact@ only on a violation or an unrunnable
   // check). 6:55 is deliberately AFTER the 6:00 estimate conversion guard and
