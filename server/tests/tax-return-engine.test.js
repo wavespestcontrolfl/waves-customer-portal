@@ -451,8 +451,17 @@ describe('warnings', () => {
     const r = computeReturn(inputs({ gross_receipts: 2000, status: 'filed', filed_on: '2026-04-01', filed_snapshot: snap }));
     const w = r.warnings.find((x) => x.code === 'filed_differs');
     expect(w.message).toContain('net profit was $1,000.00 when filed, now $2,000.00');
-    const same = computeReturn(inputs({ gross_receipts: 1000, status: 'filed', filed_on: '2026-04-01', filed_snapshot: { result: { ...snap.result, total_tax: computeReturn(inputs({ gross_receipts: 1000 })).total_tax } } }));
+    // the snapshot as fileYear freezes it: the result without its warnings
+    const frozen = (over) => { const { warnings: _w, ...result } = computeReturn(inputs(over)); return { result }; };
+    const same = computeReturn(inputs({ gross_receipts: 1000, status: 'filed', filed_on: '2026-04-01', filed_snapshot: frozen({ gross_receipts: 1000 }) }));
     expect(codes(same)).not.toContain('filed_differs');
+  });
+  test('a filed year whose expenses moved between Schedule C lines (same profit, same tax) warns too', () => {
+    const books = (lines) => ({ gross_receipts: 20000, expense_lines: lines });
+    const filed = (() => { const { warnings: _w, ...result } = computeReturn(inputs(books([{ line: '8', amount: 3000 }]))); return { result }; })();
+    const r = computeReturn(inputs({ ...books([{ line: '8', amount: 2000 }, { line: '22', amount: 1000 }]), status: 'filed', filed_on: '2026-04-01', filed_snapshot: filed }));
+    expect(r.net_profit).toBe(filed.result.net_profit);
+    expect(r.warnings.find((x) => x.code === 'filed_differs').message).toBe('This year is marked filed, but the books now give a different answer: Schedule C line 8 (Advertising) was $3,000.00 when filed, now $2,000.00; Schedule C line 22 (Supplies) was $0.00 when filed, now $1,000.00.');
   });
   test('a line the engine does not know lands on 27a with a warning; lines 13 and 30 rows are not summed', () => {
     const r = computeReturn(inputs({ gross_receipts: 5000, expense_lines: [{ line: '99', amount: 100 }, { line: '27a', amount: 50 }, { line: '13', amount: 700 }, { line: '30', amount: 800 }] }));

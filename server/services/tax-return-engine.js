@@ -178,12 +178,23 @@ function snapshotDiffers(snapshot, result) {
   if (!old) return [];
   const pairs = [
     ['net profit', old.net_profit, result.net_profit],
+    ['SE tax', old.se_tax, result.se_tax],
+    ['AGI', old.agi, result.agi],
+    ['NOL deduction', old.nol_used, result.nol_used],
+    ['QBI deduction', old.qbi_deduction, result.qbi_deduction],
+    ['taxable income', old.taxable_income, result.taxable_income],
+    ['income tax', old.income_tax, result.income_tax],
     ['total tax', old.total_tax, result.total_tax],
     ['NOL carryover', old.carry_out?.nol, result.carry_out.nol],
     ['QBI loss carryover', old.carry_out?.qbi_loss, result.carry_out.qbi_loss],
     ['section 179 carryover', old.carry_out?.sec179, result.carry_out.sec179],
     ['home office carryover', old.carry_out?.home_office, result.carry_out.home_office],
   ];
+  // every Schedule C line too: moving an expense between lines leaves the profit alone
+  const lines = (r) => new Map((r.schedule_c || []).map((l) => [`Schedule C line ${l.line} (${l.label})`, l.amount]));
+  const was = lines(old);
+  const now = lines(result);
+  for (const label of new Set([...was.keys(), ...now.keys()])) pairs.push([label, was.get(label), now.get(label)]);
   return pairs.filter(([, a, b]) => round2(a) !== round2(b)).map(([label, a, b]) => `${label} was ${fmt(a)} when filed, now ${fmt(b)}`);
 }
 
