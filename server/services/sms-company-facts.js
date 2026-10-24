@@ -186,7 +186,42 @@ function hasExactLabelFacts(factsBlock) {
   return before !== null && new RegExp(exactStructureRegexSource('required')).test(before);
 }
 
+// ---- Rebasing a stored block onto today's static section (sealed-eval freezer) ----
+//
+// The COMPANY FACTS section is STATIC: byte-identical on every draft of one identity, so it carries
+// nothing about the customer or the day. A block drafted under an EARLIER render (a known one in
+// PRIOR_COMPANY_FACTS_RENDERS) therefore differs from today's block for the same inbound and the same
+// day-of facts ONLY in that section. Without this, every wording edit (three in three weeks) emptied the
+// sealed exam's candidate pool for the 7-day age window and left it with a handful of items.
+// Returns the block with the earlier render swapped for today's, or null when the block does not end its
+// pre-BILLING text with one known earlier render (+ the optional LABEL FACTS section) - already current,
+// no company section, or typed text. Only the exact structure counts, same as hasExactCompanyFacts.
+// The caller still owns the topic question: the human reply of an old draft may restate a policy
+// whose line was reworded (RETIRED_COMPANY_FACT_TOPIC_RE).
+function rebaseCompanyFactsToCurrent(factsBlock) {
+  const facts = String(factsBlock || '');
+  const before = textBeforeFirstBilling(facts);
+  if (before === null) return null;
+  const { LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
+  const tailOk = new RegExp(`^(?:\\n${LABEL_SECTION_REGEX_SRC})?$`);
+  for (const prior of knownCompanyFactsRenders().slice(1)) {
+    const needle = `\n${prior.replace(/\n$/, '')}`;
+    const at = before.lastIndexOf(needle);
+    if (at < 0) continue;
+    const tail = before.slice(at + needle.length);
+    if (!tailOk.test(tail)) continue;
+    return `${before.slice(0, at)}${exactSectionSuffix()}${tail}${facts.slice(before.length)}`;
+  }
+  return null;
+}
+// Words around the topics of the lines in RETIRED_COMPANY_FACT_LINES (inside spray; paying). A reply
+// written under the old wording may state the old policy, so a rebased item whose inbound or human reply
+// touches these topics is not sealed. Extend this when a line is added to RETIRED_COMPANY_FACT_LINES.
+const RETIRED_COMPANY_FACT_TOPIC_RE = /\b(?:inside|interior|indoors?|cash|checks?|cards?|zelle|paid|pay(?:s|ing|ment|ments)?)\b/i;
+
 module.exports = {
+  rebaseCompanyFactsToCurrent,
+  RETIRED_COMPANY_FACT_TOPIC_RE,
   BILLING_DELIMITER,
   exactSectionSuffix,
   exactStructureRegexSource,

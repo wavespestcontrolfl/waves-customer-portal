@@ -37,7 +37,7 @@ function makeFakeDb({ activeCount = 0, candidates = [] } = {}) {
       if (builder._update) rows = 0; // nothing retired to restore, nothing to retire
       else if (builder._insertRows) rows = [];
       else if (builder._isCount) rows = [{ count: String(activeCount) }];
-      else rows = candidates;
+      else rows = tableKey === 'message_drafts' ? candidates : []; // pool reads (retired / active rows) come back empty
       return Promise.resolve(rows).then(resolve, reject);
     };
     return builder;
@@ -88,6 +88,14 @@ const MV_BINDINGS = [`\n${MISSED_VISIT_SCOPE_LINE}\n`, D_, '\nUPCOMING SERVICES:
 // 'n' (2026-10-09): the PORTAL SELF-CANCEL line, a generic line-start marker like Payment options;
 // contract order SLA, CF, LBL, VL, Payment options, MISSED VISIT scope line, PORTAL SELF-CANCEL, FREE RE-SERVICE
 const PC_BINDING = pattern_('PORTAL SELF-CANCEL:');
+// The freezer's CANDIDATE query reads a known earlier render of the static COMPANY FACTS section as current
+// (it rebases the block before freezing it); every other query keeps the exact-current test.
+const anyRender = (bindings) => bindings.map((b) => {
+  for (const label of ['optional', 'required']) {
+    if (b === exactStructureRegexSource(label)) return exactStructureRegexSource(label, { anyRender: true });
+  }
+  return b;
+});
 const CONTRACT_BINDINGS = [
   pattern_('FOLLOW-UP SLA RIGHT NOW:'),
   D_, D_, exactStructureRegexSource('optional'),
@@ -197,6 +205,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     const dbi = (table) => {
       const tableKey = typeof table === 'object' ? Object.values(table)[0] : table;
       const b = { _table: tableKey, _isCount: false, _compat: false, _insertRows: null, _update: null, _raws: [] };
+      const retiredRows = Array.from({ length: restorable }, (_, i) => ({ id: `retired-${i}`, facts_block: '' }));
       const record = (name) => (...args) => {
         calls.push([name, args, tableKey]);
         if (name === 'count') b._isCount = true;
@@ -226,7 +235,8 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
         if (b._update) rows = b._update.active === true ? restorable : 3; // restore vs retire row counts
         else if (b._insertRows) rows = [];
         else if (b._isCount) rows = [{ count: String(b._compat ? compatibleCount : activeCount) }];
-        else rows = candidates;
+        else if (tableKey === 'message_drafts') rows = candidates;
+        else rows = retiredRows; // the retired-compatible read: `restorable` rows a restore can bring back
         return Promise.resolve(rows).then(resolve, reject);
       };
       return b;
@@ -248,11 +258,11 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     // rewritten onto the aliased `md.facts_block` column — round 6: now a
     // position-scoped SUBSTRING/LEAST expression, not a bare column ref)
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block/.test(String(args[0])) && /~ \?/.test(String(args[0])))).toBe(true);
-    // the reactivation attempt ran first (Codex r5 #5194 P2), found nothing, then the retirement
+    // the reactivation plan (Codex r5 #5194 P2) found nothing to bring back, so nothing was written; the retirement
     // targeted pre-v12 rows (NOT LIKE marker), oldest first, capped at the overflow
     const restoreUpdates = dbi.updates.filter((u) => u.patch.active === true);
     const retireUpdates = dbi.updates.filter((u) => u.patch.active === false);
-    expect(restoreUpdates).toHaveLength(1);
+    expect(restoreUpdates).toHaveLength(0);
     expect(retireUpdates).toHaveLength(1);
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /!~ \?/.test(String(args[0])))).toBe(true);
     expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 3)).toBe(true);
@@ -290,10 +300,15 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     // VISIT STATUS & OPEN LOOPS (header at its rendered position), Payment options, the MISSED VISIT scope line, PORTAL SELF-CANCEL
     const CURRENT_BINDINGS = [pattern_('FOLLOW-UP SLA RIGHT NOW:'), ...RS_BINDINGS, D_, D_, exactStructureRegexSource('optional'), D_, D_, exactStructureRegexSource('required'), ...VL_BINDINGS, pattern_('- Payment options:'), ...MV_BINDINGS, PC_BINDING];
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(CURRENT_BINDINGS);
+      expect([CURRENT_BINDINGS, anyRender(CURRENT_BINDINGS)]).toContainEqual(args[1]);
       expect(String(args[0])).not.toMatch(/!~ \?/); // 11_n+c: every fact the version carries is required, none forbidden
       expect(String(args[0])).not.toMatch(/NOT \(position\(\?::text in split_part\(split_part\(/);
     }
+    // exactly the candidate query (md.facts_block) takes the earlier company renders; the count and the retirement stay exact
+    for (const [, args] of likeRaws) {
+      expect(/md\.facts_block/.test(String(args[0]))).toBe(JSON.stringify(args[1]) === JSON.stringify(anyRender(CURRENT_BINDINGS)));
+    }
+    expect(likeRaws.some(([, args]) => /md\.facts_block/.test(String(args[0])))).toBe(true);
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });
 
@@ -321,7 +336,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(contract.length).toBeGreaterThanOrEqual(2); // the count + the candidate filter
     for (const [, args] of contract) {
       expect(String(args[0])).not.toMatch(/(?<!!)~ \?(?!:)/); // nothing required, both lines forbidden
-      expect(args[1]).toEqual(CONTRACT_BINDINGS);
+      expect([CONTRACT_BINDINGS, anyRender(CONTRACT_BINDINGS)]).toContainEqual(args[1]);
     }
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block/.test(String(args[0])) && /!~ \?/.test(String(args[0])))).toBe(true);
     // the v12 items beyond the target are retired (the fake reports 3)
@@ -371,8 +386,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       const out = await sealEvalItems({ target: 100, dbi });
 
       expect(out.reactivated).toBe(10);
-      // the restore attempt was capped at the FULL shortfall (30), not the post-restore remainder
-      expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 30)).toBe(true);
+      // the restore is planned against the FULL shortfall (30), not the post-restore remainder
       const restoreUpdates = dbi.updates.filter((u) => u.patch.active === true);
       expect(restoreUpdates).toHaveLength(1);
 
