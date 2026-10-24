@@ -79,8 +79,8 @@ function Field({ id, label, children }) {
 }
 
 export default function IssueWarrantyDialog({ open, onClose, project, findings }) {
-  const base = useMemo(() => pretreatWarrantyValues({ project, findings }), [project, findings]);
   const [basisKind, setBasisKind] = useState("master");
+  const base = useMemo(() => pretreatWarrantyValues({ project, findings, basisKind }), [project, findings, basisKind]);
   const [basisDate, setBasisDate] = useState("");
   const [treatmentPrice, setTreatmentPrice] = useState("");
   const [planPrice, setPlanPrice] = useState(base.warranty.plan_price);
@@ -100,7 +100,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const { basisProblem, noticeProblem, ready } = warrantyIssueReadiness(base, {
     basisDate, noticeDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures, noticeLocation, payer,
   });
-  const lateDays = daysSinceTreatment(base.treatment.initial_date, base.warranty.issue_date);
+  const lateDays = daysSinceTreatment(base.warranty.start_date, base.warranty.issue_date);
 
   // The server builds every job field from the saved certificate and
   // stamps the issue date; only the office's own fields go up.
@@ -162,10 +162,17 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div style={{ fontSize: 16, fontWeight: 600, color: "#18181B" }}>Issue new construction warranty</div>
           <div style={mutedStyle}>
-            {base.warranty.plan || "No plan on the certificate"} · treated {base.treatment.initial_date || "date missing"} · covered
+            {base.warranty.plan || "No plan on the certificate"} · treated {base.treatment.initial_date || "date missing"} · runs
+            from the {base.warranty.start_basis} treatment date {base.warranty.start_date || "—"} · covered
             through {base.warranty.term_end || "—"} · {base.treatment.product || "product missing"}. Florida requires the
-            warranty within 30 days of the treatment date.
+            warranty within 30 days of that date.
           </div>
+          {basisKind === "master" && !base.warranty.start_date && (
+            <div role="status" style={{ fontSize: 14, color: "#B91C1C" }}>
+              A builder lot warranty runs from the final exterior treatment. Record its date on the certificate and send the
+              certificate again first.
+            </div>
+          )}
           {lateDays != null && lateDays > 30 && (
             <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
               Treated {lateDays} days ago: past the 30-day limit in Rule 5E-14.105(3)(a). Send it today.
@@ -213,7 +220,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
               <Field id="warranty-plan-price" label="Plan price">
                 <input id="warranty-plan-price" value={planPrice} onChange={(e) => setPlanPrice(e.target.value)} placeholder="$0.00" style={fieldStyle} />
               </Field>
-              <Field id="warranty-renewal-fee" label="Annual renewal fee (fixed through year 5)">
+              <Field id="warranty-renewal-fee" label={basisKind === "master" ? "Annual renewal fee (fixed through year 5, not more than $149.00)" : "Annual renewal fee (fixed through year 5)"}>
                 <input id="warranty-renewal-fee" value={renewalFee} onChange={(e) => setRenewalFee(e.target.value)} placeholder="$0.00" style={fieldStyle} />
               </Field>
               <Field id="warranty-issuer-name" label="Signed for Waves by">
