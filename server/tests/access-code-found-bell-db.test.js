@@ -50,7 +50,8 @@ maybeDescribe('found-codes bell (live Postgres)', () => {
     createdAt: '2026-10-24T11:17:00.000Z', suggestedCustomer: null, ...over,
   });
   const run = (items) => Bell.syncFoundCodesBell({
-    now: NOW, gateEnabled: true, sectionOn: true, dedupeKey: KEY, list: async () => ({ total: items.length, items }),
+    now: NOW, gateEnabled: true, sectionOn: true, dedupeKey: KEY,
+    ids: async () => items.map((row) => row.id), list: async () => ({ total: items.length, items }),
   });
 
   test('raise, quiet repeat, quiet leave, a person\'s done, a new code rings, closed at zero, a comeback rings', async () => {
@@ -130,6 +131,9 @@ maybeDescribe('found-codes bell (live Postgres)', () => {
       }).returning('*');
       const listed = await access.listFound(trx, { limit: 50, offset: 0 });
       expect(listed.items.map((item) => item.id)).toContain(found.id);
+      const waiting = await access.listFoundIds(trx);
+      expect(waiting).toContain(found.id);
+      expect(waiting).toHaveLength(listed.total);
 
       await expect(Bell.syncFoundCodesBell({ now: NOW, conn: trx, gateEnabled: true, sectionOn: true, dedupeKey: ownKey }))
         .resolves.toEqual({ count: listed.total, outcome: 'raised' });

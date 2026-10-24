@@ -16,7 +16,7 @@ jest.mock('../services/admin-alert-episodes', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n2', deduped: false })),
 }));
-jest.mock('../services/access-code-capture', () => ({ enabled: jest.fn(() => true), listFound: jest.fn() }));
+jest.mock('../services/access-code-capture', () => ({ enabled: jest.fn(() => true), listFound: jest.fn(), listFoundIds: jest.fn() }));
 
 const gates = require('../config/feature-gates');
 const episodes = require('../services/admin-alert-episodes');
@@ -43,11 +43,15 @@ function fakeConn() {
   return { conn, trx };
 }
 
+// `waiting` is every waiting code's id (default: the listed ones).
 const run = (items, over = {}) => {
   const { conn, trx } = fakeConn();
-  const list = jest.fn(async () => ({ total: over.total ?? items.length, items }));
-  return { conn, trx, list, result: Bell.syncFoundCodesBell({ now: NOW, conn, gateEnabled: true, sectionOn: true, list, ...over }) };
+  const waiting = over.waiting ?? items.map((row) => row.id);
+  const ids = jest.fn(async () => waiting);
+  const list = jest.fn(async () => ({ total: waiting.length, items }));
+  return { conn, trx, ids, list, result: Bell.syncFoundCodesBell({ now: NOW, conn, gateEnabled: true, sectionOn: true, ids, list, ...over }) };
 };
+const idsOf = (items) => items.map((row) => row.id);
 
 const neverLeaks = (composed) => {
   const text = [composed.spec.action, composed.spec.why, composed.detail].join('\n');
@@ -64,7 +68,7 @@ beforeEach(() => {
 
 describe('the copy', () => {
   test('one code from a customer names the kind, the customer and the day', () => {
-    const composed = composeFound([item()], 1);
+    const composed = composeFound([item()], ['f1']);
     const alert = composeAdminAlert(composed.spec);
     expect(alert.headline).toBe('Customers — review the door code from Pat Synthetic');
     expect(alert.why).toBe('From a text on Oct 24; a technician sees it only after the office saves it.');
@@ -78,7 +82,7 @@ describe('the copy', () => {
     const composed = composeFound([item({
       customerId: null, customerName: null, senderPhone: '+19415550123', kind: 'pass', sourceType: 'call',
       suggestedCustomer: { id: 'cust-9', name: 'Sam Example', address: '1 Sample Way' },
-    })], 1);
+    })], ['f1']);
     const alert = composeAdminAlert(composed.spec);
     expect(alert.headline).toBe('Customers — review a visitor pass from an unknown sender');
     expect(alert.why).toBe('From a call on Oct 24; no customer is linked yet, so link one, then save it.');
@@ -89,7 +93,7 @@ describe('the copy', () => {
   });
 
   test('a one-visit code says to pick the visit', () => {
-    const alert = composeAdminAlert(composeFound([item({ life: 'visit', kind: 'call_box', sourceType: 'email' })], 1).spec);
+    const alert = composeAdminAlert(composeFound([item({ life: 'visit', kind: 'call_box', sourceType: 'email' })], ['f1']).spec);
     expect(alert.headline).toBe('Customers — review the call box code from Pat Synthetic');
     expect(alert.why).toBe('From an email on Oct 24; it is for one visit, so pick the visit when you save it.');
   });
@@ -101,7 +105,7 @@ describe('the copy', () => {
       item({ id: 'f2', customerId: null, customerName: null, kind: 'neighborhood_gate', sourceAt: '2026-10-23T15:00:00.000Z' }),
       item({ id: 'f1', customerId: 'cust-2', customerName: 'Kim Sample', sourceAt: '2026-10-22T15:00:00.000Z' }),
     ];
-    const composed = composeFound(items, 4);
+    const composed = composeFound(items, idsOf(items));
     const alert = composeAdminAlert(composed.spec);
     expect(alert.headline).toBe('Customers — review 4 codes found in messages');
     expect(alert.why).toBe('From Pat Synthetic, an unknown sender and Kim Sample; the oldest is from Oct 22.');
@@ -118,7 +122,7 @@ describe('the copy', () => {
 
   test('a list longer than the names the why can hold says how many more, and a capped list says so in the detail', () => {
     const items = ['Avery', 'Blake', 'Casey', 'Devon', 'Emery'].map((first, i) => item({ id: `f${i}`, customerId: `c${i}`, customerName: `${first} Synthetic` }));
-    const composed = composeFound(items, 7);
+    const composed = composeFound(items, [...idsOf(items), 'f8', 'f9']);
     expect(composeAdminAlert(composed.spec).why).toBe('From Avery Synthetic, Blake Synthetic, Casey Synthetic and 2 more; the oldest is from Oct 24.');
     expect(composed.spec.action).toBe('review 7 codes found in messages');
     expect(composed.detail.split('\n').at(-1)).toBe('- and 2 more');
@@ -126,10 +130,10 @@ describe('the copy', () => {
 
   test('long or code-shaped names still pass the rule', () => {
     const long = 'Bartholomew-Alexander Montgomery_Worthington-Smythe the.Third';
-    expect(() => composeAdminAlert(composeFound([item({ customerName: long })], 1).spec)).not.toThrow();
+    expect(() => composeAdminAlert(composeFound([item({ customerName: long })], ['f1']).spec)).not.toThrow();
     const many = Array.from({ length: 3 }, (_, i) => item({ id: `f${i}`, customerId: `c${i}`, customerName: `${long} ${i}` }));
-    expect(() => composeAdminAlert(composeFound(many, 3).spec)).not.toThrow();
-    expect(composeAdminAlert(composeFound(many, 3).spec).why.length).toBeLessThanOrEqual(110);
+    expect(() => composeAdminAlert(composeFound(many, idsOf(many)).spec)).not.toThrow();
+    expect(composeAdminAlert(composeFound(many, idsOf(many)).spec).why.length).toBeLessThanOrEqual(110);
   });
 });
 
@@ -152,10 +156,11 @@ describe('syncFoundCodesBell', () => {
   });
 
   test('waiting codes raise one row under the lock, through the reopen helper, with its item keys and count', async () => {
-    const { trx, list, result } = run([item({ id: 'f2' }), item({ id: 'f1' })]);
+    const { trx, ids, list, result } = run([item({ id: 'f2' }), item({ id: 'f1' })]);
     await expect(result).resolves.toEqual({ count: 2, outcome: 'raised' });
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['admin:access-codes-found']);
-    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(list.mock.invocationCallOrder[0]);
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(ids.mock.invocationCallOrder[0]);
+    expect(ids).toHaveBeenCalledWith(trx);
     expect(list).toHaveBeenCalledWith(trx, { limit: 50, offset: 0 });
     const [category, title, why, opts] = episodes.raiseAdminAlertWithReopen.mock.calls[0];
     expect(category).toBe('access_codes');
@@ -170,10 +175,35 @@ describe('syncFoundCodesBell', () => {
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
-  test('the count is the whole list, not only the codes the row names', async () => {
-    const { result } = run([item({ id: 'f1' })], { total: 3 });
+  test('the count and the item keys are every waiting code, not only the codes the row names', async () => {
+    const { result } = run([item({ id: 'f1' })], { waiting: ['f3', 'f1', 'f2'] });
     await expect(result).resolves.toMatchObject({ count: 3 });
-    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][1]).toBe('Customers — review 3 codes found in messages');
+    const [, title, , opts] = episodes.raiseAdminAlertWithReopen.mock.calls[0];
+    expect(title).toBe('Customers — review 3 codes found in messages');
+    expect(opts.metadata).toMatchObject({ itemKeys: ['f1', 'f2', 'f3'], count: 3 });
+  });
+
+  test('a backlog longer than the listed codes: saving a listed code never reads the next one as new', async () => {
+    const waiting = Array.from({ length: 51 }, (_, i) => `f${String(i).padStart(2, '0')}`);
+    const listed = (ids) => ids.slice(-50).reverse().map((id) => item({ id }));
+    await run(listed(waiting), { waiting }).result;
+    const before = episodes.raiseAdminAlertWithReopen.mock.calls[0][3].metadata.itemKeys;
+    expect(before).toHaveLength(51);
+    // The office saves the newest code (f50); f00, never listed before, now is.
+    const after = waiting.slice(0, 50);
+    await run(listed(after), { waiting: after }).result;
+    const opts = episodes.raiseAdminAlertWithReopen.mock.calls[1][3];
+    expect(opts.metadata.count).toBe(50);
+    expect(opts.ringOnRefresh(null, { itemKeys: before })).toBe(false);
+    // A code that really is new still rings.
+    expect(opts.ringOnRefresh(null, { itemKeys: before.filter((id) => id !== 'f00') })).toBe(true);
+  });
+
+  test('the office decided the last codes between the two reads: nothing is written this tick', async () => {
+    const { result } = run([], { waiting: ['f1'] });
+    await expect(result).resolves.toEqual({ count: 1, outcome: 'unchanged' });
+    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
   test('an empty list closes the row done', async () => {
@@ -188,9 +218,10 @@ describe('syncFoundCodesBell', () => {
     await expect(run([]).result).resolves.toEqual({ count: 0, outcome: 'clear' });
   });
 
-  test('the access codes section off closes the row without reading the list', async () => {
-    const { list, result } = run([item()], { sectionOn: false });
+  test('the access codes section off closes the row without reading the codes', async () => {
+    const { ids, list, result } = run([item()], { sectionOn: false });
     await expect(result).resolves.toEqual({ count: 0, outcome: 'clear' });
+    expect(ids).not.toHaveBeenCalled();
     expect(list).not.toHaveBeenCalled();
     expect(episodes.closeAdminAlertKeys.mock.calls[0][2]).toBe('section_off');
   });
@@ -222,11 +253,13 @@ describe('syncFoundCodesBell', () => {
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
-  test('by default it reads the Gate codes page list and its section gate', async () => {
+  test('by default it reads the Gate codes page list, its waiting ids and its section gate', async () => {
+    capture.listFoundIds.mockResolvedValueOnce(['f1']);
     capture.listFound.mockResolvedValueOnce({ total: 1, items: [item()] });
     const { conn, trx } = fakeConn();
     await expect(Bell.syncFoundCodesBell({ now: NOW, conn })).resolves.toMatchObject({ count: 1, outcome: 'raised' });
     expect(capture.enabled).toHaveBeenCalled();
+    expect(capture.listFoundIds).toHaveBeenCalledWith(trx);
     expect(capture.listFound).toHaveBeenCalledWith(trx, { limit: 50, offset: 0 });
   });
 });
