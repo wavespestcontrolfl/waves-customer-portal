@@ -1104,6 +1104,17 @@ describe('label ladder for clashing products (rule E, Y, H)', () => {
     ]);
   });
 
+  test('the clash is judged again after each hold shortens', () => {
+    // The 72-hour hold shortens for the 48-hour label direction; then only T-Storm's best-results window still
+    // clashes, and Talak's own best-results 24 hours is not shortened for it: T-Storm follows Talak.
+    const twoDay = ['Label48', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 48, label_window: 'directs', source: 'label' }];
+    const threeDayHold = ['Long', { mode: 'hold', hold_hours: 72, label_minimum: { hold_until: 'dry' }, label_best_results: true, source: 'label' }];
+    expect(linesOf(named(twoDay, T_STORM, threeDayHold, TALAK), TUE_9AM).slice(0, 2)).toEqual([
+      'Skip your turf watering until Wed 9 AM, and not before today’s treatment has dried.',
+      'After that, water in today’s treatment with about ¼ inch by Thu 9 AM.',
+    ]);
+  });
+
   test('a label window a hold with no minimum reaches is no claim, naming the hold and the water-in', () => {
     const long = ['Long', { mode: 'hold', hold_hours: 48, source: 'label' }];
     const ins = build(named(GRUBS, long), at(TUE_9AM));

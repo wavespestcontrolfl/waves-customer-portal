@@ -673,40 +673,51 @@ function lateDayHold(holds, at) {
   }), at, SAME_DAY_DRY_HOURS);
 }
 
-// The label windows the hold as it stands leaves with no deadline: only they
-// may shorten a hold, by their own strength (E1, E2), and only a same-day one
-// among them reaches E3.
-function clashingWindows(first, waterIns, at, besideHold) {
+// The label windows a hold window leaves with no deadline: only they may
+// shorten a hold, by their own strength.
+function clashingWindows(window, waterIns, at, besideHold) {
   return waterIns.filter((r) => windowStrength(r)
-    && !waterInDeadline(at, [r], windowHoursOf(r, besideHold), first.effectiveEnd, { timedEnd: first.timedEnd, follow: false, lateDay: true }));
+    && !waterInDeadline(at, [r], windowHoursOf(r, besideHold), window.effectiveEnd, { timedEnd: window.timedEnd, follow: false, lateDay: true }));
 }
 
-// E1. As few holds as the clash needs shorten to their label minimum: the
-// latest-ending hold the strength may shorten first, then the next. The first
-// window shortens none (the 2-hour drying allowance alone).
-function bentWindows(holds, at, strength) {
+// The latest-ending hold a window of this strength may shorten, or null.
+function latestBendable(holds, at, strength) {
   const endOf = (rule) => holdWindow([rule], at).effectiveEnd.getTime();
-  const order = holds.filter((r) => bendsFor(r, strength)).sort((a, b) => endOf(b) - endOf(a));
-  const windows = [holdWindow(holds, at, SAME_DAY_DRY_HOURS)];
-  let current = holds;
-  order.forEach((rule) => {
-    current = current.map((r) => (r === rule ? toLabelMinimum(r) : r));
-    windows.push(holdWindow(current, at, SAME_DAY_DRY_HOURS));
-  });
-  return windows;
+  return holds.filter((r) => bendsFor(r, strength)).sort((a, b) => endOf(b) - endOf(a))[0] || null;
 }
 
-// The hold windows to try after the hold as it stands (E1-E3); `followLabel` is
-// E2's permission for a "for best results" window to follow the hold.
-function clashTries(holds, waterIns, at, besideHold) {
-  const first = holdWindow(holds, at);
-  const clashing = clashingWindows(first, waterIns, at, besideHold);
-  const strength = strongestWindow(clashing);
-  if (!strength) return [];
-  const tries = bentWindows(holds, at, strength).map((window) => ({ window, followLabel: false }));
-  if (strength === 'best_results') tries.push({ window: first, followLabel: true });
-  if (clashing.some((r) => r.water_in_same_day === true)) tries.push({ window: lateDayHold(holds, at), followLabel: false });
-  return tries;
+// E1-E3 after the hold as it stands left no deadline. E1, one hold at a time:
+// the windows the holds now leave with no deadline decide the strength, and the
+// latest-ending hold it may shorten goes to its label minimum, until the
+// water-ins fit or no hold may shorten (the first round shortens none: the
+// 2-hour drying allowance alone). Then E2 for a "for best results" window
+// still clashing (it follows the holds as they now are), or E3 for a same-day
+// one (the late-day cut, from the holds' own minimums). `attempt(window,
+// followLabel)` is applyWaterIn for this visit.
+function resolveClash(holds, waterIns, at, { attempt, besideHold }) {
+  let current = holds;
+  for (;;) {
+    const window = holdWindow(current, at, SAME_DAY_DRY_HOURS);
+    const short = attempt(window, false);
+    if (short) return { hold: window, short };
+    const clashing = clashingWindows(window, waterIns, at, besideHold);
+    const strength = strongestWindow(clashing);
+    const next = strength ? latestBendable(current, at, strength) : null;
+    if (!next) return lastClashTries({ holds, window, clashing, strength, at, attempt });
+    current = current.map((r) => (r === next ? toLabelMinimum(r) : r));
+  }
+}
+
+function lastClashTries({ holds, window, clashing, strength, at, attempt }) {
+  const tries = [
+    ...(strength === 'best_results' ? [{ window, followLabel: true }] : []),
+    ...(clashing.some((r) => r.water_in_same_day === true) ? [{ window: lateDayHold(holds, at), followLabel: false }] : []),
+  ];
+  for (const { window: tryWindow, followLabel } of tries) {
+    const short = attempt(tryWindow, followLabel);
+    if (short) return { hold: tryWindow, short };
+  }
+  return null;
 }
 
 // C and E: the short water-in and the hold beside it. Returns { hold, short },
@@ -716,14 +727,14 @@ function decideShortWaterIn(out, { holds, waterIns, list, resolved, runtime, pla
   const first = holds.length ? holdWindow(holds, at) : null;
   if (!waterIns.length) return { hold: first, short: null };
   const besideHold = labelFirst && holds.length > 0;
+  const attempt = (window, followLabel) => applyWaterIn(out, {
+    waterIns, runtime, plainWhenNoSetup, at, followLabel, besideHold, labelFirst, holdEnd: window && window.effectiveEnd, timedEnd: window && window.timedEnd,
+  });
   // The hold as it stands first (rule C for our own windows); then, label first, E1-E3.
-  const tries = [{ window: first, followLabel: false }, ...(labelFirst && first ? clashTries(holds, waterIns, at, besideHold) : [])];
-  for (const { window, followLabel } of tries) {
-    const short = applyWaterIn(out, {
-      waterIns, runtime, plainWhenNoSetup, at, followLabel, besideHold, labelFirst, holdEnd: window && window.effectiveEnd, timedEnd: window && window.timedEnd,
-    });
-    if (short) return { hold: window, short };
-  }
+  const short = attempt(first, false);
+  if (short) return { hold: first, short };
+  const settled = labelFirst && first ? resolveClash(holds, waterIns, at, { attempt, besideHold }) : null;
+  if (settled) return settled;
   // With no hold, only a same-day water-in fails: too late in the day to fit a run.
   return {
     noClaim: holds.length ? 'water_in_conflict' : 'same_day_too_late',
