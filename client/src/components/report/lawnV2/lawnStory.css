@@ -56,6 +56,7 @@
 @media print {
   .service-report-v1 .lawn-story-layout .plan-visit-reschedule { display: none !important; }
   .service-report-v1 .lawn-story-layout .service-report-hero { display: block; }
-  .service-report-v1 .lawn-story-layout .lawn-story-condition { display: none; }
+  .service-report-v1 .lawn-story-layout .service-report-hero > .lawn-story-condition { margin-top: 16px !important; }
+  .service-report-v1 .lawn-story-layout .lawn-story-condition a { display: none; }
   .service-report-v1 .lawn-story-layout .lawn-story-personal > [data-glass="card"] { margin-block: 16px !important; }
 }
