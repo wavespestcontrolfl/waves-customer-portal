@@ -29,7 +29,7 @@ jest.mock('../services/missed-call-bell', () => ({
 
 const {
   GATE, MESSAGE_TYPE, CLAIM, MAX_CALL_AGE_MS, SEND_SLOT_MS, VOICEMAIL_GRACE_MS,
-  _private: { stampSpamShadow, textBackCoreEligible, emptyVoicemailOn, EMPTY_VOICEMAIL_LANDING_MS, callEndedAt, sendSlotDeadline, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
+  _private: { stampSpamShadow, textBackCoreEligible, emptyVoicemailOn, failedPreconnectScreen, SKIP_FAILED_SCREEN_GATE, EMPTY_VOICEMAIL_LANDING_MS, callEndedAt, sendSlotDeadline, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
 } = require('../services/missed-call-text-back');
 const { isEnabled } = require('../config/feature-gates');
 const {
@@ -460,5 +460,22 @@ describe('robodialer spam shadow stamp (stampSpamShadow)', () => {
     classifySpamWave.mockRejectedValue(new Error('db down'));
     await expect(stampSpamShadow(call(), stampShadow)).resolves.toBeUndefined();
     expect(stampShadow).not.toHaveBeenCalled();
+  });
+});
+
+describe('failed press-1 screen (failedPreconnectScreen, GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN)', () => {
+  test('reads the gate the feature-gates entry declares', () => {
+    expect(SKIP_FAILED_SCREEN_GATE).toBe('missedCallTextSkipFailedScreen');
+  });
+
+  test('only the explicit failed stamp counts, from an object or a JSON string', () => {
+    expect(failedPreconnectScreen(call({ metadata: { preconnect_screen: 'failed' } }))).toBe(true);
+    expect(failedPreconnectScreen(call({ metadata: JSON.stringify({ preconnect_screen: 'failed' }) }))).toBe(true);
+    for (const stamp of ['passed', 'gated', 'would_gate', 'FAILED', '', undefined]) {
+      expect(failedPreconnectScreen(call({ metadata: { preconnect_screen: stamp } }))).toBe(false);
+    }
+    expect(failedPreconnectScreen(call({ metadata: null }))).toBe(false);
+    expect(failedPreconnectScreen(call({ metadata: 'not json' }))).toBe(false);
+    expect(failedPreconnectScreen(null)).toBe(false);
   });
 });

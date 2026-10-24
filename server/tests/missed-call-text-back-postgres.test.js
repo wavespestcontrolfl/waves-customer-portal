@@ -1266,4 +1266,61 @@ jest.setTimeout(30000);
       }
     });
   });
+
+  describe('failed press-1 screen (GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN, owner ruling 2026-10-24)', () => {
+    const screenGate = (on) => isEnabled.mockImplementation((gate) => (gate === 'missedCallTextSkipFailedScreen' ? on : true));
+    const REJECTED = '[Recording had no usable speech; an implausible transcription was rejected.]';
+
+    test('gate on: a caller who failed the screen and left no voicemail is not texted; the call settles skipped:screen_failed with no claim', async () => {
+      screenGate(true);
+      const row = call(READY_MINUTES_AGO, { duration_seconds: 53, metadata: { preconnect_screen: 'failed' } });
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'screen_failed' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await claimRow()).toBeUndefined();
+      expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:screen_failed');
+      // Settled for good: the sweep never offers it again.
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 0 });
+    });
+
+    test('gate on: the common robocall shape (failed screen, then an empty voicemail) is skipped by the sweep too', async () => {
+      screenGate(true);
+      const row = call(READY_MINUTES_AGO + 4, {
+        duration_seconds: 37,
+        answered_by: 'voicemail',
+        call_outcome: 'voicemail',
+        status: 'completed',
+        recording_sid: `RE${randomUUID().replaceAll('-', '')}`,
+        recording_url: 'https://example.invalid/recording',
+        transcription_status: 'rejected',
+        transcription: REJECTED,
+        updated_at: new Date(NOW - 60 * 1000),
+        metadata: { preconnect_screen: 'failed' },
+      });
+      await database('call_log').insert(row);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 1 });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await claimRow()).toBeUndefined();
+      expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:screen_failed');
+    });
+
+    test('gate off: the same failed-screen call is texted exactly as before', async () => {
+      screenGate(false);
+      const row = call(READY_MINUTES_AGO, { duration_seconds: 53, metadata: { preconnect_screen: 'failed' } });
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('gate on: a caller who pressed 1, a screen that never challenged, a lost pass/fail write and no stamp are all texted', async () => {
+      screenGate(true);
+      const stamps = ['passed', 'would_gate', 'gated', undefined];
+      for (const [i, stamp] of stamps.entries()) {
+        const row = call(READY_MINUTES_AGO, { from_phone: `+1941555030${i}`, metadata: stamp ? { preconnect_screen: stamp } : {} });
+        await database('call_log').insert(row);
+        expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+      }
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(stamps.length);
+    });
+  });
 });
