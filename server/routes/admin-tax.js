@@ -1230,11 +1230,7 @@ router.post('/expenses/auto-categorize', async (req, res, next) => {
           // recorded in its note: the category partial applies on top of it,
           // never in place of it (the share outlives a later rule change)
           const bookedPct = sharedBills.bookedSharePct(exp.notes);
-          if (bookedPct !== null) {
-            if (partial !== null) update.tax_deductible_amount = sharedBills.shareOf(partial, bookedPct);
-          } else if (partial !== null) {
-            update.tax_deductible_amount = partial;
-          }
+          if (partial !== null) update.tax_deductible_amount = bookedPct === null ? partial : sharedBills.shareOf(partial, bookedPct);
           // Re-assert still-uncategorized: the model calls run serially, so an
           // operator could categorize this row mid-batch — a bare id UPDATE
           // would clobber that manual choice with a stale AI pick. A zero-row
