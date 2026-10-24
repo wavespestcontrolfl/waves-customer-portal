@@ -18,14 +18,15 @@
  *
  * The home office is kept per tax year and computed on read. Simplified
  * method: $5 a square foot, 300 sq ft at most ($1,500 a year). Actual method
- * (Form 8829, GATE_TAX_RETURN_ENGINE): the year's rent, utilities, insurance
+ * (Form 8829, GATE_TAX_RETURN_ENGINE; writes are refused while that gate is
+ * off, an existing row still computes for the tax package): the year's rent, utilities, insurance
  * and other home costs times office sq ft over home sq ft, no 300 sq ft limit
  * and no proration by months. The simplified method is valid only on a timely
  * original return (Rev. Proc. 2013-13 section 4.03).
  */
 const db = require('../models/db');
 const { etParts } = require('../utils/datetime-et');
-const { taxSharedBillsLive } = require('../config/feature-gates');
+const { taxSharedBillsLive, taxReturnEngineLive } = require('../config/feature-gates');
 
 const DESC_CAP = 300;
 const PATTERN_MIN = 3;
@@ -261,6 +262,8 @@ async function upsertHomeOffice(year, input = {}) {
   const method = input.method === undefined ? 'simplified' : input.method;
   if (method !== 'simplified' && method !== 'actual') throw httpError(400, 'method must be simplified or actual');
   const actual = method === 'actual';
+  // the actual method is only read by the return engine: no writes while it is off
+  if (actual && !taxReturnEngineLive()) throw httpError(400, 'the actual method needs the return engine');
   const sqFt = parseIntIn(input.sq_ft, 1, actual ? HOME_SQ_FT_MAX : HOME_OFFICE_MAX_SQ_FT, 'sq_ft');
   const months = parseIntIn(input.months === undefined ? 12 : input.months, 1, 12, 'months');
   let notes = null;

@@ -3363,7 +3363,8 @@ router.put('/bank-import/ledger/rules/:id', async (req, res, next) => {
 // the home office is the simplified method, one row per tax year. /status
 // answers {enabled:false} when dark; every other route here 404s when dark.
 router.get('/shared-bills/status', (req, res) => {
-  res.json({ enabled: !!sharedBills.isOn() });
+  // actual_method: the home office may use the actual method (needs the return engine too)
+  res.json({ enabled: !!sharedBills.isOn(), actual_method: !!(sharedBills.isOn() && taxReturnEngineLive()) });
 });
 
 function sharedBillsDark(req, res, next) {

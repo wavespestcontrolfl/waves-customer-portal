@@ -19,7 +19,7 @@ function json(body, ok = true) {
 
 beforeEach(() => {
   calls = [];
-  status = { enabled: true };
+  status = { enabled: true, actual_method: true };
   bills = [bill];
   home = { year: 2026, row: null, deduction: 0 };
   localStorage.setItem('waves_admin_token', 'test-token');
@@ -114,6 +114,29 @@ it('offers the actual method: no 300 sq ft limit, the year costs over the home s
   expect(calls.find((c) => c.method === 'PUT').body).toMatchObject({
     method: 'actual', sq_ft: '500', home_sq_ft: '1000', rent: '12000', utilities: '600', insurance: '', other: '',
   });
+});
+
+it('hides the method picker while the return engine is off', async () => {
+  status = { enabled: true, actual_method: false };
+  render(<SharedBillsPanel />);
+  await screen.findByText('Phone plan');
+  expect(screen.getByLabelText('Square feet')).toBeInTheDocument();
+  expect(screen.queryByLabelText('Home office method')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Save home office' })).toBeInTheDocument();
+});
+
+it('shows a saved actual-method year read-only while the return engine is off', async () => {
+  status = { enabled: true, actual_method: false };
+  home = { year: 2026, row: { tax_year: 2026, method: 'actual', sq_ft: 300, months: 12, home_sq_ft: 1200, rent: '1000.00', utilities: '50.50', insurance: '0.00', other: null, notes: null }, deduction: 262.63 };
+  render(<SharedBillsPanel />);
+  await screen.findByText(/Actual method \(return engine off\)/);
+  await waitFor(() => expect(screen.getByLabelText('Home square feet')).toHaveValue('1200'));
+  expect(screen.getByLabelText('Square feet')).toBeDisabled();
+  expect(screen.getByLabelText('Rent for the year')).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Save home office' })).toBeNull();
+  expect(screen.queryByLabelText('Home office method')).toBeNull();
+  expect(screen.getByRole('button', { name: /^Remove \d{4}$/ })).toBeInTheDocument();
+  expect(calls.some((c) => c.method === 'PUT')).toBe(false);
 });
 
 it('loads a saved actual-method row into the form', async () => {

@@ -26,12 +26,17 @@
  *   Mileage          not used: like the P&L, the engine takes the actual-expense
  *                    method for vehicles.
  *
- * Ordering follows the owner's 2024 and 2025 working scripts:
+ * Ordering (section 179 before the home office, as Form 8829 has it; the
+ * owner's working scripts took the home office first, and the engine follows
+ * the form instead):
  *   1. other expenses and regular depreciation
- *   2. home office, capped at gross receipts less those expenses (simplified:
- *      no carryover; actual: the excess is the carryover out)
- *   3. section 179, capped at gross receipts less everything above and at the
- *      year's dollar limit (the excess is the carryover out)
+ *   2. section 179, capped at gross receipts less those expenses (the home
+ *      office is NOT subtracted) and at the year's dollar limit; the excess is
+ *      the carryover out
+ *   3. home office, capped at gross receipts less those expenses and the
+ *      section 179 allowed (Form 8829 line 8 starts from Schedule C line 29,
+ *      after line 13); actual: the excess is the carryover out; simplified: it
+ *      expires
  *   4. net profit; Schedule SE; AGI = profit + other income - half the SE tax
  *   5. NOL deduction = the smaller of the NOL carried in and 80% of taxable
  *      income before the NOL and QBI; QBI deduction = 20% of (profit - half SE
@@ -196,9 +201,24 @@ function computeReturn(inputs = {}) {
   const regularDep = round2(inputs.depreciation?.regular);
   const expenseTotal = round2([...byLine.values()].reduce((s, v) => s + v, 0));
   const otherExpenses = round2(expenseTotal + regularDep);
+  // income before section 179 and the home office
   const room = Math.max(round2(gross - otherExpenses), 0);
 
-  // 2. home office
+  // 2. section 179 comes first: its business-income limit is gross receipts
+  // less every other expense, and it does NOT count the home office. Form 8829
+  // line 8 starts from Schedule C line 29, which is AFTER line 13, so the home
+  // office is limited by what section 179 leaves (3 below).
+  const elected = round2(inputs.depreciation?.sec179_elected);
+  const pool179 = round2(elected + carryIn.sec179);
+  const incomeLimit179 = room;
+  const allowed179 = round2(Math.max(0, Math.min(pool179, K.sec179_limit, incomeLimit179)));
+  const carryOut179 = round2(pool179 - allowed179);
+  if (elected > K.sec179_limit) warnings.push(warn('sec179_over_limit', `Section 179 elected for ${year} (${fmt(elected)}) is over the ${fmt(K.sec179_limit)} limit. The phase-out for large purchases is not modeled: ask a tax preparer.`));
+
+  // 3. home office, capped at what is left after other expenses, depreciation
+  // and the section 179 allowed (floor 0). Actual: this year plus the carry-in,
+  // the excess carries out. Simplified: this year only, the excess expires.
+  const hoRoom = Math.max(round2(room - allowed179), 0);
   const ho = inputs.home_office || null;
   const hoRaw = ho ? round2(ho.deduction) : 0;
   let hoAllowed = 0;
@@ -206,10 +226,10 @@ function computeReturn(inputs = {}) {
   let hoPool = 0;
   if (ho && ho.method === 'actual') {
     hoPool = round2(hoRaw + carryIn.home_office);
-    hoAllowed = Math.min(hoPool, room);
+    hoAllowed = Math.min(hoPool, hoRoom);
     hoCarryOut = round2(hoPool - hoAllowed);
   } else {
-    hoAllowed = Math.min(hoRaw, room);
+    hoAllowed = Math.min(hoRaw, hoRoom);
     if (carryIn.home_office > 0) {
       warnings.push(warn('home_office_carry_idle', ho
         ? `${fmt(carryIn.home_office)} of home office carryover cannot be used with the simplified method. It stays carried forward.`
@@ -217,14 +237,6 @@ function computeReturn(inputs = {}) {
     }
   }
   hoAllowed = round2(hoAllowed);
-
-  // 3. section 179
-  const elected = round2(inputs.depreciation?.sec179_elected);
-  const pool179 = round2(elected + carryIn.sec179);
-  const incomeLimit179 = Math.max(round2(room - hoAllowed), 0);
-  const allowed179 = round2(Math.max(0, Math.min(pool179, K.sec179_limit, incomeLimit179)));
-  const carryOut179 = round2(pool179 - allowed179);
-  if (elected > K.sec179_limit) warnings.push(warn('sec179_over_limit', `Section 179 elected for ${year} (${fmt(elected)}) is over the ${fmt(K.sec179_limit)} limit. The phase-out for large purchases is not modeled: ask a tax preparer.`));
 
   // 4. profit, Schedule SE, AGI
   const profit = round2(gross - otherExpenses - hoAllowed - allowed179);

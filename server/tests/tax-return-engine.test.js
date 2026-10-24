@@ -8,8 +8,9 @@
  *     IRS "tax is" formula, which also proves every lower boundary.
  *  2. Schedule SE: nothing under $400 of net earnings; the Social Security
  *     part stops at the wage base; Additional Medicare above its threshold.
- *  3. Section 179 is capped by gross receipts less every other deduction and
- *     the carryover is the rest. The home office is capped first: simplified
+ *  3. Section 179 is capped by gross receipts less every other expense (the
+ *     home office is NOT subtracted) and the carryover is the rest. The home
+ *     office comes after it, capped at what section 179 leaves: simplified
  *     has no carryover, actual carries the excess.
  *  4. The NOL takes at most 80% of taxable income; QBI takes a QBI loss
  *     carryforward first and is capped at 20% of taxable income.
@@ -187,11 +188,31 @@ describe('section 179', () => {
     expect(r.lines.sec179_allowed).toBe(50000);
     expect(r.carry_out.sec179).toBe(20000);
   });
-  test('the home office is taken before it: both come out of what is left', () => {
+  test('the home office comes after it: section 179 uses the whole business income, the home office gets what is left', async () => {
+    // income before both 80,000 (100,000 - 20,000); pool 90,000; actual home office 10,000
     const r = computeReturn(inputs({ ...base, home_office: { method: 'actual', deduction: 10000 }, depreciation: { regular: 0, sec179_elected: 90000 } }));
-    expect(r.lines.home_office_deduction).toBe(10000);
-    expect(r.lines.sec179_allowed).toBe(70000); // 100,000 - 20,000 - 10,000
-    expect(r.carry_out.sec179).toBe(20000);
+    expect(r.lines.sec179_allowed).toBe(80000);
+    expect(r.carry_out.sec179).toBe(10000);
+    expect(r.lines.home_office_deduction).toBe(0);
+    expect(r.carry_out.home_office).toBe(10000);
+    expect(r.net_profit).toBe(0);
+  });
+  test('the home office gets what section 179 leaves, and the rest carries out (actual) or expires (simplified)', () => {
+    const o = { ...base, depreciation: { regular: 0, sec179_elected: 75000 } }; // leaves 80,000 - 75,000 = 5,000
+    const actual = computeReturn(inputs({ ...o, home_office: { method: 'actual', deduction: 4000 }, carry_in: { home_office: 3000 } }));
+    expect(actual.lines.home_office_deduction).toBe(5000);
+    expect(actual.carry_out.home_office).toBe(2000); // 7,000 - 5,000
+    const simplified = computeReturn(inputs({ ...o, home_office: { method: 'simplified', deduction: 6000 } }));
+    expect(simplified.lines.home_office_deduction).toBe(5000);
+    expect(simplified.carry_out.home_office).toBe(0);
+  });
+  test('the section 179 limit is the same with or without a home office', () => {
+    const d = { regular: 0, sec179_elected: 60000 };
+    const without = computeReturn(inputs({ ...base, depreciation: d }));
+    const withHo = computeReturn(inputs({ ...base, depreciation: d, home_office: { method: 'actual', deduction: 15000 } }));
+    expect(withHo.sec179.income_limit).toBe(without.sec179.income_limit);
+    expect(withHo.lines.sec179_allowed).toBe(60000);
+    expect(withHo.lines.home_office_deduction).toBe(15000); // 80,000 - 60,000 leaves 20,000
   });
 });
 
@@ -328,9 +349,9 @@ describe('cross-check against the structure of the 2025 working script', () => {
   // Synthetic inputs, same ordering as the script:
   //   gross 150,000; line 8 3,000 + line 22 9,000 + line 25 2,000 + line 27a 1,000
   //   = 15,000, regular depreciation 2,000 -> other expenses 17,000
-  //   actual home office 5,850 + carry-in 1,150 = 7,000 (cap 133,000: allowed)
   //   section 179 pool 41,000 elected + 20,000 carry-in = 61,000
-  //     limit = 150,000 - 17,000 - 7,000 = 126,000: allowed in full, carry 0
+  //     limit = 150,000 - 17,000 = 133,000 (the home office is not subtracted): allowed in full, carry 0
+  //   actual home office 5,850 + carry-in 1,150 = 7,000, capped at 133,000 - 61,000 = 72,000: allowed
   //   profit = 150,000 - 17,000 - 7,000 - 61,000 = 65,000
   //   SE base 65,000 x 0.9235 = 60,027.50; SE tax x 15.3% = 9,184.21 (9,184.2075)
   //   half 4,592.11; AGI 65,000 - 4,592.11 = 60,407.89; standard (2025 single) 15,750
@@ -358,15 +379,20 @@ describe('cross-check against the structure of the 2025 working script', () => {
     expect(r.carry_out).toEqual({ nol: 0, qbi_loss: 0, sec179: 0, home_office: 0 });
   });
   test('the same books on a smaller year: the caps bite and the carryovers move on', () => {
-    // gross 84,000: room 84,000 - 17,000 = 67,000; home office 7,000 allowed;
-    // section 179 limit 67,000 - 7,000 = 60,000 of the 61,000 pool (1,000 carries);
-    // profit 0: no SE tax, no taxable income, nothing used of the NOL or QBI loss
+    // The 2025 script took the home office first (so its 7,000 came off the
+    // section 179 limit and 1,000 of the pool carried). Form 8829 line 8 starts
+    // from Schedule C line 29, after line 13, so the engine takes section 179
+    // first: gross 84,000, room 84,000 - 17,000 = 67,000, the whole 61,000 pool
+    // is allowed (nothing carries), and the home office gets 67,000 - 61,000 =
+    // 6,000 of its 7,000 (1,000 carries out). Profit 0: no SE tax, no taxable
+    // income, nothing used of the NOL or QBI loss.
     const r = computeReturn({ ...cross, gross_receipts: 84000 });
     expect(r.net_profit).toBe(0);
-    expect(r.lines.sec179_allowed).toBe(60000);
+    expect(r.lines.sec179_allowed).toBe(61000);
+    expect(r.lines.home_office_deduction).toBe(6000);
     expect(r.total_tax).toBe(0);
     expect(r.nol_used).toBe(0);
-    expect(r.carry_out).toEqual({ nol: 26000, qbi_loss: 3000, sec179: 1000, home_office: 0 });
+    expect(r.carry_out).toEqual({ nol: 26000, qbi_loss: 3000, sec179: 0, home_office: 1000 });
     expect(r.estimates.no_estimates_required).toBe(true);
     expect(r.owed).toBe(-2000); // the estimates paid come back
   });

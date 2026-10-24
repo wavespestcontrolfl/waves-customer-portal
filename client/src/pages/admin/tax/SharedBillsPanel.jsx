@@ -251,7 +251,10 @@ function BillsBox({ categories }) {
   );
 }
 
-function HomeOfficeBox() {
+// actualMethod: the server says the actual method may be written (the return
+// engine is on too). While it is off the method picker is hidden and a saved
+// actual-method year is shown read-only: the tax package still uses it.
+function HomeOfficeBox({ actualMethod }) {
   const thisYear = etParts().year;
   const [year, setYear] = useState(thisYear);
   const [form, setForm] = useState(EMPTY_HOME);
@@ -263,6 +266,7 @@ function HomeOfficeBox() {
   // only the newest year's response may fill the form: a slower answer for a
   // year the operator already left must not land under the new year's Save
   const loadSeq = useRef(0);
+  const locked = !actualMethod && saved?.method === "actual";
 
   const load = useCallback(() => {
     const seq = ++loadSeq.current;
@@ -323,7 +327,9 @@ function HomeOfficeBox() {
       <CardBody className="flex flex-col gap-3 min-w-0">
         <strong>Home office</strong>
         <div className="text-sm text-ink-secondary">
-          {form.method === "actual"
+          {locked
+            ? "Actual method (return engine off): shown as saved and still used by the tax package. Turn the return engine on to change it, or remove it to start again with the simplified method."
+            : form.method === "actual"
             ? "Actual method (Form 8829): the year's rent, utilities, insurance and other home costs × office square feet ÷ home square feet. No square foot limit."
             : `Simplified method: $${RATE} × square feet × months ÷ 12, up to ${MAX_SQ_FT} square feet ($1,500 a year at most).`}
           {" "}The tax package lists it in home-office.csv.
@@ -336,15 +342,18 @@ function HomeOfficeBox() {
             <Select aria-label="Home office year" className="flex-1 min-w-[120px]" value={String(year)} disabled={busy} onChange={(e) => setYear(Number(e.target.value))}>
               {years.map((y) => <option key={y} value={y}>{y}</option>)}
             </Select>
-            <Select aria-label="Home office method" className="flex-1 min-w-[140px]" value={form.method} onChange={set("method")}>
-              <option value="simplified">Simplified</option>
-              <option value="actual">Actual</option>
-            </Select>
+            {actualMethod && (
+              <Select aria-label="Home office method" className="flex-1 min-w-[140px]" value={form.method} onChange={set("method")}>
+                <option value="simplified">Simplified</option>
+                <option value="actual">Actual</option>
+              </Select>
+            )}
             <Input
               aria-label="Square feet"
               placeholder={form.method === "actual" ? "Office square feet" : `Square feet (up to ${MAX_SQ_FT})`}
               inputMode="numeric"
               className="flex-1 min-w-[140px]"
+              disabled={locked}
               value={form.sq_ft}
               onChange={set("sq_ft")}
             />
@@ -354,6 +363,7 @@ function HomeOfficeBox() {
                 placeholder="Whole home square feet"
                 inputMode="numeric"
                 className="flex-1 min-w-[140px]"
+                disabled={locked}
                 value={form.home_sq_ft}
                 onChange={set("home_sq_ft")}
               />
@@ -363,6 +373,7 @@ function HomeOfficeBox() {
                 placeholder="Months (1 to 12)"
                 inputMode="numeric"
                 className="flex-1 min-w-[120px]"
+                disabled={locked}
                 value={form.months}
                 onChange={set("months")}
               />
@@ -377,18 +388,19 @@ function HomeOfficeBox() {
                   placeholder={label}
                   inputMode="decimal"
                   className="flex-1 min-w-[160px]"
+                  disabled={locked}
                   value={form[k]}
                   onChange={set(k)}
                 />
               ))}
             </div>
           )}
-          <Input aria-label="Home office notes" placeholder="Notes (optional)" value={form.notes} onChange={set("notes")} />
+          <Input aria-label="Home office notes" placeholder="Notes (optional)" disabled={locked} value={form.notes} onChange={set("notes")} />
           <div className="text-sm" data-testid="home-office-deduction">
             Deduction for {year}: <strong>{money(previewDeduction(form))}</strong>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button type="submit" variant="primary" disabled={busy || loading}>Save home office</Button>
+            {!locked && <Button type="submit" variant="primary" disabled={busy || loading}>Save home office</Button>}
             {saved && <Button variant="secondary" disabled={busy || loading} onClick={remove}>Remove {year}</Button>}
             {loading && error && <Button variant="secondary" onClick={load}>Try again</Button>}
           </div>
@@ -402,13 +414,14 @@ function HomeOfficeBox() {
 
 export default function SharedBillsPanel() {
   const [enabled, setEnabled] = useState(false);
+  const [actualMethod, setActualMethod] = useState(false);
   const [categories, setCategories] = useState([]);
 
   useEffect(() => {
     let live = true;
     adminFetch(`${T}/shared-bills/status`)
-      .then((d) => { if (live) setEnabled(!!d?.enabled); })
-      .catch(() => { if (live) setEnabled(false); });
+      .then((d) => { if (live) { setEnabled(!!d?.enabled); setActualMethod(!!d?.actual_method); } })
+      .catch(() => { if (live) { setEnabled(false); setActualMethod(false); } });
     return () => { live = false; };
   }, []);
 
@@ -423,7 +436,7 @@ export default function SharedBillsPanel() {
   return (
     <div className="flex flex-col gap-4 min-w-0">
       <BillsBox categories={categories} />
-      <HomeOfficeBox />
+      <HomeOfficeBox actualMethod={actualMethod} />
     </div>
   );
 }
