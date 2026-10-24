@@ -614,22 +614,27 @@ const MOVE_NOTICE_SENDERS = {
 };
 // The reschedule text's own stale statuses (admin-schedule sendRescheduleNoticeForVisit).
 const MOVE_NOTICE_TERMINAL = new Set(['cancelled', 'completed', 'skipped', 'no_show']);
+// A text its own pre-dispatch check refused is no delivery failure either: the
+// notice is no longer this sender's (a reclaimed cancellation lease, a restored
+// visit, a fence read that failed) or no longer true (the reschedule check: the
+// visit moved again, ended or is gone). No email for those, nor for a hold.
+const MOVE_NOTICE_REFUSALS = new Set([...NOTICE_HOLD_CODES, 'PRE_DISPATCH_CHECK_FAILED', 'notice_claim_lost',
+  'appointment_restored', 'appointment_moved', 'appointment_terminal', 'appointment_missing']);
 
-// Is the notice still true? A cancellation: the visit is still cancelled, in
-// the same cancellation the notice was for (its restoration count is the one
-// stamped when the text went out, so a cancel → restore → cancel again belongs
-// to the newer notice, which may have asked for none). A reschedule: the visit
-// is live, its slot is ahead, and the shared send guard finds that slot
-// unchanged and no grouped move holding it. Read fresh: deliverMoveNoticeEmail
-// runs it first, and the email sender runs it again at its dispatch boundary.
-// A read error, or a cancellation with no stamp, means no.
-async function moveNoticeStillCurrent({ kind, scheduledServiceId, apptTime, restorations }) {
+// Is the notice still true, and still this sender's? A cancellation: the
+// visit is still cancelled, the reminder row still carries the notice's claim
+// token (a newer cancellation, or the sweep, re-claims with its own), and the
+// restoration count is the one stamped when the text went out (a cancel →
+// restore → cancel again belongs to the newer notice, which may have asked
+// for none). A reschedule: the visit is live, its slot is ahead, and the
+// shared send guard finds that slot unchanged and no grouped move holding it.
+// Read fresh: deliverMoveNoticeEmail runs it first, and the email sender runs
+// it again at its dispatch boundary. A read error, or a cancellation with no
+// stamp, means no.
+async function moveNoticeStillCurrent({ kind, scheduledServiceId, apptTime, cancellation }) {
   const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('status');
   if (!svc) return false;
-  if (kind === 'cancelled') {
-    return String(svc.status) === 'cancelled'
-      && await require('./cancel-generation-fence').countRestorations(db, scheduledServiceId) === restorations;
-  }
+  if (kind === 'cancelled') return cancellationStillOwned(svc, scheduledServiceId, cancellation);
   if (MOVE_NOTICE_TERMINAL.has(String(svc.status)) || apptTime.getTime() <= Date.now()) return false;
   return !(await require('./visit-groups').appointmentSendHeld(scheduledServiceId, apptTime.getTime()));
 }
@@ -645,43 +650,65 @@ async function moveNoticeEmailAllowed(kind, customerId, scheduledServiceId) {
   return kind === 'cancelled' || prefs.appointmentConfirmation;
 }
 
+async function cancellationStillOwned(svc, scheduledServiceId, { token, restorations } = {}) {
+  if (String(svc.status) !== 'cancelled' || !token) return false;
+  const owned = await db('appointment_reminders')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .where('cancellation_notice_at', token)
+    .first('id');
+  return Boolean(owned) && await require('./cancel-generation-fence').countRestorations(db, scheduledServiceId) === restorations;
+}
+
 // One email per notice. A reschedule: the move's own stamp (the notice
 // sender's write time, carried on the text's audit rows as move_notice_at, so
 // a carrier bounce of any recipient's text rebuilds the same key). A
 // cancellation: its restoration count (cancellationNoticeStamp), so a retried
-// cancellation text keeps its key and a cancel after a restore gets a new one.
-function moveNoticeEmailKey(kind, scheduledServiceId, { noticeAt, restorations }) {
+// cancellation text (the sweep re-claims with a new token) keeps its key and a
+// cancel after a restore gets a new one.
+function moveNoticeEmailKey(kind, scheduledServiceId, { noticeAt, cancellation }) {
   return kind === 'cancelled'
-    ? `appointment.cancelled:${scheduledServiceId}:r${restorations}`
+    ? `appointment.cancelled:${scheduledServiceId}:r${cancellation?.restorations}`
     : `appointment.rescheduled:${scheduledServiceId}:${new Date(noticeAt).getTime()}`;
 }
 
-// The cancellation a cancellation text belongs to, stamped on its audit rows
-// (cancel_restorations): the visit's restoration count when the text went out.
-// Read only with the gate on; a failed read stamps nothing, which keeps the
-// email off (moveNoticeStillCurrent) and never touches the text.
-async function cancellationNoticeStamp(scheduledServiceId) {
+// The cancellation a cancellation text belongs to, stamped on its audit rows:
+// the notice's claim token (cancel_notice_at) and the visit's restoration
+// count (cancel_restorations) when the text went out. Read only with the gate
+// on; a failed read stamps nothing, which keeps the email off
+// (moveNoticeStillCurrent) and never touches the text.
+async function cancellationNoticeStamp(scheduledServiceId, noticeToken) {
   if (!require('../config/feature-gates').moveNoticeEmailLive()) return {};
   const { countRestorations } = require('./cancel-generation-fence');
-  return countRestorations(db, scheduledServiceId).then((n) => ({ cancel_restorations: n }), () => ({}));
+  return countRestorations(db, scheduledServiceId).then(
+    (n) => ({ cancel_notice_at: new Date(noticeToken).toISOString(), cancel_restorations: n }),
+    () => ({}),
+  );
+}
+
+// The stamp, as the email's binding (moveNoticeStillCurrent, moveNoticeEmailKey).
+function cancellationBinding(stamp) {
+  return { token: stamp.cancel_notice_at, restorations: stamp.cancel_restorations };
 }
 
 // The email version of a reschedule or cancellation text that reached nobody.
-// `sendOutcome` is the text's out-param: a hold code there means the text was
-// deferred, not lost. Returns true when the email went out. Never throws.
-async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, arrivalWindow, noticeAt, restorations, sendOutcome }) {
+// `sendOutcome` is the text's out-param: a hold or a pre-dispatch refusal there
+// means the text was deferred or no longer this sender's, not lost
+// (MOVE_NOTICE_REFUSALS). `cancellation` binds a cancellation email to its own
+// notice (cancellationNoticeStamp). Returns true when the email went out.
+// Never throws.
+async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, arrivalWindow, noticeAt, cancellation, sendOutcome }) {
   try {
     if (!require('../config/feature-gates').moveNoticeEmailLive() || !customerId || !scheduledServiceId) return false;
-    if (NOTICE_HOLD_CODES.includes(sendOutcome?.blockedCode)) return false;
+    if (MOVE_NOTICE_REFUSALS.has(sendOutcome?.blockedCode)) return false;
     if (!(await moveNoticeEmailAllowed(kind, customerId, scheduledServiceId))) return false;
-    const stillCurrent = () => moveNoticeStillCurrent({ kind, scheduledServiceId, apptTime, restorations });
+    const stillCurrent = () => moveNoticeStillCurrent({ kind, scheduledServiceId, apptTime, cancellation });
     if (!(await stillCurrent())) {
       logger.info(`[appt-remind] ${kind} email for ${scheduledServiceId} not sent: the notice is no longer current`);
       return false;
     }
     const res = await MOVE_NOTICE_SENDERS[kind]({
       customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, arrivalWindow, stillCurrent,
-      idempotencyKey: moveNoticeEmailKey(kind, scheduledServiceId, { noticeAt, restorations }),
+      idempotencyKey: moveNoticeEmailKey(kind, scheduledServiceId, { noticeAt, cancellation }),
     });
     if (res?.ok) {
       logger.info(`[appt-remind] ${kind} email sent for ${scheduledServiceId} (the text reached nobody)`);
@@ -726,7 +753,7 @@ async function deliverBouncedMoveNoticeEmail({ kind, audit, customerId, schedule
     serviceLabel: smsServiceLabelStored(row.service_type),
     arrivalWindow: meta.window_unknown === true ? require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW : formatArrivalWindow(apptTime),
     noticeAt: meta.move_notice_at || audit.created_at,
-    restorations: meta.cancel_restorations,
+    cancellation: cancellationBinding(meta),
   });
 }
 
@@ -3335,7 +3362,7 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
       return;
     }
     const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
-    const cancelStamp = await cancellationNoticeStamp(scheduledServiceId);
+    const cancelStamp = await cancellationNoticeStamp(scheduledServiceId, noticeToken);
     // The Intelligence Bar cancel card approves the exact text per recipient (renderCancellationBody); a
     // Dispatch cancel passes none and renders the live template.
     const approvedNotice = options.approvedNotice
@@ -3377,7 +3404,7 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
       emailed = await deliverMoveNoticeEmail({
         kind: 'cancelled', customerId: record.customer_id, scheduledServiceId,
         apptTime: new Date(record.appointment_time), serviceLabel: smsServiceLabelStored(record.service_type),
-        restorations: cancelStamp.cancel_restorations, sendOutcome,
+        cancellation: cancellationBinding(cancelStamp), sendOutcome,
       });
     }
     // One recipient accepted and another failed WITHOUT throwing (provider failure, opt-out, landline block): the

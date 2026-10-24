@@ -76,6 +76,7 @@ const CUSTOMER = { id: 'cust-1', first_name: 'Pat', last_name: 'Example', phone:
 // 4:00 PM Eastern (standard time in November).
 const SLOT = new Date('2099-11-04T21:00:00.000Z');
 const NOTICE_AT = new Date('2099-10-24T12:00:00.000Z');
+const OWN = (restorations = 0) => ({ token: '2099-10-24T12:00:00.000Z', restorations });
 
 function base({ status = 'confirmed', prefs = {} } = {}) {
   mockDb.first = {
@@ -85,6 +86,8 @@ function base({ status = 'confirmed', prefs = {} } = {}) {
     notifications: null,
     sms_log: null,
     phone_line_types: null,
+    // The cancellation claim ownership check (.first('id')): owned by default.
+    appointment_reminders: { id: 'rem-1' },
   };
   mockDb.rows = {};
   mockDb.updates = [];
@@ -128,7 +131,7 @@ describe('deliverMoveNoticeEmail', () => {
   test('a cancellation text that reached nobody: the cancellation email, keyed by its restoration count', async () => {
     base({ status: 'cancelled' });
     countRestorations.mockResolvedValue(2);
-    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', arrivalWindow: undefined, noticeAt: undefined, restorations: 2 }))).toBe(true);
+    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', arrivalWindow: undefined, noticeAt: undefined, cancellation: OWN(2) }))).toBe(true);
     expect(AppointmentEmail.sendAppointmentCancelledEmail).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1', scheduledServiceId: 'svc-1', idempotencyKey: 'appointment.cancelled:svc-1:r2',
     }));
@@ -157,7 +160,7 @@ describe('deliverMoveNoticeEmail', () => {
     base({ prefs: { appointment_confirmation: false } });
     expect(await deliverMoveNoticeEmail(args())).toBe(false);
     base({ status: 'cancelled', prefs: { appointment_confirmation: false } });
-    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', restorations: 0 }))).toBe(true);
+    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', cancellation: OWN() }))).toBe(true);
   });
 
   test('unreadable settings: no email', async () => {
@@ -186,14 +189,31 @@ describe('deliverMoveNoticeEmail', () => {
 
   test('a cancellation notice for a visit restored since sends nothing', async () => {
     base({ status: 'confirmed' });
-    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', restorations: 0 }))).toBe(false);
+    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', cancellation: OWN() }))).toBe(false);
     expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
   });
+
+  test('a newer cancellation (or the sweep) re-claimed the notice: this sender emails nothing', async () => {
+    base({ status: 'cancelled' });
+    mockDb.first.appointment_reminders = null;
+    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', cancellation: OWN() }))).toBe(false);
+    expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
+  });
+
+  test.each(['notice_claim_lost', 'appointment_restored', 'PRE_DISPATCH_CHECK_FAILED', 'appointment_moved', 'appointment_terminal'])(
+    'a text its own pre-dispatch check refused (%s) is no delivery failure: no email', async (blockedCode) => {
+      base({ status: 'cancelled' });
+      expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', cancellation: OWN(), sendOutcome: { blockedCode } }))).toBe(false);
+      expect(await deliverMoveNoticeEmail(args({ sendOutcome: { blockedCode } }))).toBe(false);
+      expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
+      expect(AppointmentEmail.sendAppointmentRescheduledEmail).not.toHaveBeenCalled();
+    },
+  );
 
   test('restored and cancelled again since the text: the old notice sends nothing (the newer cancellation owns its notice, or asked for none)', async () => {
     base({ status: 'cancelled' });
     countRestorations.mockResolvedValue(1);
-    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', restorations: 0 }))).toBe(false);
+    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', cancellation: OWN(0) }))).toBe(false);
     expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
   });
 
@@ -233,17 +253,18 @@ describe('deliverMoveNoticeEmail', () => {
 describe('helpers', () => {
   test('moveNoticeEmailKey: a reschedule by its stamp, a cancellation by its restoration count', () => {
     expect(moveNoticeEmailKey('rescheduled', 'svc-9', { noticeAt: '2099-10-24T12:00:00.000Z' })).toBe(`appointment.rescheduled:svc-9:${Date.parse('2099-10-24T12:00:00.000Z')}`);
-    expect(moveNoticeEmailKey('cancelled', 'svc-9', { restorations: 0 })).toBe('appointment.cancelled:svc-9:r0');
-    expect(moveNoticeEmailKey('cancelled', 'svc-9', { restorations: 1 })).toBe('appointment.cancelled:svc-9:r1');
+    expect(moveNoticeEmailKey('cancelled', 'svc-9', { cancellation: OWN(0) })).toBe('appointment.cancelled:svc-9:r0');
+    expect(moveNoticeEmailKey('cancelled', 'svc-9', { cancellation: OWN(1) })).toBe('appointment.cancelled:svc-9:r1');
   });
 
-  test('cancellationNoticeStamp: the restoration count with the gate on; nothing with it off or on a failed read', async () => {
+  test('cancellationNoticeStamp: the claim token and restoration count with the gate on; nothing with it off or on a failed read', async () => {
+    const token = new Date('2099-10-24T12:00:00.123Z');
     countRestorations.mockResolvedValueOnce(3);
-    expect(await cancellationNoticeStamp('svc-9')).toEqual({ cancel_restorations: 3 });
+    expect(await cancellationNoticeStamp('svc-9', token)).toEqual({ cancel_notice_at: '2099-10-24T12:00:00.123Z', cancel_restorations: 3 });
     countRestorations.mockRejectedValueOnce(new Error('read failed'));
-    expect(await cancellationNoticeStamp('svc-9')).toEqual({});
+    expect(await cancellationNoticeStamp('svc-9', token)).toEqual({});
     delete process.env.GATE_MOVE_NOTICE_EMAIL;
-    expect(await cancellationNoticeStamp('svc-9')).toEqual({});
+    expect(await cancellationNoticeStamp('svc-9', token)).toEqual({});
   });
 
   test('bouncedNoticeKind: gate on, the two texts own their email; off, today\'s mapping', () => {
@@ -276,7 +297,7 @@ describe('handleUndeliveredSms: a carrier bounced a reschedule or cancellation t
   };
   const cancelAudit = {
     channel: 'sms', purpose: 'appointment_cancellation', customer_id: 'cust-1', created_at: '2099-10-24T12:00:05.000Z',
-    metadata: { original_message_type: 'appointment_cancelled', scheduled_service_id: 'svc-1', cancel_restorations: 0 },
+    metadata: { original_message_type: 'appointment_cancelled', scheduled_service_id: 'svc-1', cancel_restorations: 0, cancel_notice_at: '2099-10-24T12:00:00.000Z' },
   };
   const bounce = (errorCode = '30003') => AppointmentReminders.handleUndeliveredSms({ sid: 'SM1', status: 'undelivered', errorCode, to: '+19415550199' });
 
@@ -335,6 +356,24 @@ describe('handleUndeliveredSms: a carrier bounced a reschedule or cancellation t
     mockDb.first.messaging_audit_log = cancelAudit;
     mockDb.first.appointment_reminders = { appointment_time: '2099-11-04T21:00:00.000Z', service_type: 'Pest Control', cancelled: true };
     countRestorations.mockResolvedValue(1);
+    await bounce();
+    expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a bounce after a newer cancellation re-claimed the notice sends nothing', async () => {
+    base({ status: 'cancelled' });
+    mockDb.first.messaging_audit_log = cancelAudit;
+    const row = { appointment_time: '2099-11-04T21:00:00.000Z', service_type: 'Pest Control', cancelled: true };
+    // The reminder row still exists; it no longer carries this text's claim token.
+    mockDb.first.appointment_reminders = (cols) => (cols.length === 1 && cols[0] === 'id' ? null : row);
+    await bounce();
+    expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a cancellation text stamped with no claim (sent with the gate off) sends nothing on a bounce', async () => {
+    base({ status: 'cancelled' });
+    mockDb.first.messaging_audit_log = { ...cancelAudit, metadata: { original_message_type: 'appointment_cancelled', scheduled_service_id: 'svc-1' } };
+    mockDb.first.appointment_reminders = { appointment_time: '2099-11-04T21:00:00.000Z', service_type: 'Pest Control', cancelled: true };
     await bounce();
     expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
   });
