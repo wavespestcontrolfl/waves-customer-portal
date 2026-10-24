@@ -388,3 +388,43 @@ it("a new search term clears the old results at once and no result can be picked
   await waitFor(() => expect(screen.queryByText("Searching…")).toBeNull());
   expect(screen.queryByRole("button", { name: /Lee Example/ })).toBeNull();
 });
+
+// ---- The found-codes bell links here with ?view=found ----
+
+it("a bell link (?view=found) opens Found in messages without a click", async () => {
+  rawAdminFetch.mockImplementation(foundRoutes());
+  renderPage("/?view=found");
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Found in messages (1)" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.queryByText("Synthetic Oaks")).toBeNull();
+});
+
+it("a bell link with the access codes section off shows the neighborhoods", async () => {
+  rawAdminFetch.mockImplementation((path) => (path.startsWith("/admin/access-codes/found")
+    ? response({ enabled: false }, { ok: false, status: 404 })
+    : response(ALL)));
+  renderPage("/?view=found");
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Found in messages/ })).toBeNull();
+});
+
+it("a bell link on a page already open switches to Found in messages with a fresh read, and works again", async () => {
+  rawAdminFetch.mockImplementation(foundRoutes());
+  function GoToBell() {
+    const navigate = useNavigate();
+    return <button type="button" onClick={() => navigate("/?view=found")}>Open found bell</button>;
+  }
+  render(<MemoryRouter initialEntries={["/"]}><GoToBell /><NeighborhoodGateCodesPage /></MemoryRouter>);
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  const foundReads = () => rawAdminFetch.mock.calls.filter(([p]) => p.startsWith("/admin/access-codes/found")).length;
+  await waitFor(() => expect(foundReads()).toBe(1));
+  fireEvent.click(screen.getByRole("button", { name: "Open found bell" }));
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+  await waitFor(() => expect(foundReads()).toBe(2));
+  // Back to the neighborhoods, then the bell again: the marker was dropped, so it opens again.
+  fireEvent.click(screen.getByRole("button", { name: "Neighborhoods" }));
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Open found bell" }));
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+  await waitFor(() => expect(foundReads()).toBe(3));
+});

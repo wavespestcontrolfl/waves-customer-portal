@@ -71,6 +71,7 @@ const BELL_CATEGORY_LABELS = {
   estimate_change_request: "Estimate change requests",
   visit_prep_photos: "Customer photos before a visit",
   truck_kit: "Truck check tool issues",
+  access_codes: "Gate codes found in messages",
   alert: "Operational alerts",
   system: "System events",
   service: "Service events",

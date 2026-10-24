@@ -1368,6 +1368,12 @@ const gates = {
   // time in services/access-code-capture.js; this entry is for logGateStatus only.
   accessCodesEmails: process.env.GATE_ACCESS_CODES_EMAILS === 'true',
 
+  // The found-codes bell (owner ruling 2026-10-24): one standing admin row lists
+  // the access codes waiting on Customers → Gate codes, rings when a code joins
+  // and closes itself when none wait. Exactly `true`. Read at call time in
+  // services/access-code-found-bell.js; this entry is for logGateStatus only.
+  accessCodesFoundBell: process.env.GATE_ACCESS_CODES_FOUND_BELL === 'true',
+
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
   // email-operational-actions.js; this entry is for logGateStatus only.
@@ -6503,6 +6509,11 @@ function alertEpisodesLive() {
   return !['off', 'false', '0'].includes(String(process.env.ALERT_EPISODES ?? '').trim().toLowerCase());
 }
 
+// GATE_ACCESS_CODES_FOUND_BELL read at CALL time (so a flip needs no redeploy); strict 'true'.
+function accessCodesFoundBellLive() {
+  return process.env.GATE_ACCESS_CODES_FOUND_BELL === 'true';
+}
+
 // GATE_QUIET_OVERDUE_LIST read at CALL time (so a flip needs no redeploy); strict 'true'.
 function quietOverdueListLive() {
   return process.env.GATE_QUIET_OVERDUE_LIST === 'true';
@@ -7808,3 +7819,5 @@ module.exports.setupFeeSettledAnywhereLive = setupFeeSettledAnywhereLive;
 module.exports.satellitePalmCountTypedLive = satellitePalmCountTypedLive;
 // GATE_CALL_ADDRESS_FAMILY_CARD reader, on its own line so gate PRs never conflict.
 module.exports.callAddressFamilyCardLive = callAddressFamilyCardLive;
+// GATE_ACCESS_CODES_FOUND_BELL reader, on its own line so gate PRs never conflict.
+module.exports.accessCodesFoundBellLive = accessCodesFoundBellLive;

@@ -247,9 +247,11 @@ export default function NeighborhoodGateCodesPage() {
   const [formError, setFormError] = useState("");
 
   // "Found in messages": codes customers texted, waiting for the office. The
-  // tab exists only when the access codes section answers (404 = off).
-  const [tab, setTab] = useState("neighborhoods");
-  const [found, setFound] = useState({ available: false, items: [], total: 0, loading: false, error: "" });
+  // tab exists only when the access codes section answers (404 = off). The
+  // found-codes bell links here with ?view=found, which opens that view.
+  const viewFound = searchParams.get("view") === "found";
+  const [tab, setTab] = useState(viewFound ? "found" : "neighborhoods");
+  const [found, setFound] = useState({ available: false, items: [], total: 0, loading: viewFound, error: "" });
   const foundSeq = useRef(0);
   const loadFound = useCallback(async ({ offset = 0 } = {}) => {
     const seq = ++foundSeq.current;
@@ -332,6 +334,18 @@ export default function NeighborhoodGateCodesPage() {
   useEffect(() => { load(); }, [load]);
   // After the neighborhood read, so that stays the first request the page makes.
   useEffect(() => { loadFound(); }, [loadFound]);
+  // A bell link (?view=found) opens the found list, also on a page that is
+  // already open (with a fresh read), then drops the marker so the next bell
+  // link opens it again. The first render already started on that view.
+  const viewSeen = useRef(false);
+  useEffect(() => {
+    const first = !viewSeen.current;
+    viewSeen.current = true;
+    if (!viewFound) return;
+    setTab("found");
+    if (!first) loadFound();
+    setSearchParams((prev) => { const next = new URLSearchParams(prev); next.delete("view"); return next; }, { replace: true });
+  }, [viewFound, loadFound, setSearchParams]);
   // A save that finishes after the search or filter changed reloads the
   // CURRENT view, never the one it started under.
   const loadRef = useRef(load);

@@ -29,8 +29,10 @@
  *
  * Dark behind GATE_ACCESS_CODES_SECTION (read at call time); the sweep also
  * needs GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) so turning the
- * gate on never reads history. Nothing here rings a bell or sends a message
- * (owner ruling 2026-10-03: gate-code upkeep is logged, never a bell).
+ * gate on never reads history. Nothing here rings a bell or sends a message.
+ * The one admin row for the codes waiting on the office lives in
+ * access-code-found-bell.js (owner ruling 2026-10-24); differing codes in one
+ * neighborhood still never ring (owner ruling 2026-10-03).
  *
  * Call transcripts feed the same list (owner 2026-10-23: a customer gave the
  * community gate code to a technician on a 19-second outbound call and nothing
