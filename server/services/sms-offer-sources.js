@@ -10,6 +10,10 @@
  *   website_engine  the website booking engine for the city-based fallback
  *                   (GATE_MULTI_TECH_TEXT_TIMES): the customer's pin or the
  *                   city centre, for the text's funnel service
+ *   reservice       the free re-service booking page's own openings
+ *                   (GATE_SMS_PROMPT_B1): a covered pest report is offered the
+ *                   times its re-service link shows; a person books the pick,
+ *                   so the offer ledger counts it and never acts on it
  *
  * A snapshot with no source is the old by-city finder's.
  */
@@ -18,4 +22,5 @@ module.exports = Object.freeze({
   ESTIMATE_OFFER_SOURCE: 'estimate',
   BOOK_OFFER_SOURCE: 'book',
   WEBSITE_OFFER_SOURCE: 'website_engine',
+  RESERVICE_OFFER_SOURCE: 'reservice',
 });

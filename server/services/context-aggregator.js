@@ -245,6 +245,29 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
   } catch { return null; }
 }
 
+// GATE_SMS_PROMPT_B1 (change A, owner 2026-10-24): the LATEST finished visit's service_findings (title, detail, recommendation, severity,
+// category) for the texting AI's SERVICE HISTORY. Only when that visit has customer-safe notes (customerSafeVisitNotes returned text:
+// a held or suppressed report shows none), every text field through the access-code redactor, never technician_notes. Fail soft:
+// an unreadable table is no findings. null when the gate is off, there is no visit or nothing qualifies.
+async function loadLatestVisitFindings(record) {
+  if (!record?.id || !require('../config/feature-gates').smsPromptB1Live() || !customerSafeVisitNotes(record)) return null;
+  try {
+    const rows = await db('service_findings').where({ service_record_id: record.id }).orderBy('created_at').limit(5)
+      .select('title', 'detail', 'recommendation', 'severity', 'category');
+    const findings = rows.map((r) => ({
+      title: redactAccessCodes(r.title) || null,
+      detail: redactAccessCodes(r.detail) || null,
+      recommendation: redactAccessCodes(r.recommendation) || null,
+      severity: r.severity || null,
+      category: r.category || null,
+    })).filter((f) => f.title);
+    return findings.length ? findings : null;
+  } catch (err) {
+    logger.warn(`[context-aggregator] latest visit findings read failed: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+}
+
 // How each resolved lane may be described to the customer (codex #3128 r8).
 //
 // Every lane gets its OWN truthful sentence. A blanket "not monthly, quote per
@@ -1412,6 +1435,7 @@ class ContextAggregator {
     ]);
 
     const lastService = serviceHistory[0] || null;
+    const latestVisitFindings = await loadLatestVisitFindings(serviceHistory[0]);
     // Third-party Bill-To (Codex r2, mirrors billing-v2 /balance): a payment
     // against a payer-billed invoice is the PAYER's even though the row sits
     // under the homeowner's customer_id — exclude those from both the
@@ -1582,11 +1606,13 @@ class ContextAggregator {
       lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: customerSafeVisitNotes(lastService) } : null,
       // v10 grounding: the last few visits with reviewed notes + areas —
       // "what did you do last time" is a routine customer text.
-      serviceHistory: serviceHistory.slice(0, 3).map(s => ({
+      serviceHistory: serviceHistory.slice(0, 3).map((s, i) => ({
         type: s.service_type,
         date: s.service_date,
         notes: customerSafeVisitNotes(s),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
+        // GATE_SMS_PROMPT_B1 (change A): the latest finished visit's findings; absent key when the gate is off or none were loaded
+        ...(i === 0 && latestVisitFindings ? { findings: latestVisitFindings } : {}),
       })),
       upcomingServices: upcomingServices.map((s, i) => withSeriesKey(withScheduledServiceId({
         type: s.service_type,
@@ -1984,6 +2010,7 @@ module.exports.redactAccessCodes = redactAccessCodes;
 module.exports.COMBINATION_NOUN = COMBINATION_NOUN;
 module.exports.lawnOverall = lawnOverall;
 module.exports.customerSafeVisitNotes = customerSafeVisitNotes;
+module.exports.loadLatestVisitFindings = loadLatestVisitFindings;
 module.exports.resolveBillingLaneFacts = resolveBillingLaneFacts;
 module.exports.resolveMonthlyDuesFact = resolveMonthlyDuesFact;
 module.exports.resolveDuesCollectionState = resolveDuesCollectionState;
