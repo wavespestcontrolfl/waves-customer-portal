@@ -6608,6 +6608,7 @@ AppointmentReminders._test = {
   moveNoticeEmailAllowed,
   moveNoticeEmailKey,
   cancellationNoticeStamp,
+  rescheduleWindowPhrase,
   bouncedNoticeKind,
   cancellationNoticeReport,
 };
