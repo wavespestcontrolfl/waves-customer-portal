@@ -194,6 +194,26 @@ function lastPhotosFrom(value) {
   return out;
 }
 
+// The palm count the tech recorded on the last visit at this property that
+// recorded one (owner 2026-10-24, palm follow-up C): shown so the tech can keep
+// it with one tap or type a new one. Types outside today's chip list drop out.
+function lastPalmsFrom(data) {
+  const value = data?.lastPalms;
+  const count = Number(value?.count);
+  if (!Number.isInteger(count) || count < 0) return null;
+  const large = value?.large == null ? null : Number(value.large);
+  const types = (Array.isArray(value?.types) ? value.types : []).filter((type) => PALM_TYPE_OPTIONS.includes(type));
+  return { serviceDate: typeof value?.serviceDate === 'string' ? value.serviceDate : '', count, large: Number.isInteger(large) && large >= 0 ? large : null, types };
+}
+
+// A calendar day ("2026-10-25") as "Oct 25": read as a day, never shifted by a time zone.
+const shortDay = (day) => {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ''));
+  if (!parts) return '';
+  return new Date(Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]), 12))
+    .toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+};
+
 const shortDate = (iso) => {
   const date = iso ? new Date(iso) : null;
   if (!date || Number.isNaN(date.getTime())) return '';
@@ -370,6 +390,7 @@ function contextFrom(data, service) {
     products,
     rows: monthRows(data, products, lastVisit),
     lastVisit,
+    lastPalms: lastPalmsFrom(data),
     lastVisitPhotos: lastPhotosFrom(data?.lastVisitPhotos),
     warnings: (Array.isArray(data?.warnings) ? data.warnings : [])
       .filter(Boolean)
@@ -392,7 +413,7 @@ function contextFrom(data, service) {
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, bedSqft: null, monthProductHolds: [], watchList: null, pestCheck: null, neonicCap: null, wrapUp: false, stockAdvisory: false,
-  visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
+  visitIdentity: null, visit: null, lastVisit: {}, lastPalms: null, lastVisitPhotos: {},
 };
 
 function useTreeShrubContext({ base, request, service }) {
@@ -778,7 +799,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               <Chip disabled={locked} key={label} label={label} pressed={form.plantGroups.has(label)} onClick={() => setField('plantGroups', toggleInSet(form.plantGroups, label))} />
             ))}
           </ChoiceSection>
-          <PalmsSection form={form} setField={setField} locked={locked} />
+          <PalmsSection form={form} setField={setField} locked={locked} lastPalms={ctx.lastPalms} />
           <ChoiceSection title="Areas treated" columns={2}>
             {AREA_OPTIONS.map((label) => (
               <Chip disabled={locked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
@@ -1293,7 +1314,27 @@ function ProductEditor({ row, warnings, neonicLine, heldLine, locked, onChange, 
 // Collapsed by default, nothing required: it only records what the tech sees on
 // the palms (office-only facts for the estimate check and the palm plan).
 // "None seen" clears the other symptoms, and any other symptom clears it.
-function PalmsSection({ form, setField, locked }) {
+// Last visit's palm facts with a one-tap "Same as last visit": it fills the
+// counts and types (never the symptoms, which belong to one visit), and the tech
+// can still change any of them. Nothing is filled until the tech taps it.
+function LastPalmCount({ lastPalms, setField, locked }) {
+  const day = shortDay(lastPalms.serviceDate);
+  const large = lastPalms.large === null ? '' : `, ${lastPalms.large} large`;
+  const types = lastPalms.types.length ? ` · ${lastPalms.types.join(', ')}` : '';
+  const useLast = () => {
+    setField('palmCount', String(lastPalms.count));
+    setField('palmLarge', lastPalms.large === null ? '' : String(lastPalms.large));
+    setField('palmTypes', new Set(lastPalms.types));
+  };
+  return (
+    <div className="tech-visit-section-head">
+      <p className="tech-visit-muted">{`Last count${day ? ` (${day})` : ''}: ${lastPalms.count} palm${lastPalms.count === 1 ? '' : 's'}${large}${types}`}</p>
+      <Button type="button" variant="secondary" className="tech-visit-action" disabled={locked} onClick={useLast}>Same as last visit</Button>
+    </div>
+  );
+}
+
+function PalmsSection({ form, setField, locked, lastPalms }) {
   const panelId = useId();
   const totalId = useId();
   const totalHintId = useId();
@@ -1317,10 +1358,11 @@ function PalmsSection({ form, setField, locked }) {
         disabled={locked}
         onClick={() => setOpen((prev) => !prev)}
       >
-        {`Palms (optional) ${open ? '−' : '+'}`}
+        {`Palms (optional)${lastPalms ? ` · last count ${lastPalms.count}` : ''} ${open ? '−' : '+'}`}
       </Button>
       {open && (
         <div id={panelId}>
+          {lastPalms && <LastPalmCount lastPalms={lastPalms} setField={setField} locked={locked} />}
           <div className="tech-visit-section-head">
             <h3 className="tech-visit-section-title"><label htmlFor={totalId}>Palms on property (all sizes)</label></h3>
           </div>

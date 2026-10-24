@@ -33,6 +33,7 @@ const {
   buildTreeShrubWarnings,
   lastAmountsByProduct,
   buildLastVisit,
+  buildLastPalms,
 } = require('../services/tree-shrub-fast-context');
 
 const TS_PROFILE = { category: 'tree_shrub', serviceKey: 'tree_shrub_program', findingsType: 'tree_shrub', projectBacked: false, requiresProject: false, companions: [] };
@@ -297,6 +298,21 @@ describe('per-area rate units never pre-fill', () => {
     const last = buildLastVisit([{ id: 'r2', status: 'completed', service_date: '2026-09-02', typed_values: {}, products: [{ product_id: 'snap', product_name: 'Snapshot 2.5TG', total_amount: '2.3', amount_unit: 'lb/1000sf' }] }]);
     expect(last.products).toEqual([{ productId: 'snap', productName: 'Snapshot 2.5TG', totalAmount: null, amountUnit: null }]);
   });
+
+  // Palm follow-up C (owner 2026-10-24): the next visit shows the last count the tech typed.
+  test('the last palm count is the newest COMPLETED visit that recorded one; zero is an answer, symptoms never carry', () => {
+    const history = [
+      { id: 'r4', status: 'incomplete', service_date: '2026-11-20', typed_values: { palm_count_total: '9' } },
+      { id: 'r3', status: 'completed', service_date: '2026-11-02', typed_values: { plant_groups: 'Shrubs' } },
+      { id: 'r2', status: 'completed', service_date: '2026-10-25', typed_values: { palm_count_total: ' 8 ', palm_count_large: '3', palm_types_seen: 'Queen palm, Royal palm', palm_symptoms: 'Spear leaf collapse' } },
+      { id: 'r1', status: 'completed', service_date: '2026-07-01', typed_values: { palm_count_total: '12' } },
+    ];
+    expect(buildLastPalms(history)).toEqual({ serviceDate: '2026-10-25', count: 8, large: 3, types: ['Queen palm', 'Royal palm'] });
+    expect(buildLastPalms([{ id: 'r1', status: 'completed', service_date: '2026-07-01', typed_values: { palm_count_total: '0', palm_count_large: 'many' } }]))
+      .toEqual({ serviceDate: '2026-07-01', count: 0, large: null, types: [] });
+    expect(buildLastPalms([{ id: 'r1', status: 'completed', service_date: '2026-07-01', typed_values: { palm_count_total: 'eight' } }])).toBeNull();
+    expect(buildLastPalms([])).toBeNull();
+  });
 });
 
 describe('buildTreeShrubFastContext', () => {
@@ -433,12 +449,24 @@ describe('buildTreeShrubFastContext', () => {
     expect(byId.palm.lastAmount).toBeUndefined();
   });
 
+  test('the newest typed palm count at this property rides the context as lastPalms', async () => {
+    const records = [
+      { id: 'rec-3', status: 'completed', service_date: '2026-11-02', typed_values: { plant_groups: 'Shrubs' } },
+      { id: 'rec-2', status: 'completed', service_date: '2026-10-25', typed_values: { plant_groups: 'Palms', palm_count_total: '8', palm_count_large: '3', palm_types_seen: 'Queen palm' } },
+    ];
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records, service_products: [],
+    }));
+    expect(ctx.lastVisit.serviceRecordId).toBe('rec-3');
+    expect(ctx.lastPalms).toEqual({ serviceDate: '2026-10-25', count: 8, large: 3, types: ['Queen palm'] });
+  });
+
   test('a failed history read degrades to blank pre-fill; a failed ledger read is warningsUnavailable', async () => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit(), products_catalog: catalog,
       'service_records as sr': new Error('boom'), 'property_application_history as pah': new Error('boom'),
     }));
-    expect(ctx).toMatchObject({ ok: true, eligible: true, lastVisit: null, warnings: [], warningsUnavailable: true });
+    expect(ctx).toMatchObject({ ok: true, eligible: true, lastVisit: null, lastPalms: null, warnings: [], warningsUnavailable: true });
     expect(ctx.monthProducts.every((m) => m.lastAmount === undefined)).toBe(true);
   });
 
