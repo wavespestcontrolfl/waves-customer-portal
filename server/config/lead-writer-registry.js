@@ -27,7 +27,7 @@
  *
  * Adding a new lead writer:
  *   1. Prefer routing through an existing resolver (findReusableCallLead /
- *      attributeInboundContact / findUnconvertedLeadsByContact) over a bare
+ *      findUnconvertedLeadsByContact) over a bare
  *      insert.
  *   2. Add an entry: `file` (server-relative), `anchor` (the exact trimmed
  *      source line where the insert statement STARTS — unique within the
@@ -156,15 +156,6 @@ const LEAD_WRITERS = [
     // corroboration. Named by the variable that drives it.
     identityResolver: 'dedupEmail',
     note: 'inline exact email-or-phone match on open leads; no name corroboration, no normalization',
-  },
-  {
-    file: 'services/lead-attribution.js',
-    anchor: "const [newLead] = await db('leads').insert({",
-    context: 'attributeInboundContact — inbound call/SMS attribution (phone-keyed, concurrent-call sid guard)',
-    // The inline phone-keyed lookup that decides update-vs-mint inside
-    // attributeInboundContact (naming the enclosing function itself would be
-    // a header, not a resolution).
-    identityResolver: 'existingLead',
   },
   {
     file: 'services/lead-unverified-hold.js',
