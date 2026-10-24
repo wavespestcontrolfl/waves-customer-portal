@@ -1001,7 +1001,34 @@ describe('gps-arrival-detector late-delivered samples (GATE_GPS_ARRIVAL_LATE_SAM
     expect(query.orWhere).toHaveBeenCalledWith('t.bouncie_imei_changed_at', '<', new Date(pointMs - 2 * 60 * 1000));
     expect(query.where).toHaveBeenCalledWith('s.track_state', 'en_route');
     expect(query.orWhere).toHaveBeenCalledWith('s.status', 'en_route');
-    expect(query.limit).toHaveBeenCalledWith(10);
+    // one row past the cut, so an overflow is seen (and refused)
+    expect(query.limit).toHaveBeenCalledWith(11);
+  });
+
+  test('more open candidates than the cut: refused, so an unseen stop can never make a match look unique', async () => {
+    const candidates = Array.from({ length: 11 }, (_unused, index) => lateCandidate({
+      id: `svc-${index + 1}`,
+      // only the first is at the point; the rest are far away
+      ...(index === 0 ? {} : { service_lat: 27.5, service_lng: -82.5 }),
+    }));
+
+    const { result } = await lateRun({ candidates });
+
+    expect(result).toEqual({ ok: false, reason: 'late_sample_too_many_candidates' });
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('ten open candidates are still judged', async () => {
+    const candidates = Array.from({ length: 10 }, (_unused, index) => lateCandidate({
+      id: `svc-${index + 1}`,
+      ...(index === 0 ? {} : { service_lat: 27.5, service_lng: -82.5 }),
+    }));
+
+    const { result } = await lateRun({ candidates });
+
+    expect(result).toMatchObject({ ok: true, reason: 'marked_on_property' });
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', expect.any(Object));
   });
 
   test('never stamps the arrival before the visit went en route', async () => {

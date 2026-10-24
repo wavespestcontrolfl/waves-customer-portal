@@ -31,6 +31,8 @@ const EN_ROUTE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
 // GATE_GPS_ARRIVAL_LATE_SAMPLES: a sample older than MAX_SAMPLE_AGE_MS is still
 // judged up to this age (Bouncie has delivered trip-data 35-60 minutes late).
 const LATE_SAMPLE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+// More open candidates than this and the sample is refused: one more row is
+// read, so a stop past the cut can never make a visible match look unique.
 const LATE_CANDIDATE_LIMIT = 10;
 const NOT_MARKED_ACTION = 'gps_arrival.not_marked';
 const NOT_MARKED_MEMO_MAX = 2000;
@@ -333,7 +335,7 @@ async function loadLateCandidates(techId, pointMs) {
       .orWhere('t.bouncie_imei_changed_at', '<', new Date(pointMs - SAMPLE_TIMESTAMP_TOLERANCE_MS)))
     .where((state) => state.where('s.track_state', 'en_route').orWhere('s.status', 'en_route'))
     .orderBy('s.en_route_at', 'desc')
-    .limit(LATE_CANDIDATE_LIMIT)
+    .limit(LATE_CANDIDATE_LIMIT + 1)
     .select(serviceColumns());
 }
 
@@ -661,8 +663,10 @@ async function maybeMarkArrivedFromLateSample({ techStatus, point, config }) {
     logger.warn(`[gps-arrival] late-sample lookup failed for ${techId}: ${err.message}`);
     return { ok: false, reason: 'service_lookup_failed' };
   }
+  // Fail closed: past the cut, a qualifying stop could be unseen.
+  if (candidates.length > LATE_CANDIDATE_LIMIT) return { ok: false, reason: 'late_sample_too_many_candidates' };
 
-  const evaluated = evaluateLateCandidates(candidates || [], point, config);
+  const evaluated = evaluateLateCandidates(candidates, point, config);
   const arriving = evaluated.filter((entry) => entry.decision.arrived);
   const record = async (entries, reasonOf) => {
     for (const entry of entries) {
