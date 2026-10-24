@@ -3394,18 +3394,20 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
       logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
       await finalizeClaim(true);
     } else {
-      // Transient provider failure keeps the pending lease for the
-      // sweep; deterministic non-delivery releases (codex r6 - the
-      // provider layer catches 429/5xx/timeouts, so they arrive
-      // here as sent:false + retryable, never as a throw).
-      await finalizeClaim(false, { retryable: sendOutcome.retryable === true });
-      // The text reached nobody: the email version (GATE_MOVE_NOTICE_EMAIL).
-      // Bound to this cancellation; its key holds across the sweep's retries of the text.
+      // The text reached nobody: the email version (GATE_MOVE_NOTICE_EMAIL),
+      // bound to this cancellation and sent while this worker still holds
+      // the claim (finalizing a retryable failure may release the token).
+      // Its key holds across the sweep's retries of the text.
       emailed = await deliverMoveNoticeEmail({
         kind: 'cancelled', customerId: record.customer_id, scheduledServiceId,
         apptTime: new Date(record.appointment_time), serviceLabel: smsServiceLabelStored(record.service_type),
         cancellation: cancellationBinding(cancelStamp), sendOutcome,
       });
+      // Transient provider failure keeps the pending lease for the
+      // sweep; deterministic non-delivery releases (codex r6 - the
+      // provider layer catches 429/5xx/timeouts, so they arrive
+      // here as sent:false + retryable, never as a throw).
+      await finalizeClaim(false, { retryable: sendOutcome.retryable === true });
     }
     // One recipient accepted and another failed WITHOUT throwing (provider failure, opt-out, landline block): the
     // fan-out still returns true and the claim stays 'sent' (a retry would re-text those reached), so say it was partial.

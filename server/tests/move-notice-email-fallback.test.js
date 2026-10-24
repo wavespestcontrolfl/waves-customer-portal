@@ -8,20 +8,27 @@
 // handleUndeliveredSms.
 
 // A lenient knex stand-in: every table answers from mockDb, so a test states
-// only the rows it cares about. Updates and inserts are recorded.
-const mockDb = { first: {}, rows: {}, updates: [], inserts: [] };
+// only the rows it cares about. A function answer gets the selected columns
+// and the where() arguments. Updates and inserts are recorded; with
+// mockDb.reminder set, every appointment_reminders update also applies to it.
+const mockDb = { first: {}, rows: {}, updates: [], inserts: [], reminder: null };
 jest.mock('../models/db', () => {
   const make = (table) => {
-    const q = {};
-    for (const m of ['where', 'andWhere', 'orWhere', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw',
+    const q = { wheres: [] };
+    for (const m of ['andWhere', 'orWhere', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw',
       'whereExists', 'whereNotExists', 'orderBy', 'leftJoin', 'join', 'limit', 'forUpdate', 'forShare', 'noWait', 'skipLocked',
       'modify', 'distinct', 'groupBy', 'count', 'select', 'returning']) q[m] = () => q;
+    q.where = (...a) => { q.wheres.push(a); return q; };
     q.first = async (...cols) => {
       const v = mockDb.first[table];
-      return typeof v === 'function' ? v(cols) : v;
+      return typeof v === 'function' ? v(cols, q.wheres) : v;
     };
     q.pluck = async () => [];
-    q.update = async (patch) => { mockDb.updates.push({ table, patch }); return 1; };
+    q.update = async (patch) => {
+      mockDb.updates.push({ table, patch });
+      if (table === 'appointment_reminders' && mockDb.reminder) Object.assign(mockDb.reminder, patch);
+      return 1;
+    };
     q.insert = (row) => {
       mockDb.inserts.push({ table, row });
       return { returning: async () => [{ id: `new-${table}`, ...row }], then: (res, rej) => Promise.resolve([1]).then(res, rej) };
@@ -92,6 +99,7 @@ function base({ status = 'confirmed', prefs = {} } = {}) {
   mockDb.rows = {};
   mockDb.updates = [];
   mockDb.inserts = [];
+  mockDb.reminder = null;
 }
 
 const args = (over = {}) => ({
@@ -460,6 +468,29 @@ describe('handleCancellation: the cancellation text reached nobody', () => {
       scheduledServiceId: 'svc-1', serviceLabel: 'Pest Control', idempotencyKey: 'appointment.cancelled:svc-1:r0',
     }));
     expect(outcome).toMatchObject({ notificationSent: true, notificationError: 'The text could not be delivered, so the customer got the cancellation notice by email.' });
+  });
+
+  test('a transient text failure whose finalize releases the claim still gets the email: it goes out while the claim is held', async () => {
+    base({ status: 'cancelled' });
+    mockDb.first.customers = { ...CUSTOMER, line_type: 'mobile' };
+    // Stateful reminder row: the claim stamps its token, the release (cron off, no caller claim) clears it.
+    mockDb.reminder = { ...reminder };
+    mockDb.first.appointment_reminders = (cols, wheres) => {
+      const tokenWhere = wheres.find((w) => w[0] === 'cancellation_notice_at');
+      if (cols.length === 1 && cols[0] === 'id' && tokenWhere) {
+        const held = mockDb.reminder.cancellation_notice_at;
+        return held && new Date(held).getTime() === new Date(tokenWhere[1]).getTime() ? { id: mockDb.reminder.id } : null;
+      }
+      return mockDb.reminder;
+    };
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_TIMEOUT' });
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { outcome });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentCancelledEmail).toHaveBeenCalledTimes(1);
+    // The finalize ran after the email and released the claim.
+    expect(mockDb.reminder.cancellation_notice_at).toBeNull();
+    expect(outcome.notificationSent).toBe(true);
   });
 
   test('gate off: the same cancellation keeps today\'s outcome and sends no email', async () => {
