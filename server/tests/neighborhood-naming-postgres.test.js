@@ -523,4 +523,92 @@ postgres('neighborhood naming pass', () => {
       expect(await accessRows(n)).toEqual([{ code: '#7777', status: 'active', source: 'profile' }]);
     });
   });
+
+  describe('address lookup (GATE_NEIGHBORHOOD_ADDRESS_LOOKUP)', () => {
+    const OLD_ADDRESS = process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP;
+    beforeEach(() => { process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP = 'true'; });
+    afterEach(() => {
+      if (OLD_ADDRESS === undefined) delete process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP;
+      else process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP = OLD_ADDRESS;
+    });
+    const lots = (...list) => jest.fn(async () => list);
+    const runWith = (lookup, addressLookup, extra = {}) => runNamingPass({ lookup, platLookup: async () => [], addressLookup, ...extra });
+
+    test('a pin on a neighbour\'s lot links the home by its own address', async () => {
+      const { propertyId } = await home({ street: '104 Synthetic Way' });
+      const addressLookup = lots(parcelFor('104 Synthetic Way'), parcelFor('1040 Synthetic Way', { subdivision: 'OTHER GLEN PB2/2' }));
+      const r = await runWith(queue([parcelFor('100 Synthetic Way')]), addressLookup);
+      expect(r.county).toEqual({ linked: 1 });
+      expect(addressLookup).toHaveBeenCalledWith('Manatee', { houseNumber: '104', streetWord: 'SYNTHETIC' });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Heron Pointe', link: 'county', checked: true });
+    });
+
+    test('no lot under the pin (an ambiguous stack) is searched by address too', async () => {
+      const { propertyId } = await home({ street: '200 Synthetic Way' });
+      const r = await runWith(queue([null]), lots(parcelFor('200 Synthetic Way Unit 3'), parcelFor('200 Synthetic Way Unit 4')));
+      expect(r.county).toEqual({ linked: 1 });
+      expect((await hoodOf(propertyId)).name).toBe('Heron Pointe');
+    });
+
+    test('lots that name two communities, another ZIP or another suffix link nothing', async () => {
+      const a = await home({ street: '300 Synthetic Way', lat: 27.41 });
+      const b = await home({ street: '400 Synthetic Way', lat: 27.42 });
+      const addressLookup = jest.fn(async (_county, { houseNumber }) => (houseNumber === '300'
+        ? [parcelFor('300 Synthetic Way'), parcelFor('300 Synthetic Way', { subdivision: 'OTHER GLEN PB2/2' })]
+        : [parcelFor('400 Synthetic Way', { situsZip: '34211' }), parcelFor('400 Synthetic Ct')]));
+      const r = await runWith(jest.fn(async () => parcelFor('100 Synthetic Way')), addressLookup);
+      expect(r.county).toEqual({ situs_mismatch: 2 });
+      for (const { propertyId } of [a, b]) expect(await hoodOf(propertyId)).toMatchObject({ name: null, checked: false });
+    });
+
+    test('an address search that fails is an outage: the home waits an hour, never "no name"', async () => {
+      const { propertyId } = await home({ street: '500 Synthetic Way' });
+      const down = jest.fn(async () => { throw new Error('county down'); });
+      const t0 = Date.now();
+      expect((await runWith(queue([parcelFor('100 Synthetic Way')]), down, { now: t0 })).county).toEqual({ gis_error: 1 });
+      const { p } = await hoodOf(propertyId);
+      expect(p.neighborhood_checked_at).toBeNull();
+      expect(p.neighborhood_naming).toMatchObject({ county_answered: false });
+      // Inside the hour it sits out; after it, it is asked again and linked.
+      expect((await runWith(queue([parcelFor('100 Synthetic Way')]), down, { now: t0 + 30 * 60e3 })).county).toEqual({});
+      const again = await runWith(queue([parcelFor('100 Synthetic Way')]), lots(parcelFor('500 Synthetic Way')), { now: t0 + 61 * 60e3 });
+      expect(again.county).toEqual({ linked: 1 });
+    });
+
+    test('a "#201" unit tail is read as a unit, so the pin\'s own building matches without a search', async () => {
+      const { propertyId } = await home({ street: '500 Sample Loop #201' });
+      const addressLookup = jest.fn();
+      expect((await runWith(queue([parcelFor('500 Sample Loop')]), addressLookup)).county).toEqual({ linked: 1 });
+      expect(addressLookup).not.toHaveBeenCalled();
+      expect((await hoodOf(propertyId)).name).toBe('Heron Pointe');
+    });
+
+    test('off: the pin alone decides, and the county is never asked by address', async () => {
+      process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP = 'false';
+      await home({ street: '600 Synthetic Way', lat: 27.41 });
+      await home({ street: '500 Sample Loop #201', lat: 27.42 });
+      const lookup = jest.fn(async (lat) => (Math.abs(lat - 27.41) < 1e-6 ? parcelFor('100 Synthetic Way') : parcelFor('500 Sample Loop')));
+      const addressLookup = lots(parcelFor('600 Synthetic Way'));
+      expect((await runWith(lookup, addressLookup)).county).toEqual({ situs_mismatch: 2 });
+      expect(addressLookup).not.toHaveBeenCalled();
+    });
+
+    test('the saved-code sweep links a home by its own address and files its code', async () => {
+      // A former customer is not a live home, so the naming pass skips it and the sweep's own lookup runs.
+      const { propertyId } = await home({ street: '700 Synthetic Way', code: '#7070', stage: 'churned' });
+      const addressLookup = lots(parcelFor('700 Synthetic Way'));
+      const r = await sweepSavedGateCodes({ lookup: queue([parcelFor('100 Synthetic Way')]), platLookup: async () => [], addressLookup });
+      expect(r.tally).toEqual({ filed: 1 });
+      const { p } = await hoodOf(propertyId);
+      expect(p.neighborhood_source).toBe('county');
+      expect(await accessRows(p.neighborhood_id)).toEqual([{ code: '#7070', status: 'active', source: 'profile' }]);
+    });
+
+    test('a failed address search in the sweep files nothing and leaves the home to be looked up again', async () => {
+      const { propertyId } = await home({ street: '800 Synthetic Way', code: '#8080', stage: 'churned' });
+      const r = await sweepSavedGateCodes({ lookup: queue([parcelFor('100 Synthetic Way')]), platLookup: async () => [], addressLookup: jest.fn(async () => { throw new Error('down'); }) });
+      expect(r.tally).toEqual({ no_neighborhood: 1 });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: null, checked: false });
+    });
+  });
 });
