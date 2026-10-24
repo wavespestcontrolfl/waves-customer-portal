@@ -53,8 +53,10 @@ const mockBridge = jest.fn(async () => ({ callSid: 'CA-ring', callLogId: 'log-1'
 jest.mock('../services/call-bridge', () => ({ placeBridgeCall: (...args) => mockBridge(...args) }));
 jest.mock('../services/home-line', () => ({ homeLineCallerId: () => '+19415550111' }));
 jest.mock('../config/twilio-numbers', () => ({ internalAlertCallerId: () => '+19415550122' }));
-const mockBell = jest.fn(async () => ({ bellWritten: true }));
-jest.mock('../services/notification-triggers', () => ({ triggerNotification: (...args) => mockBell(...args) }));
+// The real composer runs (it throws on a rule break under NODE_ENV=test);
+// only the row write is mocked.
+const mockBell = jest.fn(async () => ({ id: 'notif-1', deduped: false }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockBell(...args) }));
 
 const { ringForCallReply, noteRingEnded, inRingHours, _test } = require('../services/lead-call-reply-ring');
 
@@ -85,7 +87,7 @@ test('a CALL reply to our lead text in the day rings the cell with the press-1 b
     leadName: 'Pat',
     eventLabel: 'Pat asked for a call back',
     ringTimeoutSeconds: 20,
-    metadata: { type: 'lead_call_reply_ring', leadId: 'lead-1', leadName: 'Pat S.', leadPhone: PHONE, smsLogId: 'in-1' },
+    metadata: { type: 'lead_call_reply_ring', leadId: 'lead-1', leadName: 'Pat Sample', leadFirstName: 'Pat', leadPhone: PHONE, smsLogId: 'in-1' },
   });
   expect(mockBell).not.toHaveBeenCalled();
 });
@@ -113,8 +115,16 @@ test('a definite ring failure raises the missed bell at once', async () => {
   const out = await ring();
   expect(out).toEqual({ rang: false, reason: 'ring_failed' });
   expect(mockBell).toHaveBeenCalledTimes(1);
-  expect(mockBell.mock.calls[0][0]).toBe('new_lead');
-  expect(mockBell.mock.calls[0][1]).toMatchObject({ title: 'Missed call request: Pat S.', leadId: 'lead-1', customerId: 'cust-1', phone: PHONE });
+  const [category, headline, why, opts] = mockBell.mock.calls[0];
+  expect(category).toBe('lead');
+  expect(headline).toBe('Leads — call Pat Sample back');
+  expect(why).toBe('Missed call request: Pat replied CALL to our lead text and nobody pressed 1.');
+  expect(opts).toMatchObject({
+    bell: true,
+    link: '/admin/leads?lead=lead-1',
+    dedupeKey: 'lead-call-reply-missed:cust-1',
+    metadata: { area: 'Leads', severity: 'needs-you', subject: { type: 'lead', id: 'lead-1' }, doneWhen: 'lead_contacted', who: 'person' },
+  });
 });
 
 test('an ambiguous ring failure leaves the miss to the status callback', async () => {
@@ -122,6 +132,18 @@ test('an ambiguous ring failure leaves the miss to the status callback', async (
   const out = await ring();
   expect(out).toEqual({ rang: false, reason: 'ring_failed' });
   expect(mockBell).not.toHaveBeenCalled();
+});
+
+test('a failed lead text never counts', async () => {
+  const seen = [];
+  const conn = (table) => {
+    const q = mockQuery(table);
+    const raw = q.whereRaw;
+    q.whereRaw = (sql) => { seen.push(sql); return raw(sql); };
+    return q;
+  };
+  await _test.ringBlocker({ customer: LEAD, digits: '9415550100', now: AFTERNOON }, conn);
+  expect(seen.some((sql) => /NOT IN \('failed', 'undelivered', 'canceled'\)/.test(sql))).toBe(true);
 });
 
 test('ring hours are 8 AM to 8 PM Eastern', () => {
@@ -132,22 +154,47 @@ test('ring hours are 8 AM to 8 PM Eastern', () => {
   expect(inRingHours(new Date('2026-12-01T13:00:00Z'))).toBe(true); // 8:00 AM EST
 });
 
-test('the bell name is first name and last initial', () => {
-  expect(_test.displayName({ first_name: 'Pat', last_name: 'Sample' })).toBe('Pat S.');
+test('the bell name is the full name', () => {
+  expect(_test.displayName({ first_name: 'Pat', last_name: 'Sample' })).toBe('Pat Sample');
   expect(_test.displayName({ first_name: 'Pat' })).toBe('Pat');
   expect(_test.displayName({})).toBe('a lead');
 });
 
 describe('noteRingEnded', () => {
-  const ROW = { id: 'log-1', customer_id: 'cust-1', to_phone: PHONE, bridged_at: null, metadata: { leadName: 'Pat S.', leadPhone: PHONE, leadId: 'lead-1' } };
+  const ROW = { id: 'log-1', customer_id: 'cust-1', to_phone: PHONE, bridged_at: null, metadata: { leadName: 'Pat Sample', leadFirstName: 'Pat', leadPhone: PHONE, leadId: 'lead-1' } };
 
   test('a ring that ended without press 1 raises one missed bell', async () => {
     mockState.ringRow = { ...ROW };
     await expect(noteRingEnded({ callSid: 'CA-ring', callStatus: 'no-answer' })).resolves.toBe(true);
     expect(mockState.updates).toHaveLength(1);
     expect(mockBell).toHaveBeenCalledTimes(1);
-    expect(mockBell.mock.calls[0][1]).toMatchObject({ title: 'Missed call request: Pat S.', leadId: 'lead-1' });
-    expect(mockBell.mock.calls[0][2]).toEqual({ dedupeKey: 'lead-call-reply-missed:log-1' });
+    expect(mockBell.mock.calls[0][1]).toBe('Leads — call Pat Sample back');
+    expect(mockBell.mock.calls[0][3]).toMatchObject({ dedupeKey: 'lead-call-reply-missed:log-1' });
+  });
+
+  test('a bell that never lands releases the claim for a later callback', async () => {
+    jest.useFakeTimers();
+    try {
+      mockState.ringRow = { ...ROW };
+      mockBell.mockResolvedValue(null);
+      const done = noteRingEnded({ callSid: 'CA-ring', callStatus: 'no-answer' });
+      await jest.runAllTimersAsync();
+      await done;
+      expect(mockBell).toHaveBeenCalledTimes(3);
+      expect(mockState.updates).toHaveLength(2);
+      expect(mockState.updates[1].patch.metadata.sql).toContain("- 'missed_bell_at'");
+    } finally {
+      jest.useRealTimers();
+      mockBell.mockResolvedValue({ id: 'notif-1', deduped: false });
+    }
+  });
+
+  test('a deduped bell counts as delivered', async () => {
+    mockState.ringRow = { ...ROW };
+    mockBell.mockResolvedValueOnce({ id: 'notif-0', deduped: true });
+    await noteRingEnded({ callSid: 'CA-ring', callStatus: 'no-answer' });
+    expect(mockBell).toHaveBeenCalledTimes(1);
+    expect(mockState.updates).toHaveLength(1);
   });
 
   test('a completed ring nobody connected (voicemail took it) is a miss too', async () => {

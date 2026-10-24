@@ -11,10 +11,10 @@
  * not answer first; a ring that ends without press 1 raises one
  * "Missed call request" bell.
  *
- * Only a reply to OUR lead text counts (a delivered "Reply CALL" text to
- * this phone in the last 7 days), never an existing customer, at most one
- * ring per phone per 24 h, and none while another call to the phone is
- * already going. Night CALL replies and TEXT replies do nothing here.
+ * Only a reply to OUR lead text counts (a "Reply CALL" text to this phone
+ * in the last 7 days that Twilio did not report failed), never an existing
+ * customer, at most one ring per phone per 24 h, and none while another
+ * call to the phone is already going. Night CALL replies and TEXT replies do nothing here.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -46,10 +46,13 @@ function inRingHours(now = new Date()) {
   return hour >= RING_START_HOUR && hour < RING_END_HOUR;
 }
 
+// The full name: an initial with a period reads as two sentences in a bell
+// (docs/admin-notifications.md section 3).
 function displayName(customer) {
-  const first = String(customer?.first_name || '').trim();
-  const lastInitial = String(customer?.last_name || '').trim().charAt(0);
-  return [first, lastInitial ? `${lastInitial}.` : ''].filter(Boolean).join(' ') || 'a lead';
+  return [customer?.first_name, customer?.last_name]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' ') || 'a lead';
 }
 
 // Every read runs on `conn` so the caller's advisory lock covers it.
@@ -62,6 +65,8 @@ async function ringBlocker({ customer, digits, now }, conn) {
     .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
     .whereRaw("message_body ILIKE '%Reply CALL%'")
     .whereRaw("COALESCE(twilio_sid, '') ~ '^(SM|MM)'")
+    // A text Twilio reported failed never reached the phone.
+    .whereRaw("COALESCE(status, '') NOT IN ('failed', 'undelivered', 'canceled')")
     .first('id');
   if (!leadText) return 'no_lead_text';
 
@@ -91,16 +96,47 @@ async function newestLeadId(customerId, conn) {
   return lead?.id || null;
 }
 
-async function raiseMissedBell({ customerId, name, phone, leadId, callLogId }) {
-  const { triggerNotification } = require('./notification-triggers');
-  return triggerNotification('new_lead', {
-    title: `Missed call request: ${name}`,
-    name,
-    phone,
-    leadId,
-    customerId,
-    link: '/admin/leads',
-  }, { dedupeKey: `lead-call-reply-missed:${callLogId || phoneDigits(phone)}` });
+// A result that settles the miss: a written row, a dedupe onto the open
+// row, or a row held back on purpose. null (insert failed) or a throw did not.
+function bellSettled(result) {
+  return !!(result && (result.id || result.deduped || result.suppressed));
+}
+
+const MISSED_BELL_RETRY_DELAYS_MS = [0, 2000, 10000];
+
+// One "Missed call request" bell per ring (docs/admin-notifications.md).
+// Returns true once the bell is settled; false after every try failed.
+async function raiseMissedBell({ customerId, name, firstName, leadId, callLogId }, delaysMs = MISSED_BELL_RETRY_DELAYS_MS) {
+  const { raiseAdminAlert } = require('./admin-alert-compose');
+  const { fitAction } = require('./admin-alert-names');
+  const spec = {
+    area: 'Leads',
+    action: fitAction('Leads', name, [
+      (who) => `call ${who} back`,
+      (who) => `call ${who}`,
+    ]),
+    why: `Missed call request: ${firstName} replied CALL to our lead text and nobody pressed 1.`,
+    severity: 'needs-you',
+    link: leadId ? `/admin/leads?lead=${leadId}` : `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+    subject: leadId ? { type: 'lead', id: String(leadId) } : { type: 'customer', id: String(customerId) },
+    doneWhen: 'lead_contacted',
+    who: 'person',
+  };
+  for (const delay of delaysMs) {
+    if (delay) await new Promise((resolve) => { setTimeout(resolve, delay); });
+    try {
+      const result = await raiseAdminAlert('lead', spec, {
+        bell: true,
+        dedupeKey: `lead-call-reply-missed:${callLogId || customerId}`,
+        metadata: { leadId, customerId, callLogId },
+      });
+      if (bellSettled(result)) return true;
+    } catch (err) {
+      logger.warn(`[lead-call-reply-ring] missed bell try failed (${String(err?.code || err?.name || 'error')})`);
+    }
+  }
+  logger.error(`[lead-call-reply-ring] missed bell not delivered for customer ${customerId} after ${delaysMs.length} tries`);
+  return false;
 }
 
 /**
@@ -119,7 +155,7 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
     // The lock is held until the bridge's call_log row exists (placeBridgeCall
     // inserts it on its own connection before this transaction commits), so
     // a duplicate webhook waits here and then finds that row.
-    return await db.transaction(async (trx) => {
+    const outcome = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${SOURCE}:${digits}`]);
       const blocker = await ringBlocker({ customer, digits, now }, trx);
       if (blocker) {
@@ -131,7 +167,7 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
       const { homeLineCallerId } = require('./home-line');
       const { placeBridgeCall } = require('./call-bridge');
       const leadId = await newestLeadId(customer.id, trx);
-      const firstName = String(customer.first_name || '').trim() || 'the lead';
+      const firstName = String(customer.first_name || '').trim() || 'The lead';
       const name = displayName(customer);
       try {
         const { callLogId } = await placeBridgeCall({
@@ -141,7 +177,7 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
           bridgeFrom: TWILIO_NUMBERS.internalAlertCallerId(),
           customer,
           source: SOURCE,
-          metadata: { type: 'lead_call_reply_ring', leadId, leadName: name, leadPhone: fromPhone, smsLogId },
+          metadata: { type: 'lead_call_reply_ring', leadId, leadName: name, leadFirstName: firstName, leadPhone: fromPhone, smsLogId },
           leadName: firstName,
           eventLabel: `${firstName} asked for a call back`,
           ringTimeoutSeconds: RING_TIMEOUT_SECONDS,
@@ -152,13 +188,12 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
         // An ambiguous create may still be ringing: its status callback
         // decides. A definite failure never rings, so the bell goes now.
         logger.error(`[lead-call-reply-ring] ring failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
-        if (!err?.bridgeAmbiguous) {
-          await raiseMissedBell({ customerId: customer.id, name, phone: fromPhone, leadId, callLogId: null })
-            .catch((bellErr) => logger.warn(`[lead-call-reply-ring] missed bell failed: ${bellErr.message}`));
-        }
-        return { rang: false, reason: 'ring_failed' };
+        return { rang: false, reason: 'ring_failed', missed: err?.bridgeAmbiguous ? null : { customerId: customer.id, name, firstName, leadId, callLogId: null } };
       }
     });
+    // Raised after the lock is released: the bell's retries can take seconds.
+    if (outcome.missed) await raiseMissedBell(outcome.missed);
+    return { rang: outcome.rang, reason: outcome.reason, ...(outcome.callLogId ? { callLogId: outcome.callLogId } : {}) };
   } catch (err) {
     logger.error(`[lead-call-reply-ring] check failed for customer ${customer?.id}: ${err.message}`);
     return { rang: false, reason: 'error' };
@@ -189,13 +224,20 @@ async function noteRingEnded({ callSid, callStatus }) {
     });
   if (!claimed) return true;
   const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata || '{}') : (row.metadata || {});
-  await raiseMissedBell({
+  const settled = await raiseMissedBell({
     customerId: row.customer_id,
     name: meta.leadName || 'a lead',
-    phone: meta.leadPhone || row.to_phone,
+    firstName: meta.leadFirstName || 'The lead',
     leadId: meta.leadId || null,
     callLogId: row.id,
   });
+  // Not settled: release the claim so a later callback for this call can
+  // try again (the dedupe key keeps that to one bell).
+  if (!settled) {
+    await db('call_log').where({ id: row.id })
+      .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'missed_bell_at'"), updated_at: new Date() })
+      .catch((err) => logger.warn(`[lead-call-reply-ring] missed claim release failed for ${row.id} (${String(err?.code || err?.name || 'error')})`));
+  }
   return true;
 }
 
@@ -204,5 +246,5 @@ module.exports = {
   noteRingEnded,
   inRingHours,
   LEAD_CALL_REPLY_RING_SOURCE: SOURCE,
-  _test: { ringBlocker, displayName, RING_TIMEOUT_SECONDS },
+  _test: { ringBlocker, displayName, raiseMissedBell, bellSettled, RING_TIMEOUT_SECONDS },
 };
