@@ -1497,6 +1497,11 @@ router.post('/:id/send', async (req, res, next) => {
       reviewedMessages = preview.messages;
     }
     assertEstimateSendable(estimate, { engineReviewAcknowledged, confirmedPalmCount });
+    // A typed satellite palm count passed on this pre-read row (it equals
+    // confirmedPalmCount). Pin it (pre-push audit P1): the claims below check
+    // it against the row they claim, and a schedule records it for the cron
+    // leg to check again on the row it sends.
+    const pinnedPalmCount = satellitePalmCountAwaitingSend(estimate);
     // An impossible US number refuses the WHOLE send (400, nothing leaves, no
     // claim taken) rather than letting the email go and the text fail at the
     // provider: a resend after the fix would deliver the email twice.
@@ -1543,7 +1548,7 @@ router.post('/:id/send', async (req, res, next) => {
       const acknowledgedUncertainAttemptKeys = req.body?.acknowledgeUncertainSend === true
         ? (Array.isArray(attempts) ? attempts : []).filter((entry) => entry.startedAt && !entry.result).map((entry) => entry.key)
         : [];
-      const scheduledAttemptKey = idempotencyKey || (acknowledgedUncertainAttemptKeys.length ? crypto.randomUUID() : null);
+      const scheduledAttemptKey = idempotencyKey || (acknowledgedUncertainAttemptKeys.length || pinnedPalmCount != null ? crypto.randomUUID() : null);
       const scheduleOutcome = await db.transaction(async (trx) => {
         if (estimate.estimate_group_id) {
           await trx.raw(
@@ -1561,11 +1566,14 @@ router.post('/:id/send', async (req, res, next) => {
         if (req.body?.expectedEditVersion && estimateEditVersion(lockedRow) !== req.body.expectedEditVersion) {
           return { stale: true };
         }
+        // The typed palm count must match the row this schedule locks, not
+        // only the pre-read (a revision may have landed in between).
+        assertSatellitePalmCountTyped(lockedRow, { confirmedPalmCount });
         const lockedData = parseEstimateData(lockedRow?.estimate_data) || {};
         const priorAttempts = Array.isArray(lockedData.manualSendAttempts) ? lockedData.manualSendAttempts : [];
         const receipt = scheduledAttemptKey ? {
           key: scheduledAttemptKey, binding: attemptBinding, scheduleResult, channels: {},
-          scheduleReview: { scheduledAt: scheduledTime.toISOString(), reviewedMessages, reviewedOffer: req.body?.expectedEditVersion ? estimateOfferVersion(lockedRow) : null, reviewedGroupVersions: req.body?.groupVersions || null, acknowledgedUncertainAttemptKeys },
+          scheduleReview: { scheduledAt: scheduledTime.toISOString(), reviewedMessages, reviewedOffer: req.body?.expectedEditVersion ? estimateOfferVersion(lockedRow) : null, reviewedGroupVersions: req.body?.groupVersions || null, acknowledgedUncertainAttemptKeys, confirmedPalmCount: pinnedPalmCount },
         } : null;
         const claimed = await trx('estimates')
           .where({ id: estimate.id })
@@ -1663,11 +1671,13 @@ router.post('/:id/send', async (req, res, next) => {
         // meets the gate's own message.
         .modify((q) => {
           if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
-          if (req.body?.expectedEditVersion) {
+          if (req.body?.expectedEditVersion || pinnedPalmCount != null) {
             // CAS the snapshot observed before this claim. The later delivery
             // verdict also compares content; this pin stops two reviewed
             // clicks that both pre-read the same sent/draft row from winning
-            // sequentially after the first handoff completes.
+            // sequentially after the first handoff completes. A typed
+            // satellite palm count was checked on this same snapshot, so a
+            // revision that moves the priced count loses the claim too.
             q.where('status', estimate.status)
               .whereRaw("COALESCE(estimate_data, '{}'::jsonb) = ?::jsonb", [JSON.stringify(parseEstimateData(estimate.estimate_data) || {})]);
           }
@@ -2664,11 +2674,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // the cron leg must not bounce it at execution time.
   const clearedAtRequest = ['scheduled', 'sending'].includes(String(estimate.status || ''));
   const engineReviewAcknowledgedResolved = options.engineReviewAcknowledged === true || clearedAtRequest;
-  // The typed satellite palm count follows the same request-time rule.
+  // The typed satellite palm count follows the same request-time rule, except
+  // that a count the request carried (or the schedule recorded) is checked
+  // again on the row being sent.
   const sendGateOptions = {
     engineReviewAcknowledged: engineReviewAcknowledgedResolved,
     confirmedPalmCount: options.confirmedPalmCount,
-    palmCountCleared: clearedAtRequest,
+    palmCountCleared: clearedAtRequest && options.confirmedPalmCount == null,
   };
   assertEstimateSendable(estimate, sendGateOptions);
 

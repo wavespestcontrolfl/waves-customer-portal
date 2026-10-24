@@ -1362,11 +1362,67 @@ describe('satellite palm count typed before the first send (GATE_SATELLITE_PALM_
     expect(email.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('the scheduled leg sends without asking again: the count was typed when it was scheduled', async () => {
+  test('a row scheduled with no recorded count (before this check existed) sends as before', async () => {
     row.status = 'sending';
     const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
     expect(result.sent).toBe(true);
     expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  // Pre-push audit P1: the count is checked on the pre-read row, so every claim
+  // must hold it to the row it actually claims or sends.
+  const casClaims = () => db.mock.results.map((r) => r.value)
+    .filter((qb) => qb?.whereRaw?.mock.calls.some(([sql]) => sql.startsWith("COALESCE(estimate_data, '{}'::jsonb) = ?::jsonb")));
+
+  test('an immediate send without a reviewed edit version still pins the snapshot the count was checked on', async () => {
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email', confirmedPalmCount: 14 });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.sent).toBe(true);
+    expect(casClaims()).toHaveLength(1);
+    const [, bindings] = casClaims()[0].whereRaw.mock.calls.find(([sql]) => sql.startsWith('COALESCE(estimate_data'));
+    expect(JSON.parse(bindings[0])).toEqual(satelliteLine(14));
+  });
+
+  test('with nothing to count, an unreviewed immediate send claims as before (no snapshot pin)', async () => {
+    gates.satellitePalmCountTypedLive.mockReturnValue(false);
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+    expect(response.body.sent).toBe(true);
+    expect(casClaims()).toHaveLength(0);
+  });
+
+  test('a schedule checks the typed count again on the row it locks', async () => {
+    db.mockImplementation((table) => {
+      const builder = estimateDatabase(table);
+      // A revision lands between the pre-read and the schedule's row lock.
+      builder.forUpdate.mockImplementation(() => { row.estimate_data = satelliteLine(9); return builder; });
+      return builder;
+    });
+    const { body } = scheduledAttempt();
+    const response = await invoke('/:id/send', 'post', { ...body, confirmedPalmCount: 14 });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.code).toBe('PALM_COUNT_MISMATCH');
+    expect(row.status).toBe('draft');
+  });
+
+  test('a schedule records the typed count; the cron leg sends the unchanged row', async () => {
+    const { scheduledAt } = scheduledAttempt();
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email', scheduledAt, confirmedPalmCount: 14 });
+    expect(response.body.scheduled).toBe(true);
+    // A typed count always gets a receipt, so the cron leg can check it again.
+    expect(dataOf().manualSendAttempts.at(-1).scheduleReview.confirmedPalmCount).toBe(14);
+    row.status = 'sending';
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+  });
+
+  test('the cron leg refuses a scheduled row whose priced count moved after the count was typed', async () => {
+    const { body } = scheduledAttempt();
+    expect((await invoke('/:id/send', 'post', { ...body, confirmedPalmCount: 14 })).body.scheduled).toBe(true);
+    row.estimate_data = { ...dataOf(), engineResult: satelliteLine(9).engineResult };
+    row.status = 'sending';
+    await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
+      .rejects.toMatchObject({ code: 'PALM_COUNT_MISMATCH' });
+    expect(email.sendTemplate).not.toHaveBeenCalled();
   });
 
   test('a row already sent and a row with no satellite count are never asked', async () => {
