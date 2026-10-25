@@ -221,7 +221,8 @@ class WikiCompiler {
 
     const response = await createDeepMessage(anthropic, {
       laneId: 'wiki_compiler',
-      model: MODELS.DEEP,
+      // Internal job: Sonnet 5.5 on the ROUTINE tier, not Opus on DEEP (owner 2026-10-25, "cheaper internal").
+      model: MODELS.ROUTINE,
       // effort 'low' + 16000 (2026-10-05): at the pinned high effort Opus 5.5's thinking
       // plus ~9,800 tokens of articles hit the old 12000 cap, and 8 of 27 prod
       // runs ended anthropic_incomplete. Same fix as agronomic-wiki.js; 16000
@@ -436,7 +437,7 @@ ${content.substring(0, 50000)}`
 
     const response = await createDeepMessage(anthropic, {
       laneId: 'wiki_compiler',
-      model: MODELS.DEEP,
+      model: MODELS.ROUTINE, // see compileSource
       effort: 'low', // see compileSource: 12000 at high effort truncated 8 of 27 runs
       max_tokens: 16000, // DEEP: thinking spends from max_tokens — keep headroom for the compiled articles
       system: `You are the knowledge base compiler for Waves Pest Control. Read raw source documents and compile them into structured, interlinked wiki articles in markdown.
