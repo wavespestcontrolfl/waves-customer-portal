@@ -3,7 +3,7 @@ import { cn } from './cn';
 import { CONTROL_DENSITIES, useUiDensity } from './UiSurface';
 
 const BASE =
-  'ui-control inline-flex items-center justify-center font-medium ' +
+  'ui-control appearance-none inline-flex items-center justify-center font-medium ' +
   'select-none transition-colors u-focus-ring ' +
   'disabled:opacity-50 disabled:cursor-not-allowed';
 

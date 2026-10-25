@@ -90,6 +90,9 @@ Use the existing Tier-1 primitives instead of restyling local copies:
 - Inputs, selects, and textareas: existing form controls inside `Field` for a visible label and help/error associations. An existing native-input owner such as address autocomplete may use `inputStyles`; it keeps its existing ref, events, and provider behavior.
 - Cards: `Card`, `CardHeader`, `CardBody`, and `CardFooter`.
 - Tables: `Table`, `THead`, `TBody`, `TR`, `TH`, and `TD`. `Table layout="records"` presents the same semantic rows with visible `TD data-label` captions at widths of 1100px and below. Use the default scrolling layout when columns must remain aligned; sorting, data, permissions, and row actions stay with the caller.
+- Keep money, short dates, counts, and short status labels intact. Scrolling tables must retain readable column widths; do not use `overflow-wrap: anywhere` to force every column into the viewport. Long descriptions may wrap at word boundaries. Each nested table chooses its own scrolling or record layout.
+- An overflowing table exposes a named, focusable scroll region with horizontal arrow-key access. Tables that fit their container do not add a scroll-region tab stop.
+- Record lists prioritize the record identity and next action on phones. Banking payouts use a compact amount/date/status summary; Bid Desk gives the project action the full record width. Supporting values remain labeled and expanded details retain their existing actions.
 - Secondary in-page tabs: `Tabs`; record sections use `variant="section"` and `TabList scrollable`. Section tabs have 54px targets and reveal the active tab on keyboard selection and resize.
 - Overlays: `Dialog` or `Sheet`.
 - Feedback: `ActionFeedback` for status, errors, and safe retry. `Button loading` retains its accessible name and reserves spinner space. The caller must guard the action itself against duplicate invocation; a disabled button does not replace that guard.
