@@ -14,7 +14,8 @@ const { resolvePropertyCoordinates } = require('./property-coordinates');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-const MODEL = require('../config/models').DEEP;
+// Internal job: Sonnet 5.5 on the ROUTINE tier, not Opus on DEEP (owner 2026-10-25, "cheaper internal").
+const MODEL = require('../config/models').ROUTINE;
 const { createDeepMessage } = require('./llm/deep');
 
 // ══════════════════════════════════════════════════════════════

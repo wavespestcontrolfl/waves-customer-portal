@@ -617,7 +617,8 @@ const KnowledgeBaseService = {
       try {
         const response = await createDeepMessage(client, {
           laneId: 'kb_audit',
-          model: MODELS.DEEP,
+          // Internal job: Sonnet 5.5 on the ROUTINE tier, not Opus on DEEP (owner 2026-10-25, "cheaper internal").
+          model: MODELS.ROUTINE,
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
           messages: [{
             role: 'user',

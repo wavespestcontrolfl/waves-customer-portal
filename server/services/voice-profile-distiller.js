@@ -285,8 +285,11 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   }
   const { createDeepMessage } = require('./llm/deep');
+  // Internal job: Sonnet 5.5 on the ROUTINE tier, not Opus on DEEP (owner 2026-10-25, "cheaper internal").
+  const { ROUTINE } = require('../config/models');
   const response = await createDeepMessage(client, {
     laneId: 'voice_profile',
+    model: ROUTINE,
     max_tokens: 8192,
     system,
     messages: [{ role: 'user', content: user }],

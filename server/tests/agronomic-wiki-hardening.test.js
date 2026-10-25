@@ -21,7 +21,7 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/fawn-weather', () => ({ getCurrent: jest.fn() }));
 // anthropicAcceptsEffort lets the wire request carry a caller's effort, as it
 // would on a real Opus 5.5 DEEP model.
-jest.mock('../config/models', () => ({ DEEP: 'test-model', FLAGSHIP: 'test-model', anthropicAcceptsEffort: () => true }));
+jest.mock('../config/models', () => ({ DEEP: 'test-model', ROUTINE: 'test-model', FLAGSHIP: 'test-model', anthropicAcceptsEffort: () => true }));
 jest.mock('../services/lawn-grass-context', () => ({
   loadCustomerGrassContext: jest.fn(async () => ({
     trackKey: 'st_augustine',
