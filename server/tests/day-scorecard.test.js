@@ -154,6 +154,43 @@ describe('getDayScorecard', () => {
     expect(row.planned.stopsPerHour).toBeCloseTo(1 / 2); // 1 physical stop over a 2-hour (480->600) span
   });
 
+  test('a future row divides stops/hour by the departure its measurement simulated, 08:00 when it recorded none', async () => {
+    const date = '2026-09-08';
+    const tech = (assumptions) => ({
+      technicianId: 'tech1', technician: 'Tech One', scheduledVisits: 2, serviceMinutes: 120,
+      coVisitOnSiteMinutes: 90, physicalStops: 1,
+      modeledDriveMinutes: 30, modeledWaitingMinutes: 5, modeledReturnMinuteBeforeBreaks: 600,
+      modeledLateVisits: [], uncertaintyReasons: [], ...(assumptions ? { assumptions } : {}),
+    });
+    const stopsPerHour = async (assumptions) => {
+      getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'calibrated', days: [{ date, closed: false, byTech: [tech(assumptions)] }] });
+      const result = await getDayScorecard({ date_from: date, date_to: date }, conn(), new Date(`${date}T12:00:00Z`));
+      return result.days[0].byTech[0].planned.stopsPerHour;
+    };
+    expect(await stopsPerHour({ departureMinutes: 450 })).toBeCloseTo(1 / 2.5); // 07:30 -> 10:00
+    expect(await stopsPerHour({ departureMinutes: 480 })).toBeCloseTo(1 / 2);
+    expect(await stopsPerHour(undefined)).toBeCloseTo(1 / 2);
+    expect(await stopsPerHour({ departureMinutes: null })).toBeCloseTo(1 / 2);
+  });
+
+  test('a past row divides stops/hour by the departure its saved snapshot simulated, 08:00 when it recorded none', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy', days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    const stopsPerHour = async (extra) => {
+      getRoutePerformance.mockResolvedValue({
+        plans: [{ date, technicianId: 'tech1', plannedVisits: 4, plannedPhysicalStops: 2, plannedServiceMinutes: 120,
+          plannedDriveMinutes: 30, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 720, driveModel: 'legacy', stops: [], ...extra }],
+      });
+      const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+      return result.days[0].byTech[0].planned.stopsPerHour;
+    };
+    expect(await stopsPerHour({ plannedDepartureMinutes: 420 })).toBeCloseTo(2 / 5); // 07:00 -> 12:00
+    expect(await stopsPerHour({ plannedDepartureMinutes: null })).toBeCloseTo(0.5);
+    expect(await stopsPerHour({})).toBeCloseTo(0.5);
+  });
+
   test('a past row pairs the saved snapshot with recorded work and a mileage rollup', async () => {
     const date = '2026-09-01';
     getScheduleQualityMeasurements.mockResolvedValue({

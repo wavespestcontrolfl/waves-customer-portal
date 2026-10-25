@@ -57,6 +57,20 @@ describe('pickBestRows', () => {
     expect(row.map((h) => h.start_time)).toEqual(['12:00', '13:00', '10:00', '08:00']);
   });
 
+  test('row 2 leaves a last-resort day out, however good its hours are', () => {
+    const withSunday = [...days, day('2026-10-10', [hour('2026-10-10', '09:00', 0, 1)], { last_resort: true })];
+    const rows = pickBestRows(withSunday, { pickedDate: '2026-10-08', today: '2026-10-06' });
+    expect(rows.week.map((h) => h.date)).not.toContain('2026-10-10');
+    expect(rows.week.map((h) => `${h.date} ${h.start_time}`)).toEqual([
+      '2026-10-07 13:00', '2026-10-07 12:00', '2026-10-12 11:00', '2026-10-06 15:00',
+    ]);
+  });
+
+  test('row 1 still lists a last-resort picked date', () => {
+    const sunday = [day('2026-10-10', [hour('2026-10-10', '09:00', 3, 4)], { last_resort: true })];
+    expect(pickBestRows(sunday, { pickedDate: '2026-10-10', today: '2026-10-06' }).day.map((h) => h.start_time)).toEqual(['09:00']);
+  });
+
   test('row 2 covers 7 days from today and skips the picked date, closed days and days off', () => {
     const rows = pickBestRows(days, { pickedDate: '2026-10-08', today: '2026-10-06' });
     expect(rows.week_to).toBe('2026-10-12');

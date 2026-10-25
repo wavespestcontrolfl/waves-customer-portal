@@ -514,7 +514,9 @@ function promisedWindowOrder(rows) {
  * must turn an infeasible baseline into a feasible route; a backbone that is
  * itself out of window order is rebuilt from the windows (see the rebuild
  * note inside). No distance saving is needed to correct either defect. The
- * caller owns gates and fenced writes.
+ * caller owns gates and fenced writes. `startMin` is the minute the van
+ * leaves (08:00 unless the nightly pass passes the day rules' departure,
+ * scheduling/departure-time.js).
  *
  * `visit_id` VETO (deliberate, not extended to the co-visit rule above):
  * a `service_visits` row is visit-groups.js's OWN mechanism for "N
@@ -533,7 +535,7 @@ function promisedWindowOrder(rows) {
  * stays: a visit_id day is left for the visit-group path or a human, never
  * silently mis-simulated here.
  */
-function computeChronologicalRepair(RouteOptimizer, stops, home = RouteOptimizer.HQ) {
+function computeChronologicalRepair(RouteOptimizer, stops, home = RouteOptimizer.HQ, startMin = 8 * 60) {
   if (stops.some(stop => {
     const duration = workDuration(stop, 0);
     return stop.visit_id || stop.auto_dispatch_locked || stop.auto_dispatch_excluded
@@ -559,7 +561,7 @@ function computeChronologicalRepair(RouteOptimizer, stops, home = RouteOptimizer
   const rebuilt = backbone.some((stop, i) => i > 0
     && effectiveWindowRange(stop).startMin < effectiveWindowRange(backbone[i - 1]).startMin);
   if (!rebuilt && (!backbone.length || !additions.length)) return null;
-  if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered, { origin: home, end: home })) return null;
+  if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered, { startMin, origin: home, end: home })) return null;
   if (rebuilt) {
     additions = ordered;
     backbone = [];
@@ -585,7 +587,7 @@ function computeChronologicalRepair(RouteOptimizer, stops, home = RouteOptimizer
     const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > range.startMin);
     candidate.splice(index === -1 ? candidate.length : index, 0, stop);
   }
-  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate, { origin: home, end: home });
+  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate, { startMin, origin: home, end: home });
   return simulation ? { orderedStops: candidate, simulation, ...(rebuilt ? { rebuilt: true } : {}) } : null;
 }
 

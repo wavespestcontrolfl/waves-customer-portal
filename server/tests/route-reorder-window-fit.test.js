@@ -926,3 +926,57 @@ describe('promisedWindowOrder — the canonicalization baseline (shared with arr
     expect(promisedWindowOrder(rows).map((r) => r.id)).toEqual(['g1', 'g2', 'other']);
   });
 });
+
+// ── The van leaves before 08:00 (GATE_AUTO_DISPATCH_DAY_RULES, departure-time.js) ──
+// A promise opens at its window start and holds for 120 minutes. A first stop
+// 130 minutes out, promised 08:00, is unreachable from an 08:00 departure
+// (arrives 10:10, deadline 10:00) and reachable from 07:30 (arrives 09:40).
+// These tests use their own travel model (10 minutes per degree) because this
+// file's RouteOptimizer mock drives every leg in 0 minutes.
+describe('a day that starts at the van departure instead of 08:00', () => {
+  const { chooseWindowSafeOrder } = require('../services/route-reorder');
+  const TravelOptimizer = {
+    HQ: { lat: 0, lng: 0 },
+    haversine: (lat1, lng1, lat2, lng2) => Math.abs(lat1 - lat2) + Math.abs(lng1 - lng2),
+    fallbackLegMetrics: (miles) => ({ meters: Math.round(miles * 1000), minutes: Math.round(miles * 10) }),
+  };
+  // FAR is 13 degrees (130 minutes) out, promised 08:00; NEAR is at the same spot, promised 09:00.
+  const FAR = stop('far', { customer_id: 'c_far', route_order: 1, window_start: '08:00', estimated_duration_minutes: 30, lat: 13, lng: 0.0001 });
+  const NEAR = stop('near', { customer_id: 'c_near', route_order: 2, window_start: '09:00', estimated_duration_minutes: 30, lat: 13.0002, lng: 0.0001 });
+  const choose = (extra = {}) => chooseWindowSafeOrder({
+    RouteOptimizer: TravelOptimizer, googleOrder: [FAR, NEAR], sourceStops: [FAR, NEAR], googleSource: 'google_routes_api', ...extra,
+  });
+
+  test('a 07:30 departure certifies the order whose first promise is 130 minutes away', () => {
+    const out = choose({ dayStartMin: 450 });
+    expect(out.conflict).toBeNull();
+    expect(out.orderedStops.map((s) => s.id)).toEqual(['far', 'near']);
+  });
+
+  test('no dayStartMin keeps today\'s 08:00 day: the same order misses its first promise', () => {
+    expect(choose().conflict).toBe('WINDOW_FIT_CONFLICT');
+    expect(choose({ dayStartMin: null }).conflict).toBe('WINDOW_FIT_CONFLICT');
+  });
+
+  test('a 07:00 day-in-progress call is floored at the departure, not at 08:00', () => {
+    // startMin 420 + dayStartMin 450 simulates from 450 (reachable at 08:00); from 08:00 it is not.
+    expect(choose({ startMin: 420, dayStartMin: 450 }).conflict).toBeNull();
+    expect(choose({ startMin: 420 }).conflict).toBe('WINDOW_FIT_CONFLICT');
+  });
+
+  test('a call later than the departure still starts at its own minute', () => {
+    expect(choose({ startMin: 8 * 60, dayStartMin: 450 }).conflict).toBe('WINDOW_FIT_CONFLICT');
+  });
+
+  test('computeChronologicalRepair simulates from the departure it is given', () => {
+    // NEAR is numbered; FAR has no order yet. The baseline [NEAR, FAR] misses FAR
+    // either way; [FAR, NEAR] works only if the van can leave at 07:30.
+    const near = { ...NEAR, route_order: 1 };
+    const far = { ...FAR, route_order: null };
+    const fromEight = computeChronologicalRepair(TravelOptimizer, [near, far]);
+    const fromEarly = computeChronologicalRepair(TravelOptimizer, [near, far], TravelOptimizer.HQ, 450);
+    expect(fromEight).toBeNull();
+    expect(fromEarly.orderedStops.map((s) => s.id)).toEqual(['far', 'near']);
+    expect(fromEarly.simulation.arrivals[0]).toMatchObject({ id: 'far', arrivalMin: 9 * 60 + 40 });
+  });
+});

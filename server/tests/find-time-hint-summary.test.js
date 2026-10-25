@@ -59,7 +59,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { loadOccupancy } = require('../services/rain-out');
 const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
 const {
-  summarizeHintDays, summaryRangeEnd, hintSearchPlan, SUMMARY_MAX_DAYS,
+  summarizeHintDays, summaryRangeEnd, hintSearchPlan, SUMMARY_MAX_DAYS, loadSummaryDayFacts,
 } = require('../services/scheduling/find-time-hints');
 const findTimeRouter = require('../routes/admin-schedule-find-time');
 
@@ -231,6 +231,61 @@ test('summary days carry the calendar: closed days (blackout, Sunday) and the te
   absentTechDays.mockClear();
   await post({ ...BASE, dateTo: '2026-09-06', summary: true });
   expect(absentTechDays).not.toHaveBeenCalled();
+});
+
+describe('Sundays under GATE_AUTO_DISPATCH_DAY_RULES (owner 2026-10-24: a last resort, not closed)', () => {
+  const DAY_RULES = 'GATE_AUTO_DISPATCH_DAY_RULES';
+  const savedDayRules = process.env[DAY_RULES];
+  afterEach(() => {
+    if (savedDayRules === undefined) delete process.env[DAY_RULES]; else process.env[DAY_RULES] = savedDayRules;
+  });
+  // Sep 1 2026 is a Tuesday; Sep 6 is the Sunday.
+  const plan = { summary: true, from: '2026-09-01', to: '2026-09-07' };
+
+  test('gate on: the Sunday is a last-resort date and not a closed date', async () => {
+    process.env[DAY_RULES] = 'true';
+    const facts = await loadSummaryDayFacts(plan, null);
+    expect([...facts.lastResortDates]).toEqual(['2026-09-06']);
+    expect([...facts.closedDates]).toEqual([]);
+  });
+
+  test('gate off: the Sunday is closed exactly as before and nothing is last resort', async () => {
+    delete process.env[DAY_RULES];
+    const facts = await loadSummaryDayFacts(plan, null);
+    expect([...facts.closedDates]).toEqual(['2026-09-06']);
+    expect([...facts.lastResortDates]).toEqual([]);
+  });
+
+  test('a Sunday that is also a blackout date stays closed, with no last_resort mark, through the route', async () => {
+    process.env[DAY_RULES] = 'true';
+    const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
+    getBlackoutDates.mockResolvedValueOnce(new Set(['2026-09-06']));
+    findAvailableSlots.mockResolvedValue({ slots: [slot('2026-09-06', '09:00', 4)], evaluated: 1 });
+    const body = await (await post({ ...BASE, dateTo: '2026-09-07', summary: true })).json();
+    const sunday = body.summary.days.find((day) => day.date === '2026-09-06');
+    expect(sunday).toMatchObject({ closed: true });
+    expect(sunday).not.toHaveProperty('last_resort');
+  });
+
+  test('gate on: the route marks a plain Sunday last_resort, keeps its hours, and does not mark it closed', async () => {
+    process.env[DAY_RULES] = 'true';
+    findAvailableSlots.mockResolvedValue({ slots: [slot('2026-09-06', '09:00', 4)], evaluated: 1 });
+    const body = await (await post({ ...BASE, dateTo: '2026-09-07', summary: true })).json();
+    const byDate = Object.fromEntries(body.summary.days.map((day) => [day.date, day]));
+    expect(byDate['2026-09-06']).toMatchObject({ status: 'open', last_resort: true });
+    expect(byDate['2026-09-06']).not.toHaveProperty('closed');
+    expect(byDate['2026-09-06'].hours).toHaveLength(1);
+    expect(byDate['2026-09-07']).not.toHaveProperty('last_resort');
+  });
+
+  test('summarizeHintDays marks last_resort only on the dates it is given, and closed wins when both name a date', () => {
+    const days = summarizeHintDays([], {
+      from: '2026-09-05', to: '2026-09-07', closedDates: new Set(['2026-09-06']), lastResortDates: new Set(['2026-09-06', '2026-09-07']),
+    });
+    expect(days.map((d) => [d.date, d.closed === true, d.last_resort === true])).toEqual([
+      ['2026-09-05', false, false], ['2026-09-06', true, false], ['2026-09-07', false, true],
+    ]);
+  });
 });
 
 test('summary is a hint-mode construct: ignored without the hint flag', async () => {

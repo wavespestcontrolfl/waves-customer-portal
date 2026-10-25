@@ -4015,6 +4015,20 @@ const gates = {
   // call time (config.arrivalSearch). Kill switch: unset.
   autoDispatchArrivalSearch: ['shadow', 'true'].includes(String(process.env.GATE_AUTO_DISPATCH_ARRIVAL_SEARCH || '').trim().toLowerCase()),
 
+  // Auto-dispatch day rules (owner 2026-10-24: "dont skip sundays", "think
+  // sundays should be a last resort", "yes build the 7:30 depature, and make
+  // this ediatble in the admin portal"). On, the 04:10 run also searches
+  // Sundays: a Sunday slot is taken only when no Monday-Saturday slot
+  // qualifies, at most AUTO_DISPATCH_MAX_SUNDAY_MOVES_PER_RUN (2) a run, and
+  // never for a plan that skips weekends. The van leaves at the Settings →
+  // Scheduling departure time (default 07:30; scheduling/departure-time.js)
+  // in the night tool's arrival search, the 04:20 route pass and the day
+  // reports; no visit starts before its window opens. The staff time strip
+  // stops calling Sunday closed. Booking pages do not change. OFF in every
+  // environment; read at call time through autoDispatchDayRulesLive(). Kill
+  // switch: unset.
+  autoDispatchDayRules: gateEnvValue('GATE_AUTO_DISPATCH_DAY_RULES'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
@@ -6126,6 +6140,15 @@ function autoDispatchArrivalSearchMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
+// GATE_AUTO_DISPATCH_DAY_RULES read at CALL time via gateEnvValue: unset is
+// the kill, no redeploy. The one canonical reader for the night tool
+// (auto-dispatch/config.js), the departure time (scheduling/departure-time.js)
+// and the staff strip's Sunday label (find-time-hints.js). The
+// `autoDispatchDayRules` gates-map entry above is for logGateStatus only.
+function autoDispatchDayRulesLive() {
+  return gateEnvValue('GATE_AUTO_DISPATCH_DAY_RULES');
+}
+
 // GATE_ESTIMATE_CONSULTATION_OFFER read at CALL time — strict `=== 'true'`,
 // same convention as leadInspectionLinkLive(). The `estimateConsultationOffer`
 // gates-map entry above is for logGateStatus only; this is the one canonical
@@ -7490,6 +7513,7 @@ module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
+module.exports.autoDispatchDayRulesLive = autoDispatchDayRulesLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.payAfterFirstVisitLive = payAfterFirstVisitLive;

@@ -197,6 +197,43 @@ describe('conflict moves: least added drive, with a ceiling (replay 2026-10-09)'
   });
 });
 
+// GATE_AUTO_DISPATCH_DAY_RULES opens Sundays to the search; the owner wants
+// them only when nothing else works (2026-10-24, "think sundays should be a
+// last resort"). 2026-12-05 is a Saturday, 2026-12-06 a Sunday.
+describe('Sunday is the last resort (owner 2026-10-24)', () => {
+  test('a qualifying Saturday beats a Sunday with a bigger gain', () => {
+    const sunday = dayMove({ date: '2026-12-06', detour_minutes: 0 });
+    const saturday = dayMove({ date: '2026-12-05', detour_minutes: 4 });
+    const result = rank([{ cand: sunday, sc: score(99) }, { cand: saturday, sc: score(80) }]);
+    expect(result.best).toBe(saturday);
+    expect(result.ranked).toEqual([saturday, sunday]);
+  });
+
+  test('a Sunday is taken when no other day qualifies', () => {
+    const sunday = dayMove({ date: '2026-12-06', detour_minutes: 0 });
+    const weakTuesday = dayMove({ date: '2026-12-01', detour_minutes: 4 });
+    const result = rank([{ cand: weakTuesday, sc: score(70) }, { cand: sunday, sc: score(90) }]);
+    expect(result).toMatchObject({ qualifies: true, best: sunday });
+    expect(result.ranked).toEqual([sunday]);
+  });
+
+  test('an overlap on a Sunday visit still takes a free hour that same Sunday first', () => {
+    const current = { ...CURRENT, date: '2026-12-06', conflict: { kind: 'overlap', date: '2026-12-06', with: ['x1'] } };
+    const sameSunday = dayMove({ date: '2026-12-06', start_time: '11:00', detour_minutes: 20 });
+    const monday = dayMove({ date: '2026-12-07', detour_minutes: 0 });
+    const result = rank([{ cand: monday, sc: score(95) }, { cand: sameSunday, sc: score(50) }], { current });
+    expect(result.ranked).toEqual([sameSunday, monday]);
+  });
+
+  test('the move a visit in conflict would make anyway also prefers a weekday', () => {
+    const current = { ...CURRENT, conflict: { kind: 'overlap', date: CURRENT.date, with: ['x1'] } };
+    const sunday = dayMove({ date: '2026-12-06', detour_minutes: 0 });
+    const friday = dayMove({ date: '2026-12-04', detour_minutes: 0 });
+    const result = rank([{ cand: sunday, sc: score(99) }, { cand: friday, sc: score(80) }], { current });
+    expect(result.normalBest).toBe(friday);
+  });
+});
+
 test('a day move compares totals clamped WITHOUT the default-time credit (Codex #6207 r7 P2)', () => {
   const { moveGain } = require('../services/auto-dispatch/move-rules');
   // Components total 105 with 12.5 default-time points: capped total 100, default-free 92.5 (not 87.5).

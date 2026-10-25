@@ -216,13 +216,17 @@ function unallocatedSummary(unallocated, includeStopExtras) {
 }
 
 function measureDayQuality(RouteOptimizer, stops, {
-  departureMinutes = null, targetReturnMinutes = null, breakMinutes = null, future = true,
+  departureMinutes, targetReturnMinutes = null, breakMinutes = null, future = true,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS): the
   // office (simulateArrivalRoute's default) unless the caller passes the
   // tech's start point. Never put it in the returned measurement.
   home,
+  // The van's departure when the caller gave none: the Settings time with
+  // GATE_AUTO_DISPATCH_DAY_RULES on (departure-time.js), else 08:00. It
+  // models the day only; it is not a configured workday (`departureProvided`).
+  modeledDepartureMinutes = 480,
 } = {}) {
-  const modeledDeparture = departureMinutes ?? 480;
+  const modeledDeparture = departureMinutes ?? modeledDepartureMinutes;
   const ordered = currentOrder(stops);
   const timed = stops.filter(stop => parseHHMM(stop.window_start) != null)
     .map(stop => ({ start: parseHHMM(stop.window_start), end: parseHHMM(stop.window_start) + workDuration(stop) }))
@@ -333,6 +337,8 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
     return { error: 'Use a valid date range of at most 31 days.' };
   }
   const departureMinutes = parseHHMM(input.departure_time);
+  // Read once for the whole range: 08:00 with GATE_AUTO_DISPATCH_DAY_RULES off.
+  const modeledDepartureMinutes = await require('./departure-time').dayDepartureMinutes(conn);
   const targetReturnMinutes = parseHHMM(input.target_return_time);
   const breakMinutes = input.break_minutes;
   const invalidTimes = [input.departure_time, input.target_return_time].some(value => value != null && parseHHMM(value) == null);
@@ -364,7 +370,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
       const home = homeFromMap(techHomes, tech.id);
       const quality = measureDayQuality(RouteOptimizer, techStops, {
         departureMinutes, targetReturnMinutes, breakMinutes, future: date > today,
-        home,
+        home, modeledDepartureMinutes,
       });
       if (unallocated.length || closed) {
         quality.remainingServiceBudgetMinutes = null;
@@ -375,7 +381,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
       }
       const candidateAnalysis = candidate ? require('./gap-candidates').analyzeGapCandidate(candidate, stops, {
         date, technicianId: tech.id, now, today, departureMinutes, targetReturnMinutes, breakMinutes, closed,
-        home,
+        home, modeledDepartureMinutes,
       }) : null;
       if (candidateAnalysis) {
         quality.feasibleInsertionWindows = candidateAnalysis.feasibleInsertionWindows;

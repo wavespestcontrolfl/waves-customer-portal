@@ -242,6 +242,9 @@ async function findCapacitySlots(opts) {
         preserveCapacity: opts.arrivalSearch === true,
         planningMinutes: opts.arrivalSearch !== true,
         startPoints: opts.arrivalSearch === true,
+        // The van's departure (GATE_AUTO_DISPATCH_DAY_RULES): the night tool
+        // passes the Settings time; every other caller keeps 08:00.
+        vanDepartureMin: opts.arrivalSearch === true ? opts.departureMinutes : undefined,
         ...(opts.arrivalWindow?.serviceId ? {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
           // Same as the non-capacity path above.

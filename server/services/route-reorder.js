@@ -50,6 +50,7 @@ const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChrono
   staleOrderReasons, promisedWindowOrder } = require('./route-reorder-window-fit');
 
 const { loadTechStartPoints, homeFromMap, assertStartPointUnchanged } = require('./scheduling/tech-start-point');
+const { dayDepartureMinutes } = require('./scheduling/departure-time');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -513,6 +514,10 @@ function chooseWindowSafeOrder({
   // `origin` (the truck's live position on a day in progress) still wins for
   // the FIRST leg; the van always drives home to `home`.
   home = null,
+  // The minute the van leaves on a future day (GATE_AUTO_DISPATCH_DAY_RULES:
+  // the nightly pass passes scheduling/departure-time.js's answer). Absent:
+  // the 08:00 day open, as before (the staff route tools).
+  dayStartMin,
 }) {
   const { sourceStops, googleOrder, legs } = driveableInputs({ rawGoogleOrder, rawSourceStops, rawLegs, origin });
   // beforeMeters (current running order, same model as the nightly ledger's
@@ -526,13 +531,14 @@ function chooseWindowSafeOrder({
   const end = home || RouteOptimizer.HQ;
   const from = origin || end;
   const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops), from, end);
-  // The simulation clock never runs EARLIER than the 08:00 day open — a
-  // 07:00 request must not be told the truck can spend that hour driving and
-  // mark an 08:00 promise reachable (codex round 2 P1). The elapsed-window
-  // test below deliberately keeps the RAW minute instead: a 06:00-07:30
-  // promise is not elapsed at 07:00 just because the model's day starts at
-  // 08:00.
-  const simStart = startMin == null ? 8 * 60 : Math.max(8 * 60, startMin);
+  // The simulation clock never runs EARLIER than the day open (08:00, or the
+  // van's departure, dayStartMin) — a 07:00 request must not be told the
+  // truck can spend that hour driving and mark an 08:00 promise reachable
+  // (codex round 2 P1). The elapsed-window test below deliberately keeps the
+  // RAW minute instead: a 06:00-07:30 promise is not elapsed at 07:00 just
+  // because the model's day starts at 08:00.
+  const dayOpen = Number.isFinite(dayStartMin) ? dayStartMin : 8 * 60;
+  const simStart = startMin == null ? dayOpen : Math.max(dayOpen, startMin);
   // A promise that expires WHILE we wait for locks must not become
   // unconstrained: a commit-time recheck advances the simulation clock but
   // keeps the cutoff the decision was made under (codex round 5 P1).
@@ -987,7 +993,7 @@ function boundedDateList(rawDates, today, lastDate) {
  * any non-Google order (its own window-fit repair included). Legless
  * certification is otherwise only for a day Google never ran on.
  */
-function canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun = null, home = null) {
+function canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun = null, home = null, dayStartMin = null) {
   const orderedStops = promisedWindowOrder(techStops);
   const ids = (order) => order.map((s) => s.id).join(',');
   const googleAligned = !!googleRun && ids(googleRun.orderedStops || []) === ids(orderedStops);
@@ -995,7 +1001,7 @@ function canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun = null, 
     RouteOptimizer, googleOrder: orderedStops, sourceStops: techStops,
     googleSource: googleAligned ? googleRun.source : 'promised_window',
     legs: googleAligned ? googleRun.legs : null,
-    home,
+    home, dayStartMin,
   });
   if (UNCERTIFIABLE_REASONS.has(guard.reason)) return null;
   if (guard.conflict === 'WINDOW_ORDER_CONFLICT') return { conflict: 'WINDOW_ORDER_CONFLICT' };
@@ -1006,8 +1012,8 @@ function canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun = null, 
 /** True when the promised-window baseline would actually be written for this
  *  tech-day (certified, and different from what is stored) — how a capped
  *  run tells a day it had to pass over from one it could never write. */
-function baselineWritable(RouteOptimizer, techStops, home = null) {
-  const baseline = canonicalizeBaselineOrder(RouteOptimizer, techStops, null, home);
+function baselineWritable(RouteOptimizer, techStops, home = null, dayStartMin = null) {
+  const baseline = canonicalizeBaselineOrder(RouteOptimizer, techStops, null, home, dayStartMin);
   return !!baseline?.orderedStops && routeOrderChanges(techStops, baseline.orderedStops).length > 0;
 }
 
@@ -1263,10 +1269,10 @@ function classifyWriteError(writeErr, { summary, entryBase }) {
  * true, failed } once this function has itself pushed the outcome (applied,
  * dry-run plan, or a classified write failure) onto `summary`.
  */
-async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates, baseline: certified, home = null }) {
+async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates, baseline: certified, home = null, dayStartMin = null }) {
   // `certified`: the baseline the caller already certified against Google's
   // run (canonicalFloorBaseline); absent on the paths where Google never ran.
-  const baseline = certified !== undefined ? certified : canonicalizeBaselineOrder(RouteOptimizer, techStops, null, home);
+  const baseline = certified !== undefined ? certified : canonicalizeBaselineOrder(RouteOptimizer, techStops, null, home, dayStartMin);
   if (!baseline) return { handled: false };
   if (baseline.conflict) {
     // A DISTINCT, reported skip — never silently falls through to this
@@ -1377,9 +1383,9 @@ function techDayCanonicalizeState({ canonicalizeStaleEnabled, techStops, dayFroz
  *  from: the baseline's own distance, else the stored order's (byte-identical
  *  to today when not canonicalizing). A conflicted baseline ({ conflict }, no
  *  `.meters`) is not a usable comparator either — same fallback as none. */
-function canonicalFloorBaseline(RouteOptimizer, { repair, staleReasons, techStops, beforeMeters, googleRun, home = null }) {
+function canonicalFloorBaseline(RouteOptimizer, { repair, staleReasons, techStops, beforeMeters, googleRun, home = null, dayStartMin = null }) {
   const canonicalBaseline = (!repair && staleReasons.length > 0)
-    ? canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun, home) : null;
+    ? canonicalizeBaselineOrder(RouteOptimizer, techStops, googleRun, home, dayStartMin) : null;
   const floorBaselineMeters = canonicalBaseline?.meters != null ? canonicalBaseline.meters : beforeMeters;
   return { canonicalBaseline, floorBaselineMeters };
 }
@@ -1481,6 +1487,10 @@ async function runRouteReorder(opts = {}, conn = db) {
     // office. A failed read is not "no points": it fails the run below, so
     // nothing is written from the office by mistake.
     const techHomes = await loadTechStartPoints(conn);
+    // The minute the van leaves (GATE_AUTO_DISPATCH_DAY_RULES; the Settings
+    // time, departure-time.js): ONE read per run, 08:00 with the gate off.
+    // Every simulation and measurement below starts the day there.
+    const dayStartMin = await dayDepartureMinutes(conn);
     for (const dateStr of dates) {
       let stops;
       try {
@@ -1541,7 +1551,7 @@ async function runRouteReorder(opts = {}, conn = db) {
         for (const [techId, techStops] of byTech) {
           summary.measurements.push({ date: dateStr, technician_id: techId, as_of: now.toISOString(), snapshot_phase: 'loaded_schedule',
             drive_model: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy',
-            ...measureDayQuality(RouteOptimizer, techStops, { home: homeFromMap(techHomes, techId) }) });
+            ...measureDayQuality(RouteOptimizer, techStops, { home: homeFromMap(techHomes, techId), modeledDepartureMinutes: dayStartMin }) });
         }
       }
 
@@ -1597,7 +1607,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             appliedCount: summary.applied.length, maxApplies: config.maxAppliesPerRun,
           });
           const { staleReasons } = canon;
-          const canonicalizeArgs = { conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates, home };
+          const canonicalizeArgs = { conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates, home, dayStartMin };
           // Either the promised-window baseline write fully handles this
           // tech-day (applied, a dry-run plan entry, or a classified write
           // failure), or `skipEntry` is recorded instead (after `onSkip`) —
@@ -1617,7 +1627,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           // precedence the forward pass gives the cap. A day the shared
           // guard would never certify (any coordless stop) keeps its own
           // coordinate reason — the cap is not why it was skipped.
-          const canonicalizeOnlyOrSkip = (skipEntry, onSkip) => (canon.capped && baselineWritable(RouteOptimizer, techStops, home)
+          const canonicalizeOnlyOrSkip = (skipEntry, onSkip) => (canon.capped && baselineWritable(RouteOptimizer, techStops, home, dayStartMin)
             ? canonicalizeOrSkip(false, { ...entryBase, reason: 'MAX_APPLIES_REACHED' })
             : canonicalizeOrSkip(canon.eligible, skipEntry, onSkip));
           const withCoords = techStops.filter((s) => parseFloat(s.lat) && parseFloat(s.lng));
@@ -1643,7 +1653,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           // Baseline = the current running order. Every stop must survive
           // the repair or optimizer; neither path may silently truncate it.
           const ordered = currentOrder(techStops);
-          const repair = repairEnabled ? computeChronologicalRepair(RouteOptimizer, ordered, home) : null;
+          const repair = repairEnabled ? computeChronologicalRepair(RouteOptimizer, ordered, home, dayStartMin) : null;
           if (!repair && withCoords.length > GOOGLE_WAYPOINT_CAP) {
             // The pure repair never reaches Google's waypoint-limited API —
             // same coordinates-not-needed exception as above.
@@ -1715,7 +1725,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           let finalOrdered = result.orderedStops;
           let appliedMetrics = metrics;
           const guardOutcome = chooseWindowSafeOrder({
-            RouteOptimizer, googleOrder: result.orderedStops, sourceStops: techStops, googleSource: result.source, legs: result.legs, home,
+            RouteOptimizer, googleOrder: result.orderedStops, sourceStops: techStops, googleSource: result.source, legs: result.legs, home, dayStartMin,
           });
           // Stale-order canonicalization: the comparison baseline becomes the
           // promised-window order instead of the stale stored order — the
@@ -1727,7 +1737,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           const { canonicalBaseline, floorBaselineMeters } = canonicalFloorBaseline(RouteOptimizer, {
             repair, staleReasons, techStops, beforeMeters,
             googleRun: repair ? null : { orderedStops: result.orderedStops, legs: result.legs, source: result.source },
-            home,
+            home, dayStartMin,
           });
           // Savings floor for GOOGLE's order. Fallback ON + a guard conflict
           // defers the floor to the fallback's own check below: Google
@@ -1854,7 +1864,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             summary.measurements.push({ date: dateStr, technician_id: techId, as_of: (opts.now || new Date()).toISOString(),
               snapshot_phase: 'applied_reorder', drive_model: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy',
               ...require('./scheduling/day-quality').measureDayQuality(RouteOptimizer,
-                techStops.map(stop => ({ ...stop, route_order: finalIds.indexOf(stop.id) + 1 })), { home }) });
+                techStops.map(stop => ({ ...stop, route_order: finalIds.indexOf(stop.id) + 1 })), { home, modeledDepartureMinutes: dayStartMin }) });
           }
           logger.info(`[route-reorder] ${dateStr} tech ${techId}: reordered ${withCoords.length} stops, saved ~${Math.round(appliedMetrics.saved_meters)} m (${appliedMetrics.source})`);
         } catch (techErr) {
