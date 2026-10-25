@@ -87,17 +87,20 @@ const communityKey = (name) => spokenName(name).replace(/^THE\s+/, '').replace(T
 // A row the office merged into another (services/neighborhood-merge.js) stays
 // under its own name, so the county and caller names keep finding it; the
 // answer is the row it was merged into (a merge stays inside one county), so a
-// new home with the old name lands where its neighbours went.
+// new home with the old name lands where its neighbours went. This name's
+// advisory lock does not cover the row it points to, which can itself be
+// merged meanwhile: each hop is locked and re-read (a merge of it holds that
+// row, so this waits and then reads where it went).
 const MAX_MERGE_HOPS = 10;
+const COMMUNITY_COLUMNS = ['id', 'match_key', 'name', 'active', 'merged_into_id'];
 async function lockCommunity(conn, county, name) {
   const community = communityKey(name);
   await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [communityLockKey(county, name)]);
   const rows = await conn('neighborhoods').whereRaw('county IS NOT DISTINCT FROM ?', [county || null])
-    .select('id', 'match_key', 'name', 'active', 'merged_into_id');
-  const byId = new Map(rows.map((n) => [n.id, n]));
+    .select(COMMUNITY_COLUMNS);
   let row = rows.find((n) => communityKey(n.name) === community) || null;
   for (let hop = 0; row && row.merged_into_id && hop < MAX_MERGE_HOPS; hop += 1) {
-    const next = byId.get(row.merged_into_id);
+    const next = await conn('neighborhoods').where({ id: row.merged_into_id }).forUpdate().first(COMMUNITY_COLUMNS);
     if (!next) break;
     row = next;
   }

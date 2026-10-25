@@ -477,10 +477,15 @@ router.get('/', async (req, res) => {
     if (needsConfirmOnly) where += ' AND (f.needs_confirm OR f.conflict OR f.stale)';
     if (q) {
       const like = likePattern(q);
-      // A merged-away entry's names still find the entry it went into.
+      // A merged-away entry's names still find the entry it went into, down
+      // the whole chain (A into B, then B into C: A finds C).
       where += ` AND (n.name ILIKE ? ESCAPE '\\' OR CAST(n.subdivision_names AS text) ILIKE ? ESCAPE '\\'
-        OR EXISTS (SELECT 1 FROM neighborhoods m WHERE m.merged_into_id = n.id
-          AND (m.name ILIKE ? ESCAPE '\\' OR CAST(m.subdivision_names AS text) ILIKE ? ESCAPE '\\')))`;
+        OR n.id IN (WITH RECURSIVE chain AS (
+          SELECT m.merged_into_id AS at_id FROM neighborhoods m WHERE m.merged_into_id IS NOT NULL
+            AND (m.name ILIKE ? ESCAPE '\\' OR CAST(m.subdivision_names AS text) ILIKE ? ESCAPE '\\')
+          UNION
+          SELECT x.merged_into_id FROM chain c JOIN neighborhoods x ON x.id = c.at_id WHERE x.merged_into_id IS NOT NULL
+        ) SELECT at_id FROM chain))`;
       bindings.push(like, like, like, like);
     }
     const matched = `WITH matched AS (

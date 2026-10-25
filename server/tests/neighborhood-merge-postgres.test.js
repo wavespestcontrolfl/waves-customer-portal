@@ -22,7 +22,7 @@ jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jes
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-neighborhood-access');
-const { upsertNeighborhood } = require('../services/neighborhood-access');
+const { upsertNeighborhood, lockCommunity } = require('../services/neighborhood-access');
 const logger = require('../services/logger');
 
 jest.setTimeout(30000);
@@ -304,6 +304,9 @@ postgres('neighborhood merge routes', () => {
     await trx('neighborhood_access').where({ id: ea }).update({ updated_at: trx.raw("updated_at - interval '1 hour'") });
     const second = await merge(b, c);
     expect(await entryRow(ea)).toMatchObject({ neighborhood_id: c, gate_label: `Main gate (${hoodName('Chain A')}) (${hoodName('Chain B')})` });
+    // A's old name finds C down the chain, with no county upsert in between.
+    const found = await call('GET', `/?q=${encodeURIComponent(hoodName('Chain A'))}`);
+    expect(found.body.neighborhoods.map((n) => n.id)).toEqual([c]);
     expect(await homeHood(ha.propertyId)).toBe(c);
     const up = await upsertNeighborhood(trx, { county: 'Manatee', subdivision: hoodName('Chain A').toUpperCase() });
     expect(up.id).toBe(c);
@@ -319,5 +322,53 @@ postgres('neighborhood merge routes', () => {
     expect(await entryRow(ea)).toEqual({ neighborhood_id: a, gate_label: 'Main gate', status: 'active' });
     // Every undo wrote back the stamp the row had before: A's code reads untouched.
     expect((await trx('neighborhood_access').where({ id: ea }).first(trx.raw('updated_at::text AS t'))).t).toBe(before);
+  });
+});
+
+// Committed rows on two connections: the merge-of-the-target race that one
+// rolled-back transaction cannot show. The rows are removed afterwards.
+postgres('lockCommunity while the entry it points to is being merged', () => {
+  let database;
+  const raceTag = randomUUID().slice(0, 8);
+  const names = { a: `Race A ${raceTag}`, b: `Race B ${raceTag}`, c: `Race C ${raceTag}` };
+  const ids = {};
+
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    const privateQa = process.env.WAVES_DATABASE_ENVIRONMENT === 'test'
+      && /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname) && !privateQa) {
+      throw new Error('Use an isolated local/CI database or labeled private QA database');
+    }
+    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 3 } });
+    const add = async (key, fields = {}) => {
+      const [row] = await database('neighborhoods').insert({
+        name: names[key], county: 'Manatee', match_key: `manatee|${names[key].toLowerCase()}`, source: 'county',
+        subdivision_names: JSON.stringify([]), ...fields,
+      }).returning('id');
+      ids[key] = row.id;
+    };
+    await add('c');
+    await add('b');
+    await add('a', { active: false, merged_into_id: ids.b });
+  });
+  afterAll(async () => {
+    await database('neighborhoods').whereIn('id', Object.values(ids)).update({ merged_into_id: null });
+    await database('neighborhoods').whereIn('id', Object.values(ids)).del();
+    await database.destroy();
+  });
+
+  test('B is merged into C while a new home with A\'s name resolves: the answer is C, never the inactive B', async () => {
+    const merging = await database.transaction();
+    await merging('neighborhoods').where({ id: ids.b }).forUpdate().first('id');
+    await merging('neighborhoods').where({ id: ids.b }).update({ active: false, merged_into_id: ids.c });
+    const upsert = await database.transaction();
+    const pending = lockCommunity(upsert, 'Manatee', names.a);
+    // Give the resolver time to reach B and wait on the merge's row lock.
+    await new Promise((resolve) => { setTimeout(resolve, 200); });
+    await merging.commit();
+    const row = await pending;
+    await upsert.rollback();
+    expect(row).toMatchObject({ id: ids.c, active: true, merged_into_id: null });
   });
 });
