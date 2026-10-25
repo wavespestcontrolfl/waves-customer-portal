@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
+const { autoLunchLive } = require('../config/feature-gates');
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
@@ -268,6 +269,8 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
       allTechs,
       today,
       weekStart: weekStartStr,
+      // The timesheet shows its "No lunch" control only while this is on.
+      autoLunch: autoLunchLive(),
     });
   } catch (err) {
     next(err);
@@ -367,6 +370,44 @@ router.get('/daily', requireAdmin, async (req, res, next) => {
     const summaries = await timeTracking.getDailySummaries({ technicianId, startDate, endDate, status });
     res.json(summaries);
   } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PUT /daily/:technicianId/:workDate/no-lunch { noLunch, edit_reason }
+// Admin correction of a day's "No lunch today" flag (GATE_AUTO_LUNCH). Refused
+// (409) when that day or its week is approved. Who changed it and why is
+// appended to the day's notes, like an entry edit's edited_by / edit_reason.
+// ---------------------------------------------------------------------------
+router.put('/daily/:technicianId/:workDate/no-lunch', requireAdmin, async (req, res, next) => {
+  try {
+    const { technicianId, workDate } = req.params;
+    const { noLunch, edit_reason: editReason } = req.body || {};
+    if (!editReason || !String(editReason).trim()) {
+      return res.status(400).json({ error: 'edit_reason is required' });
+    }
+    if (typeof noLunch !== 'boolean') {
+      return res.status(400).json({ error: 'noLunch must be true or false.' });
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId)) {
+      return res.status(400).json({ error: 'technicianId must be a valid id.' });
+    }
+    const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(workDate);
+    const probe = ymd ? new Date(Date.UTC(+ymd[1], +ymd[2] - 1, +ymd[3])) : null;
+    if (!probe || probe.getUTCFullYear() !== +ymd[1] || probe.getUTCMonth() + 1 !== +ymd[2] || probe.getUTCDate() !== +ymd[3]) {
+      return res.status(400).json({ error: 'workDate must be a valid YYYY-MM-DD calendar date.' });
+    }
+    const tech = await db('technicians').where({ id: technicianId }).first('id');
+    if (!tech) return res.status(404).json({ error: 'Technician not found.' });
+
+    const summary = await timeTracking.setDayNoLunch(technicianId, workDate, noLunch, {
+      editedBy: req.technicianId,
+      editReason: String(editReason).trim(),
+    });
+    res.json({ technicianId, workDate, noLunch: Boolean(summary?.no_lunch), summary });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
   }
 });
@@ -1219,11 +1260,19 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       .where({ technician_id: tech.id })
       .where('work_date', '>=', from)
       .where('work_date', '<=', to)
-      .select('work_date', 'total_shift_minutes', 'overtime_minutes', 'job_count');
+      .select('work_date', 'total_shift_minutes', 'unpaid_meal_minutes', 'overtime_minutes', 'job_count');
 
+    // Pay is on PAID minutes: shift less the day's unpaid meal (0 while
+    // GATE_AUTO_LUNCH is off, so the gate-off numbers are unchanged).
+    // overtime_minutes is already a share of the paid minutes.
     const totalMin = rows.reduce((s, r) => s + parseFloat(r.total_shift_minutes || 0), 0);
+    const unpaidMin = rows.reduce((s, r) => s + parseFloat(r.unpaid_meal_minutes || 0), 0);
     const otMin = rows.reduce((s, r) => s + parseFloat(r.overtime_minutes || 0), 0);
-    const regMin = Math.max(0, totalMin - otMin);
+    const regMin = rows.reduce((s, r) => {
+      const shift = parseFloat(r.total_shift_minutes || 0);
+      const unpaid = Math.min(shift, parseFloat(r.unpaid_meal_minutes || 0));
+      return s + Math.max(0, shift - unpaid - parseFloat(r.overtime_minutes || 0));
+    }, 0);
 
     const rate = parseFloat(tech.pay_rate) > 0 ? parseFloat(tech.pay_rate) : 35;
     // Round line items to cents and reconcile gross from those rounded
@@ -1250,6 +1299,7 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       regularMinutes: regMin,
       overtimeMinutes: otMin,
       totalMinutes: totalMin,
+      unpaidMealMinutes: unpaidMin,
       regularPay,
       overtimePay,
       grossPay,

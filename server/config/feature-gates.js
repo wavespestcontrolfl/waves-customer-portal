@@ -4383,6 +4383,11 @@ const gates = {
   controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
   // Field Team Program rev 2b: evidence and simulation only; never payroll.
   fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
+  // Auto lunch (owner 2026-10-25): paid hours drop the unpaid meal. A completed
+  // break of 30+ minutes, or 30 minutes on a day over 6 hours unless the tech
+  // taps "No lunch today". This entry is for logGateStatus; the services read
+  // autoLunchLive() at CALL time. Ships DARK: exactly 'true' only. Sends nothing.
+  autoLunch: process.env.GATE_AUTO_LUNCH === 'true',
   // Consultation-link lane ("Book with Adam", scope doc
   // lead-inspection-link-scope.md): the /inspection/:token public page, the
   // buildLeadConsultationLink composer/admin builder, and the recurring-lead
@@ -6927,6 +6932,12 @@ function pinParkedCheckLive() {
   return process.env.GATE_PIN_PARKED_CHECK === 'true';
 }
 
+// Auto lunch (services/time-tracking.js), read at CALL time. Strict
+// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
+function autoLunchLive() {
+  return process.env.GATE_AUTO_LUNCH === 'true';
+}
+
 // GATE_TRUCK_KIT read at CALL time — strict `=== 'true'`, dark by default
 // (docs/tool-inventory-tracker-scope.md PR 1). The canonical reader for
 // services/truck-kit.js and routes/tech-truck-check.js. Off: both tech routes
@@ -7818,6 +7829,8 @@ module.exports.truckClockInMode = truckClockInMode;
 module.exports.callLastNameLookupLive = callLastNameLookupLive;
 // GATE_PIN_PARKED_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.pinParkedCheckLive = pinParkedCheckLive;
+// GATE_AUTO_LUNCH reader, on its own line so gate PRs never conflict.
+module.exports.autoLunchLive = autoLunchLive;
 module.exports.truckKitLive = truckKitLive;
 // GATE_LAWN_REPORT_CLARITY reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportClarityLive = lawnReportClarityLive;

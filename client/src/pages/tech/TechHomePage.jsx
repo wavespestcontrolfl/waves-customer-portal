@@ -1353,7 +1353,7 @@ function ProjectServicePicker({ services, recoveryServiceIds, onClose, onSelect 
 // is already approved by admin (sign-off is moot), or when the tech
 // has already signed. Lets the employee attest their own hours
 // before manager approval, which is the audit value here.
-function TimecardSignoffCard({ techName }) {
+export function TimecardSignoffCard({ techName }) {
   const [weekly, setWeekly] = useState(null);
   const [weekStart, setWeekStart] = useState(null);
   const [reviewToken, setReviewToken] = useState(null);
@@ -1427,8 +1427,17 @@ function TimecardSignoffCard({ techName }) {
     return null;
   }
 
-  const hours = (parseFloat(weekly.total_shift_minutes || 0) / 60).toFixed(1);
+  // What the tech attests is what payroll pays: with an unpaid lunch on the
+  // week, show paid hours (regular + overtime, both from the server) and the
+  // lunch taken off. With none (gate off), the card is exactly as before.
+  const unpaidLunchMin = parseFloat(weekly.unpaid_meal_minutes || 0);
+  const hasUnpaidLunch = unpaidLunchMin > 0;
+  const hoursMin = hasUnpaidLunch
+    ? parseFloat(weekly.regular_minutes || 0) + parseFloat(weekly.overtime_minutes || 0)
+    : parseFloat(weekly.total_shift_minutes || 0);
+  const hours = (hoursMin / 60).toFixed(1);
   const otHrs = (parseFloat(weekly.overtime_minutes || 0) / 60).toFixed(1);
+  const unpaidLunchHrs = (unpaidLunchMin / 60).toFixed(1);
 
   const handleSign = async () => {
     if (!signature.trim()) {
@@ -1470,7 +1479,10 @@ function TimecardSignoffCard({ techName }) {
         Week of {weekly.week_start ? String(weekly.week_start).split('T')[0] : weekStart} — review and attest these hours.
       </div>
       <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 14, color: FIELD.text }}>
-        <div><strong style={{ color: FIELD.text }}>{hours}h</strong> <span style={{ color: FIELD.muted }}>total</span></div>
+        <div><strong style={{ color: FIELD.text }}>{hours}h</strong> <span style={{ color: FIELD.muted }}>{hasUnpaidLunch ? 'paid' : 'total'}</span></div>
+        {hasUnpaidLunch && (
+          <div><span style={{ color: FIELD.muted }}>Unpaid lunch</span> <strong style={{ color: FIELD.text }}>{unpaidLunchHrs}h</strong></div>
+        )}
         <div><strong style={{ color: parseFloat(otHrs) > 0 ? '#854d0e' : FIELD.text }}>{otHrs}h</strong> <span style={{ color: FIELD.muted }}>OT</span></div>
         <div><strong>{weekly.job_count || 0}</strong> <span style={{ color: FIELD.muted }}>jobs</span></div>
       </div>

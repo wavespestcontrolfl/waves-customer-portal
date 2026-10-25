@@ -997,7 +997,9 @@ describe('weekly timesheet approval safety', () => {
         tech_name: 'Tech One',
         week_start: new Date('2020-01-06T00:00:00.000Z'),
         total_shift_minutes: 2460,
+        regular_minutes: 2400,
         overtime_minutes: 60,
+        unpaid_meal_minutes: 0,
         job_count: 10,
         status: 'approved',
       }],
@@ -1026,8 +1028,41 @@ describe('weekly timesheet approval safety', () => {
       'time_weekly_summary.technician_id',
       ['tech-1'],
     ]);
-    expect(csv).toContain('Tech One,2020-01-06,40.00,1.00,41.00');
+    expect(csv.split('\n')[0]).toBe(
+      'Tech,Week Start,Regular Hours,OT Hours,Total Hours,Unpaid Lunch Hours,Jobs,Revenue,RPMH,Utilization %,Status',
+    );
+    expect(csv).toContain('Tech One,2020-01-06,40.00,1.00,41.00,0.00,10');
     expect(csv).not.toMatch(/GMT|Mon Jan/);
+  });
+
+  test('exports paid hours and the unpaid lunch column for a week with unpaid meals', async () => {
+    const events = [];
+    const payrollRows = {
+      table: 'time_weekly_summary',
+      label: 'payrollRows',
+      thenValue: [{
+        id: 'weekly-1',
+        technician_id: 'tech-1',
+        tech_name: 'Tech One',
+        week_start: new Date('2020-01-06T00:00:00.000Z'),
+        // 4 days of 10.5 h on the clock, 0.5 h unpaid each: 42 h shift, 40 h paid.
+        total_shift_minutes: 2520,
+        regular_minutes: 2400,
+        overtime_minutes: 0,
+        unpaid_meal_minutes: 120,
+        job_count: 10,
+        status: 'approved',
+      }],
+    };
+    installDatabase([
+      { table: 'time_entry_daily_summary', label: 'dailyCandidates', thenValue: [{ technician_id: 'tech-1' }] },
+      { table: 'time_entries', label: 'entryCandidates', thenValue: [{ technician_id: 'tech-1' }] },
+      payrollRows,
+    ], [], events);
+
+    const csv = await approval.generateWeeklyPayrollExport('2020-01-06');
+
+    expect(csv).toContain('Tech One,2020-01-06,40.00,0.00,40.00,2.00,10');
   });
 
   test('fails payroll export when any worked technician is pending or missing a snapshot', async () => {
