@@ -15,8 +15,13 @@
  *     "pump or tankless unit" and the old list prices) only while they equal the seeded text. A field an operator edited is left
  *     alone with a warning and the others still move.
  *
- * down() reverses each part (and each services field) only while it still holds exactly what up() wrote, and removes only the audit
- * and changelog rows this migration wrote. A part an admin changed since is left alone.
+ * Ownership is recorded, same contract as 20261024100000: up() writes a system_settings state row (STATE_KEY) holding exactly what it
+ * changed, { pricingConfig: true|false, serviceFields: [...] }. A row or field that already held the new value (an operator set it
+ * before this deployed, or a re-run) is NOT written and NOT recorded, so down() never reverts a value this migration did not set.
+ * down() with no readable state row changes nothing in pricing_config or services. With a state row it restores the pricing_config row
+ * only if recorded AND still deep-equal to NEXT, and each services field only if recorded AND still equal to what up() wrote (a value
+ * an admin changed since is left alone), then deletes the state row. It always removes the audit and changelog rows this migration
+ * wrote (tagged with TAG; up() writes them only when it actually replaced the pricing row).
  *
  * NEXT is an inlined literal (a pushed migration is frozen): server/tests/mosquito-misting-pynamite-retail-migration.test.js
  * asserts it equals mosquitoMistingPricingDefaults() in constants.js, so a later constant change fails the test instead of
@@ -30,6 +35,7 @@ const KEY = seeded.KEY;
 const SERVICE_KEY = 'mosquito_misting_install';
 const TAG = 'migration:20261025090000_mosquito_misting_pynamite_retail_prices';
 const LOG = '[mosquito-misting-pynamite-retail]';
+const STATE_KEY = 'migration.20261025090000.state';
 const REASON = 'Move the mosquito misting system pricing from the MistAway model to the Pynamite system at retail sale prices read 2026-10-24 (owner: build at retail for now; dealer pricing will replace them): Standard 55-gallon 4,195 (30 nozzles), Compact 10-gallon 2,795 (10 nozzles), risers priced individually at 75, install 2 techs x 6 hours, standard refill cost 70, premium refill cost 203. Dark behind GATE_MOSQUITO_MISTING.';
 const CHANGELOG = {
   version_from: 'v4.6',
@@ -106,20 +112,54 @@ exports.KEY = KEY;
 exports.TAG = TAG;
 exports.CHANGELOG = CHANGELOG;
 exports.NEW_SERVICE = NEW_SERVICE;
+exports.STATE_KEY = STATE_KEY;
+
+const emptyState = () => ({ pricingConfig: false, serviceFields: [] });
+const normalizeState = (parsed) => ({
+  pricingConfig: parsed && parsed.pricingConfig === true,
+  serviceFields: Array.isArray(parsed && parsed.serviceFields) ? parsed.serviceFields.filter((f) => typeof f === 'string') : [],
+});
+
+async function readState(knex) {
+  if (!(await knex.schema.hasTable('system_settings'))) return null;
+  const row = await knex('system_settings').where({ key: STATE_KEY }).first();
+  if (!row) return null;
+  try {
+    return normalizeState(typeof row.value === 'string' ? JSON.parse(row.value) : row.value);
+  } catch {
+    return null;
+  }
+}
+
+// Union with the prior run so a re-run can never shrink what down() may restore, and never claims a field up() did not write.
+// Nothing changed and no prior row: no row is written.
+async function recordState(knex, changed) {
+  if (!changed.pricingConfig && !changed.serviceFields.length) return;
+  if (!(await knex.schema.hasTable('system_settings'))) return;
+  const existing = await knex('system_settings').where({ key: STATE_KEY }).first();
+  let prior = emptyState();
+  if (existing) { try { prior = normalizeState(JSON.parse(existing.value)); } catch { /* keep empty */ } }
+  const value = JSON.stringify({
+    pricingConfig: prior.pricingConfig || changed.pricingConfig,
+    serviceFields: [...new Set([...prior.serviceFields, ...changed.serviceFields])],
+  });
+  if (existing) await knex('system_settings').where({ key: STATE_KEY }).update({ value });
+  else await knex('system_settings').insert({ key: STATE_KEY, value });
+}
 
 async function upPricingConfig(knex) {
-  if (!(await knex.schema.hasTable('pricing_config'))) return;
+  if (!(await knex.schema.hasTable('pricing_config'))) return false;
   const row = await knex('pricing_config').where({ config_key: KEY }).first('data');
   if (!row) {
     console.warn(`${LOG} pricing_config ${KEY} is missing - leaving it alone`);
-    return;
+    return false;
   }
   const current = parse(row.data);
-  if (isDeepStrictEqual(current, NEXT)) return; // already applied (re-run)
+  if (isDeepStrictEqual(current, NEXT)) return false; // already holds the new prices (a re-run, or set before this deployed): not ours
   // jsonb does not keep key order: compare the values.
   if (!isDeepStrictEqual(current, SEED)) {
     console.warn(`${LOG} pricing_config ${KEY} was edited since the 20261023 seed - leaving the admin's prices alone`);
-    return;
+    return false;
   }
   await knex('pricing_config').where({ config_key: KEY }).update({ data: JSON.stringify(NEXT), updated_at: knex.fn.now() });
   if (await knex.schema.hasTable('pricing_config_audit')
@@ -142,17 +182,18 @@ async function upPricingConfig(knex) {
       rationale: REASON,
     });
   }
+  return true;
 }
 
 // Each field is guarded on its own: a price moves only while it still holds the seeded list, and a text field only while it still
 // holds the seeded text, so an operator who edited the copy (or the prices) keeps that work and the other fields still move.
 async function upService(knex) {
-  if (!(await knex.schema.hasTable('services'))) return;
+  if (!(await knex.schema.hasTable('services'))) return [];
   const row = await knex('services').where({ service_key: SERVICE_KEY })
     .first('base_price', 'price_range_min', 'description', 'internal_notes');
   if (!row) {
     console.warn(`${LOG} services ${SERVICE_KEY} is missing - leaving it alone`);
-    return;
+    return [];
   }
   const patch = {};
   const left = [];
@@ -165,12 +206,15 @@ async function upService(knex) {
   field('description', row.description === OLD_SERVICE.description, row.description === NEW_SERVICE.description, NEW_SERVICE.description);
   field('internal_notes', row.internal_notes === OLD_SERVICE.internal_notes, row.internal_notes === NEW_SERVICE.internal_notes, NEW_SERVICE.internal_notes);
   if (left.length) console.warn(`${LOG} services ${SERVICE_KEY}: ${left.join(', ')} changed since the 20261023 catalog seed - leaving ${left.length === 1 ? 'it' : 'them'} alone`);
-  if (Object.keys(patch).length) await knex('services').where({ service_key: SERVICE_KEY }).update(patch);
+  const written = Object.keys(patch);
+  if (written.length) await knex('services').where({ service_key: SERVICE_KEY }).update(patch);
+  return written;
 }
 
 exports.up = async function up(knex) {
-  await upPricingConfig(knex);
-  await upService(knex);
+  const pricingConfig = await upPricingConfig(knex);
+  const serviceFields = await upService(knex);
+  await recordState(knex, { pricingConfig, serviceFields });
 };
 
 exports.down = async function down(knex) {
@@ -180,23 +224,39 @@ exports.down = async function down(knex) {
   if (await knex.schema.hasTable('pricing_changelog')) {
     await knex('pricing_changelog').where(CHANGELOG).del();
   }
-  if (await knex.schema.hasTable('pricing_config')) {
+  const state = await readState(knex);
+  if (!state) {
+    console.warn(`${LOG} down: no readable state row - restoring nothing`);
+    return;
+  }
+  if (state.pricingConfig && await knex.schema.hasTable('pricing_config')) {
     const row = await knex('pricing_config').where({ config_key: KEY }).first('data');
+    // jsonb does not keep key order: compare the values. An admin edit since up() is left alone.
     if (row && isDeepStrictEqual(parse(row.data), NEXT)) {
       await knex('pricing_config').where({ config_key: KEY }).update({ data: JSON.stringify(SEED), updated_at: knex.fn.now() });
+    } else {
+      console.warn(`${LOG} down: pricing_config ${KEY} changed since up() - leaving it alone`);
     }
   }
-  if (await knex.schema.hasTable('services')) {
+  if (state.serviceFields.length && await knex.schema.hasTable('services')) {
     const row = await knex('services').where({ service_key: SERVICE_KEY })
       .first('base_price', 'price_range_min', 'description', 'internal_notes');
     if (row) {
-      // Each field goes back only while it still holds exactly what up() wrote.
+      // Each recorded field goes back only while it still holds exactly what up() wrote.
+      const wrote = {
+        base_price: sameNumber(row.base_price, NEW_SERVICE.base_price),
+        price_range_min: sameNumber(row.price_range_min, NEW_SERVICE.price_range_min),
+        description: row.description === NEW_SERVICE.description,
+        internal_notes: row.internal_notes === NEW_SERVICE.internal_notes,
+      };
       const patch = {};
-      if (sameNumber(row.base_price, NEW_SERVICE.base_price)) patch.base_price = OLD_SERVICE.base_price;
-      if (sameNumber(row.price_range_min, NEW_SERVICE.price_range_min)) patch.price_range_min = OLD_SERVICE.price_range_min;
-      if (row.description === NEW_SERVICE.description) patch.description = OLD_SERVICE.description;
-      if (row.internal_notes === NEW_SERVICE.internal_notes) patch.internal_notes = OLD_SERVICE.internal_notes;
+      for (const field of state.serviceFields) {
+        if (!Object.prototype.hasOwnProperty.call(wrote, field)) continue;
+        if (wrote[field]) patch[field] = OLD_SERVICE[field];
+        else console.warn(`${LOG} down: services ${SERVICE_KEY}.${field} changed since up() - leaving it alone`);
+      }
       if (Object.keys(patch).length) await knex('services').where({ service_key: SERVICE_KEY }).update(patch);
     }
   }
+  await knex('system_settings').where({ key: STATE_KEY }).del();
 };
