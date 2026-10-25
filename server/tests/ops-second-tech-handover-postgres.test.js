@@ -189,6 +189,30 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     expect(plan.would_change.visits).toBe(0);
   });
 
+  test('a pest series whose visits carry a termite bait add-on marks its customer (how pest-plus-bait is sold)', async () => {
+    const ownerD = randomUUID();
+    await knex('technicians').insert(tech(ownerD));
+    extraTechIds.push(ownerD);
+    const on = (o) => ({ technician_id: ownerD, ...o });
+    const baitCustomer = await customer();
+    const pest = await series(baitCustomer, on());
+    const visitWithBait = await child(pest, '2099-07-06', on());
+    await knex('scheduled_service_addons').insert({ scheduled_service_id: visitWithBait.id, service_name: 'Termite Bait Station Service', service_key_snapshot: 'termite_bait' });
+    const rodentCustomer = await customer();
+    const rodentPest = await series(rodentCustomer, on());
+    const visitWithRodentBait = await child(rodentPest, '2099-07-07', on());
+    await knex('scheduled_service_addons').insert({ scheduled_service_id: visitWithRodentBait.id, service_name: 'Quarterly Rodent Bait Station Service', service_key_snapshot: 'rodent_bait_quarterly' });
+
+    // A series whose first visit (the parent row) was cancelled keeps its live children.
+    const cancelledFirst = await series(await customer(), on({ status: 'cancelled' }));
+    const liveChild = await child(cancelledFirst, '2099-07-08', on());
+
+    const plan = await handover.planHandover(knex, { from: ownerD, start: START, today: TODAY });
+    expect(plan.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    expect(new Set(plan.ids.series)).toEqual(new Set([rodentPest.id, cancelledFirst.id]));
+    expect(plan.ids.visits).toContain(liveChild.id);
+  });
+
   test('without --to the plan says the target is not set and assumes Mon-Thu', async () => {
     const plan = await handover.planHandover(knex, { from: ownerId, start: START, today: TODAY });
     expect(plan.target).toBe('not set');

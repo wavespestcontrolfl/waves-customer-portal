@@ -8,7 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const script = path.join(__dirname, '..', '..', 'ops', 'agents', 'second-tech-handover.js');
 const {
-  buildPlan, parseArgs, defaultStart, isOpenVisit, isGroupedVisit, seriesTechnicianId, isBaitSeries,
+  buildPlan, parseArgs, defaultStart, isOpenVisit, isGroupedVisit, seriesTechnicianId, isBaitSeries, isTermiteBaitAddon,
 } = require(script);
 
 const OWNER = '00000000-0000-4000-8000-000000000001';
@@ -99,6 +99,27 @@ describe('second-tech-handover planner', () => {
     expect(isBaitSeries(wdo)).toBe(false);
   });
 
+  test('termite bait sold as an add-on marks its customer; a rodent bait or termite bond add-on does not', () => {
+    expect(isTermiteBaitAddon({ service_key_snapshot: 'termite_bait', service_name: 'Termite Bait Station Service' })).toBe(true);
+    expect(isTermiteBaitAddon({ service_key_snapshot: null, service_name: 'Termite Bait Station Service' })).toBe(true);
+    expect(isTermiteBaitAddon({ catalog_key: 'termite_monitoring', service_name: 'Station check' })).toBe(true);
+    expect(isTermiteBaitAddon({ service_key_snapshot: 'rodent_bait_quarterly', service_name: 'Quarterly Rodent Bait Station Service' })).toBe(false);
+    expect(isTermiteBaitAddon({ service_key_snapshot: 'termite_bond_1yr', service_name: 'Termite Bond Service (1-Year Term)' })).toBe(false);
+    const pest = parent({ customer_id: 'C-addon' });
+    const pest2 = parent({ customer_id: 'C-addon' });
+    const other = parent({ customer_id: 'C-plain' });
+    const p = plan([pest, pest2, other], [visit(pest, MON), visit(pest2, TUE), visit(other, WED)], { baitAddonSeriesIds: [pest.id] });
+    expect(p.skipped.termite_bait_customer).toEqual({ series: 2, visits: 2, customers: 1 });
+    expect(p.ids.series).toEqual([other.id]);
+  });
+
+  test('the combined pest + termite bait plan (catalog pest_control) is a bait plan', () => {
+    const combined = parent({ customer_id: 'C-combo', line: 'general', catalog_key: 'pest_termite_bait_quarterly' });
+    expect(isBaitSeries(combined)).toBe(true);
+    const p = plan([combined], [visit(combined, MON)]);
+    expect(p.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+  });
+
   test('a bait plan linked only by its catalog key (no key snapshot, no "bait" in the label) still marks its customer', () => {
     const annual = parent({ customer_id: 'C-annual', line: 'termite', catalog_key: 'termite_active_annual', service_key_snapshot: null, service_type: 'Termite Active Annual' });
     const pest = parent({ customer_id: 'C-annual' });
@@ -175,6 +196,16 @@ describe('second-tech-handover planner', () => {
     expect(p.would_change.visits).toBe(0);
   });
 
+  test('a cancelled first visit (the parent row) does not end the series: live children still move', () => {
+    const s = parent({ status: 'cancelled' });
+    const kids = [visit(s, MON), visit(s, TUE)];
+    const p = plan([s], kids);
+    expect(p.series.active).toBe(1);
+    expect(p.would_change.visits).toBe(2);
+    // Ongoing alone does not keep a cancelled parent's series active: it needs a live row.
+    expect(plan([s], [], { liveSeriesIds: [] }).series.active).toBe(0);
+  });
+
   test('lapsed series (not ongoing, nothing open ahead) is not active', () => {
     const s = parent({ recurring_ongoing: false });
     const p = plan([s], [visit(s, '2099-05-01', { status: 'completed' })]);
@@ -232,5 +263,36 @@ describe('second-tech-handover arguments and source', () => {
     expect(code).not.toMatch(/\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|TRUNCATE|DROP\s+TABLE|ALTER\s+TABLE)\b/i);
     expect(code).toMatch(/SET TRANSACTION READ ONLY/);
     expect(code).not.toMatch(/--execute/);
+  });
+});
+
+describe('tlsFor (connection TLS)', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { tlsFor } = require('../../ops/agents/second-tech-handover.js');
+  const REMOTE = 'postgresql://user:secret@example.proxy.rlwy.net:12345/railway';
+
+  test('a local database needs no TLS', () => {
+    expect(tlsFor('postgresql://waves@localhost:5439/waves_test', null)).toBe(false);
+    expect(tlsFor('postgres://u:p@127.0.0.1:5432/db', null)).toBe(false);
+  });
+
+  test('the public proxy without a pinned root is refused, even when the password says "localhost"', () => {
+    expect(() => tlsFor(REMOTE, null)).toThrow(/PG_CA_FILE/);
+    expect(() => tlsFor('postgresql://u:localhost@example.proxy.rlwy.net:1/db', null)).toThrow(/PG_CA_FILE/);
+  });
+
+  test('with a pinned root the chain is verified (rejectUnauthorized on); only the name check is skipped', () => {
+    const file = path.join(os.tmpdir(), `pinned-root-${process.pid}.pem`);
+    fs.writeFileSync(file, '-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n');
+    try {
+      const tls = tlsFor(REMOTE, file);
+      expect(tls.rejectUnauthorized).toBe(true);
+      expect(tls.ca).toContain('BEGIN CERTIFICATE');
+      expect(tls.checkServerIdentity('example.proxy.rlwy.net', {})).toBeUndefined();
+    } finally {
+      fs.unlinkSync(file);
+    }
   });
 });

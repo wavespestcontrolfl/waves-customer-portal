@@ -26,11 +26,23 @@
 //   --list   adds the series ids and visit ids that would change. Ids only.
 //   --json   machine-readable output.
 //
+//   PG_CA_FILE  REQUIRED for the public proxy: a pinned copy of the database's own
+//            root certificate (Railway's Postgres signs its server certificate with a
+//            self-signed root, CN=root-ca, that no public CA vouches for). The chain is
+//            verified against it, so an impostor proxy cannot read the password.
+//            Fetch it once and keep it outside the repo:
+//              railway run --service Postgres -- sh -c 'echo | openssl s_client -starttls postgres
+//                -connect "${DATABASE_PUBLIC_URL#*@}" -showcerts' (cut the host:port at the "/"),
+//            and save the LAST certificate block as the file.
+//
 // What the plan decides (all from the real columns):
 //   NESTED   the outer run gives DATABASE_PUBLIC_URL, the inner run the portal's
 //            GATE_* variables, so the template overlay below reads production's gate.
 //   SERIES   scheduled_services parent rows: is_recurring, recurring_parent_id IS
-//            NULL, status <> 'cancelled'. ACTIVE = recurring_ongoing, or a LIVE
+//            NULL, ANY status: the parent row is the first visit, and cancelling it
+//            does not end the series (2026-10-25: 273 open future visits sat under a
+//            cancelled parent). ACTIVE = recurring_ongoing on a parent that is not
+//            cancelled, or a LIVE
 //            row by the seeder's own test (findActiveRecurringSeries, through
 //            customer-lifecycle-guard whereVisitRowLive: open on or after today,
 //            rescheduled, or in progress at any date). Activity is not the same
@@ -57,7 +69,9 @@
 //   GROUPED  scheduled_services.visit_id points at a service_visits row that is not
 //            'dissolved' (visit grouping was removed by #6479; the 2026-10-22
 //            migration dissolved every group that could be undone cleanly).
-//   BAIT     a customer with an ACTIVE termite-line series that is a bait or
+//   BAIT     a customer with an ACTIVE series that is a termite bait plan, or whose
+//            visits carry a termite bait ADD-ON (scheduled_service_addons: how the
+//            pest-plus-bait customers are sold). Series: a termite-line series that is a bait or
 //            monitoring program: its catalog key (services.service_key by
 //            service_id) or key snapshot in TERMITE_BAIT_KEYS, or the label
 //            matches /bait|monitor/. Every series of that customer is skipped.
@@ -67,6 +81,7 @@
 //
 // Output carries counts, technician ids the operator typed, series ids and visit
 // ids only — no customer names, addresses, phones or emails are selected.
+const fs = require('fs');
 const path = require('path');
 
 const root = path.join(__dirname, '..', '..', 'server');
@@ -84,10 +99,12 @@ const OPEN_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 const STOPPED_TRACK_STATES = ['en_route', 'on_property', 'complete', 'cancelled'];
 const ASSUMED_WORK_DAYS = [1, 2, 3, 4];
 // services.service_key values of the termite bait programs (visit-facts-contract
-// termite_bait catalogKeys) — the label test below catches renamed rows.
+// termite_bait catalogKeys), plus the combined pest + bait plan, which the catalog files
+// under pest_control. The label tests below catch renamed rows.
 const TERMITE_BAIT_KEYS = new Set([
   'termite_bait', 'termite_active_annual', 'termite_active_bait_quarterly',
   'termite_monitoring', 'termite_cartridge_replacement', 'termite_installation_setup',
+  'pest_termite_bait_quarterly',
 ]);
 const TERMITE_BAIT_LABEL = /bait|monitor/i;
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -160,13 +177,24 @@ function isGroupedVisit(v) {
   return !!v.visit_id && String(v.group_status || '') !== 'dissolved';
 }
 
+const hasBaitKey = (keys) => keys.some((k) => TERMITE_BAIT_KEYS.has(String(k || '')));
 // `catalog_key` is services.service_key for the series' service_id: a row linked by
 // id may carry no key snapshot and a label without "bait" (e.g. an annual active plan).
-const isBaitSeries = (p) => p.line === 'termite'
-  && ([p.catalog_key, p.service_key_snapshot].some((k) => TERMITE_BAIT_KEYS.has(String(k || '')))
-    || TERMITE_BAIT_LABEL.test(String(p.service_type || '')));
+// A bait key counts in any line (the combined pest + bait plan reads general).
+const isBaitSeries = (p) => hasBaitKey([p.catalog_key, p.service_key_snapshot])
+  || (p.line === 'termite' && TERMITE_BAIT_LABEL.test(String(p.service_type || '')));
+// Bait sold as an ADD-ON on a pest series' visits (scheduled_service_addons): a bait key,
+// or a label naming termite AND bait/monitoring (a rodent bait station is not termite).
+const isTermiteBaitAddon = (a) => hasBaitKey([a.catalog_key, a.service_key_snapshot])
+  || (/termite/i.test(String(a.service_name || '')) && TERMITE_BAIT_LABEL.test(String(a.service_name || '')));
 
 const bump = (map, key, n = 1) => { map[key] = (map[key] || 0) + n; };
+
+/** Customers whose every series stays with the owner: an active bait plan, or a bait add-on on an active series. */
+function baitCustomerIds(active, baitAddonSeriesIds) {
+  const addon = new Set(baitAddonSeriesIds);
+  return new Set(active.filter((p) => isBaitSeries(p) || addon.has(p.id)).map((p) => p.customer_id));
+}
 
 /** The weekdays the target works, and where that came from (no --to = the ruled Mon-Thu). */
 function targetWorkDays(to) {
@@ -184,24 +212,25 @@ function targetWorkDays(to) {
  *   start     YYYY-MM-DD, first solo day
  *   today     YYYY-MM-DD (ET)
  *   liveSeriesIds  series ids with a LIVE row (the reader's whereVisitRowLive query)
+ *   baitAddonSeriesIds  series ids with a termite bait add-on on a visit (the reader's add-on query)
  *   lines     lines to move (subset of MOVABLE_LINES)
- *   parents   [{ id, customer_id, line, catalog_key, service_key_snapshot, service_type, technician_id,
+ *   parents   [{ id, status, customer_id, line, catalog_key, service_key_snapshot, service_type, technician_id,
  *               recurring_technician_id, recurring_technician_override, recurring_ongoing }]
  *             `line` is serviceLineFor's answer (null when unknown)
  *   visits    [{ id, series_id, scheduled_date, status, track_state, technician_id, visit_id, group_status }]
  *             series_id = the parent's id (a parent row is its own series_id)
  */
-function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds = [] }) {
+function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds, baitAddonSeriesIds }) {
   const bySeries = new Map();
   for (const v of visits) {
     if (!bySeries.has(v.series_id)) bySeries.set(v.series_id, []);
     bySeries.get(v.series_id).push({ ...v, scheduled_date: dayOf(v.scheduled_date) });
   }
   const live = new Set(liveSeriesIds);
-  const isActive = (p) => p.recurring_ongoing === true || live.has(p.id);
+  const isActive = (p) => (p.recurring_ongoing === true && p.status !== 'cancelled') || live.has(p.id);
   const active = parents.filter(isActive);
 
-  const baitCustomers = new Set(active.filter(isBaitSeries).map((p) => p.customer_id));
+  const baitCustomers = baitCustomerIds(active, baitAddonSeriesIds);
 
   const { workDays, workDaysSource } = targetWorkDays(to);
 
@@ -311,8 +340,7 @@ async function loadParents(db) {
   const rows = await db('scheduled_services')
     .where({ is_recurring: true })
     .whereNull('recurring_parent_id')
-    .whereNot('status', 'cancelled')
-    .select('id', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'technician_id',
+    .select('id', 'status', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'technician_id',
       'recurring_technician_id', 'recurring_technician_override', 'recurring_ongoing',
       ...(cols.recurring_template_overrides ? ['recurring_template_overrides'] : []));
   return rows.map((p) => overlayRecurringTemplateOverrides(p, cols));
@@ -347,6 +375,21 @@ async function loadLiveSeriesIds(db, parentIds, today) {
   return [...live];
 }
 
+// The series with a termite bait ADD-ON on any of their (non-cancelled) visits.
+async function loadBaitAddonSeriesIds(db, parentIds) {
+  const out = new Set();
+  for (const ids of chunks(parentIds, 1000)) {
+    const rows = await db('scheduled_service_addons as a')
+      .join('scheduled_services as s', 's.id', 'a.scheduled_service_id')
+      .leftJoin('services as cat', 'cat.id', 'a.service_id')
+      .where(function inSeries() { this.whereIn('s.recurring_parent_id', ids).orWhereIn('s.id', ids); })
+      .whereNot('s.status', 'cancelled')
+      .select('s.id', 's.recurring_parent_id', 'a.service_key_snapshot', 'a.service_name', 'cat.service_key as catalog_key');
+    for (const r of rows) if (isTermiteBaitAddon(r)) out.add(r.recurring_parent_id || r.id);
+  }
+  return [...out];
+}
+
 /** Read everything the planner needs and plan. `db` is a knex handle (or transaction). Reads only. */
 async function planHandover(db, { from, to = null, start, today = etDateString(), lines = MOVABLE_LINES }) {
   const fromRow = await loadTechnician(db, from);
@@ -376,8 +419,10 @@ async function planHandover(db, { from, to = null, start, today = etDateString()
   const parentIds = parents.map((p) => p.id);
   const visits = await loadVisits(db, parentIds, today);
   const liveSeriesIds = await loadLiveSeriesIds(db, parentIds, today);
+  const baitAddonSeriesIds = await loadBaitAddonSeriesIds(db, parentIds);
   const plan = buildPlan({
-    from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits, liveSeriesIds,
+    from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits,
+    liveSeriesIds, baitAddonSeriesIds,
   });
   // The overlay follows GATE_EDIT_APPT_PRICE_SERVICE_SCOPE, as in the app.
   plan.template_overrides = isEnabled('editApptPriceServiceScope') ? 'applied' : 'not_applied_gate_off';
@@ -446,10 +491,24 @@ function printPlan(plan, { list }) {
 
 // ---- main -------------------------------------------------------------------
 
+// TLS for the connection. A local database needs none. The public proxy's chain is
+// verified against the pinned root in PG_CA_FILE; the server certificate names the
+// database itself, not the proxy host, so the name check is skipped while the chain
+// check (rejectUnauthorized) stays on. No pinned root = no connection.
+function tlsFor(connectionString, caFile = process.env.PG_CA_FILE) {
+  let host = '';
+  try { host = new URL(connectionString).hostname; } catch { /* not a URL: treat as remote */ }
+  if (['localhost', '127.0.0.1', '[::1]'].includes(host)) return false;
+  if (!caFile) {
+    throw new Error('PG_CA_FILE is not set: pin the database root certificate first (see the header of ops/agents/second-tech-handover.js)');
+  }
+  return { ca: fs.readFileSync(caFile, 'utf8'), rejectUnauthorized: true, checkServerIdentity: () => undefined };
+}
+
 function readOnlyConn(connectionString) {
   return require('knex')({
     client: 'pg',
-    connection: { connectionString, ssl: /localhost|127\.0\.0\.1/.test(connectionString) ? false : { rejectUnauthorized: false } },
+    connection: { connectionString, ssl: tlsFor(connectionString) },
     pool: {
       min: 1,
       max: 1,
@@ -467,7 +526,13 @@ async function main() {
     console.error('DATABASE_PUBLIC_URL not set — run via: railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/second-tech-handover.js --from <uuid>');
     process.exit(2);
   }
-  const db = readOnlyConn(conn);
+  let db;
+  try {
+    db = readOnlyConn(conn);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(2);
+  }
   try {
     await db.transaction(async (trx) => {
       await trx.raw('SET TRANSACTION READ ONLY');
@@ -491,8 +556,8 @@ async function main() {
 
 module.exports = {
   MOVABLE_LINES, OPEN_STATUSES, TERMITE_BAIT_KEYS,
-  parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries,
-  buildPlan, planHandover, printPlan, readOnlyConn,
+  parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries, isTermiteBaitAddon,
+  buildPlan, planHandover, printPlan, readOnlyConn, tlsFor,
 };
 
 if (require.main === module) {
