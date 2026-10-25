@@ -1918,12 +1918,14 @@ const SPECIALTY = {
           'Do not attach long repair-and-retreat warranty without admin approval.',
         ],
       },
+      // The bottle is Atticus Talak 7.9 F, 96 fl oz (owner 2026-10-24: "swap talstar
+      // for talak"). The talstar_p key stays so saved estimates replay.
       talstar_p: {
-        label: 'Talstar P / Pro - Bifenthrin',
+        label: 'Talak 7.9 F - Bifenthrin',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
-        positioning: 'branded_repellent',
-        containerCost: 65.00,
+        positioning: 'standard_repellent',
+        containerCost: 41.57,
         containerOz: 96,
         productOzPerFinishedGallonAtStandardRate: 1.0,
         productOzPerFinishedGallonAtHighRate: 2.0,
@@ -1932,7 +1934,7 @@ const SPECIALTY = {
         defaultWarrantyPositioning: 'limited',
         warrantyRisk: 'high_for_long_warranty',
         warnings: [
-          'Branded bifenthrin repellent barrier.',
+          'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).',
           'Do not attach long repair-and-retreat warranty without admin approval.',
         ],
       },
@@ -2083,23 +2085,26 @@ const SPECIALTY = {
           'Use only when the exact Bifen I/T label supports pre-construction subterranean termite treatment.',
         ],
       },
+      // The bottle is Atticus Talak 7.9 F, 96 fl oz (owner 2026-10-24: "swap talstar
+      // for talak"); the Talstar P catalog row is inactive. The talstar_p key stays so
+      // saved estimates replay.
       talstar_p: {
-        label: 'Talstar P - Bifenthrin',
-        catalogProductName: 'Talstar P',
-        packageLabel: '1 gallon / 128 oz',
+        label: 'Talak 7.9 F - Bifenthrin',
+        catalogProductName: 'Atticus Talak 7.9 F',
+        packageLabel: '96 fl oz',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
-        positioning: 'branded_repellent',
-        containerCost: 38.99,
-        containerOz: 128,
+        positioning: 'standard_repellent',
+        containerCost: 41.57,
+        containerOz: 96,
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.5294,  // 0.45 / 0.85 — 15% across-the-board price cut (margin ~47%)
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
-          'Branded bifenthrin repellent barrier.',
-          'Use only when the exact Talstar P label supports pre-construction subterranean termite treatment.',
+          'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).',
+          'Use only when the Talak 7.9 F label supports pre-construction subterranean termite treatment.',
         ],
       },
     },

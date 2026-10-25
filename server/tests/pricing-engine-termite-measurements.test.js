@@ -167,6 +167,7 @@ describe('termite measurement overrides and safeguards', () => {
     expect(normalizeTrenchingTermiticideProduct('fipronil').productKey).toBe('taurus_sc');
     expect(normalizeTrenchingTermiticideProduct('bifen i/t').productKey).toBe('bifen_it');
     expect(normalizeTrenchingTermiticideProduct('talstar pro').productKey).toBe('talstar_p');
+    expect(normalizeTrenchingTermiticideProduct('talak').productKey).toBe('talstar_p');
     expect(normalizeTrenchingApplicationRate('0.06%').applicationRate).toBe('standard');
     expect(normalizeTrenchingApplicationRate('problem soil').applicationRate).toBe('high');
 
@@ -176,7 +177,8 @@ describe('termite measurement overrides and safeguards', () => {
     expect(priceTrenching({}, { ...base, productKey: 'termidor_sc' }).chemicalCostPerLF).toBeCloseTo(1.54, 2);
     expect(priceTrenching({}, { ...base, productKey: 'taurus_sc' }).chemicalCostPerLF).toBeCloseTo(0.35, 2);
     expect(priceTrenching({}, { ...base, productKey: 'bifen_it' }).chemicalCostPerLF).toBeCloseTo(0.23, 2);
-    expect(priceTrenching({}, { ...base, productKey: 'talstar_p' }).chemicalCostPerLF).toBeCloseTo(0.27, 2);
+    // talstar_p is the Talak 7.9 F bottle: $41.57 / 96 fl oz x 0.4 oz per LF = $0.17.
+    expect(priceTrenching({}, { ...base, productKey: 'talstar_p' }).chemicalCostPerLF).toBeCloseTo(0.17, 2);
   });
 
   test('trenching Termidor premium surcharges while Bifen never discounts below LF model', () => {
@@ -405,6 +407,7 @@ describe('termite measurement overrides and safeguards', () => {
     expect(normalizePreSlabTermiticideProduct('taurus').productKey).toBe('taurus_sc');
     expect(normalizePreSlabTermiticideProduct('bifen i/t').productKey).toBe('bifen_it');
     expect(normalizePreSlabTermiticideProduct('talstar professional').productKey).toBe('talstar_p');
+    expect(normalizePreSlabTermiticideProduct('Atticus Talak').productKey).toBe('talstar_p');
     expect(normalizePreSlabTermiticideProduct('fipronil', { legacyPayload: true }).productKey).toBe('termidor_sc');
     expect(normalizePreSlabTermiticideProduct('bifenthrin', { legacyPayload: true }).productKey).toBe('bifen_it');
 
@@ -439,12 +442,14 @@ describe('termite measurement overrides and safeguards', () => {
     expect(bifen.rawPrice).toBe(394);
     expect(bifen.price).toBe(510);
 
-    const talstar = pricePreSlabTermiticide(2500, { productKey: 'talstar_p', labelConfirmed: true });
-    expect(talstar.productOz).toBe(250);
-    expect(talstar.units).toBe(2);
-    expect(talstar.productCost).toBe(76.15);
-    expect(talstar.rawPrice).toBe(385);
-    expect(talstar.price).toBe(510);
+    // talstar_p is the Talak 7.9 F bottle: 96 fl oz at $41.57.
+    const talak = pricePreSlabTermiticide(2500, { productKey: 'talstar_p', labelConfirmed: true });
+    expect(talak.productLabel).toBe('Talak 7.9 F - Bifenthrin');
+    expect(talak.productOz).toBe(250);
+    expect(talak.units).toBe(3);
+    expect(talak.productCost).toBe(108.26);
+    expect(talak.rawPrice).toBe(445);
+    expect(talak.price).toBe(510);
   });
 
   test('Pre-Slab Termiticide uses contextual small-slab minimums', () => {
@@ -518,7 +523,7 @@ describe('termite measurement overrides and safeguards', () => {
     const huge = pricePreSlabTermiticide(9950, { productKey: 'talstar_p', labelConfirmed: true });
     expect(huge.usageStepPricedSqFt).toBe(10000);
     expect(huge.laborHrs).toBe(5);
-    expect(huge.price).toBe(1004);
+    expect(huge.price).toBe(1246);
 
     // Volume discounts apply to the stepped price (10plus implies the
     // builder-batch context: no drive cost, $128 floor at this size).
