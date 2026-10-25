@@ -53,6 +53,7 @@
  *   GATE_NEIGHBORHOOD_NAMING=true (the neighborhood sweep names every live home's community: it looks up homes never checked, names Sarasota homes from the plat number on the county's plat layer, and for a home the county cannot name uses the community the customer said on a call, linked as unconfirmed and kept out of the shared directory (no code filed from it, no entries read for its visits, no shared visitor pass) until the county or the office confirms it; read at call time via neighborhoodNamingLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_ACCESS is live; off = the sweep is byte-identical to before. No message, no bell.)
  *   GATE_NEIGHBORHOOD_ADDRESS_LOOKUP=true (when a home's stored pin sits on another lot, the neighborhood naming asks the county roll for the home's own address and links it only when the lots at that house number, full street and ZIP all name one community; also reads a '#201' unit tail as a unit; read at call time via neighborhoodAddressLookupLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_NAMING is live; off = the pin-only match as before. No message, no bell.)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
+ *   GATE_NEIGHBORHOOD_MERGE=true (the office can merge one neighborhood gate-code entry into another of the same county on Customers → Gate codes: homes, gate entries and filing-ledger rows move, the merged entry stays as an inactive pointer so new homes with its name land on the kept one, and Undo merge puts back what it moved; owner ruling 2026-10-25. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodMergeLive(), dark by default; off = the merge routes answer 404 and the page shows no merge buttons. Staff only, no bell, nothing sent to a customer.)
  *   GATE_HIRED_PACKET=true (owner ruling 2026-10-25, D7: the "Hired" button on the Staff page. On a prospective placeholder row an admin enters the hire's name, email, first day and pay, and one click makes the row an active staff account and emails the hire a set-password link (works 7 days) with a pointer to the Onboarding card. A "Resend link" action appears while the hire has not set a password yet. It never changes a customer; it sends ONE staff email per click. Strict opt-in: exactly 'true' in every environment, read at call time via hiredPacketLive(). Ships DARK; off = no button, both endpoints answer 404 before any database work and the Staff list is unchanged. The manual steps (rename, email, Active, Forgot password) still work.)
  *   GATE_STAFF_DOC_PREFILL=true (owner ruling 2026-10-25: a NEW staff form record opens with fields filled from the staff record, for the Vehicle Use & Commuting Agreement: assigned vehicle, home address and start date from the technicians row. The signer checks each value and saves; a typed value always wins. Never a checkbox, never a typed signature. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffDocPrefillLive(). Ships DARK; off = GET /versions/:id/prefill answers 404 { enabled: false } before any query and the form opens empty. Reads only; sends nothing to anyone.)
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
@@ -5513,6 +5514,12 @@ function neighborhoodTechActionsLive() {
   return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS === 'true';
 }
 
+// The office's merge of one neighborhood entry into another
+// (services/neighborhood-merge.js). Needs the directory itself live.
+function neighborhoodMergeLive() {
+  return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_MERGE === 'true';
+}
+
 // Staff onboarding documents (services/staff-onboarding.js), read at CALL time.
 // Strict `=== 'true'`, dark in every environment; unsetting it is the kill switch.
 // The reads also need the staff documents gate itself.
@@ -7757,6 +7764,8 @@ module.exports.neighborhoodNamingLive = neighborhoodNamingLive;
 module.exports.neighborhoodAddressLookupLive = neighborhoodAddressLookupLive;
 // GATE_NEIGHBORHOOD_TECH_ACTIONS reader, on its own line.
 module.exports.neighborhoodTechActionsLive = neighborhoodTechActionsLive;
+// GATE_NEIGHBORHOOD_MERGE reader, on its own line.
+module.exports.neighborhoodMergeLive = neighborhoodMergeLive;
 // GATE_CONTACT_REPORT_TEXT reader, on its own line.
 module.exports.contactReportTextLive = contactReportTextLive;
 // GATE_CONTACT_LOGIN reader, on its own line.

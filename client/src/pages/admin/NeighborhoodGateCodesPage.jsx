@@ -237,6 +237,128 @@ function FoundInMessages({ items, total, loading, error, onRetry, onMore, onSave
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// What a merge moves, from its dry run, in the words the office reads.
+function mergeSummary(source, target, preview) {
+  const parts = [`Moves ${plural(preview.homes, "home", "homes")} and ${plural(preview.entries, "gate entry", "gate entries")} into ${target.name}.`];
+  if (preview.duplicatesRetired) {
+    parts.push(`${plural(preview.duplicatesRetired, "code", "codes")} on file in both ${preview.duplicatesRetired === 1 ? "is" : "are"} kept once.`);
+  }
+  parts.push(`"${source.name}" becomes another name for it. Undo merge puts it back.`);
+  return parts.join(" ");
+}
+
+// Merge one neighborhood into another of its county (GATE_NEIGHBORHOOD_MERGE,
+// owner 2026-10-25): find the entry it joins, read what moves (a dry run that
+// writes nothing), then merge.
+function MergeIntoPanel({ neighborhood, busy, error, onSearch, onPreview, onMerge, onCancel }) {
+  const [search, setSearch] = useState("");
+  const [results, setResults] = useState([]);
+  const [searched, setSearched] = useState(false);
+  const [picked, setPicked] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [localError, setLocalError] = useState("");
+  const searchSeq = useRef(0);
+  const pickSeq = useRef(0);
+
+  useEffect(() => {
+    const q = search.trim();
+    const seq = ++searchSeq.current;
+    // A new query never shows the previous query's choices.
+    setResults([]);
+    setSearched(false);
+    if (!q) return undefined;
+    const timer = setTimeout(async () => {
+      try {
+        const found = await onSearch(q);
+        if (seq !== searchSeq.current) return;
+        setResults(found.filter((n) => n.id !== neighborhood.id && (n.county || null) === (neighborhood.county || null)));
+        setSearched(true);
+        setLocalError("");
+      } catch (err) {
+        if (seq !== searchSeq.current) return;
+        setLocalError(err.message || "Could not search neighborhoods");
+      }
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [search, neighborhood.id, neighborhood.county, onSearch]);
+
+  const pick = async (target) => {
+    const seq = ++pickSeq.current;
+    setPicked(target);
+    setPreview(null);
+    setLocalError("");
+    try {
+      const counts = await onPreview(target.id);
+      if (seq === pickSeq.current) setPreview(counts);
+    } catch (err) {
+      if (seq !== pickSeq.current) return;
+      setPicked(null);
+      setLocalError(err.message || "Could not check this merge");
+    }
+  };
+  const unpick = () => { pickSeq.current += 1; setPicked(null); setPreview(null); };
+
+  return (
+    <div className="grid gap-2 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-3">
+      {picked ? (
+        <div className="text-ui-body text-zinc-900">
+          {preview ? mergeSummary(neighborhood, picked, preview) : <span className="text-ink-secondary">Checking what moves…</span>}
+        </div>
+      ) : (
+        <>
+          <Field id={`merge-${neighborhood.id}-search`} label="Merge into">
+            <Input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={`A neighborhood in ${neighborhood.county || "the same county"}`}
+              autoComplete="off"
+              disabled={busy}
+            />
+          </Field>
+          {results.length > 0 && (
+            <div className="grid gap-1">
+              {results.map((n) => (
+                <Button key={n.id} size="sm" variant="secondary" className="justify-start" disabled={busy} onClick={() => pick(n)}>
+                  {`${n.name} · ${plural(n.propertyCount || 0, "property", "properties")}`}
+                </Button>
+              ))}
+            </div>
+          )}
+          {searched && results.length === 0 && (
+            <div className="text-ui-body text-ink-secondary">No other neighborhood in this county matches.</div>
+          )}
+        </>
+      )}
+      {(localError || error) && <ActionFeedback error>{localError || error}</ActionFeedback>}
+      <div className="flex flex-wrap gap-2">
+        {picked && <Button size="sm" disabled={busy || !preview} onClick={() => onMerge(picked)}>Merge</Button>}
+        {picked && <Button size="sm" variant="ghost" disabled={busy} onClick={unpick}>Pick another</Button>}
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
+// The entries merged into this one: their names still find it, and each
+// merge can be undone.
+function MergedIn({ merges, disabled, onUndo }) {
+  if (!merges?.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-ui-body text-ink-secondary">
+      <span>Also named:</span>
+      {merges.map((m) => (
+        <span key={m.mergeId} className="inline-flex items-center gap-1">
+          <span>{m.name}</span>
+          <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onUndo(m)}>Undo merge</Button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // The page's two views. Shown only while the access-codes section is on.
 function ViewTabs({ show, tab, onChange, foundTotal }) {
   if (!show) return null;
@@ -269,6 +391,8 @@ export default function NeighborhoodGateCodesPage() {
   const [busyKey, setBusyKey] = useState("");
   const [editingId, setEditingId] = useState("");
   const [addingTo, setAddingTo] = useState("");
+  const [mergingFrom, setMergingFrom] = useState("");
+  const [mergeEnabled, setMergeEnabled] = useState(false);
   const [formError, setFormError] = useState("");
 
   // "Found in messages": codes customers texted, waiting for the office. The
@@ -345,6 +469,7 @@ export default function NeighborhoodGateCodesPage() {
       const data = await api(`/admin/neighborhood-access?${params.toString()}`);
       if (seq !== readSeq.current) return;
       setDisabled(false);
+      setMergeEnabled(data.mergeEnabled === true);
       setNeighborhoods((prev) => (offset ? [...prev, ...(data.neighborhoods || [])] : data.neighborhoods || []));
       setTotal(data.total || 0);
     } catch (err) {
@@ -376,17 +501,17 @@ export default function NeighborhoodGateCodesPage() {
   const loadRef = useRef(load);
   loadRef.current = load;
 
-  const closeForms = () => { setEditingId(""); setAddingTo(""); setFormError(""); };
+  const closeForms = () => { setEditingId(""); setAddingTo(""); setMergingFrom(""); setFormError(""); };
 
   const mutate = async ({ key, path, method, body, successText, onError }) => {
     setBusyKey(key);
     setActionError("");
     setToast("");
     try {
-      await api(path, { method, body: JSON.stringify(body) });
+      const result = await api(path, { method, body: JSON.stringify(body) });
       closeForms();
       await loadRef.current();
-      setToast(successText);
+      setToast(typeof successText === "function" ? successText(result) : successText);
     } catch (err) {
       if (onError) onError(err.message || "Action failed");
       else setActionError(err.message || "Action failed");
@@ -421,6 +546,39 @@ export default function NeighborhoodGateCodesPage() {
     successText: "Entry added",
     onError: setFormError,
   });
+
+  // The merge picker's search: every active neighborhood, empty ones included.
+  const searchNeighborhoods = useCallback(async (term) => {
+    const data = await api(`/admin/neighborhood-access?q=${encodeURIComponent(term)}&limit=8&picker=1`);
+    return data.neighborhoods || [];
+  }, []);
+  const previewMerge = (neighborhood, targetId) => api(`/admin/neighborhood-access/${neighborhood.id}/merge`, {
+    method: "POST",
+    body: JSON.stringify({ into: targetId, dryRun: true }),
+  });
+  const onMerge = (neighborhood, target) => mutate({
+    key: `${neighborhood.id}:merge`,
+    path: `/admin/neighborhood-access/${neighborhood.id}/merge`,
+    method: "POST",
+    body: { into: target.id },
+    successText: `Merged ${neighborhood.name} into ${target.name}`,
+    onError: setFormError,
+  });
+  const onUndoMerge = (merge) => {
+    if (!window.confirm(`Undo the merge of ${merge.name}? Its homes and gate entries go back to it.`)) return;
+    mutate({
+      key: `${merge.mergeId}:undo`,
+      path: `/admin/neighborhood-access/merges/${merge.mergeId}/undo`,
+      method: "POST",
+      body: {},
+      successText: (r) => {
+        const kept = (r?.homesKept || 0) + (r?.entriesKept || 0);
+        return kept
+          ? `Undid the merge of ${merge.name}. ${plural(kept, "item", "items")} changed since ${kept === 1 ? "stays" : "stay"} here.`
+          : `Undid the merge of ${merge.name}`;
+      },
+    });
+  };
 
   const showEmpty = !loading && !readError && !disabled && neighborhoods.length === 0;
 
@@ -526,17 +684,43 @@ export default function NeighborhoodGateCodesPage() {
                         {[n.county, `${n.propertyCount} ${n.propertyCount === 1 ? "property" : "properties"}`].filter(Boolean).join(" · ")}
                       </span>
                     </div>
-                    {addingTo !== n.id && (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={busyKey !== ""}
-                        onClick={() => { closeForms(); setAddingTo(n.id); }}
-                      >
-                        Add entry
-                      </Button>
-                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {mergeEnabled && mergingFrom !== n.id && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={busyKey !== ""}
+                          onClick={() => { closeForms(); setMergingFrom(n.id); }}
+                        >
+                          Merge into…
+                        </Button>
+                      )}
+                      {addingTo !== n.id && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={busyKey !== ""}
+                          onClick={() => { closeForms(); setAddingTo(n.id); }}
+                        >
+                          Add entry
+                        </Button>
+                      )}
+                    </div>
                   </div>
+                  {mergeEnabled && <MergedIn merges={n.mergedIn} disabled={busyKey !== ""} onUndo={onUndoMerge} />}
+                  {mergingFrom === n.id && (
+                    <div className="mb-2">
+                      <MergeIntoPanel
+                        neighborhood={n}
+                        busy={busyKey === `${n.id}:merge`}
+                        error={formError}
+                        onSearch={searchNeighborhoods}
+                        onPreview={(targetId) => previewMerge(n, targetId)}
+                        onMerge={(target) => onMerge(n, target)}
+                        onCancel={closeForms}
+                      />
+                    </div>
+                  )}
                   <div className="grid gap-2">
                     {n.entries.length === 0 && addingTo !== n.id && (
                       <div className="text-ui-body text-ink-secondary">No gate entry on file yet.</div>
