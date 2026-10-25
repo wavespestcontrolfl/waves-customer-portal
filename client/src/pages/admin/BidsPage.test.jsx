@@ -23,7 +23,7 @@ vi.mock("./BidKitPage", () => ({
 }));
 
 import BidsPage from "./BidsPage";
-import BidsLegacyRedirect from "../../components/admin/BidsLegacyRedirect";
+import AdminTabRedirect from "../../components/admin/AdminTabRedirect";
 
 function Where() {
   const { pathname, search, hash } = useLocation();
@@ -35,8 +35,8 @@ function renderAt(url) {
     <MemoryRouter initialEntries={[url]}>
       <Routes>
         <Route path="/admin/bids" element={<BidsPage />} />
-        <Route path="/admin/bid-desk" element={<BidsLegacyRedirect />} />
-        <Route path="/admin/bid-kit" element={<BidsLegacyRedirect tab="kit" />} />
+        <Route path="/admin/bid-desk" element={<AdminTabRedirect to="/admin/bids" />} />
+        <Route path="/admin/bid-kit" element={<AdminTabRedirect to="/admin/bids" tab="kit" />} />
       </Routes>
       <Where />
     </MemoryRouter>,

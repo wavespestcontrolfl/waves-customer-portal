@@ -252,7 +252,6 @@ import AdminChangePasswordPage from './pages/AdminChangePasswordPage';
 import AdminForgotPasswordPage from './pages/AdminForgotPasswordPage';
 import AdminResetPasswordPage from './pages/AdminResetPasswordPage';
 import AdminLayout from './components/AdminLayoutV2';
-import BidsLegacyRedirect from './components/admin/BidsLegacyRedirect';
 import TechPortalRedirect from './components/tech/TechPortalRedirect';
 import TechNavigationLock from './components/tech/TechNavigationLock';
 import InstallPrompt from './components/InstallPrompt';
@@ -753,8 +752,8 @@ export default function App() {
             <Route path="agent-estimate" element={<Suspense fallback={<div style={{color:'#71717a',padding:40}}>Loading Agent Estimate...</div>}><AdminAgentEstimatePage /></Suspense>} />
             <Route path="bids" element={<Suspense fallback={<RouteFallback label="Loading bids..." />}><AdminBidsPage /></Suspense>} />
             {/* Bid Desk and Bid kit became tabs of Bids; old notification and bell links keep ?bid= / ?item=. */}
-            <Route path="bid-desk" element={<BidsLegacyRedirect />} />
-            <Route path="bid-kit" element={<BidsLegacyRedirect tab="kit" />} />
+            <Route path="bid-desk" element={<AdminTabRedirect to="/admin/bids" />} />
+            <Route path="bid-kit" element={<AdminTabRedirect to="/admin/bids" tab="kit" />} />
             <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<RouteFallback label="Loading proposal..." />}><AdminCommercialProposalPage /></Suspense>} />
             <Route path="estimates/:id" element={<AdminDetailRedirect to="/admin/pipeline" queryKey="estimateId" tab="estimates" />} />
             {/* /admin/dispatch is now the canonical dispatcher surface
