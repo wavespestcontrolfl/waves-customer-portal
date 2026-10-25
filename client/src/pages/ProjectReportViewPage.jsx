@@ -676,18 +676,18 @@ export default function ProjectReportViewPage() {
                   return (
                     <div key={key} style={{ padding: '12px 16px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
                       {key === 'species' ? (
-                        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                        <div style={{ fontSize: isPaperDocument ? 14 : 16, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                           <strong style={{ color: ESTIMATE_TEXT }}>Species:</strong> {formattedValue}
                         </div>
                       ) : (
                         <>
                           <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 3 }}>{humanizeKey(key)}</div>
-                          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{formattedValue}</div>
+                          <div style={{ fontSize: isPaperDocument ? 14 : 16, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{formattedValue}</div>
                         </>
                       )}
                       {showRoofRatPhoto && <RoofRatPhoto />}
                       {insight && (
-                        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
+                        <div style={{ fontSize: isPaperDocument ? 14 : 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
                           {insight}
                         </div>
                       )}
@@ -696,7 +696,7 @@ export default function ProjectReportViewPage() {
                           <summary style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT, cursor: 'pointer' }}>
                             Learn more about roof rats
                           </summary>
-                          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
+                          <div style={{ fontSize: isPaperDocument ? 14 : 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
                             {ROOF_RAT_LEARN_MORE}
                           </div>
                         </details>
@@ -730,7 +730,7 @@ export default function ProjectReportViewPage() {
           {/* Recommendations — if the text is the three-section AI-drafted
                format, render each section with its own heading. Otherwise
                fall back to the single "Recommendations" block. */}
-          {data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
+          {data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} proseSize={isPaperDocument ? 14 : 16} />}
         </div>
         )}
 
@@ -807,7 +807,7 @@ export default function ProjectReportViewPage() {
                 {Object.entries(data.followupFindings).filter(([, v]) => v).map(([key, value]) => (
                   <div key={key} style={{ padding: '12px 12px', borderRadius: 8, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
                     <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT }}>{humanizeKey(key)}</div>
-                    <div style={{ fontSize: 14, color: ESTIMATE_BODY, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
+                    <div style={{ fontSize: isPaperDocument ? 14 : 16, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
                   </div>
                 ))}
               </div>
@@ -1701,7 +1701,7 @@ function titleCase(s) {
   return s.split(' ').map(w => w[0] + w.slice(1).toLowerCase()).join(' ');
 }
 
-function RecommendationsBlock({ text, upcomingAppointment }) {
+function RecommendationsBlock({ text, upcomingAppointment, proseSize = 16 }) {
   const sections = parseSections(text);
   if (sections) {
     return (
@@ -1711,7 +1711,7 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
             <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
               {titleCase(s.heading)}
             </div>
-            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{s.body}</div>
+            <div style={{ fontSize: proseSize, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{s.body}</div>
             {s.heading === 'WHAT WE RECOMMEND' && shouldShowBookingCta(s.body) && <BookingCta upcomingAppointment={upcomingAppointment} text={s.body} />}
           </div>
         ))}
@@ -1721,7 +1721,7 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
   return (
     <div style={{ marginTop: 16, padding: '16px 20px', borderRadius: 12, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
       <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>Recommendations</div>
-      <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{text}</div>
+      <div style={{ fontSize: proseSize, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{text}</div>
       {shouldShowBookingCta(text) && <BookingCta upcomingAppointment={upcomingAppointment} text={text} />}
     </div>
   );
@@ -1766,6 +1766,7 @@ function BookingCta({ upcomingAppointment, text }) {
     <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center' }}>
       <a
         data-glass-accent=""
+        data-glass-size="primary"
         href={BOOK_URL}
         target="_blank"
         rel="noreferrer"

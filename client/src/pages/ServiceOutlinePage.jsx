@@ -144,7 +144,7 @@ function ChipsVisual({ items = [], note }) {
     <div className="mt-4 space-y-4">
       <ChipRow heading="This month's step" items={items.filter((chip) => chip.tier === "main")} tone="main" />
       <ChipRow heading="As needed" items={items.filter((chip) => chip.tier !== "main")} tone="as_needed" />
-      {note && <p className="text-sm leading-6 text-slate-500">{note}</p>}
+      {note && <p className="text-base leading-6 text-slate-500">{note}</p>}
     </div>
   );
 }
@@ -246,7 +246,7 @@ function TagsVisual({ items = [], note }) {
           </li>
         ))}
       </ul>
-      {note && <p className="mt-3 text-sm leading-6 text-slate-500">{note}</p>}
+      {note && <p className="mt-3 text-base leading-6 text-slate-500">{note}</p>}
     </div>
   );
 }
@@ -269,7 +269,7 @@ function Section({ section }) {
       {(section.body || !Visual) && <p className="mt-2 text-base leading-7 text-slate-600">{section.body}</p>}
       {Visual && <Visual {...section.visual} />}
       {!Visual && Array.isArray(section.bullets) && section.bullets.length > 0 && (
-        <ul className="mt-4 grid gap-2 text-sm leading-6 text-slate-600 md:grid-cols-2">
+        <ul className="mt-4 grid gap-2 text-base leading-6 text-slate-600 md:grid-cols-2">
           {section.bullets.map((bullet, index) => (
             <li key={`${section.key}-${index}`} data-glass="soft" className="flex gap-2 rounded-md border border-zinc-200 bg-surface-page p-3">
               <ClipboardCheck size={16} strokeWidth={1.75} className="mt-1 flex-shrink-0 text-waves-success" />
@@ -376,6 +376,7 @@ export default function ServiceOutlinePage() {
               href={estimatePath}
               onClick={() => trackCtaClick(estimatePath)}
               data-glass-accent=""
+              data-glass-size="primary"
               className="inline-flex h-12 items-center justify-center rounded-[10px] bg-waves-blue-deeper px-4 text-sm font-semibold text-white hover:bg-waves-blue-dark"
             >
               View Estimate
@@ -393,7 +394,7 @@ export default function ServiceOutlinePage() {
         <section data-glass-clear="" className="bg-white mt-6">
           <div className="mx-auto grid max-w-[760px] gap-8 px-4 py-10 lg:grid-cols-[1fr_320px]">
             <div>
-              <div className="inline-flex items-center gap-2 rounded-xs border border-waves-success-border bg-waves-success-bg px-3 py-1 text-xs font-semibold uppercase tracking-wide text-waves-success">
+              <div className="inline-flex items-center gap-2 rounded-xs border border-waves-success-border bg-waves-success-bg px-3 py-1 text-sm font-semibold uppercase tracking-wide text-waves-success">
                 <Sprout size={14} strokeWidth={1.75} />
                 Lawn Care Program
               </div>
@@ -456,14 +457,14 @@ export default function ServiceOutlinePage() {
           <section className="mx-auto max-w-[760px] px-4 pb-8">
             <div data-glass="card" className="rounded-md border border-zinc-200 bg-white p-5">
               <h2 className="text-xl font-semibold text-waves-blue-deeper">Approved Product Details</h2>
-              <p className="mt-2 text-sm leading-6 text-slate-600">These products may be relevant when turf type, site conditions, label directions, weather, and local rules allow.</p>
+              <p className="mt-2 text-base leading-6 text-slate-600">These products may be relevant when turf type, site conditions, label directions, weather, and local rules allow.</p>
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 {content.productCards.map((product) => (
                   <article key={product.id} className="rounded-md border border-zinc-200 p-4">
                     <h3 className="font-semibold text-waves-blue-deeper">{product.name}</h3>
-                    <p className="mt-1 text-xs uppercase tracking-wide text-zinc-500">{product.category}</p>
-                    <p className="mt-3 text-sm leading-6 text-slate-600">{product.summary}</p>
-                    {product.epaRegistrationNumber && <p className="mt-3 text-xs text-zinc-500">EPA Reg. No. {product.epaRegistrationNumber}</p>}
+                    <p className="mt-1 text-sm uppercase tracking-wide text-zinc-500">{product.category}</p>
+                    <p className="mt-3 text-base leading-6 text-slate-600">{product.summary}</p>
+                    {product.epaRegistrationNumber && <p className="mt-3 text-sm text-zinc-500">EPA Reg. No. {product.epaRegistrationNumber}</p>}
                   </article>
                 ))}
               </div>
@@ -475,13 +476,15 @@ export default function ServiceOutlinePage() {
           <div data-glass-ink="light" className="flex flex-col items-start justify-between gap-4 rounded-md bg-waves-blue-deeper p-5 text-white md:flex-row md:items-center">
             <div>
               <h2 className="text-xl font-semibold">Ready to review the estimate?</h2>
-              <p className="mt-1 text-sm text-zinc-300">The outline explains the program. The estimate shows pricing and approval steps.</p>
+              <p className="mt-1 text-base text-zinc-300">The outline explains the program. The estimate shows pricing and approval steps.</p>
             </div>
             {estimatePath && (
               <a
                 href={estimatePath}
                 onClick={() => trackCtaClick(estimatePath)}
-                className="inline-flex h-11 items-center justify-center rounded-xs bg-white px-5 text-sm font-semibold text-waves-blue-deeper hover:bg-surface-hover"
+                data-glass-accent=""
+                data-glass-size="primary"
+                className="inline-flex h-12 items-center justify-center rounded-[10px] bg-white px-5 text-sm font-semibold text-waves-blue-deeper hover:bg-surface-hover"
               >
                 <FileText size={16} strokeWidth={1.75} className="mr-2" />
                 View Estimate

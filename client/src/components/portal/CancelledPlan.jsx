@@ -129,7 +129,7 @@ export default function CancelledPlanPanel({ customer, compact, styles, navigate
           <div role="status" style={{ marginTop: 16, padding: 16, borderRadius: 10, background: subtle, border: '1px solid #E7E2D7' }}>
             <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Your estimate is ready.</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted }}>Opening it now. If it does not open, use the button below.</div>
-            <a data-glass-accent="" href={handoff} style={{ ...primaryButton, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none', marginTop: 12 }}>
+            <a data-glass-accent="" data-glass-size="primary" href={handoff} style={{ ...primaryButton, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none', marginTop: 12 }}>
               Review and approve my estimate
             </a>
           </div>
@@ -143,7 +143,7 @@ export default function CancelledPlanPanel({ customer, compact, styles, navigate
           </div>
         ) : (
           <div style={{ marginTop: 16, display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
-            <button data-glass-accent="" type="button" onClick={restart} disabled={state === 'busy'} style={{ ...primaryButton, opacity: state === 'busy' ? 0.7 : 1 }}>
+            <button data-glass-accent="" data-glass-size="primary" type="button" onClick={restart} disabled={state === 'busy'} style={{ ...primaryButton, opacity: state === 'busy' ? 0.7 : 1 }}>
               {state === 'busy' ? 'Building your estimate' : 'Restart my plan'}
             </button>
             {state === 'error' && (

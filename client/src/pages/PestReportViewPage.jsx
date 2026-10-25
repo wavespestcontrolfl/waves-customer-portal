@@ -311,7 +311,7 @@ export default function PestReportViewPage() {
               : 'Book online in about a minute, or call and a real person will help you right away.'}
           </p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-            <a data-glass-accent="" href={BOOK_URL} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
+            <a data-glass-accent="" data-glass-size="primary" href={BOOK_URL} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
               Book now
             </a>
             <a href={`tel:${WAVES_PHONE_TEL}`} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>

@@ -1880,15 +1880,6 @@ const gates = {
   // Off unless exactly 'true'. See services/lead-call-text-followup.js.
   leadCallTextFollowup: process.env.GATE_LEAD_CALL_TEXT_FOLLOWUP === 'true',
 
-  // Lead Call/Text Preference — a lead still in SMS intake who answers the
-  // auto-reply with a bare CALL or TEXT (owner 2026-10-14) gets one note on
-  // their newest lead, and the admin bell for that text reads "Wants a call:
-  // Name" or "Prefers text: Name". Sends nothing, stores no preference, never
-  // changes lead_intake_status. Off unless exactly 'true'; off, inbound
-  // handling is as before EXCEPT that a bare CALL / TEXT never goes to the
-  // service classifier (always, by design: it names no service).
-  leadCallTextPreference: process.env.GATE_LEAD_CALL_TEXT_PREFERENCE === 'true',
-
   // Lead Repeat Form — a row that is still a lead (not yet a customer) and
   // sends the website quote form again keeps its open SMS intake state, so
   // its next CALL / TEXT or service reply is handled as for a new lead, and

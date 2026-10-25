@@ -112,7 +112,7 @@
   margin: 4px 0 2px;
   padding: 3px 10px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -130,7 +130,7 @@
   margin: 4px 0 2px;
   padding: 3px 10px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
   color: #b45309;
   background: rgba(255, 237, 213, 0.55);
@@ -265,7 +265,7 @@
 }
 [data-glass-theme] .gc-gr-city {
   display: block;
-  font-size: 12px;
+  font-size: 14px;
   color: #5f6368;
 }
 [data-glass-theme] .gc-gr-stars {
@@ -320,6 +320,7 @@
   color: hsl(216, 42%, 38%);
 }
 [data-glass-theme] .gc-mbb-btn {
+  min-height: 48px;
   border: 1px solid rgba(255, 238, 180, 0.95);
   border-radius: 999px;
   padding: 11px 20px;

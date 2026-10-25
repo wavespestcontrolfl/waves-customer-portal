@@ -261,6 +261,7 @@ function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, locationReviewRequ
           <button
             type="button"
             data-glass-accent=""
+            data-glass-size="primary"
             onClick={onRetry}
             style={{ ...PRIMARY_CTA, width: 'auto', padding: '0 20px' }}
           >
@@ -1188,6 +1189,7 @@ function OutOfAreaCard({ token, county, ticket }) {
             <button
               type="button"
               data-glass-accent=""
+              data-glass-size="primary"
               onClick={join}
               disabled={submitting || !email.trim()}
               style={{ ...PRIMARY_CTA, width: 'auto', padding: '0 20px' }}
@@ -1292,6 +1294,7 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
       <button
         type="button"
         data-glass-accent=""
+        data-glass-size="primary"
         onClick={submit}
         disabled={submitting || !address.trim()}
         style={{ ...PRIMARY_CTA, marginTop: 14 }}
@@ -1321,11 +1324,12 @@ function EmailPickCard({ slot, movedNotice, error: submitError, showError, submi
       {slot ? (
         <>
           <div style={{ fontSize: 20, fontWeight: 700, fontFamily: FONTS.heading, color: S.text }}>{slot.fullDate || formatDateLabel(slot.date)}</div>
-          <div style={{ marginTop: 4, fontSize: 15, color: S.body }}>Arrival {arrivalWindowLabel(slot.start_time)}</div>
+          <div style={{ marginTop: 4, fontSize: 16, color: S.body }}>Arrival {arrivalWindowLabel(slot.start_time)}</div>
           {movedNotice ? <div data-glass="soft" style={{ ...SOFT_NOTE, marginTop: 12 }}>{movedNotice}</div> : null}
           <button
             type="button"
             data-glass-accent=""
+            data-glass-size="primary"
             className="wpk-action-btn"
             onClick={onBook}
             disabled={submitting}
@@ -2101,6 +2105,7 @@ export default function ScheduleFlowPage({ flow }) {
               <button
                 type="button"
                 data-glass-accent=""
+                data-glass-size="primary"
                 className="wpk-action-btn"
                 onClick={() => confirm(selectedSlot, false)}
                 disabled={submitting || !cfg.canConfirm({ lane: selectedLane, data, details })}

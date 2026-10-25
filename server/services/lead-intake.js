@@ -24,7 +24,6 @@
 const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
 const TwilioService = require('./twilio');
 const { classifyServiceIntent, parseCallTextReply } = require('./sms-service-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -272,7 +271,7 @@ async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = fal
   }
 }
 
-// GATE_LEAD_CALL_TEXT_PREFERENCE. Called by the SMS webhook for a lead in
+// Lead CALL / TEXT preference. Called by the SMS webhook for a lead in
 // intake whose reply the intake machine did NOT consume. A bare CALL / TEXT
 // reply is noted once on the customer's newest lead so the owner sees the
 // choice on the lead and on the admin bell for THAT text. Nothing else is
@@ -280,11 +279,10 @@ async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = fal
 // The customer row is locked and its status re-read first: a service reply
 // processed at the same moment may have advanced intake to estimate_drafted, and
 // then the note would describe a lead that is no longer waiting. Returns
-// 'call' | 'text' only when the note was written, else undefined (gate off, not
+// 'call' | 'text' only when the note was written, else undefined (not
 // a bare CALL / TEXT, intake over, no lead, or an error: no label when nothing
 // was saved). Errors are logged by customer id only.
 async function recordCallTextReply(customer, body, { triggerSmsLogId } = {}) {
-  if (!isEnabled('leadCallTextPreference')) return undefined;
   const choice = parseCallTextReply(body);
   if (!choice) return undefined;
   try {

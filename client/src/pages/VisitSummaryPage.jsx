@@ -65,7 +65,7 @@ export default function VisitSummaryPage() {
                 <h2 style={{ fontSize: 22, lineHeight: 1.35, margin: '12px 0 6px' }}>{service.serviceType}</h2>
                 <p style={{ color: CUSTOMER_SURFACE.muted, margin: '0 0 20px' }}>{OUTCOMES[service.outcome] || 'Service recorded'}</p>
                 {/^\/report\/[a-f0-9]{32}$/.test(service.reportUrl || '') ? (
-                  <a href={service.reportUrl} rel="noreferrer" data-glass-accent="" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, minHeight: 48, padding: '12px 18px', borderRadius: 12, background: '#F4B014', color: CUSTOMER_SURFACE.text, textDecoration: 'none', fontWeight: 600 }}>
+                  <a href={service.reportUrl} rel="noreferrer" data-glass-accent="" data-glass-size="primary" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, minHeight: 48, padding: '12px 18px', borderRadius: 12, background: '#F4B014', color: CUSTOMER_SURFACE.text, textDecoration: 'none', fontWeight: 600 }}>
                     View service report <ArrowRight size={20} aria-hidden="true" />
                   </a>
                 ) : <p style={{ margin: 0 }}>Your report is being prepared.</p>}
