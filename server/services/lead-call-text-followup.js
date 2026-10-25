@@ -254,7 +254,11 @@ async function startFollowup({ customer, fromPhone, smsLogId, kind, now }) {
   const { requestId } = claim;
 
   const body = kind === 'text_reply' ? TEXT_REPLY_BODY : NIGHT_CALL_BODY;
-  const outcome = await sendFollowup({ customer, phone: fromPhone, body, kind, requestId });
+  // The time question goes only while its request is still open: a TEXT that
+  // cancelled it first wins, and that is a choice, not a failed send.
+  const outcome = await sendFollowup({ customer, phone: fromPhone, body, kind, requestId, requireState: kind === 'call_request' ? 'asked' : null });
+  const cancelledFirst = kind === 'call_request' && outcome === 'not_sent'
+    && (await db('lead_callback_requests').where({ id: requestId }).first('state'))?.state === 'cancelled';
   await settleSend(requestId, outcome, { sentState: kind === 'text_reply' ? 'done' : 'asked', now });
   if (kind === 'text_reply' && outcome !== 'not_sent') {
     // We asked which service: the intake machine must read the answer as
@@ -265,7 +269,7 @@ async function startFollowup({ customer, fromPhone, smsLogId, kind, now }) {
       .where((q) => q.whereNull('lead_intake_status').orWhere('lead_intake_status', 'awaiting_address'))
       .update({ lead_intake_status: 'awaiting_service', updated_at: now });
   }
-  if (outcome === 'not_sent') {
+  if (outcome === 'not_sent' && !cancelledFirst) {
     await raiseLeadBell({
       customer, leadId, requestId,
       why: kind === 'text_reply'
