@@ -20,6 +20,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { inRingHours } = require('./lead-call-reply-ring');
 const { etParts, etDateString, formatETTime } = require('../utils/datetime-et');
 
 const REMINDER_LEAD_MS = 15 * 60 * 1000;
@@ -92,18 +93,30 @@ async function ringIsLive(now) {
   return !!live;
 }
 
-// Runs under placeRing's per-phone lock.
-async function bookedRingBlocker({ customer, digits, now }, conn) {
-  if (shared().REAL_CUSTOMER_STAGES.includes(customer.pipeline_stage)) return 'existing_customer';
-  const recent = await conn('call_log')
-    .where({ direction: 'outbound' })
-    .where('created_at', '>=', new Date(now.getTime() - RECENT_CALL_WINDOW_MS))
-    .where(function toThisPhone() {
-      this.whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
-        .orWhereRaw("RIGHT(regexp_replace(COALESCE(metadata->>'leadPhone', ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
-    })
-    .first('id');
-  return recent ? 'call_in_progress' : null;
+// Runs under placeRing's per-phone lock, for one booked request. The request
+// row is locked and moved to done in the same transaction that claims the
+// ring, so a TEXT that cancels it either lands first (no ring) or finds it
+// done (the ring already started). Never a cancelled call that rings.
+function bookedRingBlocker(requestId) {
+  return async ({ customer, digits, now }, conn) => {
+    const request = await conn('lead_callback_requests').where({ id: requestId }).forUpdate().first('state');
+    if (request?.state !== 'scheduled') return 'request_changed';
+    if (shared().REAL_CUSTOMER_STAGES.includes(customer.pipeline_stage)) {
+      await conn('lead_callback_requests').where({ id: requestId }).update({ state: 'cancelled', updated_at: now });
+      return 'existing_customer';
+    }
+    const recent = await conn('call_log')
+      .where({ direction: 'outbound' })
+      .where('created_at', '>=', new Date(now.getTime() - RECENT_CALL_WINDOW_MS))
+      .where(function toThisPhone() {
+        this.whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+          .orWhereRaw("RIGHT(regexp_replace(COALESCE(metadata->>'leadPhone', ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
+      })
+      .first('id');
+    // Someone is already on the phone with them: the booked call is answered.
+    await conn('lead_callback_requests').where({ id: requestId }).update({ state: 'done', updated_at: now });
+    return recent ? 'call_in_progress' : null;
+  };
 }
 
 async function ringDue(now) {
@@ -117,25 +130,33 @@ async function ringDue(now) {
   for (const row of rows) {
     const time = formatETTime(new Date(row.scheduled_for));
     const late = now.getTime() - new Date(row.scheduled_for).getTime() > RING_LATE_LIMIT_MS;
-    if (!late && await ringIsLive(now)) break; // the next tick rings it
+    // Calls ring 8 AM-8 PM only: a slot delayed past 8 PM is the owner's.
+    const handOff = late || !inRingHours(now);
+    if (!handOff && await ringIsLive(now)) break; // the next tick rings it
     if (!(await claim(row, 'ring_claimed_at', 'scheduled', now))) continue;
-    const customer = await loadCustomer(row.customer_id);
-    if (!customer) {
-      await db('lead_callback_requests').where({ id: row.id }).update({ state: 'cancelled', updated_at: now });
-      continue;
+    try {
+      const customer = await loadCustomer(row.customer_id);
+      if (!customer) {
+        await db('lead_callback_requests').where({ id: row.id }).update({ state: 'cancelled', updated_at: now });
+        continue;
+      }
+      if (handOff) {
+        const moved = await db('lead_callback_requests').where({ id: row.id, state: 'scheduled' }).update({ state: 'needs_owner', updated_at: now });
+        if (moved) await raiseLeadBell({ customer, leadId: row.lead_id, requestId: row.id, why: `Booked for ${time}; the ring could not start in time.` });
+        continue;
+      }
+      const result = await placeRing({ customer, fromPhone: row.phone, now, blocker: bookedRingBlocker(row.id) });
+      if (result.callLogId) {
+        await db('lead_callback_requests').where({ id: row.id }).update({ ring_call_log_id: result.callLogId, updated_at: now });
+      }
+      if (result.rang) rang += 1;
+    } catch (err) {
+      // Nothing rang (placeRing throws only before any call exists): free the
+      // claim so the next tick tries again, or hands the call off once late.
+      logger.error(`[lead-callback-scheduler] ring step failed for request ${row.id} (${errCode(err)})`);
+      await db('lead_callback_requests').where({ id: row.id, state: 'scheduled' }).update({ ring_claimed_at: null, updated_at: now })
+        .catch((releaseErr) => logger.warn(`[lead-callback-scheduler] ring claim release failed for ${row.id} (${errCode(releaseErr)})`));
     }
-    if (late) {
-      await db('lead_callback_requests').where({ id: row.id }).update({ state: 'needs_owner', updated_at: now });
-      await raiseLeadBell({ customer, leadId: row.lead_id, requestId: row.id, why: `Booked for ${time}; the ring did not start in time.` });
-      continue;
-    }
-    const result = await placeRing({ customer, fromPhone: row.phone, now, blocker: bookedRingBlocker });
-    await db('lead_callback_requests').where({ id: row.id }).update({
-      state: result.reason === 'existing_customer' ? 'cancelled' : 'done',
-      ring_call_log_id: result.callLogId || null,
-      updated_at: now,
-    });
-    if (result.rang) rang += 1;
   }
   return rang;
 }
@@ -152,9 +173,11 @@ async function noAnswerBells(now) {
     .orderBy('created_at').limit(BATCH);
   let rung = 0;
   for (const row of rows) {
-    if (!(await claim(row, 'no_answer_at', 'asked', now))) continue;
+    // One statement: still asked AND still unanswered, so an answer that
+    // lands at 8 AM keeps its booking.
     const moved = await db('lead_callback_requests').where({ id: row.id, state: 'asked' })
-      .update({ state: 'needs_owner', updated_at: now });
+      .whereNull('answer_text').whereNull('no_answer_at')
+      .update({ state: 'needs_owner', no_answer_at: now, updated_at: now });
     const customer = moved ? await loadCustomer(row.customer_id) : null;
     if (!customer) continue;
     await raiseLeadBell({ customer, leadId: row.lead_id, requestId: row.id, why: 'Asked for a call after hours and never sent a time.' });
