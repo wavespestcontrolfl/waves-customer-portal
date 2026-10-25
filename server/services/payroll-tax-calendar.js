@@ -11,9 +11,12 @@
  * paid). Rows come only from FINALIZED payroll_checks; drafts and voided
  * checks are never counted.
  *
- * Out of scope: semiweekly depositors (the $50,000 lookback) and the $100,000
- * next-day deposit rule. A new employer is a monthly depositor (Pub 15), so
- * every month gets one deposit row.
+ * Out of scope: semiweekly depositors (the $50,000 lookback), the $100,000
+ * next-day deposit rule, and FUTA deposits. A new employer is a monthly
+ * depositor (Pub 15), so every month gets one deposit row. A FUTA deposit is
+ * needed only once a year's FUTA passes $500 (about 12 employees), so this
+ * calendar writes one alert row for that year and leaves the amount to the
+ * owner and the accountant; Form 940 carries the full year FUTA.
  *
  * Due dates: IRS dates move to the next day that is not a Saturday, Sunday or
  * legal holiday (Pub 509: legal holidays in the District of Columbia). Florida
@@ -25,6 +28,9 @@
  * The sync inserts a row once (source_key 'payroll:<kind>:<period>'), keeps an
  * 'upcoming' row current, deletes an 'upcoming' row whose duty is gone, and
  * never touches a row in any other status (the owner or another job moved it).
+ * A row that carries an amount and was marked done is a payment on record. If
+ * a pay run later changes the liability above what the marked rows cover, a
+ * new 'upcoming' balance row (key '<row>:balance:<n>') holds the difference.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -34,8 +40,9 @@ const { etDateString } = require('../utils/datetime-et');
 // The day layer 2 was built. Earlier staff are not new hires.
 const NEW_HIRE_FLOOR = '2026-10-25';
 const NEW_HIRE_DAYS = 20;
-// FUTA is deposited when the running total passes $500.00.
-const FUTA_DEPOSIT_THRESHOLD_CENTS = 50000;
+// A FUTA deposit is due once the year's running total passes $500.00.
+const FUTA_ALERT_THRESHOLD_CENTS = 50000;
+const BALANCE_SEPARATOR = ':balance:';
 const SOURCE_PREFIX = 'payroll:';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -230,25 +237,22 @@ function quarterSpan(quarters, today) {
   return span;
 }
 
-// d. FUTA deposit rows of one year, e. Form 940 and f. W-2/W-3.
+// d. FUTA over $500 alert, e. Form 940 and f. W-2/W-3 of one year.
 function yearRows(year, yearTotals, quarters) {
   const rows = [];
   let cumulative = 0;
-  let deposited = 0;
   for (let q = 1; q <= 4; q += 1) {
     cumulative += (quarters.get(quarterKey(year, q)) || { futa: 0 }).futa;
-    const owed = cumulative - deposited;
-    if (owed <= FUTA_DEPOSIT_THRESHOLD_CENTS) continue;
-    deposited += owed;
+    if (cumulative <= FUTA_ALERT_THRESHOLD_CENTS) continue;
     rows.push({
-      source_key: `${SOURCE_PREFIX}futa_deposit:${quarterKey(year, q)}`,
-      filing_type: 'payroll_futa_deposit',
-      title: `FUTA deposit — ${quarterLabel(year, q)}`,
-      period_label: quarterLabel(year, q),
+      source_key: `${SOURCE_PREFIX}futa_over_500:${year}`,
+      filing_type: 'payroll_futa_alert',
+      title: `FUTA passed $500 — deposit due (Q${q} ${year})`,
+      period_label: `Tax Year ${year}`,
       due_date: rollIrs(afterQuarterDue(year, q)),
-      amount_due: dollars(owed),
-      notes: 'Pay on EFTPS by 8 PM ET the day before the due date (or IRS Direct Pay). Federal unemployment tax (FUTA) not yet deposited this year.',
+      notes: `FUTA for the year passed $500 in Q${q}. Deposit the undeposited FUTA on EFTPS by the due date. This calendar does not work out FUTA deposits; check the amount with your accountant.`,
     });
+    break;
   }
   const jan31 = rollIrs(ymd(year + 1, 1, 31));
   rows.push({
@@ -257,8 +261,8 @@ function yearRows(year, yearTotals, quarters) {
     title: `Form 940 — Tax Year ${year}`,
     period_label: `Tax Year ${year}`,
     due_date: jan31,
-    amount_due: dollars(yearTotals.futa - deposited),
-    notes: `FUTA for the year: $${dollars(yearTotals.futa)}. The amount due is what the FUTA deposit rows have not covered. File by mail or e-file.`,
+    amount_due: dollars(yearTotals.futa),
+    notes: `FUTA for the year: $${dollars(yearTotals.futa)}. Deposits already made reduce what is paid with the return. File by mail or e-file.`,
   }, {
     source_key: `${SOURCE_PREFIX}w2:${year}`,
     filing_type: 'payroll_w2',
@@ -308,6 +312,45 @@ function payrollObligations({ checks = [], hires = [], today }) {
     .sort((a, b) => a.due_date.localeCompare(b.due_date) || a.source_key.localeCompare(b.source_key));
 }
 
+const toCents = (v) => Math.round(Number(v) * 100) || 0;
+
+/**
+ * Turns the obligations (amount = the full liability) into the rows the
+ * calendar should hold, given the rows already marked done (status other than
+ * 'upcoming'; each { source_key, amount_paid, amount_due }).
+ *   - No marked row for a duty: the base row.
+ *   - Marked rows and no amount on the duty (a return, W-2, new hire, FUTA
+ *     alert): nothing, the duty is done.
+ *   - Marked rows and an amount: what the marked rows cover (amount_paid, else
+ *     amount_due) comes off the liability. A positive rest becomes a balance
+ *     row '<base>:balance:<count of marked rows>'; otherwise nothing.
+ */
+function withBalances(obligations, markedRows) {
+  const marked = new Map();
+  for (const row of markedRows) {
+    const duty = String(row.source_key).split(BALANCE_SEPARATOR)[0];
+    if (!marked.has(duty)) marked.set(duty, []);
+    marked.get(duty).push(row);
+  }
+  const wanted = [];
+  for (const ob of obligations) {
+    const done = marked.get(ob.source_key);
+    if (!done) { wanted.push(ob); continue; }
+    if (ob.amount_due === null || ob.amount_due === undefined) continue;
+    const covered = done.reduce((sum, row) => sum + toCents(row.amount_paid ?? row.amount_due ?? 0), 0);
+    const rest = toCents(ob.amount_due) - covered;
+    if (rest <= 0) continue;
+    wanted.push({
+      ...ob,
+      source_key: `${ob.source_key}${BALANCE_SEPARATOR}${done.length}`,
+      title: `${ob.title} — balance after a correction`,
+      amount_due: dollars(rest),
+      notes: `${ob.notes} A pay run changed after this was marked done; $${dollars(rest)} more is due. A corrected return may be needed.`,
+    });
+  }
+  return wanted;
+}
+
 const CHANGED_FIELDS = ['title', 'period_label', 'due_date', 'amount_due', 'notes'];
 const normalizeAmount = (v) => (v === null || v === undefined ? null : Number(v).toFixed(2));
 
@@ -330,11 +373,14 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
       .whereNotNull('hire_date')
       .where('hire_date', '>=', NEW_HIRE_FLOOR)
       .select('id', 'name', 'employment_type', 'employment_status', trx.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"));
-    const obligations = payrollObligations({ checks, hires, today });
     const existing = await trx('tax_filing_calendar')
       .where('source_key', 'like', `${SOURCE_PREFIX}%`)
-      .select('id', 'source_key', 'status', 'title', 'period_label', 'amount_due', 'notes',
+      .select('id', 'source_key', 'status', 'title', 'period_label', 'amount_due', 'amount_paid', 'notes',
         trx.raw("to_char(due_date, 'YYYY-MM-DD') AS due_date"));
+    const obligations = withBalances(
+      payrollObligations({ checks, hires, today }),
+      existing.filter((row) => row.status !== 'upcoming'),
+    );
     const byKey = new Map(existing.map((row) => [row.source_key, row]));
     const result = { inserted: 0, updated: 0, deleted: 0 };
 
@@ -392,6 +438,7 @@ module.exports = {
   rollIrs,
   rollFlorida,
   payrollObligations,
+  withBalances,
   syncPayrollFilings,
   syncPayrollFilingsSafe,
 };

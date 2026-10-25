@@ -188,6 +188,66 @@ postgres('payroll tax calendar sync', () => {
     expect(await payrollRows()).toHaveLength(0);
   });
 
+  describe('a pay run corrected after its deposit was marked paid', () => {
+    const KEY = 'payroll:941_deposit:2027-01';
+    const markPaid = (amount) => trx('tax_filing_calendar').where({ source_key: KEY })
+      .update({ status: 'paid', amount_paid: amount, paid_date: '2027-02-12', confirmation_number: 'SAMPLE-2' });
+    // Void the first run and finalize a replacement for the same week.
+    const replace = async (first, patch) => {
+      await trx('payroll_checks').where({ id: first.checkId }).update({ status: 'voided' });
+      await trx('payroll_runs').where({ id: first.runId }).update({ status: 'voided' });
+      return finalCheck(W1, '2027-01-15', patch);
+    };
+
+    it('adds exactly one balance row for a higher amount and leaves the paid row alone', async () => {
+      const first = await finalCheck(W1, '2027-01-15'); // deposit 253.00
+      await sync();
+      await markPaid('253.00');
+      await replace(first, { federal_income_tax_cents: 20000 }); // deposit 353.00
+      await sync();
+      const rows = (await payrollRows()).filter((r) => r.source_key.startsWith(KEY));
+      expect(rows.map((r) => [r.source_key, r.status, r.amount_due])).toEqual([
+        [KEY, 'paid', '253.00'],
+        [`${KEY}:balance:1`, 'upcoming', '100.00'],
+      ]);
+      expect(rows[0]).toMatchObject({ amount_paid: '253.00', confirmation_number: 'SAMPLE-2' });
+      expect(await sync()).toEqual({ inserted: 0, updated: 0, deleted: 0 });
+    });
+
+    it('adds no row for a lower amount', async () => {
+      const first = await finalCheck(W1, '2027-01-15');
+      await sync();
+      await markPaid('253.00');
+      await replace(first, { federal_income_tax_cents: 5000 }); // deposit 203.00
+      await sync();
+      const rows = (await payrollRows()).filter((r) => r.source_key.startsWith(KEY));
+      expect(rows.map((r) => [r.source_key, r.status, r.amount_due])).toEqual([[KEY, 'paid', '253.00']]);
+    });
+
+    it('removes the balance row when the amount comes back down before it is paid', async () => {
+      const first = await finalCheck(W1, '2027-01-15');
+      await sync();
+      await markPaid('253.00');
+      const second = await replace(first, { federal_income_tax_cents: 20000 });
+      await sync();
+      expect(await rowFor(`${KEY}:balance:1`)).toBeTruthy();
+      await replace(second, { federal_income_tax_cents: 10000 });
+      await sync();
+      expect(await rowFor(`${KEY}:balance:1`)).toBeUndefined();
+    });
+  });
+
+  it('writes one FUTA alert row when the year passes $500, and no FUTA deposit rows', async () => {
+    await finalCheck(W1, '2027-01-15', { futa_cents: 30000 });
+    await finalCheck(W2, '2027-01-22', { futa_cents: 30000 });
+    await sync();
+    const alert = await rowFor('payroll:futa_over_500:2027');
+    expect(alert).toMatchObject({ filing_type: 'payroll_futa_alert', status: 'upcoming', amount_due: null, period_label: 'Tax Year 2027' });
+    expect(alert.title).toBe('FUTA passed $500 — deposit due (Q1 2027)');
+    expect((await rowFor('payroll:940:2027')).amount_due).toBe('600.00');
+    expect((await payrollRows()).filter((r) => r.filing_type === 'payroll_futa_deposit')).toHaveLength(0);
+  });
+
   it('leaves ordinary calendar rows alone', async () => {
     await trx('tax_filing_calendar').insert({ filing_type: 'dr15_sales_tax', title: 'Sample DR-15', due_date: '2027-02-20', status: 'upcoming' });
     await sync();

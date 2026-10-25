@@ -4,7 +4,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
-  NEW_HIRE_FLOOR, legalHolidaysIrs, legalHolidaysFlorida, rollIrs, rollFlorida, payrollObligations,
+  NEW_HIRE_FLOOR, legalHolidaysIrs, legalHolidaysFlorida, rollIrs, rollFlorida, payrollObligations, withBalances,
 } = require('../services/payroll-tax-calendar');
 
 const check = (payDate, patch = {}) => ({
@@ -110,33 +110,40 @@ describe('payrollObligations', () => {
     expect(map['payroll:rt6:2027-Q4']).toBeUndefined(); // after the quarter that holds today
   });
 
-  test('FUTA over $500 makes a deposit row and lowers the Form 940 amount', () => {
+  test('FUTA over $500 makes one alert row on the first crossing quarter; the 940 holds the full year', () => {
     const rows = payrollObligations({
       checks: [
         check('2027-02-05', { futa_cents: 30000 }),
         check('2027-05-07', { futa_cents: 30000 }), // cumulative 600.00 through Q2
-        check('2027-08-06', { futa_cents: 4000 }), // 40.00 more, under the threshold on its own
+        check('2027-08-06', { futa_cents: 40000 }), // still over, but the alert is once a year
       ],
       hires: [],
       today: '2027-09-01',
     });
     const map = byKey(rows);
-    expect(map['payroll:futa_deposit:2027-Q1']).toBeUndefined();
-    expect(map['payroll:futa_deposit:2027-Q2']).toMatchObject({
-      filing_type: 'payroll_futa_deposit', amount_due: '600.00', due_date: '2027-08-02',
+    const alerts = rows.filter((r) => r.filing_type === 'payroll_futa_alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      source_key: 'payroll:futa_over_500:2027',
+      title: 'FUTA passed $500 — deposit due (Q2 2027)',
+      period_label: 'Tax Year 2027',
+      due_date: '2027-08-02', // Jul 31 is a Saturday
+      amount_due: null,
     });
-    expect(map['payroll:futa_deposit:2027-Q3']).toBeUndefined();
+    expect(alerts[0].notes).toContain('passed $500 in Q2');
+    expect(alerts[0].notes).toContain('check the amount with your accountant');
+    expect(rows.some((r) => r.filing_type === 'payroll_futa_deposit')).toBe(false);
     expect(map['payroll:940:2027']).toMatchObject({
-      period_label: 'Tax Year 2027', due_date: '2028-01-31', amount_due: '40.00',
+      period_label: 'Tax Year 2027', due_date: '2028-01-31', amount_due: '1000.00',
     });
     expect(map['payroll:w2:2027']).toMatchObject({ filing_type: 'payroll_w2', due_date: '2028-01-31', amount_due: null });
   });
 
-  test('FUTA at or under $500 for the year: no deposit row, the 940 holds it all', () => {
+  test('FUTA at or under $500 for the year: no alert row, the 940 holds it all', () => {
     const map = byKey(payrollObligations({
       checks: [check('2027-02-05', { futa_cents: 50000 })], hires: [], today: '2027-03-01',
     }));
-    expect(Object.keys(map).some((k) => k.includes('futa_deposit'))).toBe(false);
+    expect(Object.keys(map).some((k) => k.includes('futa'))).toBe(false);
     expect(map['payroll:940:2027'].amount_due).toBe('500.00');
   });
 
@@ -166,5 +173,60 @@ describe('payrollObligations', () => {
     const rows = payrollObligations({ checks: [check('2027-01-08')], hires: [], today: '2027-01-20' });
     const dates = rows.map((r) => r.due_date);
     expect(dates).toEqual([...dates].sort());
+  });
+});
+
+describe('withBalances', () => {
+  const deposit = (amount) => ({
+    source_key: 'payroll:941_deposit:2027-01', filing_type: 'payroll_941_deposit', title: 'Federal payroll tax deposit — Jan 2027',
+    period_label: 'Jan 2027', due_date: '2027-02-16', amount_due: amount, notes: 'Pay on EFTPS.',
+  });
+  const marked = (key, patch) => ({ source_key: key, amount_paid: null, amount_due: null, ...patch });
+  const BASE = 'payroll:941_deposit:2027-01';
+
+  test('no marked row: the base row is wanted as is', () => {
+    expect(withBalances([deposit('600.00')], [])).toEqual([deposit('600.00')]);
+  });
+
+  test('paid $600 and the liability is now $700: one balance row for $100', () => {
+    const rows = withBalances([deposit('700.00')], [marked(BASE, { amount_paid: '600.00', amount_due: '600.00' })]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      source_key: `${BASE}:balance:1`, filing_type: 'payroll_941_deposit', period_label: 'Jan 2027',
+      due_date: '2027-02-16', amount_due: '100.00', title: 'Federal payroll tax deposit — Jan 2027 — balance after a correction',
+    });
+    expect(rows[0].notes).toBe('Pay on EFTPS. A pay run changed after this was marked done; $100.00 more is due. A corrected return may be needed.');
+  });
+
+  test('the liability fell to the amount paid or below: no row', () => {
+    const paid = [marked(BASE, { amount_paid: '600.00', amount_due: '600.00' })];
+    expect(withBalances([deposit('600.00')], paid)).toEqual([]);
+    expect(withBalances([deposit('500.00')], paid)).toEqual([]);
+  });
+
+  test('two marked rows and the liability up again: balance 2 holds what is still uncovered', () => {
+    const rows = withBalances([deposit('750.00')], [
+      marked(BASE, { amount_paid: '600.00', amount_due: '600.00' }),
+      marked(`${BASE}:balance:1`, { amount_paid: '100.00', amount_due: '100.00' }),
+    ]);
+    expect(rows.map((r) => [r.source_key, r.amount_due])).toEqual([[`${BASE}:balance:2`, '50.00']]);
+  });
+
+  test('amount_paid wins over amount_due; a prepared row counts its amount_due as covered', () => {
+    const prepared = withBalances([deposit('700.00')], [marked(BASE, { amount_due: '650.00' })]);
+    expect(prepared[0]).toMatchObject({ source_key: `${BASE}:balance:1`, amount_due: '50.00' });
+    const paidLess = withBalances([deposit('700.00')], [marked(BASE, { amount_paid: '640.00', amount_due: '700.00' })]);
+    expect(paidLess[0].amount_due).toBe('60.00');
+  });
+
+  test('a marked row with no amount on the duty (return, W-2, new hire, alert) wants nothing', () => {
+    const ret = { ...deposit(null), source_key: 'payroll:941:2027-Q1', filing_type: 'payroll_941' };
+    expect(withBalances([ret], [marked('payroll:941:2027-Q1', { amount_paid: null })])).toEqual([]);
+    expect(withBalances([ret], [])).toEqual([ret]);
+  });
+
+  test('an unrelated marked row does not hide another duty', () => {
+    const feb = { ...deposit('300.00'), source_key: 'payroll:941_deposit:2027-02' };
+    expect(withBalances([feb], [marked(BASE, { amount_paid: '600.00' })])).toEqual([feb]);
   });
 });
