@@ -8,6 +8,8 @@ import StaffDocumentLibrary from "../../components/staffDocuments/Library";
 import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import PayGrowth from "../../components/payGrowth/PayGrowth";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
+import PayrollSettings from "../../components/payroll/PayrollSettings";
+import usePayrollAvailable from "../../hooks/usePayrollAvailable";
 import {
   BarChart3,
   CheckCircle2,
@@ -16,6 +18,7 @@ import {
   LayoutDashboard,
   List,
   Users,
+  Wallet,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import "./TimeTrackingPage.css";
@@ -174,6 +177,7 @@ const STAFF_SECTIONS = [
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
   { key: "pay-growth", label: "Growth", Icon: BarChart3 },
+  { key: "payroll", label: "Payroll", Icon: Wallet },
 ];
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf
@@ -191,7 +195,7 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents", "pay-growth"],
+    tabs: ["team", "documents", "pay-growth", "payroll"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -205,7 +209,13 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 // other invalid/role-gated deep link. While an admin's availability request
 // is still pending (null) the tab is unresolved: rendering Team meanwhile
 // would flash the wrong view and could flush a false Team usage beacon.
-export function resolveStaffTab(rawTab, payGrowthAvailable, role) {
+//
+// The payroll tab (GATE_PAYROLL) follows the same rule from its own status probe.
+export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailable = false) {
+  if (rawTab === "payroll") {
+    if (role !== "admin" || payrollAvailable === false) return "team";
+    return payrollAvailable === true ? "payroll" : null;
+  }
   if (rawTab !== "pay-growth") return rawTab;
   if (role !== "admin" || payGrowthAvailable === false) return "team";
   return payGrowthAvailable === true ? "pay-growth" : null;
@@ -214,12 +224,14 @@ export function resolveStaffTab(rawTab, payGrowthAvailable, role) {
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
   const payGrowthAvailable = usePayGrowthAvailable();
+  const payrollAvailable = usePayrollAvailable(readStaffRole() === "admin");
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
   const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
   // null = pay-growth requested by an admin while availability is still
   // unknown: no leaf renders and no beacon fires until it resolves.
-  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole());
+  const payrollGateOpen = payrollAvailable === true && readStaffRole() === "admin";
+  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole(), payrollAvailable);
   const setTab = (value) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
@@ -258,6 +270,7 @@ export default function TimeTrackingPage() {
           activeGroup.tabs.length > 1
             ? activeGroup.tabs
                 .filter((key) => key !== "pay-growth" || payGrowthGateOpen)
+                .filter((key) => key !== "payroll" || payrollGateOpen)
                 .map((key) => STAFF_LEAF_BY_KEY[key])
             : []
         }
@@ -284,7 +297,8 @@ export default function TimeTrackingPage() {
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
       {tab === "pay-growth" && <PayGrowth manage />}
-      {tab === null && <p role="status" style={{ color: "#71717A" }}>Checking pay and growth availability…</p>}
+      {tab === "payroll" && <PayrollSettings />}
+      {tab === null && <p role="status" style={{ color: "#71717A" }}>{rawTab === "payroll" ? "Checking payroll availability…" : "Checking pay and growth availability…"}</p>}
       <div
         style={{
           position: "fixed",

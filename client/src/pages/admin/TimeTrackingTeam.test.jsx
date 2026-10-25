@@ -128,3 +128,18 @@ describe('TimeTrackingPage pay-growth deep-link resolution', () => {
     expect(resolveStaffTab('dashboard', false, 'technician')).toBe('dashboard');
   });
 });
+
+describe('TimeTrackingPage payroll deep-link resolution', () => {
+  it('withholds the payroll tab while the admin status probe is pending, then resolves it', () => {
+    expect(resolveStaffTab('payroll', false, 'admin', null)).toBeNull();
+    expect(resolveStaffTab('payroll', false, 'admin', true)).toBe('payroll');
+    expect(resolveStaffTab('payroll', false, 'admin', false)).toBe('team');
+  });
+
+  it('falls back to Team for non-admins and when the status is unknown to the caller', () => {
+    expect(resolveStaffTab('payroll', true, 'technician', true)).toBe('team');
+    expect(resolveStaffTab('payroll', true, null, true)).toBe('team');
+    expect(resolveStaffTab('payroll', true, 'admin')).toBe('team');
+    expect(resolveStaffTab('pay-growth', true, 'admin', false)).toBe('pay-growth');
+  });
+});
