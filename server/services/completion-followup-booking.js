@@ -44,6 +44,7 @@ const {
 } = require('./scheduling/window-rules');
 const { findConflictingVisits } = require('./scheduling/occupancy');
 const { assertAssignableTechnician } = require('./technician-eligibility');
+const { techWorkDaysLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { completeScheduledServiceInsert } = require('./booking/create-scheduled-service');
 
@@ -392,7 +393,7 @@ async function followupPreview({ date, insertData, technicianOverride }) {
   let wouldTechnicianId = insertData.technician_id;
   if (wouldTechnicianId) {
     try {
-      await assertAssignableTechnician(wouldTechnicianId, { conn: db, date: String(date).slice(0, 10) });
+      await assertAssignableTechnician(wouldTechnicianId, { conn: db, date: String(date).slice(0, 10), workDays: !technicianOverride });
     } catch (eligErr) {
       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
       wouldTechnicianId = null;
@@ -471,11 +472,18 @@ async function commitFollowup({ svc, date, cols, insertData, technicianOverride,
     // explicit override that is not assignable is a 422.
     if (insertData.technician_id) {
       try {
-        await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(date).slice(0, 10) });
+        // An inherited technician is automatic (workDays: a day they do not
+        // work lands the follow-up unassigned); an admin override is an office
+        // choice, which only warns (GATE_TECH_WORK_DAYS).
+        await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(date).slice(0, 10), workDays: !technicianOverride });
       } catch (eligErr) {
         if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
         logger.warn(`[dispatch] follow-up inherits technician ${insertData.technician_id} who is not assignable; booking unassigned`);
         insertData.technician_id = null;
+      }
+      if (technicianOverride && insertData.technician_id && techWorkDaysLive()) {
+        const offDay = await require('./technician-eligibility').offDayWarningFor(insertData.technician_id, String(date).slice(0, 10), { conn: trx });
+        if (offDay) overlapWarning = [overlapWarning, offDay].filter(Boolean).join(' ');
       }
     }
     // expectedTechnicianId (IB closeout repair): the approval showed this

@@ -416,7 +416,7 @@ async function commitVoiceBooking({
       });
       if (clash.length) return { status: 'slot_taken' };
 
-      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr });
+      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr, workDays: true });
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only

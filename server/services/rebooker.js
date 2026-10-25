@@ -5,14 +5,25 @@ const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
 const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
+const { techWorkDaysLive } = require('../config/feature-gates');
 
 // A caller-chosen slot technician who became ineligible between availability
 // and this commit is a "pick another slot" outcome for the customer, not an
 // internal 422 naming staff: translate it to the route's SLOT_TAKEN recovery
 // (reschedule-public refreshes availability on that code).
-async function assertAssignableSlotTechnician(technicianId, trx, date) {
+//
+// Work days (GATE_TECH_WORK_DAYS): every non-admin move is automatic (customer,
+// rain-out, auto-dispatch, AI), so a kept technician who does not work that
+// weekday is refused the same way. An admin move only warns: the line is added
+// to `warnings` (a Set the caller reads) and the move proceeds.
+async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null } = {}) {
+  const staffMove = initiatedBy === 'admin';
   try {
-    await assertAssignableTechnician(technicianId, { conn: trx, date });
+    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: !staffMove });
+    if (staffMove && warnings && technicianId && techWorkDaysLive()) {
+      const line = await require('./technician-eligibility').offDayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx });
+      if (line) warnings.add(line);
+    }
   } catch (err) {
     if (err.code !== NOT_ASSIGNABLE) throw err;
     throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
@@ -1412,6 +1423,16 @@ class SmartRebooker {
       etDateString(addETDays(today, 10)),
     );
 
+    // Work days (GATE_TECH_WORK_DAYS): the options keep the visit's own
+    // technician, so a non-admin flow (a call with a `reason`: rain-out, the
+    // customer's own move) is not offered a weekday that technician does not
+    // work; the commit would refuse it. The admin picker (no reason) lists every
+    // day: office moves warn instead. One extra read, only with the gate on.
+    let keptTechWorkDays = null;
+    if (reason && service.technician_id && techWorkDaysLive()) {
+      keptTechWorkDays = await db('technicians').where({ id: service.technician_id }).first('id', 'work_days');
+    }
+
     for (let d = 1; d <= 10; d++) {
       // ET calendar math — toISOString() reads the UTC date while displayDate
       // below formats in ET, so between 8 PM and midnight ET the customer would
@@ -1420,6 +1441,7 @@ class SmartRebooker {
 
       const dateStr = etDateString(candidateDate);
       if (blackout.has(dateStr)) continue;
+      if (keptTechWorkDays && require('./technician-eligibility').isOffDay(keptTechWorkDays, dateStr)) continue;
       // A seasonal (Feb–Oct) visit must not be OFFERED a Nov–Jan option to
       // flows that commit with a non-admin initiator: rain-out calls
       // reschedule() as 'tech', whose season guard would reject the target —
@@ -1909,6 +1931,9 @@ class SmartRebooker {
     const overlapAdvisory = options.overlapAdvisory === true;
     let overlapWarned = false;
     let arrivalWarning = null;
+    // Office-move work-day warnings (assertAssignableSlotTechnician); a Set so a
+    // deadlock retry that re-runs the body never doubles a line.
+    const offDayWarnings = new Set();
     const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
     if (useArrivalWindows && updates.window_start) await preloadServiceLocations(db, [serviceId]);
     // The technician on the COMMITTED row (RETURNING off the CAS write).
@@ -1926,7 +1951,7 @@ class SmartRebooker {
         try {
           return await db.transaction(body);
         } catch (err) {
-          if (err && err.code === '40P01' && attempt < 2) { overlapWarned = false; continue; }
+          if (err && err.code === '40P01' && attempt < 2) { overlapWarned = false; offDayWarnings.clear(); continue; }
           throw err;
         }
       }
@@ -2151,7 +2176,7 @@ class SmartRebooker {
       // edit stays untouched: no new query.
       const techChangeForEligibility = Object.prototype.hasOwnProperty.call(updates, 'technician_id');
       if (techChangeForEligibility || !sameDayTarget) {
-        await assertAssignableSlotTechnician(keptTechId, trx, newDateStr);
+        await assertAssignableSlotTechnician(keptTechId, trx, newDateStr, { initiatedBy, warnings: offDayWarnings });
       }
       // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
       // re-reads the receiving tech's capabilities here; the unit mover runs the
@@ -2531,11 +2556,14 @@ class SmartRebooker {
       });
     }
 
-    if (overlapWarned) {
+    if (overlapWarned || offDayWarnings.size) {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
       // previousStatus: the status the CAS matched — the row's real
       // pre-move state, for callers that restore it (auto-dispatch).
-      return { success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId, warnings: [arrivalWarning || slotOverlapWarning(newDateStr)] };
+      return {
+        success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId,
+        warnings: [...(overlapWarned ? [arrivalWarning || slotOverlapWarning(newDateStr)] : []), ...offDayWarnings],
+      };
     }
     // technicianId: the holder on the COMMITTED row — a caller that suppressed
     // the per-move tech notice (options.suppressTechNotice) tells them itself.
@@ -2594,6 +2622,8 @@ class SmartRebooker {
     // concurrency aborts are unaffected.
     const overlapAdvisory = options.overlapAdvisory === true;
     const overlapWarnDates = new Set();
+    // Office-move work-day lines (GATE_TECH_WORK_DAYS): plain warnings only.
+    const offDayWarnings = new Set();
     // Customer intent reserves the selected visit only. Future cadence dates
     // are work for dispatch, not availability prerequisites for this booking.
     // SMS has no pre-confirmation placement disclosure, so it keeps its
@@ -3589,7 +3619,7 @@ class SmartRebooker {
           });
         }
         if (partnerDateChanges) await assertPartnerPlanDayFree(trx, partner, dateStr, [...sweptIds, ...carry.partnerIds]);
-        if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr);
+        if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr, { initiatedBy, warnings: offDayWarnings });
         if (keptTech) {
           await trx.raw(
             'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -3835,7 +3865,7 @@ class SmartRebooker {
         const anchorTechChanges = isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId');
         if (isAnchor && (anchorTechChanges || sibDateChanges)) {
           const anchorKeptTechId = anchorTechChanges ? (options.technicianId || null) : (sib.technician_id || null);
-          await assertAssignableSlotTechnician(anchorKeptTechId, trx, String(date).split('T')[0]);
+          await assertAssignableSlotTechnician(anchorKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings });
         }
         // Same save-time eligibility check for every NON-anchor sibling
         // that lands on a new date (tech-out P1): a follower keeps its own
@@ -3847,7 +3877,7 @@ class SmartRebooker {
         // move).
         if (!isAnchor && sibDateChanges) {
           const sibKeptTechId = sib.technician_id || null;
-          await assertAssignableSlotTechnician(sibKeptTechId, trx, String(date).split('T')[0]);
+          await assertAssignableSlotTechnician(sibKeptTechId, trx, String(date).split('T')[0], { initiatedBy, warnings: offDayWarnings });
         }
         if (anchorTechChanges) {
           updateData.technician_id = options.technicianId || null;
@@ -4252,7 +4282,7 @@ class SmartRebooker {
       const seriesWarnings = [...overlapWarnDates].sort().map((d) => {
         const { slotOverlapWarning } = require('./scheduling/window-rules');
         return arrivalWarnings.get(d) || slotOverlapWarning(d);
-      }).concat(followUpWarnings);
+      }).concat(followUpWarnings, [...offDayWarnings]);
       committedResult = {
         success: true,
         originalDate: dateOnly(service.scheduled_date),

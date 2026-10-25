@@ -167,6 +167,10 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
               {tech.out_today && (
                 <Badge tone="neutral" className="flex-shrink-0">Out</Badge>
               )}
+              {/* Not a work day (GATE_TECH_WORK_DAYS): information only, the card stays a drop target. */}
+              {!tech.out_today && tech.off_today && (
+                <Badge tone="neutral" className="flex-shrink-0">Off</Badge>
+              )}
             </div>
             <div className={cn('flex items-center gap-1.5 mt-0.5')}>
               <span className={cn('inline-block w-1.5 h-1.5 rounded-full', dotColor)} />
@@ -217,6 +221,7 @@ export default React.memo(TechCardImpl, (prev, next) => {
   if (prev.tech.current_job_id !== next.tech.current_job_id) return false;
   if (prev.tech.eta_minutes !== next.tech.eta_minutes) return false;
   if (prev.tech.out_today !== next.tech.out_today) return false;
+  if (prev.tech.off_today !== next.tech.off_today) return false;
   if (prev.selected !== next.selected) return false;
   if (prev.jobs !== next.jobs) return false;
   if (prev.onSelect !== next.onSelect) return false;

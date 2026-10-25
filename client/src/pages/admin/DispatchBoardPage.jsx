@@ -85,6 +85,8 @@ export default function DispatchBoardPage() {
   // outcome (success refetches via broadcast; miss is a no-op).
   const [draggingJobId, setDraggingJobId] = useState(null);
   const [assignError, setAssignError] = useState(null);
+  // Plain notes the server sent with a SAVED drag-reassign (e.g. a tech who does not work that day).
+  const [assignNotice, setAssignNotice] = useState(null);
   // Bumped after a successful drag-reassign of the job currently
   // open in JobDrawer. The drawer's own state is independent of the
   // board's jobs[] array, so the dispatch:job_update broadcast that
@@ -97,6 +99,7 @@ export default function DispatchBoardPage() {
   const handleJobDragStart = useCallback((jobId) => {
     setDraggingJobId(jobId);
     setAssignError(null);
+    setAssignNotice(null);
   }, []);
   const handleJobDragEnd = useCallback(() => {
     setDraggingJobId(null);
@@ -123,6 +126,10 @@ export default function DispatchBoardPage() {
           const body = await res.json().catch(() => null);
           throw new Error(body?.error || `HTTP ${res.status}`);
         }
+        // Saved. Show any warning lines the server sent (the save is not undone).
+        const saved = await res.json().catch(() => null);
+        const warnings = Array.isArray(saved?.warnings) ? saved.warnings.filter((w) => typeof w === "string" && w) : [];
+        setAssignNotice(warnings.length ? warnings.join(" ") : null);
         // If the drawer is open on the same job we just reassigned,
         // bump its refetch signal so it re-pulls the enriched job
         // detail and shows the new assignee. The board pin re-colors
@@ -155,6 +162,16 @@ export default function DispatchBoardPage() {
 
   return (
     <>
+      {assignNotice && (
+        <div
+          role="status"
+          className="bg-surface-page text-ink-secondary text-12 px-4 py-2 border-b border-zinc-200 cursor-pointer"
+          onClick={() => setAssignNotice(null)}
+          title="Click to dismiss"
+        >
+          {assignNotice}
+        </div>
+      )}
       {assignError && (
         <div
           role="alert"

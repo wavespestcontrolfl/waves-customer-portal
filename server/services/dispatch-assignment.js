@@ -4,6 +4,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
 const { assertAssignableTechnician } = require('./technician-eligibility');
+const { techWorkDaysLive } = require('../config/feature-gates');
 
 const ADMIN_ROOM = 'dispatch:admins';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -188,6 +189,12 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // back to the row's own date when no snapshot date is given.
   const eligibilityDate = dateOnly(noticeSnapshot?.date) || dateOnly(job.scheduled_date);
   const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn, date: eligibilityDate }) : null;
+  // Work days (GATE_TECH_WORK_DAYS): an office assignment or board drag onto a
+  // day the technician does not work is allowed; the result carries one plain
+  // warning line for the route to return. Gate off: no read, no `warnings` key.
+  const offDayLine = newTechId && (job.technician_id || null) !== newTechId && techWorkDaysLive()
+    ? await require('./technician-eligibility').offDayWarningFor(newTechId, eligibilityDate, { conn })
+    : null;
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -366,6 +373,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     job: updatedRow,
     technicianName: tech?.name || null,
     changed: true,
+    ...(offDayLine ? { warnings: [offDayLine] } : {}),
   };
 }
 

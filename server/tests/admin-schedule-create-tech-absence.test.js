@@ -101,8 +101,10 @@ function chain(row) {
 }
 
 // technicians: a single active + field-dispatchable row, whatever the where().
+// work_days (GATE_TECH_WORK_DAYS) is whatever the test sets; null = every day.
+let techWorkDays = null;
 function chainTechnician(techId) {
-  return chain({ id: techId, name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true });
+  return chain({ id: techId, name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true, work_days: techWorkDays });
 }
 
 // technician_absences: only a hit when where() named THIS tech + THIS date
@@ -137,6 +139,8 @@ let inserts;
 beforeEach(() => {
   jest.clearAllMocks();
   inserts = [];
+  techWorkDays = null;
+  delete process.env.GATE_TECH_WORK_DAYS;
   findConflictingVisits.mockResolvedValue([]);
   acquireOccupancyLock.mockImplementation(async () => {});
   lockCustomerComms.mockImplementation(async () => {});
@@ -209,3 +213,51 @@ describe('POST / — admin create — recurring child/booster technician-absence
     expect(body.code).not.toBe('TECH_NOT_ASSIGNABLE');
   });
 });
+
+// GATE_TECH_WORK_DAYS (owner 2026-10-25): the office may put a technician on a
+// day they do not work. The create saves every visit and says so in `warnings`.
+describe('POST / — admin create — technician work-days warning (office paths warn, never block)', () => {
+  afterEach(() => { delete process.env.GATE_TECH_WORK_DAYS; });
+  // Same plan as above: the parent and two children fall on Fridays, the booster on a Tuesday.
+  const recurringBody = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    technicianId: 'tech-no-absence',
+    isRecurring: true,
+    recurringPattern: 'monthly',
+    recurringCount: 3,
+    boosterMonths: [11],
+    estimatedPrice: 89,
+    createInvoice: true,
+  };
+
+  test('gate on, a Monday-to-Thursday tech: every visit is saved and one "does not work on Fridays" warning comes back', async () => {
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    techWorkDays = [1, 2, 3, 4];
+    const { status, body } = await post(recurringBody);
+    expect(status).toBe(201);
+    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-07', '2099-09-04', '2099-11-03']);
+    expect(inserts.every((d) => d.technician_id === 'tech-no-absence')).toBe(true);
+    expect(body.warnings).toContain('Test Tech does not work on Fridays.');
+    expect(body.warnings.filter((w) => /does not work/.test(w))).toHaveLength(1);
+  });
+
+  test('gate on, a tech who works Fridays: no work-days warning', async () => {
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    techWorkDays = [1, 2, 3, 4, 5];
+    const { status, body } = await post(recurringBody);
+    expect(status).toBe(201);
+    expect((body.warnings || []).some((w) => /does not work/.test(w))).toBe(false);
+  });
+
+  test('gate off: work_days is ignored, no warning', async () => {
+    techWorkDays = [1, 2, 3, 4];
+    const { status, body } = await post(recurringBody);
+    expect(status).toBe(201);
+    expect((body.warnings || []).some((w) => /does not work/.test(w))).toBe(false);
+  });
+});
+

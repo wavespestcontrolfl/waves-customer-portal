@@ -347,6 +347,30 @@ describe('roster summary + new-hire seed', () => {
     expect(asTech.body.technicians[0]).not.toHaveProperty('pay_rate');
   });
 
+  test('GATE_TECH_WORK_DAYS: the roster carries work_days and workDaysEnabled only while the gate is on; non-admin readers never see work_days', async () => {
+    const techs = [{ ...TECH, work_days: [1, 2, 3, 4] }];
+    const conn = jest.fn((table) => {
+      if (table === 'technicians') return makeChain({ rows: techs });
+      if (table === 'technician_capabilities') return makeChain({ rows: [] });
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    installDb(conn);
+    try {
+      const off = await invoke(listTechnicians, { technician: { role: 'admin' } });
+      expect(off.body).not.toHaveProperty('workDaysEnabled');
+      expect(off.body.technicians[0]).not.toHaveProperty('work_days');
+
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      const on = await invoke(listTechnicians, { technician: { role: 'admin' } });
+      expect(on.body.workDaysEnabled).toBe(true);
+      expect(on.body.technicians[0].work_days).toEqual([1, 2, 3, 4]);
+      const asTech = await invoke(listTechnicians, { technician: { role: 'technician' } });
+      expect(asTech.body.technicians[0]).not.toHaveProperty('work_days');
+    } finally {
+      delete process.env.GATE_TECH_WORK_DAYS;
+    }
+  });
+
   test('creating a technician seeds all five categories at review_required on the same transaction', async () => {
     const conn = fakeConn();
     // createTechnician: email probe (first → none), then the insert.

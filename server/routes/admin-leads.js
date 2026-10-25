@@ -2145,6 +2145,11 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // ---- end slot-overlap guard part 2
 
       await assertAssignableTechnician(technicianId || null, { conn: trx, date: String(date).slice(0, 10) });
+      // Work days (GATE_TECH_WORK_DAYS): an office booking onto a day the
+      // technician does not work still saves; the response warns.
+      if (technicianId && require('../config/feature-gates').techWorkDaysLive()) {
+        bookingWarnings.push(...await require('../services/technician-eligibility').offDayWarningsFor(technicianId, [String(date).slice(0, 10)], { conn: trx }));
+      }
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,

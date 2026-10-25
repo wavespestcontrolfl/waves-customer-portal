@@ -533,7 +533,7 @@
     },
     {
       "endpoint": "/admin/dispatch/board",
-      "reviewed": "Handler: today's clocked-in technicians (status, last location, job counts) and today's jobs (id, customer first name and last initial, address, window, status). The technician photo is a presigned S3 URL (tech-photo.js), which the row omits (avatar_url) so the signed_url signals are accepted. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
+      "reviewed": "Handler: today's clocked-in technicians (status, last location, job counts) and today's jobs (id, customer first name and last initial, address, window, status). The technician photo is a presigned S3 URL (tech-photo.js), which the row omits (avatar_url) so the signed_url signals are accepted. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed 2026-10-25 (GATE_TECH_WORK_DAYS): with the gate on, the handler adds one read of technicians (id, work_days) and a boolean off_today per technician; no new column leaves the row, signals and unresolved callees unchanged. Hash re-signed 2026-10-25 after rebasing onto main 33e3daa025 (a followed module changed upstream); same reads, signals and unresolved callees.",
       "scope": "broad",
       "omit": [
         "techs.avatar_url"
@@ -586,7 +586,7 @@
         "services/tech-photo.js#getSignedUrl",
         "services/tech-photo.js#new GetObjectCommand"
       ],
-      "hash": "81c1f0241fe78fc3a96e6f815e2fc561"
+      "hash": "527aae97f4ff5e719b90b480c50bc803"
     },
     {
       "endpoint": "/admin/dispatch/jobs/:id",
@@ -659,14 +659,14 @@
     },
     {
       "endpoint": "/admin/dispatch/technicians",
-      "reviewed": "Handler + applyAssignable (technician-eligibility.js): assignable technicians (id, name, role) with an absence filter; read end to end.",
+      "reviewed": "Handler + applyAssignable (technician-eligibility.js): assignable technicians (id, name, role) with an absence filter; read end to end. Re-reviewed 2026-10-25 (GATE_TECH_WORK_DAYS): with the gate on and a date, the handler adds one read of technicians (id, work_days) and an offDay boolean on a tech who does not work that weekday; the tech stays in the list. Hash re-signed 2026-10-25 after rebasing onto main 33e3daa025 (a followed module changed upstream); same reads, signals and unresolved callees.",
       "scope": "broad",
       "query": [
         "date"
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "22ae3a6e90e1731542b879a615fe1796"
+      "hash": "16ab00882c35869dbe7e85661801d634"
     },
     {
       "endpoint": "/admin/dispatch/techs/:id",
