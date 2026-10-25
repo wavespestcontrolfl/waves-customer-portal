@@ -738,8 +738,26 @@ async function paidRevenueForWindow(db, startDate, endDate) {
   );
 }
 
+// The sums every sales-tax leg below selects: the tax, the taxable base it was
+// charged on (subtotal less discount, as InvoiceService.create taxes it; a card
+// surcharge sits in the total untaxed, so neither tax / rate nor total - tax is
+// the base) and the county surtax part of the tax (the rate above Florida's 6%
+// state rate). The DR-15 worksheet reads all three; the P&L reads the tax only.
+const FL_STATE_SALES_TAX_RATE = 0.06;
+const TAX_BASE_SQL = 'GREATEST(COALESCE(i.subtotal, 0) - COALESCE(i.discount_amount, 0), 0)';
+const NO_TAX_LEG = { total: '0', base: '0', surtax: '0' };
+function taxLegSums(db) {
+  return [
+    db.raw("COALESCE(SUM(i.tax_amount)::text, '0') as total"),
+    db.raw(`COALESCE(SUM(${TAX_BASE_SQL})::text, '0') as base`),
+    db.raw(`COALESCE(SUM(${TAX_BASE_SQL} * GREATEST(COALESCE(i.tax_rate, 0) - ${FL_STATE_SALES_TAX_RATE}, 0))::text, '0') as surtax`),
+  ];
+}
+
 /**
- * NET sales tax liability recognized in [startDate, endDate] (ET days):
+ * NET sales tax liability recognized in [startDate, endDate] (ET days), as
+ * { tax, taxable, surtax } (see taxLegSums), with the gross legs apart in
+ * `collected` and `reversed`:
  * tax collected on invoices PAID in the window (by paid_at — receipt
  * period, stable across later refunds) MINUS tax reversed by invoices
  * FULLY refunded in the window (refund period — where the tax-inclusive
@@ -772,7 +790,7 @@ async function paidRevenueForWindow(db, startDate, endDate) {
  * code outside this PR's scope. YTD totals converge once a cycle settles —
  * only the intra-cycle month split is affected.
  */
-async function salesTaxCollectedForWindow(db, startDate, endDate) {
+async function salesTaxLegsForWindow(db, startDate, endDate) {
   const [collected, reversed, statementReversed] = await Promise.all([
     // Tax collected in the RECEIPT period. status IN ('paid','refunded') so a
     // later full refund can't retroactively rewrite the original period —
@@ -836,9 +854,9 @@ async function salesTaxCollectedForWindow(db, startDate, endDate) {
         )) BETWEEN ?::date AND ?::date`,
         [startDate, endDate],
       )
-      .select(db.raw("COALESCE(SUM(i.tax_amount)::text, '0') as total"))
+      .select(taxLegSums(db))
       .first()
-      .catch(missingTableOnly({ total: '0' })),
+      .catch(missingTableOnly(NO_TAX_LEG)),
     // Tax REVERSED in the refund period. A fully refunded invoice's outflow
     // (tax-inclusive) is netted from revenue in the refund's period by
     // outflowTransactionsQuery, so the tax excluded at receipt must be added
@@ -862,9 +880,9 @@ async function salesTaxCollectedForWindow(db, startDate, endDate) {
         )) BETWEEN ?::date AND ?::date`,
         [startDate, endDate],
       )
-      .select(db.raw("COALESCE(SUM(i.tax_amount)::text, '0') as total"))
+      .select(taxLegSums(db))
       .first()
-      .catch(missingTableOnly({ total: '0' })),
+      .catch(missingTableOnly(NO_TAX_LEG)),
     // Tax REVERSED for dispute/cascade-REOPENED invoices (codex r5-push
     // P0 ×2): an ordinary charge dispute reopens its invoice to 'overdue'
     // (payment marked 'disputed', PI cleared but metadata.dispute_invoice_id
@@ -906,15 +924,27 @@ async function salesTaxCollectedForWindow(db, startDate, endDate) {
         ) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date`,
         [startDate, endDate],
       )
-      .select(db.raw("COALESCE(SUM(i.tax_amount)::text, '0') as total"))
+      .select(taxLegSums(db))
       .first()
-      .catch(missingTableOnly({ total: '0' })),
+      .catch(missingTableOnly(NO_TAX_LEG)),
   ]);
-  return round2(
-    parseFloat(collected?.total || 0)
-    - parseFloat(reversed?.total || 0)
-    - parseFloat(statementReversed?.total || 0),
-  );
+  const leg = (key) => ({
+    in: parseFloat(collected?.[key] || 0),
+    out: parseFloat(reversed?.[key] || 0) + parseFloat(statementReversed?.[key] || 0),
+  });
+  const [tax, base, surtax] = ['total', 'base', 'surtax'].map(leg);
+  return {
+    tax: round2(tax.in - tax.out), taxable: round2(base.in - base.out), surtax: round2(surtax.in - surtax.out),
+    // the gross legs: the DR-15 reports tax collected and refunded tax (line 6) apart
+    collected: { tax: round2(tax.in), taxable: round2(base.in), surtax: round2(surtax.in) },
+    reversed: { tax: round2(tax.out), taxable: round2(base.out), surtax: round2(surtax.out) },
+  };
+}
+
+// The net sales tax alone (salesTaxLegsForWindow): what the P&L backs out of
+// receipts and the quarterly estimate subtracts.
+async function salesTaxCollectedForWindow(db, startDate, endDate) {
+  return (await salesTaxLegsForWindow(db, startDate, endDate)).tax;
 }
 
 /**
@@ -1354,6 +1384,7 @@ module.exports = {
   buildPnlReport,
   paidRevenueForWindow,
   salesTaxCollectedForWindow,
+  salesTaxLegsForWindow,
   buildQuarterlyEstimate,
   computeQuarterlyEstimate,
   assemblePnl,
