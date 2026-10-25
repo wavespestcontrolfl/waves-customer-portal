@@ -294,6 +294,19 @@ describe('ensureEstimateConsumerNotice', () => {
     expect(state.events.map((e) => e.event_type)).toEqual(['cancelled', 'created_from_document_template', 'share_link_created']);
   });
 
+  test('a newer form version with the same text is not reused: the old notice is cancelled and replaced', async () => {
+    // First issue on version 1, then the open row is read back as if it were still on an older version.
+    const first = makeDb({ technicians: [TECH] });
+    await ensureEstimateConsumerNotice({ estimate: termite, req, conn: first.database });
+    const [issued] = first.state.contracts;
+    const { database, state } = makeDb({ technicians: [TECH], contracts: [{ ...issued, id: 'contract-old', document_template_version_id: 'ver-0' }] });
+    const result = await ensureEstimateConsumerNotice({ estimate: termite, req, conn: database });
+    expect(result).toMatchObject({ ok: true, status: 201 });
+    expect(state.contracts.find((c) => c.id === 'contract-old')).toMatchObject({ status: 'cancelled' });
+    expect(state.contracts.filter((c) => c.status === 'sent')).toHaveLength(1);
+    expect(state.contracts.find((c) => c.status === 'sent').document_template_version_id).toBe('ver-1');
+  });
+
   test('a notice staff issued by hand (no estimate marker) is never re-linked', async () => {
     const staffRow = openNotice({ id: 'staff-issued', document_variables_snapshot: { issuer: { name: 'Pat Office' } } });
     const { database, state } = makeDb({ technicians: [TECH], contracts: [staffRow] });

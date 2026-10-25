@@ -161,7 +161,8 @@ async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db, blo
     // the kill switch was thrown must create nothing.
     if (!require('../config/feature-gates').estimateConsumerNoticeLive()) return refusal(404, 'not_available', 'Estimate not found');
     const meta = { source: SNAPSHOT_SOURCE, estimateId: locked.id };
-    if (existing?.contract_text_snapshot === rendered.body) {
+    // Reused only when it is the same form version (its title and signer disclosure too) and reads exactly the same.
+    if (existing && existing.document_template_version_id === version.id && existing.contract_text_snapshot === rendered.body) {
       await trx('customer_contracts').where({ id: existing.id }).update({
         status: 'sent', share_token_hash: hashContractToken(token), share_token_expires_at: expiresAt, shared_at: now, updated_at: now,
       });
