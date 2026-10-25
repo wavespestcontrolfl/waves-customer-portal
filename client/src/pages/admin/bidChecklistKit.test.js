@@ -112,8 +112,9 @@ describe("pillForLine", () => {
     expect(pillForLine("quote.references", idx).text).toBe("Kit: 1 of 3 references");
   });
 
-  it("reps and certs read two facts", () => {
-    expect(pillForLine("federal.reps_certs", index([fact("sam_uei"), fact("cage_code")])).text).toBe("Kit: on file, signed off");
-    expect(pillForLine("federal.reps_certs", index([fact("sam_uei")])).text).toBe("Kit: missing");
+  it("SAM registration reads two facts", () => {
+    expect(pillForLine("federal.sam_registration", index([fact("sam_uei"), fact("cage_code")])).text).toBe("Kit: on file, signed off");
+    expect(pillForLine("federal.sam_registration", index([fact("sam_uei")])).text).toBe("Kit: missing");
+    expect(pillForLine("federal.reps_certs", index([fact("sam_uei"), fact("cage_code")]))).toBeNull();
   });
 });

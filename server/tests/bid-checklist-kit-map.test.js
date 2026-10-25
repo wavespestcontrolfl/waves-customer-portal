@@ -35,7 +35,10 @@ describe('checklist kit map', () => {
     expect(kitKeysForLine('itb.operator_statement')).toEqual(['cpco_fulltime_statement']);
     expect(ITEM_BY_KEY.cpco_fulltime_statement.notarized).toBe(true);
     for (const key of ['references', 'references_form', 'reference_surveys', 'reference_rules', 'past_performance']) expect(CHECKLIST_KIT_MAP[key]).toEqual(['reference']);
-    expect(CHECKLIST_KIT_MAP.reps_certs).toEqual(['sam_uei', 'cage_code']);
+    expect(CHECKLIST_KIT_MAP.sam_registration).toEqual(['sam_uei', 'cage_code']);
+    expect(kitKeysForLine('federal.reps_certs')).toEqual([]);
+    expect(kitKeysForLine('base.submittals')).toEqual(['product_list']);
+    expect(kitKeysForLine('stop.local_office')).toEqual(['service_center_proof']);
     expect(REFERENCE_TARGET).toBe(3);
   });
 });

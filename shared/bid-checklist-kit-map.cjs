@@ -15,9 +15,11 @@ const CHECKLIST_KIT_MAP = {
   // The ten-line bid check.
   licenses: ['business_license_copy', 'cpco_certificate', 'sunbiz_status', 'business_tax_receipt'],
   forms: ['everify', 'drug_free_policy'],
+  submittals: ['product_list'],
   // Stop checks.
   gc_insurance: ['insurance_certificate'],
   reference_rules: ['reference'],
+  local_office: ['service_center_proof'],
   // Quote lines.
   references: ['reference'],
   insurance_certificate: ['insurance_certificate'],
@@ -34,8 +36,8 @@ const CHECKLIST_KIT_MAP = {
   reference_surveys: ['reference'],
   // General-contractor lines.
   insurance_exhibit: ['insurance_certificate'],
-  // Federal lines.
-  reps_certs: ['sam_uei', 'cage_code'],
+  // Federal lines. The kit holds the SAM numbers, not the registration date: the line still needs a check in SAM.
+  sam_registration: ['sam_uei', 'cage_code'],
   past_performance: ['reference'],
 };
 
