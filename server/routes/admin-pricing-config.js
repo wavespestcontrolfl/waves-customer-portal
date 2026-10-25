@@ -831,7 +831,7 @@ async function ensureTable() {
         products: {
           termidor_sc: { container_cost: 375.00, container_oz: 78, product_oz_per_finished_gallon_at_standard_rate: 0.8, product_oz_per_finished_gallon_at_high_rate: 1.6 },
           taurus_sc: { container_cost: 85.00, container_oz: 78, product_oz_per_finished_gallon_at_standard_rate: 0.8, product_oz_per_finished_gallon_at_high_rate: 1.6 },
-          bifen_it: { container_cost: 55.00, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1.0, product_oz_per_finished_gallon_at_high_rate: 2.0 },
+          bifen_it: { container_cost: 41.57, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1.0, product_oz_per_finished_gallon_at_high_rate: 2.0 },
           talstar_p: { container_cost: 41.57, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1.0, product_oz_per_finished_gallon_at_high_rate: 2.0 },
         },
       }) },
@@ -868,7 +868,7 @@ async function ensureTable() {
         products: {
           termidor_sc: { container_cost: 174.72, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.5294 },
           taurus_sc: { container_cost: 95.00, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.5294 },
-          bifen_it: { container_cost: 41.53, container_oz: 128, product_oz_per_10_sqft: 1.0, margin_divisor: 0.5294 },
+          bifen_it: { container_cost: 41.57, container_oz: 96, product_oz_per_10_sqft: 1.0, margin_divisor: 0.5294 },
           talstar_p: { container_cost: 41.57, container_oz: 96, product_oz_per_10_sqft: 1.0, margin_divisor: 0.5294 },
         },
       }) },
