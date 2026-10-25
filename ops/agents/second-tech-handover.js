@@ -505,10 +505,28 @@ function tlsFor(connectionString, caFile = process.env.PG_CA_FILE) {
   return { ca: fs.readFileSync(caFile, 'utf8'), rejectUnauthorized: true, checkServerIdentity: () => undefined };
 }
 
+// The connection as discrete fields. pg would apply TLS options from the URL query
+// (sslmode=disable, sslmode=no-verify, ...) over the pinned policy, so the URL itself is
+// never handed to pg, and a URL that carries any ssl* option is refused outright.
+function connectionFields(connectionString) {
+  const u = new URL(connectionString);
+  const tlsOptions = [...u.searchParams.keys()].filter((k) => /^ssl/i.test(k));
+  if (tlsOptions.length) {
+    throw new Error(`refusing TLS options in the database URL (${tlsOptions.join(', ')}): TLS comes from PG_CA_FILE only`);
+  }
+  return {
+    host: u.hostname.replace(/^\[|\]$/g, ''),
+    port: u.port ? Number(u.port) : 5432,
+    user: decodeURIComponent(u.username),
+    password: u.password ? decodeURIComponent(u.password) : undefined,
+    database: decodeURIComponent(u.pathname.replace(/^\//, '')),
+  };
+}
+
 function readOnlyConn(connectionString) {
   return require('knex')({
     client: 'pg',
-    connection: { connectionString, ssl: tlsFor(connectionString) },
+    connection: { ...connectionFields(connectionString), ssl: tlsFor(connectionString) },
     pool: {
       min: 1,
       max: 1,
@@ -557,7 +575,7 @@ async function main() {
 module.exports = {
   MOVABLE_LINES, OPEN_STATUSES, TERMITE_BAIT_KEYS,
   parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries, isTermiteBaitAddon,
-  buildPlan, planHandover, printPlan, readOnlyConn, tlsFor,
+  buildPlan, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields,
 };
 
 if (require.main === module) {

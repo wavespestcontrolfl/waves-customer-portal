@@ -283,6 +283,31 @@ describe('tlsFor (connection TLS)', () => {
     expect(() => tlsFor('postgresql://u:localhost@example.proxy.rlwy.net:1/db', null)).toThrow(/PG_CA_FILE/);
   });
 
+  test('TLS options in the URL are refused, and the URL never reaches pg (fields only)', () => {
+    const { connectionFields, readOnlyConn } = require('../../ops/agents/second-tech-handover.js');
+    for (const q of ['sslmode=disable', 'sslmode=no-verify', 'ssl=false', 'sslrootcert=/tmp/x']) {
+      expect(() => connectionFields(`${REMOTE}?${q}`)).toThrow(/refusing TLS options/);
+    }
+    expect(connectionFields('postgresql://u%40x:p%2Fq@example.proxy.rlwy.net:6543/rail%20way?application_name=plan')).toEqual({
+      host: 'example.proxy.rlwy.net', port: 6543, user: 'u@x', password: 'p/q', database: 'rail way',
+    });
+    const file = path.join(os.tmpdir(), `pinned-root-b-${process.pid}.pem`);
+    fs.writeFileSync(file, '-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n');
+    const prior = process.env.PG_CA_FILE;
+    process.env.PG_CA_FILE = file;
+    const conn = readOnlyConn(REMOTE);
+    try {
+      const cfg = conn.client.config.connection;
+      expect(cfg.connectionString).toBeUndefined();
+      expect(cfg.ssl.rejectUnauthorized).toBe(true);
+      expect(cfg.host).toBe('example.proxy.rlwy.net');
+    } finally {
+      if (prior === undefined) delete process.env.PG_CA_FILE; else process.env.PG_CA_FILE = prior;
+      fs.unlinkSync(file);
+      conn.destroy();
+    }
+  });
+
   test('with a pinned root the chain is verified (rejectUnauthorized on); only the name check is skipped', () => {
     const file = path.join(os.tmpdir(), `pinned-root-${process.pid}.pem`);
     fs.writeFileSync(file, '-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n');
