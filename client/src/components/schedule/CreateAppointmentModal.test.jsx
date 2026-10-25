@@ -4,6 +4,7 @@ import {
   APPOINTMENT_DISCOUNT_TYPES,
   appointmentGroupRequestBody,
   assertManualPrepayMintEligible,
+  autoAssignWarning,
   bookableProperties,
   bookingPropertyTarget,
   buildFindTimeRequestBody,
@@ -1026,5 +1027,31 @@ describe('lineIsRetiredSale (codex r35 on #4786)', () => {
     // camelCase still wins when both are present and only one names the retired key.
     expect(lineIsRetiredSale({ serviceKey: 'tree_shrub_quarterly', service_key: 'tree_shrub_program', name: 'Anything', cadence: 'one_time' })).toBe(true);
     expect(lineIsRetiredSale({ service_key: 'tree_shrub_program', name: 'Bi-Monthly Tree & Shrub Care', cadence: 'bimonthly' })).toBe(false);
+  });
+});
+
+describe('autoAssignWarning (GATE_UNASSIGNED_VISIT_GUARD)', () => {
+  it('says the visit was saved with no technician when the server could not place one', () => {
+    expect(autoAssignWarning([{ id: 'v1', autoAssign: { result: 'unassigned', reason: 'several_assignable' } }]))
+      .toBe("Saved with no technician: it is on no technician's route yet. More than one technician could take it. Assign one on the schedule board.");
+  });
+
+  it('still warns, without a reason line, for a reason it does not know', () => {
+    expect(autoAssignWarning([{ autoAssign: { result: 'unassigned', reason: 'something_new' } }]))
+      .toBe("Saved with no technician: it is on no technician's route yet. Assign one on the schedule board.");
+  });
+
+  it('is silent when Auto placed the visit, when the gate is off (no autoAssign) and for an empty result', () => {
+    expect(autoAssignWarning([{ autoAssign: { result: 'assigned', reason: 'only_assignable', technicianId: 't1' } }])).toBeNull();
+    expect(autoAssignWarning([{ id: 'v1', warnings: [] }])).toBeNull();
+    expect(autoAssignWarning([])).toBeNull();
+    expect(autoAssignWarning(undefined)).toBeNull();
+  });
+
+  it('warns once when any group of a multi-group booking was left unassigned', () => {
+    expect(autoAssignWarning([
+      { autoAssign: { result: 'assigned', reason: 'only_assignable', technicianId: 't1' } },
+      { autoAssign: { result: 'unassigned', reason: 'none_assignable' } },
+    ])).toContain('No technician is available that day.');
   });
 });

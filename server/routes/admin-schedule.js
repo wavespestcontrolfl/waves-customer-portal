@@ -8933,7 +8933,23 @@ async function scheduleCreateHandler(req, res, next) {
 
     // Auto-assign tech if requested
     let resolvedTechId = technicianId || null;
-    if (assignmentMode === 'auto') {
+    // GATE_UNASSIGNED_VISIT_GUARD: Auto resolves a real technician (or says it could not).
+    // Gate off keeps the old branch below untouched. `autoAssign` is undefined unless it ran.
+    let autoAssign;
+    // (read off the module at call time: a partial feature-gates mock reads as gate off)
+    if (assignmentMode === 'auto' && require('../config/feature-gates').unassignedVisitGuardLive?.()) {
+      if (!resolvedTechId) {
+        const auto = await require('../services/scheduling/office-auto-technician').resolveOfficeAutoTechnician({
+          date: scheduledDate, windowStart, windowEnd, durationMinutes: duration,
+          serviceId: serviceId || null, serviceKey: serviceRecord?.service_key, serviceType,
+          customerId, lat: bookingProperty?.lat ?? customer?.latitude ?? null, lng: bookingProperty?.lng ?? customer?.longitude ?? null,
+        });
+        resolvedTechId = auto.technicianId;
+        autoAssign = auto.result === 'assigned'
+          ? { result: 'assigned', reason: auto.reason, technicianId: auto.technicianId }
+          : { result: 'unassigned', reason: auto.reason };
+      }
+    } else if (assignmentMode === 'auto') {
       try {
         const TechMatcher = require('../services/tech-matcher');
         const match = await TechMatcher.findBestTech({ customerId, date: scheduledDate, serviceType, zone });
@@ -9401,7 +9417,16 @@ async function scheduleCreateHandler(req, res, next) {
       if (resolvedTechId) {
         const childBoosterDates = new Set([...plannedChildDates, ...plannedBoosterDates].filter(Boolean));
         for (const occDate of childBoosterDates) {
-          await assertAssignableTechnician(resolvedTechId, { conn: trx, date: occDate });
+          try {
+            await assertAssignableTechnician(resolvedTechId, { conn: trx, date: occDate });
+          } catch (err) {
+            // An Auto-resolved technician never blocks the save: marked out on a later
+            // occurrence date, the series is saved with no technician and the response says so.
+            if (autoAssign?.result !== 'assigned' || err?.code !== 'TECH_NOT_ASSIGNABLE') throw err;
+            resolvedTechId = null;
+            autoAssign = { result: 'unassigned', reason: 'absent_on_series_date' };
+            break;
+          }
         }
       }
       // Work days (GATE_TECH_WORK_DAYS): the office may put a technician on a day
@@ -10319,6 +10344,7 @@ async function scheduleCreateHandler(req, res, next) {
       estimateAccepted: estimateAutoAccepted,
       annualPrepay: annualPrepayResult,
       warnings: bookingWarnings,
+      ...(autoAssign ? { autoAssign } : {}),
     });
 
     // ── Post-commit side-effects (fire-and-forget; never fail the request) ──
