@@ -52,6 +52,7 @@ postgres('payroll pay runs', () => {
   let baseUrl;
   const OLD_GATE = process.env.GATE_PAYROLL;
   const OLD_LUNCH = process.env.GATE_AUTO_LUNCH;
+  const OLD_SHIFT_CLOSE = process.env.GATE_SHIFT_CLOSE_REVIEW;
   const ADMIN_ID = randomUUID();
 
   const technician = async (patch = {}) => {
@@ -141,6 +142,7 @@ postgres('payroll pay runs', () => {
     await trx.rollback();
     if (OLD_GATE === undefined) delete process.env.GATE_PAYROLL; else process.env.GATE_PAYROLL = OLD_GATE;
     if (OLD_LUNCH === undefined) delete process.env.GATE_AUTO_LUNCH; else process.env.GATE_AUTO_LUNCH = OLD_LUNCH;
+    if (OLD_SHIFT_CLOSE === undefined) delete process.env.GATE_SHIFT_CLOSE_REVIEW; else process.env.GATE_SHIFT_CLOSE_REVIEW = OLD_SHIFT_CLOSE;
   });
   afterAll(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -244,6 +246,45 @@ postgres('payroll pay runs', () => {
         'Sample NoRate': 'No pay rate set',
       });
       expect(await count('payroll_checks')).toBe(1);
+    });
+
+    it('holds a technician whose week has an unreviewed automatic clock-out, only while GATE_SHIFT_CLOSE_REVIEW is on', async () => {
+      const flagged = await readyTech('Sample Alpha');
+      const clean = await readyTech('Sample Beta');
+      await approvedWeek(flagged, W1);
+      await approvedWeek(clean, W1);
+      const day = addDays(W1, 1);
+      const shiftId = randomUUID();
+      await trx('time_entries').insert({
+        id: shiftId, technician_id: flagged, entry_type: 'shift', status: 'completed',
+        clock_in: parseETDateTime(`${day}T07:30`), clock_out: parseETDateTime(`${day}T17:00`), duration_minutes: 570,
+        auto_closed_at: parseETDateTime(`${day}T23:00`), auto_close_reason: 'cron_11pm',
+      });
+
+      // Gate off: the flag is ignored, both are paid as before.
+      delete process.env.GATE_SHIFT_CLOSE_REVIEW;
+      const created = (await draft(W1)).body.run;
+      expect(created.checks.map((c) => c.name)).toEqual(['Sample Alpha', 'Sample Beta']);
+      expect(created.blocked).toEqual([]);
+
+      // Gate on: the draft shows the technician as blocked, finalize is refused.
+      process.env.GATE_SHIFT_CLOSE_REVIEW = 'true';
+      const shown = (await api('GET', `/runs/${created.id}`)).body.run;
+      expect(shown.blocked).toEqual([{ technicianId: flagged, name: 'Sample Alpha', reason: 'An automatic clock-out needs a real time' }]);
+      await api('POST', `/runs/${created.id}/recompute`);
+      const held = (await api('GET', `/runs/${created.id}`)).body.run;
+      expect(held.checks.map((c) => c.name)).toEqual(['Sample Beta']);
+      const refusal = await api('POST', `/runs/${created.id}/finalize`, { body: { token: held.token } });
+      expect(refusal.status).toBe(409);
+      expect(refusal.body.error).toMatch(/Sample Alpha: An automatic clock-out needs a real time/);
+
+      // An admin confirms it: the line is paid and the run finalizes.
+      await trx('time_entries').where({ id: shiftId }).update({ auto_close_reviewed_at: new Date(), auto_close_reviewed_by: ADMIN_ID });
+      await api('POST', `/runs/${created.id}/recompute`);
+      const released = (await api('GET', `/runs/${created.id}`)).body.run;
+      expect(released.blocked).toEqual([]);
+      expect(released.checks.map((c) => c.name)).toEqual(['Sample Alpha', 'Sample Beta']);
+      expect((await finalize(created.id)).status).toBe(200);
     });
 
     it('blocks everyone when the pay date is in a year with no tables', async () => {

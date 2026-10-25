@@ -5968,6 +5968,25 @@ export function ApprovalsTab({ showToast }) {
     }
   };
 
+  // Confirm an automatic clock-out as it stands (GATE_SHIFT_CLOSE_REVIEW).
+  const confirmAutoClose = async (entryId) => {
+    try {
+      await adminFetch(`/admin/timetracking/entries/${entryId}/confirm-auto-close`, {
+        method: "POST",
+      });
+      showToast("Clock-out confirmed");
+      load();
+      if (expanded) {
+        const d = await adminFetch(
+          `/admin/timesheets/week-detail?technicianId=${expanded}&weekStart=${weekStart}`,
+        );
+        setDetail(d);
+      }
+    } catch (e) {
+      showToast(`Confirm failed: ${e.message}`);
+    }
+  };
+
   const exportCsv = () => {
     const token = localStorage.getItem("waves_admin_token");
     fetch(`${API_BASE}/admin/timesheets/export?weekStart=${weekStart}`, {
@@ -6182,6 +6201,12 @@ export function ApprovalsTab({ showToast }) {
                         Awaiting tech sign-off
                       </span>
                     ))}
+                  {t.auto_close_pending > 0 && (
+                    <span style={sBadge("#FEF3C7", D.amber)}>
+                      {t.auto_close_pending} automatic clock-out
+                      {t.auto_close_pending === 1 ? "" : "s"} to review
+                    </span>
+                  )}
                 </div>{" "}
               </div>{" "}
               <Stat
@@ -6333,6 +6358,70 @@ export function ApprovalsTab({ showToast }) {
                         </tbody>{" "}
                       </table>{" "}
                     </div>
+                    {detail.entries &&
+                      detail.entries.some(
+                        (e) => e.auto_closed_at && !e.auto_close_reviewed_at,
+                      ) && (
+                        <div style={{ marginTop: 16 }}>
+                          <div
+                            style={{
+                              fontSize: 13,
+                              fontWeight: 500,
+                              color: D.amber,
+                              marginBottom: 4,
+                            }}
+                          >
+                            Automatic clock-outs to review
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 12,
+                              color: D.muted,
+                              marginBottom: 8,
+                            }}
+                          >
+                            The technician did not clock out, so the shift was
+                            closed for them. Pay for this week is held until
+                            you edit the clock-out or confirm it as it stands.
+                          </div>
+                          {detail.entries
+                            .filter(
+                              (e) => e.auto_closed_at && !e.auto_close_reviewed_at,
+                            )
+                            .map((e) => (
+                              <div
+                                key={e.id}
+                                style={{
+                                  fontSize: 12,
+                                  padding: 8,
+                                  background: "#FEF3C7",
+                                  borderRadius: 6,
+                                  marginBottom: 4,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <div style={{ flex: 1, minWidth: 200 }}>
+                                  <strong>Shift</strong>·{" "}
+                                  {formatETDateTime(e.clock_in)} to{" "}
+                                  {formatETDateTime(e.clock_out)}
+                                </div>
+                                <button
+                                  onClick={() => confirmAutoClose(e.id)}
+                                  style={{
+                                    ...sBtn(D.card, D.teal),
+                                    fontSize: 11,
+                                    padding: "4px 8px",
+                                  }}
+                                >
+                                  Confirm clock-out
+                                </button>
+                              </div>
+                            ))}
+                        </div>
+                      )}
                     {detail.entries &&
                       detail.entries.some(
                         (e) => e.approval_status === "disputed",
