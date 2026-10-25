@@ -43,6 +43,7 @@ const {
   buildAutomatedLeadDraftEstimate,
   evaluateLeadEstimateAutomationReadiness,
 } = require('../services/lead-estimate-automation');
+const { cachedLeadMeasurements, scheduleLeadDraftPropertyLookup } = require('../services/lead-draft-measurements');
 
 const LEAD_PREFILL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -916,6 +917,26 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     let createdEstimateId = null;
     let createdEstimateServiceInterest = serviceInterest || null;
     let automatedDraftEstimate = null;
+    // The live catalog verdict rides with the key: a cadence edit or the
+    // termite rental gate can turn an instant product into quote-on-
+    // request after the map was written, and the draft must follow the
+    // catalog as it is NOW, not the static map (pre-push codex P1).
+    // A submitted key that could NOT be verified (catalog read failed,
+    // or the key is not publicly selectable) must never fall back to
+    // label inference — the label lookalike is exactly the mispricing
+    // the key exists to prevent (GH codex #3585 r4 P1). The lead is
+    // still captured; only the automated draft parks.
+    const draftReadiness = {
+      ...estimateAutomationReadiness,
+      serviceKey: leadServiceKey,
+      serviceKeyInstant: keyedService ? keyedService.instant === true : null,
+      serviceKeyUnverified: !!serviceKey && !keyedService,
+    };
+    // County home and lot size from the lookup cache (null while
+    // GATE_LEAD_DRAFT_PROPERTY_LOOKUP is off), read BEFORE the phone lock:
+    // the read takes its own pool connection, which must never wait while
+    // the lock's transaction holds one.
+    const draftMeasurements = draftReadiness.ready ? await cachedLeadMeasurements(fullAddress) : null;
     try {
       await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {
         const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phoneFormatted, { database: trx });
@@ -927,21 +948,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             intake,
             customer,
             body,
-            // The live catalog verdict rides with the key: a cadence edit or the
-            // termite rental gate can turn an instant product into quote-on-
-            // request after the map was written, and the draft must follow the
-            // catalog as it is NOW, not the static map (pre-push codex P1).
-            // A submitted key that could NOT be verified (catalog read failed,
-            // or the key is not publicly selectable) must never fall back to
-            // label inference — the label lookalike is exactly the mispricing
-            // the key exists to prevent (GH codex #3585 r4 P1). The lead is
-            // still captured; only the automated draft parks.
-            readiness: {
-              ...estimateAutomationReadiness,
-              serviceKey: leadServiceKey,
-              serviceKeyInstant: keyedService ? keyedService.instant === true : null,
-              serviceKeyUnverified: !!serviceKey && !keyedService,
-            },
+            readiness: draftReadiness,
+            measurements: draftMeasurements,
           });
           const crypto = require('crypto');
           const estimateToken = crypto.randomBytes(16).toString('hex');
@@ -974,12 +982,25 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             lead_source_detail: leadSource.detail,
             token: estimateToken,
             estimate_data: JSON.stringify(estimateData),
-            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(estimateAutomationReadiness)}${draftAutomationNote}`,
+            // The draft's own intake record: on a county-sized draft its
+            // review names the county size, not the default.
+            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(draftAutomation?.readiness || estimateAutomationReadiness)}${draftAutomationNote}`,
           }).returning(['id', 'service_interest']);
           createdEstimateId = estimateRow?.id || null;
           createdEstimateServiceInterest = estimateRow?.service_interest || createdEstimateServiceInterest;
         }
       });
+      // A draft priced on the default size gets the county's real home and
+      // lot size from one background property lookup, after the row is
+      // committed (GATE_LEAD_DRAFT_PROPERTY_LOOKUP). The rebuild reuses this
+      // submission's own inputs; the website's answer never waits on it.
+      if (createdEstimateId && automatedDraftEstimate?.automation?.sizeSource === 'default') {
+        scheduleLeadDraftPropertyLookup({
+          estimateId: createdEstimateId,
+          address: fullAddress,
+          rebuild: (measurements) => buildAutomatedLeadDraftEstimate({ intake, customer, body, readiness: draftReadiness, measurements }),
+        });
+      }
     } catch (estErr) {
       logger.error(`Lead estimate creation failed: ${estErr.message}`);
     }
