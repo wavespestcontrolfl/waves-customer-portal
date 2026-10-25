@@ -115,7 +115,8 @@ describe('TechTimeTrackingCard', () => {
 
       fireEvent.click(await screen.findByRole('button', { name: 'No lunch today' }));
       expect(await screen.findByRole('button', { name: 'Undo no lunch' })).toBeInTheDocument();
-      expect(screen.getByText('No lunch today: the full day is paid.')).toBeInTheDocument();
+      expect(screen.getByText('No lunch today: the automatic 30-minute deduction is waived.')).toBeInTheDocument();
+      expect(screen.queryByText(/full day is paid/)).not.toBeInTheDocument();
       const post = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/no-lunch'));
       expect(post[0]).toContain('/api/tech/timetracking/no-lunch');
       expect(post[1].method).toBe('POST');
@@ -123,6 +124,19 @@ describe('TechTimeTrackingCard', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Undo no lunch' }));
       expect(await screen.findByRole('button', { name: 'No lunch today' })).toBeInTheDocument();
+    });
+
+    it('says a recorded lunch of 30+ minutes stays unpaid, with or without No lunch', async () => {
+      const mock = (noLunch) => vi.fn(async () => response(200, clockedInStatus({ enabled: true, noLunch, recordedMealMinutes: 45 })));
+      vi.stubGlobal('fetch', mock(false));
+      const { unmount } = render(<TechTimeTrackingCard nextStop={null} />);
+      expect(await screen.findByText('Recorded lunch 45 min stays unpaid.')).toBeInTheDocument();
+      unmount();
+
+      vi.stubGlobal('fetch', mock(true));
+      render(<TechTimeTrackingCard nextStop={null} />);
+      expect(await screen.findByText('No lunch today waives only the automatic 30 minutes. Recorded lunch 45 min stays unpaid.')).toBeInTheDocument();
+      expect(screen.queryByText(/full day is paid/)).not.toBeInTheDocument();
     });
 
     it('shows the refusal when the day or week is already approved', async () => {

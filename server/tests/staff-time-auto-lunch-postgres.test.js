@@ -65,6 +65,7 @@ const WEEK_A = '2020-01-06';
 const WEEK_B = '2020-02-03';
 const WEEK_C = '2020-03-02';
 const WEEK_D = '2020-04-06';
+const WEEK_E = '2020-05-04';
 const dayOf = (monday, offset) => {
   const d = new Date(`${monday}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() + offset);
@@ -78,8 +79,9 @@ describeDb('auto lunch on PostgreSQL (GATE_AUTO_LUNCH)', () => {
   const techB = randomUUID();
   const techC = randomUUID();
   const techD = randomUUID();
+  const techE = randomUUID();
   const techToday = randomUUID();
-  const techIds = [techA, techB, techC, techD, techToday];
+  const techIds = [techA, techB, techC, techD, techE, techToday];
   const priorGate = process.env.GATE_AUTO_LUNCH;
 
   const insertEntry = (technicianId, entryType, start, end) => db('time_entries').insert({
@@ -270,12 +272,12 @@ describeDb('auto lunch on PostgreSQL (GATE_AUTO_LUNCH)', () => {
   test('the time clock status reports the gate and today\'s no-lunch flag', async () => {
     const today = etDateString(new Date());
     await db('time_entry_daily_summary').where({ technician_id: techToday, work_date: today }).update({ status: 'pending', no_lunch: true });
-    expect((await timeTracking.getStatus(techToday)).autoLunch).toEqual({ enabled: true, noLunch: true });
+    expect((await timeTracking.getStatus(techToday)).autoLunch).toEqual({ enabled: true, noLunch: true, recordedMealMinutes: 0 });
     await db('time_entry_daily_summary').where({ technician_id: techToday, work_date: today }).update({ no_lunch: false });
-    expect((await timeTracking.getStatus(techToday)).autoLunch).toEqual({ enabled: true, noLunch: false });
+    expect((await timeTracking.getStatus(techToday)).autoLunch).toEqual({ enabled: true, noLunch: false, recordedMealMinutes: 0 });
     process.env.GATE_AUTO_LUNCH = 'false';
     try {
-      expect((await timeTracking.getStatus(techToday)).autoLunch).toEqual({ enabled: false, noLunch: false });
+      expect((await timeTracking.getStatus(techToday)).autoLunch).toEqual({ enabled: false, noLunch: false, recordedMealMinutes: 0 });
     } finally {
       process.env.GATE_AUTO_LUNCH = 'true';
     }
@@ -380,6 +382,115 @@ describeDb('auto lunch on PostgreSQL (GATE_AUTO_LUNCH)', () => {
     const back = await call(earnings, { params: { id: techD }, query });
     expect(back.body).toMatchObject({ unpaidMealMinutes: 120, regularMinutes: 2400, overtimeMinutes: 0 });
     expect(num((await daily(techD, dayOf(WEEK_D, 0))).unpaid_meal_minutes)).toBe(30);
+  });
+
+  test('both no-lunch endpoints refuse while the gate is off and leave the flag unchanged', async () => {
+    const adminPut = routeHandler(adminRouter, 'put', '/daily/:technicianId/:workDate/no-lunch');
+    const techPost = routeHandler(techRouter, 'post', '/no-lunch');
+    const workDate = dayOf(WEEK_A, 2);
+    const today = etDateString(new Date());
+    const before = (await daily(techA, workDate)).updated_at;
+    process.env.GATE_AUTO_LUNCH = 'false';
+    try {
+      const adminRes = await call(adminPut, {
+        params: { technicianId: techA, workDate },
+        body: { noLunch: true, edit_reason: 'gate is off' },
+        technicianId: randomUUID(),
+      });
+      expect(adminRes.statusCode).toBe(409);
+      const techRes = await call(techPost, { body: { noLunch: true }, technicianId: techToday });
+      expect(techRes.statusCode).toBe(409);
+      // Nothing written, not even a day row for a tech who had none.
+      const fresh = randomUUID();
+      await db('technicians').insert({ id: fresh, name: `QA Lunch ${run} fresh`, email: `qa-lunch-${run}-fresh@example.invalid`, role: 'technician', active: true });
+      techIds.push(fresh);
+      expect((await call(techPost, { body: { noLunch: true }, technicianId: fresh })).statusCode).toBe(409);
+      expect(await daily(fresh, today)).toBeUndefined();
+    } finally {
+      process.env.GATE_AUTO_LUNCH = 'true';
+    }
+    const day = await daily(techA, workDate);
+    expect(day.no_lunch).toBe(false);
+    expect(day.notes).toBeNull();
+    expect(day.updated_at).toEqual(before);
+    expect((await daily(techToday, today)).no_lunch).toBe(false);
+  });
+
+  test('a flip to off while the call waits for the week lock is refused and writes nothing', async () => {
+    const workDate = dayOf(WEEK_A, 2);
+    let release;
+    let locked;
+    const held = new Promise((resolve) => { locked = resolve; });
+    const holder = db.transaction(async (trx) => {
+      await timeTracking.lockStaffWeek(trx, techA, WEEK_A);
+      locked();
+      await new Promise((resolve) => { release = resolve; });
+    });
+    await held;
+    // Passes the first gate check (on), then blocks on the week lock.
+    const waiting = timeTracking.setDayNoLunch(techA, workDate, true).then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    process.env.GATE_AUTO_LUNCH = 'false';
+    try {
+      release();
+      await holder;
+      const outcome = await waiting;
+      expect(outcome.ok).toBe(false);
+      expect(outcome.error.statusCode).toBe(409);
+    } finally {
+      process.env.GATE_AUTO_LUNCH = 'true';
+    }
+    expect((await daily(techA, workDate)).no_lunch).toBe(false);
+  });
+
+  test('changing No lunch clears the weekly signature even when the totals do not change', async () => {
+    const handler = routeHandler(adminRouter, 'put', '/daily/:technicianId/:workDate/no-lunch');
+    const workDate = dayOf(WEEK_E, 0);
+    // A 4-hour day: no automatic lunch, so the flag cannot change any total.
+    await insertEntry(techE, 'shift', at(workDate, '08:00'), at(workDate, '12:00'));
+    const before = await recomputeWeek(techE, WEEK_E);
+    const sign = () => db('time_weekly_summary').where({ technician_id: techE, week_start: WEEK_E })
+      .update({ tech_signed_at: new Date(), tech_signature: 'QA Signer' });
+    await sign();
+
+    const params = { technicianId: techE, workDate };
+    const adminId = randomUUID();
+    // Same value as stored: nothing changed, the signature stays.
+    await call(handler, { params, body: { noLunch: false, edit_reason: 'no change' }, technicianId: adminId });
+    expect((await weekly(techE, WEEK_E)).tech_signature).toBe('QA Signer');
+
+    const res = await call(handler, { params, body: { noLunch: true, edit_reason: 'flag only' }, technicianId: adminId });
+    expect(res.statusCode).toBe(200);
+    const after = await weekly(techE, WEEK_E);
+    expect(num(after.regular_minutes)).toBe(num(before.regular_minutes));
+    expect(num(after.unpaid_meal_minutes)).toBe(0);
+    expect(after.tech_signed_at).toBeNull();
+    expect(after.tech_signature).toBeNull();
+
+    // Clearing it again after a new signature also resets the sign-off.
+    await sign();
+    await call(handler, { params, body: { noLunch: false, edit_reason: 'flag back' }, technicianId: adminId });
+    expect((await weekly(techE, WEEK_E)).tech_signature).toBeNull();
+
+    // An approved week is never touched.
+    await sign();
+    await db('time_weekly_summary').where({ technician_id: techE, week_start: WEEK_E }).update({ status: 'approved' });
+    expect((await call(handler, { params, body: { noLunch: true, edit_reason: 'late' }, technicianId: adminId })).statusCode).toBe(409);
+    expect((await weekly(techE, WEEK_E)).tech_signature).toBe('QA Signer');
+    // Fixture only: a half-approved week would trip the audit test below.
+    await db('time_weekly_summary').where({ technician_id: techE, week_start: WEEK_E }).update({ status: 'pending' });
+  });
+
+  test('the status read reports recorded meal minutes of 30+ only', async () => {
+    const today = etDateString(new Date());
+    await insertEntry(techToday, 'break', at(today, '12:00'), at(today, '12:45'));
+    await insertEntry(techToday, 'break', at(today, '15:00'), at(today, '15:20'));
+    expect((await timeTracking.getStatus(techToday)).autoLunch.recordedMealMinutes).toBe(45);
+    await db('time_entries').where({ technician_id: techToday, entry_type: 'break' }).del();
+    expect((await timeTracking.getStatus(techToday)).autoLunch.recordedMealMinutes).toBe(0);
   });
 
   test('the rollout audit stays clean for these technicians (gate on)', async () => {

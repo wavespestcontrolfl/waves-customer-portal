@@ -81,14 +81,14 @@ describe("dashboard totals use paid minutes", () => {
 });
 
 describe("timesheet tab", () => {
-  function stubTimesheet({ autoLunch, rows, putStatus = 200 }) {
+  function stubTimesheet({ autoLunch, rows, putStatus = 200, entries = [] }) {
     const calls = [];
     vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
       calls.push([String(url), options]);
       const u = String(url);
       if (u.includes("/no-lunch")) return json(putStatus === 200 ? { noLunch: true } : { error: "approved" }, putStatus);
       if (u.includes("/admin/timetracking/daily")) return json(rows);
-      if (u.includes("/admin/timetracking/entries")) return json({ entries: [] });
+      if (u.includes("/admin/timetracking/entries")) return json({ entries });
       return json({ allTechs: [TECH], autoLunch });
     }));
     return calls;
@@ -146,12 +146,31 @@ describe("timesheet tab", () => {
     expect(JSON.parse(options.body)).toEqual({ noLunch: true, edit_reason: "worked through" });
   });
 
+  it("says a recorded lunch of 30+ minutes stays unpaid even on a No lunch day", async () => {
+    stubTimesheet({
+      autoLunch: true,
+      rows: [day({ no_lunch: true, unpaid_meal_minutes: "45.00" })],
+      entries: [{ id: "b1", entry_type: "break", status: "completed", duration_minutes: "45.00" }],
+    });
+    await mount();
+    // Paid 9.8 h (630 - 45 = 585 min); the marker shows the deduction, not "no lunch".
+    expect(screen.getAllByText("9.8").length).toBeGreaterThan(0);
+    expect(screen.getByText("lunch -0.8")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByText("9.8")[0]);
+    const panel = await screen.findByTestId("day-lunch-panel");
+    await waitFor(() => expect(within(panel).getByText(
+      "No lunch waives only the automatic 30 minutes. Recorded lunch 45 min stays unpaid.",
+    )).toBeInTheDocument());
+    expect(within(panel).queryByText(/full day is paid/)).not.toBeInTheDocument();
+  });
+
   it("clears a no lunch day, and shows an approved day as locked", async () => {
     stubTimesheet({ autoLunch: true, rows: [day({ no_lunch: true })] });
     await mount();
     fireEvent.click(screen.getAllByText("10.5")[0]);
     const panel = await screen.findByTestId("day-lunch-panel");
-    expect(within(panel).getByText("No lunch: the full day is paid.")).toBeInTheDocument();
+    expect(within(panel).getByText("No lunch: the automatic 30-minute deduction is waived.")).toBeInTheDocument();
+    expect(within(panel).queryByText(/full day is paid/)).not.toBeInTheDocument();
     expect(within(panel).getByRole("button", { name: "Clear no lunch" })).toBeInTheDocument();
     cleanup();
 

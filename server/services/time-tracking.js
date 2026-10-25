@@ -11,12 +11,14 @@ const {
 const {
   ACTIVE_WRITE_GENERATION,
   WEEKLY_OT_THRESHOLD_MINUTES,
+  UNPAID_MEAL_MIN_BREAK_MINUTES,
 } = require('../constants/staff-time');
 const { PAYROLL_SCALE, payrollUnits } = require('../utils/payroll-units');
 const { unpaidMealUnits } = require('../utils/unpaid-meal');
 const { autoLunchLive } = require('../config/feature-gates');
 
 const UNDO_STOP_WINDOW_MINUTES = 30;
+const AUTO_LUNCH_OFF_MESSAGE = 'Auto lunch is not turned on, so there is no lunch to change.';
 
 function payrollNumber(units) {
   return Number(units) / Number(PAYROLL_SCALE);
@@ -469,6 +471,15 @@ async function getStatus(technicianId) {
       .first('no_lunch')
     : null;
 
+  const mealFloor = UNPAID_MEAL_MIN_BREAK_MINUTES * 100;
+  const todayRecordedMeal = autoLunchOn
+    ? Number(todayEntries
+      .filter(e => e.entry_type === 'break' && e.status !== 'active')
+      .map(e => payrollUnits(e.duration_minutes))
+      .filter(units => units >= BigInt(mealFloor))
+      .reduce((sum, units) => sum + units, 0n)) / 100
+    : 0;
+
   const todayShiftMin = todayEntries
     .filter(e => e.entry_type === 'shift')
     .reduce((sum, e) => sum + (parseFloat(e.duration_minutes) || 0), 0);
@@ -496,9 +507,11 @@ async function getStatus(technicianId) {
       jobCount: todayJobCount,
     },
     // "No lunch today" control: the card shows it only while the gate is on.
+    // recordedMealMinutes: completed breaks of 30+ minutes today. They stay
+    // unpaid whatever "No lunch" says, so the card shows them.
     autoLunch: autoLunchOn
-      ? { enabled: true, noLunch: Boolean(todayDay?.no_lunch) }
-      : { enabled: false, noLunch: false },
+      ? { enabled: true, noLunch: Boolean(todayDay?.no_lunch), recordedMealMinutes: todayRecordedMeal }
+      : { enabled: false, noLunch: false, recordedMealMinutes: 0 },
   };
 }
 
@@ -765,12 +778,18 @@ async function recomputeEntryMutationSummaries(trx, technicianId, workDates) {
     await computeWeeklySummaryInTransaction(trx, technicianId, weekStart, { lock: false });
     // An edit or void invalidates the employee's attestation even when rounded
     // totals happen to remain unchanged (for example, a notes-only correction).
-    await trx('time_weekly_summary')
-      .where({ technician_id: technicianId, week_start: weekStart })
-      .whereNot({ status: 'approved' })
-      .whereNotNull('tech_signed_at')
-      .update({ tech_signed_at: null, tech_signature: null, updated_at: new Date() });
+    await resetWeekSignOff(trx, technicianId, weekStart);
   }
+}
+
+// Clear the technician's weekly sign-off on an unapproved week. Shared by the
+// entry edits and the No lunch change: the tech attested a different pay basis.
+async function resetWeekSignOff(trx, technicianId, weekStart) {
+  await trx('time_weekly_summary')
+    .where({ technician_id: technicianId, week_start: weekStart })
+    .whereNot({ status: 'approved' })
+    .whereNotNull('tech_signed_at')
+    .update({ tech_signed_at: null, tech_signature: null, updated_at: new Date() });
 }
 
 function withoutKeys(source, keys) {
@@ -838,8 +857,13 @@ async function setDayNoLunch(technicianId, workDate, noLunch, { editedBy = null,
   const day = validateWorkDate(workDate);
   const weekStart = staffWeekStartForWorkDate(day);
   const flag = Boolean(noLunch);
+  // No lunch only means something while GATE_AUTO_LUNCH is on. Checked here
+  // and again once the week lock is held, so a flip to off while this call
+  // waited for the lock still writes nothing.
+  if (!autoLunchLive()) throw staffTimeHttpError(409, AUTO_LUNCH_OFF_MESSAGE);
   const result = await db.transaction(async (trx) => {
     await lockStaffWeek(trx, technicianId, weekStart);
+    if (!autoLunchLive()) throw staffTimeHttpError(409, AUTO_LUNCH_OFF_MESSAGE);
 
     const weekly = await trx('time_weekly_summary')
       .where({ technician_id: technicianId, week_start: weekStart })
@@ -874,6 +898,12 @@ async function setDayNoLunch(technicianId, workDate, noLunch, { editedBy = null,
 
     const summary = await computeDailySummaryInTransaction(trx, technicianId, day);
     await computeWeeklySummaryInTransaction(trx, technicianId, weekStart, { lock: false });
+    // The tech attested the week on the old pay basis. Clear the sign-off when
+    // the flag changed, even if the totals did not (a short day, or a recorded
+    // meal that already covers the deduction), as an entry edit does.
+    if (Boolean(daily.no_lunch) !== flag) {
+      await resetWeekSignOff(trx, technicianId, weekStart);
+    }
     return summary;
   });
   logger.info(`[time-tracking] No-lunch ${flag ? 'set' : 'cleared'} for tech ${technicianId} on ${day}`, {

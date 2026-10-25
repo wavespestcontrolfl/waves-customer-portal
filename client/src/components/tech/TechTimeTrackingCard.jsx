@@ -100,6 +100,19 @@ const LOOKS = {
   },
 };
 
+// "No lunch" waives only the automatic 30-minute deduction. A meal break the
+// tech recorded (30 minutes or more) stays unpaid either way.
+function lunchCopy(noLunchToday, recordedMeal) {
+  if (recordedMeal > 0) {
+    return noLunchToday
+      ? `No lunch today waives only the automatic 30 minutes. Recorded lunch ${recordedMeal} min stays unpaid.`
+      : `Recorded lunch ${recordedMeal} min stays unpaid.`;
+  }
+  return noLunchToday
+    ? 'No lunch today: the automatic 30-minute deduction is waived.'
+    : '30 minutes of lunch come off a day over 6 hours.';
+}
+
 function customerLabel(service) {
   return service?.customerName || service?.customer_name || 'next stop';
 }
@@ -195,6 +208,7 @@ export default function TechTimeTrackingCard({ nextStop, variant }) {
   const onBreak = status?.onBreak === true;
   const autoLunchOn = status?.autoLunch?.enabled === true;
   const noLunchToday = status?.autoLunch?.noLunch === true;
+  const recordedMeal = Math.round(Number(status?.autoLunch?.recordedMealMinutes || 0));
   const showNoLunch = autoLunchOn && (clockedIn || Number(status?.todaySummary?.shiftMinutes || 0) > 0);
   const nextStopIsOnSite = nextStop?.status === 'on_site';
   // Each disabled state decided once for its button's disabled + style.
@@ -265,9 +279,7 @@ export default function TechTimeTrackingCard({ nextStop, variant }) {
       {showNoLunch && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
           <div style={{ flex: 1, color: P.muted, fontSize: 14 }}>
-            {noLunchToday
-              ? 'No lunch today: the full day is paid.'
-              : '30 minutes of lunch come off a day over 6 hours.'}
+            {lunchCopy(noLunchToday, recordedMeal)}
           </div>
           <button
             type="button"

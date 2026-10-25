@@ -1078,12 +1078,12 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                         >
                           {hrs}
                         </span>{" "}
-                        {d && d.no_lunch && (
+                        {d && d.no_lunch && lunchMin === 0 && (
                           <div style={{ fontSize: 10, color: D.muted }}>
                             no lunch
                           </div>
                         )}
-                        {d && !d.no_lunch && lunchMin > 0 && (
+                        {d && lunchMin > 0 && (
                           <div style={{ fontSize: 10, color: D.muted }}>
                             lunch -{(lunchMin / 60).toFixed(1)}
                           </div>
@@ -1149,6 +1149,16 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
               if (!day) return null;
               const lunchMin = unpaidMinutesOf(day);
               const approved = day.status === "approved";
+              // Recorded meal breaks (30 min or more) stay unpaid whatever
+              // the No lunch flag says; No lunch waives only the automatic 30.
+              const recordedMeal = cellEntries
+                .filter(
+                  (e) =>
+                    e.entry_type === "break" &&
+                    e.status !== "active" &&
+                    parseFloat(e.duration_minutes || 0) >= 30,
+                )
+                .reduce((sum, e) => sum + parseFloat(e.duration_minutes), 0);
               return (
                 <div
                   data-testid="day-lunch-panel"
@@ -1160,9 +1170,11 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                 >
                   <div style={{ fontSize: 13, color: D.text, marginBottom: 8 }}>
                     {day.no_lunch
-                      ? "No lunch: the full day is paid."
+                      ? recordedMeal > 0
+                        ? `No lunch waives only the automatic 30 minutes. Recorded lunch ${Math.round(recordedMeal)} min stays unpaid.`
+                        : "No lunch: the automatic 30-minute deduction is waived."
                       : lunchMin > 0
-                        ? `Unpaid lunch: ${Math.round(lunchMin)} min taken off.`
+                        ? `Unpaid lunch: ${Math.round(lunchMin)} min taken off${recordedMeal > 0 ? " (recorded lunch)" : ""}.`
                         : "No unpaid lunch on this day."}
                   </div>
                   {approved ? (
@@ -5891,14 +5903,20 @@ export function ApprovalsTab({ showToast }) {
                               </td>{" "}
                               {showLunchCol && (
                                 <td style={{ padding: 8 }}>
-                                  {d.no_lunch ? (
-                                    <span style={sBadge("#F1F5F9", D.text)}>
+                                  {unpaidMinutesOf(d) > 0
+                                    ? `-${fmtHrs(unpaidMinutesOf(d))}`
+                                    : d.no_lunch
+                                      ? ""
+                                      : "--"}
+                                  {d.no_lunch && (
+                                    <span
+                                      style={{
+                                        ...sBadge("#F1F5F9", D.text),
+                                        marginLeft: unpaidMinutesOf(d) > 0 ? 6 : 0,
+                                      }}
+                                    >
                                       No lunch
                                     </span>
-                                  ) : unpaidMinutesOf(d) > 0 ? (
-                                    `-${fmtHrs(unpaidMinutesOf(d))}`
-                                  ) : (
-                                    "--"
                                   )}
                                 </td>
                               )}{" "}
