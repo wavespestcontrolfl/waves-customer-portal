@@ -679,6 +679,27 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       expect((await row(w.commitment.id)).contact_check.ai_close.later_text_check).toMatchObject({ verdict: 'unclear', reason: 'unread_later_message' });
     });
 
+    test('a photo before the customer\'s "Ok" still holds it: every later message must be readable, not only the newest', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      await addSms(w, { message_body: '', created_at: later(40) });
+      await addCustomerText(w, 'Ok');
+      recordThreadLater(w, text, laterSays('not_contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      expect(askedLater(w)).toHaveLength(0);
+      expect((await row(w.commitment.id)).contact_check.ai_close.later_text_check).toMatchObject({ verdict: 'unclear', reason: 'unread_later_message' });
+    });
+
+    test('a later text too long to read whole holds it, even when it would end in a contradiction', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      await addCustomerText(w, `Thanks for the update. ${'Some details about the yard. '.repeat(80)}But nobody came yesterday.`);
+      recordThreadLater(w, text, laterSays('not_contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      expect(askedLater(w)).toHaveLength(0);
+      expect((await row(w.commitment.id)).contact_check.ai_close.later_text_check).toMatchObject({ verdict: 'unclear', reason: 'long_later_text' });
+    });
+
     test('a hold cached before the gate is judged again once when the gate turns on', async () => {
       delete process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK;
       const w = await world();

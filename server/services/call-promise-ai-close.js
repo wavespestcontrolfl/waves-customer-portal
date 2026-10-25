@@ -178,16 +178,6 @@ async function dropUnansweredHold(conn, current, message, cache, now) {
   if (!answered) delete current.sms_context.fulfillment_check;
 }
 
-// The cache a judgment stores. The later-text key exists only while that check is live, so off writes exactly
-// what it did before.
-const cacheOf = (checked, cache, laterLive) => ({ fulfillment_check: checked, thread_check: cache?.thread_check ?? null,
-  ...(laterLive ? { later_text_check: cache?.later_text_check ?? null } : {}) });
-
-// A record proof held by a later human text, as cached: no quote, the same evidence hash, and (while the
-// later-text check is live) the record it rests on, so that check can tell whether it already answered.
-const heldVerdict = (checked, verdict, laterLive) => ({ verdict: 'uncertain', reason: HELD_BY_LATER_TEXT, evidence_hash: checked.evidence_hash, retry_after: null,
-  ...(laterLive ? { record_type: verdict.record_type, record_id: verdict.record_id, matched_at: iso(verdict.matched_at || new Date()) } : {}) });
-
 // The later-text check over a held record proof: true when it found nothing against it, so the record may close
 // the promise. Keeps its answer on the judgment's cache; a spent budget (null) holds for this run, as before.
 async function laterTextsAllowClose(conn, result, { verdict, cache, now, mayCall, checkLater }) {
@@ -229,7 +219,10 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
     // evidence is not judged again on every pass (storeCache never keeps a fulfilled one).
     if (verdict !== checked) checked = { ...verdict, evidence_hash: checked.evidence_hash, retry_after: null };
   }
-  const result = { outcome: 'judged', verdict, current, message, evidence, model, cache: cacheOf(checked, cache, laterLive) };
+  const result = { outcome: 'judged', verdict, current, message, evidence, model,
+    cache: { fulfillment_check: checked, thread_check: cache?.thread_check ?? null } };
+  // The later-text key exists only while that check is live, so off writes exactly what it did before.
+  if (laterLive) result.cache.later_text_check = cache?.later_text_check ?? null;
   if (verdict.verdict === 'fulfilled') {
     // A human message after the cited record: the record alone does not close. Remember the held verdict (no
     // quote, same evidence hash) so it is not re-judged, and let the later conversation decide below.
@@ -240,7 +233,13 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
     if (laterLive && await laterTextsAllowClose(conn, result, { verdict, cache, now, mayCall: take, checkLater })) {
       return { ...result, model, laterTextChecked: true };
     }
-    result.cache.fulfillment_check = heldVerdict(checked, verdict, laterLive);
+    result.cache.fulfillment_check = { verdict: 'uncertain', reason: HELD_BY_LATER_TEXT, evidence_hash: checked.evidence_hash, retry_after: null };
+    // While the later-text check is live, the record the hold rests on (never its quote), so that check can tell
+    // whether it already answered. A proof with no time keeps none and is judged again.
+    if (laterLive) {
+      Object.assign(result.cache.fulfillment_check, { record_type: verdict.record_type, record_id: verdict.record_id,
+        matched_at: verdict.matched_at ? iso(verdict.matched_at) : null });
+    }
     result.verdict = { verdict: 'uncertain', reason: HELD_BY_LATER_TEXT };
   } else result.readThrough = null;
   // The customer's own later "got it, thanks" (or a person's "done") closes what
