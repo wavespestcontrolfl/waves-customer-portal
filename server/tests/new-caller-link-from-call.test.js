@@ -41,19 +41,24 @@ const linkedVisit = () => officeVisit({ customer_id: CUSTOMER_ID });
 const TEXT_OK = { passBlocked: false, extraction: { consent: { sms_consent_given: true } }, impliedConsent: false, callerPhone: '+15555550142' };
 const PAT = { phone: '+15555550142', first_name: 'Pat', last_name: 'Example', address_line1: '100 Example Street', address_line2: null, zip: '34200' };
 
+const WAITING = { customer_id: null, status: 'pending' };
+
 // Answers each read by table: rows.visit (the office-visit lookup), rows.call (the claimed call row),
-// rows.customer (every customers read), rows.recheck (the visit re-read after a refused link).
+// rows.customer (every customers read), rows.recheck (the visit re-read, locked, before a bell).
+// A transaction runs on the same fake, so a bell written on it carries `trx: conn`.
 function fakeConn(rows, { throwOn = null } = {}) {
   const reads = [];
   const conn = (table) => {
     const wheres = [];
+    let locked = false;
     const chain = {
       where: (...args) => { wheres.push(args); return chain; },
       whereNull: (...args) => { wheres.push(['null', ...args]); return chain; },
       whereNotIn: (...args) => { wheres.push(['notIn', ...args]); return chain; },
       orderBy: () => chain,
+      forShare: () => { locked = true; return chain; },
       first: async (...columns) => {
-        reads.push({ table, wheres, columns });
+        reads.push({ table, wheres, columns, locked });
         if (table === throwOn) throw new Error('synthetic read failure with select * from call_log');
         if (table === 'scheduled_services') return columns.length ? rows.recheck : rows.visit;
         if (table === 'call_log') return rows.call;
@@ -63,6 +68,7 @@ function fakeConn(rows, { throwOn = null } = {}) {
     };
     return chain;
   };
+  conn.transaction = async (fn) => fn(conn);
   conn.reads = reads;
   return conn;
 }
@@ -103,17 +109,28 @@ describe('the agent links the office visit after the call checkpoint', () => {
   });
 
   test('a call with no customer rings the visit bell (D4a): its own key, the visit, a person to link it', async () => {
-    const conn = fakeConn({ visit: officeVisit(), call: { customer_id: null } });
+    const conn = fakeConn({ visit: officeVisit(), call: { customer_id: null }, recheck: WAITING });
     await expect(linkOfficeVisitFromCall({ call: CALL, procToken: 'tok-1', conn })).resolves.toEqual({ outcome: 'unlinked', visitId: VISIT_ID });
     expect(newCallerVisit.linkNewCallerVisit).not.toHaveBeenCalled();
+    // The bell is written on the transaction that re-read the visit under a lock.
+    expect(conn.reads).toContainEqual(expect.objectContaining({ table: 'scheduled_services', wheres: [[{ id: VISIT_ID }]], locked: true }));
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith('schedule', "Schedule — link the new caller's visit on Fri Mar 7", _private.UNLINKED_WHY.no_customer, expect.objectContaining({
+      trx: conn,
       dedupeKey: `new-caller-visit:${VISIT_ID}`,
       bellDefault: true,
       link: LINK,
       detail: expect.stringContaining('use Link customer'),
       metadata: expect.objectContaining({ area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: VISIT_ID }, doneWhen: 'visit_linked', who: 'person' }),
     }));
+  });
+
+  test('a visit the office linked or cancelled while the pass ran gets no bell', async () => {
+    for (const recheck of [{ customer_id: 'cust-office', status: 'pending' }, { customer_id: null, status: 'cancelled' }]) {
+      const conn = fakeConn({ visit: officeVisit(), call: { customer_id: null }, recheck });
+      await expect(linkOfficeVisitFromCall({ call: CALL, procToken: 'tok-1', conn })).resolves.toEqual({ outcome: 'settled', visitId: VISIT_ID });
+    }
+    expect(notify).not.toHaveBeenCalled();
   });
 
   test('links under this pass\'s claim with the call pipeline as the property source, then sends; a clean link rings nothing', async () => {

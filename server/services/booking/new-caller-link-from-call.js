@@ -29,7 +29,7 @@ const { fitAction, lookupCustomerName } = require('../admin-alert-names');
 const { checkTcpaConsent } = require('../call-routing-gates');
 const {
   NEW_CALLER_SOURCE_ACTION, linkNewCallerVisit, armLinkedVisitComms, newCallerVisitAlertKey,
-  slotWords, bookedSlot, newCallerVisitLink: visitLink,
+  slotWords, bookedSlot, newCallerVisitLink: visitLink, raiseWhileVisitWaits,
 } = require('./new-caller-visit');
 
 // The owner can silence it in Settings → Notifications (bellDefault, below).
@@ -92,12 +92,14 @@ const UNLINKED_WHY = {
   refused: 'The call recording could not link the visit to its customer, so it has no reminders or confirmation yet.',
 };
 
-async function ringUnlinked(visit, reason, refusal = '') {
+// Rings only while the visit still waits (raiseWhileVisitWaits): the office
+// may have linked or cancelled it since this pass read it.
+async function ringUnlinked(conn, visit, reason, refusal = '') {
   const { day } = slotWords(bookedSlot(visit).date, '');
   const detail = reason === 'no_customer'
     ? 'The call recording was processed, but the call gave no customer to link: the caller may share a phone with an account, or the call named no one.'
     : `The call named a customer, but the link was refused. ${refusal}`;
-  return raiseAdminAlert(CATEGORY, {
+  return raiseWhileVisitWaits(conn, visit.id, (trx) => raiseAdminAlert(CATEGORY, {
     area: AREA,
     action: day ? `link the new caller's visit on ${day}` : "link the new caller's visit",
     why: UNLINKED_WHY[reason],
@@ -107,21 +109,20 @@ async function ringUnlinked(visit, reason, refusal = '') {
     doneWhen: 'visit_linked',
     who: 'person',
   }, {
+    trx,
     dedupeKey: newCallerVisitAlertKey(visit.id),
     bellDefault: true,
     detail: `${detail.trim()}\nOpen the visit on Dispatch and use Link customer. The reminders and the confirmation go out then.`,
     metadata: { scheduled_service_id: visit.id, call_log_id: visit.source_call_log_id || null, reason },
-  });
+  }));
 }
 
-// A refused or failed link rings only while the visit still waits: the
-// office may have linked it meanwhile, or cancelled it.
+const unlinkedOutcome = ({ waits }, visit) => ({ outcome: waits ? 'unlinked' : 'settled', visitId: visit.id });
+
+// A refused or failed link. An operational refusal carries a sentence for
+// staff; anything else may echo SQL.
 async function ringIfStillUnlinked(conn, visit, err) {
-  const now = await conn('scheduled_services').where({ id: visit.id }).first('customer_id', 'status');
-  if (!now || now.customer_id || ['cancelled', 'rescheduled'].includes(now.status)) return { outcome: 'settled', visitId: visit.id };
-  // An operational refusal carries a sentence for staff; anything else may echo SQL.
-  await ringUnlinked(visit, 'refused', err?.isOperational ? err.message : 'An error stopped it.');
-  return { outcome: 'unlinked', visitId: visit.id };
+  return unlinkedOutcome(await ringUnlinked(conn, visit, 'refused', err?.isOperational ? err.message : 'An error stopped it.'), visit);
 }
 
 // Each check: the noun for a list, its own why, and its line in the detail.
@@ -240,10 +241,7 @@ async function linkOfficeVisitFromCall({ call, procToken, text = {}, extracted =
     // The customer the checkpoint wrote (an operator's relink wins there), under this pass's claim.
     const owned = await conn('call_log').where({ id: call.id, processing_token: procToken }).first('customer_id');
     if (!owned) return { outcome: 'claim_lost' };
-    if (!owned.customer_id) {
-      await ringUnlinked(visit, 'no_customer');
-      return { outcome: 'unlinked', visitId: visit.id };
-    }
+    if (!owned.customer_id) return unlinkedOutcome(await ringUnlinked(conn, visit, 'no_customer'), visit);
     let linked;
     try {
       linked = await linkNewCallerVisit({

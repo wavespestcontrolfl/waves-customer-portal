@@ -9158,6 +9158,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN — the timed bells for a visit the office booked by address
+  // that still has no customer (GATE_NEW_CALLER_BOOKING, checked each tick): no
+  // call picked, a recording not processed 90 minutes after the call, a
+  // finished pass that left it unlinked, and the day before the visit. See
+  // server/services/booking/new-caller-visit-bells.js.
+  cron.schedule('4,14,24,34,44,54 * * * *', async () => {
+    if (!require('../config/feature-gates').isEnabled('newCallerBooking')) return;
+    try {
+      await runExclusive('new-caller-visit-bells', async () => {
+        const result = await require('./booking/new-caller-visit-bells').runNewCallerVisitBells();
+        if (result.rung > 0) logger.info(`[new-caller-bells] waiting=${result.waiting} due=${result.due} rung=${result.rung}`);
+      });
+    } catch (err) {
+      logger.error(`[new-caller-bells] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // Call booking-miss watchdog — every 30 min (offset from the ingest
   // watchdog), ring an admin bell for any call whose V2 extraction confirmed
