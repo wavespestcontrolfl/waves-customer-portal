@@ -549,7 +549,10 @@ const DURATION_RE = /(?:\b|(?<=\d))(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|
 // lawn until noon", "you can go back in now", "today", "soon") is the same
 // fixed window as a duration. Judged only by
 // access wording or a timing question — "we can treat tomorrow" is booking.
-const CLOCK_TIME_RE = /\b(?:(?:no\s+need|(?:do\s+not|don'?t|won'?t)\s+(?:need|have)|there'?s\s+no\s+need)\s+to\s+wait|no\s+(?:wait(?:ing)?(?:\s+(?:time|period))?|need\s+to\s+wait)|without\s+(?:any\s+)?waiting|no\s+(?:hay\s+que|necesita|tiene\s+que)\s+esperar|sin\s+esperar|immediately|right\s+away|right\s+after|at\s+once|straight\s+away|as\s+soon\s+as|right\s+now|inmediatamente|de\s+inmediato|enseguida|ya\s+mismo|al\s+instante)\b|\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|\b\d{1,2}:\d{2}\b|\b(?:noon|midday|midnight|tonight|tomorrow|this\s+(?:morning|afternoon|evening)|sunset|sundown|sunrise|(?:next\s+|this\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|week)|(?:(?:in|by|until|till|through|before|after|early|mid|late)[-\s]+may|may\s+\d{1,2}(?:st|nd|rd|th)?)|(?:january|february|march|april|june|july|august|september|october|november|december)|(?:el\s+)?(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)|(?:el\s+)?fin\s+de\s+semana|la\s+pr[oó]xima\s+semana|(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)|dark|darkness|(?:the\s+)?sun\s+(?:goes|sets|has\s+set|is)\s+down|oscurecer|oscurezca|se\s+ponga\s+el\s+sol|puesta\s+del\s+sol|dawn|dusk|daybreak|nightfall|morning|evening|night|afternoon|amanecer|anochecer|atardecer|dinner\s*time|bedtime|mediod[ií]a|medianoche|esta\s+(?:tarde|noche)|ma[ñn]ana|la\s+(?:tarde|noche))\b|\blas?\s+\d{1,2}(?::\d{2})?\b|\blas?\s+(?:una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\b|\b(?:by\s+now|(?:re-?enter\w*|go|come|get|head|be|return|play|walk|use|touch|mow|let\s+\S+|bring\s+\S+|take\s+\S+)\s+(?:\S+\s+){0,3}?now|today|soon|shortly|instant(?:ly)?|in\s+(?:a\s+)?(?:bit|while|little\s+while|moment|jiffy|no\s+time)|after\s+a\s+(?:bit|while|little\s+while)|quick(?:ly)?|fast|rapid(?:ly)?|ahora|hoy|pronto|en\s+un\s+(?:rato|momento|ratito)|m[aá]s\s+tarde|r[aá]pid(?:o|a|amente)|ya\s+(?:puede|pueden|puedes|podemos|se\s+puede))(?![a-zñáéíóú])/i;
+// "Instant quote" is the product the prompt steers every sale to, not a time:
+// "You can get an instant quote" read as "get (back in) instantly" and showed
+// the visitor the safety copy instead of the quote steer (10-25 chat test).
+const CLOCK_TIME_RE = /\b(?:(?:no\s+need|(?:do\s+not|don'?t|won'?t)\s+(?:need|have)|there'?s\s+no\s+need)\s+to\s+wait|no\s+(?:wait(?:ing)?(?:\s+(?:time|period))?|need\s+to\s+wait)|without\s+(?:any\s+)?waiting|no\s+(?:hay\s+que|necesita|tiene\s+que)\s+esperar|sin\s+esperar|immediately|right\s+away|right\s+after|at\s+once|straight\s+away|as\s+soon\s+as|right\s+now|inmediatamente|de\s+inmediato|enseguida|ya\s+mismo|al\s+instante)\b|\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|\b\d{1,2}:\d{2}\b|\b(?:noon|midday|midnight|tonight|tomorrow|this\s+(?:morning|afternoon|evening)|sunset|sundown|sunrise|(?:next\s+|this\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|week)|(?:(?:in|by|until|till|through|before|after|early|mid|late)[-\s]+may|may\s+\d{1,2}(?:st|nd|rd|th)?)|(?:january|february|march|april|june|july|august|september|october|november|december)|(?:el\s+)?(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)|(?:el\s+)?fin\s+de\s+semana|la\s+pr[oó]xima\s+semana|(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)|dark|darkness|(?:the\s+)?sun\s+(?:goes|sets|has\s+set|is)\s+down|oscurecer|oscurezca|se\s+ponga\s+el\s+sol|puesta\s+del\s+sol|dawn|dusk|daybreak|nightfall|morning|evening|night|afternoon|amanecer|anochecer|atardecer|dinner\s*time|bedtime|mediod[ií]a|medianoche|esta\s+(?:tarde|noche)|ma[ñn]ana|la\s+(?:tarde|noche))\b|\blas?\s+\d{1,2}(?::\d{2})?\b|\blas?\s+(?:una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\b|\b(?:by\s+now|(?:re-?enter\w*|go|come|get|head|be|return|play|walk|use|touch|mow|let\s+\S+|bring\s+\S+|take\s+\S+)\s+(?:\S+\s+){0,3}?now|today|soon|shortly|instantly|instant(?![-\s]?quot)|in\s+(?:a\s+)?(?:bit|while|little\s+while|moment|jiffy|no\s+time)|after\s+a\s+(?:bit|while|little\s+while)|quick(?:ly)?|fast|rapid(?:ly)?|ahora|hoy|pronto|en\s+un\s+(?:rato|momento|ratito)|m[aá]s\s+tarde|r[aá]pid(?:o|a|amente)|ya\s+(?:puede|pueden|puedes|podemos|se\s+puede))(?![a-zñáéíóú])/i;
 // A visit / scheduling duration ("The visit takes about 45 minutes", "every
 // 21 days") — exempt only when no drying or re-entry wording is present.
 const SCHEDULING_DURATION_RE = /\b(?:after-?\s*hours?|24[-\s/]7|24[-\s]hours?\s+(?:service|line|support|emergency)|horas?\s+(?:de\s+oficina|h[aá]biles)|hatch\w*|still\s+see|see\s+(?:more\s+|some\s+|a\s+few\s+)?(?:roaches|ants|fleas|bugs|pests|insects|activity|mosquitoes|spiders)|die\s+off|dying\s+off|eggs?|larva\w*|nymphs?|results?|take\s+effect|to\s+(?:start\s+)?work(?:ing)?|works?\s+(?:in|within)|eclosi\w*|resultados?|begins?|start\w*|expir\w*|active|activat\w*|valid|comienza\w*|empieza\w*|vence\w*|activ[ao]\w*|cancel\w*|refund\w*|billing|charge\w*|payments?|invoices?|posts?|posted|credit\w*|contract\w*|trial|renew\w*|notice|reembolso\w*|cancelaci[oó]n|factura\w*|pago\w*|protect\w*|residual|effective\w*|keeps?\s+working|works?\s+for|up\s+to|guarantee\w*|warrant\w*|control\s+for|protecci[oó]n|efectiv\w*|hasta\s+por|same-?\s*day|next-?\s*day|days?\s+(?:a|per)\s+week|weekdays?|weekends?|24\/7|(?:service|office|business|opening)\s+hours|hours\s+(?:are|of)|open|horario|mismo\s+d[ií]a|visits?|appointments?|arriv\w*|window|inspections?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|come\s+back|follow[-\s]?ups?|return\s+visits?|re-?service|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|inspecci[oó]n|cada|programad\w*)\b/i;
@@ -607,6 +610,14 @@ function durationWindow(sentence, index, length) {
 // matchers near the top of this file (EN and ES number words).
 // "Una vez que" is "once" (the condition), not the number one.
 const ANY_TIME_FIGURE_RE = new RegExp(`\\d|\\b(?!once\\b)(?!una\\s+vez\\s+que\\b)(?:${NUM_WORD}|${NUM_WORD_ES}|half|quarter|o'?clock|media|cuarto)\\b`, 'i');
+// A phone number or a property size is never a time window. The prompt has
+// the model give the office line for every job it cannot quote and echo the
+// visitor's home, so "(941) 297-5749" and "your 2,000 sq ft home" counted as
+// re-entry figures once a reply had any access phrase (10-25 chat test). Only
+// those figures are removed; a duration or clock time beside them still counts.
+const PHONE_NUMBER_RE = /(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\b\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
+const PROPERTY_SIZE_RE = /\b\d[\d,./]*[-\s]*(?:sq\.?[-\s]*f(?:ee)?t\.?|sqft|square[-\s]+f(?:ee|oo)t|acres?)(?![a-z])/gi;
+const timeFigureIn = (text) => ANY_TIME_FIGURE_RE.test(String(text || '').replace(PHONE_NUMBER_RE, ' ').replace(PROPERTY_SIZE_RE, ' '));
 // Digital re-entry ("re-enter the portal", "volver a entrar a su cuenta") is a
 // login, not a room. Only the digital phrase itself is removed before the
 // access check — a mixed turn ("I can't log in to the portal; when can I
@@ -682,7 +693,7 @@ function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = 
   const isAccess = (t) => ACCESS_SIGNAL_RE.test(physical(t)) || ACCESS_TOPIC_RE.test(physical(t));
   const accessTopic = isAccess(text) || visitorAccess(activeMessage) || REPLY_OCCUPANT_RETURN_RE.test(physical(text));
   const visitLength = VISIT_LENGTH_QUESTION_RE.test(activeMessage);
-  if (accessTopic && (CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || ANY_TIME_FIGURE_RE.test(text))) return true;
+  if (accessTopic && (CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || timeFigureIn(text))) return true;
   // No access topic: a clock time is booking ("we can treat tomorrow"); a
   // duration is judged by the words right around it.
   for (const sentence of text.split(/(?<=[.!?])\s+|[;\n]+/)) {
@@ -717,7 +728,7 @@ function aboutTreatment(question) {
 }
 
 // A terse reply takes its claim from the visitor's active question.
-const hasTimeFigure = (text) => CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || ANY_TIME_FIGURE_RE.test(text);
+const hasTimeFigure = (text) => CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || timeFigureIn(text);
 const isPhysicalAccess = (text) => visitorAccess(text);
 
 // A bare affirmation ("Yes.", "Absolutely.", "Sí, claro.") confirms whatever
