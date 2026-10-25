@@ -172,6 +172,23 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     expect(historical.skipped.termite_bait_customer).toBeUndefined();
   });
 
+  test("series activity is the seeder's live-row test: an in-progress visit keeps a non-ongoing bait series live", async () => {
+    const ownerC = randomUUID();
+    await knex('technicians').insert(tech(ownerC));
+    extraTechIds.push(ownerC);
+    const on = (o) => ({ technician_id: ownerC, ...o });
+    const baitCustomer = await customer();
+    const bait = await series(baitCustomer, on({ service_type: 'Termite Bait Station Service', recurring_ongoing: false }));
+    await child(bait, '2099-06-29', on({ service_type: bait.service_type, status: 'en_route' })); // yesterday, in progress
+    const pest = await series(baitCustomer, on());
+    await child(pest, '2099-07-06', on());
+
+    const plan = await handover.planHandover(knex, { from: ownerC, start: START, today: TODAY });
+    expect(plan.series.on_from).toBe(2); // the bait series counts as active only through its live row
+    expect(plan.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    expect(plan.would_change.visits).toBe(0);
+  });
+
   test('without --to the plan says the target is not set and assumes Mon-Thu', async () => {
     const plan = await handover.planHandover(knex, { from: ownerId, start: START, today: TODAY });
     expect(plan.target).toBe('not set');

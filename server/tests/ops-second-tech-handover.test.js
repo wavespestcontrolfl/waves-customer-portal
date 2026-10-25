@@ -32,7 +32,14 @@ const visit = (series, date, o = {}) => ({
   id: id('V'), series_id: series.id, scheduled_date: date, status: 'confirmed', track_state: null,
   technician_id: OWNER, visit_id: null, group_status: null, ...o,
 });
-const plan = (parents, visits, o = {}) => buildPlan({ from: OWNER, to: null, start: START, today: TODAY, parents, visits, ...o });
+// The reader decides activity in SQL (whereVisitRowLive). Fixtures mark a series live
+// when it has a visit that is not finished, on or after TODAY; pass liveSeriesIds to override.
+const fixtureLive = (visits) => [...new Set(visits
+  .filter((v) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(v.status) && String(v.scheduled_date) >= TODAY)
+  .map((v) => v.series_id))];
+const plan = (parents, visits, o = {}) => buildPlan({
+  from: OWNER, to: null, start: START, today: TODAY, parents, visits, liveSeriesIds: fixtureLive(visits), ...o,
+});
 
 describe('second-tech-handover planner', () => {
   test('a pest series on the owner moves its Mon-Thu visits; the Friday visit stays (stays_off_day)', () => {
@@ -145,6 +152,16 @@ describe('second-tech-handover planner', () => {
     const onOther = parent({ recurring_technician_id: OTHER });
     const p = plan([onOther], [visit(onOther, MON)]);
     expect(p.series.on_from).toBe(0);
+    expect(p.would_change.visits).toBe(0);
+  });
+
+  test('a non-ongoing bait series kept live only by an in-progress visit still protects its customer', () => {
+    const bait = parent({ customer_id: 'C-live', line: 'termite', service_type: 'Termite Bait Station', recurring_ongoing: false });
+    const pest = parent({ customer_id: 'C-live' });
+    // Its last visit is in progress (dated yesterday): not movable, but the series is live.
+    const inProgress = visit(bait, '2099-06-29', { status: 'en_route' });
+    const p = plan([bait, pest], [inProgress, visit(pest, MON)], { liveSeriesIds: [bait.id, pest.id] });
+    expect(p.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
     expect(p.would_change.visits).toBe(0);
   });
 

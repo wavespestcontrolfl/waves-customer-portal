@@ -30,9 +30,12 @@
 //   NESTED   the outer run gives DATABASE_PUBLIC_URL, the inner run the portal's
 //            GATE_* variables, so the template overlay below reads production's gate.
 //   SERIES   scheduled_services parent rows: is_recurring, recurring_parent_id IS
-//            NULL, status <> 'cancelled'. ACTIVE = recurring_ongoing, or at least
-//            one open visit (below) on or after today (the app's own test,
-//            recurring-appointment-seeder findActiveRecurringSeries).
+//            NULL, status <> 'cancelled'. ACTIVE = recurring_ongoing, or a LIVE
+//            row by the seeder's own test (findActiveRecurringSeries, through
+//            customer-lifecycle-guard whereVisitRowLive: open on or after today,
+//            rescheduled, or in progress at any date). Activity is not the same
+//            as "can move": an in-progress visit keeps its series active but
+//            never moves.
 //   ON FROM  the series technician the app gives NEW children: the template
 //            (recurring_technician_id) when recurring_technician_override, else
 //            recurring_technician_id, else the parent's technician_id
@@ -72,6 +75,7 @@ const { normalizeWorkDays, dayOfWeekOfDate } = require(path.join(root, 'services
 const { etDateString, etWeekStart, addETDays, parseETDateTime } = require(path.join(root, 'utils', 'datetime-et'));
 const { overlayRecurringTemplateOverrides } = require(path.join(root, 'services', 'recurring-template-overrides'));
 const { isEnabled } = require(path.join(root, 'config', 'feature-gates'));
+const { whereVisitRowLive } = require(path.join(root, 'services', 'customer-lifecycle-guard'));
 
 const MOVABLE_LINES = ['general', 'rodent', 'mosquito'];
 const OPEN_STATUSES = ['pending', 'confirmed', 'rescheduled'];
@@ -185,6 +189,7 @@ function targetWorkDays(to) {
  *   to        { id, work_days } | null   (null = target not set)
  *   start     YYYY-MM-DD, first solo day
  *   today     YYYY-MM-DD (ET)
+ *   liveSeriesIds  series ids with a LIVE row (the reader's whereVisitRowLive query)
  *   lines     lines to move (subset of MOVABLE_LINES)
  *   parents   [{ id, customer_id, line, catalog_key, service_key_snapshot, service_type, technician_id,
  *               recurring_technician_id, recurring_technician_override, recurring_ongoing }]
@@ -192,14 +197,14 @@ function targetWorkDays(to) {
  *   visits    [{ id, series_id, scheduled_date, status, track_state, technician_id, visit_id, group_status }]
  *             series_id = the parent's id (a parent row is its own series_id)
  */
-function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, parents, visits }) {
+function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds = [] }) {
   const bySeries = new Map();
   for (const v of visits) {
     if (!bySeries.has(v.series_id)) bySeries.set(v.series_id, []);
     bySeries.get(v.series_id).push({ ...v, scheduled_date: dayOf(v.scheduled_date) });
   }
-  const liveAhead = (v) => isOpenVisit(v) && (v.status === 'rescheduled' || v.scheduled_date >= today);
-  const isActive = (p) => p.recurring_ongoing === true || (bySeries.get(p.id) || []).some(liveAhead);
+  const live = new Set(liveSeriesIds);
+  const isActive = (p) => p.recurring_ongoing === true || live.has(p.id);
   const active = parents.filter(isActive);
 
   const baitCustomers = new Set(active.filter(isBaitSeries).map((p) => p.customer_id));
@@ -332,6 +337,21 @@ async function loadVisits(db, parentIds, today) {
   return out;
 }
 
+// The series with a LIVE row: the seeder's activity test (findActiveRecurringSeries).
+async function loadLiveSeriesIds(db, parentIds, today) {
+  const cols = await db('scheduled_services').columnInfo();
+  const live = new Set();
+  for (const ids of chunks(parentIds, 1000)) {
+    const rows = await db('scheduled_services')
+      .where(function inSeries() { this.whereIn('recurring_parent_id', ids).orWhereIn('id', ids); })
+      .where('is_recurring', true)
+      .where(function liveRow() { whereVisitRowLive(this, today, { trackState: !!cols.track_state }); })
+      .select('id', 'recurring_parent_id');
+    for (const r of rows) live.add(r.recurring_parent_id || r.id);
+  }
+  return [...live];
+}
+
 /** Read everything the planner needs and plan. `db` is a knex handle (or transaction). Reads only. */
 async function planHandover(db, { from, to = null, start, today = etDateString(), lines = MOVABLE_LINES }) {
   const fromRow = await loadTechnician(db, from);
@@ -358,8 +378,12 @@ async function planHandover(db, { from, to = null, start, today = etDateString()
     }
     p.line = cache.get(key);
   }
-  const visits = await loadVisits(db, parents.map((p) => p.id), today);
-  const plan = buildPlan({ from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits });
+  const parentIds = parents.map((p) => p.id);
+  const visits = await loadVisits(db, parentIds, today);
+  const liveSeriesIds = await loadLiveSeriesIds(db, parentIds, today);
+  const plan = buildPlan({
+    from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits, liveSeriesIds,
+  });
   // The overlay follows GATE_EDIT_APPT_PRICE_SERVICE_SCOPE, as in the app.
   plan.template_overrides = isEnabled('editApptPriceServiceScope') ? 'applied' : 'not_applied_gate_off';
   return plan;
