@@ -270,7 +270,7 @@ describe('source digest and review rows', () => {
     expect(reviews).toHaveLength(1);
     const current = now.find((r) => r.source_key === Q1_941).source_digest;
     expect(reviews[0]).toMatchObject({
-      source_key: `${Q1_941}:review:${current.slice(0, 12)}`,
+      source_key: `${Q1_941}:review:1`,
       filing_type: 'payroll_941',
       period_label: 'Q1 2027',
       title: 'Form 941 — Q1 2027 — figures changed after it was marked done',
@@ -282,19 +282,44 @@ describe('source digest and review rows', () => {
     expect(reviewsOf(withBalances(same, [marked(Q1_941, old.source_digest)]))).toEqual([]);
   });
 
-  test('a marked review row holding the current digest ends the ask; a second change makes a new key', () => {
+  test('a marked review row holding the current digest ends the ask; a second change makes review 2', () => {
     const v1 = obsFor(first)[Q1_941].source_digest;
     const secondChecks = [check('2027-01-08'), first[1]];
     const v2 = obsFor(secondChecks)[Q1_941];
-    const done = [marked(Q1_941, v1), marked(`${Q1_941}:review:${v2.source_digest.slice(0, 12)}`, v2.source_digest)];
+    const done = [marked(Q1_941, v1), marked(`${Q1_941}:review:1`, v2.source_digest)];
     const now2 = payrollObligations({ checks: secondChecks, hires: [], today: '2027-03-01' });
     expect(reviewsOf(withBalances(now2, done))).toEqual([]);
     const now3 = payrollObligations({ checks: [check('2027-01-08'), secondChecks[1]], hires: [], today: '2027-03-01' });
     const reviews = reviewsOf(withBalances(now3, done));
-    expect(reviews).toHaveLength(1);
-    const v3 = now3.find((r) => r.source_key === Q1_941).source_digest;
-    expect(reviews[0].source_key).toBe(`${Q1_941}:review:${v3.slice(0, 12)}`);
-    expect(reviews[0].source_key).not.toContain(v2.source_digest.slice(0, 12));
+    expect(reviews.map((r) => r.source_key)).toEqual([`${Q1_941}:review:2`]);
+    expect(reviews[0].source_digest).toBe(now3.find((r) => r.source_key === Q1_941).source_digest);
+  });
+
+  test('compares with the latest acknowledged state: A filed, A+B acknowledged, B voided (back to A) raises review 2', () => {
+    const A = [check('2027-01-08')];
+    const AB = [...A, check('2027-02-05')];
+    const digestOf = (checks) => payrollObligations({ checks, hires: [], today: '2027-03-01' }).find((r) => r.source_key === Q1_941).source_digest;
+    const obsOf = (checks) => payrollObligations({ checks, hires: [], today: '2027-03-01' });
+    const dA = digestOf(A);
+    const dAB = digestOf(AB);
+    const dC = digestOf([...AB, check('2027-02-12')]);
+    expect(new Set([dA, dAB, dC]).size).toBe(3);
+    const base = marked(Q1_941, dA, { updated_at: '2027-01-01' });
+    const rev1 = marked(`${Q1_941}:review:1`, dAB);
+    // Back to A: the base row's digest matches, but the latest acknowledged state is review 1.
+    expect(reviewsOf(withBalances(obsOf(A), [base, rev1])).map((r) => r.source_key)).toEqual([`${Q1_941}:review:2`]);
+    // Review 2 acknowledged with A and staying at A: nothing.
+    const rev2 = marked(`${Q1_941}:review:2`, dA);
+    expect(reviewsOf(withBalances(obsOf(A), [base, rev1, rev2]))).toEqual([]);
+    // A change to C: review 3.
+    expect(reviewsOf(withBalances(obsOf([...AB, check('2027-02-12')]), [base, rev1, rev2])).map((r) => r.source_key))
+      .toEqual([`${Q1_941}:review:3`]);
+    // Order comes from the key number, not from a timestamp: an edit to the base row changes nothing.
+    const editedBase = { ...base, updated_at: '2030-01-01' };
+    expect(reviewsOf(withBalances(obsOf(A), [editedBase, rev1, rev2]))).toEqual([]);
+    expect(reviewsOf(withBalances(obsOf(A), [editedBase, rev1])).map((r) => r.source_key)).toEqual([`${Q1_941}:review:2`]);
+    // The row order given to the helper does not matter either.
+    expect(reviewsOf(withBalances(obsOf(A), [rev2, rev1, base]))).toEqual([]);
   });
 
   test('a marked row with no digest (not written by this sync) gets no review row', () => {
@@ -324,7 +349,7 @@ describe('source digest and review rows', () => {
       marked('payroll:rt6:2027-Q1', 'old-digest', { amount_paid: '1.00', amount_due: '1.00' }),
       marked('payroll:rt6:2027-Q1:balance:1', current, { amount_paid: '49.00', amount_due: '49.00' }),
     ]);
-    expect(reviewsOf(rows).map((r) => r.source_key)).toEqual([`payroll:rt6:2027-Q1:review:${current.slice(0, 12)}`]);
+    expect(reviewsOf(rows).map((r) => r.source_key)).toEqual(['payroll:rt6:2027-Q1:review:1']);
   });
 });
 
@@ -346,14 +371,14 @@ describe('periods with every check voided', () => {
     const now = payrollObligations({ checks: [], hires: [], today: '2027-02-01', remembered: ['payroll:941:2027-Q1'] });
     expect(EMPTY).toMatch(/^[0-9a-f]{32}$/);
     const rows = withBalances(now, [marked('payroll:941:2027-Q1', 'old-digest')]);
-    expect(reviewsOf(rows).map((r) => r.source_key)).toEqual([`payroll:941:2027-Q1:review:${EMPTY.slice(0, 12)}`]);
+    expect(reviewsOf(rows).map((r) => r.source_key)).toEqual(['payroll:941:2027-Q1:review:1']);
     // The span still runs to the quarter holding today and starts at the remembered quarter.
     expect(now.map((r) => r.source_key).filter((k) => k.startsWith('payroll:rt6:'))).toEqual(['payroll:rt6:2027-Q1']);
   });
 
   test('a remembered quarter before the first check starts the span there', () => {
     const now = payrollObligations({
-      checks: [check('2027-05-07')], hires: [], today: '2027-05-10', remembered: ['payroll:rt6:2027-Q1:review:abc'],
+      checks: [check('2027-05-07')], hires: [], today: '2027-05-10', remembered: ['payroll:rt6:2027-Q1:review:2'],
     });
     expect(now.map((r) => r.source_key).filter((k) => k.startsWith('payroll:941:'))).toEqual(['payroll:941:2027-Q1', 'payroll:941:2027-Q2']);
   });
@@ -365,7 +390,7 @@ describe('periods with every check voided', () => {
     expect(now.find((r) => r.source_key === 'payroll:940:2026').amount_due).toBe('0.00');
     expect(keys.some((k) => k.includes('futa_over_500'))).toBe(false);
     const rows = withBalances(now, [marked('payroll:w2:2026', 'old-digest')]);
-    expect(reviewsOf(rows).map((r) => r.source_key)).toEqual([`payroll:w2:2026:review:${EMPTY.slice(0, 12)}`]);
+    expect(reviewsOf(rows).map((r) => r.source_key)).toEqual(['payroll:w2:2026:review:1']);
   });
 
   test('a paid deposit whose month lost every check wants no row', () => {
@@ -380,8 +405,9 @@ describe('periods with every check voided', () => {
   test('balance, review and new-hire keys name their period correctly', () => {
     const now = payrollObligations({
       checks: [], hires: [], today: '2027-01-20',
-      remembered: ['payroll:941_deposit:2027-01:balance:1', 'payroll:new_hire:t1', 'payroll:futa_over_500:2027'],
+      remembered: ['payroll:941_deposit:2027-01:balance:1', 'payroll:new_hire:t1', 'payroll:futa_over_500:2027', 'payroll:w2:2026:review:12'],
     });
-    expect(now.map((r) => r.source_key)).toEqual(['payroll:941_deposit:2027-01']);
+    expect(now.map((r) => r.source_key).filter((k) => k.includes('2027-01') || k.includes('2026'))).toEqual(expect.arrayContaining(['payroll:941_deposit:2027-01', 'payroll:w2:2026']));
+    expect(now.some((r) => r.source_key.includes('review') || r.source_key.includes('balance') || r.source_key.includes('new_hire'))).toBe(false);
   });
 });

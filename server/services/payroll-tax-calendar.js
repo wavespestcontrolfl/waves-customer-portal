@@ -34,9 +34,10 @@
  * Every row built from checks stores source_digest, a hash of exactly those
  * checks. If a Form 941, RT-6, 940 or W-2/W-3 row was marked done and its
  * checks have since changed (a void and replacement), a review row (key
- * '<row>:review:<digest prefix>') asks the owner to check the figures; marking
- * it done stores the current digest and ends the ask. Only the filing's own
- * rows (base and review) acknowledge a change, never a balance row. A period
+ * '<row>:review:<n>', n one above the highest marked review) asks the owner to
+ * check the figures; marking it done stores the current digest, which becomes
+ * the latest acknowledged state. A return to an earlier digest raises a new
+ * review. Only the base and review rows count, never a balance row. A period
  * with a marked row stays covered even when every check in it is voided (zero
  * totals, the digest of the empty set), so a filed return still gets its
  * review row. A marked row with no digest (not written by this sync) never
@@ -389,11 +390,18 @@ const toCents = (v) => Math.round(Number(v) * 100) || 0;
  *   - Marked rows and an amount: what the marked rows cover (amount_paid, else
  *     amount_due) comes off the liability. A positive rest becomes a balance
  *     row '<base>:balance:<count of marked rows>'; otherwise nothing.
- *   - A filing in REVIEW_TYPES with marked rows, none of them holding the
- *     current source_digest, and at least one holding some digest: a review
- *     row '<base>:review:<first 12 of the digest>' (no amount).
+ *   - A filing in REVIEW_TYPES whose latest acknowledged state (the marked
+ *     review row with the highest number, else the marked base row) holds a
+ *     digest different from the current source_digest: a review row
+ *     '<base>:review:<highest marked n + 1>' (no amount).
  * Both can apply to one duty (RT-6, Form 940).
  */
+// The n of a '<base>:review:<n>' key, else 0.
+const reviewNumber = (key) => {
+  const m = /:review:(\d+)$/.exec(String(key));
+  return m ? Number(m[1]) : 0;
+};
+
 function withBalances(obligations, markedRows) {
   const marked = new Map();
   for (const row of markedRows) {
@@ -405,15 +413,21 @@ function withBalances(obligations, markedRows) {
   for (const ob of obligations) {
     const done = marked.get(ob.source_key);
     if (!done) { wanted.push(ob); continue; }
-    // Only the filing's own rows acknowledge a change: a payment on a balance
-    // row says nothing about the return.
-    const filings = done.filter((row) => !String(row.source_key).includes(BALANCE_SEPARATOR));
-    if (REVIEW_TYPES.has(ob.filing_type) && ob.source_digest
-      && !filings.some((row) => row.source_digest === ob.source_digest)
-      && filings.some((row) => row.source_digest)) {
+    // The latest acknowledged state of a filing is its marked review row with
+    // the highest number, else its marked base row. The number comes from the
+    // key, never from a timestamp. A balance row says nothing about the return.
+    let latest = null;
+    let latestReview = 0;
+    for (const row of done) {
+      const n = reviewNumber(row.source_key);
+      if (n > latestReview) { latestReview = n; latest = row; }
+    }
+    if (!latest) latest = done.find((row) => row.source_key === ob.source_key) || null;
+    if (REVIEW_TYPES.has(ob.filing_type) && ob.source_digest && latest
+      && latest.source_digest && latest.source_digest !== ob.source_digest) {
       wanted.push({
         ...ob,
-        source_key: `${ob.source_key}${REVIEW_SEPARATOR}${ob.source_digest.slice(0, 12)}`,
+        source_key: `${ob.source_key}${REVIEW_SEPARATOR}${latestReview + 1}`,
         title: `${ob.title} — figures changed after it was marked done`,
         amount_due: null,
         notes: 'A pay run changed after this was marked done. Check the figures; a corrected return may be needed (941-X, RT-8A, amended 940 or W-2c).',

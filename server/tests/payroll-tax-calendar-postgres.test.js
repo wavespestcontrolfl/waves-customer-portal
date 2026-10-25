@@ -251,7 +251,7 @@ postgres('payroll tax calendar sync', () => {
     const rows = await trx('tax_filing_calendar').where('source_key', 'like', `${KEY}%`).orderBy('source_key');
     expect(rows.map((r) => [r.status, r.amount_due])).toEqual([['filed', null], ['upcoming', null]]);
     expect(rows[0]).toMatchObject({ source_key: KEY, source_digest: before.source_digest });
-    expect(rows[1].source_key).toBe(`${KEY}:review:${rows[1].source_digest.slice(0, 12)}`);
+    expect(rows[1].source_key).toBe(`${KEY}:review:1`);
     expect(rows[1].source_digest).not.toBe(before.source_digest);
     expect(rows[1].title).toBe('Form 941 — Q1 2027 — figures changed after it was marked done');
     expect(await sync()).toEqual({ inserted: 0, updated: 0, deleted: 0 });
@@ -278,6 +278,30 @@ postgres('payroll tax calendar sync', () => {
     const filedAfter = await trx('tax_filing_calendar').whereIn('source_key', [Q1, W2]).orderBy('source_key');
     expect(filedAfter).toEqual(filedBefore);
     expect(await sync()).toEqual({ inserted: 0, updated: 0, deleted: 0 });
+  });
+
+  it('compares with the latest acknowledged state: A filed, A+B acknowledged, B voided raises review 2', async () => {
+    const KEY = 'payroll:941:2027-Q1';
+    const reviewRows = () => trx('tax_filing_calendar').where('source_key', 'like', `${KEY}:review:%`).orderBy('source_key');
+    await finalCheck(W1, '2027-01-15'); // A
+    await sync();
+    await trx('tax_filing_calendar').where({ source_key: KEY }).update({ status: 'filed', filed_date: '2027-04-20' });
+    const baseDigest = (await rowFor(KEY)).source_digest;
+    const b = await finalCheck(W3, '2027-02-05'); // A+B
+    await sync();
+    let reviews = await reviewRows();
+    expect(reviews.map((r) => [r.source_key, r.status])).toEqual([[`${KEY}:review:1`, 'upcoming']]);
+    await trx('tax_filing_calendar').where({ id: reviews[0].id }).update({ status: 'filed', filed_date: '2027-04-25' });
+    expect(await sync()).toEqual({ inserted: 0, updated: 0, deleted: 0 });
+    await trx('payroll_checks').where({ id: b.checkId }).update({ status: 'voided' });
+    await trx('payroll_runs').where({ id: b.runId }).update({ status: 'voided' }); // back to A
+    await sync();
+    reviews = await reviewRows();
+    expect(reviews.map((r) => [r.source_key, r.status])).toEqual([[`${KEY}:review:1`, 'filed'], [`${KEY}:review:2`, 'upcoming']]);
+    expect(reviews[1].source_digest).toBe(baseDigest); // the original A figures, new state to acknowledge
+    await trx('tax_filing_calendar').where({ id: reviews[1].id }).update({ status: 'filed', filed_date: '2027-04-30' });
+    expect(await sync()).toEqual({ inserted: 0, updated: 0, deleted: 0 });
+    expect(await reviewRows()).toHaveLength(2);
   });
 
   it('a balance payment does not end a review', async () => {
