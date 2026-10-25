@@ -241,6 +241,7 @@
  *   GATE_LAWN_WATERING_TEXT_FORECAST=true (lawn watering forecast from two sources, needs GATE_LAWN_WATERING_FORECAST: the water-in rain sentence is frozen only when Open-Meteo's amount AND an NWS hourly "rain likely" hour agree in the window; a timed hold then a water-in gets the sentence for rain after the hold ends; the watering text carries the frozen sentence. Off = today: Open-Meteo alone, plain water-in only, live banner only)
  *   GATE_LAWN_WATERING_SHORT_TEXT=true (short lawn watering text, owner 2026-10-23: the watering text sends short steps built from the frozen instruction's fields under template lawn_watering_instruction_short ("Lawn watering: {watering_lines}") plus a short rain sentence; an unknown shape or a missing short row sends the full lines; report, PDF, banner and Ask Waves unchanged; ships DARK, read at call time via lawnWateringShortTextLive(); off = today's text byte for byte)
  *   GATE_WARRANTY_13692_CHECK=true (owner 2026-10-24, Rule 5E-14.105(1): the New Construction Termite Warranty and the Builder Master Agreement read the signed FDACS-13692 consumer notice on file (an e-signed Document Request or an office-uploaded scan of the paper form) instead of a typed date. On or before the notice grace end (2026-11-24) a missing notice only warns and the typed date still works; after it the issue refuses until a notice dated on or before the contract basis date and the treatment date is on file. Adds the admin consumer-notices routes. Read at call time via warranty13692CheckLive(), strict 1/true/on, dark by default; off = typed date only, routes answer 404. Sends nothing to a customer.)
+ *   GATE_ESTIMATE_CONSUMER_NOTICE=true (owner 2026-10-25, Rule 5E-14.105(1), F.A.C.: an estimate with a termite line asks the customer to read and sign the FDACS-13692 consumer notice on the estimate page BEFORE they can accept. Adds POST /api/estimates/:token/consumer-notice (issues the consumer_notice.fdacs_13692 Document Request and returns its signing URL), cta.consumerNotice on GET /:token/data, and refuses PUT /:token/accept with 409 consumer_notice_required until the customer has a notice on file. Read at call time via estimateConsumerNoticeLive(), strict 1/true/on, dark by default; off = byte-identical estimate page and accept. Sends nothing to a customer.)
  *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the lawn program v13 focuses on this month (lawn-program-line.js PROGRAM_LINES_V13, claims proven against server/config/lawn-protocol-v13.json), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note), and only a visit whose plan resolved the staged v13 version with GATE_LAWN_V13 on: a visit with no recorded version or an older one keeps the old note (the retired per-grass sentences were removed, so no past report is rewritten); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES=true (lawn report: no Lawn Coverage section when the visit's coverage zones were only the schematic defaults (no technician-marked zone) AT COMPLETION; owner 2026-10-06; the verdict is frozen once at completion by the lawn write gate into service_records.structured_notes.lawnCoverageVerdict { v: 1, defaultsOnly, frozenAt }, first writer wins, only while the gate is live and the zone / geometry reads succeeded; a render and the PDF key (':covhide=1' only for a frozen defaultsOnly true) read that frozen value and never the live zone rows; a visit with no frozen verdict, such as an older visit, renders exactly as with the gate off; ships DARK, read at call time via lawnCoverageHideDefaultZonesLive(); off = byte-identical payload)
  *   GATE_LAWN_PROGRAM_DETAIL=true (lawn report: under the v13 month sentence, the month's "Why now" line from lawn-program-line.js PROGRAM_DETAIL_V13: seasonal facts and the step by category, no product names, rates, watering advice or outcome timing; needs GATE_LAWN_EXPECTATIONS; strict 'true' only; owner 2026-10-06; ships DARK, read at call time via lawnProgramDetailLive(); off = byte-identical payload)
@@ -4794,6 +4795,11 @@ const gates = {
   // warranty13692CheckLive().
   warranty13692Check: gateEnvValue('GATE_WARRANTY_13692_CHECK'),
 
+  // Estimate consumer notice (owner 2026-10-25). Ships DARK. This entry is for
+  // logGateStatus only: estimate-public.js and estimate-consumer-notice.js read
+  // GATE_ESTIMATE_CONSUMER_NOTICE at call time via estimateConsumerNoticeLive().
+  estimateConsumerNotice: gateEnvValue('GATE_ESTIMATE_CONSUMER_NOTICE'),
+
   // Lawn report monthly program line (lawn report rebuild P9): snapshot.seasonalNote
   // becomes the month's lawn program v13 sentence (v13 visits only). Ships DARK. This
   // entry is for logGateStatus only: lawn-report-v2.js reads GATE_LAWN_EXPECTATIONS
@@ -6314,6 +6320,14 @@ function lawnWateringShortTextLive() {
 // notice on file (Rule 5E-14.105(1)). Off = the typed date only, as before.
 function warranty13692CheckLive() {
   return gateEnvValue('GATE_WARRANTY_13692_CHECK');
+}
+
+// GATE_ESTIMATE_CONSUMER_NOTICE read at CALL time (same 1/true/on convention as
+// gateEnvValue). Owner 2026-10-25, Rule 5E-14.105(1): the customer signs the
+// FDACS-13692 consumer notice on the estimate page before accepting a termite
+// estimate. Off = the estimate page, /data and accept are byte-identical.
+function estimateConsumerNoticeLive() {
+  return gateEnvValue('GATE_ESTIMATE_CONSUMER_NOTICE');
 }
 
 // GATE_LAWN_EXPECTATIONS read at CALL time (same 1/true/on convention as
@@ -7985,3 +7999,5 @@ module.exports.accessCodesFoundBellLive = accessCodesFoundBellLive;
 module.exports.planRateLedgerReconcileLive = planRateLedgerReconcileLive;
 // GATE_LEAD_DRAFT_PROPERTY_LOOKUP reader, on its own line so gate PRs never conflict.
 module.exports.leadDraftPropertyLookupLive = leadDraftPropertyLookupLive;
+// GATE_ESTIMATE_CONSUMER_NOTICE reader, on its own line so gate PRs never conflict.
+module.exports.estimateConsumerNoticeLive = estimateConsumerNoticeLive;

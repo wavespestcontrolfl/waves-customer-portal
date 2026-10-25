@@ -504,6 +504,8 @@ app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
 // Commercial proposal signing (GATE_COMMERCIAL_PROPOSAL_SIGN): same reason. Privacy headers and the dark gate's generic 404 land before the global limiter.
 app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
+// Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): same reason, same shape.
+app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 
 app.use('/api/', limiter);
 
