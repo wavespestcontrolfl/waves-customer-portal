@@ -25,6 +25,7 @@ import {
   Calculator,
   DollarSign,
   Download,
+  FileSpreadsheet,
   FileText,
   Inbox,
   LayoutDashboard,
@@ -41,6 +42,8 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import LedgerInboxTab from "./tax/LedgerInboxTab";
 import SharedBillsPanel from "./tax/SharedBillsPanel";
 import ReturnTab from "./tax/ReturnTab";
+import SalesTaxTab from "./tax/SalesTaxTab";
+import Form1099Tab from "./tax/Form1099Tab";
 function useTaxRead(path, setData, field) {
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -243,6 +246,8 @@ const TAX_SECTIONS = [
   },
   { key: "ledger", label: "Inbox", Icon: Inbox },
   { key: "return", label: "Return", Icon: Calculator },
+  { key: "salestax", label: "Sales tax", Icon: FileSpreadsheet },
+  { key: "form1099", label: "1099s", Icon: FileText },
   {
     key: "mileage",
     label: "Mileage",
@@ -6745,6 +6750,8 @@ export default function TaxPage() {
   // GATE_TAX_RETURN_ENGINE (nested under GATE_BANK_IMPORT): the Return leaf
   // exists only when its status says so; a failed read keeps it hidden.
   const [returnOn, setReturnOn] = useState(false);
+  // GATE_TAX_WORKSHEETS (nested under GATE_BANK_IMPORT): the Sales tax and 1099s leaves exist only when its status says so; a failed read keeps them hidden.
+  const [worksheetsOn, setWorksheetsOn] = useState(false);
   const tabGroups = (bankImportOn
     ? TAX_TAB_GROUPS.map((g) =>
         g.key === "expenses"
@@ -6756,7 +6763,16 @@ export default function TaxPage() {
       )
     : TAX_TAB_GROUPS
   ).map((g) =>
-    g.key === "reports" && returnOn ? { ...g, tabs: [...g.tabs, "return"] } : g,
+    g.key === "reports" && (returnOn || worksheetsOn)
+      ? {
+          ...g,
+          tabs: [
+            ...g.tabs,
+            ...(returnOn ? ["return"] : []),
+            ...(worksheetsOn ? ["salestax", "form1099"] : []),
+          ],
+        }
+      : g,
   );
   const activeGroup =
     tabGroups.find((g) => g.tabs.includes(activeTab)) || tabGroups[0];
@@ -6784,6 +6800,9 @@ export default function TaxPage() {
       .catch(() => {});
     adminFetch("/admin/tax/return-engine/status")
       .then((r) => setReturnOn(!!r?.enabled))
+      .catch(() => {});
+    adminFetch("/admin/tax/worksheets/status")
+      .then((r) => setWorksheetsOn(!!r?.enabled))
       .catch(() => {});
     loadDashboard();
   }, [loadDashboard]);
@@ -7277,6 +7296,8 @@ export default function TaxPage() {
       {activeTab === "bankimport" && <BankImportTab />}
       {activeTab === "ledger" && <LedgerInboxTab />}
       {activeTab === "return" && <ReturnTab />}
+      {activeTab === "salestax" && <SalesTaxTab />}
+      {activeTab === "form1099" && <Form1099Tab />}
       {activeTab === "mileage" && <MileageTab />}
       {activeTab === "revenue" && <RevenueTab />}
       {activeTab === "filings" && <FilingCalendarTab />}
