@@ -28,6 +28,7 @@ beforeEach(() => {
       return reply(options.method === 'POST' ? { election: W4 } : { technician: {} });
     }
     if (path === '/admin/payroll/technicians') return reply({ technicians: TECHS });
+    if (path === '/admin/payroll/runs') return reply({ runs: [] });
     if (path === '/admin/payroll/technicians/tech-a/w4') return reply({ elections: [W4, { ...W4, id: 'w4-0', filingStatus: 'single', step2Checkbox: false, step4cExtraWithholding: '0.00', formYear: 2025, effectiveOn: '2025-01-06', signedOn: '2025-01-02' }] });
     return reply({}, false, 404);
   });

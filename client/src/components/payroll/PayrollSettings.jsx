@@ -12,6 +12,8 @@ import { Textarea } from '../ui/Textarea';
 import { UiSurface } from '../ui/UiSurface';
 import { adminFetch } from '../../lib/adminFetch';
 import { etDateString } from '../../lib/timezone';
+import { dayLabel, dollars } from './payrollFormat';
+import PayRuns from './PayRuns';
 
 // Staff page, Payroll tab (owner 2026-10-25, basic payroll layer 1b-2a). An admin
 // types the W-4 elections from the signed PAPER form and records how each W-2
@@ -28,23 +30,14 @@ const FILING_WORDS = {
   married_jointly: 'Married filing jointly',
   head_of_household: 'Head of household',
 };
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
 export const filingWords = status => FILING_WORDS[status] || 'Not recorded';
 
-export function dayLabel(value) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ''));
-  if (!match) return '';
-  return `${MONTHS[Number(match[2]) - 1]} ${Number(match[3])}, ${match[1]}`;
-}
+export { dayLabel, dollars };
 
-export function dollars(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n.toLocaleString('en-US', { style: 'currency', currency: 'USD' }) : '';
-}
-
-async function call(path, options) {
+// raw: true hands back the Response (the CSV download); errors read the same.
+async function call(path, { raw = false, ...options } = {}) {
   const response = await adminFetch(`/admin/payroll${path}`, options);
+  if (raw && response.ok) return response;
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `Payroll request failed (${response.status}).`);
   return data;
@@ -282,6 +275,7 @@ export default function PayrollSettings() {
         </TBody>
       </Table>
     </Card>}
+    <PayRuns call={call} />
     {dialog?.kind === 'w4' && <W4Dialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'pay' && <PayMethodDialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'history' && <W4HistoryDialog technician={dialog.tech} onClose={close} />}

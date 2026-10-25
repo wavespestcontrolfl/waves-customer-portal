@@ -341,6 +341,7 @@ function sharedBillsToCSV(bills) {
 }
 
 module.exports = {
+  csvRow: row,
   transactionsToCSV,
   expensesToCSV,
   mileageToCSV,
