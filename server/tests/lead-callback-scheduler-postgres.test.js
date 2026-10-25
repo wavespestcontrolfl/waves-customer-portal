@@ -1,0 +1,245 @@
+// CI's DB-gated pass runs this against PostgreSQL: the booked-call
+// scheduler (services/lead-callback-scheduler.js) — the 15-minute reminder,
+// the ring at the booked time, one ring at a time, the late hand-off, and the
+// 8 AM no-answer bell. The ring itself (placeRing), the text send and the
+// bell write are mocked; each bell spec passes the real notification rule.
+const SKIP = !process.env.DATABASE_URL;
+const knex = require('knex');
+const { randomUUID } = require('crypto');
+let mockConn;
+jest.mock('../models/db', () => {
+  const proxy = (...args) => mockConn(...args);
+  proxy.raw = (...args) => mockConn.raw(...args);
+  proxy.transaction = (...args) => mockConn.transaction(...args);
+  return proxy;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+jest.mock('../utils/customer-comms-lock', () => ({ withSmsConsentLock: (conn, _keys, work) => conn.transaction(work) }));
+jest.mock('../services/admin-alert-compose', () => ({ ...jest.requireActual('../services/admin-alert-compose'), raiseAdminAlert: jest.fn(async () => ({ id: 'n1' })) }));
+const mockPlaceRing = jest.fn();
+const mockSettle = jest.fn(async () => true);
+jest.mock('../services/lead-call-reply-ring', () => ({
+  ...jest.requireActual('../services/lead-call-reply-ring'),
+  placeRing: (...args) => mockPlaceRing(...args),
+  settleUnstartedRing: (...args) => mockSettle(...args),
+}));
+
+const { isEnabled } = require('../config/feature-gates');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
+const { runLeadCallbackTick, _test } = require('../services/lead-callback-scheduler');
+
+const bellSpecs = () => raiseAdminAlert.mock.calls.map(([, spec]) => { composeAdminAlert(spec); return spec; });
+const REAL_SEND = { sent: true, providerMessageId: 'SM_real_sid', deliveryOutcome: 'accepted' };
+// 9:55 AM EDT Oct 21, 2026; the slot is 10:00 AM.
+const SLOT = new Date('2026-10-21T14:00:00Z');
+const BEFORE = new Date('2026-10-21T13:50:00Z');
+
+jest.setTimeout(30000);
+(SKIP ? describe.skip : describe)('lead callback scheduler on PostgreSQL', () => {
+  let database;
+  const schema = `lead_cb_sched_${randomUUID().replaceAll('-', '')}`;
+  const tables = ['customers', 'leads', 'call_log', 'lead_callback_requests'];
+
+  beforeAll(async () => {
+    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
+    await database.raw('CREATE SCHEMA ??', [schema]);
+    for (const table of tables) await database.raw('CREATE TABLE ??.?? AS SELECT * FROM public.?? WITH NO DATA', [schema, table, table]);
+    const t = `"${schema}".lead_callback_requests`;
+    await database.raw(`ALTER TABLE ${t} ALTER COLUMN id SET DEFAULT gen_random_uuid(), ALTER COLUMN created_at SET DEFAULT now(), ALTER COLUMN updated_at SET DEFAULT now()`);
+    mockConn = database;
+  });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isEnabled.mockImplementation(() => true);
+    sendCustomerMessage.mockResolvedValue(REAL_SEND);
+    mockPlaceRing.mockResolvedValue({ rang: true, reason: 'rang', callLogId: randomUUID() });
+  });
+  afterEach(async () => {
+    for (const table of tables) await database.raw('TRUNCATE TABLE ??.?? CASCADE', [schema, table]);
+  });
+  afterAll(async () => {
+    await database.raw('DROP SCHEMA ?? CASCADE', [schema]);
+    await database.destroy();
+  });
+
+  async function booked({ phone = '+19415550100', at = SLOT, state = 'scheduled', extra = {} } = {}) {
+    const customer = { id: randomUUID(), first_name: 'Pat', last_name: 'Sample', phone, pipeline_stage: 'new_lead' };
+    await database('customers').insert(customer);
+    const [row] = await database('lead_callback_requests').insert({
+      customer_id: customer.id, lead_id: randomUUID(), phone, kind: 'call_request', state,
+      send_outcome: 'sent', target_date: '2026-10-21', scheduled_for: state === 'scheduled' ? at : null, ...extra,
+    }).returning('*');
+    return { customer, row };
+  }
+  const rowNow = async (id) => database('lead_callback_requests').where({ id }).first();
+
+  test('15 minutes before: one owner bell and one lead reminder, never twice', async () => {
+    const { row } = await booked();
+    await runLeadCallbackTick({ now: BEFORE });
+    await runLeadCallbackTick({ now: new Date(BEFORE.getTime() + 60000) });
+    expect(bellSpecs()).toHaveLength(1);
+    expect(bellSpecs()[0]).toMatchObject({ action: 'call Pat Sample at 10:00 AM', why: 'Booked call in 15 minutes; your cell rings at 10:00 AM with press 1.' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].body).toBe("Hi Pat, Adam from Waves here. I'll call you in about 15 minutes.");
+    expect((await rowNow(row.id)).reminded_at).not.toBeNull();
+  });
+
+  test('an 8:00 slot reminds the owner at 7:50 but never texts the lead before 8 AM', async () => {
+    await booked({ at: new Date('2026-10-21T12:00:00Z') });
+    await runLeadCallbackTick({ now: new Date('2026-10-21T11:50:00Z') });
+    expect(bellSpecs()).toHaveLength(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('at the booked time the press-1 ring goes once and the row closes', async () => {
+    const { row } = await booked();
+    const callLogId = randomUUID();
+    mockPlaceRing.mockResolvedValueOnce({ rang: true, reason: 'rang', callLogId });
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 30000) });
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 90000) });
+    expect(mockPlaceRing).toHaveBeenCalledTimes(1);
+    expect(mockPlaceRing.mock.calls[0][0]).toMatchObject({ fromPhone: '+19415550100' });
+    // (the real placeRing runs bookedRingBlocker, which closes the booking;
+    // the mock does not, so the ring_claimed_at stamp is what stops a repeat)
+    expect(await rowNow(row.id)).toMatchObject({ ring_call_log_id: callLogId });
+    expect((await rowNow(row.id)).ring_claimed_at).not.toBeNull();
+  });
+
+  test('one ring at a time: a live lead ring makes the next one wait a tick', async () => {
+    const { row } = await booked();
+    await database('call_log').insert({ id: randomUUID(), source: 'lead-call-reply-ring', direction: 'outbound', status: 'ringing', to_phone: '+19415550199', from_phone: '+19412975749', created_at: SLOT });
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 30000) });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+    expect((await rowNow(row.id)).ring_claimed_at).toBeNull();
+  });
+
+  test('a ring more than 30 minutes late goes to the owner instead', async () => {
+    const { row } = await booked();
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 31 * 60000) });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+    expect((await rowNow(row.id)).state).toBe('needs_owner');
+    expect(bellSpecs().map((s) => s.why)).toContain('Booked for 10:00 AM; the ring could not start in time.');
+  });
+
+  test('8 AM: an unanswered night question raises one bell; before 8 nothing', async () => {
+    const { row } = await booked({ state: 'asked' });
+    await runLeadCallbackTick({ now: new Date('2026-10-21T11:30:00Z') });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    await runLeadCallbackTick({ now: new Date('2026-10-21T12:05:00Z') });
+    await runLeadCallbackTick({ now: new Date('2026-10-21T12:06:00Z') });
+    expect(bellSpecs()).toEqual([expect.objectContaining({ action: 'call Pat Sample back', why: 'Asked for a call after hours and never sent a time.' })]);
+    expect((await rowNow(row.id)).state).toBe('needs_owner');
+  });
+
+  test('a lead who became a customer is not rung', async () => {
+    const { customer } = await booked();
+    const { row } = await database('lead_callback_requests').first().then((r) => ({ row: r }));
+    await expect(_test.bookedRingBlocker(row.id)({ customer: { ...customer, pipeline_stage: 'active_customer' }, digits: '9415550100', now: SLOT }, database))
+      .resolves.toBe('existing_customer');
+    expect((await rowNow(row.id)).state).toBe('cancelled');
+  });
+
+  test('a booking a TEXT cancelled before the ring never rings', async () => {
+    const { customer, row } = await booked();
+    await database('lead_callback_requests').where({ id: row.id }).update({ state: 'cancelled' });
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBe('request_changed');
+  });
+
+  test('the blocker moves the booking to done in the claim transaction', async () => {
+    const { customer, row } = await booked();
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBeNull();
+    expect((await rowNow(row.id)).state).toBe('done');
+  });
+
+  test('a 7:45 PM booking still waiting at 8:05 PM goes to the owner, not to a ring', async () => {
+    const { row } = await booked({ at: new Date('2026-10-21T23:45:00Z') });
+    await runLeadCallbackTick({ now: new Date('2026-10-22T00:05:00Z') });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+    expect((await rowNow(row.id)).state).toBe('needs_owner');
+  });
+
+  test('a database error before the ring frees the claim for the next tick', async () => {
+    const { row } = await booked();
+    mockPlaceRing.mockRejectedValueOnce(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 30000) });
+    expect((await rowNow(row.id)).ring_claimed_at).toBeNull();
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 90000) });
+    expect(mockPlaceRing).toHaveBeenCalledTimes(2);
+  });
+
+  test('a finished failed call does not cancel the booked ring; a live one makes it wait', async () => {
+    const { customer, row } = await booked();
+    await database('call_log').insert({ id: randomUUID(), direction: 'outbound', status: 'no-answer', to_phone: '+19415550100', from_phone: '+19412975749', created_at: SLOT });
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBeNull();
+    await database('lead_callback_requests').where({ id: row.id }).update({ state: 'scheduled' });
+    await database('call_log').insert({ id: randomUUID(), direction: 'outbound', status: 'in-progress', to_phone: '+19415550100', from_phone: '+19412975749', created_at: SLOT });
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBe('call_live');
+    expect((await rowNow(row.id)).state).toBe('scheduled');
+  });
+
+  test('a no-answer bell that never lands is tried again on the next tick', async () => {
+    const { row } = await booked({ state: 'asked' });
+    raiseAdminAlert.mockResolvedValue(null);
+    // Real timers: the bell's three tries take about 12 s (no fake timers next
+    // to a live pool).
+    try {
+      await runLeadCallbackTick({ now: new Date('2026-10-21T12:05:00Z') });
+    } finally {
+      raiseAdminAlert.mockResolvedValue({ id: 'n1' });
+    }
+    expect(await rowNow(row.id)).toMatchObject({ state: 'asked', no_answer_at: null });
+  });
+
+  test('a ring claim abandoned by a restart is taken again after 5 minutes', async () => {
+    const { row } = await booked();
+    await database('lead_callback_requests').where({ id: row.id }).update({ ring_claimed_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 60000) });
+    expect(mockPlaceRing).toHaveBeenCalledTimes(1);
+  });
+
+  test('a lead ring live for 20 minutes still makes the next booking wait', async () => {
+    await booked();
+    await database('call_log').insert({ id: randomUUID(), source: 'lead-call-reply-ring', direction: 'outbound', status: 'in-progress', to_phone: '+19415550199', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 20 * 60000) });
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 30000) });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+  });
+
+  test('a ring row stranded with no CallSid for 5 minutes is settled as a miss', async () => {
+    const stranded = randomUUID();
+    await database('call_log').insert({ id: stranded, source: 'lead-call-reply-ring', direction: 'outbound', status: 'initiated', to_phone: '+19415550100', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await database('call_log').insert({ id: randomUUID(), source: 'lead-call-reply-ring', direction: 'outbound', status: 'initiated', to_phone: '+19415550101', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 60000) });
+    await runLeadCallbackTick({ now: SLOT });
+    expect(mockSettle.mock.calls.map(([id]) => id)).toEqual([stranded]);
+  });
+
+  test('a failed sidless ring whose bell never landed is retried; one with its bell is not', async () => {
+    const pending = randomUUID();
+    await database('call_log').insert({ id: pending, source: 'lead-call-reply-ring', direction: 'outbound', status: 'failed', to_phone: '+19415550102', from_phone: '+19412975749', metadata: {}, created_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await database('call_log').insert({ id: randomUUID(), source: 'lead-call-reply-ring', direction: 'outbound', status: 'failed', to_phone: '+19415550103', from_phone: '+19412975749', metadata: { missed_bell_at: SLOT.toISOString() }, created_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await runLeadCallbackTick({ now: SLOT });
+    expect(mockSettle.mock.calls.map(([id]) => id)).toEqual([pending]);
+  });
+
+  test('a staff call to the lead live for 30 minutes still makes the booked ring wait', async () => {
+    const { customer, row } = await booked();
+    await database('call_log').insert({ id: randomUUID(), source: 'admin-click', direction: 'outbound', status: 'in-progress', to_phone: '+19415550100', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 30 * 60000) });
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBe('call_live');
+  });
+
+  test('a lead who became a customer since booking gets no reminder and the booking closes', async () => {
+    const { customer, row } = await booked();
+    await database('customers').where({ id: customer.id }).update({ pipeline_stage: 'active_customer' });
+    await runLeadCallbackTick({ now: BEFORE });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect((await rowNow(row.id)).state).toBe('cancelled');
+  });
+
+  test('gate off: nothing is read', async () => {
+    isEnabled.mockImplementation(() => false);
+    await expect(runLeadCallbackTick({ now: SLOT })).resolves.toEqual({ skipped: 'gate_off' });
+  });
+});

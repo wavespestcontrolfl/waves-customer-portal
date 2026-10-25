@@ -169,78 +169,89 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
     // US / Canada only: the 10-digit suffix match below would let a foreign
     // number borrow a US number's history.
     if (!/^\+1\d{10}$/.test(String(fromPhone || ''))) return { rang: false, reason: 'bad_phone' };
-    const digits = phoneDigits(fromPhone);
-
-    // The per-phone lock covers only the checks and the claim: the ring's
-    // call_log row is inserted and committed here, so a duplicate webhook
-    // waits, then finds it. The Twilio request runs after the commit, with
-    // no connection held across it.
-    const TWILIO_NUMBERS = require('../config/twilio-numbers');
-    const { homeLineCallerId } = require('./home-line');
-    const { placeBridgeCall, insertBridgeRow } = require('./call-bridge');
-    const firstName = String(customer.first_name || '').trim() || 'The lead';
-    const name = displayName(customer);
-    const from = homeLineCallerId(customer);
-    const claim = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${SOURCE}:${digits}`]);
-      const blocker = await ringBlocker({ customer, digits, now }, trx);
-      if (blocker) return { blocker };
-      const leadId = await newestLeadId(customer.id, trx);
-      const metadata = { type: 'lead_call_reply_ring', leadId, leadName: name, leadFirstName: firstName, leadPhone: fromPhone, smsLogId };
-      const callLogId = await insertBridgeRow({ to: fromPhone, from, customer, source: SOURCE, metadata }, trx);
-      return { leadId, metadata, callLogId };
-    });
-    if (claim.blocker) {
-      logger.info(`[lead-call-reply-ring] no ring for customer ${customer.id}: ${claim.blocker}`);
-      return { rang: false, reason: claim.blocker };
-    }
-
-    try {
-      await placeBridgeCall({
-        to: fromPhone,
-        bridgePhone: ADAM_CELL,
-        from,
-        bridgeFrom: TWILIO_NUMBERS.internalAlertCallerId(),
-        customer,
-        source: SOURCE,
-        metadata: claim.metadata,
-        leadName: firstName,
-        eventLabel: `${firstName} asked for a call back`,
-        ringTimeoutSeconds: RING_TIMEOUT_SECONDS,
-        reservedCallLogId: claim.callLogId,
-      });
-      logger.info(`[lead-call-reply-ring] rang for customer ${customer.id} (call_log ${claim.callLogId})`);
-      // The ring answers the request: an open night time ask for this phone
-      // (lead-call-text-followup.js) is no longer needed.
-      await db('lead_callback_requests').where({ state: 'asked', kind: 'call_request' })
-        .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
-        .update({ state: 'cancelled', updated_at: new Date() })
-        .catch((err) => logger.warn(`[lead-call-reply-ring] time-ask close skipped for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`));
-      return { rang: true, reason: 'rang', callLogId: claim.callLogId };
-    } catch (err) {
-      // A definite failure never rings: the claimed row closes as failed (it
-      // still holds the 24 h limit) and the bell goes now. An uncertain
-      // create may be ringing: its callbacks decide, and a check after 3
-      // minutes settles it as a miss if it never became a call.
-      logger.error(`[lead-call-reply-ring] ring failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
-      // Twilio's 429 (20429) refuses the request outright: no call exists.
-      const refused = err?.status === 429 || Number(err?.code) === 20429;
-      if (err?.bridgeAmbiguous && !refused) {
-        const timer = setTimeout(() => {
-          settleUnstartedRing(claim.callLogId)
-            .catch((checkErr) => logger.warn(`[lead-call-reply-ring] uncertain-ring check failed for ${claim.callLogId} (${String(checkErr?.code || checkErr?.name || 'error')})`));
-        }, UNCERTAIN_RING_CHECK_MS);
-        if (typeof timer.unref === 'function') timer.unref();
-        return { rang: false, reason: 'ring_uncertain' };
-      }
-      await settleUnstartedRing(claim.callLogId)
-        .catch((settleErr) => logger.warn(`[lead-call-reply-ring] refused-ring settle failed for ${claim.callLogId} (${String(settleErr?.code || settleErr?.name || 'error')})`));
-      return { rang: false, reason: 'ring_failed' };
-    }
+    return await placeRing({ customer, fromPhone, smsLogId, now, blocker: ringBlocker });
   } catch (err) {
     // Code only: a knex message carries the bindings (the phone digits).
     logger.error(`[lead-call-reply-ring] check failed for customer ${customer?.id} (${String(err?.code || err?.name || 'error')})`);
     return { rang: false, reason: 'error' };
+  }
+}
+
+
+/**
+ * The press-1 ring itself, shared by the CALL reply (now) and a booked call
+ * slot (lead-call-text-followup.js, at its time). `blocker` runs under the
+ * per-phone lock and returns a reason to skip, or null. Throws only on a
+ * database error; the caller logs it.
+ */
+async function placeRing({ customer, fromPhone, smsLogId = null, now = new Date(), blocker }) {
+  const digits = phoneDigits(fromPhone);
+
+  // The per-phone lock covers only the checks and the claim: the ring's
+  // call_log row is inserted and committed here, so a duplicate webhook
+  // waits, then finds it. The Twilio request runs after the commit, with
+  // no connection held across it.
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const { homeLineCallerId } = require('./home-line');
+  const { placeBridgeCall, insertBridgeRow } = require('./call-bridge');
+  const firstName = String(customer.first_name || '').trim() || 'The lead';
+  const name = displayName(customer);
+  const from = homeLineCallerId(customer);
+  const claim = await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${SOURCE}:${digits}`]);
+    const blocked = await blocker({ customer, digits, now }, trx);
+    if (blocked) return { blocker: blocked };
+    const leadId = await newestLeadId(customer.id, trx);
+    const metadata = { type: 'lead_call_reply_ring', leadId, leadName: name, leadFirstName: firstName, leadPhone: fromPhone, smsLogId };
+    const callLogId = await insertBridgeRow({ to: fromPhone, from, customer, source: SOURCE, metadata }, trx);
+    return { leadId, metadata, callLogId };
+  });
+  if (claim.blocker) {
+    logger.info(`[lead-call-reply-ring] no ring for customer ${customer.id}: ${claim.blocker}`);
+    return { rang: false, reason: claim.blocker };
+  }
+
+  try {
+    await placeBridgeCall({
+      to: fromPhone,
+      bridgePhone: ADAM_CELL,
+      from,
+      bridgeFrom: TWILIO_NUMBERS.internalAlertCallerId(),
+      customer,
+      source: SOURCE,
+      metadata: claim.metadata,
+      leadName: firstName,
+      eventLabel: `${firstName} asked for a call back`,
+      ringTimeoutSeconds: RING_TIMEOUT_SECONDS,
+      reservedCallLogId: claim.callLogId,
+    });
+    logger.info(`[lead-call-reply-ring] rang for customer ${customer.id} (call_log ${claim.callLogId})`);
+    // The ring answers the request: an open night time ask for this phone
+    // (lead-call-text-followup.js) is no longer needed.
+    await db('lead_callback_requests').where({ state: 'asked', kind: 'call_request' })
+      .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
+      .update({ state: 'cancelled', updated_at: new Date() })
+      .catch((err) => logger.warn(`[lead-call-reply-ring] time-ask close skipped for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`));
+    return { rang: true, reason: 'rang', callLogId: claim.callLogId };
+  } catch (err) {
+    // A definite failure never rings: the claimed row closes as failed (it
+    // still holds the 24 h limit) and the bell goes now. An uncertain
+    // create may be ringing: its callbacks decide, and a check after 3
+    // minutes settles it as a miss if it never became a call.
+    logger.error(`[lead-call-reply-ring] ring failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
+    // Twilio's 429 (20429) refuses the request outright: no call exists.
+    const refused = err?.status === 429 || Number(err?.code) === 20429;
+    if (err?.bridgeAmbiguous && !refused) {
+      const timer = setTimeout(() => {
+        settleUnstartedRing(claim.callLogId)
+          .catch((checkErr) => logger.warn(`[lead-call-reply-ring] uncertain-ring check failed for ${claim.callLogId} (${String(checkErr?.code || checkErr?.name || 'error')})`));
+      }, UNCERTAIN_RING_CHECK_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      return { rang: false, reason: 'ring_uncertain' };
+    }
+    await settleUnstartedRing(claim.callLogId)
+      .catch((settleErr) => logger.warn(`[lead-call-reply-ring] refused-ring settle failed for ${claim.callLogId} (${String(settleErr?.code || settleErr?.name || 'error')})`));
+    return { rang: false, reason: 'ring_failed' };
   }
 }
 
@@ -308,6 +319,8 @@ async function settleUnstartedRing(callLogId) {
 
 module.exports = {
   ringForCallReply,
+  placeRing,
+  settleUnstartedRing,
   leadTextBlocker,
   noteRingEnded,
   inRingHours,
