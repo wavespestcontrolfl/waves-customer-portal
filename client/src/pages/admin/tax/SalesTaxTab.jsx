@@ -253,6 +253,8 @@ export default function SalesTaxTab() {
                     <Row label="Line A, column 2 — Exempt sales (residential work)" value={money(sheet.lines.exempt_sales)} />
                     <Row label="Line A, column 3 — Taxable amount (commercial work)" value={money(sheet.lines.taxable_amount)} />
                     <Row label="Line A, column 4 — Tax collected" value={money(sheet.lines.tax_collected)} />
+                    <Row label="Line 6 — Lawful deductions (tax refunded)" value={money(Number(sheet.lines.lawful_deductions) > 0 ? -sheet.lines.lawful_deductions : 0)} />
+                    <Row label="Line 7 — Total tax due" value={money(sheet.lines.tax_due)} />
                     <Row label="Line 15(d) — Surtax collected (part of column 4)" value={money(sheet.lines.surtax_collected)} />
                     <Row
                       label="Line 11 — Collection allowance"

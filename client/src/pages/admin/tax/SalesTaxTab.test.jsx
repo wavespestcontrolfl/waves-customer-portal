@@ -31,7 +31,7 @@ beforeEach(() => {
     period: { kind: 'month', year: 2026, index: 9, label: 'Sep 2026', start: '2026-09-01', end: '2026-09-30', in_progress: false },
     due_date: '2026-11-20',
     late: true,
-    lines: { gross_sales: 12000, exempt_sales: 9000, taxable_amount: 3000, tax_collected: 210, surtax_collected: 30, collection_allowance: 0.33, penalty: 15.5, amount_due: 225.17 },
+    lines: { gross_sales: 12000, exempt_sales: 9000, taxable_amount: 3000, tax_collected: 210, lawful_deductions: 0, tax_due: 210, surtax_collected: 30, collection_allowance: 0.33, penalty: 15.5, amount_due: 225.17 },
     allowance_note: 'The allowance is 2.5% of the first $1,200 of tax.',
     penalty_note: 'Late returns pay 10% of the tax due.',
     filing: openFiling,
@@ -61,7 +61,7 @@ it('renders nothing and makes only the status request while the gate is off', as
   expect(calls.length).toBe(1);
 });
 
-it('shows the nine DR-15 lines with their values, the due date, the Late badge and the warnings', async () => {
+it('shows the DR-15 lines with their values, the due date, the Late badge and the warnings', async () => {
   render(<SalesTaxTab />);
   await screen.findByText('Sep 2026');
   const row = (label) => screen.getByText(label).closest('tr');
@@ -69,6 +69,8 @@ it('shows the nine DR-15 lines with their values, the due date, the Late badge a
   expect(row('Line A, column 2 — Exempt sales (residential work)')).toHaveTextContent('$9,000.00');
   expect(row('Line A, column 3 — Taxable amount (commercial work)')).toHaveTextContent('$3,000.00');
   expect(row('Line A, column 4 — Tax collected')).toHaveTextContent('$210.00');
+  expect(row('Line 6 — Lawful deductions (tax refunded)')).toHaveTextContent('$0.00');
+  expect(row('Line 7 — Total tax due')).toHaveTextContent('$210.00');
   expect(row('Line 15(d) — Surtax collected (part of column 4)')).toHaveTextContent('$30.00');
   expect(row('Line 11 — Collection allowance')).toHaveTextContent('-$0.33');
   expect(row('Line 11 — Collection allowance')).toHaveTextContent('The allowance is 2.5% of the first $1,200 of tax.');
@@ -81,6 +83,14 @@ it('shows the nine DR-15 lines with their values, the due date, the Late badge a
   expect(screen.queryByText('In progress')).toBeNull();
   expect(screen.getByText('Two invoices have no tax rate.')).toBeInTheDocument();
   expect(screen.getByText('File on the Florida Department of Revenue site and copy these numbers across.')).toBeInTheDocument();
+});
+
+it('shows refunded tax on line 6 as a deduction', async () => {
+  sheet.lines = { ...sheet.lines, lawful_deductions: 13.37, tax_due: 196.63 };
+  render(<SalesTaxTab />);
+  await screen.findByText('Sep 2026');
+  expect(screen.getByText('Line 6 — Lawful deductions (tax refunded)').closest('tr')).toHaveTextContent('-$13.37');
+  expect(screen.getByText('Line 7 — Total tax due').closest('tr')).toHaveTextContent('$196.63');
 });
 
 it('reads the previous month by default and re-reads with kind=quarter when the kind changes', async () => {

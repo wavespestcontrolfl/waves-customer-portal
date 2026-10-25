@@ -91,33 +91,44 @@ describe('periods and due dates', () => {
 });
 
 describe('DR-15 lines', () => {
-  const base = { grossSales: 8929.31, taxable: 191, tax: 13.37, surtax: 1.91, dueDate: '2026-11-20' };
+  const NONE = { tax: 0, taxable: 0, surtax: 0 };
+  const legs = (tax, taxable, surtax) => ({ tax, taxable, surtax });
+  const base = { revenue: 8929.31, collected: legs(13.37, 191, 1.91), reversed: NONE, dueDate: '2026-11-20' };
 
   test('on time: allowance 2.5% of the tax, no penalty', () => {
     const r = ws.dr15Lines({ ...base, today: '2026-11-02' });
     expect(r.late).toBe(false);
     expect(r.lines).toEqual({
-      gross_sales: 8929.31, exempt_sales: 8738.31, taxable_amount: 191, tax_collected: 13.37,
-      surtax_collected: 1.91, collection_allowance: 0.33, penalty: 0, amount_due: 13.04,
+      gross_sales: 8929.31, exempt_sales: 8738.31, taxable_amount: 191, tax_collected: 13.37, lawful_deductions: 0,
+      tax_due: 13.37, surtax_collected: 1.91, collection_allowance: 0.33, penalty: 0, amount_due: 13.04,
     });
     expect(r.allowance_note).toContain('2026-11-20');
   });
 
   test('late: no allowance, penalty 10% of the tax but at least $50, even with almost no tax', () => {
-    const r = ws.dr15Lines({ grossSales: 2131.1, taxable: 5.1, tax: 0.36, surtax: 0.05, dueDate: '2026-05-20', today: '2026-10-25' });
+    const r = ws.dr15Lines({ revenue: 2131.1, collected: legs(0.36, 5.1, 0.05), reversed: NONE, dueDate: '2026-05-20', today: '2026-10-25' });
     expect(r.late).toBe(true);
     expect(r.lines).toMatchObject({ collection_allowance: 0, penalty: 50, amount_due: 50.36 });
     expect(r.penalty_note).toContain('at least $50');
-    const big = ws.dr15Lines({ grossSales: 20000, taxable: 10000, tax: 700, surtax: 100, dueDate: '2026-05-20', today: '2026-10-25' });
+    const big = ws.dr15Lines({ revenue: 20000, collected: legs(700, 10000, 100), reversed: NONE, dueDate: '2026-05-20', today: '2026-10-25' });
     expect(big.lines.penalty).toBe(70);
-    const bigger = ws.dr15Lines({ grossSales: 20000, taxable: 10000, tax: 1000, surtax: 100, dueDate: '2026-05-20', today: '2026-10-25' });
+    const bigger = ws.dr15Lines({ revenue: 20000, collected: legs(1000, 10000, 100), reversed: NONE, dueDate: '2026-05-20', today: '2026-10-25' });
     expect(bigger.lines.penalty).toBe(100);
   });
 
   test('the allowance stops at $30 (2.5% of the first $1,200)', () => {
-    const r = ws.dr15Lines({ grossSales: 40000, taxable: 30000, tax: 2100, surtax: 300, dueDate: '2026-11-20', today: '2026-11-02' });
+    const r = ws.dr15Lines({ revenue: 40000, collected: legs(2100, 30000, 300), reversed: NONE, dueDate: '2026-11-20', today: '2026-11-02' });
     expect(r.lines.collection_allowance).toBe(30);
     expect(r.lines.amount_due).toBe(2070);
+  });
+
+  test('refunded tax is line 6; refunds beyond the tax collected are an excess for the next return, never a negative amount due', () => {
+    const r = ws.dr15Lines({ revenue: 5000, collected: legs(30, 428.57, 4.29), reversed: legs(100, 1428.57, 14.29), dueDate: '2026-12-21', today: '2026-12-01' });
+    expect(r.lines).toMatchObject({ gross_sales: 6428.57, taxable_amount: 428.57, tax_collected: 30, lawful_deductions: 100, tax_due: 0, collection_allowance: 0, amount_due: 0 });
+    expect(r.excess_deduction).toBe(70);
+    const part = ws.dr15Lines({ revenue: 5000, collected: legs(100, 1428.57, 14.29), reversed: legs(13.37, 191, 1.91), dueDate: '2026-12-21', today: '2026-12-01' });
+    expect(part.lines).toMatchObject({ tax_due: 86.63, collection_allowance: 2.17, amount_due: 84.46 });
+    expect(part.excess_deduction).toBe(0);
   });
 
   test('a return filed and paid on time stays on time after the due date passes', () => {
@@ -132,11 +143,11 @@ describe('DR-15 lines', () => {
   });
 
   test('a zero-tax return filed on time needs no payment', () => {
-    expect(ws.dr15Lines({ ...base, tax: 0, taxable: 0, today: '2026-12-15', filedOn: '2026-11-18' }).late).toBe(false);
+    expect(ws.dr15Lines({ ...base, collected: NONE, today: '2026-12-15', filedOn: '2026-11-18' }).late).toBe(false);
   });
 
   test('exempt sales never go below zero', () => {
-    expect(ws.dr15Lines({ ...base, grossSales: 100, today: '2026-11-02' }).lines.exempt_sales).toBe(0);
+    expect(ws.dr15Lines({ ...base, revenue: 100, today: '2026-11-02' }).lines.exempt_sales).toBe(0);
   });
 });
 
@@ -224,7 +235,7 @@ describe('1099 list', () => {
 describe('salesTaxSheet', () => {
   test('reads the P&L revenue and tax legs, maps the calendar row, warns for a period in progress', async () => {
     pnl.buildPnlReport.mockResolvedValue({ revenue: { total: 8929.31 }, coverage: { complete: true } });
-    pnl.salesTaxLegsForWindow.mockResolvedValue({ tax: 13.37, taxable: 191, surtax: 1.91 });
+    pnl.salesTaxLegsForWindow.mockResolvedValue({ tax: 13.37, taxable: 191, surtax: 1.91, collected: { tax: 13.37, taxable: 191, surtax: 1.91 }, reversed: { tax: 0, taxable: 0, surtax: 0 } });
     tables.tax_filing_calendar = () => ({ id: 'f-10', status: 'upcoming', period_label: 'Oct 2026', due_date: '2026-11-20', filed_date: null, paid_date: null, amount_paid: null, confirmation_number: null });
     const r = await ws.salesTaxSheet({ kind: 'month', year: '2026', index: '10' });
     expect(pnl.buildPnlReport).toHaveBeenCalledWith(mockDb, '2026-10-01', '2026-10-31');
@@ -238,7 +249,7 @@ describe('salesTaxSheet', () => {
 
   test('a filed return is judged by its filing date; incomplete P&L coverage is a warning', async () => {
     pnl.buildPnlReport.mockResolvedValue({ revenue: { total: 2131.1 }, coverage: { complete: false, note: 'sync needed' } });
-    pnl.salesTaxLegsForWindow.mockResolvedValue({ tax: 0.36, taxable: 5.1, surtax: 0.05 });
+    pnl.salesTaxLegsForWindow.mockResolvedValue({ tax: 0.36, taxable: 5.1, surtax: 0.05, collected: { tax: 0.36, taxable: 5.1, surtax: 0.05 }, reversed: { tax: 0, taxable: 0, surtax: 0 } });
     tables.tax_filing_calendar = () => ({ id: 'f-4', status: 'paid', period_label: 'Apr 2026', due_date: '2026-05-20', filed_date: '2026-05-19', paid_date: '2026-05-19', amount_paid: '0.35', confirmation_number: 'C-1' });
     const r = await ws.salesTaxSheet({ kind: 'month', year: 2026, index: 4 });
     expect(r.late).toBe(false);
@@ -246,9 +257,17 @@ describe('salesTaxSheet', () => {
     expect(r.warnings).toEqual([{ code: 'pnl_coverage', text: 'Sales may be incomplete: sync needed' }]);
   });
 
+  test('refunds beyond the tax collected warn to carry the excess to the next return', async () => {
+    pnl.buildPnlReport.mockResolvedValue({ revenue: { total: 5000 }, coverage: { complete: true } });
+    pnl.salesTaxLegsForWindow.mockResolvedValue({ tax: -70, taxable: -1000, surtax: -10, collected: { tax: 30, taxable: 428.57, surtax: 4.29 }, reversed: { tax: 100, taxable: 1428.57, surtax: 14.29 } });
+    const r = await ws.salesTaxSheet({ kind: 'month', year: 2026, index: 9 });
+    expect(r.lines).toMatchObject({ tax_due: 0, lawful_deductions: 100, amount_due: 50 });
+    expect(r.warnings).toContainEqual({ code: 'excess_deduction', text: "Tax refunded ($100.00) is more than the tax collected. Carry the $70.00 excess to the next return's line 6." });
+  });
+
   test('a period with no calendar row has no filing; a future period is a 400', async () => {
     pnl.buildPnlReport.mockResolvedValue({ revenue: { total: 0 } });
-    pnl.salesTaxLegsForWindow.mockResolvedValue({ tax: 0, taxable: 0, surtax: 0 });
+    pnl.salesTaxLegsForWindow.mockResolvedValue({ tax: 0, taxable: 0, surtax: 0, collected: { tax: 0, taxable: 0, surtax: 0 }, reversed: { tax: 0, taxable: 0, surtax: 0 } });
     const q = await ws.salesTaxSheet({ kind: 'quarter', year: 2026, index: 2 });
     expect(q.filing).toBeNull();
     await expect(ws.salesTaxSheet({ kind: 'month', year: 2026, index: 11 })).rejects.toMatchObject({ status: 400, message: 'Nov 2026 has not started' });

@@ -756,7 +756,8 @@ function taxLegSums(db) {
 
 /**
  * NET sales tax liability recognized in [startDate, endDate] (ET days), as
- * { tax, taxable, surtax } (see taxLegSums):
+ * { tax, taxable, surtax } (see taxLegSums), with the gross legs apart in
+ * `collected` and `reversed`:
  * tax collected on invoices PAID in the window (by paid_at — receipt
  * period, stable across later refunds) MINUS tax reversed by invoices
  * FULLY refunded in the window (refund period — where the tax-inclusive
@@ -927,12 +928,17 @@ async function salesTaxLegsForWindow(db, startDate, endDate) {
       .first()
       .catch(missingTableOnly(NO_TAX_LEG)),
   ]);
-  const net = (key) => round2(
-    parseFloat(collected?.[key] || 0)
-    - parseFloat(reversed?.[key] || 0)
-    - parseFloat(statementReversed?.[key] || 0),
-  );
-  return { tax: net('total'), taxable: net('base'), surtax: net('surtax') };
+  const leg = (key) => ({
+    in: parseFloat(collected?.[key] || 0),
+    out: parseFloat(reversed?.[key] || 0) + parseFloat(statementReversed?.[key] || 0),
+  });
+  const [tax, base, surtax] = ['total', 'base', 'surtax'].map(leg);
+  return {
+    tax: round2(tax.in - tax.out), taxable: round2(base.in - base.out), surtax: round2(surtax.in - surtax.out),
+    // the gross legs: the DR-15 reports tax collected and refunded tax (line 6) apart
+    collected: { tax: round2(tax.in), taxable: round2(base.in), surtax: round2(surtax.in) },
+    reversed: { tax: round2(tax.out), taxable: round2(base.out), surtax: round2(surtax.out) },
+  };
 }
 
 // The net sales tax alone (salesTaxLegsForWindow): what the P&L backs out of

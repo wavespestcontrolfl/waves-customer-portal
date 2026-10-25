@@ -108,22 +108,32 @@ function dr15DueDate(periodEnd) {
   return nextBusinessDay(m === 12 ? isoDate(y + 1, 1, 20) : isoDate(y, m + 1, 20));
 }
 
-// The DR-15 lines from the period's figures. A return is on time only when it
-// is filed AND its tax is paid by the due date: `filedOn` and `paidOn` come
-// from the filing calendar row, and a missing one is judged from `today`.
-function dr15Lines({ grossSales, taxable, tax, surtax, dueDate, today, filedOn = null, paidOn = null }) {
-  const taxDue = Math.max(0, round2(tax));
+// The DR-15 lines from the period's figures. Tax collected (line A column 4)
+// and the tax refunded on earlier sales (line 6, lawful deductions) stay
+// apart; refunds beyond the tax collected are an excess the next return
+// deducts, never a negative amount due. Gross sales add the refunded taxable
+// base back to the P&L revenue, which nets refunds, so column 3 never tops
+// column 1. A return is on time only when it is filed AND its tax is paid by
+// the due date: `filedOn` and `paidOn` come from the filing calendar row, and
+// a missing one is judged from `today`.
+function dr15Lines({ revenue, collected, reversed, dueDate, today, filedOn = null, paidOn = null }) {
+  const grossSales = round2(revenue + reversed.taxable);
+  const taxDue = round2(Math.max(0, collected.tax - reversed.tax));
+  const excessDeduction = round2(Math.max(0, reversed.tax - collected.tax));
   const late = (filedOn || today) > dueDate || (taxDue > 0 && (paidOn || today) > dueDate);
   const allowance = late ? 0 : round2(ALLOWANCE_RATE * Math.min(taxDue, ALLOWANCE_TAX_CAP));
   const penalty = late ? round2(Math.max(PENALTY_MIN, PENALTY_RATE * taxDue)) : 0;
   return {
     late,
+    excess_deduction: excessDeduction,
     lines: {
-      gross_sales: round2(grossSales),
-      exempt_sales: round2(Math.max(0, grossSales - taxable)),
-      taxable_amount: round2(taxable),
-      tax_collected: taxDue,
-      surtax_collected: round2(surtax),
+      gross_sales: grossSales,
+      exempt_sales: round2(Math.max(0, grossSales - collected.taxable)),
+      taxable_amount: round2(collected.taxable),
+      tax_collected: round2(collected.tax),
+      lawful_deductions: round2(reversed.tax),
+      tax_due: taxDue,
+      surtax_collected: round2(collected.surtax),
       collection_allowance: allowance,
       penalty,
       amount_due: round2(taxDue - allowance + penalty),
@@ -164,12 +174,14 @@ async function salesTaxSheet({ kind = 'month', year, index } = {}) {
   const filedOn = filing && ['filed', 'paid'].includes(filing.status) ? (filing.filed_date || filing.paid_date) : null;
   const paidOn = filing?.paid_date || null;
   const dueDate = dr15DueDate(period.end);
-  const grossSales = Number(pnl.revenue?.total) || 0;
-  const sheet = dr15Lines({ grossSales, taxable: legs.taxable, tax: legs.tax, surtax: legs.surtax, dueDate, today, filedOn, paidOn });
+  const revenue = Number(pnl.revenue?.total) || 0;
+  const sheet = dr15Lines({ revenue, collected: legs.collected, reversed: legs.reversed, dueDate, today, filedOn, paidOn });
+  const { gross_sales: grossSales, taxable_amount: taxable } = sheet.lines;
   const warnings = [
     period.end >= today && { code: 'in_progress', text: `This period runs to ${period.end}; the figures will change.` },
     pnl.coverage?.complete === false && { code: 'pnl_coverage', text: `Sales may be incomplete: ${pnl.coverage.note}` },
-    legs.taxable > grossSales && { code: 'taxable_over_gross', text: `The taxable amount (${money(legs.taxable)}) is more than gross sales (${money(grossSales)}). Check the period's refunds and credits.` },
+    sheet.excess_deduction > 0 && { code: 'excess_deduction', text: `Tax refunded (${money(sheet.lines.lawful_deductions)}) is more than the tax collected. Carry the ${money(sheet.excess_deduction)} excess to the next return's line 6.` },
+    taxable > grossSales && { code: 'taxable_over_gross', text: `The taxable amount (${money(taxable)}) is more than gross sales (${money(grossSales)}). Check the period's refunds and credits.` },
   ].filter(Boolean);
   return { period: { ...period, in_progress: period.end >= today }, due_date: dueDate, ...sheet, filing, warnings };
 }
