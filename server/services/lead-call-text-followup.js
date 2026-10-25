@@ -158,23 +158,37 @@ async function sendFollowup({ customer, phone, body, kind, requestId }) {
   return 'not_sent';
 }
 
-async function raiseLeadBell({ customer, leadId, requestId, why }) {
+const BELL_RETRY_DELAYS_MS = [0, 2000, 10000];
+
+// One Leads bell per request, tried 3 times; only a written, deduped or
+// deliberately held row counts (the ring's own rule, lead-call-reply-ring.js).
+async function raiseLeadBell({ customer, leadId, requestId, why }, delaysMs = BELL_RETRY_DELAYS_MS) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const { fitAction } = require('./admin-alert-names');
-  try {
-    await raiseAdminAlert('lead', {
-      area: 'Leads',
-      action: fitAction('Leads', fullName(customer), [(who) => `call ${who} back`, (who) => `call ${who}`]),
-      why,
-      severity: 'needs-you',
-      link: leadId ? `/admin/leads?lead=${leadId}` : `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
-      subject: leadId ? { type: 'lead', id: String(leadId) } : { type: 'customer', id: String(customer.id) },
-      doneWhen: 'lead_contacted',
-      who: 'person',
-    }, { bell: true, dedupeKey: `lead-call-text-followup:${requestId}`, metadata: { leadId, customerId: customer.id, leadCallbackRequestId: requestId } });
-  } catch (err) {
-    logger.warn(`[lead-call-text-followup] bell failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
+  const { _test: { bellSettled } } = require('./lead-call-reply-ring');
+  const spec = {
+    area: 'Leads',
+    action: fitAction('Leads', fullName(customer), [(who) => `call ${who} back`, (who) => `call ${who}`]),
+    why,
+    severity: 'needs-you',
+    link: leadId ? `/admin/leads?lead=${leadId}` : `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+    subject: leadId ? { type: 'lead', id: String(leadId) } : { type: 'customer', id: String(customer.id) },
+    doneWhen: 'lead_contacted',
+    who: 'person',
+  };
+  for (const delay of delaysMs) {
+    if (delay) await new Promise((resolve) => { setTimeout(resolve, delay); });
+    try {
+      const result = await raiseAdminAlert('lead', spec, {
+        bell: true, dedupeKey: `lead-call-text-followup:${requestId}`, metadata: { leadId, customerId: customer.id, leadCallbackRequestId: requestId },
+      });
+      if (bellSettled(result)) return true;
+    } catch (err) {
+      logger.warn(`[lead-call-text-followup] bell try failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
+    }
   }
+  logger.error(`[lead-call-text-followup] bell not delivered for customer ${customer.id} after ${delaysMs.length} tries (request ${requestId})`);
+  return false;
 }
 
 // Settles only a row still in the claimed state: a TEXT answer or a
