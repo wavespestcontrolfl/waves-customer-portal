@@ -1,9 +1,8 @@
-// A deploy stamps the call-processing passes it interrupts
-// (GATE_CALL_PROC_SHUTDOWN_RELEASE).
+// A deploy stamps the call-processing passes it interrupts.
 //
 // Why: 2026-10-09 a 56-second lead call took 30 minutes to process — three
 // deploys in ten minutes killed the pass mid-transcription and the row waited
-// for the 10-minute quiet reclaim plus a sweep tick. With the gate on, SIGTERM
+// for the 10-minute quiet reclaim plus a sweep tick. SIGTERM
 // stamps every row this process holds a claim for (metadata
 // .shutdown_interrupted_at) and changes nothing else: the dying pass keeps its
 // claim, so no second pass can overlap it. On the replacing pod a stamped
@@ -35,22 +34,17 @@ const REC = 'RE' + '8'.repeat(32);
 const RECORDING_URL = `https://api.twilio.com/2010-04-01/Accounts/ACfixture/Recordings/${REC}.mp3`;
 const ALL_SIDS = [SID, SID_DEAD, SID_BEATING, SID_UNSTAMPED, SID_LATE, SID_QUAR_STAMPED, SID_QUAR_UNSTAMPED];
 
-describe('markInFlightForShutdown with the gate off (unit)', () => {
-  test('is a no-op that reports counts only', async () => {
+describe('shutdown stamp reclaim predicate (unit)', () => {
+  test('the reclaim predicate always carries the stamped-claim clause', () => {
     let processor;
     jest.isolateModules(() => {
-      delete process.env.GATE_CALL_PROC_SHUTDOWN_RELEASE;
       processor = require('../services/call-recording-processor');
     });
-    const summary = await processor.markInFlightForShutdown({ deadlineMs: 0 });
-    expect(summary).toEqual({ enabled: false, inFlight: 0, stamped: 0, failed: 0 });
-    expect(processor.inFlightPassCount()).toBe(0);
-    // Rollback is complete: a gate-off pod ignores stamps a gate-on pod left.
-    expect(processor._test.reclaimableClaimSql(10)).not.toContain('shutdown_interrupted_at');
+    expect(processor._test.reclaimableClaimSql(10)).toContain('shutdown_interrupted_at');
   });
 });
 
-maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)', () => {
+maybeDescribe('deploy-interrupted call passes (live Postgres)', () => {
   let db;
   let processor;
   let fetchSpy;
@@ -77,7 +71,6 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
   };
 
   beforeAll(async () => {
-    process.env.GATE_CALL_PROC_SHUTDOWN_RELEASE = 'true';
     jest.resetModules();
     db = require('../models/db');
     processor = require('../services/call-recording-processor');
@@ -87,7 +80,6 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
 
   afterAll(async () => {
     fetchSpy.mockRestore();
-    delete process.env.GATE_CALL_PROC_SHUTDOWN_RELEASE;
     await db('call_log').whereIn('twilio_call_sid', ALL_SIDS).del();
     await db.destroy();
   });
@@ -105,7 +97,7 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
     expect(claimed.processing_status).toBe('processing');
 
     const summary = await processor.markInFlightForShutdown({ deadlineMs: 5000 });
-    expect(summary).toEqual({ enabled: true, inFlight: 1, stamped: 1, failed: 0 });
+    expect(summary).toEqual({ inFlight: 1, stamped: 1, failed: 0 });
 
     // Stamp only: claim, token and status untouched, so nothing can overlap
     // the pass while it is alive.
@@ -186,7 +178,7 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
     // row loses the claim and leaves; the owner must still be stampable.
     expect((await processor.processRecording(SID)).reason).toBe('already_processing');
     expect(processor.inFlightPassCount()).toBe(1);
-    expect(await processor.markInFlightForShutdown({ deadlineMs: 5000 })).toEqual({ enabled: true, inFlight: 1, stamped: 1, failed: 0 });
+    expect(await processor.markInFlightForShutdown({ deadlineMs: 5000 })).toEqual({ inFlight: 1, stamped: 1, failed: 0 });
     releaseDownload();
     expect((await owner).reason).toBe('recording_not_ready');
     expect(processor.inFlightPassCount()).toBe(0);
@@ -196,7 +188,7 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
     processor._test.resetShutdownForTests();
     await insertCall(SID_LATE);
     // Nothing in flight: the mark only sets the drain flag.
-    expect(await processor.markInFlightForShutdown({ deadlineMs: 0 })).toEqual({ enabled: true, inFlight: 0, stamped: 0, failed: 0 });
+    expect(await processor.markInFlightForShutdown({ deadlineMs: 0 })).toEqual({ inFlight: 0, stamped: 0, failed: 0 });
     fetchSpy.mockClear();
     expect((await processor.processRecording(SID_LATE)).reason).toBe('recording_not_ready');
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -230,7 +222,7 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
     // SIGTERM lands now; the lock lets go 300 ms later, inside the budget.
     setTimeout(() => { holder.commit().catch(() => {}); }, 300);
     const summary = await processor.markInFlightForShutdown({ deadlineMs: 5000 });
-    expect(summary).toEqual({ enabled: true, inFlight: 1, stamped: 1, failed: 0 });
+    expect(summary).toEqual({ inFlight: 1, stamped: 1, failed: 0 });
     const stamped = await readRow(SID);
     expect(stamped.processing_status).toBe('processing');
     expect(stamped.metadata.shutdown_interrupted_at).toEqual(expect.any(String));

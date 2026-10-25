@@ -4352,7 +4352,7 @@ const FORCE_CLAIM_QUIET_MINUTES = 3;
 // branch — permanently unreclaimable, the worst possible bug in a lock.
 const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
   + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
-// A pass interrupted by a deploy (GATE_CALL_PROC_SHUTDOWN_RELEASE). At SIGTERM
+// A pass interrupted by a deploy. At SIGTERM
 // every pass this process holds a claim for is STAMPED — nothing else changes:
 // the claim, token and status stay with the dying pass, so no second pass can
 // run while it is still alive (a released claim let the replacement pod resend
@@ -4365,8 +4365,6 @@ const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
 // write refreshes the heartbeat in the same statement: the pass IS alive at
 // SIGTERM, and a beat that had gone stale behind a long provider call must not
 // make the row reclaimable during the old pod's last 25 seconds (Codex r5 P1).
-// The clause is read only while the gate is on: a gate-off pod after a rollback
-// ignores stamps a gate-on pod left behind (Codex r5 P1).
 const SHUTDOWN_RECLAIM_QUIET_MINUTES = 2;
 const SHUTDOWN_STAMP_KEY = 'shutdown_interrupted_at';
 const shutdownInterruptedClaim = "("
@@ -4377,14 +4375,12 @@ const shutdownInterruptedClaim = "("
 // webhook's immediate path win; the claim itself refreshes updated_at, so a
 // deploy-stamped quarantined claim would wait the full window behind it
 // (Codex r6 P2). This alternative opens that gate for a stamped dead claim.
-const stampedDeadClaimOrFalse = () => (isEnabled('callProcShutdownRelease')
-  ? `(processing_status = 'processing' AND ${shutdownInterruptedClaim})`
-  : 'FALSE');
+const stampedDeadClaim = `(processing_status = 'processing' AND ${shutdownInterruptedClaim})`;
 const reclaimableClaim = (quietMinutes) => "("
   + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
   + ` OR (NOT (${CURRENT_BEAT}) AND`
   + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
-  + (isEnabled('callProcShutdownRelease') ? ` OR ${shutdownInterruptedClaim}` : '')
+  + ` OR ${shutdownInterruptedClaim}`
   + ")";
 // Passes this process currently holds a claim for (call_log.id → claim token),
 // so markInFlightForShutdown knows which rows to stamp. Filled right after the
@@ -10989,7 +10985,7 @@ const CallRecordingProcessor = {
             // lands with the claim even if the forced exit kills the process
             // before the post-commit check below (Codex r9 P2); that check
             // covers the flag flipping while this transaction is open.
-            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+            metadata: shuttingDown
               ? shutdownStampSql(trx)
               : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
@@ -11063,7 +11059,7 @@ const CallRecordingProcessor = {
             // lands with the claim even if the forced exit kills the process
             // before the post-commit check below (Codex r9 P2); that check
             // covers the flag flipping while this transaction is open.
-            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+            metadata: shuttingDown
               ? shutdownStampSql(trx)
               : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
@@ -11089,7 +11085,7 @@ const CallRecordingProcessor = {
     // the registry before the transaction and the row is committed, so the
     // marker's UPDATE matches). Token-fenced, so a row a peer has since
     // taken is left alone.
-    if (!claimBlocked && shuttingDown && isEnabled('callProcShutdownRelease')) {
+    if (!claimBlocked && shuttingDown) {
       await db('call_log')
         .where({ id: call.id })
         .where('processing_token', procToken)
@@ -24898,22 +24894,18 @@ const CallRecordingProcessor = {
    * SHUTDOWN_RECLAIM_QUIET_MINUTES (reclaimableClaim), and the claim that
    * takes the row clears it. Also marks this process as draining so a claim
    * taken from here on stamps itself.
-   *
-   * No-op (counts only) while GATE_CALL_PROC_SHUTDOWN_RELEASE is off.
    */
   async markInFlightForShutdown({ deadlineMs = 5000 } = {}) {
-    const enabled = isEnabled('callProcShutdownRelease');
     // Flag FIRST, snapshot second, with no await between: a pass whose claim
     // commits after this snapshot reads the flag in its post-commit check and
     // stamps itself; a pass that read the flag as false before this line is
     // in the snapshot with a committed claim.
-    if (enabled) shuttingDown = true;
-    if (!enabled) return { enabled, inFlight: inFlightPasses.size, stamped: 0, failed: 0 };
+    shuttingDown = true;
     const deadline = new Promise((resolve) => {
       const t = setTimeout(() => resolve('deadline'), Math.max(0, deadlineMs));
       if (typeof t.unref === 'function') t.unref();
     });
-    const summary = { enabled, inFlight: 0, stamped: 0, failed: 0 };
+    const summary = { inFlight: 0, stamped: 0, failed: 0 };
     const seen = new Set();
     // One token-fenced stamp per entry, all concurrent, each racing the
     // shared deadline. Returns the tokens whose stamp landed (1 row).
@@ -25045,7 +25037,7 @@ const CallRecordingProcessor = {
             })
             .andWhere(function quarantineBackstopAge() {
               this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
-                .orWhereRaw(stampedDeadClaimOrFalse());
+                .orWhereRaw(stampedDeadClaim);
             });
         });
       })
