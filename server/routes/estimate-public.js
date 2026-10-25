@@ -3560,6 +3560,10 @@ const COMPANY = {
 // faceless "your Waves account manager"). Keep in sync with
 // WAVES_ACCOUNT_MANAGER_FIRST_NAME in client/src/constants/business.js.
 const ACCOUNT_MANAGER_FIRST_NAME = 'Adam';
+// Authored commercial proposal next step (this page shows no sign button): the SAME sentence the
+// browser PDF uses when online signing is not offered (client estimateDocumentNextSteps,
+// variant `authored`), so the server-rendered page, the web page and the PDF agree.
+const AUTHORED_PROPOSAL_FOLLOW_UP_HTML = `${ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer questions and finalize this proposal \u2014 or call ${COMPANY.phone} any time.`;
 
 const SOCIAL_LINKS = [
   { name: 'Facebook',  url: 'https://facebook.com/wavespestcontrol',  path: 'M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z' },
@@ -7542,9 +7546,7 @@ ${shellTopBar()}
 
   ${est.status === 'accepted' ? `<div class="accepted-banner">✓ You\u2019ve accepted this estimate — we\u2019ll be in touch shortly.</div>` : ''}
   ${quoteRequired && est.status !== 'accepted' ? (commercialProposal
-    ? `<div class="quote-required-banner">${proposalPdfEmailed
-        ? 'Your formal proposal is attached as a PDF to the email we sent.'
-        : `${ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, has your formal proposal and will share the PDF with you directly.`} There\u2019s no online checkout for a commercial bid \u2014 ${ACCOUNT_MANAGER_FIRST_NAME} will follow up to finalize. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
+    ? `<div class="quote-required-banner">${AUTHORED_PROPOSAL_FOLLOW_UP_HTML}</div>`
     : commercialRiskType
     ? `<div class="quote-required-banner">This is a commercial service plan \u2014 your Waves account manager will confirm the details with you and finalize it directly, so there\u2019s no online checkout for this one. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
     : commercialLowConfidence
@@ -7773,9 +7775,7 @@ ${shellTopBar()}
   ${(quoteRequired || trenchingReviewBeforeBooking) && est.status !== 'accepted' ? (commercialProposal ? `
   <div class="final">
     <h2>Your commercial proposal is ready</h2>
-    <p>${proposalPdfEmailed
-      ? 'We’ve emailed your formal proposal as a PDF.'
-      : 'Your Waves account manager has your formal proposal and will send the PDF to you directly.'} There’s no online checkout for a commercial bid — your account manager will follow up to answer questions and finalize the agreement.</p>
+    <p>${AUTHORED_PROPOSAL_FOLLOW_UP_HTML}</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>

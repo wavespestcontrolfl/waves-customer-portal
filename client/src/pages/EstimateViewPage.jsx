@@ -9716,12 +9716,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             address={estimate.address}
             quoteReason={quoteRequiredReason}
             isProposal
-            // An authored proposal on the page uses the browser PDF's own
-            // next-step wording (online signing offered or not), not the
-            // legacy "no online checkout" copy.
-            authoredProposal={authoredProposalOnPage}
+            // The browser PDF's own next-step wording (online signing offered
+            // or not), not the legacy "no online checkout" copy.
             cta={cta}
-            proposalPdfEmailed={proposalPdfEmailed}
           />
         ) : null}
         {/* Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS
@@ -9763,7 +9760,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             address={estimate.address}
             quoteReason={quoteRequiredReason}
             isProposal={isCommercialProposal}
-            proposalPdfEmailed={proposalPdfEmailed}
           />
         )}
         {/* The Waves app pitch ("the whole household") and the neighbor / pool-cage

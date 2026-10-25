@@ -1569,7 +1569,7 @@ describe('TerminalStateCard', () => {
     expect(screen.getByText('Severe infestation')).toBeInTheDocument();
   });
 
-  it('renders formal-proposal copy (PDF emailed) instead of the inspection state', () => {
+  it('renders the PDF next-step wording for a proposal instead of the inspection state', () => {
     render(
       <TerminalStateCard
         state="quote_required"
@@ -1577,7 +1577,6 @@ describe('TerminalStateCard', () => {
         address="123 Main St"
         quoteReason="commercial_proposal"
         isProposal
-        proposalPdfEmailed
       />,
     );
 
@@ -1585,13 +1584,16 @@ describe('TerminalStateCard', () => {
     // is ready — the card answers what happens next (owner 2026-08-08).
     expect(screen.getByText('What happens next')).toBeInTheDocument();
     expect(screen.queryByText('This treatment needs an inspection.')).not.toBeInTheDocument();
-    // proposal copy describes the emailed PDF + account-manager follow-up...
-    expect(screen.getByText(/attached as a PDF to the email/i)).toBeInTheDocument();
-    // ...and never surfaces the raw "commercial_proposal" token as a reason badge
+    // The browser PDF's follow-up sentence, with the account manager named (owner 2026-08-08)...
+    expect(screen.getByText(/Adam, your Waves account manager, will follow up to answer questions and finalize this proposal/i)).toBeInTheDocument();
+    // ...never the retired "no online checkout" copy, and no PDF promise (an SMS-only send has none)...
+    expect(screen.queryByText(/no online checkout/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/attached as a PDF/i)).not.toBeInTheDocument();
+    // ...and never the raw "commercial_proposal" token as a reason badge.
     expect(screen.queryByText('Commercial proposal')).not.toBeInTheDocument();
   });
 
-  it('does not promise an emailed PDF for an SMS-only proposal send', () => {
+  it('points a proposal with online signing at the sign card below', () => {
     render(
       <TerminalStateCard
         state="quote_required"
@@ -1599,14 +1601,13 @@ describe('TerminalStateCard', () => {
         address="123 Main St"
         quoteReason="commercial_proposal"
         isProposal
-        proposalPdfEmailed={false}
+        cta={{ commercialAgreement: { canSign: true } }}
       />,
     );
 
     expect(screen.getByText('What happens next')).toBeInTheDocument();
-    expect(screen.queryByText(/attached as a PDF to the email/i)).not.toBeInTheDocument();
-    // The account manager is named (owner 2026-08-08).
-    expect(screen.getByText(/Adam, your Waves account manager, has your formal proposal/i)).toBeInTheDocument();
+    expect(screen.getByText(/below to review and sign your service agreement online/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no online checkout/i)).not.toBeInTheDocument();
   });
 
   it('renders account-manager copy for a commercial risk-type hold, not the inspection state', () => {
