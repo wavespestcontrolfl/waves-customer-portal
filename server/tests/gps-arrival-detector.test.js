@@ -236,6 +236,8 @@ describe('gps-arrival-detector', () => {
       ok: true,
       reason: 'marked_on_property',
       state: 'on_property',
+      arrivalMarked: true,
+      serviceId: 'svc-1',
     });
   });
 
@@ -579,7 +581,7 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
     const result = await run(baseService());
 
-    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_failed' });
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_failed', arrivalMarked: false });
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'gps_arrival.mark_on_property_failed',
     }));
@@ -759,7 +761,7 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
     const result = await run(baseService());
 
-    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_failed', state: 'on_property' });
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_failed', state: 'on_property', arrivalMarked: true });
     expect(notMarkedWrites()).toHaveLength(0);
   });
 
@@ -774,7 +776,7 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
     const result = await run(service);
 
-    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_threw' });
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_threw', arrivalMarked: false });
     expect(notMarkedWrites()).toHaveLength(0);
   });
 
@@ -783,7 +785,7 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
     const result = await run(baseService());
 
-    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_threw' });
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_threw', arrivalMarked: false });
     expect(notMarkedWrites()).toEqual([expect.objectContaining({
       metadata: expect.objectContaining({ reason: 'mark_on_property_failed', detail: 'lock timeout' }),
     })]);

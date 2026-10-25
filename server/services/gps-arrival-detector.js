@@ -553,6 +553,11 @@ async function markAndAudit({ service, techStatus, destination, distance, point,
       state: result?.state || null,
       distanceMeters: distance,
       result,
+      // The truck's arrival at this stop happened on this call (truck clock-in
+      // reads these). A grouped stop that answers visit_fanout_incomplete still
+      // landed the primary on property, so the returned state counts too.
+      arrivalMarked: result?.ok === true || result?.state === 'on_property',
+      serviceId: service.id,
     };
   } catch (err) {
     logger.error(`[gps-arrival] markOnProperty failed for ${service.id}: ${err.message}`);
@@ -565,7 +570,7 @@ async function markAndAudit({ service, techStatus, destination, distance, point,
         reason: 'mark_on_property_failed', detail: err.message,
       });
     }
-    return { ok: false, reason: 'mark_on_property_threw', distanceMeters: distance };
+    return { ok: false, reason: 'mark_on_property_threw', distanceMeters: distance, arrivalMarked: false, serviceId: service.id };
   }
 }
 
