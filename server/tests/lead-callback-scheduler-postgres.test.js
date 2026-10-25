@@ -168,6 +168,29 @@ jest.setTimeout(30000);
     expect(mockPlaceRing).toHaveBeenCalledTimes(2);
   });
 
+  test('a finished failed call does not cancel the booked ring; a live one makes it wait', async () => {
+    const { customer, row } = await booked();
+    await database('call_log').insert({ id: randomUUID(), direction: 'outbound', status: 'no-answer', to_phone: '+19415550100', from_phone: '+19412975749', created_at: SLOT });
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBeNull();
+    await database('lead_callback_requests').where({ id: row.id }).update({ state: 'scheduled' });
+    await database('call_log').insert({ id: randomUUID(), direction: 'outbound', status: 'in-progress', to_phone: '+19415550100', from_phone: '+19412975749', created_at: SLOT });
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBe('call_live');
+    expect((await rowNow(row.id)).state).toBe('scheduled');
+  });
+
+  test('a no-answer bell that never lands is tried again on the next tick', async () => {
+    const { row } = await booked({ state: 'asked' });
+    raiseAdminAlert.mockResolvedValue(null);
+    // Real timers: the bell's three tries take about 12 s (no fake timers next
+    // to a live pool).
+    try {
+      await runLeadCallbackTick({ now: new Date('2026-10-21T12:05:00Z') });
+    } finally {
+      raiseAdminAlert.mockResolvedValue({ id: 'n1' });
+    }
+    expect(await rowNow(row.id)).toMatchObject({ state: 'asked', no_answer_at: null });
+  });
+
   test('gate off: nothing is read', async () => {
     isEnabled.mockImplementation(() => false);
     await expect(runLeadCallbackTick({ now: SLOT })).resolves.toEqual({ skipped: 'gate_off' });

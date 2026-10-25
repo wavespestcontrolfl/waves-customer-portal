@@ -105,18 +105,27 @@ function bookedRingBlocker(requestId) {
       await conn('lead_callback_requests').where({ id: requestId }).update({ state: 'cancelled', updated_at: now });
       return 'existing_customer';
     }
-    const recent = await conn('call_log')
+    // A call still live to them waits for the next tick; a finished attempt
+    // (failed, busy, no answer) changes nothing: the booked ring still goes.
+    const live = await conn('call_log')
       .where({ direction: 'outbound' })
+      .whereNotIn('status', TERMINAL_CALL_STATUSES)
       .where('created_at', '>=', new Date(now.getTime() - RECENT_CALL_WINDOW_MS))
       .where(function toThisPhone() {
         this.whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
           .orWhereRaw("RIGHT(regexp_replace(COALESCE(metadata->>'leadPhone', ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
       })
       .first('id');
-    // Someone is already on the phone with them: the booked call is answered.
+    if (live) return 'call_live';
     await conn('lead_callback_requests').where({ id: requestId }).update({ state: 'done', updated_at: now });
-    return recent ? 'call_in_progress' : null;
+    return null;
   };
+}
+
+// Puts a claimed booking back so the next tick takes it again.
+async function releaseRingClaim(id, fromState, now) {
+  await db('lead_callback_requests').where({ id, state: fromState })
+    .update({ state: 'scheduled', ring_claimed_at: null, updated_at: now });
 }
 
 async function ringDue(now) {
@@ -142,10 +151,16 @@ async function ringDue(now) {
       }
       if (handOff) {
         const moved = await db('lead_callback_requests').where({ id: row.id, state: 'scheduled' }).update({ state: 'needs_owner', updated_at: now });
-        if (moved) await raiseLeadBell({ customer, leadId: row.lead_id, requestId: row.id, why: `Booked for ${time}; the ring could not start in time.` });
+        const rung = moved && await raiseLeadBell({ customer, leadId: row.lead_id, requestId: row.id, why: `Booked for ${time}; the ring could not start in time.` });
+        // A bell that never landed: back to scheduled, and the next tick tries again.
+        if (moved && !rung) await releaseRingClaim(row.id, 'needs_owner', now);
         continue;
       }
       const result = await placeRing({ customer, fromPhone: row.phone, now, blocker: bookedRingBlocker(row.id) });
+      if (result.reason === 'call_live') {
+        await releaseRingClaim(row.id, 'scheduled', now);
+        continue;
+      }
       if (result.callLogId) {
         await db('lead_callback_requests').where({ id: row.id }).update({ ring_call_log_id: result.callLogId, updated_at: now });
       }
@@ -154,7 +169,7 @@ async function ringDue(now) {
       // Nothing rang (placeRing throws only before any call exists): free the
       // claim so the next tick tries again, or hands the call off once late.
       logger.error(`[lead-callback-scheduler] ring step failed for request ${row.id} (${errCode(err)})`);
-      await db('lead_callback_requests').where({ id: row.id, state: 'scheduled' }).update({ ring_claimed_at: null, updated_at: now })
+      await releaseRingClaim(row.id, 'scheduled', now)
         .catch((releaseErr) => logger.warn(`[lead-callback-scheduler] ring claim release failed for ${row.id} (${errCode(releaseErr)})`));
     }
   }
@@ -180,7 +195,13 @@ async function noAnswerBells(now) {
       .update({ state: 'needs_owner', no_answer_at: now, updated_at: now });
     const customer = moved ? await loadCustomer(row.customer_id) : null;
     if (!customer) continue;
-    await raiseLeadBell({ customer, leadId: row.lead_id, requestId: row.id, why: 'Asked for a call after hours and never sent a time.' });
+    const settled = await raiseLeadBell({ customer, leadId: row.lead_id, requestId: row.id, why: 'Asked for a call after hours and never sent a time.' });
+    if (!settled) {
+      // A bell that never landed: back to asked, and the next tick tries again.
+      await db('lead_callback_requests').where({ id: row.id, state: 'needs_owner' })
+        .update({ state: 'asked', no_answer_at: null, updated_at: now });
+      continue;
+    }
     rung += 1;
   }
   return rung;
