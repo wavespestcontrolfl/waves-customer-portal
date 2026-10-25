@@ -608,8 +608,10 @@ function durationWindow(sentence, index, length) {
 // window — units or not ("until four o'clock", "hasta las cuatro", "in 2").
 // NUM_WORD / NUM_WORD_ES are the spelled-number lists defined with the price
 // matchers near the top of this file (EN and ES number words).
-// "Una vez que" is "once" (the condition), not the number one.
-const ANY_TIME_FIGURE_RE = new RegExp(`\\d|\\b(?!once\\b)(?!una\\s+vez\\s+que\\b)(?:${NUM_WORD}|${NUM_WORD_ES}|half|quarter|o'?clock|media|cuarto)\\b`, 'i');
+// The Spanish articles "un / una / unos / unas" are "a / some", not a number
+// ("una cotización", "una infestación", "una vez que"); a time with them is
+// caught on its unit or clock form ("una hora", "en un rato", "a la una").
+const ANY_TIME_FIGURE_RE = new RegExp(`\\d|\\b(?!once\\b)(?!(?:un|una|unos|unas)\\b)(?:${NUM_WORD}|${NUM_WORD_ES}|half|quarter|o'?clock|media|cuarto)\\b`, 'i');
 // A phone number or a property size is never a time window. The prompt has
 // the model give the office line for every job it cannot quote and echo the
 // visitor's home, so "(941) 297-5749" and "your 2,000 sq ft home" counted as
