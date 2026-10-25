@@ -170,7 +170,8 @@ describe('buildFindTimeRequestBody', () => {
 });
 
 describe('quick-add phone-match confirm helpers', () => {
-  const err = (status, code, match) => Object.assign(new Error('x'), { status, code, details: match ? { match } : undefined });
+  // The shape adminFetch throws: the server's JSON reply rides on err.body.
+  const err = (status, code, match) => Object.assign(new Error('x'), { status, body: { error: 'x', code, ...(match ? { match } : {}) } });
 
   it('maps only the two 409 confirm codes to a conflict (other errors stay generic)', () => {
     expect(quickAddConflictFromError(null)).toBeNull();
