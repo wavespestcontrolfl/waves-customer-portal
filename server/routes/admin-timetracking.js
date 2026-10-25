@@ -1186,33 +1186,28 @@ function hiredPacketOff(res) {
 // same fields (canonical email, '' clears a payroll field, name trimmed).
 // Returns { error } or { name, email, hireDate, patch } where patch carries
 // only the optional fields the caller sent.
+// Optional payroll fields: absent, null or '' keeps or clears the column (the
+// PUT rule, applied by applyPayrollProfileFields); any other value must pass
+// its check, so a bad value is a 400 instead of a database error.
+const HIRE_OPTIONAL_FIELD_CHECKS = [
+  ['payRate', (v) => typeof v !== 'boolean' && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 999999.99,
+    'Pay rate must be a number between 0 and 999999.99'],
+  ['jobTitle', (v) => typeof v === 'string' && v.length <= 100, 'Job title must be 100 characters or fewer'],
+  ['employmentType', (v) => HIRE_EMPLOYMENT_TYPES.includes(v), "Employment type must be 'w2' or '1099'"],
+];
+
 function parseHireBody(body) {
   if (typeof body.name !== 'string' || !body.name.trim()) return { error: 'Name is required' };
   const normalizedEmail = normalizeTechnicianEmail(body.email);
   if (normalizedEmail.error) return { error: normalizedEmail.error };
   if (!normalizedEmail.value) return { error: 'Email is required' };
   if (!validDateOnly(body.hireDate)) return { error: 'First day must be a valid YYYY-MM-DD date' };
+  if (body.phone != null && typeof body.phone !== 'string') return { error: 'Phone must be a string' };
+  const invalid = HIRE_OPTIONAL_FIELD_CHECKS
+    .find(([key, valid]) => body[key] != null && body[key] !== '' && !valid(body[key]));
+  if (invalid) return { error: invalid[2] };
 
-  const patch = {};
-  if (body.phone !== undefined) {
-    if (body.phone !== null && typeof body.phone !== 'string') return { error: 'Phone must be a string' };
-    patch.phone = body.phone || null;
-  }
-  if (body.payRate !== undefined && body.payRate !== null && body.payRate !== '') {
-    const rate = Number(body.payRate);
-    if (typeof body.payRate === 'boolean' || !Number.isFinite(rate) || rate < 0 || rate > 999999.99) {
-      return { error: 'Pay rate must be a number between 0 and 999999.99' };
-    }
-  }
-  if (body.jobTitle !== undefined && body.jobTitle !== null && body.jobTitle !== '') {
-    if (typeof body.jobTitle !== 'string' || body.jobTitle.length > 100) {
-      return { error: 'Job title must be 100 characters or fewer' };
-    }
-  }
-  if (body.employmentType !== undefined && body.employmentType !== null && body.employmentType !== ''
-    && !HIRE_EMPLOYMENT_TYPES.includes(body.employmentType)) {
-    return { error: "Employment type must be 'w2' or '1099'" };
-  }
+  const patch = body.phone === undefined ? {} : { phone: body.phone || null };
   applyPayrollProfileFields(patch, {
     payRate: body.payRate,
     jobTitle: body.jobTitle,
