@@ -48,6 +48,20 @@ brand-new row and returns 409 once the placeholder owns the email, and
    (visits already assigned are listed for manual reassignment, never
    moved). The editor records who verified each category and when.
 
+### Hired button (GATE_HIRED_PACKET)
+
+When `GATE_HIRED_PACKET` is on (dark by default; see `docs/gates-and-env.md`),
+one step replaces steps 1 to 3 above. On the Team tab, press **Hired** on the
+prospective row, fill in the hire's email and first day (name, phone, pay rate,
+job title and employment type are prefilled from the row), and press **Hire
+and send link**. The row becomes an active staff account and the hire gets a
+welcome email with a link to set their password; it works for 7 days. The
+toast says whether the email went out. If it did not arrive, or the link
+expired, press **Resend link** on that row (once a minute at most). The hire is
+not field-dispatchable until you tick that box (step 4), and the Onboarding
+card lists their required documents once they sign in. The manual steps above
+still work with the gate off or on.
+
 ## Before you start
 
 - You need an **admin session token** (log into the admin portal, or use the
