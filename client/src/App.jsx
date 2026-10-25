@@ -1,6 +1,7 @@
 import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useOutletContext, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
+import { CHUNK_RELOAD_FLAG, isStaleChunkReloadPending, markStaleChunkReloadPending } from './lib/staleChunkReload';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -74,14 +75,18 @@ function CustomerFailureScreen({ title, message, onRetry }) {
   );
 }
 
-class PageErrorBoundary extends Component {
+export class PageErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
   static getDerivedStateFromError(error) { return { error }; }
   componentDidCatch(error, info) {
+    // A stale-chunk reload is already under way: the swallowed import made
+    // React.lazy throw, and the page is about to reload into the new build.
+    if (isStaleChunkReloadPending()) return;
     console.error('[Page crash]', error, info.componentStack);
     reportError(error, { context: 'PageErrorBoundary', componentStack: info.componentStack });
   }
   render() {
+    if (this.state.error && isStaleChunkReloadPending()) return <RouteFallback />;
     if (this.state.error) {
       if (this.props.customerGlass) {
         return (
@@ -330,18 +335,27 @@ function RouteFallback({ label = 'Loading...' }) {
   );
 }
 
-function lazyWithRetry(factory) {
+export function lazyWithRetry(factory) {
   return lazy(async () => {
     try {
       const mod = await factory();
-      sessionStorage.removeItem('chunk-reload-attempted');
+      // main.jsx's vite:preloadError handler swallowed a stale chunk: the
+      // import resolved undefined and a reload is in flight. Hold the loading
+      // placeholder and keep the one-shot flag; clearing it here would let a
+      // still-stale build reload-loop.
+      if (!mod && isStaleChunkReloadPending()) return { default: RouteFallback };
+      sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
       return mod;
     } catch (err) {
+      // A CSS preload already started the reload, then the chunk itself
+      // failed too: same reload, same placeholder.
+      if (isStaleChunkReloadPending()) return { default: RouteFallback };
       const msg = String(err?.message || '');
       const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError/i.test(msg);
       if (isChunkError) {
-        if (!sessionStorage.getItem('chunk-reload-attempted')) {
-          sessionStorage.setItem('chunk-reload-attempted', '1');
+        if (!sessionStorage.getItem(CHUNK_RELOAD_FLAG)) {
+          sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+          markStaleChunkReloadPending();
           showReloadToast();
           setTimeout(() => window.location.reload(), 1200);
           return { default: () => null };
