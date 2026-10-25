@@ -1515,7 +1515,7 @@ function DayStartTab() {
           <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
         ) : (
           <>
-            <div className="grid items-end gap-3 md:grid-cols-[minmax(180px,0.6fr)_auto]">
+            <div className="grid items-end gap-3 md:grid-cols-[minmax(180px,240px)_auto] md:justify-start">
               <Field label="Van leaves at">
                 <Select
                   value={value}
