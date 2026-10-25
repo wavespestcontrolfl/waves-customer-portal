@@ -126,8 +126,8 @@ async function newestLeadId(customerId) {
 }
 
 // ── Sending ──────────────────────────────────────────────────────────────
-// `requireState`: the send goes only if the request still has this state at
-// the provider boundary (a TEXT that cancelled a booked call wins).
+// `requireState`: the send goes only if the request still has this state,
+// held under a row lock through the provider request.
 async function sendFollowup({ customer, phone, body, kind, requestId, requireState = null }) {
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
   const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
@@ -142,13 +142,16 @@ async function sendFollowup({ customer, phone, body, kind, requestId, requireSta
       customerId: customer.id,
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: ENTRY_POINT,
+      // The request row stays locked through the provider request: a TEXT
+      // that cancels it waits, so a text never goes for a changed request.
       ...(requireState ? {
-        providerPreSendCheck: async ({ dbi } = {}) => {
-          const row = await (dbi || db)('lead_callback_requests').where({ id: requestId }).first('state');
-          return row?.state === requireState
-            ? { ok: true }
-            : { ok: false, code: 'LEAD_CALLBACK_CHANGED', reason: 'the call request changed before the text went out' };
-        },
+        withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
+          const row = await trx('lead_callback_requests').where({ id: requestId }).forUpdate().first('state');
+          if (row?.state !== requireState) {
+            return { ok: false, code: 'LEAD_CALLBACK_CHANGED', reason: 'the call request changed before the text went out' };
+          }
+          return dispatch(trx);
+        }),
       } : {}),
       metadata: {
         original_message_type: 'auto_reply',
