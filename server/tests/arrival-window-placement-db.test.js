@@ -222,6 +222,73 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       await expect(capacity.verifyArrivalCapacity(prepared, { conn: mockConn })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'technician_unavailable' });
     });
   });
+  // GATE_STAFF_ROUTE_INSERTION (owner 2026-10-25): a moved visit is tried
+  // between the stops of a numbered day, and the save numbers the day in the
+  // order the box and the save probe both certified.
+  describe('staff route insertion', () => {
+    let savedGate;
+    const { placeMovedVisit } = require('../services/scheduling/arrival-route');
+    const dayOrder = () => mockConn('scheduled_services').where({ scheduled_date: DAY }).orderBy('route_order').pluck('id');
+    const routeNumber = async id => (await mockConn('scheduled_services').where({ id }).first('route_order')).route_order;
+    beforeEach(async () => {
+      savedGate = process.env.GATE_STAFF_ROUTE_INSERTION;
+      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
+      await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', ['audit_log', 'audit_log']);
+      // The nightly pass numbered the day: north first, south second.
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ route_order: 1 });
+      await mockConn('scheduled_services').where({ id: SOUTH }).update({ route_order: 2 });
+    });
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_STAFF_ROUTE_INSERTION;
+      else process.env.GATE_STAFF_ROUTE_INSERTION = savedGate;
+    });
+
+    test('the box, the save probe and the save agree on the place between the stops', async () => {
+      const nine = (await findAvailableSlots(OPTIONS)).slots.find(slot => slot.start_time === '09:00');
+      expect(nine.route_arrivals.map(row => row.id)).toEqual([NORTH, TARGET, SOUTH]);
+      expect(await probe()).toEqual([]);
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+      await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toEqual([NORTH, TARGET, SOUTH]);
+      expect(await dayOrder()).toEqual([NORTH, TARGET, SOUTH]);
+      expect(await mockConn('audit_log').where({ action: 'schedule.route_order_placed', resource_id: TARGET }).first('metadata'))
+        .toEqual({ metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: [NORTH, TARGET, SOUTH] } });
+      // Numbers only: every promised window stays as it was.
+      expect(await mockConn('scheduled_services').where({ id: SOUTH }).first('window_start', 'window_end'))
+        .toEqual({ window_start: '10:00:00', window_end: '11:00:00' });
+    });
+
+    test('gate off: the visit stays after the last numbered stop and the save writes nothing', async () => {
+      delete process.env.GATE_STAFF_ROUTE_INSERTION;
+      expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(false);
+      expect((await probe())[0]).toMatchObject({ conflict_reason: 'arrival_window' });
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+      await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toBeNull();
+      expect(await routeNumber(TARGET)).toBeNull();
+    });
+
+    test('a save past its warning keeps the day as it was', async () => {
+      await mockConn('scheduled_services').where({ id: TARGET })
+        .update({ scheduled_date: DAY, estimated_duration_minutes: 240, window_end: '13:00' });
+      await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toBeNull();
+      expect(await dayOrder()).toEqual([NORTH, SOUTH, TARGET]);
+      expect(await routeNumber(TARGET)).toBeNull();
+    });
+
+    test('a tech-day fence held by another writer leaves the numbers to that writer', async () => {
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+      const second = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
+      const other = await second.transaction();
+      try {
+        await require('../services/scheduling/tech-day-lock').lockTechDays(other, [{ techId: TECH, date: DAY }]);
+        await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toBeNull();
+      } finally {
+        await other.rollback();
+        await second.destroy();
+      }
+      expect(await routeNumber(TARGET)).toBeNull();
+    });
+  });
+
   test('capacity offers and save probes isolate technicians while retaining unassigned blockers', async () => {
     const gate = process.env.GATE_SCHEDULING_CAPACITY;
     process.env.GATE_SCHEDULING_CAPACITY = 'true';

@@ -40,7 +40,7 @@ const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./ca
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks, techScopedConfirmActive } = require('./scheduling/occupancy');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { resolveStopCoords } = require('./scheduling/travel-gap');
-const { arrivalWindowRoutingEnabled, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
+const { arrivalWindowRoutingEnabled, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, placeMovedVisit } = require('./scheduling/arrival-route');
 const { guardedCoordSelects, preloadServiceLocations } = require('./scheduling/day-stops');
 const { getIo } = require('../sockets');
 const {
@@ -2352,6 +2352,11 @@ class SmartRebooker {
       // byte-identical to today.
       if (capacityCommitFit) {
         await persistArrivalOrder(trx, capacityCommitFit, serviceId);
+      } else if (placementWindowChanged && (useArrivalWindows || options.placeInRoute === true) && !service.visit_id) {
+        // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
+        // off): the staff check placed this visit between stops, so number
+        // the day in that order and the board shows it where the box did.
+        await placeMovedVisit(trx, { serviceId });
       }
 
       if (service.status !== landedStatus) {
@@ -4164,6 +4169,15 @@ class SmartRebooker {
             isOperational: true,
             code: 'SLOT_TAKEN',
           });
+        }
+        // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
+        // off): the anchor is the visit the staff check placed, so number
+        // its day in that order. Later occurrences keep today's handling.
+        if (isAnchor && updateData.window_start && !sib.visit_id
+          && (useArrivalWindows || options.placeInRoute === true)
+          && (sibDateChanges || anchorTechChanges
+            || String(updateData.window_start).slice(0, 5) !== String(sib.window_start || '').slice(0, 5))) {
+          await placeMovedVisit(trx, { serviceId: sib.id });
         }
         if (awaitingPlacement || sibClashBeyondHorizon || (anchorCleared && sib.window_start)) {
           // The row just went timed → windowless: pre-close its reminder in

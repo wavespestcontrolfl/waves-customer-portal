@@ -4099,6 +4099,16 @@ const gates = {
   // never changes neighbours' promises or sends notifications. Call-time
   // kill switch in scheduling/arrival-route.js; off in every environment.
   adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
+  // Staff route insertion (owner 2026-10-25, "go" + "save order"): with
+  // capacity mode off, a staff check of a MOVED visit (another day,
+  // technician or start) tries it at every place in the technician's stored
+  // order instead of after the last numbered stop, keeps every later stop 15
+  // minutes inside its arrival window, and the staff save numbers that day in
+  // the certified order. Never changes a customer's time or sends a message.
+  // Dark in every environment; scheduling/arrival-route.js reads it through
+  // gateEnvValue() at call time. Kill switch: unset. This entry is for
+  // logGateStatus only.
+  staffRouteInsertion: gateEnvValue('GATE_STAFF_ROUTE_INSERTION'),
   // Shared 08:00–18:00 capacity, catalog durations and complete-route booking.
   // Dark in every environment; callers read at operation time. Owner activation.
   schedulingCapacity: gateEnvValue('GATE_SCHEDULING_CAPACITY'),

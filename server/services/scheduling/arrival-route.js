@@ -5,6 +5,7 @@
  * insertion orders and persist them with an audit inside the occupancy lock.
  */
 const db = require('../../models/db');
+const logger = require('../logger');
 const RouteOptimizer = require('../route-optimizer');
 const { loadTechStartPoint } = require('./tech-start-point');
 const { gateEnvValue } = require('../../config/feature-gates');
@@ -71,6 +72,31 @@ function hasCoords(stop) {
  *  both are ignored: byte-identical. */
 function comboRouteCheckLive() {
   return gateEnvValue('GATE_COMBO_ROUTE_CHECK');
+}
+
+/** GATE_STAFF_ROUTE_INSERTION (owner 2026-10-25, "go" + "save order"): dark
+ *  unless set, read at call time, capacity mode off only. On, a staff check of
+ *  a MOVED visit tries it at every place in the technician's stored order
+ *  instead of after the last numbered stop, and the save numbers the day in
+ *  the certified order (placeMovedVisit). Off: byte-identical. */
+function staffRouteInsertionLive() {
+  return gateEnvValue('GATE_STAFF_ROUTE_INSERTION');
+}
+
+// A moved visit goes in ahead of a stop only when that stop still arrives at
+// least this long before its window closes: the drive model is off by about
+// 4 minutes a leg (route-optimizer.js), so a 2-minute fit on paper is not a
+// fit (owner 2026-10-25).
+const INSERTION_MARGIN_MINUTES = 15;
+
+/** True when this evaluation puts the visit somewhere it is not stored: a new
+ *  visit, or another day, technician or start than its saved row. */
+function movesVisit(context, date, technicianId, windowStart) {
+  if (context.prospective) return true;
+  const at = context.placedAt;
+  if (!at) return false;
+  return at.date !== date || at.technicianId !== (technicianId || null)
+    || at.windowStart !== String(windowStart || '').slice(0, 5);
 }
 
 /** The whole visit as ONE target: the tapped row carrying its members'
@@ -242,6 +268,9 @@ async function loadArrivalRouteContext({
   date, now, grouped, activeTarget, prospective: !!prospective,
   insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
     || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
+  // Where the visit is saved now (movesVisit, GATE_STAFF_ROUTE_INSERTION).
+  placedAt: prospective ? null : { date: dateOnly(stored.scheduled_date),
+    technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
   travel, preserveCapacity, blocks,
   vanDepartureMin,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
@@ -402,9 +431,11 @@ function resolvePlacementOrigin(context, capacity, departureMin, target, own) {
  *  baseline drive (baselineDriveMinutes). Insertion tries every position —
  *  a prospective placement or a genuine move; an existing save probe
  *  re-sequences the day once with the target appended. Tried once per
- *  sequencer (see the stale-order rescue above the caller). */
-function buildCandidateOrders(context, capacity, groupedPending, target, allowInsertion, sequencers, baselineDriveMinutes) {
-  const insert = capacity && allowInsertion && (context.prospective || context.insertTarget);
+ *  sequencer (see the stale-order rescue above the caller). `staffInsert`
+ *  (GATE_STAFF_ROUTE_INSERTION, capacity off): every position for a moved
+ *  visit, the save probe included, since the save writes that order. */
+function buildCandidateOrders(context, capacity, groupedPending, target, allowInsertion, sequencers, baselineDriveMinutes, staffInsert = false) {
+  const insert = staffInsert || (capacity && allowInsertion && (context.prospective || context.insertTarget));
   return sequencers.flatMap((sequence) => {
     const baseline = sequence(groupedPending);
     const baselineDrive = baselineDriveMinutes(baseline);
@@ -414,13 +445,28 @@ function buildCandidateOrders(context, capacity, groupedPending, target, allowIn
   });
 }
 
+/** True when a stop after the placed visit arrives less than `margin` minutes
+ *  before its window closes. Stops ahead of the visit drive as before, and a
+ *  stop with no promise has no window to keep. */
+function laterStopTooTight(simulation, order, targetId, rangeForStop, margin) {
+  const at = order.findIndex(row => row.id === targetId);
+  return at >= 0 && simulation.arrivals.some((arrival, index) => {
+    const range = index > at ? rangeForStop(order[index]) : null;
+    return range != null && range.endMin - arrival.arrivalMin < margin;
+  });
+}
+
 /** Simulate every candidate order and certify the winner: least travel,
  *  ties broken by less waiting — skipping any order that overruns a return
  *  deadline (returnTooLate) or collides with a FIXED blocker (unassigned
- *  work, another technician's live hold, or a technician-day block). */
-function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, capacity, target, startMin }) {
+ *  work, another technician's live hold, or a technician-day block), and,
+ *  with `marginMinutes`, any order that leaves a later stop less than that
+ *  before its window closes (tooTight). */
+function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, capacity, target, startMin,
+  marginMinutes = 0, rangeForStop }) {
   let winner = null;
   let returnTooLate = false;
+  let tooTight = false;
   for (const { order, baselineDrive } of orders) {
     const usedLegs = [];
     const simulation = simulate(order, usedLegs);
@@ -456,12 +502,16 @@ function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, 
       return start == null || (simulation.serviceFinishMin < end && simulation.returnFinishMin > start);
     }));
     if (hitsFixed) continue;
+    if (marginMinutes > 0 && laterStopTooTight(simulation, order, target.id, rangeForStop, marginMinutes)) {
+      tooTight = true;
+      continue;
+    }
     if (!winner || simulation.travelMin < winner.simulation.travelMin
       || (simulation.travelMin === winner.simulation.travelMin && simulation.waitingMin < winner.simulation.waitingMin)) {
       winner = { simulation, order, usedLegs, baselineDrive };
     }
   }
-  return { winner, returnTooLate };
+  return { winner, returnTooLate, tooTight };
 }
 
 /** True when the day's existing stops alone cannot keep their promises in
@@ -473,11 +523,13 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
 
 /** Shape the certified winner into evaluateArrivalPlacement's public
  *  feasible result. */
-function buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner, origin, home = RouteOptimizer.HQ }) {
+function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, own, windowStart, winner, origin, home = RouteOptimizer.HQ }) {
   const { simulation, order, usedLegs, baselineDrive } = winner;
   // Fixed blockers remain immovable; selected-technician holds are included
   // in the capacity route alongside that technician's appointments.
   const arrival = simulation.arrivals.find(row => row.id === target.id);
+  const routeOrder = [...currentOrder(own.filter(row => row.status === 'completed')).map(row => row.id),
+    ...order.flatMap(row => row.memberIds || [row.id])];
   return {
     feasible: true, target,
     estimatedArrival: hhmm(arrival.arrivalMin + (target.arrivalOffsetMinutes || 0)),
@@ -488,14 +540,15 @@ function buildFeasibleResult({ target, capacity, startMin, own, windowStart, win
     ...(capacity ? {
       finishMinute: simulation.returnFinishMin,
       occupiedMinutes: simulation.returnFinishMin - startMin,
-      routeOrder: [...currentOrder(own.filter(row => row.status === 'completed')).map(row => row.id),
-        ...order.flatMap(row => row.memberIds || [row.id])],
+      routeOrder,
       travelSource: usedLegs.every(leg => leg.source === 'google_traffic') ? 'google_traffic' : 'conservative_model',
       travelReasons: [...new Set(usedLegs.map(leg => leg.reason).filter(Boolean))],
       // Where the van starts this route (home base, or today's last
       // completed stop), so a picker can say where the first drive starts.
       origin: origin ? { isHome: origin === home } : null,
     } : {}),
+    // The order a staff save writes (placeMovedVisit).
+    ...(staffInsert ? { routeOrder } : {}),
     arrivalDelayMinutes: arrival.arrivalMin + (target.arrivalOffsetMinutes || 0) - minuteOfDay(windowStart),
     arrivals: simulation.arrivals.map(row => ({ id: row.id, arrival: hhmm(row.arrivalMin), departure: hhmm(row.departureMin), drive: row.driveMin })),
   };
@@ -503,7 +556,7 @@ function buildFeasibleResult({ target, capacity, startMin, own, windowStart, win
 
 /** Pure evaluation shared by the hint, live conflict check, and save probe. */
 function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60,
-  departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true }) {
+  departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true, place = false }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
   const capacity = capacityEnabled() || context.preserveCapacity;
@@ -518,6 +571,11 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (capacity) dayEndMin = Math.min(dayEndMin, SHIFT.endMinutes);
   const target = buildPlacementTarget(context, windowStart, windowEnd, durationMinutes);
   if (targetUnroutable(capacity, target, windowStart, windowEnd, grouped)) return unverified(target, date);
+  // Staff route insertion (GATE_STAFF_ROUTE_INSERTION, capacity off): a moved
+  // visit, or the save writer's own placement (`place`), tries every place. A
+  // whole shared stop (`unit`) keeps today's rule: its save does not renumber.
+  const staffInsert = !capacity && staffRouteInsertionLive() && !target.memberIds
+    && (place || movesVisit(context, date, target.technician_id, windowStart));
   const own = rows.filter(row => row.technician_id === target.technician_id && (capacity || row.reservation_expires_at == null));
   const resolvedOrigin = resolvePlacementOrigin(context, capacity, departureMin, target, own);
   if (!resolvedOrigin) return unverified(target, date);
@@ -528,8 +586,9 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // duplicates or an afternoon stop ahead of a morning one is leftover
   // numbering, not a plan. Simulate the day in promised-window order too and
   // certify whichever fits better; commit persists the certified order. A
-  // complete, window-ordered dispatch order stays the only baseline.
-  const sequencers = capacity && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
+  // complete, window-ordered dispatch order stays the only baseline. A staff
+  // move under GATE_STAFF_ROUTE_INSERTION follows the same rule.
+  const sequencers = (capacity || staffInsert) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
   const simulate = (order, usedLegs) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
@@ -576,15 +635,21 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     if (collectLegs) collectLegs.push(...legs);
     return baselineSimulation ? baselineSimulation.travelMin : routeDriveMinutes(baseline, origin, context.home || RouteOptimizer.HQ);
   };
-  const orders = buildCandidateOrders(context, capacity, groupedPending, target, allowInsertion, sequencers, baselineDriveMinutes);
-  const { winner, returnTooLate } = selectWinningOrder(orders,
-    { simulate, collectLegs, returnByMin, rows, capacity, target, startMin });
+  const orders = buildCandidateOrders(context, capacity, groupedPending, target, allowInsertion, sequencers, baselineDriveMinutes, staffInsert);
+  const { winner, returnTooLate, tooTight } = selectWinningOrder(orders,
+    { simulate, collectLegs, returnByMin, rows, capacity, target, startMin,
+      marginMinutes: staffInsert ? INSERTION_MARGIN_MINUTES : 0, rangeForStop });
   const fail = {
     feasible: false, target, reason: 'arrival_window',
     warning: `The route on ${date} cannot keep every promised arrival window with the planned service and driving times. Review the stop order or choose another window.`,
   };
   if (!winner && returnTooLate) {
     return { ...fail, reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` };
+  }
+  // Every place it fits crowds a later customer (staff route insertion).
+  if (!winner && tooTight) {
+    return { ...fail, reason: 'arrival_margin',
+      warning: `The route on ${date} fits this visit only by leaving a later stop less than ${INSERTION_MARGIN_MINUTES} minutes before its arrival window closes. Choose another window.` };
   }
   // Tell "this visit breaks the day" apart from "the day is already broken":
   // the existing stops alone cannot keep their promises in any order tried.
@@ -593,7 +658,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` };
   }
   if (!winner) return fail;
-  return buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner, origin, home: context.home || RouteOptimizer.HQ });
+  return buildFeasibleResult({ target, capacity, staffInsert, startMin, own, windowStart, winner, origin, home: context.home || RouteOptimizer.HQ });
 }
 
 /** One on-the-hour enumeration for the staff finder and read-only gap
@@ -728,14 +793,59 @@ async function assertCapacityEligibility(conn, context, serviceTypes) {
   }
 }
 
-async function persistArrivalOrder(conn, fit, targetId) {
+// One number per stop in the certified order; a stop already holding its
+// number is not rewritten. Returns the order written.
+async function writeRouteOrder(conn, fit, targetId) {
   const order = fit.routeOrder.map(id => id === '__candidate__' ? targetId : id);
   for (let i = 0; i < order.length; i++) {
     await conn('scheduled_services').where({ id: order[i] })
       .where({ scheduled_date: fit.target.scheduled_date, technician_id: fit.target.technician_id })
       .whereRaw('route_order IS DISTINCT FROM ?', [i + 1]).update({ route_order: i + 1 });
   }
+  return order;
+}
+
+async function persistArrivalOrder(conn, fit, targetId) {
+  await writeRouteOrder(conn, fit, targetId);
   await recordCapacityDecision(conn, fit, targetId);
+}
+
+/** GATE_STAFF_ROUTE_INSERTION, capacity mode off: after a staff save moved a
+ *  visit (another day, technician or start), number its technician's day in
+ *  the order the staff check certified. Until then a moved visit has no
+ *  number, and the board, the tech app and the tracking page list it after
+ *  every numbered stop. Runs on the caller's save transaction under a
+ *  savepoint: any failure keeps the save and leaves the numbers as they
+ *  were. A day the check cannot certify (a save past its warning, a stop
+ *  under way, a missing location, a shared stop) also stays as it was.
+ *  Callers hold the tech-day fence; a busy one leaves the numbers to the
+ *  writer holding it. Returns the order written, or null. */
+async function placeMovedVisit(conn, { serviceId } = {}) {
+  if (capacityEnabled() || !staffRouteInsertionLive() || !arrivalWindowRoutingEnabled()) return null;
+  if (!conn?.isTransaction || !serviceId) return null;
+  try {
+    return await conn.transaction(async (sp) => {
+      const row = await sp('scheduled_services').where({ id: serviceId })
+        .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
+      const date = row ? dateOnly(row.scheduled_date) : '';
+      if (!row?.technician_id || !row.window_start || !date) return null;
+      if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return null;
+      // The tech's start point, as the times box plans the day.
+      const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id, startPoints: true });
+      if (!context || context.grouped) return null;
+      const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
+        windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true });
+      if (!fit.feasible || !fit.routeOrder) return null;
+      const order = await writeRouteOrder(sp, fit, serviceId);
+      await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
+        resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,
+        metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: order } });
+      return order;
+    });
+  } catch (error) {
+    logger.warn(`[arrival-route] route order not placed for ${serviceId}: ${error.message}`);
+    return null;
+  }
 }
 
 // Conversion expands a certified combined anchor without changing its route position.
@@ -777,5 +887,6 @@ module.exports = {
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
-  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget },
+  placeMovedVisit, INSERTION_MARGIN_MINUTES,
+  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight },
 };
