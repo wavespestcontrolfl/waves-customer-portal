@@ -61,12 +61,12 @@ router.get('/dashboard', async (req, res, next) => {
     // item and both groups always have room.
     const [overdueDeadlines, upcomingDeadlines] = await Promise.all([
       db('tax_filing_calendar')
-        .whereNot('status', 'filed')
+        .whereNotIn('status', ['filed', 'paid'])
         .where('due_date', '<', db.fn.now())
         .orderBy('due_date', 'desc').limit(3)
         .catch(() => []),
       db('tax_filing_calendar')
-        .whereNot('status', 'filed')
+        .whereNotIn('status', ['filed', 'paid'])
         .where('due_date', '>=', db.fn.now())
         .orderBy('due_date', 'asc').limit(5)
         .catch(() => []),
@@ -765,6 +765,13 @@ router.put('/filings/:id', async (req, res, next) => {
       confirmationNumber: 'confirmation_number', notes: 'notes',
     };
     for (const [k, col] of Object.entries(map)) { if (fields[k] !== undefined) update[col] = fields[k]; }
+    if (update.confirmation_number !== undefined && update.confirmation_number !== null) {
+      const conf = typeof update.confirmation_number === 'string' ? update.confirmation_number.trim() : null;
+      if (conf === null || conf.length > 100) {
+        return res.status(400).json({ error: 'confirmationNumber must be text of at most 100 characters' });
+      }
+      update.confirmation_number = conf || null;
+    }
     // Server-enforced (codex r4-push P1): a paid filing MUST carry a valid
     // amount — the quarterly estimate credits SUM(amount_paid) of paid
     // rows, and an amount-less paid row silently credits $0 and re-bills

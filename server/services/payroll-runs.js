@@ -35,6 +35,7 @@ const { recordAuditEvent } = require('./audit-log');
 const { computePaycheck } = require('./payroll-calc');
 const { currentW4For, PayrollError } = require('./payroll-w4');
 const { csvRow } = require('./csv-generators');
+const { syncPayrollFilingsSafe } = require('./payroll-tax-calendar');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const {
   STAFF_WORK_DATE_SQL,
@@ -556,6 +557,8 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await audit(trx, actorId, 'payroll.run_finalized', 'payroll_runs', runId, { run_id: runId });
   });
   if (changed) throw new PayrollError(409, 'Hours or settings changed. Review the new numbers.');
+  // Tax calendar rows follow the finalized checks. Never fails the finalize.
+  await syncPayrollFilingsSafe({ conn });
   return runView(conn, runId);
 }
 
@@ -577,6 +580,7 @@ async function voidRun(runId, input, actor, conn = db) {
     });
     await audit(trx, actorId, 'payroll.run_voided', 'payroll_runs', runId, { run_id: runId });
   });
+  await syncPayrollFilingsSafe({ conn });
   return runView(conn, runId);
 }
 

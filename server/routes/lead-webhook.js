@@ -894,24 +894,24 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       }
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
-    try {
-      if (!leadAgentConfigured) {
+    // Seed the intake state machine so the customer's next inbound SMS
+    // gets routed through server/services/lead-intake.js (classify →
+    // ask for address → auto-create draft estimate → notify Adam).
+    // Seeded now, whichever text ends up going out, so the address-only
+    // clarification below can still advance it from the form data. If the
+    // agent's personal text is the one that goes out, the service-menu
+    // state is cleared again at that send (clearServiceMenuIntakeState in
+    // services/lead-auto-reply.js, called by send_lead_response).
+    // With the agent configured it was already seeded before the lead's
+    // deadline was armed (above). With it off, the seed comes BEFORE the
+    // text and in its own step: a send that throws can no longer skip it,
+    // and a reply that beats the seed still finds the state set.
+    if (!leadAgentConfigured) {
+      try { await seedLeadIntakeState(customer.id); } catch (e) { logger.error(`Lead intake seed failed: ${e.message}`); }
+      try {
         await sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource });
-      }
-
-      // Seed the intake state machine so the customer's next inbound SMS
-      // gets routed through server/services/lead-intake.js (classify →
-      // ask for address → auto-create draft estimate → notify Adam).
-      // Seeded now, whichever text ends up going out, so the address-only
-      // clarification below can still advance it from the form data. If the
-      // agent's personal text is the one that goes out, the service-menu
-      // state is cleared again at that send (clearServiceMenuIntakeState in
-      // services/lead-auto-reply.js, called by send_lead_response).
-      // With the agent configured it was already seeded before the lead's
-      // deadline was armed (above), so a reply that arrives before this
-      // point is never overwritten here.
-      if (!leadAgentConfigured) await seedLeadIntakeState(customer.id);
-    } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
+      } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
+    }
 
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     let createdEstimateId = null;

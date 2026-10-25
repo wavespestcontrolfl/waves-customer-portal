@@ -6959,6 +6959,11 @@ function initScheduledJobs() {
       const today = etDateString(now);
       const futureDate = etDateString(addETDays(now, 14));
 
+      // Payroll tax rows (GATE_PAYROLL_TAX_CALENDAR; returns at once when off)
+      // so quarters with no pay run and new hires are on the calendar and
+      // get this run's reminder. Never throws.
+      await require('./payroll-tax-calendar').syncPayrollFilingsSafe();
+
       // Find filings due in the next 14 days that haven't been reminded yet
       const upcomingFilings = await db('tax_filing_calendar')
         .where('due_date', '>=', today)
