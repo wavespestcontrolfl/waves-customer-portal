@@ -1653,7 +1653,7 @@ function saysRetiredName(text) {
 }
 
 function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
-  const { COMPLETION_ACCESS_CODE_RE } = require('./complete-scheduled-service');
+  const { COMPLETION_ACCESS_CODE_RE } = require('./completion-access-code');
   const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
   // After an office label ("Office: ...") the following sentences may still be the
   // aside: their audience is unclear, so they never go to the customer unasked.

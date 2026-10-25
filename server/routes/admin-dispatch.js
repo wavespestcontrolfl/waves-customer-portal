@@ -1,6 +1,5 @@
 const {
   completeScheduledService,
-  COMPLETION_ACCESS_CODE_RE,
   serviceDateOnly,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_RECORD_END_FIELDS,
@@ -16,6 +15,7 @@ const {
   isPestStockAdvisoryCompletion,
   isLawnTsStockAdvisoryCompletion,
 } = require('../services/complete-scheduled-service');
+const { COMPLETION_ACCESS_CODE_RE } = require('../services/completion-access-code');
 const express = require('express');
 const crypto = require('crypto');
 // The occurrence fields a manual no-show's reschedule_log freezes (missed-appointment onSkip).
