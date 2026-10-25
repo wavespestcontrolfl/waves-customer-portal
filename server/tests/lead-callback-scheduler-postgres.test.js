@@ -215,6 +215,20 @@ jest.setTimeout(30000);
     expect(mockSettle.mock.calls.map(([id]) => id)).toEqual([stranded]);
   });
 
+  test('a failed sidless ring whose bell never landed is retried; one with its bell is not', async () => {
+    const pending = randomUUID();
+    await database('call_log').insert({ id: pending, source: 'lead-call-reply-ring', direction: 'outbound', status: 'failed', to_phone: '+19415550102', from_phone: '+19412975749', metadata: {}, created_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await database('call_log').insert({ id: randomUUID(), source: 'lead-call-reply-ring', direction: 'outbound', status: 'failed', to_phone: '+19415550103', from_phone: '+19412975749', metadata: { missed_bell_at: SLOT.toISOString() }, created_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await runLeadCallbackTick({ now: SLOT });
+    expect(mockSettle.mock.calls.map(([id]) => id)).toEqual([pending]);
+  });
+
+  test('a staff call to the lead live for 30 minutes still makes the booked ring wait', async () => {
+    const { customer, row } = await booked();
+    await database('call_log').insert({ id: randomUUID(), source: 'admin-click', direction: 'outbound', status: 'in-progress', to_phone: '+19415550100', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 30 * 60000) });
+    await expect(_test.bookedRingBlocker(row.id)({ customer, digits: '9415550100', now: SLOT }, database)).resolves.toBe('call_live');
+  });
+
   test('a lead who became a customer since booking gets no reminder and the booking closes', async () => {
     const { customer, row } = await booked();
     await database('customers').where({ id: customer.id }).update({ pipeline_stage: 'active_customer' });

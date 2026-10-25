@@ -31,7 +31,6 @@ const ACTIVE_RING_WINDOW_MS = 2 * 60 * 60 * 1000;
 // A ring claim this old never reached placeRing's own claim (that moves the
 // booking to done): the process stopped in between, so it is taken again.
 const STALE_RING_CLAIM_MS = 5 * 60 * 1000;
-const RECENT_CALL_WINDOW_MS = 10 * 60 * 1000;
 const BATCH = 25;
 const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'no-answer', 'canceled'];
 
@@ -99,12 +98,17 @@ async function sendReminders(now) {
 
 // A ring row that never got a CallSid within 5 minutes never rang: the
 // process stopped between the claim and the Twilio request (either ring
-// path). It closes as failed with its "Missed call request" bell.
+// path), or a refusal's bell never landed. It closes as failed with its
+// "Missed call request" bell, tried each tick until the bell is written.
 async function settleStrandedRings(now) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const { LEAD_CALL_REPLY_RING_SOURCE, settleUnstartedRing } = require('./lead-call-reply-ring');
   const rows = await db('call_log')
-    .where({ source: LEAD_CALL_REPLY_RING_SOURCE, direction: 'outbound', status: 'initiated' })
+    .where({ source: LEAD_CALL_REPLY_RING_SOURCE, direction: 'outbound' })
+    // 'failed' too: a settle whose bell never landed released its claim and
+    // is tried again here until the bell is written.
+    .whereIn('status', ['initiated', 'failed'])
+    .whereRaw("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'missed_bell_at')")
     .modify((q) => whereNotSandboxCall(q))
     .whereNull('twilio_call_sid')
     .where('created_at', '<', new Date(now.getTime() - STALE_RING_CLAIM_MS))
@@ -147,7 +151,9 @@ function bookedRingBlocker(requestId) {
     const live = await conn('call_log')
       .where({ direction: 'outbound' })
       .whereNotIn('status', TERMINAL_CALL_STATUSES)
-      .where('created_at', '>=', new Date(now.getTime() - RECENT_CALL_WINDOW_MS))
+      // Any call, any source, still live to them: a long staff call keeps
+      // the booked ring waiting (the same 2 h bound as a live lead ring).
+      .where('created_at', '>=', new Date(now.getTime() - ACTIVE_RING_WINDOW_MS))
       .where(function toThisPhone() {
         this.whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
           .orWhereRaw("RIGHT(regexp_replace(COALESCE(metadata->>'leadPhone', ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
