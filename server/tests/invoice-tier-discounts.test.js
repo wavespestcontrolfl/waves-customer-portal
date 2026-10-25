@@ -23,6 +23,13 @@ jest.mock('../services/short-url', () => ({
 
 const db = require('../models/db');
 
+// InvoiceService.create's billed-elsewhere guard (scheduled-invoice-mint):
+// no Billing Recovery disposition is recorded for these visits.
+const mockNoBilledElsewhere = () => {
+  const q = { join: () => q, where: () => q, whereNotIn: () => q, first: async () => null };
+  return q;
+};
+
 // Match knex's transaction identity; the root client is not its own trx.
 async function mockTransaction(callback) {
   const trx = (...args) => db(...args);
@@ -159,6 +166,8 @@ function setupDb({
       };
       return q;
     }
+
+    if (table === 'visit_billing_dispositions as d') return mockNoBilledElsewhere();
 
     throw new Error(`Unexpected table query: ${table}`);
   });

@@ -34,13 +34,18 @@ const KNOWN_FLAGS = new Map([['--json', 1], ['--md', 1], ['--since', 1]]);
 const SINCE = argValue('--since') || '2026-06-01';
 // Reused from the billing code, never re-typed (codex r3 P1): the always-free
 // service-type list and the active-autopay predicate the workbench applies.
-const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require(path.join(__dirname, '..', 'server', 'services', 'no-cost-visit-types'));
+const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX } = require(path.join(__dirname, '..', 'server', 'services', 'no-cost-visit-types'));
 const { autopayActivePredicate } = require(path.join(__dirname, '..', 'server', 'services', 'autopay-eligibility'));
 const { INTERNAL_TEST_CUSTOMERS } = require(path.join(__dirname, '..', 'server', 'services', 'internal-test-customers'));
 const { etDateString } = require(path.join(__dirname, '..', 'server', 'utils', 'datetime-et'));
 const TODAY_ET = etDateString(new Date());
 // Word-boundary regex, same as the workbench's `~*` bind (a bare `%re service%` ILIKE matched "Lawn Ca-re Service").
 const ALWAYS_FREE_SQL_LITERAL = `'${ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX.replace(/'/g, "''")}'`;
+const CONSULTATION_SQL_LITERAL = `'${CONSULTATION_SERVICE_TYPE_SQL_REGEX.replace(/'/g, "''")}'`;
+// InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES (invoice.js is not
+// required here: it loads the payment clients). A 'billed' / 'billed_elsewhere'
+// disposition whose invoice has one of these statuses no longer settles a visit.
+const DEAD_INVOICE_STATUSES_SQL = "('void', 'refunded', 'canceled', 'cancelled')";
 const AUTOPAY_ACTIVE_SQL = autopayActivePredicate(new Date()).sql.replace('?', '$2');
 const ENGINE_TIER_SQL = `coalesce(${['serviceOptOut,engineTier','result,recurring,waveGuardTier','result,recurring,tier','recurring,waveGuardTier','recurring,tier','engineResult,recurring,waveGuardTier','engineResult,recurring,tier','engineResult,waveGuard,tier','result,waveGuard,tier','waveGuard,tier'].map((p) => { const k = p.split(','); return `nullif(trim(estimate_data${k.slice(0, -1).map((x) => `->'${x}'`).join('')}->>'${k[k.length - 1]}'), '')`; }).join(', ')})`;
 // Same exclusion as the workbench (admin-billing-recovery.js INTERNAL_NAME_SQL + INTERNAL_TEST_CUSTOMERS) — codex r4 P1; empty list ⇒ no-op
@@ -333,9 +338,11 @@ const CHECKS = [
     // Mirrors uninvoicedLeakQuery in server/routes/admin-billing-recovery.js
     // (the authoritative Billing Recovery workbench predicate — codex r3 P1):
     // effective price > 0 (row price, else the per-application fee), completed
-    // service record or status-only completion, not dispositioned, no
+    // service record or status-only completion, not dispositioned (or a
+    // 'billed' / 'billed_elsewhere' disposition whose invoice is gone), no
     // non-void invoice on the record or the visit, no callback on either row,
-    // not fully prepaid, self-pay only, never an always-free type, and not an
+    // not fully prepaid, self-pay only, never an always-free type or an
+    // unpriced consultation (Waves Assessment), and not an
     // active-autopay customer unless on a per-visit lane. The population is
     // scoped by COMPLETION time like the workbench (ss.completed_at, ET date
     // >= --since), not by scheduled_date — a late status correction completes
@@ -354,9 +361,10 @@ const CHECKS = [
             join customers c on c.id = ss.customer_id
             left join service_records sr on sr.scheduled_service_id = ss.id
             left join visit_billing_dispositions d on d.scheduled_service_id = ss.id
+            left join invoices di on di.id = d.invoice_id
             where (ss.completed_at at time zone 'America/New_York')::date >= $1::date
               and ${EFFECTIVE_PRICE_SQL} > 0
-              and d.id is null
+              and (d.id is null or (d.disposition in ('billed', 'billed_elsewhere') and (di.id is null or di.status in ${DEAD_INVOICE_STATUSES_SQL})))
               and (sr.status = 'completed' or (sr.id is null and ss.status = 'completed'))
               and not exists (select 1 from invoices i where (i.service_record_id = sr.id or i.scheduled_service_id = ss.id) and coalesce(i.status, '') <> 'void')
               and coalesce(ss.is_callback,false) = false and coalesce(sr.is_callback,false) = false
@@ -364,6 +372,7 @@ const CHECKS = [
               and ss.annual_prepay_term_id is null
               and coalesce(ss.payer_id, case when coalesce(ss.self_pay_override,false) then null else c.payer_id end) is null
               and coalesce(ss.service_type,'') !~* ${ALWAYS_FREE_SQL_LITERAL}
+              and not (coalesce(ss.service_type,'') ~* ${CONSULTATION_SQL_LITERAL} and coalesce(ss.estimated_price,0) <= 0)
               and coalesce(c.billing_mode,'') <> 'monthly_membership'
               ${INTERNAL_TEST_SQL}
               and (not ${AUTOPAY_ACTIVE_SQL} or c.billing_mode in ('per_application','per_visit','one_time')))

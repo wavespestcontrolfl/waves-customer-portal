@@ -31,6 +31,7 @@ jest.mock('../services/tax-calculator', () => ({
 }));
 
 const db = require('../models/db');
+
 const TaxCalculator = require('../services/tax-calculator');
 const InvoiceService = require('../services/invoice');
 
@@ -62,6 +63,9 @@ function mockCreateDb({ customer = COMMERCIAL_CUSTOMER, scheduled = SCHEDULED_SE
     q.whereIn = jest.fn(() => q);
     q.andWhere = jest.fn(() => q);
     q.leftJoin = jest.fn(() => q);
+    // InvoiceService.create's billed-elsewhere guard: first() → null (none recorded).
+    q.join = jest.fn(() => q);
+    q.whereNotIn = jest.fn(() => q);
     q.select = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.update = jest.fn(() => q);

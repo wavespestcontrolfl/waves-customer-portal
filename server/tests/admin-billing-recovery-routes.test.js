@@ -6,7 +6,10 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/invoice', () => ({ createFromService: jest.fn() }));
+jest.mock('../services/invoice', () => ({
+  createFromService: jest.fn(),
+  CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'refunded', 'canceled', 'cancelled'],
+}));
 // Payer ownership comes from the canonical resolver (active payers only).
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
 jest.mock('../services/autopay-eligibility', () => ({
@@ -574,6 +577,164 @@ describe('admin billing-recovery routes', () => {
       expect(res.status).toBe(200);
       expect(body.leaks.find((r) => r.scheduled_service_id === 'ss-1').voided_invoice_number).toBe('WPC-2026-0598');
       expect(body.leaks.find((r) => r.scheduled_service_id === 'ss-2').voided_invoice_number).toBeNull();
+    });
+  });
+
+  // "Billed elsewhere": another invoice (a plan prepay, a two-home invoice, a
+  // duplicate row's invoice) already bills the visit. The row leaves the
+  // queue, revenue is untouched, and the covering invoice is recorded.
+  describe('POST /:id/billed-elsewhere', () => {
+    const VISIT = { id: 'ss-1', completed_at: '2026-10-24T15:00:00Z', customer_id: 'cust-1', account_id: 'acct-1', service_record_id: 'sr-1', service_record_status: 'completed', estimated_price: '117.00', service_type: 'Quarterly Pest Control Service' };
+    const COVER = { id: 'inv-cover', invoice_number: 'WPC-2026-0600', status: 'viewed', total: '210.60', scheduled_service_id: null, service_record_id: null, customer_id: 'cust-1', account_id: 'acct-1' };
+    function routeTables({ visit = VISIT, own = null, cover = COVER, existing = null, existingInvoiceStatus = null, openAttempt = null, packet = null } = {}) {
+      const dispositionQB = makeQB({ first: existing });
+      dispositionQB.del = jest.fn(() => Promise.resolve(1));
+      const invoicesQB = makeQB();
+      // First read: the visit's own invoice; second: a stale disposition's invoice.
+      invoicesQB.first = jest.fn().mockResolvedValueOnce(own).mockResolvedValueOnce(existingInvoiceStatus ? { status: existingInvoiceStatus } : null);
+      installTransaction((arg) => {
+        if (typeof arg === 'object' && arg.ss) return makeQB({ first: visit });
+        if (typeof arg === 'object' && arg.i) return makeQB({ first: cover });
+        if (arg === 'invoices') return invoicesQB;
+        if (arg === 'visit_billing_dispositions') return dispositionQB;
+        if (arg === 'service_completion_attempts') return makeQB({ first: openAttempt });
+        // The packet-ownership guard (scheduled-invoice-mint): visit row, then its saved closeout.
+        if (arg === 'scheduled_services') return makeQB({ first: { visit_id: packet ? 'visit-1' : null } });
+        if (arg === 'visit_completion_packets') return makeQB({ first: packet });
+        throw new Error(`unexpected trx table ${JSON.stringify(arg)}`);
+      });
+      return { dispositionQB };
+    }
+    const markElsewhere = (baseUrl, body) => fetch(`${baseUrl}/admin/billing-recovery/ss-1/billed-elsewhere`, {
+      method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+
+    test('records the covering invoice with the note and actor', async () => {
+      const { dispositionQB } = routeTables();
+      await withServer(async (baseUrl) => {
+        const res = await markElsewhere(baseUrl, { invoiceNumber: ' wpc-2026-0600 ', note: 'Two-home invoice' });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.invoice).toEqual({ id: 'inv-cover', invoice_number: 'WPC-2026-0600', status: 'viewed' });
+        expect(dispositionQB.insert).toHaveBeenCalledWith({
+          scheduled_service_id: 'ss-1', service_record_id: 'sr-1', disposition: 'billed_elsewhere',
+          invoice_id: 'inv-cover', reason: 'Two-home invoice', actor_user_id: 'admin-1',
+        });
+        expect(dispositionQB.del).not.toHaveBeenCalled();
+      });
+    });
+
+    test('another profile of the same account may cover the visit', async () => {
+      const { dispositionQB } = routeTables({ cover: { ...COVER, customer_id: 'cust-2' } });
+      await withServer(async (baseUrl) => {
+        expect((await markElsewhere(baseUrl, { invoiceNumber: 'WPC-2026-0600' })).status).toBe(200);
+        expect(dispositionQB.insert).toHaveBeenCalled();
+      });
+    });
+
+    test.each([
+      ['no invoice number', {}, {}, 400, /invoiceNumber required/],
+      ['a visit that is not completed', { invoiceNumber: 'WPC-2026-0600' }, { visit: { ...VISIT, completed_at: null } }, 422, /not completed/],
+      // A status-only visit still runs the completion flow, and an unfinished
+      // attempt resumes its mint: either could bill the visit again.
+      ['a status-only visit', { invoiceNumber: 'WPC-2026-0600' }, { visit: { ...VISIT, service_record_id: null, service_record_status: null } }, 422, /Finish this visit's closeout first/],
+      ['a closeout still finishing', { invoiceNumber: 'WPC-2026-0600' }, { openAttempt: { id: 'att-1' } }, 409, /still finishing/],
+      // A saved combined-visit closeout bills every member on one invoice.
+      ['a visit its saved closeout bills', { invoiceNumber: 'WPC-2026-0600' }, { packet: { id: 'pkt-1' } }, 409, /billed by its saved visit closeout/],
+      ['a visit with its own invoice', { invoiceNumber: 'WPC-2026-0600' }, { own: { id: 'inv-own' } }, 409, /own invoice/],
+      ['an unknown invoice', { invoiceNumber: 'WPC-2026-9999' }, { cover: null }, 404, /not found/],
+      ['another customer and account', { invoiceNumber: 'WPC-2026-0600' }, { cover: { ...COVER, customer_id: 'cust-9', account_id: 'acct-9' } }, 409, /different customer/],
+      ['a draft covering invoice', { invoiceNumber: 'WPC-2026-0600' }, { cover: { ...COVER, status: 'draft' } }, 409, /is draft/],
+      ['a void covering invoice', { invoiceNumber: 'WPC-2026-0600' }, { cover: { ...COVER, status: 'void' } }, 409, /is void/],
+      ['a visit already handled', { invoiceNumber: 'WPC-2026-0600' }, { existing: { id: 'disp-1', disposition: 'intentionally_free', invoice_id: null } }, 409, /already been handled/],
+    ])('refuses %s', async (_label, body, tables, status, error) => {
+      const { dispositionQB } = routeTables(tables);
+      await withServer(async (baseUrl) => {
+        const res = await markElsewhere(baseUrl, body);
+        expect(res.status).toBe(status);
+        expect((await res.json()).error).toMatch(error);
+        expect(dispositionQB.insert).not.toHaveBeenCalled();
+      });
+    });
+
+    // A covering invoice that is smaller than the visit, or that already
+    // bills another visit (a duplicate row's twin), more likely names the
+    // wrong row: refused without a note that explains it.
+    test.each([
+      ['totals less than the visit', { cover: { ...COVER, invoice_number: 'WPC-2026-0309', total: '99.00' }, visit: { ...VISIT, estimated_price: '350.00' } },
+        /totals \$99\.00, less than this visit's \$350\.00\. If this row is a duplicate or was never performed, use Mark free/],
+      ['already bills another visit', { cover: { ...COVER, invoice_number: 'WPC-2026-0307', total: '58.50', scheduled_service_id: 'ss-twin' }, visit: { ...VISIT, estimated_price: '58.50' } },
+        /WPC-2026-0307 already bills another visit\. If this row is a duplicate/],
+    ])('a covering invoice that %s needs a note', async (_label, tables, error) => {
+      const refused = routeTables(tables);
+      await withServer(async (baseUrl) => {
+        const res = await markElsewhere(baseUrl, { invoiceNumber: tables.cover.invoice_number });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(error);
+        expect(refused.dispositionQB.insert).not.toHaveBeenCalled();
+      });
+      const noted = routeTables(tables);
+      await withServer(async (baseUrl) => {
+        const res = await markElsewhere(baseUrl, { invoiceNumber: tables.cover.invoice_number, note: 'Office confirmed the invoice covers this visit' });
+        expect(res.status).toBe(200);
+        expect(noted.dispositionQB.insert).toHaveBeenCalledWith(expect.objectContaining({ reason: 'Office confirmed the invoice covers this visit' }));
+      });
+    });
+
+    test('replaces a billed-elsewhere row whose covering invoice was voided', async () => {
+      const { dispositionQB } = routeTables({
+        existing: { id: 'disp-old', disposition: 'billed_elsewhere', invoice_id: 'inv-old' }, existingInvoiceStatus: 'void',
+      });
+      await withServer(async (baseUrl) => {
+        expect((await markElsewhere(baseUrl, { invoiceNumber: 'WPC-2026-0600' })).status).toBe(200);
+        expect(dispositionQB.del).toHaveBeenCalled();
+        expect(dispositionQB.insert).toHaveBeenCalledWith(expect.objectContaining({ disposition: 'billed_elsewhere', invoice_id: 'inv-cover' }));
+      });
+    });
+  });
+
+  test('Mark free replaces a billed-elsewhere row whose covering invoice was voided', async () => {
+    const dispositionQB = makeQB({ first: { id: 'disp-old', disposition: 'billed_elsewhere', invoice_id: 'inv-old' } });
+    dispositionQB.del = jest.fn(() => Promise.resolve(1));
+    const invoicesQB = makeQB();
+    invoicesQB.first = jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({ status: 'void' });
+    installTransaction((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { scheduled_service_id: 'ss-1', completed_at: '2026-06-18', service_record_id: 'sr-1' } });
+      if (arg === 'invoices') return invoicesQB;
+      if (arg === 'visit_billing_dispositions') return dispositionQB;
+      throw new Error(`unexpected trx table ${JSON.stringify(arg)}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/dismiss`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Covering prepay voided; visit given free' }),
+      });
+      expect(res.status).toBe(200);
+      expect(dispositionQB.del).toHaveBeenCalled();
+      expect(dispositionQB.insert).toHaveBeenCalledWith(expect.objectContaining({ disposition: 'intentionally_free' }));
+    });
+  });
+
+  test('GET /leaks names a billed-elsewhere invoice that died, and only for that disposition', async () => {
+    const rows = [
+      { scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service', estimated_price: '120.00', prepaid_amount: '0', completed_at: '2026-10-24', customer_id: 'cust-1', first_name: 'Colby', last_name: 'Example', monthly_rate: '0', waveguard_tier: null, stale_disposition: 'billed_elsewhere', stale_disposition_invoice_number: 'WPC-2026-0601', stale_disposition_invoice_status: 'void' },
+      { scheduled_service_id: 'ss-2', service_record_id: 'sr-2', service_type: 'Quarterly Pest Control Service', estimated_price: '117.00', prepaid_amount: '0', completed_at: '2026-10-23', customer_id: 'cust-2', first_name: 'Ray', last_name: 'Example', monthly_rate: '0', waveguard_tier: null, stale_disposition: 'billed', stale_disposition_invoice_number: 'WPC-2026-0602', stale_disposition_invoice_status: 'void' },
+    ];
+    let qb;
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) { qb = makeQB({ rows }); return qb; }
+      throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/leaks?days=90`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      // The stale-disposition join is part of the query.
+      expect(qb.leftJoin).toHaveBeenCalledWith({ di: 'invoices' }, 'di.id', 'd.invoice_id');
+      const back = body.leaks.find((r) => r.scheduled_service_id === 'ss-1');
+      expect(back).toEqual(expect.objectContaining({ billed_elsewhere_invoice_number: 'WPC-2026-0601', billed_elsewhere_invoice_status: 'void' }));
+      const billedBack = body.leaks.find((r) => r.scheduled_service_id === 'ss-2');
+      expect(billedBack.billed_elsewhere_invoice_number).toBeNull();
     });
   });
 
