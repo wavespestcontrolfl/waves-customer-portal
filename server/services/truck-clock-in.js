@@ -1,29 +1,32 @@
 /**
- * Truck clock-in (GATE_TRUCK_CLOCK_IN, owner 2026-10-25, "this works").
+ * Truck clock-in, SHADOW ONLY (GATE_TRUCK_CLOCK_IN=shadow, owner 2026-10-25,
+ * "this works").
  *
- * A technician's shift starts at the truck's first GPS arrival at a stop, when
- * the technician is not clocked in and has signed the Vehicle Use & Commuting
- * Agreement. If the truck's first trip of the day starts at the office, the shift
- * starts at that trip. Home-to-first-stop driving is unpaid commute under the
- * agreement; a day that starts at the shop is paid from the shop. Training days
- * stay by hand: a trainee rides in the trainer's truck, so no Bouncie device maps
- * to the trainee and nothing here fires for them.
+ * The rule: a technician's shift starts at the truck's first GPS arrival at a
+ * stop, when the technician is not clocked in and has signed the Vehicle Use &
+ * Commuting Agreement; if the truck's first trip of the day starts at the office,
+ * the shift starts at that trip. Home-to-first-stop driving is unpaid commute
+ * under the agreement. Training days stay by hand: a trainee rides in the
+ * trainer's truck, so no Bouncie device maps to the trainee.
+ *
+ * THIS RELEASE ONLY RECORDS. It decides what the rule would do and writes one
+ * truck_clock_in_shadow row; it never writes time_entries and never calls
+ * time-tracking. Live clock-in (the shift write, the GPS time as clock_in, an
+ * atomic claim and a persisted retry) is a separate later change.
  *
  * Called by the Bouncie receiver (routes/webhooks-bouncie.js) after the arrival
  * detector, once per GPS point, in its own try/catch.
  *
  * Two triggers; per technician per Eastern work day the FIRST one wins and later
- * ones do nothing (truck_clock_in_shadow is UNIQUE on technician + work_date):
+ * ones do nothing (truck_clock_in_shadow is UNIQUE on technician + work date):
  *   first_arrival      the detector marked an arrival on this very call
  *                      (maybeMarkArrivedFromGps -> arrivalMarked).
  *   office_trip_start  a trip-start event whose point is within 200 m of the office
  *                      AND the truck's first trip-start of the Eastern work day (no
  *                      earlier trip-start in bouncie_webhook_log for the same truck).
  *
- * Modes (truckClockInMode()): off = nothing runs; shadow = decide and record the
- * row, never write time_entries; true = record the same row and clock the
- * technician in (source 'truck_gps'). Clock-out, the 9 PM reminder and the 11 PM
- * close are not touched here. Sends nothing to anyone.
+ * Modes (truckClockInMode()): off = nothing runs; shadow = decide and record.
+ * Clock-out, the 9 PM reminder and the 11 PM close are not touched. Sends nothing.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -42,7 +45,6 @@ const OFFICE_RADIUS_METERS = 200;
 const MAX_TRIP_START_AGE_MS = 10 * 60 * 1000;
 const FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
 const DECIDED_MEMO_MAX = 2000;
-const SOURCE = 'truck_gps';
 
 // tech:workDate keys already decided (row exists) by this process, so a moving
 // truck costs no query per GPS point after the first trigger of the day. The
@@ -87,7 +89,7 @@ function detectTrigger({ eventType, point, arrival, now = new Date() }) {
  * (staff.vehicle-use-commuting-agreement) on any issued version; a read that
  * fails is agreement_unknown, never a guess either way.
  */
-async function decideClockIn(technicianId, conn = db, { savepoint = false } = {}) {
+async function decideClockIn(technicianId, conn = db) {
   const active = await conn('time_entries')
     .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
     .first('id');
@@ -95,11 +97,7 @@ async function decideClockIn(technicianId, conn = db, { savepoint = false } = {}
 
   let signed;
   try {
-    // Inside the claim transaction a failed read would abort it (Postgres), so the
-    // read runs in a savepoint: its failure is agreement_unknown and nothing more.
-    signed = savepoint
-      ? await conn.transaction((sp) => hasCompletedIssuedRecord(sp, technicianId, VEHICLE_AGREEMENT_KEY))
-      : await hasCompletedIssuedRecord(conn, technicianId, VEHICLE_AGREEMENT_KEY);
+    signed = await hasCompletedIssuedRecord(conn, technicianId, VEHICLE_AGREEMENT_KEY);
   } catch (err) {
     logger.warn(`[truck-clock-in] agreement lookup failed: ${err.message}`);
     return { wouldClockIn: false, skipReason: 'agreement_unknown' };
@@ -157,71 +155,6 @@ async function insertClaim(conn, row) {
   return first ? (first.id || first) : null;
 }
 
-function clockInOptions(fired) {
-  const label = fired.trigger === 'first_arrival' ? 'first GPS arrival at a stop' : 'first trip started at the office';
-  return {
-    lat: fired.lat,
-    lng: fired.lng,
-    source: SOURCE,
-    notes: `Truck clock-in: ${label}`,
-    // The shift starts when the truck did, not when a late webhook arrived. Only
-    // when the point carried its own time; otherwise the event time IS now.
-    ...(fired.eventKnown ? { clockInAt: fired.eventAt } : {}),
-  };
-}
-
-/**
- * 'true' mode: the claim row and the shift are ONE transaction. A transient
- * failure rolls both back (no claim, no memo), so a later point that day retries.
- * ALREADY_CLOCKED_IN is thrown before any write, so the transaction is still
- * usable: the claim row is updated to say so and commits.
- * Returns { lost: true } when another sample or instance already claimed the day.
- */
-async function claimAndClockIn(tech, workDate, fired) {
-  const timeTracking = require('./time-tracking');
-  return db.transaction(async (trx) => {
-    let decision = await decideClockIn(tech.id, trx, { savepoint: true });
-    const claimId = await insertClaim(trx, claimRow(tech.id, workDate, fired, decision));
-    if (!claimId) return { lost: true };
-    if (!decision.wouldClockIn) return { lost: false, decision };
-    try {
-      await timeTracking.clockInInTransaction(trx, tech.id, clockInOptions(fired));
-    } catch (err) {
-      if (err && err.code === 'ALREADY_CLOCKED_IN') {
-        decision = { wouldClockIn: false, skipReason: 'already_clocked_in' };
-        await trx('truck_clock_in_shadow')
-          .where({ id: claimId })
-          .update({ would_clock_in: false, skip_reason: decision.skipReason });
-        return { lost: false, decision };
-      }
-      throw err;
-    }
-    return { lost: false, decision };
-  });
-}
-
-// Decide and record the day. 'true' = claim + shift in one transaction; shadow =
-// claim only. Remembers the day only once it is settled (commit, or lost to a
-// winner); a rolled-back failure rethrows with no claim row and no memo.
-async function settleDay(mode, tech, workDate, fired, key) {
-  if (mode === 'true') {
-    let result;
-    try {
-      result = await claimAndClockIn(tech, workDate, fired);
-    } catch (err) {
-      logger.error(`[truck-clock-in] clock-in rolled back for ${tech.id}: ${err && err.message}`);
-      throw err;
-    }
-    remember(key);
-    return result;
-  }
-  const decision = await decideClockIn(tech.id);
-  const claimId = await insertClaim(db, claimRow(tech.id, workDate, fired, decision));
-  remember(key);
-  // Another instance or sample won the day between the check and the insert.
-  return claimId ? { lost: false, decision } : { lost: true };
-}
-
 /**
  * The webhook hook. `tech` is the technician the Bouncie IMEI maps to; `logId` is
  * the bouncie_webhook_log row of the event being handled.
@@ -230,7 +163,7 @@ async function settleDay(mode, tech, workDate, fired, key) {
  */
 async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, logId = null, now = new Date() } = {}) {
   const mode = truckClockInMode();
-  if (mode === 'off') return { action: 'off' };
+  if (mode !== 'shadow') return { action: 'off' };
   if (!tech?.id) return { action: 'no_trigger' };
   if (isStaffMaintenanceEnabled()) return { action: 'maintenance' };
 
@@ -256,18 +189,21 @@ async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, l
     }
   }
 
-  const settled = await settleDay(mode, tech, workDate, fired, key);
-  if (settled.lost) return { action: 'already_decided', workDate };
-  const outcome = settled.decision;
+  // Shadow: decide and record, never write time_entries.
+  const decision = await decideClockIn(tech.id);
+  const claimId = await insertClaim(db, claimRow(tech.id, workDate, fired, decision));
+  remember(key);
+  // Another instance or sample won the day between the check and the insert.
+  if (!claimId) return { action: 'already_decided', workDate };
 
-  logger.info(`[truck-clock-in] ${mode} tech=${tech.id} ${workDate} ${fired.trigger} would_clock_in=${outcome.wouldClockIn}${outcome.skipReason ? ` skip=${outcome.skipReason}` : ''}`);
+  logger.info(`[truck-clock-in] ${mode} tech=${tech.id} ${workDate} ${fired.trigger} would_clock_in=${decision.wouldClockIn}${decision.skipReason ? ` skip=${decision.skipReason}` : ''}`);
   return {
     action: 'recorded',
     mode,
     workDate,
     trigger: fired.trigger,
-    wouldClockIn: outcome.wouldClockIn,
-    skipReason: outcome.skipReason,
+    wouldClockIn: decision.wouldClockIn,
+    skipReason: decision.skipReason,
   };
 }
 
@@ -278,6 +214,5 @@ function resetMemo() {
 module.exports = {
   maybeClockInFromTruck,
   OFFICE_RADIUS_METERS,
-  SOURCE,
   _test: { detectTrigger, decideClockIn, isFirstTripStartOfDay, isWithinOfficeRadius, resetMemo, MAX_TRIP_START_AGE_MS },
 };

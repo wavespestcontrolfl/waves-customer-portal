@@ -6,10 +6,10 @@ jest.mock('../services/staff-onboarding', () => ({
   VEHICLE_AGREEMENT_KEY: 'staff.vehicle-use-commuting-agreement',
   hasCompletedIssuedRecord: jest.fn(),
 }));
-jest.mock('../services/time-tracking', () => ({ clockInInTransaction: jest.fn() }));
+// Shadow only: the service must never touch time tracking.
+jest.mock('../services/time-tracking', () => ({ clockIn: jest.fn() }));
 
 const db = require('../models/db');
-const logger = require('../services/logger');
 const { hasCompletedIssuedRecord } = require('../services/staff-onboarding');
 const timeTracking = require('../services/time-tracking');
 const RouteOptimizer = require('../services/route-optimizer');
@@ -27,8 +27,7 @@ function point(overrides = {}) {
 }
 const nearOffice = (dLat = 0.001) => ({ lat: HQ.lat + dLat, lng: HQ.lng });
 
-// In-memory stand-in for the tables the service touches. db.transaction rolls the
-// shadow rows back when its callback throws, like Postgres would.
+// In-memory stand-in for the tables the service touches.
 let shadowRows;
 let activeShift;
 let inserts;
@@ -85,18 +84,6 @@ function installDb({ shiftActive = false } = {}) {
   loseClaim = false;
   activeShift = shiftActive;
   db.mockImplementation(tableImpl);
-  const trx = jest.fn(tableImpl);
-  trx.transaction = jest.fn(async (fn) => fn(trx));
-  db.transaction = jest.fn(async (fn) => {
-    const snapshot = shadowRows.map((r) => ({ ...r }));
-    try {
-      return await fn(trx);
-    } catch (err) {
-      shadowRows = snapshot;
-      throw err;
-    }
-  });
-  db.trx = trx;
 }
 
 describe('truckClockInMode', () => {
@@ -106,7 +93,8 @@ describe('truckClockInMode', () => {
   });
   test.each([
     [undefined, 'off'], ['', 'off'], ['false', 'off'], ['1', 'off'], ['on', 'off'], ['yes', 'off'],
-    ['shadow', 'shadow'], [' Shadow ', 'shadow'], ['true', 'true'], ['TRUE', 'true'],
+    ['shadow', 'shadow'], [' Shadow ', 'shadow'], ['SHADOW', 'shadow'],
+    ['true', 'off'], ['TRUE', 'off'], ['live', 'off'], ['shadow,true', 'off'],
   ])('GATE_TRUCK_CLOCK_IN=%p reads %p', (value, expected) => {
     if (value === undefined) delete process.env.GATE_TRUCK_CLOCK_IN; else process.env.GATE_TRUCK_CLOCK_IN = value;
     expect(truckClockInMode()).toBe(expected);
@@ -208,7 +196,6 @@ describe('maybeClockInFromTruck', () => {
     delete process.env.STAFF_MAINTENANCE_MODE;
     installDb();
     hasCompletedIssuedRecord.mockResolvedValue(true);
-    timeTracking.clockInInTransaction.mockResolvedValue({ id: 'shift-new' });
   });
   afterEach(() => {
     if (saved === undefined) delete process.env.GATE_TRUCK_CLOCK_IN; else process.env.GATE_TRUCK_CLOCK_IN = saved;
@@ -223,15 +210,15 @@ describe('maybeClockInFromTruck', () => {
     delete process.env.GATE_TRUCK_CLOCK_IN;
     await expect(run()).resolves.toEqual({ action: 'off' });
     expect(db).not.toHaveBeenCalled();
-    expect(timeTracking.clockInInTransaction).not.toHaveBeenCalled();
+    expect(timeTracking.clockIn).not.toHaveBeenCalled();
   });
 
   test('Staff maintenance: nothing runs', async () => {
-    process.env.GATE_TRUCK_CLOCK_IN = 'true';
+    process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
     process.env.STAFF_MAINTENANCE_MODE = 'true';
     await expect(run()).resolves.toEqual({ action: 'maintenance' });
     expect(db).not.toHaveBeenCalled();
-    expect(timeTracking.clockInInTransaction).not.toHaveBeenCalled();
+    expect(timeTracking.clockIn).not.toHaveBeenCalled();
   });
 
   test('shadow: records the row and never clocks in', async () => {
@@ -243,99 +230,49 @@ describe('maybeClockInFromTruck', () => {
       technician_id: TECH.id, work_date: '2026-10-25', trigger: 'first_arrival', would_clock_in: true, skip_reason: null,
       lat: STOP.lat, lng: STOP.lng,
     });
-    expect(timeTracking.clockInInTransaction).not.toHaveBeenCalled();
+    expect(timeTracking.clockIn).not.toHaveBeenCalled();
   });
 
-  test('true: records the row and clocks in with source truck_gps', async () => {
+  test('GATE_TRUCK_CLOCK_IN=true behaves as off: no row, no clock-in, no database call', async () => {
     process.env.GATE_TRUCK_CLOCK_IN = 'true';
-    const result = await run();
-    expect(result).toMatchObject({ action: 'recorded', mode: 'true', wouldClockIn: true });
-    expect(timeTracking.clockInInTransaction).toHaveBeenCalledTimes(1);
-    expect(timeTracking.clockInInTransaction).toHaveBeenCalledWith(db.trx, TECH.id, expect.objectContaining({
-      source: 'truck_gps', lat: STOP.lat, lng: STOP.lng, notes: expect.stringContaining('first GPS arrival'),
-      clockInAt: expect.any(Date),
-    }));
-    expect(timeTracking.clockInInTransaction.mock.calls[0][2].clockInAt.toISOString()).toBe(NOW.toISOString());
-    expect(shadowRows[0]).toMatchObject({ would_clock_in: true, skip_reason: null });
-  });
-
-  test('true: ALREADY_CLOCKED_IN from the race is a no-op, and the row says so', async () => {
-    process.env.GATE_TRUCK_CLOCK_IN = 'true';
-    const err = new Error('Already clocked in.');
-    err.code = 'ALREADY_CLOCKED_IN';
-    timeTracking.clockInInTransaction.mockRejectedValue(err);
-    const result = await run();
-    expect(result).toMatchObject({ action: 'recorded', wouldClockIn: false, skipReason: 'already_clocked_in' });
-    expect(shadowRows[0]).toMatchObject({ would_clock_in: false, skip_reason: 'already_clocked_in' });
-  });
-
-  test('true: a transient clock-in failure rolls back the claim, leaves no memo, and a later point retries', async () => {
-    process.env.GATE_TRUCK_CLOCK_IN = 'true';
-    timeTracking.clockInInTransaction.mockRejectedValueOnce(new Error('db down'));
-    await expect(run()).rejects.toThrow('db down');
+    await expect(run()).resolves.toEqual({ action: 'off' });
+    expect(db).not.toHaveBeenCalled();
     expect(shadowRows).toHaveLength(0);
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('rolled back'));
-
-    const retry = await run({ now: new Date(NOW.getTime() + 60e3), point: point({ reported_at: new Date(NOW.getTime() + 60e3).toISOString() }) });
-    expect(retry).toMatchObject({ action: 'recorded', wouldClockIn: true });
-    expect(shadowRows).toHaveLength(1);
-    expect(timeTracking.clockInInTransaction).toHaveBeenCalledTimes(2);
+    expect(timeTracking.clockIn).not.toHaveBeenCalled();
   });
 
-  test('true: the claim and the shift run in one transaction', async () => {
-    process.env.GATE_TRUCK_CLOCK_IN = 'true';
-    await run();
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(timeTracking.clockInInTransaction.mock.calls[0][0]).toBe(db.trx);
-  });
-
-  test('true: an unsigned agreement claims the day inside the transaction and never touches the shift', async () => {
-    process.env.GATE_TRUCK_CLOCK_IN = 'true';
-    hasCompletedIssuedRecord.mockResolvedValue(false);
-    await run();
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(shadowRows).toHaveLength(1);
-  });
-
-  test('true: no clockInAt when the point carried no time of its own', async () => {
-    process.env.GATE_TRUCK_CLOCK_IN = 'true';
-    await run({ point: point({ reported_at: null }) });
-    expect(timeTracking.clockInInTransaction.mock.calls[0][2]).not.toHaveProperty('clockInAt');
-  });
-
-  test.each(['shadow', 'true'])('%s: already clocked in records the skip and never clocks in', async (mode) => {
-    process.env.GATE_TRUCK_CLOCK_IN = mode;
+  test('already clocked in records the skip and never clocks in', async () => {
+    process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
     installDb({ shiftActive: true });
     const result = await run();
     expect(result).toMatchObject({ wouldClockIn: false, skipReason: 'already_clocked_in' });
     expect(shadowRows[0]).toMatchObject({ would_clock_in: false, skip_reason: 'already_clocked_in' });
-    expect(timeTracking.clockInInTransaction).not.toHaveBeenCalled();
+    expect(timeTracking.clockIn).not.toHaveBeenCalled();
   });
 
   test.each([
     [false, 'agreement_not_signed'],
     [new Error('boom'), 'agreement_unknown'],
-  ])('true: agreement %p records %s and never clocks in', async (agreement, reason) => {
-    process.env.GATE_TRUCK_CLOCK_IN = 'true';
+  ])('shadow: agreement %p records %s and never clocks in', async (agreement, reason) => {
+    process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
     if (agreement instanceof Error) hasCompletedIssuedRecord.mockRejectedValue(agreement);
     else hasCompletedIssuedRecord.mockResolvedValue(agreement);
     const result = await run();
     expect(result).toMatchObject({ wouldClockIn: false, skipReason: reason });
     expect(shadowRows[0]).toMatchObject({ would_clock_in: false, skip_reason: reason });
-    expect(timeTracking.clockInInTransaction).not.toHaveBeenCalled();
+    expect(timeTracking.clockIn).not.toHaveBeenCalled();
   });
 
   test('office trip start records office_trip_start; the later arrival the same day does nothing', async () => {
-    process.env.GATE_TRUCK_CLOCK_IN = 'true';
+    process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
     const first = await run({ eventType: 'trip-start', point: point(nearOffice()), arrival: null });
     expect(first).toMatchObject({ action: 'recorded', trigger: 'office_trip_start', wouldClockIn: true });
-    expect(timeTracking.clockInInTransaction).toHaveBeenCalledWith(db.trx, TECH.id, expect.objectContaining({ notes: expect.stringContaining('office') }));
+    
 
     const later = await run({ now: new Date(NOW.getTime() + 3600e3), point: point({ reported_at: new Date(NOW.getTime() + 3600e3).toISOString() }) });
     expect(later).toMatchObject({ action: 'already_decided' });
     expect(shadowRows).toHaveLength(1);
     expect(shadowRows[0].trigger).toBe('office_trip_start');
-    expect(timeTracking.clockInInTransaction).toHaveBeenCalledTimes(1);
   });
 
   test('first trigger of the day wins even when a fresh process has an empty memo (durable row)', async () => {
@@ -348,12 +285,12 @@ describe('maybeClockInFromTruck', () => {
     expect(inserts).toHaveLength(0);
   });
 
-  test('losing the insert race to another instance does not clock in', async () => {
-    process.env.GATE_TRUCK_CLOCK_IN = 'true';
+  test('losing the insert race to another instance records nothing more', async () => {
+    process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
     loseClaim = true;
     const result = await run();
     expect(result).toMatchObject({ action: 'already_decided' });
-    expect(timeTracking.clockInInTransaction).not.toHaveBeenCalled();
+    expect(timeTracking.clockIn).not.toHaveBeenCalled();
     expect(shadowRows).toHaveLength(0);
   });
 
@@ -382,12 +319,12 @@ describe('maybeClockInFromTruck', () => {
     test.each([['trip-start'], ['tripStart'], ['TripStart'], ['trip_start']])(
       'refused after an earlier trip-start stored as %p (first trip started away from the office)',
       async (stored) => {
-        process.env.GATE_TRUCK_CLOCK_IN = 'true';
+        process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
         earlierEventTypes = ['trip-data', stored];
         const result = await tripStart();
         expect(result).toEqual({ action: 'no_trigger', reason: 'not_first_trip' });
         expect(shadowRows).toHaveLength(0);
-        expect(timeTracking.clockInInTransaction).not.toHaveBeenCalled();
+        expect(timeTracking.clockIn).not.toHaveBeenCalled();
       },
     );
 
