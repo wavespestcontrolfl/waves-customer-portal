@@ -3663,8 +3663,8 @@ function buildTodaysResult({
     const rooms = isGerman ? String(values.rooms_treated || '').trim().replace(/\.$/, '') : '';
     const intro = isGerman
       ? (rooms
-        ? `Completed your ${initial}German cockroach knockdown service in the ${rooms.charAt(0).toLowerCase()}${rooms.slice(1)}.`
-        : `Completed your ${initial}German cockroach knockdown service.`)
+        ? `Completed your ${initial}german cockroach knockdown service in the ${rooms.charAt(0).toLowerCase()}${rooms.slice(1)}.`
+        : `Completed your ${initial}german cockroach knockdown service.`)
       : `Completed your ${initial}large-roach knockdown service.`;
     const disclosure = isGerman
       ? ' Please avoid over-the-counter sprays, clean food debris behind and under appliances, and keep bait placements undisturbed so the bait can do its job.'

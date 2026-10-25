@@ -348,7 +348,7 @@ describe('buildReportCopyContext — writer rules: label facts', () => {
   test('on: a pest named in the note that the label names reaches PRODUCT FACTS', async () => {
     process.env.GATE_PEST_LABEL_FACTS = 'true';
     const { contextText } = await run();
-    expect(contextText).toContain('its label lists German cockroaches.');
+    expect(contextText).toContain('its label lists german cockroaches.');
   });
 
   test('off (unset or not exactly "true"): no label fact', async () => {

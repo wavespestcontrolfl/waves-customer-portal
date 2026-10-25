@@ -226,3 +226,18 @@ describe('the one-voice specialty prompt', () => {
     expect(activityLevelContradictions(body, band)).toEqual([]);
   });
 });
+
+// Owner 2026-10-25: "german cockroaches" with a small g, and (owner 2026-10-23,
+// "giving cleaning instructions is fine") a recorded cleaning step is advice the
+// report passes on; aftercare for a treated area or a bait stays out.
+describe('owner rulings 2026-10-23 and 2026-10-25', () => {
+  test('german takes a small g, in the rule and in every example report', () => {
+    expect(SPECIALTY_REPORT_VOICE_PROMPT).toContain('- Write "german cockroaches" and "german roaches" with a small g, except as the first word of a sentence.');
+    for (const example of SPECIALTY_VOICE_EXAMPLES) expect(example.report).not.toMatch(/\bGerman\b/);
+  });
+
+  test('a recorded cleaning step is passed on; aftercare for a treated area stays out', () => {
+    expect(SPECIALTY_REPORT_VOICE_PROMPT).toContain('A cleaning or sanitation step the note or Recommendations give ("wipe the counters dry before bed") is the customer\'s own task: say it in WHAT\'S NEXT.');
+    expect(SPECIALTY_REPORT_VOICE_PROMPT).not.toContain('never tell the customer to leave, clean, water or avoid anything');
+  });
+});

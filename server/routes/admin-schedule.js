@@ -146,7 +146,7 @@ const { technicianReportCustomerCopy, containsReportAccessCode } = require('../s
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, observedAndReportedLines, writerRulesRejection,
   noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
-  activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation,
+  activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation, lowercaseGermanRoach,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
@@ -27277,7 +27277,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
     // Under the writer rules a cached draft is screened again below before it
     // is served.
-    if (cached && !writerRulesOn) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    if (cached && !writerRulesOn) return res.json({ report: lowercaseGermanRoach(cached), cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
@@ -27380,7 +27380,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // The chip tapped off: a draft that still claims the sweep is never served.
     const sweepClaimRefused = (text) => sweepNotDone === true && reportClaimsSweep(text);
     if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached) && !sweepClaimRefused(cached)) {
-      return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+      return res.json({ report: lowercaseGermanRoach(cached), cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
     }
     // The same wall-clock ceiling the provider chain keeps: the last-resort
     // copy's meaning check below is charged against it too.
@@ -27488,7 +27488,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // No photoGroundingUsed here (Codex #5145 r5): the deterministic
       // fallback is built from structured actions only and never reads the
       // photo captions, so the client must not treat captions as inputs to it.
-      return res.json({ report: fallbackReport, fallback: true, deterministic: true });
+      return res.json({ report: lowercaseGermanRoach(fallbackReport), fallback: true, deterministic: true });
     }
 
     const { report } = generated;
@@ -27502,7 +27502,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       ...(writerRulesOn ? { writerRules: true } : {}),
       ...contextSignals,
     });
-    res.json({ report, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    // "german cockroaches" with a small g (lowercaseGermanRoach), on every path.
+    res.json({ report: lowercaseGermanRoach(report), ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
   } catch (err) {
     logger.error('[generate-report] AI failed', {
       message: err.message,

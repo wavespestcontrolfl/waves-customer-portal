@@ -226,6 +226,17 @@ A thin record gets one sentence per section, each one from the record. Write as 
 
 BEFORE YOU ANSWER, read your draft for these. The report is rejected if any appears: "no issues", "no problems", "all clear", "nothing to worry about"; an absence with no place named in the same clause; infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, pest-free, any "-proof" word, guarantee, bond, the word "map"; safe, safely, unsafe, non-toxic, harmless, toxic, poison, dangerous, chemical; a product, brand or active ingredient name; an amount, rate, percentage or footage; a price, "free" or "included"; a timeframe that is not copied from an EXPECTATIONS line; a date, weekday or clock time other than an earlier visit's date and the REACH-OUT DATE; the activity rating as a number; a quotation of the customer's message; an instruction to leave, clean, water or avoid a treated area or a bait.`;
 
+// "german cockroaches" takes a small g in report text (owner 2026-10-25,
+// "dont capitalize German"), except as the first word of a sentence or a
+// line, where every word takes a capital. The inputs say "German" (the form's
+// species value), so the writer's draft is set right after it is written.
+const GERMAN_ROACH_RE = /\bGerman(?=[\s-]+(?:cockroach|roach)(?:es|s)?\b)/g;
+const SENTENCE_START_RE = /(?:^|[.!?]["\u201d\u2019)]*\s+|\n\s*)["\u201c\u2018(]*$/;
+function lowercaseGermanRoach(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(GERMAN_ROACH_RE, (word, offset) => (SENTENCE_START_RE.test(text.slice(0, offset)) ? word : 'german'));
+}
+
 // A note that says "no issues" / "no problems" pulls those words into every
 // draft, and the screen refuses them (2026-10-09: four drafts in a row, then
 // the standard report). The line goes under the note itself.
@@ -846,6 +857,7 @@ module.exports = {
   CUSTOMER_WORDS_HEADER,
   withheldProductsLine,
   observedAndReportedLines,
+  lowercaseGermanRoach,
   bookedReasonBlock,
   COMMON_ACTIVE_INGREDIENTS,
   activeIngredientsMentioned,
