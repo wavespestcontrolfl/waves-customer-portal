@@ -85,6 +85,20 @@ jest.setTimeout(30000);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  test('a TEXT that cancels the booking before the confirmation leaves stops the confirmation', async () => {
+    const c = await lead('+19415550122');
+    await reply(c, 'call', NIGHT);
+    // The provider boundary runs the lane's own check, as Twilio's dispatch would.
+    sendCustomerMessage.mockImplementationOnce(async (input) => {
+      await database('lead_callback_requests').where({ customer_id: c.id }).update({ state: 'cancelled' });
+      const verdict = await input.providerPreSendCheck({});
+      return verdict.ok ? REAL_SEND : { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict.code };
+    });
+    await reply(c, '10am', NIGHT);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(sendCustomerMessage.mock.calls[1][0].providerPreSendCheck).toEqual(expect.any(Function));
+  });
+
   test('two TEXT replies handled at once send one text', async () => {
     const c = await lead('+19415550111');
     const results = await Promise.all([reply(c, 'text', NIGHT), reply(c, 'text', NIGHT)]);

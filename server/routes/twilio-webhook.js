@@ -1263,11 +1263,12 @@ router.post('/sms', async (req, res) => {
       // texts fall through to the general quote-intent trigger. The
       // message continues into normal inbox handling either way.
       const { handleClarifyReply } = require('../services/estimate-clarify-asks');
-      const clarifyReply = (!intakeScopeVetoed && Body && String(Body).trim())
+      // A callback-time answer ("2" = 2 PM) is never quote data: no clarify, no draft.
+      const clarifyReply = (!intakeScopeVetoed && !pendingTimeAnswer && Body && String(Body).trim())
         ? await handleClarifyReply({ phone: From, body: Body, triggerSmsLogId: smsLogEntry.id })
         : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
-      if (!intakeScopeVetoed && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
+      if (!intakeScopeVetoed && !pendingTimeAnswer && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
         await startSmsThreadDraft({ phone: From, triggerBody: Body, triggerSmsLogId: smsLogEntry.id });
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }

@@ -126,7 +126,9 @@ async function newestLeadId(customerId) {
 }
 
 // ── Sending ──────────────────────────────────────────────────────────────
-async function sendFollowup({ customer, phone, body, kind, requestId }) {
+// `requireState`: the send goes only if the request still has this state at
+// the provider boundary (a TEXT that cancelled a booked call wins).
+async function sendFollowup({ customer, phone, body, kind, requestId, requireState = null }) {
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
   const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
   let result;
@@ -140,6 +142,14 @@ async function sendFollowup({ customer, phone, body, kind, requestId }) {
       customerId: customer.id,
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: ENTRY_POINT,
+      ...(requireState ? {
+        providerPreSendCheck: async ({ dbi } = {}) => {
+          const row = await (dbi || db)('lead_callback_requests').where({ id: requestId }).first('state');
+          return row?.state === requireState
+            ? { ok: true }
+            : { ok: false, code: 'LEAD_CALLBACK_CHANGED', reason: 'the call request changed before the text went out' };
+        },
+      } : {}),
       metadata: {
         original_message_type: 'auto_reply',
         templateKey: `${ENTRY_POINT}_${kind}`,
@@ -319,8 +329,9 @@ async function answerTimeAsk({ customer, request, body, smsLogId, now }) {
 
   const dayWord = etDateString(booked) === etDateString(now) ? 'today' : 'tomorrow';
   const confirm = `You're all set. We'll call you ${dayWord} at ${formatETTime(booked)}.`;
-  const outcome = await sendFollowup({ customer, phone: request.phone, body: confirm, kind: 'call_confirm', requestId: request.id });
-  if (outcome === 'not_sent') {
+  const outcome = await sendFollowup({ customer, phone: request.phone, body: confirm, kind: 'call_confirm', requestId: request.id, requireState: 'scheduled' });
+  const still = await db('lead_callback_requests').where({ id: request.id }).first('state');
+  if (outcome === 'not_sent' && still?.state === 'scheduled') {
     await raiseLeadBell({ customer, leadId: request.lead_id, requestId: request.id, why: `Call booked for ${formatETTime(booked)}; our confirmation text did not send.` });
   }
   return { action: 'booked', scheduledFor: booked, outcome };
