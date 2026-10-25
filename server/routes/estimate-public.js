@@ -12271,7 +12271,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // against a linkage correction. One order everywhere:
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
-        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status');
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status', 'customer_id');
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -12325,6 +12325,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const err = new Error('Estimate is no longer active');
           err.status = 409;
           throw err;
+        }
+        // Florida consumer notice at the commit (GATE_ESTIMATE_CONSUMER_NOTICE): the live gate and the notice are judged
+        // again on the estimate row locked above, so an accept that waited on payment checks or locks while the gate was
+        // turned on (or while a termite line arrived) cannot commit without the signed FDACS-13692.
+        if (featureGates.estimateConsumerNoticeLive()) {
+          const consumerNotice = require('../services/estimate-consumer-notice');
+          const lockedForNotice = { ...estimate, estimate_data: freshLinkRow?.estimate_data, customer_id: freshLinkRow?.customer_id };
+          if (await consumerNotice.consumerNoticeBlocksAccept(lockedForNotice, trx)) {
+            const err = new Error(consumerNotice.REQUIRED_MESSAGE);
+            err.status = 409;
+            err.code = 'consumer_notice_required';
+            throw err;
+          }
         }
       }
       // Plan-restart accept revalidation (C4 codex GH r4 P1): the restart
