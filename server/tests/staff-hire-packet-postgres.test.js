@@ -421,13 +421,22 @@ postgres('Hired button on migrated PostgreSQL', () => {
       await call(`/technicians/${id}/hire`, { body: hireBody() });
       const list = await call('/technicians', { method: 'GET' });
       expect(list.status).toBe(200);
-      expect(list.body.hiredPacketLive).toBe(true);
       const hired = list.body.technicians.find((t) => t.id === id);
-      expect(hired).toMatchObject({ hire_password_unset: true, hire_link_pending: true });
+      expect(hired).toMatchObject({ hire_action: 'resend', hire_password_unset: true, hire_link_pending: true });
       expect(new Date(hired.hire_link_expires_at).getTime()).toBeGreaterThan(Date.now() + 6 * DAY);
       expect(JSON.stringify(list.body)).not.toMatch(/password_reset_token_hash|password_hash/);
       const admin = list.body.technicians.find((t) => t.id === adminId);
-      expect(admin.hire_link_pending).toBe(false);
+      expect(admin).toMatchObject({ hire_action: null, hire_link_pending: false });
+      const waiting = await addTech();
+      const again = await call('/technicians', { method: 'GET' });
+      expect(again.body.technicians.find((t) => t.id === waiting).hire_action).toBe('hire');
+      // A technician caller never gets the hire fields, gate on or not.
+      const asTech = await call('/technicians', { method: 'GET', role: 'technician' });
+      expect(asTech.status).toBe(200);
+      for (const t of asTech.body.technicians) {
+        expect(t).not.toHaveProperty('hire_action');
+        expect(t).not.toHaveProperty('hire_password_unset');
+      }
     });
 
     test('gate off: the list has no new fields at all', async () => {
@@ -435,8 +444,8 @@ postgres('Hired button on migrated PostgreSQL', () => {
       await call(`/technicians/${id}/hire`, { body: hireBody() });
       delete process.env.GATE_HIRED_PACKET;
       const list = await call('/technicians', { method: 'GET' });
-      expect(list.body).not.toHaveProperty('hiredPacketLive');
       for (const t of list.body.technicians) {
+        expect(t).not.toHaveProperty('hire_action');
         expect(t).not.toHaveProperty('hire_link_pending');
         expect(t).not.toHaveProperty('hire_password_unset');
         expect(t).not.toHaveProperty('hire_link_expires_at');

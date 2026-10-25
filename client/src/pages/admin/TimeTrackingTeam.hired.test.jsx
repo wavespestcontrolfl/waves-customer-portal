@@ -46,7 +46,14 @@ const SETTLED = {
 function stubApi({ live = true, technicians = [PROSPECTIVE, WAITING, SETTLED], onPost } = {}) {
   const fetchMock = vi.fn(async (url, options = {}) => {
     if (options.method === 'POST') return onPost ? onPost(url, options) : json({});
-    return json(live ? { technicians, hiredPacketLive: true } : { technicians });
+    // The server adds hire_action (and the link state) only while the gate is on.
+    const rows = live
+      ? technicians.map((t) => ({
+        ...t,
+        hire_action: t.employment_status === 'prospective' ? 'hire' : (t.hire_password_unset ? 'resend' : null),
+      }))
+      : technicians.map(({ hire_password_unset, hire_link_pending, hire_link_expires_at, ...rest }) => rest);
+    return json({ technicians: rows });
   });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
@@ -75,9 +82,11 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
     expect(screen.queryByText('Waiting for first password')).not.toBeInTheDocument();
   });
 
-  it('a non-admin never sees the buttons even if the flag arrives', async () => {
+  it('a non-admin sees no buttons: the server sends hire_action to admins only', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
-    stubApi();
+    // What GET /technicians returns to a technician caller: no hire fields
+    // (staff-hire-packet-postgres asserts the server side).
+    stubApi({ live: false });
     render(<TeamTab showToast={vi.fn()} />);
     expect(await screen.findByText('Placeholder One')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Hired' })).not.toBeInTheDocument();

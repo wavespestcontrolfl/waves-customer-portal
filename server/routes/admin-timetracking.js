@@ -96,7 +96,7 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'can_move_visits',
   // Hired button state (GATE_HIRED_PACKET); present only while the gate is on.
   // Derived flags only: the token, its hash and the password hash never ship.
-  'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at',
+  'hire_action', 'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at',
 ];
 
 function pickTechResponseFields(tech, fields) {
@@ -704,6 +704,9 @@ function hireLinkState(tech, now = new Date()) {
   const pending = passwordUnset && Boolean(tech.password_reset_token_hash)
     && expires !== null && expires > now;
   return {
+    // The one action the Team tab offers on this row: hire a prospective
+    // placeholder, or resend the link to a hire who has no password yet.
+    hire_action: status === 'prospective' ? 'hire' : (passwordUnset ? 'resend' : null),
     hire_password_unset: passwordUnset,
     hire_link_pending: pending,
     hire_link_expires_at: pending ? expires.toISOString() : null,
@@ -731,9 +734,9 @@ async function listTechnicians(req, res, next) {
     // needs review / off / not set) — the editor itself lives at
     // GET /technicians/:id/capabilities.
     const summaries = await summarizeCapabilities(db, techs.map((t) => t.id));
-    // GATE_HIRED_PACKET: admins also get each row's hire-link state and a flag
-    // that turns the Hired / Resend link buttons on. Gate off (or a technician
-    // caller) = the response is exactly what it was.
+    // GATE_HIRED_PACKET: admins also get each row's hire action and link
+    // state (hire_action turns the Hired / Resend link buttons on). Gate off
+    // (or a technician caller) = the response is exactly what it was.
     const hiredPacket = callerIsAdmin && featureGates.hiredPacketLive();
     const now = new Date();
     const enriched = await Promise.all(techs.map(async (t) => {
@@ -745,9 +748,7 @@ async function listTechnicians(req, res, next) {
       };
       return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
     }));
-    res.json(hiredPacket
-      ? { technicians: enriched, hiredPacketLive: true }
-      : { technicians: enriched });
+    res.json({ technicians: enriched });
   } catch (err) { next(err); }
 }
 

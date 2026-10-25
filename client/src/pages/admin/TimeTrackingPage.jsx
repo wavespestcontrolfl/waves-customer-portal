@@ -2802,9 +2802,9 @@ export function TeamTab({ showToast }) {
   const [deactivateError, setDeactivateError] = useState("");
   const [deactivating, setDeactivating] = useState(false);
   const deactivateInFlightRef = useRef(false);
-  // GATE_HIRED_PACKET: the server sends hiredPacketLive: true to admins only
-  // while the gate is on. Off = none of the Hired / Resend link UI renders.
-  const [hiredPacketLive, setHiredPacketLive] = useState(false);
+  // GATE_HIRED_PACKET: the server sets t.hire_action ("hire" | "resend") on a
+  // row only for an admin while the gate is on; no hire_action = no Hired /
+  // Resend link UI.
   const [hireTech, setHireTech] = useState(null);
   const [hireError, setHireError] = useState("");
   const [hiring, setHiring] = useState(false);
@@ -2865,7 +2865,6 @@ export function TeamTab({ showToast }) {
     try {
       const res = await adminFetch("/admin/timetracking/technicians");
       setTechs(res.technicians || []);
-      setHiredPacketLive(res.hiredPacketLive === true);
     } catch {
       /* ignore */
     }
@@ -3813,7 +3812,7 @@ export function TeamTab({ showToast }) {
                       Field dispatchable
                     </div>
                   )}
-                  {isAdmin && hiredPacketLive && t.hire_password_unset && (
+                  {t.hire_action === "resend" && (
                     <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
                       {t.hire_link_pending ? "Waiting for first password" : "Link expired or not sent"}
                     </div>
@@ -3901,7 +3900,7 @@ export function TeamTab({ showToast }) {
                     >
                       {uploadingId === t.id ? "Uploading…" : "Photo"}
                     </button>{" "}
-                    {isAdmin && hiredPacketLive && t.employment_status === "prospective" && (
+                    {t.hire_action === "hire" && (
                       <button
                         onClick={(event) => {
                           event.currentTarget.focus({ preventScroll: true });
@@ -3921,7 +3920,7 @@ export function TeamTab({ showToast }) {
                         Hired
                       </button>
                     )}{" "}
-                    {isAdmin && hiredPacketLive && t.hire_password_unset && (
+                    {t.hire_action === "resend" && (
                       <button
                         onClick={() => handleResendLink(t)}
                         disabled={resendingId !== null}
@@ -3932,8 +3931,7 @@ export function TeamTab({ showToast }) {
                           borderRadius: 6,
                           color: D.teal,
                           fontSize: 11,
-                          cursor: resendingId !== null ? "wait" : "pointer",
-                          opacity: resendingId !== null && resendingId !== t.id ? 0.4 : 1,
+                          cursor: "pointer",
                         }}
                       >
                         {resendingId === t.id ? "Sending…" : "Resend link"}
