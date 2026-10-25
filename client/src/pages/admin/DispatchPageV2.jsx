@@ -1648,6 +1648,8 @@ export default function DispatchPageV2({
           addressFirstTimes={safeData.addressFirstTimes === true}
           // GATE_NEW_APPT_PHONE_MATCH: phone match as it is typed, and one Save adds and books a new caller.
           newCustomerPhoneMatch={safeData.newCustomerPhoneMatch === true}
+          // GATE_NEW_CALLER_BOOKING: Book saves a new caller's visit by address, no customer yet.
+          newCallerBooking={safeData.newCallerBooking === true}
           requireTimeChoice={newApptDefaults?.requireTimeChoice === true}
           onClose={() => {
             setShowNewAppt(false);
