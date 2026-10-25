@@ -97,6 +97,8 @@ describe('createTechnician', () => {
     expect(res.statusCode).toBe(200);
     expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({
       employment_status: 'active', active: true, field_dispatchable: false,
+      // GATE_TECH_MOVE_SWITCH (owner 2026-10-25): a new technician cannot move visits until switched on.
+      can_move_visits: false,
     }));
   });
 
@@ -117,6 +119,7 @@ describe('createTechnician', () => {
     expect((await invoke(createTechnician, { body: { name: 'X', employmentStatus: 'inactive' } })).statusCode).toBe(400);
     expect((await invoke(createTechnician, { body: { name: 'X', employmentStatus: 'fired' } })).statusCode).toBe(400);
     expect((await invoke(createTechnician, { body: { name: 'X', employmentStatus: 'prospective', fieldDispatchable: 'yes' } })).statusCode).toBe(400);
+    expect((await invoke(createTechnician, { body: { name: 'X', employmentStatus: 'prospective', canMoveVisits: 'yes' } })).statusCode).toBe(400);
     expect(db.transaction).not.toHaveBeenCalled();
   });
 });
@@ -224,9 +227,22 @@ describe('updateTechnician', () => {
     expect(res.body.futureAssignedVisits).toEqual([]);
   });
 
-  test('a bad employmentStatus or fieldDispatchable is rejected before any read', async () => {
+  test('the "Can move visits" switch writes its column only and never rotates credentials', async () => {
+    const target = makeChain({ first: { ...ADAM, id: 'tech-9', role: 'technician', can_move_visits: false } });
+    const write = makeChain();
+    const reread = makeChain({ first: { ...ADAM, id: 'tech-9', can_move_visits: true } });
+    installTransaction([target, write, reread]);
+    const res = await invoke(updateTechnician, { params: { id: 'tech-9' }, body: { canMoveVisits: true }, technicianId: 'adam' });
+    expect(res.statusCode).toBe(200);
+    expect(write.update.mock.calls[0][0]).toMatchObject({ can_move_visits: true });
+    expect(write.update.mock.calls[0][0]).not.toHaveProperty('auth_token_version');
+    expect(res.body.technician).toMatchObject({ can_move_visits: true });
+  });
+
+  test('a bad employmentStatus, fieldDispatchable or canMoveVisits is rejected before any read', async () => {
     expect((await invoke(updateTechnician, { params: { id: 'x' }, body: { employmentStatus: 'quit' } })).statusCode).toBe(400);
     expect((await invoke(updateTechnician, { params: { id: 'x' }, body: { fieldDispatchable: 1 } })).statusCode).toBe(400);
+    expect((await invoke(updateTechnician, { params: { id: 'x' }, body: { canMoveVisits: 'on' } })).statusCode).toBe(400);
     expect(db.transaction).not.toHaveBeenCalled();
   });
 });
