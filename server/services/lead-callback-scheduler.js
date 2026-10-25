@@ -69,21 +69,46 @@ async function sendReminders(now) {
     .orderBy('scheduled_for').limit(BATCH);
   let sent = 0;
   for (const row of rows) {
-    if (!(await claim(row, 'reminded_at', 'scheduled', now))) continue;
+    // The lead is read before the claim: a failed read leaves the row as it was.
     const customer = await loadCustomer(row.customer_id);
     if (!customer) continue;
+    if (!(await claim(row, 'reminded_at', 'scheduled', now))) continue;
     const time = formatETTime(new Date(row.scheduled_for));
-    await raiseLeadBell({
+    const rung = await raiseLeadBell({
       customer, leadId: row.lead_id, requestId: row.id, key: 'lead-callback-reminder',
       actions: [(who) => `call ${who} at ${time}`, (who) => `call ${who}`],
       why: `Booked call in 15 minutes; your cell rings at ${time} with press 1.`,
     });
+    if (!rung) {
+      // The owner bell never landed: the next tick tries both again.
+      await db('lead_callback_requests').where({ id: row.id, state: 'scheduled' }).update({ reminded_at: null, updated_at: now });
+      continue;
+    }
     if (etParts(now).hour >= 8) {
       await sendFollowup({ customer, phone: row.phone, body: reminderBody(customer), kind: 'call_reminder', requestId: row.id, requireState: 'scheduled' });
     }
     sent += 1;
   }
   return sent;
+}
+
+// A ring row that never got a CallSid within 5 minutes never rang: the
+// process stopped between the claim and the Twilio request (either ring
+// path). It closes as failed with its "Missed call request" bell.
+async function settleStrandedRings(now) {
+  const { LEAD_CALL_REPLY_RING_SOURCE, settleUnstartedRing } = require('./lead-call-reply-ring');
+  const rows = await db('call_log')
+    .where({ source: LEAD_CALL_REPLY_RING_SOURCE, direction: 'outbound', status: 'initiated' })
+    .whereNull('twilio_call_sid')
+    .where('created_at', '<', new Date(now.getTime() - STALE_RING_CLAIM_MS))
+    .where('created_at', '>', new Date(now.getTime() - 24 * 60 * 60 * 1000))
+    .orderBy('created_at').limit(BATCH)
+    .select('id');
+  let settled = 0;
+  for (const row of rows) {
+    if (await settleUnstartedRing(row.id)) settled += 1;
+  }
+  return settled;
 }
 
 // ── At the booked time ───────────────────────────────────────────────────
@@ -225,7 +250,7 @@ async function noAnswerBells(now) {
 async function runLeadCallbackTick({ now = new Date() } = {}) {
   if (!isEnabled('leadCallTextFollowup')) return { skipped: 'gate_off' };
   const out = {};
-  for (const [name, step] of [['reminded', sendReminders], ['rang', ringDue], ['noAnswer', noAnswerBells]]) {
+  for (const [name, step] of [['reminded', sendReminders], ['rang', ringDue], ['stranded', settleStrandedRings], ['noAnswer', noAnswerBells]]) {
     try {
       out[name] = await step(now);
     } catch (err) {

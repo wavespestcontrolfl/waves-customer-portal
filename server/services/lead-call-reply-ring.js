@@ -320,6 +320,7 @@ async function settleUnstartedRing(callLogId) {
 module.exports = {
   ringForCallReply,
   placeRing,
+  settleUnstartedRing,
   leadTextBlocker,
   noteRingEnded,
   inRingHours,

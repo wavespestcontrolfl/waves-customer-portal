@@ -19,9 +19,11 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../utils/customer-comms-lock', () => ({ withSmsConsentLock: (conn, _keys, work) => conn.transaction(work) }));
 jest.mock('../services/admin-alert-compose', () => ({ ...jest.requireActual('../services/admin-alert-compose'), raiseAdminAlert: jest.fn(async () => ({ id: 'n1' })) }));
 const mockPlaceRing = jest.fn();
+const mockSettle = jest.fn(async () => true);
 jest.mock('../services/lead-call-reply-ring', () => ({
   ...jest.requireActual('../services/lead-call-reply-ring'),
   placeRing: (...args) => mockPlaceRing(...args),
+  settleUnstartedRing: (...args) => mockSettle(...args),
 }));
 
 const { isEnabled } = require('../config/feature-gates');
@@ -203,6 +205,14 @@ jest.setTimeout(30000);
     await database('call_log').insert({ id: randomUUID(), source: 'lead-call-reply-ring', direction: 'outbound', status: 'in-progress', to_phone: '+19415550199', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 20 * 60000) });
     await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 30000) });
     expect(mockPlaceRing).not.toHaveBeenCalled();
+  });
+
+  test('a ring row stranded with no CallSid for 5 minutes is settled as a miss', async () => {
+    const stranded = randomUUID();
+    await database('call_log').insert({ id: stranded, source: 'lead-call-reply-ring', direction: 'outbound', status: 'initiated', to_phone: '+19415550100', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await database('call_log').insert({ id: randomUUID(), source: 'lead-call-reply-ring', direction: 'outbound', status: 'initiated', to_phone: '+19415550101', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 60000) });
+    await runLeadCallbackTick({ now: SLOT });
+    expect(mockSettle.mock.calls.map(([id]) => id)).toEqual([stranded]);
   });
 
   test('gate off: nothing is read', async () => {
