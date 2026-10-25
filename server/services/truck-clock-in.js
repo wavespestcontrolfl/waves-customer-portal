@@ -37,7 +37,8 @@ const { truckClockInMode } = require('../config/feature-gates');
 const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
 const { staffWorkDate } = require('../utils/staff-time-work-date');
 const { parseETDateTime } = require('../utils/datetime-et');
-const { normalizeEventType } = require('./bouncie-payload');
+const { redactBouncieWebhookPayload } = require('./bouncie-webhook-security');
+const { normalizeEventType, pointFromPayload, stableJson, tripIdentity } = require('./bouncie-payload');
 
 const OFFICE_RADIUS_METERS = 200;
 // A trip-start older than this is a replayed or delayed webhook: a shift started
@@ -107,24 +108,66 @@ async function decideClockIn(technicianId, conn = db) {
     : { wouldClockIn: false, skipReason: 'agreement_not_signed' };
 }
 
+// Two receivers (/api/bouncie/webhook and /api/webhooks/bouncie) each log a copy of
+// the same Bouncie event under their own dedupe namespace, so an "earlier" trip-start
+// row can be the very same trip as the current one. Trips are told apart by identity:
+//   1. both carry a trip identity (transactionId / tripId): same trip iff equal;
+//   2. else byte-identical payloads: the same delivery, so the same trip;
+//   3. else both carry a trip-start time: same trip iff within 2 minutes;
+//   4. else unknown, which counts as a DIFFERENT trip. That is the safe side: the
+//      office trigger is suppressed (a later arrival still fires) instead of
+//      starting paid time from a trip that may not be the day's first.
+const SAME_TRIP_TOLERANCE_MS = 2 * 60 * 1000;
+
+// Stored rows are redacted by the receivers (stringifyBounciePayload); redact the
+// live payload the same way so a byte comparison sees the same bytes.
+function asPayloadObject(value) {
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value); } catch { return null; }
+  }
+  return parsed && typeof parsed === 'object' ? redactBouncieWebhookPayload(parsed) : null;
+}
+
+function tripStartMs(payload) {
+  const at = pointFromPayload(payload, 'trip-start')?.reported_at;
+  const ms = at ? new Date(at).getTime() : NaN;
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function isSameTrip(current, other) {
+  if (!current || !other) return false;
+  const currentId = tripIdentity(current);
+  const otherId = tripIdentity(other);
+  if (currentId && otherId) return currentId === otherId;
+  if (stableJson(current) === stableJson(other)) return true;
+  const currentMs = tripStartMs(current);
+  const otherMs = tripStartMs(other);
+  return currentMs != null && otherMs != null && Math.abs(currentMs - otherMs) <= SAME_TRIP_TOLERANCE_MS;
+}
+
 /**
  * Is the trip-start being handled the truck's first of the Eastern work day?
- * The durable log decides: any earlier row (lower id) for the same vehicle since
- * the start of the ET day whose stored event type normalizes to 'trip-start' (the
- * receiver's own normalizer, so a raw "tripStart" row counts too) means no.
- * The current event must have a log id; without one the order is unknowable and
- * the answer is null (fire nothing).
+ * The durable log decides: an earlier row (lower id) for the same vehicle since the
+ * start of the ET day whose stored event type normalizes to 'trip-start' (the
+ * receiver's own normalizer, so a raw "tripStart" row counts too) AND that is a
+ * different trip (isSameTrip) means no. The current event must have a log id and
+ * its payload; without them the order is unknowable and the answer is null.
  */
-async function isFirstTripStartOfDay({ imei, logId, workDate, conn = db }) {
-  if (!imei || logId == null) return null;
-  const dayStart = parseETDateTime(`${workDate}T00:00`);
-  const types = await conn('bouncie_webhook_log')
+async function isFirstTripStartOfDay({ imei, logId, workDate, payload, conn = db }) {
+  const current = asPayloadObject(payload);
+  if (!imei || logId == null || !current) return null;
+  const earlier = () => conn('bouncie_webhook_log')
     .where('vehicle_imei', imei)
     .where('id', '<', logId)
-    .whereRaw('received_at >= ?::timestamptz', [dayStart.toISOString()])
-    .distinct('event_type')
-    .select('event_type');
-  return !(types || []).some((row) => normalizeEventType(row.event_type) === 'trip-start');
+    .whereRaw('received_at >= ?::timestamptz', [parseETDateTime(`${workDate}T00:00`).toISOString()]);
+  const types = await earlier().distinct('event_type').select('event_type');
+  const tripStartTypes = (types || [])
+    .map((row) => row.event_type)
+    .filter((type) => normalizeEventType(type) === 'trip-start');
+  if (!tripStartTypes.length) return true;
+  const rows = await earlier().whereIn('event_type', tripStartTypes).select('id', 'payload');
+  return !(rows || []).some((row) => !isSameTrip(current, asPayloadObject(row.payload)));
 }
 
 function remember(key) {
@@ -161,7 +204,7 @@ async function insertClaim(conn, row) {
  * Returns { action, ... } for tests and logs: 'off', 'maintenance', 'no_trigger',
  * 'already_decided' or 'recorded'.
  */
-async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, logId = null, now = new Date() } = {}) {
+async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, logId = null, payload = null, now = new Date() } = {}) {
   const mode = truckClockInMode();
   if (mode !== 'shadow') return { action: 'off' };
   if (!tech?.id) return { action: 'no_trigger' };
@@ -183,7 +226,7 @@ async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, l
   }
 
   if (fired.trigger === 'office_trip_start') {
-    const first = await isFirstTripStartOfDay({ imei: tech.bouncie_imei, logId, workDate });
+    const first = await isFirstTripStartOfDay({ imei: tech.bouncie_imei, logId, workDate, payload });
     if (first !== true) {
       return { action: 'no_trigger', reason: first === null ? 'trip_order_unknown' : 'not_first_trip' };
     }
@@ -214,5 +257,5 @@ function resetMemo() {
 module.exports = {
   maybeClockInFromTruck,
   OFFICE_RADIUS_METERS,
-  _test: { detectTrigger, decideClockIn, isFirstTripStartOfDay, isWithinOfficeRadius, resetMemo, MAX_TRIP_START_AGE_MS },
+  _test: { detectTrigger, decideClockIn, isFirstTripStartOfDay, isSameTrip, isWithinOfficeRadius, resetMemo, MAX_TRIP_START_AGE_MS },
 };

@@ -202,6 +202,13 @@ function stableJson(value) {
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
 }
 
+// The trip a Bouncie event belongs to: the one field the dedupe key already reads
+// (transactionId, with its snake_case and tripId spellings). null when absent.
+function tripIdentity(payload = {}) {
+  const id = firstPresent(payload.transactionId, payload.transaction_id, payload.tripId, payload.trip_id);
+  return id === undefined ? null : String(id);
+}
+
 function webhookDedupeKey(payload = {}, canonicalEventType = eventTypeFromPayload(payload), namespace = 'default') {
   return crypto
     .createHash('sha256')
@@ -227,5 +234,6 @@ module.exports = {
   pointFromPayload,
   pointFromSource,
   stableJson,
+  tripIdentity,
   webhookDedupeKey,
 };

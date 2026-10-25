@@ -72,6 +72,7 @@ describe('Bouncie tracking webhook, truck clock-in hook', () => {
       point: expect.objectContaining({ lat: 27.3, lng: -82.5 }),
       arrival: { ok: true, arrivalMarked: true, serviceId: 'svc-1' },
       logId: 7,
+      payload: PAYLOAD,
     });
     expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
   });

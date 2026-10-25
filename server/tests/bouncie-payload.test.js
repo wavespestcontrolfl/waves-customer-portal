@@ -3,6 +3,7 @@ const {
   extractImei,
   normalizeTripMetricsPayload,
   pointFromPayload,
+  tripIdentity,
   webhookDedupeKey,
 } = require('../services/bouncie-payload');
 
@@ -87,5 +88,15 @@ describe('Bouncie payload normalization', () => {
       .not.toBe(webhookDedupeKey(payload, 'trip-data', 'bouncie-live-tracking'));
     expect(webhookDedupeKey(payload, 'trip-data', 'bouncie-live-tracking'))
       .toBe(webhookDedupeKey(payload, 'trip-data', 'bouncie-live-tracking'));
+  });
+
+  test('reads the trip identity from the same fields the dedupe key uses', () => {
+    expect(tripIdentity({ transactionId: 'txn-1' })).toBe('txn-1');
+    expect(tripIdentity({ transaction_id: 'txn-2' })).toBe('txn-2');
+    expect(tripIdentity({ tripId: 'trip-3' })).toBe('trip-3');
+    expect(tripIdentity({ trip_id: 4 })).toBe('4');
+    expect(tripIdentity({ transactionId: '', tripId: 'trip-5' })).toBe('trip-5');
+    expect(tripIdentity({ eventType: 'tripStart', imei: 'imei-1' })).toBeNull();
+    expect(tripIdentity()).toBeNull();
   });
 });

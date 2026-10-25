@@ -32,7 +32,7 @@ let shadowRows;
 let activeShift;
 let inserts;
 let updates;
-let earlierEventTypes;
+let earlierRows;
 let webhookLogWheres;
 let loseClaim;
 function tableImpl(table) {
@@ -40,11 +40,33 @@ function tableImpl(table) {
     return { where: jest.fn().mockReturnThis(), first: jest.fn().mockImplementation(async () => (activeShift ? { id: 'shift-1' } : undefined)) };
   }
   if (table === 'bouncie_webhook_log') {
+    // Applies the where filters the service asks for to earlierRows, so the vehicle,
+    // earlier-id and ET-day-window arguments are exercised, not just recorded.
+    const filters = [];
+    let distinct = false;
+    let types = null;
     const chain = {
-      where: jest.fn().mockImplementation((...args) => { webhookLogWheres.push(args); return chain; }),
-      whereRaw: jest.fn().mockImplementation((...args) => { webhookLogWheres.push(args); return chain; }),
-      distinct: jest.fn().mockReturnThis(),
-      select: jest.fn().mockImplementation(async () => earlierEventTypes.map((event_type) => ({ event_type }))),
+      where: jest.fn().mockImplementation((...args) => {
+        webhookLogWheres.push(args);
+        const [column, op, value] = args;
+        if (args.length === 2) filters.push((r) => r[column] === op);
+        else if (op === '<') filters.push((r) => r[column] < value);
+        return chain;
+      }),
+      whereRaw: jest.fn().mockImplementation((...args) => {
+        webhookLogWheres.push(args);
+        const since = new Date(args[1][0]).getTime();
+        filters.push((r) => new Date(r.received_at).getTime() >= since);
+        return chain;
+      }),
+      whereIn: jest.fn().mockImplementation((column, values) => { types = values; return chain; }),
+      distinct: jest.fn().mockImplementation(() => { distinct = true; return chain; }),
+      select: jest.fn().mockImplementation(async () => {
+        let rows = earlierRows.filter((r) => filters.every((f) => f(r)));
+        if (types) rows = rows.filter((r) => types.includes(r.event_type));
+        if (distinct) return [...new Set(rows.map((r) => r.event_type))].map((event_type) => ({ event_type }));
+        return rows.map((r) => ({ id: r.id, payload: r.payload }));
+      }),
     };
     return chain;
   }
@@ -79,7 +101,7 @@ function installDb({ shiftActive = false } = {}) {
   shadowRows = [];
   inserts = [];
   updates = [];
-  earlierEventTypes = [];
+  earlierRows = [];
   webhookLogWheres = [];
   loseClaim = false;
   activeShift = shiftActive;
@@ -265,9 +287,8 @@ describe('maybeClockInFromTruck', () => {
 
   test('office trip start records office_trip_start; the later arrival the same day does nothing', async () => {
     process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
-    const first = await run({ eventType: 'trip-start', point: point(nearOffice()), arrival: null });
+    const first = await run({ eventType: 'trip-start', point: point(nearOffice()), arrival: null, payload: { eventType: 'tripStart', imei: 'imei-1', transactionId: 'trip-1' } });
     expect(first).toMatchObject({ action: 'recorded', trigger: 'office_trip_start', wouldClockIn: true });
-    
 
     const later = await run({ now: new Date(NOW.getTime() + 3600e3), point: point({ reported_at: new Date(NOW.getTime() + 3600e3).toISOString() }) });
     expect(later).toMatchObject({ action: 'already_decided' });
@@ -295,13 +316,27 @@ describe('maybeClockInFromTruck', () => {
   });
 
   describe('first trip of the day', () => {
-    const tripStart = (extra = {}) => run({ eventType: 'trip-start', point: point(nearOffice()), arrival: null, logId: 100, ...extra });
+    const CUR = {
+      eventType: 'tripStart', imei: 'imei-1', transactionId: 'trip-current',
+      start: { timestamp: NOW.toISOString(), gps: { lat: HQ.lat + 0.001, lon: HQ.lng } },
+    };
+    // A log row as either receiver stores it (payload already redacted, normalized or raw type).
+    const row = (id, extra = {}) => ({
+      id, event_type: 'trip-start', vehicle_imei: 'imei-1', received_at: '2026-10-25T12:00:00.000Z', payload: CUR, ...extra,
+    });
+    const tripStart = (extra = {}) => run({
+      eventType: 'trip-start', point: point(nearOffice()), arrival: null, logId: 100, payload: CUR, ...extra,
+    });
+    const fires = (result) => expect(result).toMatchObject({ action: 'recorded', trigger: 'office_trip_start' });
+    const refused = (result) => {
+      expect(result).toEqual({ action: 'no_trigger', reason: 'not_first_trip' });
+      expect(shadowRows).toHaveLength(0);
+    };
+    beforeEach(() => { process.env.GATE_TRUCK_CLOCK_IN = 'shadow'; });
 
-    test('allowed when no earlier trip-start exists for the truck that day', async () => {
-      process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
-      earlierEventTypes = ['trip-data', 'connect']; // earlier rows, none a trip start
-      const result = await tripStart();
-      expect(result).toMatchObject({ action: 'recorded', trigger: 'office_trip_start' });
+    test('allowed when no earlier trip-start exists for the truck that day, scoped by truck, id and ET day', async () => {
+      earlierRows = [row(90, { event_type: 'trip-data' }), row(91, { event_type: 'connect' })];
+      fires(await tripStart());
       // Scoped to this truck, to earlier log rows, and to the ET work day (00:00 EDT = 04:00Z).
       expect(webhookLogWheres).toEqual(expect.arrayContaining([
         ['vehicle_imei', 'imei-1'],
@@ -311,41 +346,115 @@ describe('maybeClockInFromTruck', () => {
     });
 
     test('allowed when the log holds no earlier rows at all', async () => {
-      process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
-      earlierEventTypes = [];
-      await expect(tripStart()).resolves.toMatchObject({ action: 'recorded' });
+      fires(await tripStart());
     });
 
     test.each([['trip-start'], ['tripStart'], ['TripStart'], ['trip_start']])(
-      'refused after an earlier trip-start stored as %p (first trip started away from the office)',
+      'refused after an earlier, different trip-start stored as %p (first trip started away from the office)',
       async (stored) => {
-        process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
-        earlierEventTypes = ['trip-data', stored];
-        const result = await tripStart();
-        expect(result).toEqual({ action: 'no_trigger', reason: 'not_first_trip' });
-        expect(shadowRows).toHaveLength(0);
+        earlierRows = [row(90, { event_type: 'trip-data' }), row(91, { event_type: stored, payload: { ...CUR, transactionId: 'trip-morning' } })];
+        refused(await tripStart());
         expect(timeTracking.clockIn).not.toHaveBeenCalled();
       },
     );
 
+    test('the SAME trip-start already logged by the other receiver does not suppress it (either order)', async () => {
+      // Other receiver's copy logged first (lower id), stored under the raw or the normalized name.
+      earlierRows = [row(95, { event_type: 'tripStart' })];
+      fires(await tripStart());
+    });
+
+    test('the same trip-start logged by the other receiver AFTER this one is never an earlier row', async () => {
+      earlierRows = [row(101)];
+      fires(await tripStart());
+    });
+
+    test('the same trip identity spelled transaction_id on one side is still the same trip', async () => {
+      earlierRows = [row(95, { payload: { eventType: 'trip-start', imei: 'imei-1', transaction_id: 'trip-current' } })];
+      // Different spelling of the key: identities are read through tripIdentity, so equal.
+      fires(await tripStart({ payload: { ...CUR, transactionId: undefined, transaction_id: 'trip-current' } }));
+    });
+
+    test('a stored payload arriving as a JSON string is read too', async () => {
+      earlierRows = [row(95, { payload: JSON.stringify(CUR) })];
+      fires(await tripStart());
+      truck._test.resetMemo();
+      shadowRows.length = 0;
+      earlierRows = [row(95, { payload: JSON.stringify({ ...CUR, transactionId: 'trip-morning' }) })];
+      refused(await tripStart());
+    });
+
+    test('a genuinely earlier trip is not hidden by a same-trip copy: any different trip suppresses', async () => {
+      earlierRows = [row(80, { payload: { ...CUR, transactionId: 'trip-morning' } }), row(95)];
+      refused(await tripStart());
+    });
+
+    test('rows from the previous ET day are ignored', async () => {
+      // 11:30 PM EDT on Oct 24 = 03:30Z on Oct 25, before the ET day starts at 04:00Z.
+      earlierRows = [row(80, { received_at: '2026-10-25T03:30:00.000Z', payload: { ...CUR, transactionId: 'trip-last-night' } })];
+      fires(await tripStart());
+      // One minute after the ET day started counts.
+      truck._test.resetMemo();
+      shadowRows.length = 0;
+      earlierRows = [row(80, { received_at: '2026-10-25T04:01:00.000Z', payload: { ...CUR, transactionId: 'trip-after-midnight' } })];
+      refused(await tripStart());
+    });
+
+    test("another truck's trip-start is ignored", async () => {
+      earlierRows = [row(80, { vehicle_imei: 'imei-2', payload: { ...CUR, imei: 'imei-2', transactionId: 'trip-other-truck' } })];
+      fires(await tripStart());
+    });
+
+    describe('a row with no trip identity', () => {
+      const NO_ID = { eventType: 'tripStart', imei: 'imei-1', start: { timestamp: NOW.toISOString(), gps: { lat: 27.43, lon: -82.4 } } };
+      const at = (offsetMs) => ({ ...NO_ID, start: { ...NO_ID.start, timestamp: new Date(NOW.getTime() + offsetMs).toISOString() } });
+
+      test('an identical payload is the same delivery, hence the same trip', async () => {
+        earlierRows = [row(95, { payload: NO_ID })];
+        fires(await tripStart({ payload: NO_ID }));
+      });
+
+      test('a trip-start time within 2 minutes is the same trip', async () => {
+        earlierRows = [row(95, { payload: at(90 * 1000) })];
+        fires(await tripStart({ payload: { ...NO_ID, extra: 'x' } }));
+      });
+
+      test('a trip-start time more than 2 minutes apart is a different trip', async () => {
+        earlierRows = [row(95, { payload: at(-3 * 60 * 1000) })];
+        refused(await tripStart({ payload: { ...NO_ID, extra: 'x' } }));
+      });
+
+      test('no identity and no time cannot be proven the same, so it counts as different (safe side)', async () => {
+        earlierRows = [row(95, { payload: { eventType: 'tripStart', imei: 'imei-1' } })];
+        refused(await tripStart({ payload: { ...NO_ID, extra: 'x' } }));
+      });
+
+      test('an identity on only one side falls back to payload and time, not to a mismatch', async () => {
+        earlierRows = [row(95, { payload: NO_ID })];
+        fires(await tripStart({ payload: { ...NO_ID, transactionId: 'trip-current' } }));
+      });
+    });
+
     test('refused when the event has no log id, since the order is unknowable', async () => {
-      process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
       const result = await tripStart({ logId: null });
       expect(result).toEqual({ action: 'no_trigger', reason: 'trip_order_unknown' });
       expect(shadowRows).toHaveLength(0);
     });
 
+    test('refused when the hook was given no payload', async () => {
+      const result = await tripStart({ payload: null });
+      expect(result).toEqual({ action: 'no_trigger', reason: 'trip_order_unknown' });
+    });
+
     test('a refused office trip does not stop a later first arrival from firing', async () => {
-      process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
-      earlierEventTypes = ['trip-start'];
+      earlierRows = [row(90, { payload: { ...CUR, transactionId: 'trip-morning' } })];
       await tripStart();
       const arrived = await run({ logId: 101 });
       expect(arrived).toMatchObject({ action: 'recorded', trigger: 'first_arrival' });
     });
 
     test('an arrival never consults the log', async () => {
-      process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
-      earlierEventTypes = ['trip-start'];
+      earlierRows = [row(90, { payload: { ...CUR, transactionId: 'trip-morning' } })];
       await run({ logId: 101 });
       expect(webhookLogWheres).toHaveLength(0);
     });
