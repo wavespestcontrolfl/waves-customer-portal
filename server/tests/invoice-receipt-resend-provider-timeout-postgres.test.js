@@ -56,7 +56,10 @@ postgres('resend receipt: a provider timeout through the real messaging path', (
     await db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).del();
     await db('sms_log').where({ customer_id: customerId }).del().catch(() => {});
     await db('invoices').where({ id: invoiceId }).del();
-    await db('customers').where({ id: customerId }).del().catch(() => {});
+    // A sent receipt writes an activity_log row that blocks the customer delete; a
+    // customer left behind matches other suites' searches (customer-search-fuzzy).
+    await db('activity_log').where({ customer_id: customerId }).del();
+    await db('customers').where({ id: customerId }).del();
   });
 
   const job = () => db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first();

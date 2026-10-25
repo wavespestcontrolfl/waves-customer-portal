@@ -35,7 +35,9 @@ jest.setTimeout(120000);
   let server;
   let base;
   let resetNameIndexCache;
-  const tag = `fz${randomUUID().slice(0, 8)}`;
+  // Letters only: company_name is searched, and a digit in the tag can complete a
+  // numeric search word below ("12" in '12 Orlan Stompf St' matched fz0212ae99).
+  const tag = `fz${randomUUID().slice(0, 8).replace(/\d/g, (d) => 'ghijklmnop'[d])}`;
   const ids = {};
   let techId;
   let otherTechId;
@@ -192,9 +194,12 @@ jest.setTimeout(120000);
     });
 
     test('a phone, email or address search never runs the sound-alike pass', async () => {
+      // A customer another suite left in the shared database can match these words
+      // exactly (the all-words fallback), so only this suite's rows and sound-alike rows count.
+      const mine = new Set(Object.values(ids));
       for (const search of ['941-555-9999', 'orlan@example.test', '12 Orlan Stompf St']) {
         const { body } = await get(`/admin/customers?search=${encodeURIComponent(search)}&suggest=1`);
-        expect(body.customers).toEqual([]);
+        expect(body.customers.filter((row) => row.approximate || mine.has(row.id))).toEqual([]);
         expect(body.approximateCount).toBe(0);
       }
     });
