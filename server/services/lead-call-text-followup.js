@@ -315,8 +315,11 @@ async function answerTimeAsk({ customer, request, body, smsLogId, now }) {
   const claimed = await db('lead_callback_requests').where({ id: request.id, state: 'asked' }).whereNull('answer_text')
     .update({ answer_sms_log_id: smsLogId, answer_text: String(body).slice(0, 500), updated_at: now });
   if (!claimed) return { action: 'none', reason: 'already_answered' };
+  // Only a request still open goes to the owner: one a TEXT or the ring
+  // cancelled meanwhile needs no call.
   const toOwner = async (why) => {
-    await db('lead_callback_requests').where({ id: request.id, state: 'asked' }).update({ state: 'needs_owner', updated_at: now });
+    const moved = await db('lead_callback_requests').where({ id: request.id, state: 'asked' }).update({ state: 'needs_owner', updated_at: now });
+    if (!moved) return { action: 'none', reason: 'cancelled' };
     await raiseLeadBell({ customer, leadId: request.lead_id, requestId: request.id, why });
     return { action: 'owner_bell' };
   };
