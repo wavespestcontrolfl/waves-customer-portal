@@ -270,9 +270,9 @@ function yearRows(year, yearTotals, quarters) {
   return rows;
 }
 
-// g. Florida new hire report.
+// g. Florida new hire report. A prospective person is not hired yet.
 function hireRow(hire) {
-  if (hire.employment_type !== 'w2') return null;
+  if (hire.employment_type !== 'w2' || hire.employment_status === 'prospective') return null;
   const hired = String(hire.hire_date || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(hired) || hired < NEW_HIRE_FLOOR) return null;
   return {
@@ -287,7 +287,7 @@ function hireRow(hire) {
 
 /**
  * checks: finalized payroll_checks rows (pay_date 'YYYY-MM-DD' + cents columns).
- * hires: W-2 technicians ({ id, name, hire_date, employment_type }).
+ * hires: W-2 technicians ({ id, name, hire_date, employment_type, employment_status }).
  * today: 'YYYY-MM-DD' in ET. Returns the obligations sorted by due date.
  */
 function payrollObligations({ checks = [], hires = [], today }) {
@@ -326,9 +326,10 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
     );
     const hires = await trx('technicians')
       .where({ employment_type: 'w2' })
+      .whereNot('employment_status', 'prospective')
       .whereNotNull('hire_date')
       .where('hire_date', '>=', NEW_HIRE_FLOOR)
-      .select('id', 'name', 'employment_type', trx.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"));
+      .select('id', 'name', 'employment_type', 'employment_status', trx.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"));
     const obligations = payrollObligations({ checks, hires, today });
     const existing = await trx('tax_filing_calendar')
       .where('source_key', 'like', `${SOURCE_PREFIX}%`)

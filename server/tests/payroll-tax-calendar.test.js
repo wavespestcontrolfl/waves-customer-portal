@@ -140,7 +140,7 @@ describe('payrollObligations', () => {
     expect(map['payroll:940:2027'].amount_due).toBe('500.00');
   });
 
-  test('new hire: due 20 days after hire; earlier hires and non-W-2 get none', () => {
+  test('new hire: due 20 days after hire; earlier hires, non-W-2 and prospective people get none', () => {
     const rows = payrollObligations({
       checks: [],
       hires: [
@@ -149,6 +149,7 @@ describe('payrollObligations', () => {
         { id: 't-old', name: 'Old Employee', employment_type: 'w2', hire_date: '2026-10-24' },
         { id: 't-contractor', name: 'Contract Person', employment_type: '1099', hire_date: '2026-11-03' },
         { id: 't-none', name: 'No Date', employment_type: 'w2', hire_date: null },
+        { id: 't-prospect', name: 'Sample Candidate', employment_type: 'w2', employment_status: 'prospective', hire_date: '2026-11-09' },
       ],
       today: '2026-11-05',
     });
