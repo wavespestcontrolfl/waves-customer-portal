@@ -70,6 +70,7 @@ const { normalizeAdvisoryForTreatmentScope, buildCompletionAdvisory } = require(
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
 const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct } = require('../services/service-report/service-line-configs');
 const { reentryAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
+const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
 
 const source = (fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8'));
 const pdfQueueSource = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
@@ -86,6 +87,16 @@ describe('service-line advisory defaults', () => {
       exterior_reentry_min: 30,
       interior_reentry_min: 120,
     });
+  });
+
+  // Owner 2026-10-25 ("safety A"): the Ready to Re-enter card's precaution names people and pets in the spray
+  // labels' own words, the line the product cards print. Roach visits take the pest line through the override.
+  test('pest, roach and mosquito precautions are the label line for people and pets', () => {
+    const line = 'Keep people and pets off treated areas until sprays have dried.';
+    expect(SERVICE_LINE_CONFIGS.pest.advisoryDefaults.pet_advisory).toBe(line);
+    expect(SERVICE_LINE_CONFIGS.mosquito.advisoryDefaults.pet_advisory).toBe(line);
+    expect(getAdvisoryDefaults('Cockroach Control').pet_advisory).toBe(line);
+    expect(customerCopyViolations(line)).toEqual([]);
   });
 
   // Owner rule 2026-08-11: cockroach-family visits default to a 2-hour
