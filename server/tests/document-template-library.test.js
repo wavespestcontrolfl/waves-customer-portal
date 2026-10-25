@@ -47,6 +47,18 @@ describe('document template library', () => {
     });
   });
 
+  test('a hand-issued Commercial Pest Service Agreement (version 2) prints the Net 30 paragraph version 1 fixed', () => {
+    const { V1_PAYMENT, V2_PAYMENT } = require('../models/migrations/20261025120000_commercial_agreement_payment_terms');
+    // The Customers issue form sends flat values with no payment paragraph.
+    const handIssued = buildCustomerDocumentContext({ id: 'customer-1', first_name: 'Pat' }, { serviceName: 'Commercial pest control', agreementStartDate: '2026-11-01' });
+    const rendered = renderDocumentText(`Start date: {{agreement.start_date}}\n${V2_PAYMENT}`, handIssued);
+    expect(rendered.unresolvedVariables).toEqual([]);
+    expect(rendered.rendered).toBe(`Start date: 2026-11-01\n${V1_PAYMENT}`);
+    // The proposal issuer's own paragraph wins, and an explicit empty one stays unresolved (never silently Net 30).
+    expect(buildCustomerDocumentContext({}, { agreement: { payment_terms: 'Issuer paragraph.' } }).agreement.payment_terms).toBe('Issuer paragraph.');
+    expect(renderDocumentText(V2_PAYMENT, buildCustomerDocumentContext({}, { agreement: { payment_terms: '' } })).unresolvedVariables).toEqual(['agreement.payment_terms']);
+  });
+
   test('builds customer document context with business and customer defaults', () => {
     const context = buildCustomerDocumentContext({
       id: 'customer-1',

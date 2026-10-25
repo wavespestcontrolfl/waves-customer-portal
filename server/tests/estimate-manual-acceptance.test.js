@@ -1468,6 +1468,34 @@ describe('commercial proposal win paths (#1917)', () => {
     expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled(); // not invoice-mode
   });
 
+  // Auto Pay (GATE_COMMERCIAL_AUTOPAY, owner 2026-10-24): the customer's Auto Pay enrollment collects it after each
+  // service, so it wins without invoice mode, and never beside it.
+  const withPaymentTerms = (paymentTerms) => ({ proposal: { ...proposalData.proposal, commercialTerms: { paymentTerms } } });
+
+  test('an Auto Pay proposal wins without invoice mode and builds no invoice', async () => {
+    const estimate = baseProposalEstimate({ id: 'prop-autopay', customer_id: 'cust-1', bill_by_invoice: false, estimate_data: withPaymentTerms('autopay') });
+    const { database } = makeDb(estimate);
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() }, estimateConverter: { convertEstimate: jest.fn() },
+    });
+    expect(proposalWin.promoteLinkedCustomerForProposalWin).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+    expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['Auto Pay beside invoice mode', { bill_by_invoice: true, estimate_data: withPaymentTerms('autopay') }, /on Auto Pay, which cannot be combined with Bill by invoice/],
+    ['a Net term without invoice mode', { bill_by_invoice: false, estimate_data: withPaymentTerms('net30') }, /only invoice-mode billing enforces/],
+  ])('%s refuses the win and bills nothing', async (_label, extra, message) => {
+    const estimate = baseProposalEstimate({ id: 'prop-pair', customer_id: 'cust-1', ...extra });
+    const { database } = makeDb(estimate);
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() }, estimateConverter: { convertEstimate: jest.fn() },
+    })).rejects.toThrow(message);
+    expect(proposalWin.createProposalAcceptanceInvoice).not.toHaveBeenCalled();
+  });
+
   test('invoice-mode win: builds the proposal invoice and surfaces it', async () => {
     const estimate = baseProposalEstimate({ id: 'prop-inv', customer_id: 'cust-1', bill_by_invoice: true });
     const { database } = makeDb(estimate);

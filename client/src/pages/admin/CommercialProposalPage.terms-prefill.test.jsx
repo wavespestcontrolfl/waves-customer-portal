@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { AGREEMENT_TERMS } from '@commercial-agreement-terms';
+import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS } from '@commercial-agreement-terms';
 import CommercialProposalPage from './CommercialProposalPage';
 
 // Owner 2026-10-24: a proposal that never had structured terms opens with the agreement's own texts
@@ -14,8 +14,9 @@ const RENEWAL = 'Renews automatically for 12-month terms unless either party giv
 const PRICE_ADJUSTMENT = "Pricing may be adjusted at renewal or with at least 30 days' written notice.";
 const CANCELLATION = "Either party may cancel with 30 days' written notice. Charges for services already performed remain due.";
 
-const makeFixture = ({ commercialTerms, billByInvoice = false, status = 'draft' } = {}) => ({
+const makeFixture = ({ commercialTerms, billByInvoice = false, status = 'draft', autopay = false } = {}) => ({
   bidToolsEnabled: true,
+  commercialAutopayEnabled: autopay,
   suggestedTaxRate: 0,
   estimate: { id: 'synthetic-proposal', status, editVersion: 'loaded-version', customerName: 'Synthetic Office', billByInvoice },
   proposal: {
@@ -52,7 +53,8 @@ it('the prefilled texts are the agreement constants the server checks, word for 
   expect(AGREEMENT_TERMS.priceAdjustment).toBe(PRICE_ADJUSTMENT);
   expect(AGREEMENT_TERMS.cancellation).toBe(CANCELLATION);
   expect(AGREEMENT_TERMS.initialTermMonths).toBe(12);
-  expect(AGREEMENT_TERMS.paymentTerms).toBe('net30');
+  expect(AUTOPAY_PAYMENT_TERMS).toBe('autopay');
+  expect(INVOICE_PAYMENT_TERMS).toBe('net30');
 });
 
 it('fills empty terms on load, marks the proposal unsaved, and leaves payment terms "Not set" without Bill by invoice', async () => {
@@ -72,6 +74,33 @@ it('sets Net 30 only when Bill by invoice is on', async () => {
   const f = await mount({ billByInvoice: true });
   await waitFor(() => expect(f.payment).toHaveValue('net30'));
   expect(f.renewal).toHaveValue(RENEWAL);
+});
+
+// Owner 2026-10-24 "autopay default" (GATE_COMMERCIAL_AUTOPAY): Auto Pay is the payment term of a proposal that does not
+// bill by invoice; Net terms still need Bill by invoice.
+it('with Auto Pay on, an empty proposal without Bill by invoice opens on Auto Pay; Net terms stay unavailable', async () => {
+  const f = await mount({ autopay: true });
+  await waitFor(() => expect(f.payment).toHaveValue('autopay'));
+  expect(f.payment).not.toBeDisabled();
+  expect(screen.getByRole('option', { name: 'Auto Pay' })).toBeInTheDocument();
+  expect(screen.getByRole('option', { name: 'Net-30' })).toBeDisabled();
+  expect(screen.getByText(/Auto Pay charges the saved card or bank account after each service\. Net terms require Bill by invoice\./)).toBeInTheDocument();
+});
+
+it('with Auto Pay on, a Bill-by-invoice proposal still opens on Net 30 and offers no Auto Pay', async () => {
+  const f = await mount({ autopay: true, billByInvoice: true });
+  await waitFor(() => expect(f.payment).toHaveValue('net30'));
+  expect(screen.queryByRole('option', { name: 'Auto Pay' })).not.toBeInTheDocument();
+  expect(screen.getByRole('option', { name: 'Net-30' })).not.toBeDisabled();
+});
+
+it('with Auto Pay off, no Auto Pay choice is offered, but a proposal already on Auto Pay keeps it', async () => {
+  await mount({});
+  expect(screen.queryByRole('option', { name: 'Auto Pay' })).not.toBeInTheDocument();
+  cleanup();
+  const f = await mount({ commercialTerms: { paymentTerms: 'autopay' } });
+  await waitFor(() => expect(f.payment).toHaveValue('autopay'));
+  expect(screen.getByRole('option', { name: 'Auto Pay' })).toBeInTheDocument();
 });
 
 it('stays editable: the operator can change a prefilled term', async () => {

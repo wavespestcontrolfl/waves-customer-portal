@@ -82,6 +82,9 @@ function serviceName({ number, proposal, totals }) {
 
 // The agreement's merge values. customer.name and customer.address are the
 // business and property the proposal was written for, not the account row.
+// agreement.payment_terms is the payment paragraph for the proposal's payment
+// term (template version 2); empty for a term the agreement cannot carry, so the
+// render reports it unresolved and nothing is issued.
 function buildAgreementValues(estimate, proposal, totals) {
   const number = estimateNumber(estimate);
   return {
@@ -90,7 +93,10 @@ function buildAgreementValues(estimate, proposal, totals) {
       address: proposal.propertyAddress || estimate.address || '',
     },
     service: { name: serviceName({ number, proposal, totals }) },
-    agreement: { start_date: START_DATE_TEXT },
+    agreement: {
+      start_date: START_DATE_TEXT,
+      payment_terms: AGREEMENT_PAYMENT_TEXT[proposal.commercialTerms?.paymentTerms] || '',
+    },
     estimate: {
       id: estimate.id,
       number,
@@ -122,13 +128,14 @@ function signableProposal(estimate) {
   return { proposal, totals };
 }
 
-// The Commercial Pest Service Agreement template FIXES its terms: Net 30 billing, a 12-month initial term that renews
-// automatically for 12-month terms unless either party gives written notice at least 30 days before the term ends,
-// cancellation on 30 days' written notice, and price adjustment at renewal or with at least 30 days' notice. A proposal
-// whose structured commercialTerms say anything else would sit beside a contradictory signed agreement, so online
-// signing is offered only when EVERY structured term agrees with the agreement. This is the one chokepoint
-// (agreementTermsConflict, used through signEligibility by /data, the route, the issuing re-check and the sign-time
-// re-check); a new term never gets its own ad-hoc check.
+// The Commercial Pest Service Agreement template FIXES its terms: a 12-month initial term that renews automatically for
+// 12-month terms unless either party gives written notice at least 30 days before the term ends, cancellation on 30 days'
+// written notice, and price adjustment at renewal or with at least 30 days' notice. Its payment paragraph is one of two
+// (AGREEMENT_PAYMENT_TEXT): Auto Pay, the commercial default (owner 2026-10-24, GATE_COMMERCIAL_AUTOPAY), on a proposal
+// that does not bill by invoice, or Net 30. A proposal whose structured commercialTerms say anything else would sit
+// beside a contradictory signed agreement, so online signing is offered only when EVERY structured term agrees with the
+// agreement. This is the one chokepoint (agreementTermsConflict, used through signEligibility by /data, the route, the
+// issuing re-check and the sign-time re-check); a new term never gets its own ad-hoc check.
 //
 // The fields are read from the proposal normalizer's own output (normalizeCommercialTerms keeps only its known keys,
 // null when empty), so a field added to the normalizer later arrives here with no rule and FAILS CLOSED until a rule
@@ -136,16 +143,19 @@ function signableProposal(estimate) {
 // to the agreement, they do not contradict a fixed term.
 //
 // These are the agreement-aligned texts the builder will prefill; a field is also fine blank (the agreement governs).
-const { AGREEMENT_TERMS } = require('../../shared/commercial-agreement-terms.cjs');
+const {
+  AGREEMENT_TERMS, AGREEMENT_PAYMENT_TEXT, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS,
+} = require('../../shared/commercial-agreement-terms.cjs');
+
+const commercialAutopayLive = () => require('../config/feature-gates').commercialAutopayLive();
 
 // Case, whitespace and apostrophe style do not matter ("30 days\u2019" typed on a phone equals "30 days'").
 const normalizeTermText = (value) => String(value).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
 const matchesDefaultText = (key) => (value) => normalizeTermText(value) === normalizeTermText(AGREEMENT_TERMS[key]);
 
 // field -> { detail: what the builder line asks for, allowed(value): the value the agreement can sit beside }.
-// A blank value never reaches allowed(): blank is always fine except for paymentTerms (required, below).
+// A blank value never reaches allowed(): blank is always fine (the payment term is checked apart, below).
 const TERM_RULES = Object.freeze({
-  paymentTerms: { detail: 'payment terms Net 30', allowed: (v) => v === AGREEMENT_TERMS.paymentTerms },
   initialTermMonths: { detail: 'initial term 12 months (or blank)', allowed: (v) => Number(v) === AGREEMENT_TERMS.initialTermMonths },
   renewal: { detail: 'renewal blank or automatic 12-month terms with 30 days\' notice', allowed: matchesDefaultText('renewal') },
   cancellation: { detail: 'cancellation blank or 30 days\' written notice', allowed: matchesDefaultText('cancellation') },
@@ -153,13 +163,21 @@ const TERM_RULES = Object.freeze({
   accessRequirements: { detail: 'site access', allowed: () => true },
 });
 
-// null = the proposal's structured terms agree with the agreement; else { field, detail } for the first conflict.
-function agreementTermsConflict(proposal) {
-  const terms = proposal?.commercialTerms || {};
-  // Net 30 is REQUIRED (the agreement bills Net 30; a proposal silent on it has not agreed).
-  if (terms.paymentTerms !== AGREEMENT_TERMS.paymentTerms) return { field: 'paymentTerms', detail: TERM_RULES.paymentTerms.detail };
-  for (const [field, value] of Object.entries(terms)) {
-    if (value === null || value === undefined || value === '') continue;
+// The payment term is REQUIRED (a proposal silent on it has not agreed to a payment paragraph): Net 30, or Auto Pay while
+// GATE_COMMERCIAL_AUTOPAY is on and the proposal does not bill by invoice (an invoice-mode proposal bills its first
+// invoice on its terms; Auto Pay charges each completed service). The save, the Bill-by-invoice switch and the win
+// enforce the same pairing; this re-check keeps a stale pairing from reaching a signature.
+function paymentTermsConflict(paymentTerms, { billByInvoice = false } = {}) {
+  if (paymentTerms === INVOICE_PAYMENT_TERMS) return null;
+  const autopayOn = commercialAutopayLive();
+  if (paymentTerms === AUTOPAY_PAYMENT_TERMS && autopayOn && billByInvoice !== true) return null;
+  return { field: 'paymentTerms', detail: autopayOn ? 'payment terms Auto Pay, or Net 30 with Bill by invoice' : 'payment terms Net 30' };
+}
+
+// null = every structured term except payment agrees with the agreement; else { field, detail } for the first conflict.
+function fixedTermsConflict(terms = {}) {
+  for (const [field, value] of Object.entries(terms || {})) {
+    if (field === 'paymentTerms' || value === null || value === undefined || value === '') continue;
     const rule = TERM_RULES[field];
     if (!rule) return { field, detail: 'the terms fields (one is not covered by the agreement)' };
     if (!rule.allowed(value)) return { field, detail: rule.detail };
@@ -167,12 +185,19 @@ function agreementTermsConflict(proposal) {
   return null;
 }
 
+// null = the proposal's structured terms agree with the agreement; else { field, detail } for the first conflict.
+// `billByInvoice`: the estimate's own bill_by_invoice (signEligibility passes it).
+function agreementTermsConflict(proposal, { billByInvoice = false } = {}) {
+  const terms = proposal?.commercialTerms || {};
+  return paymentTermsConflict(terms.paymentTerms, { billByInvoice }) || fixedTermsConflict(terms);
+}
+
 const termsNote = (conflict) => `Online signing needs the proposal terms to match the agreement: ${conflict.detail}.`;
 
 function signEligibility(estimate) {
   const found = signableProposal(estimate);
   if (!found) return { ok: false, reason: 'not_signable' };
-  const conflict = agreementTermsConflict(found.proposal);
+  const conflict = agreementTermsConflict(found.proposal, { billByInvoice: estimate.bill_by_invoice === true });
   if (conflict) return { ok: false, reason: 'terms_conflict', field: conflict.field, note: termsNote(conflict), ...found };
   return { ok: true, ...found };
 }
@@ -190,9 +215,12 @@ function canonical(value) {
 }
 
 // sha256 over the normalized proposal (lines, programs, corrective work, scope, terms, tax rate), its totals, the
-// merge values the contract renders, the customer and the template version.
+// merge values the contract renders, the customer and the template version. agreement.payment_terms is left out: it is
+// derived from the proposal's payment term (hashed with the proposal), and leaving it out keeps the fingerprint of an
+// agreement issued before the payment paragraph existed, so its signing link stays valid.
 function quoteFingerprint({ proposal, totals, values, customerId, templateVersionId }) {
-  const { estimate: _estimate, ...rendered } = values;
+  const { estimate: _estimate, agreement: { payment_terms: _paymentTerms, ...agreement } = {}, ...others } = values;
+  const rendered = { ...others, agreement };
   return crypto.createHash('sha256')
     .update(JSON.stringify(canonical({ proposal, totals, rendered, customerId: String(customerId), templateVersionId: String(templateVersionId) })))
     .digest('hex');
@@ -340,6 +368,11 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
     // waited on those locks while the kill switch was thrown must not create, re-open or re-link an agreement
     // (live gate re-read at the commit boundary).
     if (!require('../config/feature-gates').commercialProposalSignLive()) return refusal(404, 'not_signable', 'Estimate not found');
+    // The payment term is judged again here for the same reason: GATE_COMMERCIAL_AUTOPAY (and Bill by invoice on the
+    // locked row) may have changed while this request waited. lockedFound is eligible, so it carries a payment term.
+    if (paymentTermsConflict(lockedFound.proposal.commercialTerms.paymentTerms, { billByInvoice: locked.bill_by_invoice === true })) {
+      return refusal(404, 'not_signable', 'Estimate not found');
+    }
     if (existing?.status === 'signed') return refusal(409, 'already_signed', 'This agreement has already been signed.');
     if (existing) {
       const snap = parseJson(existing.document_variables_snapshot);
@@ -371,8 +404,10 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
     const context = buildCustomerDocumentContext(customer, values);
     context.customer = { ...context.customer, name: values.customer.name || context.customer.name, address: values.customer.address || context.customer.address };
     const rendered = renderDocumentTemplate({ template, version, context });
-    if (rendered.unresolvedVariables.length) {
-      logger.warn(`[commercial-agreement] unresolved variables for estimate ${locked.id}: ${rendered.unresolvedVariables.join(', ')}`);
+    // The signed text must also carry the payment paragraph its term promises: version 1 fixes Net 30, so an Auto Pay
+    // agreement cannot print from it (version 2 fills the paragraph from agreement.payment_terms).
+    if (rendered.unresolvedVariables.length || !rendered.body.includes(values.agreement.payment_terms)) {
+      logger.warn(`[commercial-agreement] agreement for estimate ${locked.id} lacks its payment paragraph or has unresolved variables [${rendered.unresolvedVariables.join(', ')}]`);
       return refusal(409, 'template_unavailable', 'Online signing is not available right now. Please call us.');
     }
     const [row] = await trx('customer_contracts')
@@ -446,16 +481,52 @@ async function refuseStaleSignature({ trx, contract, estimateLock, req = {} }) {
   return STALE_PROPOSAL_MESSAGE;
 }
 
+// The alert's payment sentence (with a trailing space), or '' for an agreement issued before the payment paragraph.
+// `snapshotEstimate` is the signed contract's frozen estimate block. Auto Pay reads the customer's live Auto Pay state;
+// an unreadable state says "not confirmed", never "on".
+async function paymentSentence(snapshotEstimate, customerId, database) {
+  const paymentTerms = snapshotEstimate.proposal?.commercialTerms?.paymentTerms;
+  if (paymentTerms === INVOICE_PAYMENT_TERMS) return 'Payment: Net 30 by invoice. ';
+  if (paymentTerms !== AUTOPAY_PAYMENT_TERMS) return '';
+  let on = false;
+  let chargesEachService = false;
+  try {
+    const customer = customerId ? await database('customers').where({ id: customerId }).first() : null;
+    on = await require('./autopay-eligibility').customerOnAutopay(customer, { db: database, failClosed: true });
+    chargesEachService = on && chargesEachCompletedService(customer);
+  } catch (err) {
+    logger.warn(`[commercial-agreement] Auto Pay state unreadable for customer ${customerId}: ${err.code || 'error'}`);
+  }
+  if (on && chargesEachService) return 'Payment: Auto Pay, and a card or bank account is saved. ';
+  if (on) {
+    return 'Payment: Auto Pay, and a card or bank account is saved, but this account\'s billing type does not charge each completed service: check it on the customer page before the first visit. ';
+  }
+  return 'Payment: Auto Pay, but no card or bank account is saved yet. The signing page offered the Auto Pay setup step; if none is saved before the first visit, send an Auto Pay setup link from the customer page. ';
+}
+
+// The Auto Pay setup link's own rule for "each completed service is charged to the saved method" (the per-visit lane
+// while GATE_COMPLETION_AUTOPAY_CHARGE is on, or per application): an Auto Pay agreement is only "on" where it is true.
+function chargesEachCompletedService(customer) {
+  return Boolean(customer) && require('./autopay-setup-link').billingLaneSupported(customer);
+}
+
+// The variables snapshot of a SIGNED agreement this module issued (its estimate marker), else null: every other
+// template, a commercial agreement staff issued by hand, and a contract not yet signed.
+function issuedSignedSnapshot(contract) {
+  if (!contract || contract.document_template_key !== TEMPLATE_KEY || contract.status !== 'signed') return null;
+  const snapshot = parseJson(contract.document_variables_snapshot);
+  return snapshot?.estimate?.source === SNAPSHOT_SOURCE && snapshot.estimate.id ? snapshot : null;
+}
+
 // After a customer signs (contracts-public, after commit): tell the office the
 // agreement is in, and leave an activity row on the estimate. Never throws.
 // Inert for any contract this module did not issue. The estimate is NOT touched.
 async function handleAgreementSigned({ contractId, database = db }) {
   try {
     const contract = await database('customer_contracts').where({ id: contractId }).first();
-    if (!contract || contract.document_template_key !== TEMPLATE_KEY || contract.status !== 'signed') return { skipped: 'not_commercial_agreement' };
-    const snapshot = parseJson(contract.document_variables_snapshot);
-    const est = snapshot?.estimate;
-    if (est?.source !== SNAPSHOT_SOURCE || !est.id) return { skipped: 'no_estimate' };
+    const snapshot = issuedSignedSnapshot(contract);
+    if (!snapshot) return { skipped: 'not_ours' };
+    const est = snapshot.estimate;
 
     const { raiseAdminAlert } = require('./admin-alert-compose');
     const { fitAction, tidyName } = require('./admin-alert-names');
@@ -464,6 +535,7 @@ async function handleAgreementSigned({ contractId, database = db }) {
     const signedOn = contract.signed_at
       ? new Date(contract.signed_at).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' })
       : '';
+    const payment = await paymentSentence(est, contract.customer_id, database);
 
     await raiseAdminAlert('customer', {
       area: 'Estimates',
@@ -481,7 +553,7 @@ async function handleAgreementSigned({ contractId, database = db }) {
       // A customer signing is a customer acting: the bell policy never silences it.
       bell: true,
       dedupeKey: `commercial-agreement-signed:${contract.id}`,
-      detail: `${name} signed the Commercial Pest Service Agreement for ${number}${signedOn ? ` on ${signedOn}` : ''}. The estimate was not accepted, and no visit, invoice or charge was created. Mark the estimate won, then schedule the first visit. The signed copy goes to the customer by email.`,
+      detail: `${name} signed the Commercial Pest Service Agreement for ${number}${signedOn ? ` on ${signedOn}` : ''}. The estimate was not accepted, and no visit, invoice or charge was created. ${payment}Mark the estimate won, then schedule the first visit. The signed copy goes to the customer by email.`,
       metadata: { estimateId: est.id, customerId: contract.customer_id, contractId: contract.id },
     });
 
@@ -503,6 +575,38 @@ async function handleAgreementSigned({ contractId, database = db }) {
   }
 }
 
+// After a customer signs an Auto Pay agreement (contracts-public, after commit and BEFORE the signed hook, so its alert
+// reads the result): the signing page's next step. It reuses the standalone Auto Pay setup link
+// (services/autopay-setup-link.js, the one card-or-bank save that enrolls Auto Pay, GATE_AUTOPAY_SETUP_LINK) minted
+// INLINE: nothing is sent, the page shows the button. A customer already on Auto Pay, or whose consented saved card the
+// link service enrolls, needs no link. Nothing is charged. Never throws. null = no next step (not an agreement issued
+// here, not Auto Pay, the gate is off, or the link service declined: the office alert then says no method is saved).
+async function autopayNextStep({ contractId, database = db }) {
+  try {
+    if (!commercialAutopayLive()) return null;
+    const contract = await database('customer_contracts').where({ id: contractId })
+      .first('id', 'customer_id', 'status', 'document_template_key', 'document_variables_snapshot');
+    const snapshot = issuedSignedSnapshot(contract);
+    if (snapshot?.estimate.proposal?.commercialTerms?.paymentTerms !== AUTOPAY_PAYMENT_TERMS) return null;
+    const { requestAutopaySetupLink } = require('./autopay-setup-link');
+    const result = await requestAutopaySetupLink({ customerId: contract.customer_id, delivery: 'inline', trigger: SNAPSHOT_SOURCE });
+    if (result?.action === 'link_created' && result.secureUrl) return { state: 'setup', url: result.secureUrl };
+    // The link service enrolls a saved card only on a lane that charges each completed service, but it reports an
+    // account already on Auto Pay BEFORE that lane check: judged here, or the page would promise a charge after each
+    // completed service that never runs (a membership lane, or per visit with the completion charge off).
+    if (result?.action === 'auto_secured') return { state: 'on' };
+    if (result?.reason === 'autopay_already_active') {
+      const customer = await database('customers').where({ id: contract.customer_id }).first();
+      if (chargesEachCompletedService(customer)) return { state: 'on' };
+    }
+    logger.info(`[commercial-agreement] no Auto Pay next step for contract ${contract.id}: ${result?.reason || 'unknown'}`);
+    return null;
+  } catch (err) {
+    logger.warn(`[commercial-agreement] Auto Pay next step failed for contract ${contractId}: ${err.code || 'error'}`);
+    return null;
+  }
+}
+
 module.exports = {
   TEMPLATE_KEY,
   SNAPSHOT_SOURCE,
@@ -511,7 +615,9 @@ module.exports = {
   signableProposal,
   signEligibility,
   AGREEMENT_TERMS,
+  AGREEMENT_PAYMENT_TEXT,
   agreementTermsConflict,
+  fixedTermsConflict,
   STALE_PROPOSAL_MESSAGE,
   agreementAdminStatus,
   lockEstimateForSign,
@@ -521,4 +627,6 @@ module.exports = {
   newContractRow,
   ensureAgreement,
   handleAgreementSigned,
+  autopayNextStep,
+  quoteFingerprint,
 };

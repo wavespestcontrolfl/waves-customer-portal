@@ -412,13 +412,20 @@ router.post('/:token/sign', async (req, res, next) => {
     // other contract: the service reads the estimate marker only an agreement it
     // issued carries, so a signature collected before a kill still reaches the
     // office. Never throws out of this route (the service catches and logs).
+    // An agreement on Auto Pay (GATE_COMMERCIAL_AUTOPAY) first gets its next step,
+    // the Auto Pay setup link minted inline (nothing is sent, nothing is charged),
+    // awaited so the office alert reads whether Auto Pay is on yet; null for every
+    // other contract and the response is unchanged.
+    let autopaySetup = null;
     if (signedContract?.id && signedContract.documentTemplateKey === COMMERCIAL_AGREEMENT_TEMPLATE_KEY) {
-      void require('../services/commercial-proposal-agreement').handleAgreementSigned({ contractId: signedContract.id }).catch((err) => {
+      const commercialAgreement = require('../services/commercial-proposal-agreement');
+      autopaySetup = await commercialAgreement.autopayNextStep({ contractId: signedContract.id });
+      void commercialAgreement.handleAgreementSigned({ contractId: signedContract.id }).catch((err) => {
         logger.warn(`[contracts-public] commercial agreement signed hook errored for contract ${signedContract.id}: ${err.message}`);
       });
     }
 
-    res.json(response.body);
+    res.json(autopaySetup ? { ...response.body, autopaySetup } : response.body);
   } catch (err) {
     // A locked re-verify inside the signing transaction rolled it back
     // with a customer-facing status (payment_method_removed).

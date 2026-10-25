@@ -1635,6 +1635,7 @@ module.exports = {
   TEMPLATE_KEY,
   EMAIL_TEMPLATE_KEY,
   isAutopaySetupLinkEnabled,
+  billingLaneSupported,
   setupLinkIneligibility,
   requestAutopaySetupLink,
   autopayDeliveryPreflight,
