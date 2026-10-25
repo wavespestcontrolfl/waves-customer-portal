@@ -612,6 +612,149 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     });
   });
 
+  describe('the later-text check (GATE_CALL_PROMISE_LATER_TEXT_CHECK)', () => {
+    const LATER_PROMPT = 'Decide whether any LATER text says otherwise';
+    const askedLater = (w) => askedAll(w).filter(([, payload]) => payload.text.includes(LATER_PROMPT));
+    // The record check finds the staff text, the thread check finds no confirmation, the later-text check answers `later`.
+    const recordThreadLater = (w, textId, later) => say(w, (payload) => {
+      if (payload.text.includes(LATER_PROMPT)) return typeof later === 'function' ? later(payload) : later;
+      if (payload.text.includes(THREAD_PROMPT)) return { ok: true, json: { verdict: 'not_completed', record_ref: null, quote: null } };
+      return fulfilledBy(`sms:${textId}`, 'the warranty covers the retreatment');
+    });
+    const laterSays = (verdict) => ({ ok: true, json: { verdict, record_ref: null } });
+    beforeEach(() => { process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK = 'true'; });
+    afterEach(() => { delete process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK; });
+
+    test('staff "done", then the customer replies "Ok": the record closes it, and the proof says the later texts were checked', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      await addCustomerText(w, 'Ok');
+      recordThreadLater(w, text, laterSays('not_contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      const closed = await row(w.commitment.id);
+      expect(closed.status).toBe('fulfilled');
+      expect(closed.fulfillment).toMatchObject({ basis: 'ai_check', record_id: text, later_text_check: expect.any(String) });
+      expect(askedLater(w)).toHaveLength(1);
+      expect(askedLater(w)[0][1].text).toContain('"text":"Ok"');
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+    });
+
+    test('staff "done", then "No one came": contradicted holds it, and unchanged texts are not asked again', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      await addCustomerText(w, 'No one came, still waiting');
+      recordThreadLater(w, text, laterSays('contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      const held = (await row(w.commitment.id)).contact_check.ai_close;
+      expect(held.fulfillment_check).toMatchObject({ reason: 'contradicted_by_later_text', record_id: text });
+      expect(held.later_text_check).toMatchObject({ verdict: 'contradicted' });
+      const before = dispatchWithFallback.mock.calls.length;
+      expect(await run(w)).toMatchObject({ closed: 0, model_calls: 0 });
+      expect(dispatchWithFallback.mock.calls.length).toBe(before);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('unclear and a failed read hold it too', async () => {
+      const unsure = await world();
+      const unsureText = await addSms(unsure);
+      await addCustomerText(unsure, 'Hmm');
+      recordThreadLater(unsure, unsureText, laterSays('unclear'));
+      const failing = await world();
+      const failingText = await addSms(failing);
+      await addCustomerText(failing, 'Ok');
+      recordThreadLater(failing, failingText, { ok: false, reason: 'timeout' });
+      expect(await run([unsure, failing])).toMatchObject({ closed: 0 });
+      expect((await row(unsure.commitment.id)).status).toBe('open');
+      expect((await row(failing.commitment.id)).contact_check.ai_close.later_text_check).toMatchObject({ verdict: 'unclear', reason: 'provider_failed' });
+    });
+
+    test('a later staff text with no words (a photo) keeps the hold, with no later-text model call', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      await addSms(w, { message_body: '', created_at: later(60) });
+      recordThreadLater(w, text, laterSays('not_contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      expect(askedLater(w)).toHaveLength(0);
+      expect((await row(w.commitment.id)).contact_check.ai_close.later_text_check).toMatchObject({ verdict: 'unclear', reason: 'unread_later_message' });
+    });
+
+    test('a photo before the customer\'s "Ok" still holds it: every later message must be readable, not only the newest', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      await addSms(w, { message_body: '', created_at: later(40) });
+      await addCustomerText(w, 'Ok');
+      recordThreadLater(w, text, laterSays('not_contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      expect(askedLater(w)).toHaveLength(0);
+      expect((await row(w.commitment.id)).contact_check.ai_close.later_text_check).toMatchObject({ verdict: 'unclear', reason: 'unread_later_message' });
+    });
+
+    test('a later text too long to read whole holds it, even when it would end in a contradiction', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      await addCustomerText(w, `Thanks for the update. ${'Some details about the yard. '.repeat(80)}But nobody came yesterday.`);
+      recordThreadLater(w, text, laterSays('not_contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      expect(askedLater(w)).toHaveLength(0);
+      expect((await row(w.commitment.id)).contact_check.ai_close.later_text_check).toMatchObject({ verdict: 'unclear', reason: 'long_later_text' });
+    });
+
+    test('a hold cached before the check existed (no record on it) is judged again once when the gate turns on', async () => {
+      delete process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK;
+      const w = await world();
+      const text = await addSms(w);
+      await addCustomerText(w, 'Ok thanks');
+      recordThreadLater(w, text, laterSays('not_contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      // The shape a hold had before this change: no record_type, record_id or matched_at.
+      await db('call_commitments').where({ id: w.commitment.id }).update({ contact_check: db.raw(
+        "contact_check #- '{ai_close,fulfillment_check,record_type}' #- '{ai_close,fulfillment_check,record_id}' #- '{ai_close,fulfillment_check,matched_at}'") });
+      expect((await row(w.commitment.id)).contact_check.ai_close.fulfillment_check).toEqual(expect.not.objectContaining({ record_id: expect.anything() }));
+      expect(askedLater(w)).toHaveLength(0);
+      process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK = 'true';
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      expect(askedLater(w)).toHaveLength(1);
+    });
+
+    test('a newer customer text reopens such a close; the next run asks again and holds on a contradiction', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      await addCustomerText(w, 'Ok');
+      recordThreadLater(w, text, (payload) => laterSays(payload.text.includes('still has bugs') ? 'contradicted' : 'not_contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      await addSms(w, { direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, message_type: null, status: 'received', metadata: null,
+        message_body: 'The kitchen still has bugs', created_at: new Date(Date.now() - 60 * 1000) });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('open');
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      expect((await row(w.commitment.id)).status).toBe('open');
+      expect(askedLater(w)).toHaveLength(2);
+    });
+
+    test('gate off: an "Ok" after the record still holds it and the later-text check is never asked; the hold notes its record, never a quote', async () => {
+      delete process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK;
+      const w = await world();
+      const text = await addSms(w);
+      await addCustomerText(w, 'Ok');
+      recordThreadLater(w, text, laterSays('not_contradicted'));
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      expect(askedLater(w)).toHaveLength(0);
+      const ai = (await row(w.commitment.id)).contact_check.ai_close;
+      expect(ai).not.toHaveProperty('later_text_check');
+      expect(Object.keys(ai.fulfillment_check).sort()).toEqual(['evidence_hash', 'matched_at', 'reason', 'record_id', 'record_type', 'retry_after', 'verdict']);
+      expect(ai.fulfillment_check).toMatchObject({ reason: 'contradicted_by_later_text', record_type: 'sms', record_id: text });
+      // The same evidence on the next run: no model call and no new write.
+      const before = dispatchWithFallback.mock.calls.length;
+      const { updated_at: stamp, contact_check: kept } = await row(w.commitment.id);
+      expect(await run(w)).toMatchObject({ closed: 0, model_calls: 0 });
+      expect(dispatchWithFallback.mock.calls.length).toBe(before);
+      const after = await row(w.commitment.id);
+      expect(after.updated_at).toEqual(stamp);
+      expect(after.contact_check.ai_close.checked_at).toBe(kept.ai_close.checked_at);
+    });
+  });
+
   describe('cost', () => {
     test('an unchanged promise with unchanged evidence is never asked twice; a new record is asked again', async () => {
       const w = await world();
