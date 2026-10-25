@@ -138,15 +138,7 @@ const areaAddOnGovernedRate = require('./area-addon-governed-rate');
 const areaAddOnLimits = require('./area-addon-limits');
 const tsOrnamental = require('./tree-shrub-ornamental-fertilizer-limits');
 
-// Report/track egress (AGENTS.md): entry-code shapes that must never persist
-// into customer-visible completion text. Three shapes: a code word near a
-// location word ("gate ... code"), a code word followed by digits
-// ("pin 9921"), and the bare shorthand of a code-carrying location word
-// followed directly by a code-shaped number ("Gate 1234", "lockbox is
-// 2468" — codex r3). Ordinary copy ("entry points treated", "gate was
-// open") never trips; a street address near the word "gate" may — that
-// false positive fails closed and the tech rephrases.
-const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}[a-z]?\d{2,4}(?:[-\s]\d{2,4}){0,2}|\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,12}\b(?:[a-z]?\d{3,8}|[a-z]?\d{2,4}(?:[-\s]\d{2,4}){1,2})\b)/i;
+const { COMPLETION_ACCESS_CODE_RE } = require('./completion-access-code');
 
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -3920,6 +3912,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Returns {status, body} on rejection, null when valid; mutates the
     // typed* locals on success.
     const runTypedValidation = () => {
+      // The completed protocol actions publish as the report's actions (the
+      // lawn and tree & shrub "Today's focus"): the picked labels and every
+      // [Protocol] / [Protocol optional] / [Action] note line, the same
+      // sources reportProtocolActions persists below. Both branches screen
+      // them for entry codes.
+      const protocolActionCopy = [
+        ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
+        ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
+      ];
       // Untyped completions render the same tech-entered copy on customer
       // reports (observations feed the pest-pressure main-driver line,
       // recommendations feed the recap, captions sit under photos) — the
@@ -3966,7 +3967,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // reach customer-facing reports. These free-text fields render
         // verbatim (pressure driver line, photo captions), so a line that
         // reads like an entry code fails closed instead of persisting.
-        if (untypedCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+        if ([...untypedCopySources, ...protocolActionCopy]
+          .some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
           return {
             status: 422,
             body: {
@@ -4117,7 +4119,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // r4): typed completions carry the identical customer-visible
         // free-text surfaces, and an entry code in any of them would
         // persist into the report the same way.
-        if (customerCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+        if ([...customerCopySources, ...protocolActionCopy]
+          .some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
           return {
             status: 422,
             body: {
@@ -16012,7 +16015,6 @@ module.exports = {
   throwIfDeliveryUnverified,
   completionSmsDefiniteRejectionError,
   definiteRejectionMarkerFromAttemptError,
-  COMPLETION_ACCESS_CODE_RE,
   serviceReportEmailEligible,
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
@@ -16073,5 +16075,4 @@ module.exports.isPestStockAdvisoryCompletion = isPestStockAdvisoryCompletion;
 module.exports.isLawnTsStockAdvisoryCompletion = isLawnTsStockAdvisoryCompletion;
 module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
-module.exports.COMPLETION_ACCESS_CODE_RE = COMPLETION_ACCESS_CODE_RE;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;

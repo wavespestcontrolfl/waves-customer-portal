@@ -114,6 +114,8 @@ const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { isReService } = require('../services/re-service');
+const { recentTrappingVisits } = require('../services/rodent-trap-visits');
+const { validDateOnly } = require('../utils/date-only');
 const reserviceOfficeRequest = require('../services/reservice-office-request');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
@@ -2905,6 +2907,27 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
       ? computed
       : (Number.isFinite(catalogBase) && catalogBase > 0 ? Math.round(catalogBase * 100) / 100 : null);
     res.json({ price, source: computed != null ? 'engine_default' : (price != null ? 'catalog_base' : null) });
+  } catch (err) { next(err); }
+});
+
+// GET /rodent-trapping-visits?customerId=&propertyId=&date= — the rodent
+// trapping notice in the create-appointment modal (owner ruling 2026-09-26:
+// trapping covers the setup visit + 1 trap check; visit 3 and later is the
+// office-booked "Rodent Trap Check - Additional"). Lists the customer's
+// active trapping visits at the booking's address in the 60 days up to the
+// booking date. Read-only and advisory: it never decides included vs.
+// billable, and nothing is priced from it. requireAdmin for the same reason
+// as the mosquito quote above.
+router.get('/rodent-trapping-visits', requireAdmin, async (req, res, next) => {
+  try {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const customerId = String(req.query.customerId || '').trim();
+    if (!uuid.test(customerId)) throw httpError(400, 'customerId must be a valid customer id');
+    const propertyId = req.query.propertyId == null ? '' : String(req.query.propertyId).trim();
+    if (propertyId && !uuid.test(propertyId)) throw httpError(400, 'propertyId must be a valid property id');
+    const date = req.query.date == null ? '' : String(req.query.date).trim();
+    if (date && !validDateOnly(date)) throw httpError(400, 'date must be a calendar date (YYYY-MM-DD)');
+    res.json(await recentTrappingVisits(db, customerId, { propertyId: propertyId || null, date: date || null }));
   } catch (err) { next(err); }
 });
 
@@ -7096,8 +7119,8 @@ router.get('/', async (req, res, next) => {
     res.json({
       date, services: enriched,
       visitCloseout: legacyCloseoutEnabled,
-      // GATE_DISPATCH_FIND_TIME_PANEL: shows the Dispatch board's "Find a time" button.
-      findTimePanel: isEnabled('dispatchFindTimePanel'),
+      // GATE_NEW_APPT_ADDRESS_TIMES: New Appointment's time box answers on a new caller's address alone.
+      addressFirstTimes: isEnabled('newApptAddressTimes'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,

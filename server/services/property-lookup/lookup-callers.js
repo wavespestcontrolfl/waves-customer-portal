@@ -55,6 +55,11 @@ const CALLERS = freezeEntries({
   customer_pricing_ai: { surface: 'customer', suiteSizing: false, calls: 1, file: 'services/customer-pricing-ai.js', why: 'customer self-quote' },
   report_cross_sell: { surface: 'customer', suiteSizing: false, calls: 1, file: 'services/service-report/cross-sell.js', why: 'customer report, cache-only' },
   report_cross_sell_prewarm: { surface: 'automation', suiteSizing: false, calls: 1, file: 'services/service-report/evidence-prewarm.js', why: 'warms the cross-sell cache for a customer report' },
+  // Website lead drafts (GATE_LEAD_DRAFT_PROPERTY_LOOKUP): a free cache read
+  // when the draft is built, and one live lookup in the background for a
+  // draft priced on the default size. Only a county-assessed single-family
+  // home and lot at an address with no unit is used; no answer surface.
+  lead_draft: { surface: 'automation', suiteSizing: false, calls: 2, file: 'services/lead-draft-measurements.js', why: 'a cache-only read when the draft is built, then one background lookup for a draft still on the default size; county home and lot only' },
 });
 
 function freezeEntries(registry) {

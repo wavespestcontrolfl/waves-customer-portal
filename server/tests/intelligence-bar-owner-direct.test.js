@@ -195,11 +195,17 @@ describe('which writes skip the card', () => {
     expect(OwnerDirect.OWNER_DIRECT_CARDED_PROMPT).toMatch(/Never claim a change is done/);
   });
 
-  test('update_customer skips the card only for name, phone, address, source and note fields', () => {
+  test('update_customer skips the card only for name, source and note fields', () => {
     const run = updates => OwnerDirect.executesWithoutCard('update_customer', { customer_id: A, updates }, { notes_replaced: { before: null } });
     expect(run({ first_name: 'Jay' })).toBe(true);
-    expect(run({ phone: '9415550100', notes: 'gate code moved' })).toBe(true);
+    expect(run({ last_name: 'Ray', notes: 'gate code moved' })).toBe(true);
     expect(run({ lead_source: 'Referral' })).toBe(true);
+    // The phone is the customer's portal sign-in key: always a card, alone or
+    // beside a direct field, and never counted as a possible direct edit
+    // (owner 2026-10-24).
+    expect(run({ phone: '9415550100' })).toBe(false);
+    expect(run({ first_name: 'Jay', phone: '9415550100' })).toBe(false);
+    expect(OwnerDirect.mayExecuteWithoutCard('update_customer', { customer_id: A, updates: { phone: '9415550100' } })).toBe(false);
     // Money, a customer message, and lifecycle (churn / reactivation) keep the card.
     expect(run({ monthly_rate: 49 })).toBe(false);
     expect(run({ email: 'new@example.test' })).toBe(false);
@@ -457,7 +463,7 @@ describe('owner-direct limits (owner ruling 2026-10-02)', () => {
     expect(mixed.get('update_customer')).toBe(1);
     expect(OwnerDirect.cappedTools(seeded, OwnerDirect.messageDirectPlan([lead(LEAD)])).has('update_lead_status')).toBe(true);
     const failed = await OwnerDirect.seedDirectCounts({ id: 'task-1' }, seedDb([], { fail: true }));
-    expect(OwnerDirect.cappedTools(failed, OwnerDirect.messageDirectPlan([call('update_customer', { customer_id: A, updates: { phone: '+19415550100' } })])).has('update_customer')).toBe(true);
+    expect(OwnerDirect.cappedTools(failed, OwnerDirect.messageDirectPlan([call('update_customer', { customer_id: A, updates: { first_name: 'Jay' } })])).has('update_customer')).toBe(true);
     expect((await OwnerDirect.seedDirectCounts(null)).size).toBe(0);
   });
 
@@ -467,7 +473,7 @@ describe('owner-direct limits (owner ruling 2026-10-02)', () => {
     expect(OwnerDirect.executesWithoutCard('update_customer', input, { notes_replaced: { before: 'Gate 1234, call ahead' } })).toBe(false);
     expect(OwnerDirect.executesWithoutCard('update_customer', input, {})).toBe(false);
     expect(OwnerDirect.executesWithoutCard('update_customer', input)).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: A, updates: { phone: '+19415550100' } })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: A, updates: { first_name: 'Jay' } })).toBe(true);
   });
 
   test('the owner prompt states both limits', () => {

@@ -329,15 +329,11 @@ async function getSavedDayPlans({ date, now = new Date() }, conn) {
     { plannedVisits: plan.plannedStops.length, ...plannedPassthrough(plan) }]));
 }
 
-async function getRoutePerformance({ from, to, now = new Date() }, conn) {
-  // Range validation is shared with the caller, getScheduleQualityMeasurements.
-  const runs = await planningRuns(conn, from, to);
-  const plans = selectPlanningSnapshots(runs.slice(0, 500), { from, to, now, validStopId: isUuid });
-  const plannedIds = [...new Set(plans.flatMap(plan => plan.plannedStops.map(stop => stop.id)))];
-  const rows = await conn('scheduled_services').where(query => query.whereIn('id', plannedIds).orWhereBetween('scheduled_date', [from, to]))
-    .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'status', 'visit_id', 'is_callback', 'followup_included', 'window_start', 'time_window',
-      'actual_start_time', 'check_in_time', 'arrived_at', 'actual_end_time', 'check_out_time', 'completed_at',
-      'service_time_minutes', 'actual_duration_minutes', 'time_on_site_adjusted_minutes');
+// The evidence recordedTiming reads, attached to each scheduled_services row
+// (the row needs id and customer_id): the completion's structured notes and
+// the row's on_site / completed status events. Shared with the weekly ops
+// scoreboard so both read an arrival the same way.
+async function withRecordedTimingEvidence(rows, conn) {
   const ids = rows.map(row => row.id);
   const records = ids.length ? await conn('service_records').whereIn('scheduled_service_id', ids)
     .orderBy('created_at', 'desc').orderBy('id', 'desc')
@@ -348,7 +344,7 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
   const events = ids.length ? await conn('job_status_history').whereIn('job_id', ids)
     .whereIn('to_status', ['on_site', 'completed'])
     .select('job_id', 'from_status', 'to_status', 'transitioned_at') : [];
-  const enriched = rows.map(row => {
+  return rows.map(row => {
     // Match closeout-status: the succeeded attempt's committed sibling wins
     // over later recap/project records; otherwise use the newest sibling.
     const siblings = records.filter(record => record.scheduled_service_id === row.id && record.customer_id === row.customer_id);
@@ -357,6 +353,18 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     return { ...row, completionNotes: record?.structured_notes,
       statusHistory: events.filter(event => event.job_id === row.id) };
   });
+}
+
+async function getRoutePerformance({ from, to, now = new Date() }, conn) {
+  // Range validation is shared with the caller, getScheduleQualityMeasurements.
+  const runs = await planningRuns(conn, from, to);
+  const plans = selectPlanningSnapshots(runs.slice(0, 500), { from, to, now, validStopId: isUuid });
+  const plannedIds = [...new Set(plans.flatMap(plan => plan.plannedStops.map(stop => stop.id)))];
+  const rows = await conn('scheduled_services').where(query => query.whereIn('id', plannedIds).orWhereBetween('scheduled_date', [from, to]))
+    .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'status', 'visit_id', 'is_callback', 'followup_included', 'window_start', 'time_window',
+      'actual_start_time', 'check_in_time', 'arrived_at', 'actual_end_time', 'check_out_time', 'completed_at',
+      'service_time_minutes', 'actual_duration_minutes', 'time_on_site_adjusted_minutes');
+  const enriched = await withRecordedTimingEvidence(rows, conn);
   const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
   const coveredRoutes = new Map(plans.map(plan => [routeKey(plan.date, plan.technician_id), new Set(plan.plannedStops.map(stop => stop.id))]));
   const today = etDateString(now);
@@ -445,4 +453,4 @@ function missingBaselineActualStops(routes, pastWork, routeKey) {
   return byKey;
 }
 
-module.exports = { lifecycleMinutes, physicalVisitCount, recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, getSavedDayPlans, missingBaselineActualStops };
+module.exports = { lifecycleMinutes, physicalVisitCount, recordedTiming, withRecordedTimingEvidence, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, getSavedDayPlans, missingBaselineActualStops };

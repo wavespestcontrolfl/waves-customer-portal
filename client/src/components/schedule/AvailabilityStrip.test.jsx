@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning, drivePhrase, driveHerePhrase, rainPhrase, fmtHour, stopPhrase } from './AvailabilityStrip';
+import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning, drivePhrase, driveHerePhrase, rainPhrase, fmtHour } from './AvailabilityStrip';
 
 afterEach(cleanup);
 
@@ -126,6 +126,14 @@ describe('AvailabilityStrip', () => {
     expect(screen.getByText('Wed Jan 3: no hour fits.')).toBeTruthy();
   });
 
+  it('browsed-day chips show the rain chance only on a rain surface (showRain)', () => {
+    const days = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 0, { rainChance: 55 })] }];
+    const { rerender } = render(<AvailabilityStrip availability={answer(null, days)} currentDate="2035-01-02" currentStart="12:00" onPick={() => {}} />);
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added drive');
+    rerender(<AvailabilityStrip availability={answer(null, days)} currentDate="2035-01-02" currentStart="12:00" onPick={() => {}} showRain />);
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added drive55% rain');
+  });
+
   it('the hour already in the fields is shown pressed, not offered again', () => {
     const fits = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 11 });
     render(<AvailabilityStrip availability={fits} currentDate="2035-01-02" currentStart="09:00:00" currentTechnicianId="t1" onPick={() => {}} />);
@@ -146,10 +154,10 @@ describe('AvailabilityStrip', () => {
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-02', start: '09:00', technicianId: 't1' }));
   });
 
-  it('names the technician on an all-technician search', () => {
+  it('an all-technician search still keeps the chip to the hour and drive (the pick adopts the technician)', () => {
     const days = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 0, { technicianName: 'Fixture Tech' })] }];
     render(<AvailabilityStrip availability={answer(null, days)} currentDate="2035-01-02" currentStart="12:00" onPick={() => {}} />);
-    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added driveFixture Tech');
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added drive');
   });
 });
 
@@ -228,33 +236,24 @@ describe('best-times rows', () => {
     expect(screen.queryByText('Open that day:')).toBeNull();
     const rows = screen.getAllByTestId('best-row');
     expect([...rows[0].querySelectorAll('button')].map((b) => b.textContent)).toEqual([
-      '12 PM19 min here+34 min day20% rain', '1 PM19 min here+34 min day60% rain',
+      '12 PM19 min', '1 PM19 min',
     ]);
     // Model numbers carry "~" and the legend says what it means.
-    expect(rows[1].querySelector('button').textContent).toBe('Mon 110 AM~7 min here~+9 min day');
+    expect(rows[1].querySelector('button').textContent).toBe('Mon 110 AM~7 min');
     expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
     fireEvent.click(rows[1].querySelector('button'));
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-01', start: '10:00' }));
   });
 
-  it('stop names (GATE_BEST_TIMES_CHIP_STOP_NAMES): "after <name>", "from home base", or nothing', () => {
-    expect(stopPhrase({ fromName: 'Stop A', fromHomeBase: false })).toBe('after Stop A');
-    expect(stopPhrase({ fromName: null, fromHomeBase: true })).toBe('from home base');
-    expect(stopPhrase({ fromName: null, fromHomeBase: null })).toBeNull();
-  });
-
-  it('names the previous stop on each best chip only when the server says so', () => {
+  it('the chip is the hour and the drive minutes only: no rain, technician or stop name (owner 2026-10-24)', () => {
     const named = {
-      day: [chip('2035-01-02', '12:00', 34, 19, { driveSource: 'google', fromName: 'Stop A' })],
+      day: [chip('2035-01-02', '12:00', 34, 19, { driveSource: 'google', fromName: 'Stop A', rainChance: 60, technicianName: 'Fixture Tech' })],
       week: [chip('2035-01-01', '08:00', 9, 7, { driveSource: 'google', fromHomeBase: true })],
     };
-    const { rerender } = render(<AvailabilityStrip bestRows availability={withBest(null, { best: named })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
-    let rows = screen.getAllByTestId('best-row');
-    expect(rows[0].querySelector('button').textContent).toBe('12 PM19 min here+34 min day');
-    rerender(<AvailabilityStrip bestRows availability={withBest(null, { best: named, chipStopNames: true })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
-    rows = screen.getAllByTestId('best-row');
-    expect(rows[0].querySelector('button').textContent).toBe('12 PM19 min here+34 min dayafter Stop A');
-    expect(rows[1].querySelector('button').textContent).toBe('Mon 18 AM7 min here+9 min dayfrom home base');
+    render(<AvailabilityStrip bestRows availability={withBest(null, { best: named })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    const rows = screen.getAllByTestId('best-row');
+    expect(rows[0].querySelector('button').textContent).toBe('12 PM19 min');
+    expect(rows[1].querySelector('button').textContent).toBe('Mon 18 AM7 min');
   });
 
   it('an empty picked day says why and keeps the week row', () => {
