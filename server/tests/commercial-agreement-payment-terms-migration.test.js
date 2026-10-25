@@ -1,10 +1,10 @@
 /**
- * Commercial Pest Service Agreement version 2 (migration 20261025070000, owner 2026-10-24 "autopay default"): the
+ * Commercial Pest Service Agreement version 2 (migration 20261025120000, owner 2026-10-24 "autopay default"): the
  * payment paragraph becomes {{agreement.payment_terms}}. Runs the real version 1 seed into an in-memory store, then the
  * version 2 migration, so the test proves the replacement against the seeded text itself. Synthetic data only.
  */
 const seed = require('../models/migrations/20260623000005_seed_commercial_service_agreement');
-const v2 = require('../models/migrations/20261025070000_commercial_agreement_payment_terms');
+const v2 = require('../models/migrations/20261025120000_commercial_agreement_payment_terms');
 const { AGREEMENT_PAYMENT_TEXT } = require('../../shared/commercial-agreement-terms.cjs');
 const { renderDocumentText } = require('../services/document-template-library');
 

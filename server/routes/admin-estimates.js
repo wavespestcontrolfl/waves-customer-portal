@@ -5139,7 +5139,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     if (!updatedCount) {
       return res.status(409).json({
         error: savingPaymentTerm
-          ? 'Estimate was accepted, locked, or switched off invoice billing while you were editing. Refresh and retry.'
+          ? `Estimate was accepted, locked, or switched ${savingPaymentTerm.billByInvoice ? 'off' : 'to'} invoice billing while you were editing. Refresh and retry.`
           : 'Estimate was accepted or locked while you were editing. Refresh and retry.',
       });
     }

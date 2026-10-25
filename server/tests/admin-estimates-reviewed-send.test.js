@@ -23,6 +23,7 @@ jest.mock('../config/feature-gates', () => ({
   // gateEnvValue's own always-false mock above.
   termiteAnnualPlanSelectionEnabled: jest.fn(() => false),
   commercialProposalSignLive: () => false,
+  commercialAutopayLive: jest.fn(() => false),
   satellitePalmCountTypedLive: jest.fn(() => false),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
@@ -101,7 +102,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, commercialAutopayLive } = require('../config/feature-gates');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { buildPricingBundle } = require('../routes/estimate-public');
 const { estimateOfferVersion } = require('../services/estimate-offer-version');
@@ -1801,6 +1802,66 @@ describe('GET /:id/proposal suggestedTaxRate', () => {
     const { resolveCommercialPrepayBaseRate, FL_COMMERCIAL_TAX_RATE } = require('../services/estimate-converter');
     await expect(resolveCommercialPrepayBaseRate('synthetic-customer', {})).resolves.toBe(FL_COMMERCIAL_TAX_RATE);
     await expect(resolveCommercialPrepayBaseRate('synthetic-customer', { strict: true })).rejects.toThrow('synthetic lookup failure');
+  });
+});
+
+// Owner 2026-10-24 "autopay default" (GATE_COMMERCIAL_AUTOPAY): Auto Pay is the payment term of a proposal that does
+// not bill by invoice, and never sits beside Bill by invoice. Net terms still need Bill by invoice.
+describe('commercial Auto Pay payment term', () => {
+  const recurring = (commercialTerms) => ({
+    enabled: true,
+    buildings: [{ name: 'Synthetic office', lineItems: [{ id: 'monthly', description: 'Synthetic monthly service', quantity: 1, unitPrice: 100, frequency: 'monthly' }] }],
+    ...(commercialTerms ? { commercialTerms } : {}),
+  });
+  const put = (commercialTerms) => invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: recurring(commercialTerms) });
+  beforeEach(() => {
+    commercialAutopayLive.mockReturnValue(true);
+    Object.assign(row, { status: 'draft', bill_by_invoice: false, estimate_data: { proposal: recurring() } });
+  });
+  afterEach(() => commercialAutopayLive.mockReturnValue(false));
+
+  test('the builder read says whether Auto Pay is offered', async () => {
+    expect((await invoke('/:id/proposal', 'get')).body.commercialAutopayEnabled).toBe(true);
+    commercialAutopayLive.mockReturnValue(false);
+    expect((await invoke('/:id/proposal', 'get')).body.commercialAutopayEnabled).toBe(false);
+  });
+
+  test('Auto Pay saves on a proposal that does not bill by invoice', async () => {
+    const res = await put({ paymentTerms: 'Auto Pay' });
+    expect(res.statusCode).toBe(200);
+    expect(dataOf().proposal.commercialTerms.paymentTerms).toBe('autopay');
+  });
+
+  test('Auto Pay is refused beside Bill by invoice, and nothing is written', async () => {
+    row.bill_by_invoice = true;
+    const res = await put({ paymentTerms: 'autopay' });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toBe('Auto Pay cannot be combined with Bill by invoice. Pick Net-30 for an invoiced proposal, or turn off Bill by invoice.');
+    expect(mutations).toEqual([]);
+  });
+
+  test('with the gate off a new Auto Pay term is refused, but a proposal already on Auto Pay can still be saved', async () => {
+    commercialAutopayLive.mockReturnValue(false);
+    const refused = await put({ paymentTerms: 'autopay' });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.body.error).toBe('Payment terms must be one of: Due on receipt, Net-15, Net-30.');
+    row.estimate_data = { proposal: recurring({ paymentTerms: 'autopay' }) };
+    expect((await put({ paymentTerms: 'autopay' })).statusCode).toBe(200);
+  });
+
+  test('a Net term still needs Bill by invoice', async () => {
+    const res = await put({ paymentTerms: 'net30' });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/Structured payment terms require Bill by invoice/);
+  });
+
+  test('Bill by invoice cannot be turned on while the proposal is on Auto Pay', async () => {
+    row.estimate_data = { proposal: recurring({ paymentTerms: 'autopay' }) };
+    const res = await invoke('/:id', 'patch', { billByInvoice: true });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toBe('This proposal is on Auto Pay, which cannot be combined with Bill by invoice. Set Payment terms to Not set in the proposal editor first.');
+    expect(mutations).toEqual([]);
+    expect(row.bill_by_invoice).toBe(false);
   });
 });
 

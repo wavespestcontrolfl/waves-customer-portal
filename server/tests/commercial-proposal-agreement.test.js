@@ -401,7 +401,7 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
   });
 
   test('a Net 30 agreement prints the paragraph version 1 fixed, word for word', async () => {
-    const { V1_PAYMENT } = require('../models/migrations/20261025070000_commercial_agreement_payment_terms');
+    const { V1_PAYMENT } = require('../models/migrations/20261025120000_commercial_agreement_payment_terms');
     const { database, state } = slotDb(estimateRow());
     expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: true, status: 201 });
     expect(state.contracts[0].contract_text_snapshot).toContain(V1_PAYMENT);
