@@ -20,6 +20,7 @@
 const db = require('../../models/db');
 const { isEnabled } = require('../../config/feature-gates');
 const { TERMINAL_CALL_STATUSES, callEndedAt } = require('../../utils/call-timeline');
+const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 // booking-insert-contract.test.js recognizes the contract helper by this path.
 const { completeScheduledServiceInsert } = require('../booking/create-scheduled-service');
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
@@ -172,6 +173,7 @@ function stillPickable(row, { now, endedMinutes }) {
 function answeredCallsQuery(conn, { now, answeredMinutes }) {
   const answeredSince = new Date(now.getTime() - answeredMinutes * 60 * 1000);
   return conn('call_log')
+    .modify((q) => whereNotSandboxCall(q))
     .where('created_at', '>=', new Date(answeredSince.getTime() - RING_BEFORE_ANSWER_MINUTES * 60 * 1000))
     .where((scope) => {
       scope.where((inbound) => {
