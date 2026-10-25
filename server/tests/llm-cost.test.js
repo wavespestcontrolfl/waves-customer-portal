@@ -214,7 +214,7 @@ describe('failed calls and unknown usage', () => {
   const prices = new Map([['claude-sonnet-5', { input: 3, output: 15 }]]);
   const M = 1_000_000;
   // usage_unknown comes from the ledger query, which does not count failed calls the
-  // provider refused with an HTTP error (the PostgreSQL tests below prove that SQL)
+  // provider refused before processing (the PostgreSQL tests below prove that SQL)
   const laneRow = (over) => ({ lane_id: 'sms_draft', provider: 'anthropic', model: 'claude-sonnet-5', calls: 1, usage_unknown: 0, input_tokens: M, output_tokens: 0, ...over });
   const day = new Map([['sms_draft', { usd: 12, unpricedCalls: 0 }]]);
   const spikeLanes = (baselineRows) => llmCost.findSpikes(day, llmCost.foldLaneCosts(baselineRows, prices), { minUsd: 5, multiplier: 3, baselineDays: 7 }).map((s) => s.laneId);
@@ -430,7 +430,7 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
   });
 
-  test('a refused call (HTTP error) with no usage is not unknown usage; a timeout or a successful one still is (grouped and per-call rows)', async () => {
+  test('a call the provider refused with no usage is not unknown usage; a timeout, 5xx-other or successful one still is (grouped and per-call rows)', async () => {
     const sol = { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015' }] } };
     await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }, sol])), now: NOW });
     const at = atET('2026-09-30');
@@ -449,10 +449,21 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(1);
     expect(llmCost.findSpikes(new Map([['sms_draft', { usd: 12 }]]), res.byLane, { minUsd: 5, multiplier: 3, baselineDays: 1 })).toEqual([]);
 
-    // so does an unclassified failure, and a successful call with null usage
-    await app('llm_dispatch_log').insert([row({ created_at: at, ok: false, error_code: 'error', input_tokens: null }), row({ created_at: at, input_tokens: null })]);
+    // so do an unclassified failure, a successful call with null usage, and statuses that do not prove
+    // the request was refused before processing (504 gateway timeout, 500, 502)
+    await app('llm_dispatch_log').insert([
+      row({ created_at: at, ok: false, error_code: 'error', input_tokens: null }),
+      row({ created_at: at, input_tokens: null }),
+      row({ created_at: at, ok: false, error_code: 'anthropic_504', input_tokens: null }),
+      row({ created_at: at, ok: false, error_code: 'openai_500', input_tokens: null }),
+      row({ created_at: at, ok: false, error_code: 'gemini_502', input_tokens: null }),
+    ]);
     res = await llmCost.laneCosts(...window, { conn: app });
-    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(3);
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(6);
+    // 529 (overloaded) is a refusal like 503: not unknown
+    await app('llm_dispatch_log').insert(row({ created_at: at, ok: false, error_code: 'anthropic_529', input_tokens: null }));
+    res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(6);
 
     // per-call rows (prompt at or above the tier floor): a refused one is not unknown
     const openai = { provider: 'openai', requested_model: 'gpt-6-sol', served_model: 'gpt-6-sol', created_at: at, lane_id: 'report' };

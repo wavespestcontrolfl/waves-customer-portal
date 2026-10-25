@@ -44,11 +44,14 @@ const FEED_PROVIDERS = Object.freeze({ anthropic: 'anthropic', openai: 'openai',
 const LIVE_WORKLOAD = "(workload IS NULL OR workload = 'live')";
 // Same rows the hub sums: per-call rows and per-turn session deltas.
 const ROW_KINDS = ['call', 'session_turn'];
-// A call whose usage was never captured is unknown spend, except a failed call the provider refused
-// with an HTTP error status (error_code '<provider>_<4xx|5xx>', e.g. anthropic_400, openai_401,
-// gemini_503): the provider did not process it, so it billed nothing. A timeout, a response-body read
-// failure or an unclassified error may have been processed and billed, so its usage stays unknown.
-const USAGE_UNKNOWN_SQL = "input_tokens IS NULL AND NOT (ok IS FALSE AND COALESCE(error_code, '') ~ '^[a-z0-9]+_[45][0-9]{2}$')";
+// A call whose usage was never captured is unknown spend, except a failed call the provider REFUSED
+// before processing it (error_code '<provider>_<status>' with a status that means rejection: a bad,
+// unauthorized, unpaid, forbidden, missing, too-large or invalid request, a rate limit, or an
+// unavailable / overloaded service; e.g. anthropic_400, openai_401, gemini_503). That call billed
+// nothing. Every other failure (a timeout, 408/504/524, a 500/502, a body read error, an unclassified
+// 'error') may have been processed and billed, so its usage stays unknown.
+const REFUSED_STATUSES = ['400', '401', '402', '403', '404', '413', '422', '429', '503', '529'];
+const USAGE_UNKNOWN_SQL = `input_tokens IS NULL AND NOT (ok IS FALSE AND COALESCE(error_code, '') ~ '^[a-z0-9]+_(${REFUSED_STATUSES.join('|')})$')`;
 
 // Spend-spike rule: yesterday's estimated spend on a lane is at least
 // MIN_USD AND at least MULTIPLIER × its average day over the 7 days before.
@@ -293,7 +296,7 @@ function costUsd(provider, t, p) {
 
 // Token sums per lane × provider × model over [from, to). `usage_unknown`
 // counts calls whose usage was never captured (null counters), except failed
-// calls the provider refused with an HTTP error (USAGE_UNKNOWN_SQL): those bill
+// calls the provider refused before processing (USAGE_UNKNOWN_SQL): those bill
 // nothing, and counting them turned a lane's spike check off for a week after
 // one refused call. With a
 // `tierFloor`, calls whose prompt reaches it come back one row each
