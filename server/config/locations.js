@@ -176,8 +176,9 @@ const CITY_TO_LOCATION = {
   'lakewood ranch': 'bradenton', 'bradenton': 'bradenton', 'university park': 'bradenton',
   'cortez': 'bradenton', 'anna maria': 'bradenton', 'bradenton beach': 'bradenton', 'holmes beach': 'bradenton',
   'oneco': 'bradenton', 'tallevast': 'bradenton', 'myakka city': 'bradenton',
-  'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota', 'osprey': 'sarasota', 'longboat key': 'sarasota',
-  'venice': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'laurel': 'venice',
+  'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota', 'longboat key': 'sarasota',
+  // Osprey is a Venice-office town (owner 2026-10-24 "osprey is venice").
+  'venice': 'venice', 'osprey': 'venice', 'north port': 'venice', 'englewood': 'venice', 'nokomis': 'venice', 'laurel': 'venice',
   'port charlotte': 'venice', 'babcock ranch': 'venice', 'punta gorda': 'venice', 'placida': 'venice', 'boca grande': 'venice',
   'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'terra ceia': 'parrish',
   // Communities that appear as the typed city on real customer records
@@ -230,7 +231,6 @@ const REVIEW_CITY_EXTRAS = {
   'kensington park': 'sarasota',
   'indian beach': 'sarasota',
   'bird key': 'sarasota',
-  'osprey': 'venice',           // review-only: owner 2026-10-24 "osprey should be venice" (leads stay Sarasota)
   'casey key': 'venice',
   'south venice': 'venice',
   'warm mineral springs': 'venice',

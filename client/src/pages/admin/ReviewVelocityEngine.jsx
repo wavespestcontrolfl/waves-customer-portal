@@ -95,7 +95,6 @@ const GBP_LOCATIONS = [
       "sarasota",
       "siesta key",
       "lido key",
-      "osprey",
       "longboat key",
       "bee ridge",
       "fruitville",
@@ -123,6 +122,7 @@ const GBP_LOCATIONS = [
     name: "Venice",
     zones: [
       "venice",
+      "osprey",
       "north port",
       "englewood",
       "nokomis",
