@@ -65,6 +65,7 @@
  *   GATE_BID_CHECKLIST=true (Bid Desk PR B, needs GATE_BID_DESK: each bid also carries its solicitation type, scored or pass/fail, a questions-due date, a mandatory job walk, a link to its estimate and proposal, its documents (the attachments of its emails), a per-bid checklist built from templates, and a submission record; adds a 14-day reminder before a confirmed due date, one reminder 2 days before the questions date and one 2 days before the job walk. Admin bell only: nothing goes to a buyer, contractor or agency. Read at call time via bidChecklistLive(), strict 'true', dark by default; off = the new fields are hidden and refused, no new reminder fires, and the Bid Desk works as before.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
+ *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
  *   GATE_CONTACT_LOGIN=true (an on-location contact signs into the customer app with their OWN phone number through the same SMS code login, landing on the account they are a contact for as a CONTACT session: view-only schedule, visit history, technician tracking, service-report documents (never for a contact the report rule withholds from) and their own notification choices (GET/PUT /api/notifications/contact-preferences); every other portal route answers 403 ACCOUNT_HOLDER_ONLY — billing, payments, cards, referrals, credits, requests, chat, property, account deletion, the holder's preferences, push subscriptions. The account holder's own number always wins; a contact number is tried only when no holder row matches, and the contact's session dies at its next refresh once the holder removes them. Per-contact notification choices (service_contact_notification_prefs) only NARROW what the account sends: a purpose the holder turned off stays off. Owner rulings 2026-10-20: view only, no confirm or reschedule; the contact's in-app text-consent checkbox counts as the YES for a pending opt-in ask only, never over a STOP. Read at call time via contactLoginLive(), strict 'true', dark by default; off = a contact number never logs in, an existing contact token is refused (401) and the senders ignore the per-contact table, byte-identical to before. Sends nothing to a customer.)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
@@ -89,6 +90,7 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
+ *   GATE_TECH_WORK_DAYS=true (owner 2026-10-25, work days per technician: a technician row may carry technicians.work_days, the weekdays that person works (the Team tab "Work days" row; empty = every day). On, slot offers, automatic booking and automatic moves skip that technician on a day they do not work, and an automatic booking that lands on such a day stays unassigned for the owner; office saves (schedule create and edit, board assign and drag) still go through and add a plain warning line. Strict opt-in: exactly 'true', read at call time via techWorkDaysLive(). Ships DARK; off = work_days is ignored everywhere and the Team tab shows no editor. Sends nothing to a customer.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
@@ -3197,6 +3199,11 @@ const gates = {
   // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
   commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
 
+  // Basic payroll settings (owner 2026-10-25): W-4 elections and pay method for W-2
+  // technicians. OFF in every environment; read at call time via payrollLive().
+  // Kill switch: unset GATE_PAYROLL.
+  payroll: process.env.GATE_PAYROLL === 'true',
+
   // Bid unit, private costing and validity controls; default off everywhere.
   // Readers always honor saved quantities and dates after the controls are off.
   commercialBidBuilder: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
@@ -4642,6 +4649,11 @@ const gates = {
   // multiTechConfirmLive() below. Kill switch: unset GATE_MULTI_TECH_CONFIRM —
   // every confirm-side probe goes back to tech-blind, byte for byte.
   multiTechConfirm: gateEnvValue('GATE_MULTI_TECH_CONFIRM'),
+
+  // Work days per technician (owner 2026-10-25). Ships DARK: exactly 'true'.
+  // Registered for logGateStatus only; consumers read techWorkDaysLive() at
+  // CALL time. Kill switch: unset - work_days is ignored everywhere.
+  techWorkDays: process.env.GATE_TECH_WORK_DAYS === 'true',
 
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
@@ -6313,6 +6325,14 @@ function multiTechConfirmLive() {
   return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
 }
 
+// GATE_TECH_WORK_DAYS read at CALL time - strict `=== 'true'`. The one reader for
+// technicians.work_days (services/technician-eligibility.js): on, a technician
+// is skipped by slot offers and automatic placement on a day they do not work;
+// off, work_days is ignored everywhere (byte-identical to before).
+function techWorkDaysLive() {
+  return process.env.GATE_TECH_WORK_DAYS === 'true';
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -7479,6 +7499,14 @@ function aioGapSweepMonthlyLive() {
   return process.env.GATE_AIO_GAP_SWEEP_MONTHLY === 'true';
 }
 
+// GATE_PAYROLL read at CALL time — strict 'true' only, so an unset variable is
+// off. Gates the basic payroll settings (services/payroll-w4.js, routes/
+// admin-payroll.js): W-4 elections typed from the paper form and each W-2
+// technician's pay method. Stores no SSN and no bank account number.
+function payrollLive() {
+  return process.env.GATE_PAYROLL === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -7592,6 +7620,8 @@ module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
+// GATE_TECH_WORK_DAYS reader, on its own line so gate PRs never conflict.
+module.exports.techWorkDaysLive = techWorkDaysLive;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
 module.exports.autoDispatchDayRulesLive = autoDispatchDayRulesLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
@@ -7834,6 +7864,8 @@ module.exports.ibOpenaiBackupLive = ibOpenaiBackupLive;
 module.exports.ibBillingModeEditLive = ibBillingModeEditLive;
 // GATE_AIO_GAP_SWEEP_MONTHLY reader, on its own line so gate PRs never conflict.
 module.exports.aioGapSweepMonthlyLive = aioGapSweepMonthlyLive;
+// GATE_PAYROLL reader, on its own line so gate PRs never conflict.
+module.exports.payrollLive = payrollLive;
 // GATE_IB_TIER_UPGRADE_EMAIL reader, on its own line so gate PRs never conflict.
 module.exports.ibTierUpgradeEmailLive = ibTierUpgradeEmailLive;
 // GATE_STAFF_ONBOARDING_DOCS reader, on its own line so gate PRs never conflict.

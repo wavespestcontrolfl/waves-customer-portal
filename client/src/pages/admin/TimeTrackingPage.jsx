@@ -8,6 +8,8 @@ import StaffDocumentLibrary from "../../components/staffDocuments/Library";
 import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import PayGrowth from "../../components/payGrowth/PayGrowth";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
+import PayrollSettings from "../../components/payroll/PayrollSettings";
+import usePayrollAvailable from "../../hooks/usePayrollAvailable";
 import {
   BarChart3,
   CheckCircle2,
@@ -16,6 +18,7 @@ import {
   LayoutDashboard,
   List,
   Users,
+  Wallet,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import "./TimeTrackingPage.css";
@@ -185,6 +188,7 @@ const STAFF_SECTIONS = [
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
   { key: "pay-growth", label: "Growth", Icon: BarChart3 },
+  { key: "payroll", label: "Payroll", Icon: Wallet },
 ];
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf
@@ -202,7 +206,7 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents", "pay-growth"],
+    tabs: ["team", "documents", "pay-growth", "payroll"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -216,7 +220,13 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 // other invalid/role-gated deep link. While an admin's availability request
 // is still pending (null) the tab is unresolved: rendering Team meanwhile
 // would flash the wrong view and could flush a false Team usage beacon.
-export function resolveStaffTab(rawTab, payGrowthAvailable, role) {
+//
+// The payroll tab (GATE_PAYROLL) follows the same rule from its own status probe.
+export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailable = false) {
+  if (rawTab === "payroll") {
+    if (role !== "admin" || payrollAvailable === false) return "team";
+    return payrollAvailable === true ? "payroll" : null;
+  }
   if (rawTab !== "pay-growth") return rawTab;
   if (role !== "admin" || payGrowthAvailable === false) return "team";
   return payGrowthAvailable === true ? "pay-growth" : null;
@@ -225,12 +235,14 @@ export function resolveStaffTab(rawTab, payGrowthAvailable, role) {
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
   const payGrowthAvailable = usePayGrowthAvailable();
+  const payrollAvailable = usePayrollAvailable(readStaffRole() === "admin");
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
   const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
   // null = pay-growth requested by an admin while availability is still
   // unknown: no leaf renders and no beacon fires until it resolves.
-  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole());
+  const payrollGateOpen = payrollAvailable === true && readStaffRole() === "admin";
+  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole(), payrollAvailable);
   const setTab = (value) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
@@ -269,6 +281,7 @@ export default function TimeTrackingPage() {
           activeGroup.tabs.length > 1
             ? activeGroup.tabs
                 .filter((key) => key !== "pay-growth" || payGrowthGateOpen)
+                .filter((key) => key !== "payroll" || payrollGateOpen)
                 .map((key) => STAFF_LEAF_BY_KEY[key])
             : []
         }
@@ -295,7 +308,8 @@ export default function TimeTrackingPage() {
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
       {tab === "pay-growth" && <PayGrowth manage />}
-      {tab === null && <p role="status" style={{ color: "#71717A" }}>Checking pay and growth availability…</p>}
+      {tab === "payroll" && <PayrollSettings />}
+      {tab === null && <p role="status" style={{ color: "#71717A" }}>{rawTab === "payroll" ? "Checking payroll availability…" : "Checking pay and growth availability…"}</p>}
       <div
         style={{
           position: "fixed",
@@ -2765,7 +2779,42 @@ const EMPTY_TECH_FORM = {
   startMode: "office",
   startText: "",
   startPoint: null,
+  // GATE_TECH_WORK_DAYS: weekdays this person works, stored 0 = Sunday. All
+  // seven = every day (sent as null). Only sent while the server says the
+  // gate is on (workDaysEnabled).
+  workDays: [0, 1, 2, 3, 4, 5, 6],
 };
+
+// Work-days toggles in display order (Mon to Sun); values are stored 0 = Sunday.
+const WORK_DAY_OPTIONS = [
+  { day: 1, label: "Mon" },
+  { day: 2, label: "Tue" },
+  { day: 3, label: "Wed" },
+  { day: 4, label: "Thu" },
+  { day: 5, label: "Fri" },
+  { day: 6, label: "Sat" },
+  { day: 0, label: "Sun" },
+];
+
+// "Mon–Thu" for a run of days, "Mon, Wed, Fri" for a gap. Empty when the
+// list is missing or covers all seven days (works every day: nothing to say).
+function describeWorkDays(workDays) {
+  if (!Array.isArray(workDays) || !workDays.length) return "";
+  const set = new Set(workDays.map(Number));
+  const picked = WORK_DAY_OPTIONS.map((o, i) => (set.has(o.day) ? i : -1)).filter((i) => i >= 0);
+  if (!picked.length || picked.length === 7) return "";
+  const runs = [];
+  for (const i of picked) {
+    const last = runs[runs.length - 1];
+    if (last && i === last[1] + 1) last[1] = i;
+    else runs.push([i, i]);
+  }
+  return runs
+    .map(([from, to]) => (from === to
+      ? WORK_DAY_OPTIONS[from].label
+      : `${WORK_DAY_OPTIONS[from].label}–${WORK_DAY_OPTIONS[to].label}`))
+    .join(", ");
+}
 
 // Wire shape for `startPoint` on PUT: null (office) or { address, lat, lng }.
 // A typed-but-unpicked address has no coordinates and is never sent.
@@ -2773,6 +2822,14 @@ function buildStartPointPayload(form) {
   if (form.startMode !== "home") return null;
   const p = form.startPoint;
   return p ? { address: p.address, lat: p.lat, lng: p.lng } : null;
+}
+
+// `workDays` on the wire: nothing while the gate is off; null when all seven
+// days are on (works every day); otherwise the picked days, stored 0 = Sunday.
+function buildWorkDaysPayload(enabled, workDays) {
+  if (!enabled) return {};
+  const days = [...new Set(workDays || [])].sort((a, b) => a - b);
+  return { workDays: days.length === 7 ? null : days };
 }
 
 function startPointNeedsPick(form) {
@@ -2794,6 +2851,9 @@ export function TeamTab({ showToast }) {
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_TECH_FORM);
+  // GATE_TECH_WORK_DAYS: the server marks the roster response when the gate is
+  // on; off, the Work days row and summary never render and nothing is sent.
+  const [workDaysEnabled, setWorkDaysEnabled] = useState(false);
   const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
@@ -2865,6 +2925,7 @@ export function TeamTab({ showToast }) {
     try {
       const res = await adminFetch("/admin/timetracking/technicians");
       setTechs(res.technicians || []);
+      setWorkDaysEnabled(res.workDaysEnabled === true);
     } catch {
       /* ignore */
     }
@@ -2877,13 +2938,17 @@ export function TeamTab({ showToast }) {
 
   const handleSave = async () => {
     if (!form.name.trim()) return;
+    if (workDaysEnabled && form.workDays.length === 0) {
+      showToast("Pick at least one work day");
+      return;
+    }
     setSaving(true);
     try {
       if (editingId) {
-        const { startMode, startText, startPoint, ...rest } = form;
+        const { startMode, startText, startPoint, workDays, ...rest } = form;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
-          body: JSON.stringify({ ...rest, startPoint: buildStartPointPayload(form) }),
+          body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays), startPoint: buildStartPointPayload(form) }),
         });
         // Leaving the dispatch pool through Edit (Employment → Inactive or
         // Prospective, or field eligibility removed) surfaces the same
@@ -2896,10 +2961,10 @@ export function TeamTab({ showToast }) {
             : "Technician updated",
         );
       } else {
-        const { startMode, startText, startPoint, ...rest } = form;
+        const { startMode, startText, startPoint, workDays, ...rest } = form;
         await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
-          body: JSON.stringify(rest),
+          body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays) }),
         });
         showToast("Technician added");
       }
@@ -3034,6 +3099,9 @@ export function TeamTab({ showToast }) {
       emergencyContactName: tech.emergency_contact_name || "",
       emergencyContactPhone: tech.emergency_contact_phone || "",
       ssnLast4: tech.ssn_last4 || "",
+      workDays: Array.isArray(tech.work_days) && tech.work_days.length
+        ? tech.work_days.map(Number)
+        : [0, 1, 2, 3, 4, 5, 6],
       ...(tech.start_address && tech.start_lat != null && tech.start_lng != null
         ? {
             startMode: "home",
@@ -3264,6 +3332,48 @@ export function TeamTab({ showToast }) {
                         Pick the address from the list
                       </div>
                     )}
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Work days (GATE_TECH_WORK_DAYS): the weekdays this person works.
+                All seven on = every day. Off days are skipped by slot offers
+                and automatic booking; the office can still place work there
+                and gets a warning. */}
+            {workDaysEnabled && (
+              <div style={{ gridColumn: "1 / -1" }}>
+                {" "}
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                  Work days
+                </div>{" "}
+                <div role="group" aria-label="Work days" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {WORK_DAY_OPTIONS.map(({ day, label }) => {
+                    const on = form.workDays.includes(day);
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() =>
+                          setForm((f) => ({
+                            ...f,
+                            workDays: on ? f.workDays.filter((d) => d !== day) : [...f.workDays, day],
+                          }))
+                        }
+                        style={{
+                          ...sBtn(on ? D.green : "transparent", on ? D.white : D.muted),
+                          border: `1px solid ${on ? D.green : D.border}`,
+                          minWidth: 44,
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>{" "}
+                {form.workDays.length === 0 && (
+                  <div role="alert" style={{ fontSize: 11, color: D.amber, marginTop: 4 }}>
+                    Pick at least one work day
                   </div>
                 )}
               </div>
@@ -3618,10 +3728,10 @@ export function TeamTab({ showToast }) {
             {" "}
             <button
               onClick={handleSave}
-              disabled={saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form))}
+              disabled={saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0)}
               style={{
                 ...sBtn(D.green, D.white),
-                opacity: saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) ? 0.5 : 1,
+                opacity: saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0) ? 0.5 : 1,
               }}
             >
               {saving ? "Saving..." : editingId ? "Update" : "Add"}
@@ -3739,6 +3849,11 @@ export function TeamTab({ showToast }) {
                   {isAdmin && (
                     <div style={{ fontSize: 11, fontWeight: 400, color: D.muted, marginTop: 2 }}>
                       {describeStartPoint(t)}
+                    </div>
+                  )}
+                  {workDaysEnabled && describeWorkDays(t.work_days) && (
+                    <div style={{ fontSize: 11, fontWeight: 400, color: D.muted, marginTop: 2 }}>
+                      {`Works ${describeWorkDays(t.work_days)}`}
                     </div>
                   )}
                   {(t.job_title || t.pay_rate) && (

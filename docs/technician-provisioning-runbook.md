@@ -167,6 +167,18 @@ to it is lost.
 Not yet: automated visit texts from the line (owner ruling — those stay on
 the location lines).
 
+## Work days (`GATE_TECH_WORK_DAYS`)
+
+Set a technician's weekdays on the Team tab: Edit, then "Work days" (seven
+toggles; all seven on means every day, and at least one must stay on). With
+the gate on, the portal stops offering or automatically placing that
+technician's work on a day they do not work: slot offers skip them, and an
+automatic booking that lands on such a day stays unassigned for the owner,
+exactly like an absence. The office can still put them on an off day by hand;
+the schedule save, board drag and assign go through and show a warning line
+("<Name> does not work on Fridays."). The open-visit nudge still reaches a
+tech who really holds a visit on an off day. Gate off: the setting is ignored.
+
 ## What the account can do
 
 A technician logs in to the admin app and lands on `/admin/today`; `/tech`

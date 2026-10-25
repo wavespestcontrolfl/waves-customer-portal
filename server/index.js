@@ -759,6 +759,7 @@ app.use('/api/admin/customers/:customerId/consumer-notices', require('./routes/a
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
 app.use('/api/admin/neighborhood-access', require('./routes/admin-neighborhood-access'));
+app.use('/api/admin/payroll', require('./routes/admin-payroll'));
 app.use('/api/admin/access-codes', require('./routes/admin-access-codes'));
 app.use('/api/admin/customer-geocodes', require('./routes/admin-customer-geocodes'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);

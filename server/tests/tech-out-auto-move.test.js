@@ -338,6 +338,18 @@ describe('autoAssignParkedAlert', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
+  test('GATE_TECH_WORK_DAYS: each candidate is checked with workDays, so a tech who does not work that day is skipped', async () => {
+    assertAssignableTechnician.mockRejectedValue(Object.assign(new Error('off day'), { code: NOT_ASSIGNABLE, offDay: true }));
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query({}), query({})];
+    db.mockImplementation(() => queue.shift() || query({}));
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(assertAssignableTechnician).toHaveBeenCalledWith(CANDIDATE.id, expect.objectContaining({ workDays: true }));
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'no_eligible_candidate' });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
   test('success: moves via the canonical mover, pins the expect CAS, resolves the alert, broadcasts', async () => {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
     const stopQuery = query(baseStop());
@@ -546,6 +558,36 @@ describe('in-transaction fit recheck (moveGuard)', () => {
     await expect(guard({ trx, technicianId: CANDIDATE.id, service: baseStop() }))
       .rejects.toMatchObject({ code: 'TECH_OUT_AUTO_MOVE_NO_FIT' });
     expect(trx).toHaveBeenCalledWith('scheduled_services');
+  });
+
+  // GATE_TECH_WORK_DAYS: a work-days edit between ranking and the commit.
+  test('the move transaction rechecks work days: an off-day candidate refuses before capability or fit reads', async () => {
+    const guard = await capturedMoveGuard();
+    assertAssignableTechnician.mockClear();
+    assertAssignableTechnician.mockRejectedValueOnce(Object.assign(new Error('off day'), { code: NOT_ASSIGNABLE, offDay: true }));
+    const trx = jest.fn(() => { throw new Error('no further read once the day is an off day'); });
+
+    await expect(guard({ trx, technicianId: CANDIDATE.id, service: baseStop() }))
+      .rejects.toMatchObject({ code: NOT_ASSIGNABLE });
+    expect(assertAssignableTechnician).toHaveBeenCalledWith(CANDIDATE.id, { conn: trx, date: DATE, workDays: true });
+  });
+
+  test('an off-day refusal at commit is a failed candidate: the next candidate is tried, and when none is left the card stays open as no_eligible_candidate', async () => {
+    const other = { ...CANDIDATE, id: 'tech-3', name: 'Tech Three' };
+    SmartRebooker.reschedule
+      .mockRejectedValueOnce(Object.assign(new Error('off day'), { code: NOT_ASSIGNABLE, status: 422, statusCode: 422 }))
+      .mockResolvedValueOnce({ success: true });
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE, other]), query([]), query([]), query([]), query([])];
+    db.mockImplementation(() => queue.shift() || query({}));
+    const moved = await autoAssignParkedAlert({ alertId: ALERT_ID });
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(2);
+    expect(moved.moved).toBe(true);
+
+    jest.clearAllMocks();
+    SmartRebooker.reschedule.mockRejectedValue(Object.assign(new Error('off day'), { code: NOT_ASSIGNABLE, status: 422, statusCode: 422 }));
+    const queue2 = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([])];
+    db.mockImplementation(() => queue2.shift() || query({}));
+    expect(await autoAssignParkedAlert({ alertId: ALERT_ID })).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'no_eligible_candidate' });
   });
 
   test('candidate still fits on the move transaction: the move proceeds', async () => {

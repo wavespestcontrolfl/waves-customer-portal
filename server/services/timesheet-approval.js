@@ -805,6 +805,13 @@ async function unlockWeek({ technicianId, weekStart, adminId, reason, reviewToke
       );
     }
 
+    // A finalized paycheck was worked out from these hours (GATE_PAYROLL pay
+    // runs). Reopening the week would leave the check without its hours.
+    const paid = await trx('payroll_checks')
+      .where({ technician_id: technicianId, week_start: start, status: 'finalized' })
+      .first('id');
+    if (paid) throw approvalHttpError(409, 'Void the pay run for this week first.');
+
     await trx('time_entries')
       .where({ technician_id: technicianId })
       .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])

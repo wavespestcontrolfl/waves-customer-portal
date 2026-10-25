@@ -161,3 +161,36 @@ describe('out_today disables the drop target (Codex r4 P2 on PR #4678)', () => {
     expect(container.querySelector('.ring-dashed')).not.toBeNull();
   });
 });
+
+// GATE_TECH_WORK_DAYS: a technician who does not work today shows "Off", but the
+// card stays a valid drop target (the office may place work there; it warns).
+describe('off_today (GATE_TECH_WORK_DAYS)', () => {
+  const offTech = (extra = {}) => ({
+    id: 'tech-3', name: 'Tech Three', status: 'idle', current_job_id: null,
+    out_today: false, off_today: true, today_completed: 0, today_total: 0, location_updated_at: null,
+    ...extra,
+  });
+
+  it('shows an Off badge and keeps the card a drop target', () => {
+    const { container } = render(
+      <TechCard tech={offTech()} jobs={new Map()} selected={false} onSelect={vi.fn()} isDropTarget={true} />
+    );
+    expect(screen.getByText('Off')).toBeInTheDocument();
+    expect(container.querySelector('[data-tech-card-id="tech-3"]')).not.toBeNull();
+    expect(container.querySelector('.ring-dashed')).not.toBeNull();
+  });
+
+  it('shows no Off badge for a tech who works today, or when the server sends no flag', () => {
+    const { rerender } = render(
+      <TechCard tech={offTech({ off_today: false })} jobs={new Map()} selected={false} onSelect={vi.fn()} isDropTarget={false} />
+    );
+    expect(screen.queryByText('Off')).toBeNull();
+    rerender(<TechCard tech={offTech({ off_today: undefined })} jobs={new Map()} selected={false} onSelect={vi.fn()} isDropTarget={false} />);
+    expect(screen.queryByText('Off')).toBeNull();
+  });
+
+  it('an out tech shows Out, not Off', () => {
+    render(<TechCard tech={offTech({ out_today: true })} jobs={new Map()} selected={false} onSelect={vi.fn()} isDropTarget={false} />);
+    expect(screen.queryByText('Off')).toBeNull();
+  });
+});

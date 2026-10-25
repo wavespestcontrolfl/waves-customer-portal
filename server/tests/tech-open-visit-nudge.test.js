@@ -458,6 +458,26 @@ describe('recipient, absence, and failure outcomes (Codex r1)', () => {
     expect(absenceChain.whereIn).toHaveBeenCalledWith('technician_id', ['tech-a']);
   });
 
+  test('GATE_TECH_WORK_DAYS on: a visit a Monday-to-Thursday tech holds on a Friday still gets its nudge (the nudge opts out of off days)', async () => {
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    try {
+      const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
+      db.mockImplementation((table) => {
+        if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+        // Were the nudge to ask for off days, this is the row it would read.
+        if (table === 'technicians') return chain({ select: jest.fn().mockResolvedValue([{ id: 'tech-a', work_days: [1, 2, 3, 4] }]) });
+        return chain();
+      });
+      // 2026-10-30 23:00 UTC = 7 PM ET on a Friday.
+      const r = await runTechOpenVisitNudge({ now: new Date('2026-10-30T23:00:00Z') });
+      expect(r).toMatchObject({ sent: 1, skipped: 0 });
+      expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+      expect(db.mock.calls.map((c) => c[0])).not.toContain('technicians');
+    } finally {
+      delete process.env.GATE_TECH_WORK_DAYS;
+    }
+  });
+
   test('a thrown send marked not_sent releases the claim; an uncertain result keeps it', async () => {
     const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
     const run = async () => {

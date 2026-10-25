@@ -20219,7 +20219,7 @@ const CallRecordingProcessor = {
                       // (dated absences), same check the package helper runs.
                       if (followUpTechId && packageFollowUp) {
                         try {
-                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate });
+                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate, workDays: true });
                         } catch (eligErr) {
                           if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                           logger.warn(`[call-proc] package visit 2 technician ${followUpTechId} not assignable on ${fuPlan.scheduledDate}; seeding unassigned`);
@@ -20520,7 +20520,7 @@ const CallRecordingProcessor = {
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = reuseCandidateTechId;
                     try {
-                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day });
+                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true });
                       // A PICKED technician passed the capability filter on a
                       // plain read; re-read it under the technician share lock
                       // so an Off saved since cannot receive this visit.
@@ -21334,7 +21334,7 @@ const CallRecordingProcessor = {
                 // triage note already says who was auto-assigned (or nobody).
                 if (insertData.technician_id) {
                   try {
-                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10) });
+                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10), workDays: true });
                     // A PICKED technician passed the capability filter on a
                     // plain read; re-read it under the technician share lock
                     // so an Off saved since cannot receive this visit.
