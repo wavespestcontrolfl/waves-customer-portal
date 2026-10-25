@@ -6405,8 +6405,8 @@ export function ApprovalsTab({ showToast }) {
                               >
                                 <div style={{ flex: 1, minWidth: 200 }}>
                                   <strong>Shift</strong>·{" "}
-                                  {new Date(e.clock_in).toLocaleString()} to{" "}
-                                  {new Date(e.clock_out).toLocaleString()}
+                                  {formatETDateTime(e.clock_in)} to{" "}
+                                  {formatETDateTime(e.clock_out)}
                                 </div>
                                 <button
                                   onClick={() => confirmAutoClose(e.id)}
