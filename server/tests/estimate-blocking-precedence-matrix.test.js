@@ -434,6 +434,13 @@ describe('source order (the cells above that HTTP cannot reach, and a guard agai
     for (const needle of ['if (gatedAddOn) return res.status(409).json(gatedAddOn);', 'contactLastNameError', 'HOLD_EXPIRED_409', 'No appointment is needed for this renewal', 'quoteRequirement.quoteRequired', 'estimateTrenchingReviewRequired(estData)']) {
       expect([needle, at(needle) > park]).toEqual([needle, true]);
     }
+    // The Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE) follows the blocking decision and the Bermuda gate, and is ahead of every
+    // validation, hold, card and write.
+    const notice = at("consumerNotice.consumerNoticeBlocksAccept(estimate)");
+    expect(notice).toBeGreaterThan(at('if (gatedAddOn) return res.status(409).json(gatedAddOn);'));
+    for (const needle of ['contactLastNameError', 'HOLD_EXPIRED_409', 'No appointment is needed for this renewal', 'quoteRequirement.quoteRequired', 'estimateTrenchingReviewRequired(estData)', 'db.transaction(']) {
+      expect([needle, at(needle) > notice]).toEqual([needle, true]);
+    }
     // The Bermuda gate no longer answers ahead of the accepted / inactive refusals.
     const head = estSrc.slice(estSrc.indexOf("router.put('/:token/accept'") > 0 ? estSrc.indexOf("router.put('/:token/accept'") : 0, estSrc.indexOf('// ORDER (the same as /data'));
     expect(head).not.toContain("code: 'BERMUDA_SUPPRESSION_GATED'");

@@ -82,6 +82,18 @@ function ContractBodyText({ text }) {
   ));
 }
 
+// A Florida consumer notice opened from the estimate page (the server marks it fromEstimate) offers the way back,
+// when this tab has a page to go back to.
+function BackToEstimateButton({ contract }) {
+  if (contract.fromEstimate !== true || contract.documentTemplateKey !== 'consumer_notice.fdacs_13692') return null;
+  if (window.history.length <= 1) return null;
+  return (
+    <BrandButton type="button" fullWidth style={{ marginTop: SP.md }} onClick={() => window.history.back()}>
+      Back to your estimate
+    </BrandButton>
+  );
+}
+
 export default function ContractSignPage() {
   const { token } = useParams();
   // Always reflects the active token so an in-flight sign POST can tell if the
@@ -323,6 +335,7 @@ export default function ContractSignPage() {
                 <p style={{ margin: '8px 0 0', color: DOC.muted, fontSize: FS.body, lineHeight: LH.body }}>
                   Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature{isAutopay ? ' and authorization' : ''}.
                 </p>
+                <BackToEstimateButton contract={contract} />
               </div>
             ) : !needsSignature ? (
               <div>

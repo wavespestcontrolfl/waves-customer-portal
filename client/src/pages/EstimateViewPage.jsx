@@ -79,6 +79,7 @@ import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyle
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
+import ConsumerNoticeSign, { ConsumerNoticeHint, CONSUMER_NOTICE_HINT } from '../components/estimate/ConsumerNoticeSign';
 import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
 import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } from '@estimate-copy-claims';
 import { estimateCopyFor } from '../lib/estimate-copy';
@@ -5938,6 +5939,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // expired staff token must not disable an ordinary customer view.
   const adminDraftPreview = data?.adminDraftPreview === true;
   const readOnlyPreview = data?.verifiedStaffPreview === true || adminDraftPreview;
+  // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): /data carries cta.consumerNotice only with the gate on and a
+  // termite line on an open estimate. Until it reads 'signed' EVERY accept control is held off through this one flag
+  // (slot-to-payment choice, confirm, the prepay confirm, the accept itself); the server refuses the accept too.
+  const consumerNoticeBlocked = !!data?.cta?.consumerNotice && data.cta.consumerNotice.state !== 'signed';
   // Headless document capture (?mode=pdf — mirrors /report/:token?mode=pdf):
   // renders EstimateProposalDocument instead of the interactive page. The
   // /data fetch carries the mode (plus the optional signed valid-through pin)
@@ -6554,6 +6559,24 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // read it from the resolved value; every other caller ignores it.
     return body;
   }, [token, adminPreviewRequested, pdfDocumentMode, pdfDocPin]);
+
+  // Back from the signing page (a bfcache restore or a tab switch), a customer waiting on the Florida consumer notice
+  // sees it signed without a manual reload. Listens only while the notice blocks the accept.
+  useEffect(() => {
+    if (!consumerNoticeBlocked) return undefined;
+    const refresh = () => {
+      if (ctaPhaseRef.current === 'submitting') return;
+      loadEstimate({ preserveSelection: true }).catch(() => {});
+    };
+    const onPageShow = (event) => { if (event.persisted) refresh(); };
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh(); };
+    window.addEventListener('pageshow', onPageShow);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('pageshow', onPageShow);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [consumerNoticeBlocked, loadEstimate]);
 
 
   // A different estimate token is a fresh session — let its first load count.
@@ -7459,6 +7482,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
       return;
     }
+    // No hold is reserved until the Florida consumer notice is signed.
+    if (consumerNoticeBlocked) {
+      setError(CONSUMER_NOTICE_HINT);
+      return;
+    }
     // Belt and braces behind the disabled buttons (codex r11 P2): a retained
     // callback or a keyboard event that skips `disabled` must not re-adopt a
     // hold that recovery is deleting, or one it failed to delete.
@@ -7577,7 +7605,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [readOnlyPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
+  }, [readOnlyPreview, consumerNoticeBlocked, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -7665,6 +7693,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // blocks the flow before review, and the server 409s a draft accept.
     if (readOnlyPreview) {
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
+      return;
+    }
+    if (consumerNoticeBlocked) {
+      setError(CONSUMER_NOTICE_HINT);
       return;
     }
     // Required-field guard mirrors confirmDisabled below (defense in depth —
@@ -7977,6 +8009,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             await loadEstimate({ preserveSelection: true });
             throw new Error(body.error || 'Your payment terms were updated — please review them and confirm again.');
           }
+          if (body.code === 'consumer_notice_required') {
+            // The Florida consumer notice is not on file (this tab loaded before it was asked for, or it was never
+            // signed): nothing was accepted. Refetch so the notice card shows the real state, keep the reservation.
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || CONSUMER_NOTICE_HINT);
+          }
           if (body.code === 'LAWN_LIMITS_STALE') {
             // The lawn limits copy changed since this tab loaded: nothing was accepted. Refetch so
             // the card is the one the server will record, keep the reservation and selections,
@@ -8115,7 +8153,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, consumerNoticeBlocked, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -8124,6 +8162,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // is off, so this falls straight through to performAccept.
   const handleConfirm = useCallback(async () => {
     if (readOnlyPreview) return;
+    // Before any card or deposit step mints an intent.
+    if (consumerNoticeBlocked) {
+      setError(CONSUMER_NOTICE_HINT);
+      return;
+    }
     // No card step and no accept while the estimate has no phone: the server
     // refuses both. The review button is disabled for it; this covers every
     // other entry (the annual-prepay confirm).
@@ -8363,7 +8406,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       }
     }
     await performAccept();
-  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, extendHoldAndSettle, noteRenderedRecurringConsent]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, consumerNoticeBlocked, extendHoldAndSettle, noteRenderedRecurringConsent]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
@@ -8673,12 +8716,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   useEffect(() => {
     if (!seamlessAutoPay || serviceMode === 'one_time') return;
     if (ctaPhase !== 'configure' || !selectedSlotId) return;
-    if (readOnlyPreview || existingAppointment || invoiceOnlyAccept || manualScheduleAccept) return;
+    if (readOnlyPreview || consumerNoticeBlocked || existingAppointment || invoiceOnlyAccept || manualScheduleAccept) return;
     if (data?.estimate?.billByInvoice || data?.estimate?.siteConfirmationHold) return;
     if (autoAdvancedSlotRef.current === selectedSlotId) return;
     autoAdvancedSlotRef.current = selectedSlotId;
     handlePaymentChoice('pay_at_visit');
-  }, [seamlessAutoPay, serviceMode, ctaPhase, selectedSlotId, readOnlyPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, data, handlePaymentChoice]);
+  }, [seamlessAutoPay, serviceMode, ctaPhase, selectedSlotId, readOnlyPreview, consumerNoticeBlocked, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, data, handlePaymentChoice]);
 
   const handleAddServiceRequest = useCallback(async () => {
     // Draft preview: don't file a real bundle inquiry (it notifies the team)
@@ -9868,6 +9911,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
   const reviewContent = (
     <>
+          <ConsumerNoticeHint blocked={consumerNoticeBlocked} />
           {existingAppointment ? (
             <>
               <ExistingAppointmentCard
@@ -9884,7 +9928,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // unmounts the inline Payment Element mid-confirmSetup and
                 // the in-flight handleConfirm closure would book the OLD
                 // choice the UI no longer shows.
-                disabled={readOnlyPreview || ctaPhase === 'submitting' || inlineConfirmBusy || recoveryInFlight || recoveryStuck}
+                disabled={readOnlyPreview || consumerNoticeBlocked || ctaPhase === 'submitting' || inlineConfirmBusy || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -9988,7 +10032,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               ) : null}
               <button
                 type="button"
-                disabled={ctaPhase === 'submitting' || replacingPaymentMethod || !consentSatisfied}
+                disabled={consumerNoticeBlocked || ctaPhase === 'submitting' || replacingPaymentMethod || !consentSatisfied}
                 onClick={() => {
                   prepayChargeAckRef.current = {
                     totalCents: prepayChargeQuote.totalCents,
@@ -10150,7 +10194,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 ? (prepayAfterVisit ? 'Confirm the 12-month plan' : 'Confirm & pay the 12-month plan')
                 : (inlineCardState.methodType === 'us_bank_account' ? 'Confirm booking & save bank account' : 'Confirm booking & save card'))
               : null}
-            confirmDisabled={!!prepayChargeQuote
+            confirmDisabled={consumerNoticeBlocked
+              || !!prepayChargeQuote
               // While the exact-total quote card is up, ITS button is the
               // only confirm — the underlying review CTA stays disabled so
               // a plain confirm can't race the payment authorization
@@ -10224,6 +10269,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   );
   const bookingContent = (
     <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+            {/* Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): right above the accept controls; absent with the gate off. */}
+            <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} />
             {canShowSlotPicker ? (
               // SlotPicker takes no disabled prop, so freeze it from out here
               // while a reserve/accept is in flight (ctaPhase 'submitting'
@@ -10269,6 +10316,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const paymentContent = (
     (existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
             <div id={PAYMENT_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+              <ConsumerNoticeHint blocked={consumerNoticeBlocked} />
               <PaymentPreferenceButtons
                 onSelect={handlePaymentChoice}
                 // Draft preview: dead from first render (Codex rd 1), not just
@@ -10276,7 +10324,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // payment options the customer will get. Forcing cta.canAccept
                 // false server-side would fall through to the null-terminal
                 // "expired" card and destroy the preview's purpose.
-                disabled={readOnlyPreview || ctaPhase === 'submitting' || recoveryInFlight || recoveryStuck}
+                disabled={readOnlyPreview || consumerNoticeBlocked || ctaPhase === 'submitting' || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
