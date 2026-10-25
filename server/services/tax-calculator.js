@@ -186,13 +186,15 @@ const TaxCalculator = {
    * dethatching, topdressing, plugging or aeration. A name that also names
    * building pest work (pests, termites, rodents, roaches, bed bugs, fleas,
    * bees, wasps, a WDO inspection) or mosquitoes is left to the normal rules,
-   * so a combined visit keeps its tax. Underscores count as spaces, so a
-   * service key reads like its name.
+   * so a combined visit keeps its tax. "Lawn pest" (turf insects, as in Lawn
+   * Pest Knockdown) is lawn work, not building pest work. Underscores count as
+   * spaces, so a service key reads like its name.
    */
   isGroundsTreatment(serviceType) {
     const name = String(serviceType || '').replace(/_/g, ' ');
+    const rest = name.replace(/\b(?:lawn|turf)\s+pests?\b/gi, 'lawn');
     return /\b(?:lawns?|turf|sod|trees?|shrubs?|palms?|weeds?|fertili[sz]\w*|pre-?emergent|fire\s?ants?|dethatch\w*|top-?dress\w*|plugging|aerat\w*)\b/i.test(name)
-      && !/\b(?:pests?|termites?|rodents?|(?:cock)?roach(?:es)?|bed\s?bugs?|fleas?|bees?|wasps?|wdo|mosquito(?:es)?|misting)\b/i.test(name);
+      && !/\b(?:pests?|termites?|rodents?|(?:cock)?roach(?:es)?|bed\s?bugs?|fleas?|bees?|wasps?|wdo|mosquito(?:es)?|misting)\b/i.test(rest);
   },
 
   /**

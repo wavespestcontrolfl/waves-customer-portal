@@ -67,6 +67,7 @@ const GROUNDS_NAMES = [
   'Bed Pre-Emergent Weed Control',
   'Shell, Rock & Paver Weed Control',
   'Topdressing',
+  'Lawn Pest Knockdown Service',
   'lawn_recurring',
 ];
 
@@ -119,6 +120,10 @@ describe('isGroundsTreatment', () => {
     ['Lawn Plugging', true],
     ['tree_shrub', true],
     ['area_addon_fire_ant_yard', true],
+    ['Lawn Pest Knockdown Service', true],
+    ['lawn_pest_knockdown', true],
+    ['Lawn & Pest Control', false],
+    ['Lawn Pest Knockdown + Quarterly Pest Control', false],
     ['Lawn Care Visit #4 + Quarterly Pest Control', false],
     ['Seasonal Mosquito Control Service', false],
     ['Mosquito Barrier Treatment', false],
