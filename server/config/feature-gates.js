@@ -1224,6 +1224,15 @@ const gates = {
   // Rollback: unset.
   reviewAskFixedDay0: process.env.GATE_REVIEW_ASK_FIXED_DAY0 === 'true',
 
+  // Exact quotes for the tech-voice fact check (owner 2026-10-05, closing
+  // #5893: fix it in the prompts, keep the code checks): the checker is asked
+  // for the bare words of one record line (no "Visit report:" frame), the
+  // writer for each fact in its source's own words, and a quote held by
+  // several record lines is dated by the newest of them, not the oldest.
+  // Off = today's prompts and dating. Customer-facing text, so opt-in in
+  // EVERY env. Rollback: unset.
+  reviewAskExactQuotes: process.env.GATE_REVIEW_ASK_EXACT_QUOTES === 'true',
+
   // Review ask texts/emails link STRAIGHT to the tracked /api/rate/:token/go
   // redirect (which 302s to the Google review form) instead of the /rate/<token>
   // thank-you page. Off = every ask body resolves {review_url} to /rate/<token>.
