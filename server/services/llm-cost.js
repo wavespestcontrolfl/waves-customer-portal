@@ -287,7 +287,10 @@ function costUsd(provider, t, p) {
 }
 
 // Token sums per lane × provider × model over [from, to). `usage_unknown`
-// counts rows whose usage was never captured (null counters). With a
+// counts SUCCESSFUL calls whose usage was never captured (null counters). A
+// failed call (ok = false) never captures usage and bills nothing, so it is
+// not unknown: counting it turned a lane's spike check off for a week after
+// one failure (ok is NOT NULL in the table; a null is read as a success). With a
 // `tierFloor`, calls whose prompt reaches it come back one row each
 // (`per_call`), so each can be priced at its own long-prompt tier; a sum of
 // several calls cannot say which tier any of them reached. A session_turn
@@ -318,7 +321,7 @@ function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
       'provider',
       conn.raw('COALESCE(served_model, requested_model) AS model'),
       conn.raw('COUNT(*)::int AS calls'),
-      conn.raw('COUNT(*) FILTER (WHERE input_tokens IS NULL)::int AS usage_unknown'),
+      conn.raw('COUNT(*) FILTER (WHERE input_tokens IS NULL AND ok IS DISTINCT FROM false)::int AS usage_unknown'),
       ...sums,
     );
   if (tierFloor == null) return grouped;
@@ -330,7 +333,7 @@ function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
       'provider',
       conn.raw('COALESCE(served_model, requested_model) AS model'),
       conn.raw('1 AS calls'),
-      conn.raw('(input_tokens IS NULL)::int AS usage_unknown'),
+      conn.raw('(input_tokens IS NULL AND ok IS DISTINCT FROM false)::int AS usage_unknown'),
       conn.raw('true AS per_call'),
       ...['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens']
         .map((c) => conn.raw(`COALESCE(${c}, 0)::bigint AS ${c}`)),
@@ -340,7 +343,8 @@ function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
 
 /**
  * Fold lane × model rows into per-lane estimates (pure):
- * Map(laneId → { usd, unpricedCalls }). unpricedCalls = calls with no usage,
+ * Map(laneId → { usd, unpricedCalls }). unpricedCalls = successful calls with
+ * no usage (a failed call has none to bill),
  * plus every call on a model the price table does not list, at a
  * long-prompt tier the feed gives no rate for, or in a session turn whose
  * total prompt reaches a tier (one turn can be several shorter calls).
