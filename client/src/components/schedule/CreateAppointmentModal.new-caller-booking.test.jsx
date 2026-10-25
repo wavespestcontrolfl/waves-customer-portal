@@ -169,6 +169,55 @@ describe('CreateAppointmentModal new-caller Book', () => {
     expect(JSON.parse(posts(fetcher, '/admin/schedule/new-caller')[0][1].body).callLogId).toBeNull();
   });
 
+  it('a failed call lookup is not "no live call": Book stays blocked until Try again loads the calls', async () => {
+    const fetcher = installFetch();
+    const base = fetcher.getMockImplementation();
+    let fail = true;
+    fetcher.mockImplementation((input, options) => (String(input).endsWith('/admin/schedule/new-caller/calls') && fail
+      ? Promise.reject(new TypeError('Failed to fetch'))
+      : base(input, options)));
+    mount({ newCallerBooking: true });
+    fireEvent.click(screen.getByText('pick suggestion'));
+    expect(await screen.findByText(/The calls did not load/)).toBeTruthy();
+    await addService();
+    expect(screen.getByRole('button', { name: 'Book' }).disabled).toBe(true);
+    expect(screen.queryByText(/No live call found/)).toBeNull();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('This call')).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Book' }).disabled).toBe(false));
+  });
+
+  it('a pending Book keeps every save locked after the form leaves Book mode', async () => {
+    const fetcher = installFetch();
+    const base = fetcher.getMockImplementation();
+    let release;
+    fetcher.mockImplementation((input, options = {}) => (String(input).endsWith('/admin/schedule/new-caller') && options.method === 'POST'
+      ? new Promise((resolve) => { release = () => resolve(json({ ok: true, id: 'visit-1', scheduledDate: futureDate(), warnings: [] }, { status: 201 })); })
+      : base(input, options)));
+    // Phone match on: a typed name and phone make the one-Save customer flow ready to save.
+    mount({ newCallerBooking: true, newCustomerPhoneMatch: true });
+    fireEvent.click(screen.getByText('pick suggestion'));
+    await screen.findByText('This call');
+    await addService();
+    const book = await screen.findByRole('button', { name: 'Book' });
+    await waitFor(() => expect(book.disabled).toBe(false));
+    fireEvent.click(book);
+    await waitFor(() => expect(posts(fetcher, '/admin/schedule/new-caller')).toHaveLength(1));
+    const [first, last, phone] = Array.from(screen.getByLabelText('quick-add address').closest('div').parentElement.querySelectorAll('input'));
+    fireEvent.change(first, { target: { value: 'Pat' } });
+    fireEvent.change(last, { target: { value: 'Example' } });
+    fireEvent.change(phone, { target: { value: '941-555-0199' } });
+    const pending = screen.getByRole('button', { name: 'Booking…' });
+    expect(pending.disabled).toBe(true);
+    fireEvent.click(pending);
+    expect(posts(fetcher, '/admin/customers/quick-add')).toEqual([]);
+    expect(posts(fetcher, '/admin/schedule')).toEqual([]);
+    release();
+    // Only the pending Book held it: once it settles, the customer flow's save opens.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+  });
+
   it('two services stop Book with a reason', async () => {
     installFetch();
     mount({ newCallerBooking: true });

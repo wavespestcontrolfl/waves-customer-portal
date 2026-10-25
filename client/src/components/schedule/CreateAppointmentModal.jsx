@@ -1700,6 +1700,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [newCallerCallId, setNewCallerCallId] = useState('');
   const [newCallerSubmitting, setNewCallerSubmitting] = useState(false);
   const [newCallerError, setNewCallerError] = useState('');
+  // A failed call lookup is not "no live call": Book waits for a lookup that worked.
+  const [newCallerCallsFailed, setNewCallerCallsFailed] = useState(false);
+  const [newCallerCallsAttempt, setNewCallerCallsAttempt] = useState(0);
   // 409 phone-match conflict from quick-add ({ code, match }) — the admin
   // picks attach / duplicate / separate account and we resubmit with the flag.
   const [quickAddConflict, setQuickAddConflict] = useState(null);
@@ -5189,6 +5192,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!newCallerBookMode) return undefined;
     let cancelled = false;
     setNewCallerCalls(null);
+    setNewCallerCallsFailed(false);
     adminFetch('/admin/schedule/new-caller/calls')
       .then((data) => {
         if (cancelled) return;
@@ -5199,11 +5203,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       })
       .catch(() => {
         if (cancelled) return;
-        setNewCallerCalls([]);
+        setNewCallerCallsFailed(true);
         setNewCallerCallId('');
       });
     return () => { cancelled = true; };
-  }, [newCallerBookMode]);
+  }, [newCallerBookMode, newCallerCallsAttempt]);
   const bookNewCaller = async () => {
     if (!canBookNewCaller) return;
     setNewCallerError('');
@@ -5243,8 +5247,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     && !discountSaveBlockedReason && !tierCatalogBlocksSave;
   // Locked while a one-Save booking waits for the form to settle, so a tap
   // then cannot book twice.
-  const saveEnabled = newCallerBookMode ? canBookNewCaller : (!pendingQuickAddSave && (quickAddSaveMode ? canSaveNewCustomer : canSubmit));
-  const savingLabel = newCallerBookMode ? newCallerSubmitting : (saving || pendingQuickAddSave || (quickAddSaveMode && quickAddSubmitting));
+  // A pending Book locks every save path, whatever mode the form moves to meanwhile.
+  const saveEnabled = !newCallerSubmitting && (newCallerBookMode ? canBookNewCaller : (!pendingQuickAddSave && (quickAddSaveMode ? canSaveNewCustomer : canSubmit)));
+  const savingLabel = newCallerSubmitting || (!newCallerBookMode && (saving || pendingQuickAddSave || (quickAddSaveMode && quickAddSubmitting)));
   const saveNewCustomerThenBook = async () => {
     if (!canSaveNewCustomer) return;
     setQuickAddSaveNotice('');
@@ -5253,6 +5258,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (created) setPendingQuickAddSave({ customerId: String(created.id), totalAtSave });
   };
   const handleSave = (arg) => {
+    if (newCallerSubmitting) return undefined;
     if (newCallerBookMode) return bookNewCaller();
     return quickAddSaveMode ? saveNewCustomerThenBook() : handleSubmit(arg);
   };
@@ -5591,7 +5597,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   {newCallerBookMode && (
                     <div role="group" aria-label="New caller booking" style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 8, padding: 10, background: '#FAFAFA', border: '1px solid #E4E4E7', borderRadius: 8, fontSize: 14, color: '#18181B' }}>
                       <div>Book saves this visit with the address only. Nothing goes to the caller now: the call-recording agent adds the customer after the call and sends the confirmation.</div>
-                      {newCallerCalls === null ? (
+                      {newCallerCallsFailed ? (
+                        <div role="alert" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, color: D.red }}>
+                          <span>The calls did not load. Book waits until they do.</span>
+                          <button type="button" onClick={() => setNewCallerCallsAttempt((n) => n + 1)} style={{ minHeight: 44, padding: '8px 14px', background: 'none', color: '#18181B', border: '1px solid #E4E4E7', borderRadius: 6, fontSize: 14, cursor: 'pointer' }}>
+                            Try again
+                          </button>
+                        </div>
+                      ) : newCallerCalls === null ? (
                         <div style={{ color: D.muted }}>Finding the call…</div>
                       ) : newCallerCalls.length === 0 ? (
                         <div style={{ color: D.muted }}>No live call found. The visit books without a call, and the office gets a reminder to link the customer.</div>
@@ -7002,7 +7015,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               minHeight: 52, opacity: saveEnabled ? 1 : 0.5,
               transition: 'opacity 0.15s',
             }}>
-              {newCallerBookMode ? (newCallerSubmitting ? 'Booking…' : 'Book') : (savingLabel ? 'Scheduling…' : 'Schedule appointment')}
+              {newCallerSubmitting ? 'Booking…' : newCallerBookMode ? 'Book' : (savingLabel ? 'Scheduling…' : 'Schedule appointment')}
             </button>
           )}
         </div>
@@ -7026,7 +7039,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 fontFamily: ROBOTO_STACK,
               }}
             >
-              {savingLabel ? 'Scheduling...' : 'Schedule appointment'}
+              {newCallerSubmitting ? 'Booking…' : newCallerBookMode ? 'Book' : (savingLabel ? 'Scheduling...' : 'Schedule appointment')}
             </button>
           </div>
         )}
