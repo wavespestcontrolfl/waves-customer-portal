@@ -70,7 +70,15 @@ comment above `LONG_TTL_TOOL_NAMES`) and an update to that snapshot test.
    `server/tests/intelligence-bar-write-gate-contract.test.js` — it exists to
    make step 2 unforgettable; it should fail until the registration is right.
 4. The preview must show the operator everything the commit will do
-   (recipient, amount, date — no hidden fields).
+   (recipient, amount, date — no hidden fields), and it must AGREE with the
+   authoritative writer it previews — same eligibility checks in the same
+   ORDER. A preview that re-derives the outcome from its own preflight
+   refuses what the real action allows: `requestAutopaySetupLink`
+   (`server/services/autopay-setup-link.js`) enrolls a consented saved card
+   and returns `auto_secured` BEFORE it validates the delivery channel, so a
+   tool that checks the channel first reported "unavailable" for a customer
+   the Customers-page action handles fine (#6266, #6318 P1). Mirror the
+   writer's order, or apply a check only where it actually gates the write.
 5. Tech-portal contexts stay read-only. Never add a write tool to
    `tech-tools`.
 6. Card life defaults to 10 minutes. Add the tool to `LONG_TTL_TOOL_NAMES` only
