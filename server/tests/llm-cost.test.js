@@ -430,13 +430,13 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
   });
 
-  test('a call the provider refused with no usage is not unknown usage; a timeout, 5xx-other or successful one still is (grouped and per-call rows)', async () => {
+  test('a call refused with a non-retryable status is not unknown usage; a timeout, retryable status, session turn or successful null row still is (grouped and per-call rows)', async () => {
     const sol = { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015' }] } };
     await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }, sol])), now: NOW });
     const at = atET('2026-09-30');
     const window = [atET('2026-09-30', '00'), atET('2026-10-01', '00')];
-    // sms_draft: one priced call and two calls the provider refused (HTTP 400 / 503), no usage captured
-    await app('llm_dispatch_log').insert([row({ created_at: at }), row({ created_at: at, ok: false, error_code: 'anthropic_400', input_tokens: null }), row({ created_at: at, ok: false, error_code: 'anthropic_503', input_tokens: null })]);
+    // sms_draft: one priced call and two calls the provider refused with a status the SDKs never retry
+    await app('llm_dispatch_log').insert([row({ created_at: at }), row({ created_at: at, ok: false, error_code: 'anthropic_400', input_tokens: null }), row({ created_at: at, ok: false, error_code: 'anthropic_403', input_tokens: null })]);
     let res = await llmCost.laneCosts(...window, { conn: app });
     expect(res.byLane.get('sms_draft').usd).toBeCloseTo(3, 9);
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
@@ -460,18 +460,20 @@ postgres('llm cost (PostgreSQL)', () => {
     ]);
     res = await llmCost.laneCosts(...window, { conn: app });
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(6);
-    // 529 (overloaded) is a refusal like 503: not unknown
-    await app('llm_dispatch_log').insert(row({ created_at: at, ok: false, error_code: 'anthropic_529', input_tokens: null }));
+    // a retryable status (429, 503, 529) can end several SDK attempts, an earlier one of which may have
+    // billed: it stays unknown
+    await app('llm_dispatch_log').insert(['anthropic_429', 'anthropic_503', 'anthropic_529']
+      .map((code) => row({ created_at: at, ok: false, error_code: code, input_tokens: null })));
     res = await llmCost.laneCosts(...window, { conn: app });
-    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(6);
-    // a session turn with a refused status may still have billed agent work: it stays unknown
-    await app('llm_dispatch_log').insert(row({ created_at: at, row_kind: 'session_turn', ok: false, error_code: 'anthropic_429', input_tokens: null }));
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(9);
+    // a session turn with even a non-retryable refusal may still have billed agent work: it stays unknown
+    await app('llm_dispatch_log').insert(row({ created_at: at, row_kind: 'session_turn', ok: false, error_code: 'anthropic_400', input_tokens: null }));
     res = await llmCost.laneCosts(...window, { conn: app });
-    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(7);
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(10);
 
     // per-call rows (prompt at or above the tier floor): a refused one is not unknown
     const openai = { provider: 'openai', requested_model: 'gpt-6-sol', served_model: 'gpt-6-sol', created_at: at, lane_id: 'report' };
-    await app('llm_dispatch_log').insert([row({ ...openai, input_tokens: 300_000 }), row({ ...openai, ok: false, error_code: 'openai_401', input_tokens: null }), row({ ...openai, ok: false, error_code: 'openai_429', input_tokens: null })]);
+    await app('llm_dispatch_log').insert([row({ ...openai, input_tokens: 300_000 }), row({ ...openai, ok: false, error_code: 'openai_401', input_tokens: null }), row({ ...openai, ok: false, error_code: 'openai_422', input_tokens: null })]);
     res = await llmCost.laneCosts(...window, { conn: app });
     expect(res.byLane.get('report').unpricedCalls).toBe(0);
     await app('llm_dispatch_log').insert(row({ ...openai, ok: false, error_code: 'openai_timeout', input_tokens: null }));

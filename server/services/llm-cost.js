@@ -44,16 +44,16 @@ const FEED_PROVIDERS = Object.freeze({ anthropic: 'anthropic', openai: 'openai',
 const LIVE_WORKLOAD = "(workload IS NULL OR workload = 'live')";
 // Same rows the hub sums: per-call rows and per-turn session deltas.
 const ROW_KINDS = ['call', 'session_turn'];
-// A call whose usage was never captured is unknown spend, except a failed call the provider REFUSED
-// before processing it (error_code '<provider>_<status>' with a status that means rejection: a bad,
-// unauthorized, unpaid, forbidden, missing, too-large or invalid request, a rate limit, or an
-// unavailable / overloaded service; e.g. anthropic_400, openai_401, gemini_503). That call billed
-// nothing. Every other failure (a timeout, 408/504/524, a 500/502, a body read error, an unclassified
-// 'error') may have been processed and billed, so its usage stays unknown.
-const REFUSED_STATUSES = ['400', '401', '402', '403', '404', '413', '422', '429', '503', '529'];
-// Single calls only: a Managed Agent session_turn can carry a refused status from its event stream
-// after the agent already did billable work (the message is posted before the stream opens), so a
-// session turn with no usage stays unknown whatever its error code (Codex P2 on #6669).
+// A call whose usage was never captured is unknown spend, except a single call the provider REFUSED
+// with a status the SDKs never retry (error_code '<provider>_<status>': a bad, unauthorized, unpaid,
+// forbidden, missing, too-large or invalid request, e.g. anthropic_400, openai_401, gemini_402). Such a
+// status ends the first and only attempt before any processing, so the call billed nothing. A retryable
+// status (408, 409, 429, 5xx incl. 503/529) can be the last of several SDK attempts, an earlier one of
+// which may have billed, so it stays unknown, like a timeout, a body read failure or an unclassified
+// 'error' (pre-push review rounds on #6669). Single calls only: a Managed Agent session_turn can carry a
+// refused status from its event stream after the agent already did billable work (the message is posted
+// before the stream opens), so a session turn with no usage stays unknown (Codex P2 on #6669).
+const REFUSED_STATUSES = ['400', '401', '402', '403', '404', '413', '422'];
 const USAGE_UNKNOWN_SQL = `input_tokens IS NULL AND NOT (row_kind = 'call' AND ok IS FALSE AND COALESCE(error_code, '') ~ '^[a-z0-9]+_(${REFUSED_STATUSES.join('|')})$')`;
 
 // Spend-spike rule: yesterday's estimated spend on a lane is at least
