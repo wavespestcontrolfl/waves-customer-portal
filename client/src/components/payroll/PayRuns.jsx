@@ -8,7 +8,8 @@ import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { Table, TBody, TD, TH, THead, TR } from '../ui/Table';
 import { Textarea } from '../ui/Textarea';
-import { addDays, centsToDollars, dayLabel, defaultPayDate, lastFinishedWeekStart, weekLabel } from './payrollFormat';
+import { centsToDollars, dayLabel, defaultPayDate, lastFinishedWeekStart, weekLabel } from './payrollFormat';
+import { addStaffCalendarDays } from '../../lib/staffTimeDate';
 
 // Staff page, Payroll tab, "Pay runs" (owner 2026-10-25, basic payroll layer
 // 1b-2b). The portal works out each paycheck from the approved weekly hours.
@@ -281,7 +282,7 @@ export function RunDetail({ call, run, onChanged, onMessage }) {
 export default function PayRuns({ call }) {
   const weeks = useMemo(() => {
     const last = lastFinishedWeekStart();
-    return Array.from({ length: WEEK_CHOICES }, (_, n) => addDays(last, -7 * n));
+    return Array.from({ length: WEEK_CHOICES }, (_, n) => addStaffCalendarDays(last, -7 * n));
   }, []);
   const [runs, setRuns] = useState(null);
   const [run, setRun] = useState(null);
@@ -339,7 +340,7 @@ export default function PayRuns({ call }) {
           </Select>
         </Field>
         <Field label="Pay date" help="The Friday after the week.">
-          <Input type="date" min={addDays(week, 7)} value={payDate} onChange={event => setPayDate(event.target.value)} />
+          <Input type="date" min={addStaffCalendarDays(week, 7)} value={payDate} onChange={event => setPayDate(event.target.value)} />
         </Field>
         <div><Button type="submit" disabled={busy || !week || !payDate}>{busy ? 'Working…' : 'New pay run'}</Button></div>
       </form>

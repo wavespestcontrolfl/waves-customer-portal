@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PayrollSettings from './PayrollSettings';
-import { addDays, defaultPayDate, lastFinishedWeekStart, weekLabel } from './payrollFormat';
+import { defaultPayDate, lastFinishedWeekStart, weekLabel } from './payrollFormat';
 import { adminFetch } from '../../lib/adminFetch';
 
 vi.mock('../../lib/adminFetch', () => ({ adminFetch: vi.fn() }));
@@ -102,7 +102,6 @@ describe('Pay runs section', () => {
     expect(lastFinishedWeekStart('2026-10-25')).toBe('2026-10-12');
     expect(lastFinishedWeekStart('2026-10-26')).toBe('2026-10-19');
     expect(defaultPayDate('2026-12-28')).toBe('2027-01-08');
-    expect(addDays('2026-03-01', -1)).toBe('2026-02-28');
     expect(weekLabel('2026-12-28')).toBe('Dec 28, 2026 to Jan 3, 2027');
   });
 
