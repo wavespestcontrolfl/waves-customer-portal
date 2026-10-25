@@ -230,6 +230,7 @@ const REVIEW_CITY_EXTRAS = {
   'kensington park': 'sarasota',
   'indian beach': 'sarasota',
   'bird key': 'sarasota',
+  'osprey': 'venice',           // review-only: owner 2026-10-24 "osprey should be venice" (leads stay Sarasota)
   'casey key': 'venice',
   'south venice': 'venice',
   'warm mineral springs': 'venice',
