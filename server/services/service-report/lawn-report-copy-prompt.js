@@ -8,6 +8,7 @@ const {
 } = require('./remaining-service-copy-prompts');
 const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt, PEST_WRITER_ADAPTER } = require('./report-writer-rules');
 const { pestReportVoicePrompt } = require('./pest-report-voice');
+const { specialtyReportVoicePrompt, SPECIALTY_VOICE_MODULES } = require('./specialty-report-voice');
 
 const LAWN_COPY_CORE = `## ROLE AND PURPOSE
 
@@ -222,6 +223,18 @@ function pestVoiceServes(serviceType, context = {}) {
     && resolveDedicatedWriter(serviceType, context) === 'pest';
 }
 
+// Whether selectReportCopyPrompt serves the one-voice termite, cockroach,
+// rodent and mosquito prompt (GATE_SPECIALTY_REPORT_VOICE): under the writer
+// rules, for a visit whose remaining-service modules are all in
+// SPECIALTY_VOICE_MODULES. The generate route trims the same empty inputs as
+// the quiet pest writer then, so both read this.
+function specialtyVoiceServes(context = {}) {
+  if (context.writerRules !== true || context.specialtyVoice !== true) return false;
+  if (!selectRemainingServicePrompt(context, 'main')) return false;
+  const modules = resolveRemainingServiceModules(context);
+  return Boolean(modules?.length) && modules.every((key) => SPECIALTY_VOICE_MODULES.has(key));
+}
+
 function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   // Keep shared safety/provenance, without the old style rules and examples
   // that demanded variation or supplied unsupported recovery timelines.
@@ -231,6 +244,12 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   const writerRules = context.writerRules === true && writerRulesInScope(serviceType, context);
   const compose = (parts) => (writerRules ? composeWriterRulesPrompt(parts) : parts.filter(Boolean).join('\n\n'));
   const remaining = selectRemainingServicePrompt(context, 'main');
+  // GATE_SPECIALTY_REPORT_VOICE (specialty-report-voice.js): one prompt in the
+  // pest report's voice in place of the stacked blocks below; a callback or
+  // re-service is named at its end, as the callback modifier was.
+  if (remaining && specialtyVoiceServes(context)) {
+    return specialtyReportVoicePrompt({ reservice: context.isCallback === true || context.isReservice === true });
+  }
   if (remaining) return compose([`# ${REMAINING_SERVICE_PROMPT_VERSION}`, sharedSafety, remaining]);
   const writer = resolveDedicatedWriter(serviceType, context);
   if (writer === 'shared') return sharedPrompt;
@@ -262,5 +281,5 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
 
 module.exports = {
   LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER, LAWN_RESULT_TIMING_RULE, selectReportCopyPrompt, writerRulesInScope,
-  pestVoiceServes,
+  pestVoiceServes, specialtyVoiceServes,
 };

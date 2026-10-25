@@ -7812,6 +7812,17 @@ function pestLabelFactsLive() {
 // GATE_PEST_LABEL_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.pestLabelFactsLive = pestLabelFactsLive;
 
+// GATE_SPECIALTY_REPORT_VOICE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-24,
+// "yes build voice"). On (with GATE_REPORT_WRITER_RULES), the termite, cockroach, rodent and mosquito report writers
+// get one prompt in the pest report's voice (service-report/specialty-report-voice.js) in place of their stacked
+// blocks, and the route leaves out the same empty input lines as the quiet pest writer. Output screens are unchanged.
+// Off = their prompts and inputs are byte-identical to before.
+function specialtyReportVoiceLive() {
+  return process.env.GATE_SPECIALTY_REPORT_VOICE === 'true';
+}
+// GATE_SPECIALTY_REPORT_VOICE reader, on its own line so gate PRs never conflict.
+module.exports.specialtyReportVoiceLive = specialtyReportVoiceLive;
+
 // GATE_LAWN_TS_STOCK_ADVISORY read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-20,
 // "make lawn and tree & shrub work the same as pest"). On, a lawn or tree & shrub visit's completion may take a
 // product's stock below zero (recorded on the visit, as a WaveGuard lawn completion's is) instead of refusing, the lawn
