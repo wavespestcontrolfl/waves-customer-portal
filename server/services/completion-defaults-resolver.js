@@ -45,7 +45,6 @@ const REVIEW_GBP_BY_CITY = {
   'braden river': 'bradenton',
   'bee ridge': 'sarasota',
   'gulf gate': 'sarasota',
-  'osprey': 'venice',
 };
 
 const CUSTOMER_INTERACTION_CHOICES = [
