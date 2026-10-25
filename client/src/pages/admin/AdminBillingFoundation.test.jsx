@@ -106,6 +106,47 @@ describe("Admin billing failure and draft boundaries", () => {
     expect(screen.getByRole("dialog")).toHaveTextContent("Jordan Example");
   });
 
+  it("records the covering invoice for a visit billed elsewhere and names a covering invoice that died", async () => {
+    let posts = 0;
+    const fetch = vi.fn(async (url, options) => {
+      if (options?.method === "POST") {
+        posts += 1;
+        return posts === 1 ? response({ error: "Invoice WPC-2026-0600 belongs to a different customer." }, 409)
+          : response({ ok: true, invoice: { id: "inv-c", invoice_number: "WPC-2026-0600", status: "viewed" } });
+      }
+      if (url.includes("/leaks?")) return response({ summary: {}, leaks: [
+        { scheduled_service_id: "visit-a", customer: "Avery Example", price: 120, billable: true },
+        { scheduled_service_id: "visit-b", customer: "Jordan Example", price: 117, billable: true, billed_elsewhere_invoice_number: "WPC-2026-0601", billed_elsewhere_invoice_status: "void" },
+        { scheduled_service_id: "visit-c", customer: "Riley Example", price: 90, billable: false, leak_kind: "completed_no_service_record" },
+      ] });
+      if (url.endsWith("/aging")) return response({ aging: {}, top_balances: [] });
+      return response({ accounts: [], count: 0, atRisk: 0 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<BillingRecoveryPage />);
+    await screen.findByText("Marked as billed on WPC-2026-0601, which is now void — bill this visit or mark it free");
+    // A status-only visit finishes its closeout first: no Billed elsewhere button.
+    const elsewhereButtons = await screen.findAllByRole("button", { name: "Billed elsewhere" });
+    expect(elsewhereButtons).toHaveLength(2);
+    fireEvent.click(elsewhereButtons[0]);
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText(/Avery Example/)).toBeInTheDocument();
+    fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+    await dialog.findByText("Enter the invoice number that bills this visit.");
+    expect(posts).toBe(0);
+    fireEvent.change(dialog.getByLabelText("Invoice number"), { target: { value: " WPC-2026-0600 " } });
+    fireEvent.change(dialog.getByLabelText("Optional note"), { target: { value: "Two-home invoice" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+    await dialog.findByText("Invoice WPC-2026-0600 belongs to a different customer.");
+    expect(dialog.getByLabelText("Invoice number")).toHaveValue(" WPC-2026-0600 ");
+    fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const writes = fetch.mock.calls.filter(([, options]) => options?.method === "POST");
+    expect(writes).toHaveLength(2);
+    expect(writes[1][0]).toBe("/api/admin/billing-recovery/visit-a/billed-elsewhere");
+    expect(JSON.parse(writes[1][1].body)).toEqual({ invoiceNumber: "WPC-2026-0600", note: "Two-home invoice" });
+  });
+
   it("distinguishes payer read failures from an empty directory and retries only the read", async () => {
     const fetch = vi.fn().mockResolvedValueOnce(response({ error: "Directory unavailable" }, 503)).mockResolvedValue(response({ payers: [payer] }));
     vi.stubGlobal("fetch", fetch);

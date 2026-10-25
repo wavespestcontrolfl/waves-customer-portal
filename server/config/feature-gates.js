@@ -3844,6 +3844,15 @@ const gates = {
   // customer's property_type exactly as before.
   slabHomeNoTax: gateEnvValue('GATE_SLAB_HOME_NO_TAX'),
 
+  // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
+  // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
+  // taxes pest control only for an infestation of a nonresidential building, so
+  // tree and shrub and palm care is not taxed either. Mosquito work keeps its tax.
+  // TaxCalculator.calculateTax reads it at call time via lawnSprayNoTaxLive();
+  // dark by default. Off = these services are taxed by the customer's
+  // property_type exactly as before.
+  lawnSprayNoTax: gateEnvValue('GATE_LAWN_SPRAY_NO_TAX'),
+
   // Tax worksheets (2026-10-25): Tax > Reports > Sales tax (the Florida DR-15
   // lines for a month, quarter, half year or year from the books) and 1099s
   // (who was paid for contract labor or legal and professional work, and who
@@ -3937,6 +3946,17 @@ const gates = {
   // every environment; read through gateEnvValue() at call time. Kill switch:
   // unset — every route starts and ends at the office, as before.
   techStartPoints: gateEnvValue('GATE_TECH_START_POINTS'),
+
+  // Technician "can move visits" switch (owner 2026-10-25, the way ServiceTitan
+  // gates technician rescheduling): on, a non-admin technician whose Team tab
+  // switch (technicians.can_move_visits) is off cannot move a visit: Quick Move
+  // in the tech app and Quick Move / Reschedule from the dispatch routes answer
+  // "Ask the office to move this visit." Every technician on file when the
+  // column landed keeps moves on; a technician added later starts off. Admins
+  // are never refused. OFF in every environment; read through gateEnvValue()
+  // at call time (scheduling/tech-move-permission.js). Kill switch: unset —
+  // every technician can move their own visits, as before.
+  techMoveSwitch: gateEnvValue('GATE_TECH_MOVE_SWITCH'),
 
   // Customer rain rank (owner 2026-10-08): the same rain-fit rule on the
   // customer booking surfaces. buildBookingAvailability (routes/booking.js:
@@ -5792,6 +5812,11 @@ function taxReturnEngineLive() {
 // GATE_SLAB_HOME_NO_TAX read at CALL time (so a flip needs no redeploy).
 function slabHomeNoTaxLive() {
   return gateEnvValue('GATE_SLAB_HOME_NO_TAX');
+}
+
+// GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
+function lawnSprayNoTaxLive() {
+  return gateEnvValue('GATE_LAWN_SPRAY_NO_TAX');
 }
 
 // GATE_TAX_WORKSHEETS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
@@ -8062,6 +8087,8 @@ module.exports.taxSharedBillsLive = taxSharedBillsLive;
 module.exports.taxReturnEngineLive = taxReturnEngineLive;
 // GATE_SLAB_HOME_NO_TAX reader, on its own line so gate PRs never conflict.
 module.exports.slabHomeNoTaxLive = slabHomeNoTaxLive;
+// GATE_LAWN_SPRAY_NO_TAX reader, on its own line so gate PRs never conflict.
+module.exports.lawnSprayNoTaxLive = lawnSprayNoTaxLive;
 // GATE_TAX_WORKSHEETS reader, on its own line so gate PRs never conflict.
 module.exports.taxWorksheetsLive = taxWorksheetsLive;
 // GATE_PUBLIC_LLM_SHARED_CAP reader, on its own line so gate PRs never conflict.

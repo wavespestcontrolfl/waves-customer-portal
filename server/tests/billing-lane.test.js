@@ -177,6 +177,50 @@ describe('predictCompletionBilling', () => {
       .not.toBe('covered_annual');
   });
 
+  // A Waves Assessment is an advisory walkthrough, not an application: the
+  // plan fee never prices it (a quiet closeout once minted one at the fee).
+  // It reads as a by-design no-charge, never the 'no_amount_on_file' money gap.
+  test('per-application: an unpriced consultation predicts no charge, never the fee', () => {
+    const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
+    expect(predictCompletionBilling({ ...perApp, serviceType: 'Waves Assessment' }))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'consultation' });
+    // A consultation priced on purpose still bills its own price.
+    expect(predictCompletionBilling({ ...perApp, serviceType: 'Waves Assessment', estimatedPrice: 75 }))
+      .toEqual(expect.objectContaining({ kind: 'auto_charge', amount: 75 }));
+    // Payer lane: an unpriced consultation bills nobody.
+    expect(predictCompletionBilling({ ...perApp, serviceType: 'Waves Assessment', payerBilled: true }))
+      .toEqual(expect.objectContaining({ kind: 'no_charge', reason: 'consultation' }));
+    // Explicit per-visit lane: no money-gap reason either.
+    expect(predictCompletionBilling({ ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null, serviceType: 'Waves Assessment' }))
+      .toEqual(expect.objectContaining({ kind: 'no_charge', reason: 'consultation' }));
+  });
+
+  test('completionInvoiceAmount: a consultation never takes a plan fallback price (fee or monthly rate); its own price still bills', () => {
+    const args = {
+      estimatedPrice: null, isCallback: false, perApplicationBilling: true,
+      perApplicationFee: 95, monthlyRate: 31.67, billingMode: 'per_application',
+    };
+    expect(completionInvoiceAmount({ ...args, serviceType: 'Waves Assessment' })).toBe(0);
+    expect(completionInvoiceAmount({ ...args, serviceType: 'Waves Assessment', estimatedPrice: 75 })).toBe(75);
+    // Every other type keeps the fee, and a caller that omits serviceType is unchanged.
+    expect(completionInvoiceAmount({ ...args, serviceType: 'Quarterly Pest Control Service' })).toBe(95);
+    expect(completionInvoiceAmount(args)).toBe(95);
+    // The membership dues fallback: same rule.
+    const member = { ...args, perApplicationBilling: false, perApplicationFee: null, billingMode: 'monthly_membership' };
+    expect(completionInvoiceAmount({ ...member, serviceType: 'Waves Assessment' })).toBe(0);
+    expect(completionInvoiceAmount({ ...member, serviceType: 'Quarterly Pest Control Service' })).toBe(31.67);
+  });
+
+  test('membership: an unpriced consultation never bills the monthly rate, autopay live or dead', () => {
+    expect(predictCompletionBilling({ ...memberBase, autopayActive: false, serviceType: 'Waves Assessment' }))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'consultation' });
+    expect(predictCompletionBilling({ ...memberBase, autopayActive: false, serviceType: 'Quarterly Pest Control Service' }))
+      .toEqual(expect.objectContaining({ kind: 'invoice', amount: 33.33 }));
+    // Dues cover the visit either way; the Charge Now base it previews is $0, not the rate.
+    expect(predictCompletionBilling({ ...memberBase, serviceType: 'Waves Assessment' }))
+      .toEqual(expect.objectContaining({ kind: 'covered_membership', grossAmount: 0 }));
+  });
+
   test('per-application: auto-charge with a live saved method, invoice without one', () => {
     const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
     expect(predictCompletionBilling(perApp)).toEqual({ kind: 'auto_charge', amount: 98, grossAmount: 98, conflictStampedPrice: false });

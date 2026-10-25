@@ -31,7 +31,7 @@
  */
 
 const logger = require('./logger');
-const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cost-visit-types');
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
@@ -118,6 +118,10 @@ function deriveRevenue({ serviceRecord, scheduledService, customer, ignoreExisti
 
   const visitPrice = Number(scheduledService?.estimated_price);
   if (Number.isFinite(visitPrice) && visitPrice > 0) return round2(visitPrice);
+
+  // An unpriced consultation (Waves Assessment) bills nothing, so it books $0
+  // — never the monthly_rate fallback below (completionInvoiceAmount).
+  if (isConsultationServiceType(serviceType)) return 0;
 
   // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 (as
   // opposed to a genuinely blank row) records $0 revenue, never the

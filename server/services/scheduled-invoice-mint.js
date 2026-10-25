@@ -123,6 +123,28 @@ async function assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId, pac
   if (packetId && owner?.id !== packetId) throw new Error('Visit invoice ownership mismatch');
 }
 
+// Call under the existing mint lock (InvoiceService.create runs it for every
+// visit-linked invoice). Billing Recovery recorded that another live invoice
+// already bills this visit ('billed_elsewhere' — a plan prepay, a combined
+// multi-home invoice): one more invoice for it bills the customer twice. A
+// covering invoice that is void / refunded / cancelled settles nothing, so
+// the visit bills normally again.
+async function assertScheduledInvoiceNotBilledElsewhere(trx, scheduledServiceId) {
+  const covering = await trx('visit_billing_dispositions as d')
+    .join('invoices as i', 'i.id', 'd.invoice_id')
+    .where('d.scheduled_service_id', scheduledServiceId)
+    .where('d.disposition', 'billed_elsewhere')
+    .whereNotIn('i.status', ['void', ...TERMINAL_INVOICE_STATUSES])
+    .first('i.invoice_number');
+  if (!covering) return;
+  const err = new Error(`This visit is billed on invoice ${covering.invoice_number}. Add charges to that invoice, or void it first.`);
+  err.status = 409;
+  err.statusCode = 409;
+  err.isOperational = true;
+  err.code = 'VISIT_BILLED_ELSEWHERE';
+  throw err;
+}
+
 // The ONE lock chain every scheduled-price invoice writer takes, in the ONE
 // order: advisory mint lock → customer KEY SHARE → (caller eligibility
 // hook) → visit row FOR UPDATE.
@@ -459,6 +481,7 @@ module.exports = {
   acquireScheduledInvoiceMintLock,
   tryAcquireScheduledInvoiceMintLock,
   assertScheduledInvoiceNotPacketOwned,
+  assertScheduledInvoiceNotBilledElsewhere,
   acquireScheduledMintLockChain,
   findAdoptableScheduledInvoice,
   adoptScheduledInvoiceUnderMintLock,

@@ -36,6 +36,7 @@ const multer = require('multer');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../models/db');
+const { techMoveRefusal } = require('../services/scheduling/tech-move-permission');
 const config = require('../config');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
@@ -622,6 +623,12 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
     if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
+    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees
+    // why, not move choices the commit would refuse.
+    {
+      const refusal = await techMoveRefusal(req);
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
+    }
 
     // Stale-tap guard — same as /en-route and /on-site: a job dispatch
     // already moved to a future day must not be rain-out'd back to
@@ -659,6 +666,11 @@ router.post('/:id/rain-out', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer.
+    {
+      const refusal = await techMoveRefusal(req);
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
     }
 
     // Stale-tap guard — same as /en-route and /on-site. The guard is on

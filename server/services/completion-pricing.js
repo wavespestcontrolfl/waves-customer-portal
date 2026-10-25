@@ -301,7 +301,9 @@ async function loadCompletionPricing(serviceId, { database = db, role = 'technic
     // Codex round 4 P1 follow-through: `service` is the full scheduled_services
     // row, so primary_line_price is on it — pass it or a fully-discounted $0
     // review misreads its own frozen zero as unpriced and falls back to the fee.
-    primaryLinePrice: service.primary_line_price });
+    primaryLinePrice: service.primary_line_price,
+    // A consultation (Waves Assessment) never takes the per-application fee.
+    serviceType: service.service_type });
   const view = {
     serviceId: service.id, estimate: source.estimate ? { id: source.estimate.id, reference: source.estimate.estimate_slug,
       status: source.estimate.status, tier: source.estimate.waveguard_tier,

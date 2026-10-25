@@ -992,6 +992,25 @@ describe('mintOrReuseScheduledServiceInvoice — sibling-lookup refusal', () => 
 // Codex r5 P2 on #5237: the 'covered' copy follows the combined invoice's
 // collection state (collectionStateForCoveredInvoice) — "collect on that
 // invoice" only when it is collectible from this customer.
+// A consultation (Waves Assessment) bills nothing at completion when unpriced,
+// so Charge Now neither refuses it with the fee copy nor bases it on a plan price.
+describe('resolveScheduledServiceCharge — an unpriced consultation takes no plan price', () => {
+  const { resolveScheduledServiceCharge } = adminScheduleRouter._test;
+  const resolve = (o) => resolveScheduledServiceCharge({ estimatedPrice: null, isCallback: false, monthlyRate: 33.33, ...o });
+
+  test('per_application: not refused, no base; every other unpriced type keeps the refusal', async () => {
+    await expect(resolve({ billingMode: 'per_application', serviceType: 'Waves Assessment' })).resolves.toBe(0);
+    await expect(resolve({ billingMode: 'per_application', serviceType: 'Lawn Care Visit' }))
+      .resolves.toMatchObject({ refused: true, reason: 'per_application_fee_at_completion' });
+  });
+
+  test('monthly_membership: never the monthly rate; a priced consultation bills its own price', async () => {
+    await expect(resolve({ billingMode: 'monthly_membership', serviceType: 'Waves Assessment' })).resolves.toBe(0);
+    await expect(resolve({ billingMode: 'monthly_membership', serviceType: 'Quarterly Pest Control Service' })).resolves.toBe(33.33);
+    await expect(resolve({ billingMode: 'monthly_membership', serviceType: 'Waves Assessment', estimatedPrice: 75 })).resolves.toBe(75);
+  });
+});
+
 describe('siblingCoverageRefusal — covered copy follows the combined invoice state', () => {
   const { siblingCoverageRefusal } = require('../routes/admin-schedule')._test;
   const base = { id: 'inv-1', invoice_number: 'WPC-1', total: 153.6, amount_paid: 0 };

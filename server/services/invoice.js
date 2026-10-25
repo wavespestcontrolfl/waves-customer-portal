@@ -6455,8 +6455,12 @@ const InvoiceService = {
       // Harness databases may omit transaction(); production knex does not.
     }
     if (linkedScheduledServiceId) {
-      const { assertScheduledInvoiceNotPacketOwned } = require('./scheduled-invoice-mint');
+      const { assertScheduledInvoiceNotPacketOwned, assertScheduledInvoiceNotBilledElsewhere } = require('./scheduled-invoice-mint');
       await assertScheduledInvoiceNotPacketOwned(database, linkedScheduledServiceId, packetWrite?.packetId);
+      // Every visit-linked writer (completion, Charge Now, pre-completion and
+      // manual mints): a visit an operator marked billed elsewhere never gets
+      // a second bill while its covering invoice is live.
+      await assertScheduledInvoiceNotBilledElsewhere(database, linkedScheduledServiceId);
     } else if (packetWrite) {
       throw new Error('Visit invoice requires a billed member');
     }

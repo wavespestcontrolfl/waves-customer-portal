@@ -13,6 +13,8 @@ import { useEffect } from "react";
  * viewport down to keep a lower focused field visible (offsetTop > 0), a
  * bare-height extent would leave the bottom offsetTop px of the visible
  * range outside the shell and clip the focused form content.
+ * .admin-shell-v2 / .admin-main read --admin-shell-vh, which also counts
+ * the document scroll iOS adds while the keyboard is up (see below).
  */
 export const KEYBOARD_OPEN_MIN_PX = 150;
 
@@ -30,22 +32,42 @@ export function syncAdminViewportVars() {
   const height = usable ? vv.height : layoutH;
   const offsetTop = usable ? vv.offsetTop : 0;
   const keyboardInset = Math.max(0, layoutH - height - offsetTop);
-  root.style.setProperty("--admin-vh", `${Math.round(height + offsetTop)}px`);
-  root.style.setProperty("--vv-offset-top", `${Math.round(offsetTop)}px`);
-  root.style.setProperty("--keyboard-inset", `${Math.round(keyboardInset)}px`);
   // Keyboard-open is the scale-guarded HEIGHT reduction, not the inset:
   // the inset also subtracts offsetTop, so as iOS pans the visual viewport
   // to expose a lower field it shrinks toward 0 while the keyboard is still
   // up. A soft keyboard is at least ~200px; URL-bar / toolbar changes are
   // far smaller. The fixed mobile tab bar hides while it is open
   // (index.css), otherwise it lifts onto the keyboard over the field.
-  root.toggleAttribute("data-keyboard-open", layoutH - height >= KEYBOARD_OPEN_MIN_PX);
+  const keyboardOpen = usable && layoutH - height >= KEYBOARD_OPEN_MIN_PX;
+  // iOS also SCROLLS THE DOCUMENT to reveal a focused field (~220px on the
+  // SMS composer, owner 2026-10-25). The overflow-hidden admin shell sits at
+  // document y=0, so that scroll lifted its bottom edge off the keyboard and
+  // left blank page below it. --admin-shell-vh adds the document scroll while
+  // the keyboard is up, bounded by the keyboard height. Only the shell uses
+  // it: fixed panels and the auth pages keep --admin-vh.
+  const pageTop = usable && Number.isFinite(vv.pageTop) ? vv.pageTop : window.scrollY + offsetTop;
+  const documentScroll = keyboardOpen
+    ? Math.min(Math.max(0, pageTop - offsetTop), layoutH - height)
+    : 0;
+  root.style.setProperty("--admin-vh", `${Math.round(height + offsetTop)}px`);
+  root.style.setProperty("--admin-shell-vh", `${Math.round(height + offsetTop + documentScroll)}px`);
+  root.style.setProperty("--vv-offset-top", `${Math.round(offsetTop)}px`);
+  root.style.setProperty("--keyboard-inset", `${Math.round(keyboardInset)}px`);
+  root.toggleAttribute("data-keyboard-open", keyboardOpen);
+  // The shell never wants a scrolled document once the keyboard is down, but
+  // iOS can leave the scroll in place after it closes: the blank band then
+  // stayed at the bottom until a reload. Not while pinch-zoomed (the user is
+  // panning) and not on the auth pages, whose document scrolls by design.
+  if (usable && !keyboardOpen && window.scrollY > 0 && document.querySelector(".admin-shell-v2")) {
+    window.scrollTo(0, 0);
+  }
 }
 
 export function clearAdminViewportVars() {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
   root.style.removeProperty("--admin-vh");
+  root.style.removeProperty("--admin-shell-vh");
   root.style.removeProperty("--vv-offset-top");
   root.style.removeProperty("--keyboard-inset");
   root.removeAttribute("data-keyboard-open");
@@ -57,10 +79,12 @@ export default function useAdminViewport(active) {
     const vv = window.visualViewport;
     syncAdminViewportVars();
     window.addEventListener("resize", syncAdminViewportVars);
+    window.addEventListener("scroll", syncAdminViewportVars, { passive: true });
     vv?.addEventListener("resize", syncAdminViewportVars);
     vv?.addEventListener("scroll", syncAdminViewportVars);
     return () => {
       window.removeEventListener("resize", syncAdminViewportVars);
+      window.removeEventListener("scroll", syncAdminViewportVars);
       vv?.removeEventListener("resize", syncAdminViewportVars);
       vv?.removeEventListener("scroll", syncAdminViewportVars);
       clearAdminViewportVars();

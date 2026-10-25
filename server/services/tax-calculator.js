@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS } = require('../config/county-zips');
-const { slabHomeNoTaxLive } = require('../config/feature-gates');
+const { slabHomeNoTaxLive, lawnSprayNoTaxLive } = require('../config/feature-gates');
 
 // Waves operates in ET. Use ET calendar date regardless of server TZ (Railway=UTC).
 function todayET() {
@@ -11,6 +11,11 @@ function todayET() {
 const CANONICAL_COUNTY_KEYS = new Map(
   ['Manatee', 'Sarasota', 'Charlotte', 'Lee', 'Collier', 'DeSoto'].map((county) => [county.toLowerCase(), county]),
 );
+
+// isGroundsTreatment's vocabulary: lawn and landscape work, and the building
+// pest work (or mosquito work) that keeps a service taxable.
+const GROUNDS_TERMS = /\b(?:lawns?|turf|sod|trees?|shrubs?|palms?|weeds?|fertili[sz]\w*|pre-?emergent|fire\s?ants?|dethatch\w*|top-?dress\w*|plugging|aerat\w*)\b/i;
+const BUILDING_PEST_TERMS = /\b(?:pests?|termites?|rodents?|rats?|mice|mouse|(?:cock)?roach(?:es)?|palmetto|bed\s?bugs?|fleas?|ticks?|bees?|wasps?|hornets?|ants?|spiders?|silverfish|scorpions?|crickets?|wdo|mosquito(?:es)?|misting)\b/i;
 
 const TaxCalculator = {
 
@@ -138,6 +143,13 @@ const TaxCalculator = {
     if (slabHomeNoTaxLive() && this.isHomeSlabPretreat(serviceType)) {
       return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Pre-construction termite treatment for a home — not taxable (FL Rule 12A-1.009)' };
     }
+    // Lawn and landscape treatments: Florida does not tax lawn spraying,
+    // residential or nonresidential (Rule 12A-1.009(6)), and taxes pest control
+    // only for an infestation of a nonresidential building, so tree and shrub
+    // and palm care is not taxed either (GATE_LAWN_SPRAY_NO_TAX).
+    if (lawnSprayNoTaxLive() && this.isGroundsTreatment(serviceType)) {
+      return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Lawn and landscape treatment — not taxable (FL Rule 12A-1.009)' };
+    }
 
     // Normalize service type to key format
     const serviceKey = serviceType.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_');
@@ -171,6 +183,24 @@ const TaxCalculator = {
     return /\bpre[-\s]?(?:slab|treat(?:ment)?|construction)\b/i.test(name)
       && /termit|termidor|slab|\bbora/i.test(name)
       && !/\b(?:commercial|non-?residential)\b/i.test(name);
+  },
+
+  /**
+   * A lawn or landscape treatment: the name names a lawn, turf, sod, trees,
+   * shrubs, palms, weeds, fertilizer, pre-emergent or fire ants, or
+   * dethatching, topdressing, plugging or aeration. A combined visit ("A + B")
+   * qualifies only when every part does, and a part that also names building
+   * pest work or mosquitoes is left to the normal rules, so a combined visit
+   * keeps its tax. "Lawn pest" (turf insects, as in Lawn Pest Knockdown) and
+   * fire ants are lawn work. Underscores count as spaces, so a service key
+   * reads like its name.
+   */
+  isGroundsTreatment(serviceType) {
+    const name = String(serviceType || '').replace(/_/g, ' ');
+    return name.split('+').every((part) => {
+      const rest = part.replace(/\b(?:lawn|turf)\s+pests?\b/gi, 'lawn').replace(/\bfire\s?ants?\b/gi, 'fireant');
+      return GROUNDS_TERMS.test(part) && !BUILDING_PEST_TERMS.test(rest);
+    });
   },
 
   /**

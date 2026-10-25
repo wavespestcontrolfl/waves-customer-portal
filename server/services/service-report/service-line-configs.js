@@ -40,7 +40,9 @@ const SERVICE_LINE_CONFIGS = {
       // (PATCH /admin/dispatch/:serviceId/reentry).
       interior_reentry_min: 120,
       irrigation_hold_hr: 24,
-      pet_advisory: 'Keep pets off treated zones until dry.',
+      // Owner 2026-10-25 ("safety A"): the spray labels' own words, people and pets, the same line
+      // the product cards print (was "Keep pets off treated zones until dry.").
+      pet_advisory: 'Keep people and pets off treated areas until sprays have dried.',
     },
   },
   lawn: {
@@ -80,7 +82,8 @@ const SERVICE_LINE_CONFIGS = {
       exterior_reentry_min: 30,
       interior_reentry_min: 0,
       irrigation_hold_hr: 12,
-      pet_advisory: 'Keep pets away from treated landscape areas until dry.',
+      // Owner 2026-10-25 ("safety A"), as on pest (was "Keep pets away from treated landscape areas until dry.").
+      pet_advisory: 'Keep people and pets off treated areas until sprays have dried.',
     },
   },
   termite: {

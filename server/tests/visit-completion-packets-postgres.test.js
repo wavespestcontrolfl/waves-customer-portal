@@ -3151,6 +3151,58 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
+  // Billing Recovery "Billed elsewhere": an operator named the live invoice
+  // that already bills this visit. Every visit-linked mint (direct,
+  // record-linked, serialized, completion replay) refuses a second bill while
+  // that invoice is live, and the visit bills normally once it dies.
+  test('every visit-linked mint refuses a visit billed elsewhere until its covering invoice dies', async () => {
+    const { scheduledServiceId, serviceRecordId } = await createUnownedInvoiceLink({ scheduledDate: fixture.scheduledDate });
+    const covering = await InvoiceService.create({ customerId: fixture.customerId,
+      lineItems: [{ description: 'Fixture plan prepay', quantity: 1, unit_price: 480 }] });
+    await mockPg('invoices').where({ id: covering.id }).update({ status: 'sent' });
+    await mockPg('visit_billing_dispositions').insert({ scheduled_service_id: scheduledServiceId,
+      service_record_id: serviceRecordId, disposition: 'billed_elsewhere', invoice_id: covering.id });
+    try {
+      const common = { customerId: fixture.customerId, lineItems: [{ description: 'Fixture service', quantity: 1, unit_price: 120 }] };
+      const billedElsewhere = { code: 'VISIT_BILLED_ELSEWHERE', status: 409 };
+      await expect(InvoiceService.create({ ...common, scheduledServiceId })).rejects.toMatchObject(billedElsewhere);
+      await expect(InvoiceService.create({ ...common, serviceRecordId })).rejects.toMatchObject(billedElsewhere);
+      const svc = await mockPg('scheduled_services').where({ id: scheduledServiceId }).first();
+      await expect(mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams: () => ({ ...common, scheduledServiceId }) }))
+        .rejects.toMatchObject(billedElsewhere);
+      await expect(InvoiceService.createFromService(serviceRecordId, { amount: 120, useScheduledReplay: true }))
+        .rejects.toMatchObject(billedElsewhere);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      // A voided covering invoice settles nothing: the visit bills normally.
+      await mockPg('invoices').where({ id: covering.id }).update({ status: 'void' });
+      const billed = await InvoiceService.create({ ...common, scheduledServiceId });
+      expect(billed.scheduled_service_id).toBe(scheduledServiceId);
+    } finally {
+      // visit_billing_dispositions keys restrict deletes; clear it before cleanup.
+      await mockPg('visit_billing_dispositions').where({ scheduled_service_id: scheduledServiceId }).del();
+    }
+  });
+
+  // The combined invoice links only its first member, so a SECOND member
+  // billed elsewhere is checked on its own, under the packet's mint locks:
+  // the packet goes to the office instead of billing that member twice.
+  test('a second member billed elsewhere sends the combined invoice to the office', async () => {
+    const secondMember = fixture.serviceIds[1];
+    const covering = await InvoiceService.create({ customerId: fixture.customerId,
+      lineItems: [{ description: 'Fixture plan prepay', quantity: 1, unit_price: 480 }] });
+    await mockPg('invoices').where({ id: covering.id }).update({ status: 'sent' });
+    await mockPg('visit_billing_dispositions').insert({ scheduled_service_id: secondMember,
+      disposition: 'billed_elsewhere', invoice_id: covering.id });
+    try {
+      const result = await saveVisitCompletionPacket(submission());
+      expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'member_billed_elsewhere' });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('visit_billing_dispositions').where({ scheduled_service_id: secondMember }).del();
+    }
+  });
+
   test('an edited packet invoice still owns an unlinked accepted-estimate application mint', async () => {
     const estimateId = await linkFixtureEstimate();
     const saved = await saveVisitCompletionPacket(submission());
@@ -4189,6 +4241,18 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const result = await saveVisitCompletionPacket(submission());
     expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'member_price_missing' });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+  });
+
+  // A Waves Assessment is a free consultation. Unpriced, it bills nothing and
+  // never takes the plan's per-application fee or blocks its priced sibling.
+  test('an unpriced consultation member bills nothing and never blocks its priced sibling', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ billing_mode: 'per_application', per_application_fee: 240 });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ estimated_price: null, service_type: 'Waves Assessment' });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'invoice_ready', total: 120 });
+    const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
+    expect(invoices).toHaveLength(1);
+    expect(Number(invoices[0].total)).toBe(120);
   });
 
   test('an unpriced source-estimate member still refuses without an exact acceptance invoice', async () => {

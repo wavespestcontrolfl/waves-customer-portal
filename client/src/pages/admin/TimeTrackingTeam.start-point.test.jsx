@@ -129,3 +129,59 @@ describe('TeamTab start point', () => {
     expect(screen.queryByLabelText('Starts the day from')).not.toBeInTheDocument();
   });
 });
+
+// GATE_TECH_MOVE_SWITCH (owner 2026-10-25): the per-technician "Can move visits"
+// switch loads from the row and rides the Team save as canMoveVisits.
+describe('TeamTab Can move visits', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('waves_admin_token', 'admin-token');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+  });
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('shows the saved switch and sends the change on Update', async () => {
+    const puts = setup({ ...BASE_TECH, can_move_visits: false });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = screen.getByRole('checkbox', { name: /Can move visits/ });
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0].canMoveVisits).toBe(true);
+  });
+
+  it('a technician who can move visits loads ticked and saves unchanged', async () => {
+    const puts = setup({ ...BASE_TECH, can_move_visits: true });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect(screen.getByRole('checkbox', { name: /Can move visits/ })).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0].canMoveVisits).toBe(true);
+  });
+});
+
+describe('TeamTab Can move visits, unknown value', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('waves_admin_token', 'admin-token');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+  });
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('a row without the switch saves without canMoveVisits, so an edit never turns moves off', async () => {
+    const puts = setup(BASE_TECH);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0]).not.toHaveProperty('canMoveVisits');
+  });
+});
