@@ -55,7 +55,8 @@
 //            'dissolved' (visit grouping was removed by #6479; the 2026-10-22
 //            migration dissolved every group that could be undone cleanly).
 //   BAIT     a customer with an ACTIVE termite-line series that is a bait or
-//            monitoring program: services key in TERMITE_BAIT_KEYS, or the label
+//            monitoring program: its catalog key (services.service_key by
+//            service_id) or key snapshot in TERMITE_BAIT_KEYS, or the label
 //            matches /bait|monitor/. Every series of that customer is skipped.
 //   OFF DAY  the target's work_days (or Mon-Thu when --to is not set). A visit on a
 //            target day off STAYS with --from (owner decision still open: move the
@@ -161,8 +162,11 @@ function isGroupedVisit(v) {
   return !!v.visit_id && String(v.group_status || '') !== 'dissolved';
 }
 
+// `catalog_key` is services.service_key for the series' service_id: a row linked by
+// id may carry no key snapshot and a label without "bait" (e.g. an annual active plan).
 const isBaitSeries = (p) => p.line === 'termite'
-  && (TERMITE_BAIT_KEYS.has(String(p.service_key_snapshot || '')) || TERMITE_BAIT_LABEL.test(String(p.service_type || '')));
+  && ([p.catalog_key, p.service_key_snapshot].some((k) => TERMITE_BAIT_KEYS.has(String(k || '')))
+    || TERMITE_BAIT_LABEL.test(String(p.service_type || '')));
 
 const bump = (map, key, n = 1) => { map[key] = (map[key] || 0) + n; };
 
@@ -182,7 +186,7 @@ function targetWorkDays(to) {
  *   start     YYYY-MM-DD, first solo day
  *   today     YYYY-MM-DD (ET)
  *   lines     lines to move (subset of MOVABLE_LINES)
- *   parents   [{ id, customer_id, line, service_key_snapshot, service_type, technician_id,
+ *   parents   [{ id, customer_id, line, catalog_key, service_key_snapshot, service_type, technician_id,
  *               recurring_technician_id, recurring_technician_override, recurring_ongoing }]
  *             `line` is serviceLineFor's answer (null when unknown)
  *   visits    [{ id, series_id, scheduled_date, status, track_state, technician_id, visit_id, group_status }]
@@ -338,8 +342,14 @@ async function planHandover(db, { from, to = null, start, today = etDateString()
     if (!toRow) throw new Error('--to: no technician row with that id (leave --to off while the hire has no row)');
   }
   const parents = await loadParents(db);
+  const serviceIds = [...new Set(parents.map((p) => p.service_id).filter(Boolean))];
+  const catalogKeys = new Map();
+  for (const ids of chunks(serviceIds, 1000)) {
+    for (const r of await db('services').whereIn('id', ids).select('id', 'service_key')) catalogKeys.set(r.id, r.service_key);
+  }
   const cache = new Map();
   for (const p of parents) {
+    p.catalog_key = (p.service_id && catalogKeys.get(p.service_id)) || null;
     const key = [p.service_id || '', p.service_key_snapshot || '', p.service_type || ''].join('|');
     if (!cache.has(key)) {
       cache.set(key, (await serviceLineFor(db, {

@@ -82,6 +82,16 @@ describe('second-tech-handover planner', () => {
     expect(isBaitSeries(wdo)).toBe(false);
   });
 
+  test('a bait plan linked only by its catalog key (no key snapshot, no "bait" in the label) still marks its customer', () => {
+    const annual = parent({ customer_id: 'C-annual', line: 'termite', catalog_key: 'termite_active_annual', service_key_snapshot: null, service_type: 'Termite Active Annual' });
+    const pest = parent({ customer_id: 'C-annual' });
+    expect(isBaitSeries(annual)).toBe(true);
+    expect(isBaitSeries({ ...annual, catalog_key: null })).toBe(false);
+    const p = plan([annual, pest], [annual, pest].map((s) => visit(s, MON)));
+    expect(p.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    expect(p.would_change.visits).toBe(0);
+  });
+
   test('a bait series that is no longer active does not protect its customer', () => {
     const bait = parent({ customer_id: 'C-old', line: 'termite', service_type: 'Termite Bait Station', recurring_ongoing: false });
     const done = visit(bait, '2099-05-01', { status: 'completed' });
