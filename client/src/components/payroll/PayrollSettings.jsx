@@ -32,8 +32,6 @@ const FILING_WORDS = {
 };
 export const filingWords = status => FILING_WORDS[status] || 'Not recorded';
 
-export { dayLabel, dollars };
-
 // raw: true hands back the Response (the CSV download); errors read the same.
 async function call(path, { raw = false, ...options } = {}) {
   const response = await adminFetch(`/admin/payroll${path}`, options);
