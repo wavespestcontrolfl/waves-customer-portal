@@ -276,4 +276,25 @@ describe('recordLinePickShadow', () => {
     await new Promise((r) => setImmediate(r));
     expect(db.inserts).toHaveLength(0);
   });
+
+  test('a deferred row records the visit as committed, not the first-save snapshot the accept later rewrote', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    const db = fakeDb({
+      lines: LINES,
+      visits: [{
+        id: 'visit-1', customer_id: 'cust-1', scheduled_date: MONDAY, window_start: '13:00', window_end: '14:30',
+        service_id: null, service_key_snapshot: null, service_type: 'Lawn Fertilization',
+        estimated_duration_minutes: 90, technician_id: OWNER.id,
+      }],
+    });
+    defaultDb.mockImplementation(db);
+    // First-save snapshot: a pest visit at 09:00 on the hire. The accept then rewrote it.
+    await recordLinePickShadow({ ...base, actualTechnicianId: HIRE.id, trx: { executionPromise: Promise.resolve() } });
+    for (let i = 0; i < 4; i += 1) await new Promise((r) => setImmediate(r));
+    expect(db.inserts).toHaveLength(1);
+    expect(db.inserts[0].row).toMatchObject({
+      service_type: 'Lawn Fertilization', service_line: 'lawn', window_start: '13:00',
+      actual_technician_id: OWNER.id, would_technician_id: OWNER.id, would_reason: 'home',
+    });
+  });
 });

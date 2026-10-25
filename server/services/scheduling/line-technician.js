@@ -175,15 +175,36 @@ async function wouldBeFree(db, { technicianId, date, windowStart, windowEnd, dur
   }
 }
 
-/** True when the visit is readable from the pool (so its transaction committed); true with no visit id. */
-async function visitIsCommitted(scheduledServiceId) {
-  if (!scheduledServiceId) return true;
+/**
+ * The visit as committed, read from the pool once the caller's transaction ends;
+ * null when it is not readable (a rolled-back insert never is).
+ */
+async function loadCommittedVisit(scheduledServiceId) {
   try {
-    return !!(await defaultDb('scheduled_services').where({ id: scheduledServiceId }).first('id'));
+    return (await defaultDb('scheduled_services').where({ id: scheduledServiceId }).first(
+      'customer_id', 'scheduled_date', 'window_start', 'window_end', 'service_id',
+      'service_key_snapshot', 'service_type', 'estimated_duration_minutes', 'technician_id',
+    )) || null;
   } catch {
-    return false;
+    return null;
   }
 }
+
+// The estimate accept rewrites a visit after its first save (the combined service's
+// identity, duration and capacity window), so a deferred row takes the committed
+// visit's own fields over the caller's first-save snapshot.
+const withCommittedVisit = (row, visit) => ({
+  ...row,
+  customerId: visit.customer_id || row.customerId,
+  date: visit.scheduled_date || row.date,
+  windowStart: visit.window_start || null,
+  windowEnd: visit.window_end || null,
+  serviceId: visit.service_id || null,
+  serviceKey: visit.service_key_snapshot || row.serviceKey || null,
+  serviceType: visit.service_type || row.serviceType,
+  durationMinutes: visit.estimated_duration_minutes || row.durationMinutes,
+  actualTechnicianId: visit.technician_id || null,
+});
 
 async function writeShadowRow(row) {
   const db = defaultDb;
@@ -229,8 +250,9 @@ async function writeShadowRow(row) {
  *
  * Call it AFTER the caller's commit. `trx` (optional) is the caller's still-open
  * transaction when the choice point sits inside one that outlives the call (the
- * estimate accept): the write then waits for that OUTERMOST commit and is dropped
- * on rollback. The write itself always rides the global pool, never the caller's
+ * estimate accept): the write then waits for that OUTERMOST commit, is dropped
+ * on rollback, and records the visit as committed (the accept rewrites a visit
+ * after its first save). The write itself always rides the global pool, never the caller's
  * transaction. Gate off = returns at once, no query. ALWAYS in its own try/catch:
  * it never throws and never changes the caller's result, so callers do not need
  * to await it.
@@ -238,7 +260,7 @@ async function writeShadowRow(row) {
 function recordLinePickShadow(row) {
   try {
     if (!shadowOn() || !row || !SOURCES.includes(row.source)) return Promise.resolve(null);
-    const run = () => writeShadowRow(row).then(() => null, (err) => {
+    const run = (fields) => writeShadowRow(fields).then(() => null, (err) => {
       logger.warn(`[line-technician] shadow row not written (${row.source}): ${err.message}`);
       return null;
     });
@@ -246,14 +268,18 @@ function recordLinePickShadow(row) {
     if (commitPromise) {
       // A transaction that throws rejects this promise, so a failed accept records nothing.
       // A bare trx.rollback() resolves it (knex doNotRejectOnRollback): the visit itself
-      // must then be readable from the pool, which a rolled-back insert never is.
+      // must then be readable from the pool, which a rolled-back insert never is. The row
+      // records the visit as committed, not as first saved.
       commitPromise
-        .then(() => visitIsCommitted(row.scheduledServiceId))
-        .then((committed) => (committed ? run() : null))
+        .then(() => (row.scheduledServiceId ? loadCommittedVisit(row.scheduledServiceId) : null))
+        .then((visit) => {
+          if (!row.scheduledServiceId) return run(row);
+          return visit ? run(withCommittedVisit(row, visit)) : null;
+        })
         .catch(() => {});
       return Promise.resolve(null);
     }
-    return run();
+    return run(row);
   } catch (err) {
     try { logger.warn(`[line-technician] shadow recorder failed: ${err.message}`); } catch { /* never throws */ }
     return Promise.resolve(null);

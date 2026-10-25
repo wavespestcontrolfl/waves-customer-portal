@@ -93,7 +93,11 @@ describeDb('service-line map shadow on PostgreSQL', () => {
     windowStart: '09:00', serviceType: 'General Pest Control', actualTechnicianId: ownerId, ...extra,
   });
 
+  // Each test starts from an empty service_line_techs. A database that already holds a
+  // map (a developer's) gets it back row for row in afterAll.
+  let priorLineTechs = [];
   beforeAll(async () => {
+    priorLineTechs = await db('service_line_techs').select('*');
     await db('technicians').insert([
       tech(ownerId, `Owner ${run}`, 'active'),
       tech(hireId, `Hire ${run}`, 'active', { work_days: [1, 2, 3, 4] }),
@@ -112,6 +116,7 @@ describeDb('service-line map shadow on PostgreSQL', () => {
     if (priorGates.shadow === undefined) delete process.env.GATE_SERVICE_LINE_MAP; else process.env.GATE_SERVICE_LINE_MAP = priorGates.shadow;
     if (priorGates.days === undefined) delete process.env.GATE_TECH_WORK_DAYS; else process.env.GATE_TECH_WORK_DAYS = priorGates.days;
     await db('service_line_techs').del();
+    if (priorLineTechs.length) await db('service_line_techs').insert(priorLineTechs);
     await db('service_line_pick_shadow').where({ run_id: run }).del();
     await db('technician_absences').whereIn('technician_id', techIds).del();
     await db('technicians').whereIn('id', techIds).del();
