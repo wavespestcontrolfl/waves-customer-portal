@@ -46,10 +46,12 @@ postgres('neighborhood merge routes', () => {
   // Synthetic community names, unique per run so the county-wide community
   // match never meets another suite's rows.
   const hoodName = (base) => `${base} ${tag}`;
-  const neighborhood = async (base, { county = 'Manatee', active = true } = {}) => {
-    const name = hoodName(base);
+  // exact: the name as given (the suggestion rules read it), with a unique match key.
+  const neighborhood = async (base, { county = 'Manatee', active = true, exact = false } = {}) => {
+    const name = exact ? base : hoodName(base);
+    const key = `${county.toLowerCase()}|${name.toLowerCase()}${exact ? ` ${randomUUID()}` : ''}`;
     const [row] = await trx('neighborhoods')
-      .insert({ name, county, match_key: `${county.toLowerCase()}|${name.toLowerCase()}`, source: 'county', active, subdivision_names: JSON.stringify([]) })
+      .insert({ name, county, match_key: key, source: 'county', active, subdivision_names: JSON.stringify([]) })
       .returning('id');
     return row.id;
   };
@@ -307,6 +309,36 @@ postgres('neighborhood merge routes', () => {
     await call('POST', `/merges/${r.body.mergeId}/undo`);
     expect(await entryRow(newer)).toMatchObject({ neighborhood_id: source, status: 'active' });
     expect(await entryRow(older)).toMatchObject({ neighborhood_id: target, status: 'active' });
+  });
+
+  test('suggestions: pairs that read as one community, never a merged-away entry; Not the same keeps a pair out', async () => {
+    const kept = await neighborhood('Heron Point', { exact: true });
+    const phase = await neighborhood('Heron Point Subphase C', { exact: true });
+    const spelled = await neighborhood('Heron Point Lwr', { exact: true });
+    await neighborhood('Heron Point 2', { exact: true, county: 'Sarasota' });
+    await home(kept);
+    await home(kept);
+    await home(phase);
+    const list = await call('GET', '/merge-suggestions');
+    expect(list.status).toBe(200);
+    expect(list.body.suggestions.map((s) => [s.source.id, s.target.id])).toEqual([[phase, kept], [spelled, kept]]);
+    expect(list.body.suggestions[0]).toEqual({
+      source: { id: phase, name: 'Heron Point Subphase C', county: 'Manatee', propertyCount: 1, liveEntries: 0 },
+      target: { id: kept, name: 'Heron Point', county: 'Manatee', propertyCount: 2, liveEntries: 0 },
+    });
+
+    expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: spelled, targetId: kept })).body).toEqual({ dismissed: true });
+    expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: spelled, targetId: kept })).status).toBe(200);
+    expect((await trx('neighborhood_merge_dismissals').where({ source_id: spelled }).first('dismissed_by')).dismissed_by).toBe(mockActor);
+    await merge(phase, kept);
+    expect((await call('GET', '/merge-suggestions')).body.suggestions).toEqual([]);
+
+    expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: 'x', targetId: kept })).status).toBe(400);
+    expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: randomUUID(), targetId: kept })).status).toBe(404);
+    expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: kept, targetId: kept })).status).toBe(404);
+    delete process.env.GATE_NEIGHBORHOOD_MERGE;
+    expect(await call('GET', '/merge-suggestions')).toEqual({ status: 404, body: { enabled: false } });
+    expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: spelled, targetId: kept })).status).toBe(404);
   });
 
   test('a chain: A into B, then B into C; undo of A into B waits for the later one, and the pointer chain reaches C', async () => {

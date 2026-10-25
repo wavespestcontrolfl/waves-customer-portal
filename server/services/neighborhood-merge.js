@@ -286,4 +286,85 @@ async function mergesInto(conn, targetIds) {
   return byTarget;
 }
 
-module.exports = { mergeNeighborhood, undoMerge, mergesInto, duplicateLosers, withOrigin };
+// ---- suggested merges (owner ruling 2026-10-25) ------------------------------
+// Entries whose names read as one community, for the office to merge or mark
+// "not the same"; nothing here merges. Two rules only (a word-prefix rule was
+// tried on the live list and half its pairs were different communities):
+//  - the same name once phase words are taken off ("Subphase C", "Phase 2", a
+//    trailing "II" / "2" / "A-1a", "Lwr" for Lakewood Ranch, "Sub", "Condo",
+//    "Townhomes", "Villas", "Homes"), spaces ignored ("Cross Creek" =
+//    "Crosscreek");
+//  - "X at Y" where Y is such a name of another entry ("Terrace III at
+//    Sample National" joins "Sample National Golf Club").
+// Same county only. In each group the entry with the most homes (then the
+// most gate entries, then the shorter name) is the one kept.
+const PHASE_TAIL = / (?:subphase|phase|phases|ph|unit|units|section|sec|tract|parcel|replat)(?: .*)?$/;
+const TRAILING_TAG = /^(?:[ivx]+|\d+[a-z]?|[a-z]|[a-z]-?\d[a-z0-9-]*)$/;
+const SUFFIX_WORDS = new Set(['sub', 'subdivision', 'subdivisi', 'condo', 'condominium', 'townhomes', 'villas', 'homes']);
+const MIN_KEY = 4;
+
+function familyKey(name) {
+  let s = ` ${String(name || '').toLowerCase().replace(/[^a-z0-9& -]/g, ' ').replace(/\s+/g, ' ')} `;
+  s = s.replace(/ lwr /g, ' lakewood ranch ').replace(/ vil /g, ' village ');
+  s = s.replace(/ (?:at )?lakewood ranch /g, ' ').replace(/ golf (?:and country )?club /g, ' ');
+  s = s.replace(/^ the /, ' ').trim().replace(PHASE_TAIL, '');
+  const words = s.split(' ').filter(Boolean);
+  while (words.length > 1 && (TRAILING_TAG.test(words.at(-1)) || SUFFIX_WORDS.has(words.at(-1)))) words.pop();
+  return words.join(' ');
+}
+
+const squash = (key) => key.replace(/ /g, '');
+const keeps = (a, b) => (b.homes - a.homes) || (b.liveEntries - a.liveEntries) || (a.name.length - b.name.length) || (a.id < b.id ? -1 : 1);
+
+// entries: [{ id, name, county, homes, liveEntries }]; dismissed: Set of
+// "sourceId|targetId". Returns [{ source, target }], biggest kept entry first.
+function groupSuggestions(entries, dismissed = new Set()) {
+  const keyed = entries.map((e) => ({ ...e, key: familyKey(e.name) }));
+  const known = new Set(keyed.map((e) => `${e.county}|${squash(e.key)}`));
+  const groups = new Map();
+  for (const e of keyed) {
+    let key = squash(e.key);
+    const at = / at (.+)$/.exec(e.key);
+    if (at && known.has(`${e.county}|${squash(at[1])}`)) key = squash(at[1]);
+    if (key.length < MIN_KEY) continue;
+    const g = `${e.county}|${key}`;
+    groups.set(g, [...(groups.get(g) || []), e]);
+  }
+  const out = [];
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const [target, ...rest] = [...list].sort(keeps);
+    for (const source of rest) {
+      if (!dismissed.has(`${source.id}|${target.id}`)) out.push({ source, target });
+    }
+  }
+  const view = ({ id, name, county, homes, liveEntries }) => ({ id, name, county, propertyCount: homes, liveEntries });
+  return out.sort((a, b) => keeps(a.target, b.target) || keeps(a.source, b.source))
+    .map(({ source, target }) => ({ source: view(source), target: view(target) }));
+}
+
+async function suggestMerges(conn) {
+  const entries = (await conn.raw(`SELECT n.id, n.name, n.county,
+      (SELECT count(*) FROM customer_properties p WHERE p.neighborhood_id = n.id AND p.active)::int AS homes,
+      (SELECT count(*) FROM neighborhood_access a WHERE a.neighborhood_id = n.id AND a.status <> 'retired')::int AS live_entries
+    FROM neighborhoods n WHERE n.active AND n.merged_into_id IS NULL`)).rows
+    .map((r) => ({ id: r.id, name: r.name, county: r.county || null, homes: r.homes, liveEntries: r.live_entries }));
+  const dismissed = new Set((await conn('neighborhood_merge_dismissals').select('source_id', 'target_id'))
+    .map((d) => `${d.source_id}|${d.target_id}`));
+  return groupSuggestions(entries, dismissed);
+}
+
+// "Not the same": the pair is never suggested again. Returns false when
+// either entry is gone.
+async function dismissSuggestion(trx, { sourceId, targetId, actorId = null }) {
+  const found = await trx('neighborhoods').whereIn('id', [sourceId, targetId]).count('* as n').first();
+  if (sourceId === targetId || Number(found.n) !== 2) return false;
+  await trx.raw(`INSERT INTO neighborhood_merge_dismissals (source_id, target_id, dismissed_by)
+    VALUES (?, ?, ?) ON CONFLICT (source_id, target_id) DO NOTHING`, [sourceId, targetId, actorId]);
+  return true;
+}
+
+module.exports = {
+  mergeNeighborhood, undoMerge, mergesInto, duplicateLosers, withOrigin,
+  familyKey, groupSuggestions, suggestMerges, dismissSuggestion,
+};
