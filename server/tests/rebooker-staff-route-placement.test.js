@@ -161,10 +161,10 @@ describe('rescheduleOnce numbers the day after a staff move', () => {
     expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 
-  test('a shared stop (visit_id) is left to the visit mover', async () => {
+  test('a row that keeps a visit id still asks: the placement itself leaves a stop shared with a live member alone', async () => {
     wireRescheduleMocks(service({ visit_id: 'visit-1' }));
     await move(TARGET, { start: '09:00', end: '10:00' }, { ...STAFF, visitPolicy: 'single' });
-    expect(placeMovedVisit).not.toHaveBeenCalled();
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
   });
 
   test('the capacity commit keeps its own order write', async () => {
@@ -192,7 +192,7 @@ describe('the series and Edit saves place only the visit the staff check placed 
     const call = body.indexOf(statement);
     expect(call).toBeGreaterThan(-1);
     expect(body.indexOf('placeMovedVisit(', call + statement.length)).toBe(-1);
-    const guard = body.lastIndexOf('if (isAnchor && updateData.window_start && !sib.visit_id', call);
+    const guard = body.lastIndexOf('if (isAnchor && updateData.window_start', call);
     expect(guard).toBeGreaterThan(body.indexOf('.update(updateData, SERIES_MOVE_SNAPSHOT_COLUMNS);'));
   });
 

@@ -2352,10 +2352,12 @@ class SmartRebooker {
       // byte-identical to today.
       if (capacityCommitFit) {
         await persistArrivalOrder(trx, capacityCommitFit, serviceId);
-      } else if (placementWindowChanged && (useArrivalWindows || options.placeInRoute === true) && !service.visit_id) {
+      } else if (placementWindowChanged && (useArrivalWindows || options.placeInRoute === true)) {
         // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
         // off): the staff check placed this visit between stops, so number
         // the day in that order and the board shows it where the box did.
+        // A stop still shared with a live member is left as it was by the
+        // placement itself (the check never placed it either).
         await placeMovedVisit(trx, { serviceId });
       }
 
@@ -4173,7 +4175,7 @@ class SmartRebooker {
         // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
         // off): the anchor is the visit the staff check placed, so number
         // its day in that order. Later occurrences keep today's handling.
-        if (isAnchor && updateData.window_start && !sib.visit_id
+        if (isAnchor && updateData.window_start
           && (useArrivalWindows || options.placeInRoute === true)
           && (sibDateChanges || anchorTechChanges
             || String(updateData.window_start).slice(0, 5) !== String(sib.window_start || '').slice(0, 5))) {

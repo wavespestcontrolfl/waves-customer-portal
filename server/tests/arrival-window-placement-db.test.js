@@ -32,6 +32,8 @@ const NORTH = '20000000-0000-4000-8000-000000000002';
 const SOUTH = '20000000-0000-4000-8000-000000000003';
 const BLOCKER = '20000000-0000-4000-8000-000000000004';
 const CUSTOMER = '30000000-0000-4000-8000-000000000001';
+const VISIT = '50000000-0000-4000-8000-000000000001';
+const PARTNER = '20000000-0000-4000-8000-000000000005';
 const OPTIONS = {
   lat: 27.545, lng: -82.4, dateFrom: DAY, dateTo: DAY, durationMinutes: 60,
   technicianId: TECH, includeWeekends: true, includeBlackoutDates: true,
@@ -271,6 +273,20 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
         .update({ scheduled_date: DAY, estimated_duration_minutes: 240, window_end: '13:00' });
       await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toBeNull();
       expect(await dayOrder()).toEqual([NORTH, SOUTH, TARGET]);
+      expect(await routeNumber(TARGET)).toBeNull();
+    });
+
+    test('a visit id with no live partner is a single visit, and is numbered', async () => {
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY, visit_id: VISIT });
+      await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toEqual([NORTH, TARGET, SOUTH]);
+    });
+
+    test('a stop shared with a live partner is left as it was', async () => {
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY, visit_id: VISIT });
+      await mockConn('scheduled_services').insert({ id: PARTNER, customer_id: CUSTOMER, technician_id: TECH, status: 'confirmed',
+        scheduled_date: DAY, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 30, lat: 27.545, lng: -82.4,
+        visit_id: VISIT, created_at: '2020-01-02T12:00:00Z' });
+      await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toBeNull();
       expect(await routeNumber(TARGET)).toBeNull();
     });
 
