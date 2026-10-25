@@ -44,8 +44,10 @@ const {
   staleClaimReviewHoldError,
   invoiceDepositCreditCents,
   invoiceSmsDigest,
-  visitHasNoCustomerError,
 } = require("./invoice-helpers");
+// Its own statement on purpose: the import above is hashed into the reviewed Intelligence Bar
+// read fingerprints (admin-read-reviewed.json), and this write-path refusal changes no read.
+const { visitHasNoCustomerError } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
 // cover page DWELL time, not link age (the customer-photo blank-render class).

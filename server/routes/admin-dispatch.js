@@ -4197,11 +4197,9 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
       expectedVisit: expectedVisit && typeof expectedVisit === 'object' && !Array.isArray(expectedVisit) ? expectedVisit : null,
     });
-    if (!result.ok) {
-      return res.status(recapStatusForReason(result.reason)).json(result.reason === VISIT_NO_CUSTOMER_CODE
-        ? { error: VISIT_NO_CUSTOMER_MESSAGE, code: VISIT_NO_CUSTOMER_CODE }
-        : { error: result.reason });
-    }
+    if (!result.ok) return res.status(recapStatusForReason(result.reason)).json(result.reason === VISIT_NO_CUSTOMER_CODE
+      ? { error: VISIT_NO_CUSTOMER_MESSAGE, code: VISIT_NO_CUSTOMER_CODE }
+      : { error: result.reason });
     await settleRecapSupplies(req.params.serviceId, result);
     res.json(result);
   } catch (err) { next(err); }

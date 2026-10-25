@@ -288,9 +288,6 @@ async function mintScheduledServiceInvoiceWithDeposit({
   // to the month's dedupe (and refused if the month is already covered).
   membershipDues = null,
 }) {
-  // A visit booked by address only has no customer to bill (invoices.customer_id is NOT NULL):
-  // refused before the lock chain, whatever the caller's own checks said.
-  if (!svc.customer_id) throw visitHasNoCustomerError();
   const InvoiceService = require('../services/invoice');
   const {
     acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit,
@@ -318,6 +315,9 @@ async function mintScheduledServiceInvoiceWithDeposit({
           e.status = 404;
           throw e;
         }
+        // A visit booked by address only has no customer to bill (invoices.customer_id is NOT NULL).
+        // Refused here, AFTER the caller's in-lock ownership recheck, so an unowned tech still gets 404.
+        if (!lockedSvc.customer_id) throw visitHasNoCustomerError();
         if (String(lockedSvc.customer_id) !== String(svc.customer_id)
           || String(lockedSvc.source_estimate_id || '') !== String(sourceEstimateId || '')
           // Codex round-6 P1: a sibling-coverage verdict (both the

@@ -93,13 +93,16 @@ describe('completion of a visit with no customer yet', () => {
 });
 
 describe('invoice writers refuse a visit with no customer yet', () => {
-  test('the scheduled-visit mint throws the typed 409 before it opens a transaction', async () => {
+  test('the scheduled-visit mint throws the typed 409 under the visit lock, after the ownership recheck, before it builds an invoice', async () => {
     const buildCreateParams = jest.fn();
+    const assertEligibleInTrx = jest.fn(async () => {});
 
-    await expect(mintScheduledServiceInvoiceWithDeposit({ svc: { id: SERVICE_ID, customer_id: null }, buildCreateParams }))
+    await expect(mintScheduledServiceInvoiceWithDeposit({ svc: { id: SERVICE_ID, customer_id: null }, buildCreateParams, assertEligibleInTrx }))
       .rejects.toMatchObject({ message: VISIT_NO_CUSTOMER_MESSAGE, status: 409, statusCode: 409, isOperational: true, code: VISIT_NO_CUSTOMER_CODE });
-    expect(db.transaction).not.toHaveBeenCalled();
+    // The ownership hook runs first, so an unowned tech still gets its 404 (admin-tech-role-scoping covers that order).
+    expect(assertEligibleInTrx).toHaveBeenCalledTimes(1);
     expect(buildCreateParams).not.toHaveBeenCalled();
+    expect(builder.insert).not.toHaveBeenCalled();
   });
 
   test('InvoiceService.create throws the same typed 409 for a visit with no customer, before any read', async () => {
@@ -110,8 +113,12 @@ describe('invoice writers refuse a visit with no customer yet', () => {
   });
 
   test('a visit that has a customer goes past the refusal into its normal mint transaction', async () => {
-    await mintScheduledServiceInvoiceWithDeposit({ svc: { id: SERVICE_ID, customer_id: CUSTOMER_ID }, buildCreateParams: jest.fn() }).catch(() => {});
+    service.customer_id = CUSTOMER_ID;
+
+    const outcome = await mintScheduledServiceInvoiceWithDeposit({ svc: { id: SERVICE_ID, customer_id: CUSTOMER_ID }, buildCreateParams: jest.fn() })
+      .catch((err) => err);
 
     expect(db.transaction).toHaveBeenCalled();
+    expect(outcome?.code).not.toBe(VISIT_NO_CUSTOMER_CODE);
   });
 });
