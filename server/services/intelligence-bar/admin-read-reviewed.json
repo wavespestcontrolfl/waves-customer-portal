@@ -4,11 +4,11 @@
   "reviewed": [
     {
       "endpoint": "/admin/call-recordings/stats",
-      "reviewed": "Handler + CallRecordingProcessor.getStats, whereNotSandboxCall (relay-protocol.js), reclaimableClaim: COUNT FILTER aggregates over call_log plus a call count grouped by receiving business number; no caller data returned; read end to end.",
+      "reviewed": "Handler + CallRecordingProcessor.getStats, whereNotSandboxCall (relay-protocol.js), reclaimableClaim (deploy-stamp clause always on, #6671): COUNT FILTER aggregates over call_log plus a call count grouped by receiving business number; no caller data returned; read end to end.",
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "fdfc4e75e660ad68fd886a3da4ee6e78"
+      "hash": "9810ab5a0ab988cfa154ff1627e60e0e"
     },
     {
       "endpoint": "/admin/communications/ai-auto-reply-status",
