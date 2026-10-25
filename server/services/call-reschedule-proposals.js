@@ -168,11 +168,14 @@ async function visitsForCard(conn, customerId, now) {
     property: properties.find((p) => p.id === r.property_id && p.customer_id === r.customer_id) || null, current_window: customerWindow(r.scheduled_date, r.window_start) }));
 }
 
-async function listProposals(conn, { limit = 100, offset = 0, now = new Date() } = {}) {
+async function listProposals(conn, { limit = 100, offset = 0, now = new Date(), customerScope = null } = {}) {
   if (!enabled()) return [];
-  const rows = await conn('triage_items as t').join('call_log as cl', 'cl.id', 't.call_log_id')
+  let query = conn('triage_items as t').join('call_log as cl', 'cl.id', 't.call_log_id')
     .join('customers as c', 'c.id', 'cl.customer_id').whereNull('c.deleted_at').whereIn('t.status', openStates)
-    .whereRaw("t.payload->'reschedule_proposal' IS NOT NULL").orderBy('t.created_at', 'asc').orderBy('t.id').limit(limit).offset(offset)
+    .whereRaw("t.payload->'reschedule_proposal' IS NOT NULL");
+  // customerScope: a subquery of customer ids (a technician login's own customers, GATE_TECH_LOGIN_PRIVACY).
+  if (customerScope) query = query.whereIn('cl.customer_id', customerScope);
+  const rows = await query.orderBy('t.created_at', 'asc').orderBy('t.id').limit(limit).offset(offset)
     .select('t.id', 't.call_log_id', 't.updated_at', 't.payload', 'cl.customer_id', 'cl.created_at as call_at',
       'c.first_name', 'c.last_name', 'c.phone', ...ADDRESS_COLUMNS.map((field) => `c.${field}`));
   const visitsByCustomer = new Map();

@@ -13,6 +13,32 @@ const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// GATE_TECH_LOGIN_PRIVACY: a technician login sees and changes promises and
+// reschedule proposals only for customers on its own route, by the same rule
+// the Communications routes use (technician-visit-scope). Admin logins and
+// the gate being off are unscoped.
+function techPrivacyOn(req) {
+  return req.techRole === 'technician' && Boolean(require('../config/feature-gates').techLoginPrivacyLive?.());
+}
+// Subquery of the technician's own customer ids, or null when unscoped.
+function ownCustomerScope(req) {
+  return techPrivacyOn(req) ? require('../services/technician-visit-scope').technicianCustomerIdsSubquery(req, db) : null;
+}
+async function ownsCustomer(req, customerId) {
+  if (!techPrivacyOn(req)) return true;
+  return Boolean(customerId) && require('../services/technician-visit-scope').technicianServicesCustomer(req, customerId);
+}
+async function ownsCall(req, callLogId) {
+  if (!techPrivacyOn(req)) return true;
+  const call = callLogId ? await db('call_log').where({ id: callLogId }).first('customer_id') : null;
+  return ownsCustomer(req, call?.customer_id);
+}
+async function ownsProposal(req, proposalId) {
+  if (!techPrivacyOn(req)) return true;
+  const card = await db('triage_items').where({ id: proposalId }).first('call_log_id');
+  return ownsCall(req, card?.call_log_id);
+}
+
 function maskSid(sid) {
   if (!sid) return 'none';
   const value = String(sid);
@@ -267,6 +293,7 @@ router.get('/commitments/sms', async (req, res, next) => {
     const { customer_id: customerId, limit, offset } = req.query;
     if (!UUID_RE.test(String(customerId || ''))) return res.status(400).json({ error: 'customer_id must be a UUID' });
     if (offset !== undefined && !/^\d{1,9}$/.test(String(offset))) return res.status(400).json({ error: 'offset must be a non-negative integer' });
+    if (!(await ownsCustomer(req, customerId))) return res.status(404).json({ error: 'Customer not found' });
     const { listSmsCommitments, smsCommitmentsEnabled } = require('../services/sms-operational-actions');
     const { gateEnvValue } = require('../config/feature-gates');
     const pageLimit = Math.max(1, Math.min(200, Number(limit) || 20));
@@ -287,7 +314,7 @@ router.get('/proposals', async (req, res, next) => {
     const offset = Number(req.query.offset || 0);
     if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
     const proposals = require('../services/call-reschedule-proposals');
-    const rows = await proposals.listProposals(db, { limit: 101, offset });
+    const rows = await proposals.listProposals(db, { limit: 101, offset, customerScope: ownCustomerScope(req) });
     res.json({ proposals_enabled: proposals.enabled(), proposals: rows.slice(0, 100), has_more: rows.length > 100, next_offset: offset + 100 });
   } catch (err) { next(err); }
 });
@@ -295,6 +322,7 @@ router.get('/proposals', async (req, res, next) => {
 router.post('/proposals/:id/preview', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id) || (req.body?.visit_id && !UUID_RE.test(req.body.visit_id))) return res.status(400).json({ error: 'Invalid proposal or visit id' });
+    if (!(await ownsProposal(req, req.params.id))) return res.status(404).json({ error: 'Proposal not found' });
     // GATE_TECH_MOVE_SWITCH: applying a proposal moves the visit, so a
     // technician whose Team tab switch is off sees why before applying.
     const refusal = await techMoveRefusal(req);
@@ -317,6 +345,7 @@ router.post('/proposals/:id/apply', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id) || !UUID_RE.test(String(req.body?.visit_id || ''))
       || !/^[a-f0-9]{64}$/.test(String(req.body?.preview_hash || ''))) return res.status(400).json({ error: 'Preview the selected visit before applying' });
+    if (!(await ownsProposal(req, req.params.id))) return res.status(404).json({ error: 'Proposal not found' });
     // GATE_TECH_MOVE_SWITCH: the apply is the enforcer.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
@@ -333,6 +362,7 @@ router.post('/proposals/:id/apply', async (req, res, next) => {
 router.post('/proposals/:id/dismiss', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid proposal id' });
+    if (!(await ownsProposal(req, req.params.id))) return res.status(404).json({ error: 'Proposal not found' });
     res.json(await require('../services/call-reschedule-proposals').dismissProposal(db, req.params.id, {
       actorId: req.technicianId, expectedAt: req.body?.expected_at,
     }));
@@ -359,7 +389,7 @@ router.get('/commitments/open', async (req, res, next) => {
     // 200-row page passing as the whole worklist (Codex #3725 r17 P2).
     const pageLimit = Math.max(1, Math.min(200, Number(limit) || 100));
     const pageOffset = Number(offset) || 0;
-    const opts = { party: party || null, kind: kind || null, customerId: customerId || null, leadId: leadId || null, limit: pageLimit + 1, offset: pageOffset, includeHints: hints !== '0', prepare: true };
+    const opts = { party: party || null, kind: kind || null, customerId: customerId || null, leadId: leadId || null, limit: pageLimit + 1, offset: pageOffset, includeHints: hints !== '0', prepare: true, customerScope: ownCustomerScope(req) };
     const { isEnabled } = require('../config/feature-gates');
     const enabled = isEnabled('callCommitments');
     let rows = await listOpenCommitments(db, opts);
@@ -432,7 +462,7 @@ router.get('/commitments/auto-closed', async (req, res, next) => {
       before = { at: new Date(String(beforeAt)).toISOString(), id: String(beforeId) };
     }
     const { listAutoClosedCommitments } = require('../services/call-commitments');
-    const page = await listAutoClosedCommitments(db, { days, before });
+    const page = await listAutoClosedCommitments(db, { days, before, customerScope: ownCustomerScope(req) });
     res.json({ commitments: page.commitments, days, has_more: Boolean(page.next),
       next: page.next ? { before_at: page.next.at, before_id: page.next.id } : null });
   } catch (err) { next(err); }
@@ -444,7 +474,7 @@ router.post('/calls/:id/commitments', requireCommitmentsEnabled, async (req, res
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
     const call = await db('call_log').where({ id: req.params.id }).first('id');
-    if (!call) return res.status(404).json({ error: 'Call not found' });
+    if (!call || !(await ownsCall(req, call.id))) return res.status(404).json({ error: 'Call not found' });
     const { addHumanCommitment } = require('../services/call-commitments');
     const row = await addHumanCommitment(db, call.id, {
       party: req.body?.party,
@@ -478,6 +508,13 @@ router.patch('/commitments/:id', async (req, res, next) => {
     }
     const existing = await db('call_commitments').where({ id: req.params.id }).first('call_log_id', 'sms_log_id', 'email_id', 'kind', 'party');
     if (!existing) return res.status(404).json({ error: 'Commitment not found' });
+    // GATE_TECH_LOGIN_PRIVACY: a promise outside the technician's own customers answers 404 and writes nothing.
+    // An SMS or email promise names its customer in the request (the update re-checks that the profile owns it).
+    if (techPrivacyOn(req) && !(existing.sms_log_id || existing.email_id
+      ? await ownsCustomer(req, UUID_RE.test(String(req.body?.customer_id || '')) ? req.body.customer_id : null)
+      : await ownsCall(req, existing.call_log_id))) {
+      return res.status(404).json({ error: 'Commitment not found' });
+    }
     if (existing.sms_log_id || existing.email_id) {
       if (!UUID_RE.test(String(req.body?.customer_id || ''))) return res.status(400).json({ error: 'customer_id must be a UUID' });
       const row = await applySmsCommitmentUpdate(db, req.params.id, {

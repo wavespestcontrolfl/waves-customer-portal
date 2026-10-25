@@ -142,7 +142,7 @@ router.get('/', async (req, res, next) => {
     const before = parseCursor(req.query.before);
     if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
     const offset = before ? 0 : (page - 1) * limit;
-    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, before });
+    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
     // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
@@ -170,7 +170,7 @@ router.get('/done', requireAdmin, async (req, res, next) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
     const before = parseCursor(req.query.before);
     if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
-    const rows = await NotificationService.getAdminDoneNotifications({ role: req.techRole, limit: limit + 1, before });
+    const rows = await NotificationService.getAdminDoneNotifications({ role: req.techRole, technicianId: req.technicianId, limit: limit + 1, before });
     const page = rows.slice(0, limit);
     res.json({
       notifications: page,
@@ -358,7 +358,7 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
 // zero (was lingering because live alerts have no persisted read_at).
 router.put('/read-all', async (req, res, next) => {
   try {
-    await NotificationService.markAllReadAdmin({ role: req.techRole });
+    await NotificationService.markAllReadAdmin({ role: req.techRole, technicianId: req.technicianId });
     // Live-alert dismissal is admin-only: the overlay never renders for
     // other roles, and its helper also marks persisted dashboard_alert
     // rows read — rows the fail-closed feed hides from them (codex P1).
@@ -492,7 +492,7 @@ router.put('/:id/read', async (req, res, next) => {
       return res.json({ success: true, live: true, dismissed: recorded > 0 });
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
-    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole });
+    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole, technicianId: req.technicianId });
     // No badge-ordering stamp — see /read-all.
     res.json({ success: true, updated });
   } catch (err) { next(err); }
@@ -517,9 +517,9 @@ router.put('/:id/done', async (req, res, next) => {
       return res.status(400).json({ error: 'version is required' });
     }
     const resolution = typeof req.body?.resolution === 'string' ? req.body.resolution : null;
-    const updated = await NotificationService.markAdminDone([id], { by: String(req.technicianId), resolution, role: req.techRole, expectedVersion: version.toLowerCase() });
+    const updated = await NotificationService.markAdminDone([id], { by: String(req.technicianId), resolution, role: req.techRole, technicianId: req.technicianId, expectedVersion: version.toLowerCase() });
     if (!updated) {
-      const state = await NotificationService.getAdminNotificationState(id, { role: req.techRole });
+      const state = await NotificationService.getAdminNotificationState(id, { role: req.techRole, technicianId: req.technicianId });
       if (state && !state.done && state.version !== version.toLowerCase()) return res.status(409).json({ error: 'changed' });
     }
     // GATE_SMS_FOLLOWUP_WITNESS_FIX: Done on a text follow-up bell also settles

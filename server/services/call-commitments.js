@@ -3564,7 +3564,7 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 // callback cards (deadline, default owner, audit row) as they read; every
 // other caller — the Intelligence Bar's read-only tool, the integrations
 // worker — gets a pure read and sees whatever those paths persisted.
-async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
+async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null, customerScope = null } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -3595,6 +3595,8 @@ async function listOpenCommitments(conn, { party = null, kind = null, kinds = nu
       const kindFilter = kinds && kinds.length ? kinds : (kind ? [kind] : null);
       if (kindFilter) b.whereIn('cc.kind', kindFilter);
       scopeCommitmentRows(b, { customerId, leadId, leadSid, phone });
+      // customerScope: a subquery of customer ids (a technician login's own customers, GATE_TECH_LOGIN_PRIVACY).
+      if (customerScope) b.whereIn('cl.customer_id', customerScope);
       if (!includeHints) b.whereNull('cc.fulfillment');
       // activeSince (the follow-up pager): only promises made, dated or
       // snoozed since then — a large historical backlog must not page
@@ -3635,7 +3637,7 @@ async function listOpenCommitments(conn, { party = null, kind = null, kinds = nu
 // new close between pages never skips or repeats a row); `next` is the
 // cursor for the page after, null on the last page.
 const AUTO_CLOSED_LIMIT = 100;
-async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_LIMIT, before = null } = {}) {
+async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_LIMIT, before = null, customerScope = null } = {}) {
   const since = new Date(Date.now() - Math.max(1, Math.min(30, Number(days) || 7)) * 24 * 60 * 60 * 1000);
   const pageSize = Math.max(1, Math.min(AUTO_CLOSED_LIMIT, Number(limit) || AUTO_CLOSED_LIMIT));
   // When the portal closed it (storedProof's closed_at, a JS instant, so the
@@ -3653,6 +3655,7 @@ async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_L
     // association close or a customer-left dismissal — never another writer's.
     .whereIn('cc.status', ['fulfilled', 'dismissed'])
     .whereRaw("cc.fulfillment ->> 'closed_by' = ?", [CLOSED_BY_EVIDENCE])
+    .modify((q) => { if (customerScope) q.whereIn('cl.customer_id', customerScope); })
     .modify((q) => { if (before) q.whereRaw(`(${position}, cc.id) < (?, ?::uuid)`, [new Date(before.at).toISOString(), before.id]); })
     .orderByRaw(`${position} DESC, cc.id DESC`)
     // One row past the page says whether another follows.

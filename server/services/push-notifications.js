@@ -369,12 +369,14 @@ class PushNotificationService {
     return claimLost && !stats.sent ? { ...stats, reason: 'push_in_flight' } : stats;
   }
 
-  async sendToAdmins(notification) {
+  // adminOnly: admin-role devices only (GATE_TECH_LOGIN_PRIVACY callers); the
+  // default reaches every staff device, technicians included, as before.
+  async sendToAdmins(notification, { adminOnly = false } = {}) {
     const subs = await staffMfaPushFilter(db('push_subscriptions as ps')
       .join('technicians as t', 'ps.admin_user_id', 't.id')
       .where({ 'ps.active': true, 't.active': true })
       .whereRaw('ps.staff_token_version = t.auth_token_version')
-      .whereIn('t.role', ['admin', 'technician']))
+      .whereIn('t.role', adminOnly ? ['admin'] : ['admin', 'technician']))
       .select('ps.*');
     const results = [];
     for (const sub of subs) {
