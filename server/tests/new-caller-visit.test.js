@@ -195,6 +195,9 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     expect(link.indexOf('await lockCallForBooking(trx, call);')).toBeGreaterThan(-1);
     expect(link.indexOf('await lockCallForBooking(trx, call);')).toBeLessThan(link.indexOf('await lockCustomerComms(trx, customerId);'));
     expect(link.indexOf('await lockCustomerComms(trx, customerId);')).toBeLessThan(link.indexOf('recordCallProperty('));
+    // The agent's claim fence: the customer row, then the call row (recordCallProperty's order), before any write.
+    expect(link.indexOf("trx('customers').where({ id: customerId }).forUpdate()")).toBeLessThan(link.indexOf('processing_token: claimFence.procToken'));
+    expect(link.indexOf('processing_token: claimFence.procToken')).toBeLessThan(link.indexOf('await ensurePrimaryProperty('));
   });
 
   test('after a link, the outcome is read from the helpers\' own answers (they catch their failures)', async () => {

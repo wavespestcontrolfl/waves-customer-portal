@@ -1705,12 +1705,13 @@ describe('findNewCallerVisitForCall (GATE_NEW_CALLER_BOOKING: the office booked 
     };
   }
 
-  test('finds the live customer-less visit stamped with this call, whoever the customer turns out to be', async () => {
+  test('finds the live visit the office booked for this call, linked or not, whoever the customer turns out to be', async () => {
     const log = [];
     await expect(findNewCallerVisitForCall({ call: { id: 'call-1' }, trx: fakeFirstConn(officeVisit, log) })).resolves.toBe(officeVisit);
     expect(log).toContainEqual(['table', 'scheduled_services']);
     expect(log).toContainEqual(['where', { source_call_log_id: 'call-1', source_action: 'admin_new_caller' }]);
-    expect(log).toContainEqual(['whereNull', 'customer_id']);
+    // A visit the link step gave to another customer (an operator relinked the call mid-pass) holds as well.
+    expect(log).not.toContainEqual(['whereNull', 'customer_id']);
     expect(log).toContainEqual(['whereNull', 'parent_service_id']);
     expect(log).toContainEqual(['whereNotIn', 'status', ['cancelled', 'rescheduled']]);
   });
