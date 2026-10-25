@@ -3843,6 +3843,15 @@ const gates = {
   // customer's property_type exactly as before.
   slabHomeNoTax: gateEnvValue('GATE_SLAB_HOME_NO_TAX'),
 
+  // Tax worksheets (2026-10-25): Tax > Reports > Sales tax (the Florida DR-15
+  // lines for a month, quarter, half year or year from the books) and 1099s
+  // (who was paid for contract labor or legal and professional work, and who
+  // needs a 1099-NEC). Read-only; Mark filed uses the filing calendar's own
+  // route. Nested under GATE_BANK_IMPORT; read at call time via
+  // taxWorksheetsLive(); dark by default. Off = the routes 404 and the tabs
+  // stay hidden.
+  taxWorksheets: gateEnvValue('GATE_TAX_WORKSHEETS'),
+
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic
@@ -5752,6 +5761,11 @@ function taxReturnEngineLive() {
 // GATE_SLAB_HOME_NO_TAX read at CALL time (so a flip needs no redeploy).
 function slabHomeNoTaxLive() {
   return gateEnvValue('GATE_SLAB_HOME_NO_TAX');
+}
+
+// GATE_TAX_WORKSHEETS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
+function taxWorksheetsLive() {
+  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_WORKSHEETS');
 }
 
 // GATE_PUBLIC_LLM_SHARED_CAP read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -8005,6 +8019,8 @@ module.exports.taxSharedBillsLive = taxSharedBillsLive;
 module.exports.taxReturnEngineLive = taxReturnEngineLive;
 // GATE_SLAB_HOME_NO_TAX reader, on its own line so gate PRs never conflict.
 module.exports.slabHomeNoTaxLive = slabHomeNoTaxLive;
+// GATE_TAX_WORKSHEETS reader, on its own line so gate PRs never conflict.
+module.exports.taxWorksheetsLive = taxWorksheetsLive;
 // GATE_PUBLIC_LLM_SHARED_CAP reader, on its own line so gate PRs never conflict.
 module.exports.publicLlmSharedCapLive = publicLlmSharedCapLive;
 // GATE_SMS_FOLLOWUP_WITNESS_FIX reader, on its own line so gate PRs never conflict.

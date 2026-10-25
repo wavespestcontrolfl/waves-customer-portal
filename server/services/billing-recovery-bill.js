@@ -22,10 +22,10 @@
 const db = require('../models/db');
 const InvoiceService = require('./invoice');
 const { customerOnAutopay } = require('./autopay-eligibility');
-const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cost-visit-types');
 const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
 const { refuseCoveredMemberMintInTrx } = require('./estimate-first-application-invoice');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
@@ -33,11 +33,15 @@ const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive(
 
 // Match the completion path's due date (the service date), so a recovered
 // 60/90-day-old visit ages correctly instead of resetting to today+30. A
-// date-only string is used as-is; a timestamp is normalized to its ET date.
+// date-only string is used as-is. A service_date read back as a Date is a
+// Postgres DATE (pg returns it at UTC midnight), so its calendar day is taken
+// as-is too: reading that instant in ET lands on the PREVIOUS day. A
+// completed_at timestamp is normalized to its ET date.
 function dueDateFromVisit(v) {
   const raw = v.service_date || v.completed_at;
   if (!raw) return undefined;
   if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  if (v.service_date && raw instanceof Date) return dateOnlyString(raw);
   return etDateString(new Date(raw));
 }
 
@@ -267,7 +271,10 @@ function priceRefusalOrAmount(visit, billing) {
   // internal check) because this call site never consulted the predicate
   // at all before, so it must stay byte-identical while the gate is off.
   const stampedZero = stampedZeroFreeLive() && hasAuthoritativeZeroPrice(visit.estimated_price, null);
-  const price = rowPrice > 0 ? rowPrice : (stampedZero ? 0 : (billing.mode === 'per_application' ? billing.perApplicationFee : 0));
+  // A consultation (Waves Assessment) is not an application: the plan's
+  // per-application fee never prices it — only its own row price bills.
+  const feeApplies = billing.mode === 'per_application' && !isConsultationServiceType(visit.service_type);
+  const price = rowPrice > 0 ? rowPrice : (stampedZero ? 0 : (feeApplies ? billing.perApplicationFee : 0));
   if (!(price > 0)) return refuse(422, 'Visit has no price to invoice.');
   if (prepaid >= price) return refuse(409, 'Visit is already fully prepaid.');
   // Partial prepay needs the prepaid credit applied (completion does this via
