@@ -6389,6 +6389,18 @@ router.get('/held-visits', requireAdmin, async (req, res) => {
 });
 
 // GET /api/admin/schedule — day view (board + dispatch)
+// GATE_NEW_CALLER_BOOKING: a visit booked by address before its customer
+// exists reads "New caller" and offers Link customer on the visit sheet (PUT
+// /api/admin/schedule/new-caller/:id/link). The day and the week feed both
+// open that sheet, so both carry these fields.
+function newCallerRowFields(s) {
+  const awaitingCustomerLink = !s.customer_id && s.source_action === 'admin_new_caller';
+  return {
+    customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || (awaitingCustomerLink ? 'New caller' : null),
+    awaitingCustomerLink,
+  };
+}
+
 router.get('/', async (req, res, next) => {
   try {
     const date = req.query.date || etDateString();
@@ -6925,13 +6937,7 @@ router.get('/', async (req, res, next) => {
         linkedProjectLookupFailed: projectCompletionContext.linkedProjectLookupFailed === true,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
-        // GATE_NEW_CALLER_BOOKING: a visit booked by address before its
-        // customer exists reads "New caller" until the call-recording agent
-        // (or staff) links the customer.
-        customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim()
-          || (!s.customer_id && s.source_action === 'admin_new_caller' ? 'New caller' : null),
-        // The visit sheet offers Link customer for it (PUT /api/admin/schedule/new-caller/:id/link).
-        awaitingCustomerLink: !s.customer_id && s.source_action === 'admin_new_caller',
+        ...newCallerRowFields(s),
         customerId: s.customer_id,
         // propertyId, address, city, state, lat, lng, customerPhone and
         // checkInTime: shared with the week feed (visitPremiseFields).
@@ -7191,7 +7197,7 @@ router.get('/week', async (req, res, next) => {
         .leftJoin('visit_completion_packets as closeout_packet', 'closeout_packet.visit_id', 'scheduled_services.visit_id')
         .leftJoin('service_visits as closeout_visit', 'closeout_visit.id', 'scheduled_services.visit_id')
         .joinRaw(`LEFT JOIN payers AS bill_to_payer ON bill_to_payer.id = ${effectiveBillToSql} AND bill_to_payer.active = true`)
-        .select('scheduled_services.id', 'scheduled_services.customer_id',
+        .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.source_action',
           'scheduled_services.visit_id', 'closeout_packet.id as closeout_packet_id', 'closeout_packet.status as closeout_packet_status',
           'closeout_visit.behavior_version as visit_behavior_version',
           'bill_to_payer.id as billed_to_payer_id',
@@ -7462,7 +7468,7 @@ router.get('/week', async (req, res, next) => {
         return {
           id: s.id,
           customerId: s.customer_id,
-          customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
+          ...newCallerRowFields(s),
           // propertyId and the rest of the premise the day feed carries: the
           // Fast Complete rules and sheets read them off this row too.
           ...visitPremiseFields(s),
@@ -29144,6 +29150,7 @@ module.exports.buildAppointmentPricing = buildAppointmentPricing;
 // new-caller booking route (admin-schedule-new-caller.js), which books by
 // address before a customer exists.
 module.exports.getZone = getZone;
+module.exports.newCallerRowFields = newCallerRowFields;
 // The percent-discount exclusion predicate (termite bond, rodent bait,
 // bed bug, Bora-Care, pre-slab, ...) — consumed lazily by the IB
 // create_appointment member-discount auto-apply (tools.js) so its automatic

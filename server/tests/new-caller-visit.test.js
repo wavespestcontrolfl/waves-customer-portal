@@ -161,6 +161,13 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
   test('rides the admin schedule day view to Dispatch, and the route mounts before the main schedule router', () => {
     const day = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     expect(day).toContain("newCallerBooking: isEnabled('newCallerBooking')");
+    // The day and the week feed both open the visit sheet, so both carry the New caller fields
+    // (the week query selects source_action for them).
+    expect(day.match(/\.\.\.newCallerRowFields\(s\)/g)).toHaveLength(2);
+    const weekStart = day.indexOf("router.get('/week'");
+    const week = day.slice(weekStart, day.indexOf('router.', weekStart + 20));
+    expect(week).toContain("'scheduled_services.source_action'");
+    expect(week).toContain('...newCallerRowFields(s)');
     const index = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
     const own = index.indexOf("app.use('/api/admin/schedule/new-caller'");
     const main = index.indexOf("app.use('/api/admin/schedule', require('./routes/admin-schedule'))");
@@ -247,6 +254,14 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     } finally {
       if (saved === undefined) delete process.env.GATE_MOSQUITO_MISTING; else process.env.GATE_MOSQUITO_MISTING = saved;
     }
+  });
+
+  test('a visit booked by address reads "New caller" and awaits its link; a named visit or a slot hold does not', () => {
+    const { newCallerRowFields } = require('../routes/admin-schedule');
+    expect(newCallerRowFields({ customer_id: null, source_action: 'admin_new_caller' })).toEqual({ customerName: 'New caller', awaitingCustomerLink: true });
+    expect(newCallerRowFields({ customer_id: 'cust-1', source_action: 'admin_new_caller', first_name: 'Pat', last_name: 'Example' }))
+      .toEqual({ customerName: 'Pat Example', awaitingCustomerLink: false });
+    expect(newCallerRowFields({ customer_id: null, source_action: 'estimate_slot_hold' })).toEqual({ customerName: null, awaitingCustomerLink: false });
   });
 
   test('the service refuses with a 404 while the gate is off, before any read', async () => {
