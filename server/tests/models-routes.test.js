@@ -59,6 +59,34 @@ describe('models registry — cross-provider routing', () => {
     }
   });
 
+  test('the Fast Complete fact readers keep Luna when MODEL_OPENAI_FAST moves, and only MODEL_OPENAI_FAST_INTERACTIVE moves them (2026-10-25)', () => {
+    const saved = { fast: process.env.MODEL_OPENAI_FAST, interactive: process.env.MODEL_OPENAI_FAST_INTERACTIVE };
+    const restore = () => {
+      for (const [key, env] of [['fast', 'MODEL_OPENAI_FAST'], ['interactive', 'MODEL_OPENAI_FAST_INTERACTIVE']]) {
+        if (saved[key] === undefined) delete process.env[env]; else process.env[env] = saved[key];
+      }
+      jest.resetModules();
+    };
+    try {
+      jest.resetModules();
+      process.env.MODEL_OPENAI_FAST = 'gpt-6.1-sol';
+      delete process.env.MODEL_OPENAI_FAST_INTERACTIVE;
+      let M = require('../config/models');
+      expect(M.TEXT_POLICIES.fastStructured.primary.model).toBe('gpt-6.1-sol');
+      expect(M.TEXT_POLICIES.fastStructuredInteractive.primary).toEqual({ provider: M.PROVIDER.OPENAI, model: 'gpt-5.6-luna' });
+      expect(M.TEXT_POLICIES.fastStructuredInteractive.fallback).toEqual(M.TEXT_POLICIES.fastStructured.fallback);
+
+      jest.resetModules();
+      process.env.MODEL_OPENAI_FAST_INTERACTIVE = 'gpt-interactive-canary';
+      M = require('../config/models');
+      expect(M.OPENAI_FAST_INTERACTIVE).toBe('gpt-interactive-canary');
+      expect(M.TEXT_POLICIES.fastStructuredInteractive.primary.model).toBe('gpt-interactive-canary');
+      expect(M.TEXT_POLICIES.fastStructured.primary.model).toBe('gpt-6.1-sol');
+    } finally {
+      restore();
+    }
+  });
+
   test('every generated-text policy crosses providers', () => {
     const M = require('../config/models');
     for (const policy of Object.values(M.TEXT_POLICIES)) {

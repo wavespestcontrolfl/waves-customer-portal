@@ -977,7 +977,7 @@ describe('readVoiceFacts', () => {
     expect(facts).toMatchObject({ status: 'read', areas: ['Inside', 'Outside'], unclearAreas: [], pests: ['ghost ants'], spray: 'perimeter' });
     expect(facts.heard.areas).toHaveLength(2);
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
-    expect(policy.name).toBe('fastStructured');
+    expect(policy.name).toBe('fastStructuredInteractive');
     expect(payload).toMatchObject({ laneId: 'visit_voice_facts', jsonSchema: expect.any(Object) });
     expect(payload.text).toContain('Baited the counter edge');
     expect(options).toEqual({ reserveFallbackBudget: true });

@@ -149,7 +149,7 @@ async function readLaneFacts({ note, laneKey }) {
   if (text.length > MAX_NOTE_CHARS) return empty('too_long');
   let result;
   try {
-    result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructuredInteractive, {
       laneId: 'visit_lane_facts',
       system: laneSystemPrompt(laneKey, spec),
       text: `TECHNICIAN NOTE:\n${text}`,
