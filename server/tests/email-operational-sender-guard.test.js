@@ -95,3 +95,44 @@ describe('email spam-blocker — isOperationalDomain export', () => {
     expect(isOperationalDomain('retailer.example.com')).toBe(false);
   });
 });
+
+describe('email government-sender guard (outside review 2026-10-25)', () => {
+  const { isGovernmentDomain } = require('../services/email/spam-blocker');
+
+  test('recognizes .gov, .mil, .fed.us, Florida .us and named Florida agencies — never look-alikes', () => {
+    for (const domain of ['fdacs.gov', 'licensing.fdacs.gov', 'epa.gov', 'irs.gov', 'army.mil', 'fs.fed.us',
+      'co.manatee.fl.us', 'dep.state.fl.us', 'freshfromflorida.com', 'mail.freshfromflorida.com',
+      'floridarevenue.com', 'myfloridalicense.com', 'scgov.net']) {
+      expect(isGovernmentDomain(domain)).toBe(true);
+    }
+    for (const domain of ['connectively.us', 'gov.example.com', 'fdacs.gov.attacker.example', 'mygov.com',
+      'freshfromflorida.com.evil.example', '', null]) {
+      expect(isGovernmentDomain(domain)).toBe(false);
+    }
+  });
+
+  test('a regulator notice classified spam or newsletter is never auto-actioned when its auth aligns', () => {
+    expect(shouldSkipAutoAction('spam', 'licensing@fdacs.gov', GOOG('fdacs.gov'))).toBe(true);
+    expect(shouldSkipAutoAction('marketing_newsletter', 'news@freshfromflorida.com', GOOG('freshfromflorida.com'))).toBe(true);
+    expect(shouldSkipAutoAction('spam', 'notices@floridarevenue.com', GOOG('floridarevenue.com'))).toBe(true);
+  });
+
+  test('a spoofed .gov sender that fails auth still falls through to quarantine', () => {
+    expect(shouldSkipAutoAction('spam', 'licensing@fdacs.gov', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example; dkim=none')).toBe(false);
+  });
+
+  test('non-destructive categories still run for government senders', () => {
+    expect(shouldSkipAutoAction('regulatory', 'licensing@fdacs.gov', GOOG('fdacs.gov'))).toBe(false);
+    expect(shouldSkipAutoAction('vendor_invoice', 'billing@myflorida.com', GOOG('myflorida.com'))).toBe(false);
+  });
+
+  test('autoUnsubscribe refuses a government sender', async () => {
+    const result = await autoUnsubscribe({
+      id: 'test',
+      from_address: 'news@freshfromflorida.com',
+      list_unsubscribe: '<https://example.com/unsub>',
+    });
+    expect(result.method).toBe('none');
+    expect(result.note).toContain('government sender');
+  });
+});

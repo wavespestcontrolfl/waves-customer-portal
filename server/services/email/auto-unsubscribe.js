@@ -163,10 +163,16 @@ async function autoUnsubscribe(email) {
   // one-click POST on our own newsletter's List-Unsubscribe header
   // enrolls the shared inbox in SendGrid's suppression group — this
   // exact failure silently knocked contact@ off our own list twice.
-  const { isOperationalDomain, domainFromAddress } = require('./spam-blocker');
+  const { isOperationalDomain, isGovernmentDomain, domainFromAddress } = require('./spam-blocker');
   if (isOperationalDomain(domainFromAddress(email.from_address))) {
     logger.info(`[unsubscribe] Refused: operational sender (email ${email.id})`);
     return { method: 'none', note: 'operational sender — never unsubscribe' };
+  }
+  // Same belt for government senders: dropping off a regulator's list
+  // (FDACS, DOR, county) can hide a licensing or tax notice.
+  if (isGovernmentDomain(domainFromAddress(email.from_address))) {
+    logger.info(`[unsubscribe] Refused: government sender (email ${email.id})`);
+    return { method: 'none', note: 'government sender — never unsubscribe' };
   }
 
   // The unsubscribe URLs are sender-controlled requests — following them for

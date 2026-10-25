@@ -1,7 +1,7 @@
 const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
-const { isOperationalDomain, domainFromAddress, domainMatches, normalizeAddress } = require('./spam-blocker');
+const { isOperationalDomain, isGovernmentDomain, domainFromAddress, domainMatches, normalizeAddress } = require('./spam-blocker');
 const { whereLiveCustomer } = require('../customer-stages');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 
@@ -25,7 +25,11 @@ const { isInternalEmailRecipient } = require('../../utils/internal-email-recipie
 const DESTRUCTIVE_CATEGORIES = new Set(['spam', 'marketing_newsletter']);
 function shouldSkipAutoAction(category, fromAddress, authResults) {
   if (!DESTRUCTIVE_CATEGORIES.has(category)) return isInternalEmailRecipient(fromAddress);
-  if (!isOperationalDomain(domainFromAddress(fromAddress))) return false;
+  // Government senders get the same protection, under the same auth rule
+  // below: a regulator's notice is never quarantined or unsubscribed on a
+  // classifier verdict, while a spoofed .gov that fails auth still is.
+  const senderDomain = domainFromAddress(fromAddress);
+  if (!isOperationalDomain(senderDomain) && !isGovernmentDomain(senderDomain)) return false;
   // Gmail stamps EVERY inbound SMTP message with a trusted
   // Authentication-Results header, so:
   //   - header present → this is inbound; the skip only applies when it

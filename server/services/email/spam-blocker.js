@@ -115,6 +115,35 @@ function isOperationalDomain(domain) {
   return domainMatches(domain, OPERATIONAL_EMAIL_DOMAINS);
 }
 
+// Government senders (outside review of the model audit, 2026-10-25): a
+// classifier verdict must never quarantine, trash, auto-block or one-click
+// unsubscribe mail from a regulator or tax office. One spam label on an
+// FDACS licensing notice would otherwise end in a persistent sender block,
+// and email-sync trashes a blocked sender's later mail before it is ever
+// classified. .gov / .mil / .fed.us and the Florida .us namespaces are
+// registrar-restricted; the named list covers Florida state and local
+// agencies that mail from ordinary domains. Kept separate from
+// OPERATIONAL_EMAIL_DOMAINS, which also means "not a customer sender" to
+// other callers (access-code capture).
+const GOVERNMENT_SUFFIX_RE = /\.(?:gov|mil)$|\.fed\.us$|\.fl\.us$|\.state\.[a-z]{2}\.us$/;
+const GOVERNMENT_EMAIL_DOMAINS = new Set([
+  'freshfromflorida.com', // FDACS — pest control licensing and inspections
+  'myflorida.com', // State of Florida agencies
+  'floridarevenue.com', // Florida Department of Revenue
+  'myfloridalicense.com', // Florida DBPR
+  'sunbiz.org', // Florida Division of Corporations
+  'floridajobs.org', // FloridaCommerce (reemployment tax)
+  'mymanatee.org', // Manatee County Government
+  'scgov.net', // Sarasota County Government
+  'taxcollector.com', // Manatee County Tax Collector
+]);
+
+function isGovernmentDomain(domain) {
+  const normalized = String(domain || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return GOVERNMENT_SUFFIX_RE.test(normalized) || domainMatches(normalized, GOVERNMENT_EMAIL_DOMAINS);
+}
+
 function redactEmail(value) {
   const normalized = normalizeAddress(value);
   const [local, domain] = normalized.split('@');
@@ -155,6 +184,10 @@ async function blockSpamSender(email) {
   // critical platform mail. These senders carry customer replies, account
   // security notices, GBP, GSC, calendar, and infrastructure alerts.
   if (isOperationalDomain(domain)) return;
+  // Nor a government sender: a spoof of a real agency address that fails
+  // auth is still trashed by the sweep, but the agency itself must never
+  // land on the block list.
+  if (isGovernmentDomain(domain)) return;
 
   // Don't block known good domains
   const isVendor = await db('vendor_email_domains').where('domain', domain).first();
@@ -594,7 +627,7 @@ async function reconcileStaleAutoBlocks() {
     if (!normalized) continue;
     try {
       const domain = domainFromAddress(normalized);
-      const identity = (domain && isOperationalDomain(domain))
+      const identity = (domain && (isOperationalDomain(domain) || isGovernmentDomain(domain)))
         || !!(await db('customers').whereRaw('LOWER(email) = ?', [normalized]).whereNull('deleted_at').first())
         || !!(await db('leads')
           .whereRaw('LOWER(email) = ?', [normalized])
@@ -631,6 +664,9 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
     .first();
 
   const identity = isOperationalDomain(domain)
+    // A government sender is an identity too: a stale AUTOMATIC block on an
+    // agency address is removed; a manual admin block still stands.
+    || isGovernmentDomain(domain)
     // Live customers only — a soft-deleted customer is no longer a protected
     // identity (mirrors isKnownSender), so their block stays enforced.
     || !!(await db('customers').whereRaw('LOWER(email) = ?', [normalized]).whereNull('deleted_at').first())
@@ -682,5 +718,6 @@ module.exports = {
   domainMatches,
   isProtectedDomain,
   isOperationalDomain,
+  isGovernmentDomain,
   normalizeAddress,
 };
