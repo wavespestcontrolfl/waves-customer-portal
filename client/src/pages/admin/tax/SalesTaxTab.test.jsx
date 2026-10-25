@@ -120,6 +120,21 @@ it('Mark filed with no amount sends status filed', async () => {
   expect(calls.find((c) => c.method === 'PUT').body).toMatchObject({ status: 'filed', paidDate: null, amountPaid: 0 });
 });
 
+it('Mark filed reads "$1,000.00" as 1000 and refuses text that is not an amount', async () => {
+  render(<SalesTaxTab />);
+  await screen.findByRole('button', { name: 'Mark filed' });
+  for (const bad of ['abc', '-5', '']) {
+    fireEvent.change(screen.getByLabelText('Amount paid'), { target: { value: bad } });
+    fireEvent.click(screen.getByRole('button', { name: 'Mark filed' }));
+    expect(await screen.findByText('Enter the amount paid as a number, for example 13.04.')).toBeInTheDocument();
+  }
+  expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+  fireEvent.change(screen.getByLabelText('Amount paid'), { target: { value: '$1,000.00' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Mark filed' }));
+  await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+  expect(calls.find((c) => c.method === 'PUT').body).toMatchObject({ status: 'paid', amountPaid: 1000 });
+});
+
 it('a filed row shows the filed facts and no Mark filed button', async () => {
   sheet = { ...sheet, filing: { ...openFiling, status: 'paid', filed_date: '2026-11-18', paid_date: '2026-11-18', amount_paid: 225.17, confirmation_number: 'XYZ789' } };
   render(<SalesTaxTab />);

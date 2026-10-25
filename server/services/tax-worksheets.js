@@ -184,16 +184,18 @@ const SCHEDULE_C_1099_LINES = ['11', '17'];
 const LEFT_OUT_CHANNELS = new Set(['card', 'debit_card', 'platform']);
 
 // How a payment left the business: the expense's payment method first, then
-// the bank text, first match wins. Fiverr and Upwork come before the payment
-// apps because they file 1099-Ks for the work bought through them.
+// the bank text, first match wins. Fiverr and Upwork come first because they
+// file 1099-Ks for the work bought through them, and a card purchase comes
+// before the payment apps: "Debit Card Purchase - Cash App*..." was a card
+// payment, which the network reports.
 const CHANNEL_RULES = [
   ['platform', /\b(?:fiverr|upwork)\b/i],
+  ['debit_card', /debit\s*card|card\s+purchase|\bpos\b|checkcard/i],
   ['zelle', /\bzelle\b/i],
   ['venmo', /\bvenmo\b/i],
   ['cash_app', /cash\s*app|square\s*cash/i],
   ['paypal', /\bpaypal\b/i],
   ['wise', /\bwise\b|transferwise/i],
-  ['debit_card', /debit\s*card|card\s+purchase|\bpos\b|checkcard/i],
   ['check', /\bche(?:ck|que)\b|\bchk\b/i],
   ['bank_transfer', /transfer|\bach\b|\bwire\b|bill\s*pay/i],
 ];
@@ -215,6 +217,8 @@ const PAYEE_PATTERNS = [
   /\bpaypal\s*\*\s*(.+)/i,
 ];
 const NO_PAYEE = [/\bwise\b|transferwise/i, /^\s*che(?:ck|que)\b|^\s*chk\b/i];
+// what is left of "VENMO PAYMENT" or "Online Transfer" names no one
+const GENERIC_NAME = /^(?:(?:payment|transfer|purchase|withdrawal|deposit|online|mobile|web|ach|venmo|zelle|cash\s*app|paypal|wise)\s*)+$/i;
 const REFERENCE_TAIL = /\s+(?:conf(?:irmation)?|ref(?:erence)?|id|trn|txn)\b.*$/i;
 const tidy = (text) => text.replace(REFERENCE_TAIL, '').replace(/\b\d{5,}\b/g, '').replace(/[\s,.-]+$/, '').replace(/\s+/g, ' ').trim();
 
@@ -223,7 +227,8 @@ function payeeOf(text) {
   const pattern = PAYEE_PATTERNS.map((re) => re.exec(raw)).find(Boolean);
   if (!pattern && NO_PAYEE.some((re) => re.test(raw))) return { name: `${tidy(raw)} (payee not in the bank text)`, identified: false };
   const name = tidy(pattern ? pattern[1] : raw.replace(/^(?:debit\s+card\s+purchase|online\s+transfer\s+to|payment\s+to)\s*-?\s*/i, ''));
-  return name ? { name, identified: true } : { name: 'Unknown payee', identified: false };
+  if (/[a-z]/i.test(name) && !GENERIC_NAME.test(name)) return { name, identified: true };
+  return { name: raw ? `${tidy(raw)} (payee not in the bank text)` : 'Unknown payee', identified: false };
 }
 const payeeKey = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 

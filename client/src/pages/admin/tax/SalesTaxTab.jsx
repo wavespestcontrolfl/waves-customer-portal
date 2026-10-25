@@ -102,6 +102,7 @@ function FilingBox({ sheet, busy, onMarkFiled }) {
   const [filedDate, setFiledDate] = useState(() => etDateString());
   const [amount, setAmount] = useState(() => String(Number(lines.amount_due) || 0));
   const [confirmation, setConfirmation] = useState("");
+  const [amountError, setAmountError] = useState("");
   if (!filing) {
     return <div className="text-sm text-ink-secondary">No filing calendar row for this period, so it cannot be marked filed here.</div>;
   }
@@ -116,7 +117,14 @@ function FilingBox({ sheet, busy, onMarkFiled }) {
   }
   const submit = (e) => {
     e.preventDefault();
-    const paid = Number(amount) || 0;
+    // "$1,000.00" is fine; text that is not an amount, or a negative one, is refused
+    const cleaned = amount.replace(/[$,\s]/g, "");
+    const paid = cleaned === "" ? NaN : Number(cleaned);
+    if (!Number.isFinite(paid) || paid < 0) {
+      setAmountError("Enter the amount paid as a number, for example 13.04.");
+      return;
+    }
+    setAmountError("");
     onMarkFiled(filing.id, {
       status: paid > 0 ? "paid" : "filed",
       filedDate,
@@ -133,6 +141,7 @@ function FilingBox({ sheet, busy, onMarkFiled }) {
         <Input aria-label="Amount paid" inputMode="decimal" className="flex-1 min-w-[140px]" disabled={busy} value={amount} onChange={(e) => setAmount(e.target.value)} />
         <Input aria-label="Confirmation number" placeholder="Confirmation number" className="flex-1 min-w-[180px]" disabled={busy} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} />
       </div>
+      {amountError && <ActionFeedback error>{amountError}</ActionFeedback>}
       <div>
         <Button type="submit" variant="primary" disabled={busy}>Mark filed</Button>
       </div>

@@ -148,6 +148,7 @@ describe('payment channel and payee', () => {
     ['ach', 'Zelle money sent to Pat Example', 'zelle'],
     ['ach', 'Debit Card Purchase - FIVERR NEW YORK NY', 'platform'],
     ['ach', 'Debit Card Purchase - HARDWARE STORE BRADENTON FL', 'debit_card'],
+    ['ach', 'Debit Card Purchase - Cash App*Pat Example', 'debit_card'],
     ['ach', 'Withdrawal from WISE US INC WISE', 'wise'],
     ['ach', 'VENMO PAYMENT 1234567', 'venmo'],
     ['ach', 'Cash App*Lee Sample', 'cash_app'],
@@ -166,6 +167,9 @@ describe('payment channel and payee', () => {
     ['Pat Example', 'Pat Example', true],
     ['Withdrawal from WISE US INC WISE', 'Withdrawal from WISE US INC WISE (payee not in the bank text)', false],
     ['Check 1042', 'Check 1042 (payee not in the bank text)', false],
+    ['VENMO PAYMENT', 'VENMO PAYMENT (payee not in the bank text)', false],
+    ['Venmo', 'Venmo (payee not in the bank text)', false],
+    ['Online Transfer', 'Online Transfer (payee not in the bank text)', false],
     ['', 'Unknown payee', false],
   ])('"%s" -> %s', (text, name, identified) => {
     expect(ws.payeeOf(text)).toEqual({ name, identified });
