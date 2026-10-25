@@ -218,6 +218,35 @@ describe('CreateAppointmentModal new-caller Book', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
   });
 
+  it('a repeating service books its first visit only: no Repeats, cadence or booster choice in Book mode', async () => {
+    const fetcher = installFetch();
+    mount({ newCallerBooking: true });
+    fireEvent.click(screen.getByText('pick suggestion'));
+    await screen.findByText('This call');
+    await addService('Quarterly', /Quarterly Pest Control/i);
+    expect(await screen.findByText(/This service repeats\. Book saves the first visit only/)).toBeTruthy();
+    expect(screen.getByText('First visit only')).toBeTruthy();
+    expect(screen.queryByLabelText(/Repeats for/)).toBeNull();
+    expect(screen.queryByText('Booster months (optional)')).toBeNull();
+    const book = await screen.findByRole('button', { name: 'Book' });
+    await waitFor(() => expect(book.disabled).toBe(false));
+    fireEvent.click(book);
+    await waitFor(() => expect(posts(fetcher, '/admin/schedule/new-caller')).toHaveLength(1));
+    expect(JSON.parse(posts(fetcher, '/admin/schedule/new-caller')[0][1].body)).toMatchObject({ serviceId: 'svc-q' });
+  });
+
+  it('leaving Book mode brings the Repeats choice back with the service\'s cadence', async () => {
+    installFetch();
+    mount({ newCallerBooking: true });
+    fireEvent.click(screen.getByText('pick suggestion'));
+    await screen.findByText('This call');
+    await addService('Quarterly', /Quarterly Pest Control/i);
+    await screen.findByText('First visit only');
+    fireEvent.change(firstNameInput(), { target: { value: 'Pat' } });
+    const repeats = await screen.findByLabelText(/Repeats for Quarterly Pest Control/);
+    expect(repeats.value).not.toBe('one_time');
+  });
+
   it('two services stop Book with a reason', async () => {
     installFetch();
     mount({ newCallerBooking: true });

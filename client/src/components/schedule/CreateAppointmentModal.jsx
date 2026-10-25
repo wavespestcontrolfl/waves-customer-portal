@@ -5597,6 +5597,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   {newCallerBookMode && (
                     <div role="group" aria-label="New caller booking" style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 8, padding: 10, background: '#FAFAFA', border: '1px solid #E4E4E7', borderRadius: 8, fontSize: 14, color: '#18181B' }}>
                       <div>Book saves this visit with the address only. Nothing goes to the caller now: the call-recording agent adds the customer after the call and sends the confirmation.</div>
+                      {newCallerLine?.cadence && newCallerLine.cadence !== 'one_time' && (
+                        <div>This service repeats. Book saves the first visit only; the plan comes from the estimate once the customer is linked.</div>
+                      )}
                       {newCallerCallsFailed ? (
                         <div role="alert" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, color: D.red }}>
                           <span>The calls did not load. Book waits until they do.</span>
@@ -6263,17 +6266,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
                 <div style={{ gridColumn: isMobile ? '1 / -1' : undefined }}>
                   {isMobile && serviceFieldLabel('Repeats')}
-                  <select
-                    aria-label={`Repeats for ${svc.name || 'service'}`}
-                    value={svc.cadence || 'one_time'}
-                    onChange={(e) => updateServiceCadence(idx, e.target.value)}
-                    disabled={partialCommitLocked}
-                    style={inputStyle}
-                  >
-                    {CADENCE_OPTIONS.map((c) => (
-                      <option key={c.value} value={c.value}>{c.label}</option>
-                    ))}
-                  </select>
+                  {newCallerBookMode ? (
+                    <div style={{ ...inputStyle, color: D.muted }}>First visit only</div>
+                  ) : (
+                    <select
+                      aria-label={`Repeats for ${svc.name || 'service'}`}
+                      value={svc.cadence || 'one_time'}
+                      onChange={(e) => updateServiceCadence(idx, e.target.value)}
+                      disabled={partialCommitLocked}
+                      style={inputStyle}
+                    >
+                      {CADENCE_OPTIONS.map((c) => (
+                        <option key={c.value} value={c.value}>{c.label}</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
 
                 <button
@@ -6308,7 +6315,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
 
-                {svc.cadence === 'custom' && (
+                {!newCallerBookMode && svc.cadence === 'custom' && (
                   <div
                     style={{
                       gridColumn: '1 / -1',
@@ -6332,7 +6339,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
 
-                {svc.cadence === 'monthly_nth_weekday' && (
+                {!newCallerBookMode && svc.cadence === 'monthly_nth_weekday' && (
                   <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : '140px 180px', gap: 8 }}>
                     <div>
                       {serviceFieldLabel('Nth')}
@@ -6357,7 +6364,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
 
-                {svc.cadence && svc.cadence !== 'one_time' && (() => {
+                {!newCallerBookMode && svc.cadence && svc.cadence !== 'one_time' && (() => {
                   const selected = Array.isArray(svc.boosterMonths) ? svc.boosterMonths : [];
                   const summary = selected.length
                     ? MONTH_CHIPS.filter((m) => selected.includes(m.value)).map((m) => m.label).join(', ')
