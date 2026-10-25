@@ -25,7 +25,12 @@ const { etParts, etDateString, formatETTime } = require('../utils/datetime-et');
 
 const REMINDER_LEAD_MS = 15 * 60 * 1000;
 const RING_LATE_LIMIT_MS = 30 * 60 * 1000;
-const ACTIVE_RING_WINDOW_MS = 15 * 60 * 1000;
+// A lead ring still not terminal blocks the next one: a long call keeps Adam
+// busy. Two hours bounds a row whose final status never arrived.
+const ACTIVE_RING_WINDOW_MS = 2 * 60 * 60 * 1000;
+// A ring claim this old never reached placeRing's own claim (that moves the
+// booking to done): the process stopped in between, so it is taken again.
+const STALE_RING_CLAIM_MS = 5 * 60 * 1000;
 const RECENT_CALL_WINDOW_MS = 10 * 60 * 1000;
 const BATCH = 25;
 const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'no-answer', 'canceled'];
@@ -131,8 +136,10 @@ async function releaseRingClaim(id, fromState, now) {
 async function ringDue(now) {
   const { raiseLeadBell } = shared();
   const { placeRing } = require('./lead-call-reply-ring');
+  const stale = new Date(now.getTime() - STALE_RING_CLAIM_MS);
+  const unclaimed = (q) => q.whereNull('ring_claimed_at').orWhere('ring_claimed_at', '<', stale);
   const rows = await db('lead_callback_requests')
-    .where({ state: 'scheduled' }).whereNull('ring_claimed_at')
+    .where({ state: 'scheduled' }).where(unclaimed)
     .where('scheduled_for', '<=', now)
     .orderBy('scheduled_for').limit(BATCH);
   let rang = 0;
@@ -142,7 +149,9 @@ async function ringDue(now) {
     // Calls ring 8 AM-8 PM only: a slot delayed past 8 PM is the owner's.
     const handOff = late || !inRingHours(now);
     if (!handOff && await ringIsLive(now)) break; // the next tick rings it
-    if (!(await claim(row, 'ring_claimed_at', 'scheduled', now))) continue;
+    const won = await db('lead_callback_requests').where({ id: row.id, state: 'scheduled' }).where(unclaimed)
+      .update({ ring_claimed_at: now, updated_at: now });
+    if (!won) continue;
     try {
       const customer = await loadCustomer(row.customer_id);
       if (!customer) {
@@ -190,11 +199,13 @@ async function noAnswerBells(now) {
   for (const row of rows) {
     // One statement: still asked AND still unanswered, so an answer that
     // lands at 8 AM keeps its booking.
+    // The lead is read first: a failed read leaves the row as it was.
+    const customer = await loadCustomer(row.customer_id);
+    if (!customer) continue;
     const moved = await db('lead_callback_requests').where({ id: row.id, state: 'asked' })
       .whereNull('answer_text').whereNull('no_answer_at')
       .update({ state: 'needs_owner', no_answer_at: now, updated_at: now });
-    const customer = moved ? await loadCustomer(row.customer_id) : null;
-    if (!customer) continue;
+    if (!moved) continue;
     const settled = await raiseLeadBell({ customer, leadId: row.lead_id, requestId: row.id, why: 'Asked for a call after hours and never sent a time.' });
     if (!settled) {
       // A bell that never landed: back to asked, and the next tick tries again.

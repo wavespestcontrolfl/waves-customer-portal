@@ -191,6 +191,20 @@ jest.setTimeout(30000);
     expect(await rowNow(row.id)).toMatchObject({ state: 'asked', no_answer_at: null });
   });
 
+  test('a ring claim abandoned by a restart is taken again after 5 minutes', async () => {
+    const { row } = await booked();
+    await database('lead_callback_requests').where({ id: row.id }).update({ ring_claimed_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 60000) });
+    expect(mockPlaceRing).toHaveBeenCalledTimes(1);
+  });
+
+  test('a lead ring live for 20 minutes still makes the next booking wait', async () => {
+    await booked();
+    await database('call_log').insert({ id: randomUUID(), source: 'lead-call-reply-ring', direction: 'outbound', status: 'in-progress', to_phone: '+19415550199', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 20 * 60000) });
+    await runLeadCallbackTick({ now: new Date(SLOT.getTime() + 30000) });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+  });
+
   test('gate off: nothing is read', async () => {
     isEnabled.mockImplementation(() => false);
     await expect(runLeadCallbackTick({ now: SLOT })).resolves.toEqual({ skipped: 'gate_off' });
