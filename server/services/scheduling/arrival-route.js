@@ -226,6 +226,10 @@ async function loadArrivalRouteContext({
   if (dateOnly(stored.scheduled_date) !== date || (stored.technician_id || null) !== (techId || null)) {
     target.route_order = null;
   }
+  // A new route number in the pending edit (not the stored one sent back) is
+  // the place the save keeps, so the staff insertion rule checks that place.
+  const routeOrderPinned = target.route_order != null && changes.route_order != null
+    && Number(changes.route_order) !== Number(stored.route_order);
   const rows = await dayStopsQuery(conn, {
     dateStr: date,
     excludeStatuses: NOT_A_ROUTE_STOP_STATUSES,
@@ -271,6 +275,7 @@ async function loadArrivalRouteContext({
   // Where the visit is saved now (movesVisit, GATE_STAFF_ROUTE_INSERTION).
   placedAt: prospective ? null : { date: dateOnly(stored.scheduled_date),
     technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
+  routeOrderPinned,
   travel, preserveCapacity, blocks,
   vanDepartureMin,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
@@ -573,8 +578,9 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (targetUnroutable(capacity, target, windowStart, windowEnd, grouped)) return unverified(target, date);
   // Staff route insertion (GATE_STAFF_ROUTE_INSERTION, capacity off): a moved
   // visit, or the save writer's own placement (`place`), tries every place. A
-  // whole shared stop (`unit`) keeps today's rule: its save does not renumber.
-  const staffInsert = !capacity && staffRouteInsertionLive() && !target.memberIds
+  // whole shared stop (`unit`) and a route number the office typed keep
+  // today's rule: their save keeps that place.
+  const staffInsert = !capacity && staffRouteInsertionLive() && !target.memberIds && !context.routeOrderPinned
     && (place || movesVisit(context, date, target.technician_id, windowStart));
   const own = rows.filter(row => row.technician_id === target.technician_id && (capacity || row.reservation_expires_at == null));
   const resolvedOrigin = resolvePlacementOrigin(context, capacity, departureMin, target, own);

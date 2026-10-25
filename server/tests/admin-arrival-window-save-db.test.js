@@ -348,10 +348,13 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
       expect(await numbers()).toEqual({ [NORTH_STOP]: 1, [MOVER]: 2, [SOUTH_STOP]: 3 });
     });
 
-    test('gate on: a new number the office typed is kept', async () => {
+    test('gate on: a new number the office typed is kept, and checked where it puts the visit', async () => {
       process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
       await mockConn('scheduled_services').where({ id: MOVER }).update({ scheduled_date: DAY, window_start: '13:00', window_end: '14:00', route_order: 3 });
-      expect((await move({ scheduledDate: DAY, routeOrder: 7 })).status).toBe(200);
+      const result = await move({ scheduledDate: DAY, routeOrder: 7 });
+      expect(result.status).toBe(200);
+      // Number 7 runs the 9 AM visit after the 10 AM stop: the save warns.
+      expect(result.body.warnings).toEqual([expect.stringContaining(DAY)]);
       expect(await numbers()).toEqual({ [NORTH_STOP]: 1, [SOUTH_STOP]: 2, [MOVER]: 7 });
       expect(await mockConn('audit_log').where({ action: 'schedule.route_order_placed' })).toHaveLength(0);
     });

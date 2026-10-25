@@ -103,6 +103,13 @@ describe('a check of the visit where it is saved keeps today\'s answer', () => {
     expect(evaluateArrivalPlacement(context({ target }), at('09:00'))).toMatchObject({ feasible: false, reason: 'arrival_window' });
   });
 
+  test('a route number the office typed is the place checked', () => {
+    const target = stop('target', '09:00', 27.545, { route_order: 3 });
+    const fit = evaluateArrivalPlacement({ ...context({ target, placedAt: { date: DATE, technicianId: 'tech', windowStart: '13:00' } }),
+      routeOrderPinned: true }, at('09:00'));
+    expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
+  });
+
   test('a hand-built context with no saved place (the gap tool) keeps the saved order', () => {
     const input = context();
     delete input.placedAt;
