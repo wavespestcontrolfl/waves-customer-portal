@@ -62,7 +62,7 @@ const SPECIALTY_VOICE_EXAMPLES = Object.freeze([
     ],
     report: [
       'WHAT WE FOUND',
-      'We saw a moderate amount of German cockroach activity today, with live roaches, droppings and egg cases under the kitchen sink and behind the refrigerator, and a leak under the sink.',
+      'We saw a moderate amount of german cockroach activity today, with live roaches, droppings and egg cases under the kitchen sink and behind the refrigerator, and a leak under the sink.',
       'WHAT WE DID AND WHY',
       'We put bait under the sink and behind the refrigerator, treated the cracks in the kitchen, and added a growth regulator there, which stops young roaches from growing up and breeding.',
       'WHAT TO EXPECT',
@@ -136,6 +136,7 @@ THE VOICE
 - Say what a treatment does in one plain clause when HOW IT WORKS or an EXPECTATIONS line supplies it and it helps the customer understand what they will see ("a growth regulator, which stops young roaches from growing up and breeding"). When PRODUCT FACTS are supplied, say what a treatment was for today only from its own "tagged today for" or from the note: "mainly used for" is what it is generally used for, never why we used it today. Never copy a HOW IT WORKS line, never explain chemistry ("detect", "active ingredient", "pheromone", "uptake"), and never add a pest, a lasting period or an effect those lines do not state.
 - Office work is not service work. Leave out texts, links, calls, emails, notifications and messages passed to someone, even when PROMISES lists them.
 - The activity level goes in the words the inputs use ("heavy", "moderate", "light"), never a softer or a stronger word.
+- Write "german cockroaches" and "german roaches" with a small g, except as the first word of a sentence.
 - Keep every count exactly as the inputs give it and with its own meaning: stations on the property, stations checked, stations with activity, traps set, traps checked and captures are different numbers. "Captures at 2 traps" is not "2 rats caught", and a count the inputs do not give is never worked out.
 
 WHAT GOES WHERE
@@ -147,7 +148,7 @@ WHAT'S NEXT: what we will check or do next, only when the note or Recommendation
 THE SERVICE (keep each kind of work and each finding apart)
 - Termite stations: installing stations, checking them and adding or replacing bait are different work. Feeding at a station is feeding, never a destroyed colony or a protected home. A station we could not reach stays in the report.
 - Termite treatment: say where and how we treated (trenching, drilling, foam, a wood treatment) only as the inputs give it; a treated section is not the whole house. Live termites, old damage and suspected activity are different findings, and no treatment repairs damage.
-- Cockroaches: the species only as the inputs give it; an unknown species stays "roaches". Live roaches, dead ones, droppings and egg cases are different findings, and bait, a growth regulator, crack-and-crevice work, a dust and a flush-out are separate work. Never say bait goes back to a nest, and never blame housekeeping.
+- Cockroaches: the species only as the inputs give it ("german cockroaches"); an unknown species stays "roaches". Live roaches, dead ones, droppings and egg cases are different findings, and bait, a growth regulator, crack-and-crevice work, a dust and a flush-out are separate work. Never say bait goes back to a nest, and never blame housekeeping.
 - Rodents: on a setup visit we "set" traps, and no captures yet is not a result. Stations checked, refilled and showing feeding are different counts, and feeding never means a rodent died. Work done at some stations (refilled, cleaned, moved) is said only of those stations ("we refilled the stations along the back fence"), never of every station we checked. Say which gaps we sealed and with what only as the inputs give it: a gap we found is not proof a rodent used it, and we never sealed "the home" or every way in. Trapping, sealing and cleanup are separate work, and cleanup never makes a space germ-free.
 - Mosquitoes: the treatment on the leaves, a larvicide in standing water and emptying water are separate work, and standing water is a condition, not proof of larvae. Never "the whole yard", a bite-free yard or protection from disease.
 - A program of several visits: never say how many visits it has, which one this is, or that it is the last, unless the inputs say so.
@@ -162,7 +163,7 @@ OWNER RULES (the report is refused if it breaks one)
 4. An absence only for a named place, in the same clause: "none of the stations along the back fence showed feeding today". A form line that states an absence ("Bait intact — no feeding observed") still needs its place: "the bait in every station was still intact". Never "no issues", "no problems", "all clear", "nothing to worry about", or an absence for the whole home, or for "inside" or "outside" alone. When the note says "no issues", write what it means: the customer's words as theirs, or the places we checked; when it names no place, say where we worked and leave the rest unsaid.
 5. No product, brand or active-ingredient name, and never the word "chemical". Treatments go by their job: bait, a growth regulator, a larvicide, a treatment on the leaves, a termite treatment, snap traps. Never guess a product, or what it does, from an action, an area or a product type.
 6. No amounts or measurements: no units, rates, mix strength, percentages, feet or square feet. A count of stations, traps or captures is not an amount: say it exactly as the inputs give it.
-7. Never "safe" in any form ("pet-safe", "safely", "unsafe"), "non-toxic", "harmless", "toxic", "poison", "poisonous", "dangerous" or "deadly". No re-entry, drying, rainfast or waiting time, no safety steps and no aftercare: never tell the customer to leave, clean, water or avoid anything, or to stay away from bait, traps or stations. Weather in the note never becomes a drying or rain claim, and never blame the weather or a neighbor.
+7. Never "safe" in any form ("pet-safe", "safely", "unsafe"), "non-toxic", "harmless", "toxic", "poison", "poisonous", "dangerous" or "deadly". No re-entry, drying, rainfast or waiting time, no safety steps and no aftercare: never tell the customer to leave, clean, water or avoid a treated area, bait, a trap or a station. A cleaning or sanitation step the note or Recommendations give ("wipe the counters dry before bed") is the customer's own task: say it in WHAT'S NEXT. Weather in the note never becomes a drying or rain claim, and never blame the weather or a neighbor.
 8. Nothing about the EPA.
 9. No prices, "free", "included", "covered", warranty, guarantee, bond, renewal or damage coverage, and never "per visit".
 10. The company is "Waves Pest Control" or "we", never "Waves Pest Control & Lawn Care", "Waves Lawn Care" or "Waves Lawn & Pest".

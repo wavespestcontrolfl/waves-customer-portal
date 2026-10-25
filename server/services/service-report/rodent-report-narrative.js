@@ -29,6 +29,7 @@
  * posture as the pest narrative.
  */
 
+const { lowercaseGermanRoach } = require('./report-writer-rules');
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 const crypto = require('crypto');
 const MODELS = require('../../config/models');
@@ -1502,7 +1503,9 @@ async function applyTypedReportNarrative(input = {}, deps = {}) {
       if (echoesWithheldName(text, input.applications)) banned.push('withheld_product_name');
       banned.push(...ungroundedClaims(text, facts));
       if (!banned.length) {
-        value = text;
+        // "german cockroaches" with a small g (owner 2026-10-25); the ratified
+        // sentences appended below keep their own words.
+        value = lowercaseGermanRoach(text);
         // Care-instruction preservation is ENFORCED, not requested (codex
         // P1 r2 + P2 r3): on the Pest V2 override surface the narrative
         // replaces the ratified body, so BOTH the next-step copy and any

@@ -133,7 +133,7 @@ function productFactLines(applications, { namedPests = null } = {}) {
 // Owner 2026-10-24 page: "the writer can use it: 'the treatment in the kitchen
 // is one labeled for German cockroaches'". A permissive "you may" was left
 // unused in the replay (0 of 4), so it is an instruction.
-const LABEL_LISTS_NOTE = ' "Its label lists" names a pest from today\'s note that this treatment\'s EPA label names. Say it once in WHAT WE DID AND WHY, as a treatment "labeled for" that pest ("the treatment in the kitchen is one labeled for German cockroaches"), and nothing else about the label: never that it kills the pest, keeps it away or works on any pest not listed there.';
+const LABEL_LISTS_NOTE = ' "Its label lists" names a pest from today\'s note that this treatment\'s EPA label names. Say it once in WHAT WE DID AND WHY, as a treatment "labeled for" that pest ("the treatment in the kitchen is one labeled for german cockroaches"), in the fact\'s own words, and nothing else about the label: never that it kills the pest, keeps it away or works on any pest not listed there.';
 
 function productFactsSection(applications, { namedPests = null } = {}) {
   const lines = productFactLines(applications, { namedPests });

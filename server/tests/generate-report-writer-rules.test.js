@@ -948,6 +948,23 @@ describe('GATE_SPECIALTY_REPORT_VOICE', () => {
   });
 });
 
+// Owner 2026-10-25, "dont capitalize German": the draft the route returns
+// writes "german cockroaches" mid-sentence, whatever the model wrote.
+test('the returned report writes german with a small g mid-sentence', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockProvider.mockImplementation(async () => ({
+    ok: true,
+    text: "WHAT WE FOUND\nGerman cockroaches were under the kitchen sink, and we saw more German roaches by the fridge.\nWHAT WE DID AND WHY\nWe put bait under the sink for the German cockroaches.\nWHAT TO EXPECT\nToday's visit was part of your regular pest control plan.\nWHAT'S NEXT\nIf you still see German cockroaches in the kitchen, text or call us.",
+  }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'German roaches under the sink and by the fridge. Bait under the sink.', fresh: true }), res);
+  expect(res.statusCode).toBe(200);
+  const { report } = res.json.mock.calls[0][0];
+  expect(report).toContain('German cockroaches were under the kitchen sink, and we saw more german roaches by the fridge.');
+  expect(report).toContain('We put bait under the sink for the german cockroaches.');
+  expect(report).toContain('If you still see german cockroaches in the kitchen, text or call us.');
+});
+
 // GATE_PEST_LABEL_FACTS reads which pests the technician named; the route
 // hands the context its own redacted note and observations to read them from.
 test('the grounding context gets the redacted note and observations as visitTexts', async () => {

@@ -437,8 +437,8 @@ const TIPS = Object.freeze([
     pests: ['Roaches'], keywords: ['stove', 'range', 'grease', 'oven', 'german roach'], lines: ['pest'], season: 'all',
     blog: { topic: 'grease behind the stove and cockroaches' },
     sources: [{ fact: 'fact-tip-german-cockroach-sanitation', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1190' }],
-    sourcedCopy: "The grease film behind and under a range is a calorie source that can sustain a German roach population on its own, which is why UF/IFAS puts sanitation beside treatment in its German cockroach program. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
-    copy: "The grease film behind and under a range is a calorie source that can sustain a German roach population on its own. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
+    sourcedCopy: "The grease film behind and under a range is a calorie source that can sustain a german roach population on its own, which is why UF/IFAS puts sanitation beside treatment in its german cockroach program. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
+    copy: "The grease film behind and under a range is a calorie source that can sustain a german roach population on its own. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
   },
   {
     id: 'interior_cardboard', group: 'kitchen', label: 'Cardboard boxes to plastic bins',
@@ -857,8 +857,8 @@ const TIPS = Object.freeze([
     keywords: ["spray", "fogger", "raid", "store", "over the counter"], lines: ["pest"], season: 'all',
     services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
     sources: [{ fact: 'fact-tip-gr-no-store-spray', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1190' }],
-    sourcedCopy: "Store sprays and foggers don't reach German roaches in the walls. UF/IFAS calls fogging generally ineffective, and liquid sprays near the bait repel roaches from it. If you see one, a paper towel and the trash is the better move while the bait works.",
-    copy: "Store sprays and foggers scatter German roaches into the walls and teach them to avoid the bait. If you see one, a paper towel and the trash is the better move while the bait works through the colony.",
+    sourcedCopy: "Store sprays and foggers don't reach german roaches in the walls. UF/IFAS calls fogging generally ineffective, and liquid sprays near the bait repel roaches from it. If you see one, a paper towel and the trash is the better move while the bait works.",
+    copy: "Store sprays and foggers scatter german roaches into the walls and teach them to avoid the bait. If you see one, a paper towel and the trash is the better move while the bait works through the colony.",
   },
   {
     id: 'gr_dry_at_night', group: 'roaches', label: "Counters and sink dry at bedtime",
@@ -1793,7 +1793,7 @@ const TIPS = Object.freeze([
     services: ['german_roach', 'german_roach_initial', 'pest_initial_german_knockdown'],
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-gr-egg-case', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN128' }],
-    copy: "A German roach carries her egg case until just before it hatches, and UF/IFAS says a typical case holds 30 to 40 eggs.",
+    copy: "A german roach carries her egg case until just before it hatches, and UF/IFAS says a typical case holds 30 to 40 eggs.",
   },
   {
     id: 'bb_not_dirt', group: 'bed_bugs', label: "Bed bugs aren't about dirt",

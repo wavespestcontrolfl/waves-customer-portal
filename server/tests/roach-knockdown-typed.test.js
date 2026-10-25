@@ -97,7 +97,8 @@ describe('German knockdown report', () => {
       visitSequence: 1,
     });
     expect(result.headline).toBe('German cockroach activity was moderate today.');
-    expect(result.body).toContain('Completed your initial German cockroach knockdown service in the kitchen and adjacent areas.');
+    // "german" takes a small g mid-sentence (owner 2026-10-25)
+    expect(result.body).toContain('Completed your initial german cockroach knockdown service in the kitchen and adjacent areas.');
     expect(result.body).toContain('placed targeted gel bait');
     expect(result.body).toContain('avoid over-the-counter sprays');
     expect(result.body).toContain('keep bait placements undisturbed');
