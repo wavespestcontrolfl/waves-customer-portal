@@ -35,6 +35,7 @@ import {
   ADMIN_DESKTOP_NAV_SECTIONS,
   ADMIN_MOBILE_TABS,
   isAdminNavItemActive,
+  isAdminNavItemEnabled,
   isPathAdminOnly,
 } from "../config/adminNavigation";
 import NotificationBell from "./NotificationBell";
@@ -494,7 +495,7 @@ export default function AdminLayoutV2() {
           {ADMIN_DESKTOP_NAV_SECTIONS.map(({ section, items }) => {
             const visibleItems = items
               .filter((item) => !item.adminOnly || user?.role === "admin")
-              .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled) || (item.flag === "bid_desk" && bidDeskEnabled) || (item.flag === "bid_kit" && bidKitEnabled));
+              .filter((item) => isAdminNavItemEnabled(item, { agent_estimate: agentEstimateEnabled, bid_desk: bidDeskEnabled, bid_kit: bidKitEnabled }));
             // Role/flag filtering can empty a whole section (e.g. Marketing
             // for a technician) — an orphaned heading reads as a bug.
             if (visibleItems.length === 0) return null;

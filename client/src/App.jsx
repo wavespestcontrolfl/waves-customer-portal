@@ -252,6 +252,7 @@ import AdminChangePasswordPage from './pages/AdminChangePasswordPage';
 import AdminForgotPasswordPage from './pages/AdminForgotPasswordPage';
 import AdminResetPasswordPage from './pages/AdminResetPasswordPage';
 import AdminLayout from './components/AdminLayoutV2';
+import BidsLegacyRedirect from './components/admin/BidsLegacyRedirect';
 import TechPortalRedirect from './components/tech/TechPortalRedirect';
 import TechNavigationLock from './components/tech/TechNavigationLock';
 import InstallPrompt from './components/InstallPrompt';
@@ -416,8 +417,7 @@ const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealth
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
 const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
 const AdminNeighborhoodGateCodesPage = lazyWithRetry(() => import('./pages/admin/NeighborhoodGateCodesPage'));
-const AdminBidDeskPage = lazyWithRetry(() => import('./pages/admin/BidDeskPage'));
-const AdminBidKitPage = lazyWithRetry(() => import('./pages/admin/BidKitPage'));
+const AdminBidsPage = lazyWithRetry(() => import('./pages/admin/BidsPage'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
 const AdminTurfHeightReviewPage = lazyWithRetry(() => import('./pages/admin/TurfHeightReviewPage'));
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
@@ -751,8 +751,10 @@ export default function App() {
                 no longer mount duplicate copies of EstimatesPageV2. */}
             <Route path="estimates" element={<AdminTabRedirect to="/admin/pipeline" tab="estimates" preserveTabs={['leads', 'estimates', 'new', 'pricing']} />} />
             <Route path="agent-estimate" element={<Suspense fallback={<div style={{color:'#71717a',padding:40}}>Loading Agent Estimate...</div>}><AdminAgentEstimatePage /></Suspense>} />
-            <Route path="bid-desk" element={<Suspense fallback={<RouteFallback label="Loading bid desk..." />}><AdminBidDeskPage /></Suspense>} />
-            <Route path="bid-kit" element={<Suspense fallback={<RouteFallback label="Loading bid kit..." />}><AdminBidKitPage /></Suspense>} />
+            <Route path="bids" element={<Suspense fallback={<RouteFallback label="Loading bids..." />}><AdminBidsPage /></Suspense>} />
+            {/* Bid Desk and Bid kit became tabs of Bids; old notification and bell links keep ?bid= / ?item=. */}
+            <Route path="bid-desk" element={<BidsLegacyRedirect />} />
+            <Route path="bid-kit" element={<BidsLegacyRedirect tab="kit" />} />
             <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<RouteFallback label="Loading proposal..." />}><AdminCommercialProposalPage /></Suspense>} />
             <Route path="estimates/:id" element={<AdminDetailRedirect to="/admin/pipeline" queryKey="estimateId" tab="estimates" />} />
             {/* /admin/dispatch is now the canonical dispatcher surface

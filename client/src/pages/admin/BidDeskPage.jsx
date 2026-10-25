@@ -303,7 +303,7 @@ function MarkEmail({ onMarked }) {
   );
 }
 
-export default function BidDeskPage() {
+export default function BidDeskPage({ embedded = false }) {
   const [params, setParams] = useSearchParams();
   const [bids, setBids] = useState([]);
   const [checklistLive, setChecklistLive] = useState(false);
@@ -345,7 +345,7 @@ export default function BidDeskPage() {
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
-      <AdminCommandHeader variant="workspace" title="Bid Desk" icon={Gavel} />
+      {!embedded && <AdminCommandHeader variant="workspace" title="Bid Desk" icon={Gavel} />}
 
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
         Bid invites that reached the shared inbox (BuildingConnected, Procore, city and HOA requests). A due date is read from the invite
