@@ -25,6 +25,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { parseCallTextReply } = require('./sms-service-intent');
+const { withSmsConsentLock } = require('../utils/customer-comms-lock');
 const { etParts, etDateString, addETDays, parseETDateTime, formatETTime, dateOnlyString } = require('../utils/datetime-et');
 
 const ENTRY_POINT = 'lead_call_text_followup';
@@ -130,7 +131,7 @@ async function newestLeadId(customerId) {
 
 // ── Sending ──────────────────────────────────────────────────────────────
 // `requireState`: the send goes only if the request still has this state,
-// held under a row lock through the provider request.
+// held under a row lock through the provider request (inside the consent lock).
 async function sendFollowup({ customer, phone, body, kind, requestId, requireState = null }) {
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
   const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
@@ -145,17 +146,20 @@ async function sendFollowup({ customer, phone, body, kind, requestId, requireSta
       customerId: customer.id,
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: 'lead_call_text_followup',
-      // The request row stays locked through the provider request: a TEXT
-      // that cancels it waits, so a text never goes for a changed request.
-      ...(requireState ? {
-        withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
+      // Every follow-up dispatches inside the shared SMS consent lock (the
+      // STOP and preference writers' own), so a STOP that lands meanwhile
+      // wins. With requireState the request row is also locked through the
+      // provider request: a TEXT that cancels it waits, so a text never goes
+      // for a changed request.
+      withSmsHandoff: (dispatch) => withSmsConsentLock(db, { phone, customerId: customer.id }, async (trx) => {
+        if (requireState) {
           const row = await trx('lead_callback_requests').where({ id: requestId }).forUpdate().first('state');
           if (row?.state !== requireState) {
             return { ok: false, code: 'LEAD_CALLBACK_CHANGED', reason: 'the call request changed before the text went out' };
           }
-          return dispatch(trx);
-        }),
-      } : {}),
+        }
+        return dispatch(trx);
+      }),
       metadata: {
         original_message_type: 'auto_reply',
         templateKey: `${ENTRY_POINT}_${kind}`,

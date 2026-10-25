@@ -16,6 +16,8 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+// The consent lock's own locking is covered by its suite; here it runs the work on a plain transaction.
+jest.mock('../utils/customer-comms-lock', () => ({ withSmsConsentLock: (conn, _keys, work) => conn.transaction(work) }));
 jest.mock('../services/admin-alert-compose', () => ({ ...jest.requireActual('../services/admin-alert-compose'), raiseAdminAlert: jest.fn(async () => ({ id: 'n1' })) }));
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -98,6 +100,12 @@ jest.setTimeout(30000);
     await reply(c, '10am', NIGHT);
     expect(raiseAdminAlert).not.toHaveBeenCalled();
     expect(sendCustomerMessage.mock.calls[1][0].withSmsHandoff).toEqual(expect.any(Function));
+  });
+
+  test('every follow-up send carries the locked consent handoff', async () => {
+    const c = await lead('+19415550123');
+    await reply(c, 'text', NIGHT);
+    expect(sendCustomerMessage.mock.calls[0][0].withSmsHandoff).toEqual(expect.any(Function));
   });
 
   test('two TEXT replies handled at once send one text', async () => {
