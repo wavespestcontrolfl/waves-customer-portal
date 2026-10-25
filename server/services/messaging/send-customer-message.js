@@ -573,7 +573,7 @@ async function sendCustomerMessageCore(input) {
   // reschedule links, are the callers whose authority may change between
   // validation and the handoff.
   const smsHandoffAllowed = (input.audience === 'lead' && input.purpose === 'conversational'
-      && ['lead_response_auto_reply', 'lead_webhook_auto_reply'].includes(input.entryPoint))
+      && ['lead_response_auto_reply', 'lead_webhook_auto_reply', 'lead_call_text_followup'].includes(input.entryPoint))
     || (input.audience === 'customer' && input.purpose === 'service_completion'
       && input.metadata?.original_message_type === 'visit_summary'
       && ['visit_closeout_summary', 'scheduled_sms_cron'].includes(input.entryPoint))

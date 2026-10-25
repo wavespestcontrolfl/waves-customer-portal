@@ -108,13 +108,13 @@ const locationLine = Object.values(numbers.locations).map((l) => l.number)
   .find((n) => numbers.findByNumber(n)?.type === 'location' && n !== numbers.tollFree.number);
 const CUSTOMER = { id: 'ffffffff-0000-4111-8222-333333333333', first_name: 'Dana', last_name: 'Reed', phone: sender, lead_intake_status: 'awaiting_service' };
 
-async function receive(body) {
+async function receive(body, to = locationLine) {
   const res = new EventEmitter();
   mockState.res = res;
   res.status = (code) => { res.statusCode = code; return res; };
   res.type = () => res;
   res.send = (value) => { res.body = value; return res; };
-  await handler({ body: { From: sender, To: locationLine, Body: body, MessageSid: `SM-pref-${Date.now()}`, NumMedia: '0' } }, res);
+  await handler({ body: { From: sender, To: to, Body: body, MessageSid: `SM-pref-${Date.now()}`, NumMedia: '0' } }, res);
   await new Promise((r) => setTimeout(r, 20));
   return res;
 }
@@ -192,5 +192,16 @@ test('a reply the intake machine consumed never reaches the ring service', async
   mockIntake.mockResolvedValue({ handled: true, next: 'estimate_drafted' });
   const res = await receive('100 Sample St');
   res.emit('finish');
+  expect(mockRing).not.toHaveBeenCalled();
+});
+
+test('a CALL to a technician line or the AI line never reaches the ring service', async () => {
+  mockIntake.mockResolvedValue({ handled: false });
+  const techLine = numbers.fieldTech[0]?.number;
+  expect(techLine).toBeTruthy();
+  for (const to of [numbers.tollFree.number, techLine]) {
+    const res = await receive('call', to);
+    res.emit('finish');
+  }
   expect(mockRing).not.toHaveBeenCalled();
 });

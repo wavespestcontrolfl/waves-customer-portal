@@ -1882,6 +1882,13 @@ const gates = {
   // bell. Off unless exactly 'true'. See services/lead-call-reply-ring.js.
   leadCallReplyRing: process.env.GATE_LEAD_CALL_REPLY_RING === 'true',
 
+  // Lead Call/Text Follow-up — a lead who answers our lead text with TEXT
+  // gets "What service(s) are you interested in?"; a CALL after 8 PM gets
+  // "What time tomorrow works best for us to call you?" and a clear time
+  // books a 15-minute call slot with a confirmation text (owner 2026-10-24).
+  // Off unless exactly 'true'. See services/lead-call-text-followup.js.
+  leadCallTextFollowup: process.env.GATE_LEAD_CALL_TEXT_FOLLOWUP === 'true',
+
   // Lead Repeat Form — a row that is still a lead (not yet a customer) and
   // sends the website quote form again keeps its open SMS intake state, so
   // its next CALL / TEXT or service reply is handled as for a new lead, and

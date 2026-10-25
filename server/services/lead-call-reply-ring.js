@@ -59,8 +59,9 @@ function displayName(customer) {
     .join(' ') || 'a lead';
 }
 
-// Every read runs on `conn` so the caller's advisory lock covers it.
-async function ringBlocker({ customer, digits, now }, conn) {
+// The lead-text half of the rule, shared with lead-call-text-followup.js: a
+// lead (not a customer) who got our "Reply CALL" text in the last 7 days.
+async function leadTextBlocker({ customer, digits, now }, conn = db) {
   if (REAL_CUSTOMER_STAGES.includes(customer.pipeline_stage)) return 'existing_customer';
 
   const leadText = await conn('sms_log')
@@ -73,7 +74,13 @@ async function ringBlocker({ customer, digits, now }, conn) {
     .whereRaw("COALESCE(status, '') NOT IN ('failed', 'undelivered', 'canceled')")
     .modify(excludeUnresolvedSendReservations)
     .first('id');
-  if (!leadText) return 'no_lead_text';
+  return leadText ? null : 'no_lead_text';
+}
+
+// Every read runs on `conn` so the caller's advisory lock covers it.
+async function ringBlocker({ customer, digits, now }, conn) {
+  const leadBlocker = await leadTextBlocker({ customer, digits, now }, conn);
+  if (leadBlocker) return leadBlocker;
 
   const priorRing = await conn('call_log')
     .where({ source: SOURCE, direction: 'outbound' })
@@ -203,6 +210,12 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
         reservedCallLogId: claim.callLogId,
       });
       logger.info(`[lead-call-reply-ring] rang for customer ${customer.id} (call_log ${claim.callLogId})`);
+      // The ring answers the request: an open night time ask for this phone
+      // (lead-call-text-followup.js) is no longer needed.
+      await db('lead_callback_requests').where({ state: 'asked', kind: 'call_request' })
+        .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
+        .update({ state: 'cancelled', updated_at: new Date() })
+        .catch((err) => logger.warn(`[lead-call-reply-ring] time-ask close skipped for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`));
       return { rang: true, reason: 'rang', callLogId: claim.callLogId };
     } catch (err) {
       // A definite failure never rings: the claimed row closes as failed (it
@@ -295,6 +308,7 @@ async function settleUnstartedRing(callLogId) {
 
 module.exports = {
   ringForCallReply,
+  leadTextBlocker,
   noteRingEnded,
   inRingHours,
   LEAD_CALL_REPLY_RING_SOURCE: SOURCE,
