@@ -64,6 +64,7 @@ async function call(handler, { params = {}, query = {}, body = {}, technicianId 
 const WEEK_A = '2020-01-06';
 const WEEK_B = '2020-02-03';
 const WEEK_C = '2020-03-02';
+const WEEK_D = '2020-04-06';
 const dayOf = (monday, offset) => {
   const d = new Date(`${monday}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() + offset);
@@ -76,8 +77,9 @@ describeDb('auto lunch on PostgreSQL (GATE_AUTO_LUNCH)', () => {
   const techA = randomUUID();
   const techB = randomUUID();
   const techC = randomUUID();
+  const techD = randomUUID();
   const techToday = randomUUID();
-  const techIds = [techA, techB, techC, techToday];
+  const techIds = [techA, techB, techC, techD, techToday];
   const priorGate = process.env.GATE_AUTO_LUNCH;
 
   const insertEntry = (technicianId, entryType, start, end) => db('time_entries').insert({
@@ -265,6 +267,20 @@ describeDb('auto lunch on PostgreSQL (GATE_AUTO_LUNCH)', () => {
     expect((await daily(techToday, today)).no_lunch).toBe(false);
   });
 
+  test('the time clock status reports the gate and today\'s no-lunch flag', async () => {
+    const today = etDateString(new Date());
+    await db('time_entry_daily_summary').where({ technician_id: techToday, work_date: today }).update({ status: 'pending', no_lunch: true });
+    expect((await timeTracking.getStatus(techToday)).autoLunch).toEqual({ enabled: true, noLunch: true });
+    await db('time_entry_daily_summary').where({ technician_id: techToday, work_date: today }).update({ no_lunch: false });
+    expect((await timeTracking.getStatus(techToday)).autoLunch).toEqual({ enabled: true, noLunch: false });
+    process.env.GATE_AUTO_LUNCH = 'false';
+    try {
+      expect((await timeTracking.getStatus(techToday)).autoLunch).toEqual({ enabled: false, noLunch: false });
+    } finally {
+      process.env.GATE_AUTO_LUNCH = 'true';
+    }
+  });
+
   test('tech no-lunch before the first clock-out creates the day and keeps the flag', async () => {
     const handler = routeHandler(techRouter, 'post', '/no-lunch');
     const lonely = randomUUID();
@@ -317,6 +333,53 @@ describeDb('auto lunch on PostgreSQL (GATE_AUTO_LUNCH)', () => {
     }
     for (let i = 0; i < 7; i += 1) await timeTracking.computeDailySummary(techC, dayOf(WEEK_C, i));
     await timeTracking.computeWeeklySummary(techC, WEEK_C);
+  });
+
+  test('a gate flip refreshes open days through the weekly and earnings paths, approved days keep their snapshot', async () => {
+    const earnings = routeHandler(adminRouter, 'get', '/technicians/:id/earnings');
+    const query = { from: WEEK_D, to: dayOf(WEEK_D, 6) };
+    await insertFourTens(techD, WEEK_D);
+
+    // Off -> on: days written with the gate off carry no deduction; the weekly
+    // path (no hand-rebuilt days) derives it from the entries.
+    process.env.GATE_AUTO_LUNCH = 'false';
+    try {
+      await recomputeWeek(techD, WEEK_D);
+      expect(num((await weekly(techD, WEEK_D)).overtime_minutes)).toBe(120);
+      expect(num((await daily(techD, dayOf(WEEK_D, 0))).unpaid_meal_minutes)).toBe(0);
+    } finally {
+      process.env.GATE_AUTO_LUNCH = 'true';
+    }
+    const on = await timeTracking.computeWeeklySummary(techD, WEEK_D);
+    expect(num(on.unpaid_meal_minutes)).toBe(120);
+    expect(num(on.regular_minutes)).toBe(2400);
+    expect(num(on.overtime_minutes)).toBe(0);
+    expect(num((await daily(techD, dayOf(WEEK_D, 3))).unpaid_meal_minutes)).toBe(30);
+    expect(num((await daily(techD, dayOf(WEEK_D, 3))).overtime_minutes)).toBe(0);
+
+    // No-lunch days are respected by the refresh (flag read from the day row).
+    await db('time_entry_daily_summary').where({ technician_id: techD, work_date: dayOf(WEEK_D, 1) }).update({ no_lunch: true });
+    expect(num((await timeTracking.computeWeeklySummary(techD, WEEK_D)).unpaid_meal_minutes)).toBe(90);
+    await db('time_entry_daily_summary').where({ technician_id: techD, work_date: dayOf(WEEK_D, 1) }).update({ no_lunch: false });
+    expect(num((await timeTracking.computeWeeklySummary(techD, WEEK_D)).unpaid_meal_minutes)).toBe(120);
+
+    // On -> off through the earnings endpoint, with one approved day.
+    await db('time_entry_daily_summary').where({ technician_id: techD, work_date: dayOf(WEEK_D, 0) }).update({ status: 'approved' });
+    process.env.GATE_AUTO_LUNCH = 'false';
+    try {
+      const off = await call(earnings, { params: { id: techD }, query });
+      expect(off.body).toMatchObject({ totalMinutes: 2520, unpaidMealMinutes: 30, regularMinutes: 2400, overtimeMinutes: 90 });
+      expect(num((await daily(techD, dayOf(WEEK_D, 0))).unpaid_meal_minutes)).toBe(30);
+      expect(num((await daily(techD, dayOf(WEEK_D, 1))).unpaid_meal_minutes)).toBe(0);
+      expect(num((await weekly(techD, WEEK_D)).unpaid_meal_minutes)).toBe(30);
+    } finally {
+      process.env.GATE_AUTO_LUNCH = 'true';
+    }
+
+    // Back on: open days are refreshed again; the approved day is unchanged.
+    const back = await call(earnings, { params: { id: techD }, query });
+    expect(back.body).toMatchObject({ unpaidMealMinutes: 120, regularMinutes: 2400, overtimeMinutes: 0 });
+    expect(num((await daily(techD, dayOf(WEEK_D, 0))).unpaid_meal_minutes)).toBe(30);
   });
 
   test('the rollout audit stays clean for these technicians (gate on)', async () => {

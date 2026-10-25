@@ -58,6 +58,17 @@ const D = {
 const MONO = "'JetBrains Mono', monospace";
 const LABOR_RATE = 35;
 
+// Unpaid lunch (GATE_AUTO_LUNCH): paid minutes are shift minutes less the
+// day's unpaid meal. A row without the field (restricted viewer projection,
+// gate off) has none, so every figure equals the shift figure as before.
+const unpaidMinutesOf = (d) =>
+  Math.min(
+    parseFloat(d.total_shift_minutes || 0),
+    parseFloat(d.unpaid_meal_minutes || 0),
+  );
+const paidMinutesOf = (d) =>
+  Math.max(0, parseFloat(d.total_shift_minutes || 0) - unpaidMinutesOf(d));
+
 function adminFetch(path, opts = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...opts,
@@ -353,6 +364,7 @@ export function DashboardTab({ showToast }) {
     (s, d) => s + parseFloat(d.total_shift_minutes || 0),
     0,
   );
+  const todayPaidMin = todaySummaries.reduce((s, d) => s + paidMinutesOf(d), 0);
   const todayJobMin = todaySummaries.reduce(
     (s, d) => s + parseFloat(d.total_job_minutes || 0),
     0,
@@ -372,20 +384,20 @@ export function DashboardTab({ showToast }) {
       tech && parseFloat(tech.pay_rate) > 0
         ? parseFloat(tech.pay_rate)
         : LABOR_RATE;
-    return s + (parseFloat(d.total_shift_minutes || 0) / 60) * rate;
+    return s + (paidMinutesOf(d) / 60) * rate;
   }, 0);
   const todayUtil = todayShiftMin > 0 ? (todayJobMin / todayShiftMin) * 100 : 0;
 
   // This week totals
-  const weekShiftMin = weekDailies.reduce(
-    (s, d) => s + parseFloat(d.total_shift_minutes || 0),
+  const weekPaidMin = weekDailies.reduce(
+    (s, d) => s + paidMinutesOf(d),
     0,
   );
   const weekRevenue = weekDailies.reduce(
     (s, d) => s + parseFloat(d.revenue_generated || 0),
     0,
   );
-  const weekOT = Math.max(0, weekShiftMin - 2400);
+  const weekOT = Math.max(0, weekPaidMin - 2400);
   // Only show techs with activity — hide inactive techs with 0 hours/jobs
   const liveTechs = allTechs.filter((tech) => {
     const active = activeShifts.find((s) => s.technician_id === tech.id);
@@ -548,7 +560,7 @@ export function DashboardTab({ showToast }) {
         {" "}
         <StatCard
           label="Total Hours"
-          value={fmtHrs(todayShiftMin)}
+          value={fmtHrs(todayPaidMin)}
           color={D.teal}
         />{" "}
         <StatCard
@@ -593,7 +605,7 @@ export function DashboardTab({ showToast }) {
         >
           {" "}
           <span style={{ fontSize: 12, color: D.muted }}>
-            Week total: {fmtHrs(weekShiftMin)}
+            Week total: {fmtHrs(weekPaidMin)}
             {!isRestrictedViewer && <> | Revenue: {fmt(weekRevenue)}</>}
             {/* overtime_minutes is a per-tech field the server never sends a
                 restricted viewer (techSafeDailySummary) — this weekly OT
@@ -702,10 +714,7 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
             d.work_date === dateStr ||
             (d.work_date && d.work_date.split("T")[0] === dateStr),
         );
-        const shiftMin = dayData.reduce(
-          (s, d) => s + parseFloat(d.total_shift_minutes || 0),
-          0,
-        );
+        const shiftMin = dayData.reduce((s, d) => s + paidMinutesOf(d), 0);
         // codex round-3 P2: overtime_minutes is never sent to a restricted
         // (technician) viewer (techSafeDailySummary) — reading it as 0
         // wouldn't fabricate a number, but the OT/regular split it drives
@@ -800,13 +809,18 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
 // =============================================================================
 // TIMESHEET TAB
 // =============================================================================
-function TimesheetTab({ showToast, onOpenApprovals }) {
+export function TimesheetTab({ showToast, onOpenApprovals }) {
   const [weekStart, setWeekStart] = useState(() => getMonday(new Date()));
   const [dailies, setDailies] = useState([]);
   const [techs, setTechs] = useState([]);
   const [expanded, setExpanded] = useState(null); // { techId, date }
   const [cellEntries, setCellEntries] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Unpaid lunch controls show only while GATE_AUTO_LUNCH is on (the
+  // dashboard read says so).
+  const [autoLunch, setAutoLunch] = useState(false);
+  const [lunchReason, setLunchReason] = useState("");
+  const [lunchBusy, setLunchBusy] = useState(false);
 
   const weekEnd = useMemo(() => addDays(weekStart, 6), [weekStart]);
 
@@ -821,6 +835,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
       ]);
       setDailies(dailyRes);
       setTechs(dashRes.allTechs || []);
+      setAutoLunch(dashRes.autoLunch === true);
     } catch (e) {
       showToast("Failed to load timesheet");
     }
@@ -838,6 +853,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
         return;
       }
       setExpanded({ techId, date });
+      setLunchReason("");
       try {
         const res = await adminFetch(
           `/admin/timetracking/entries?technicianId=${techId}&startDate=${date}&endDate=${date}`,
@@ -848,6 +864,35 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
       }
     },
     [expanded],
+  );
+
+  // Admin set/clear of a day's "No lunch" flag. The reason is required and is
+  // recorded on the day; an approved day or week is refused by the server.
+  const setDayNoLunch = useCallback(
+    async (techId, date, noLunch) => {
+      if (!lunchReason.trim()) return;
+      setLunchBusy(true);
+      try {
+        await adminFetch(
+          `/admin/timetracking/daily/${techId}/${date}/no-lunch`,
+          {
+            method: "PUT",
+            body: { noLunch, edit_reason: lunchReason.trim() },
+          },
+        );
+        showToast(noLunch ? "No lunch recorded" : "Lunch restored");
+        setLunchReason("");
+        await load();
+      } catch (e) {
+        showToast(
+          e.message === "HTTP 409"
+            ? "That day or week is approved. Unlock it first."
+            : `Lunch change failed: ${e.message}`,
+        );
+      }
+      setLunchBusy(false);
+    },
+    [lunchReason, load, showToast],
   );
 
   const exportCSV = useCallback(() => {
@@ -963,7 +1008,8 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                   </span>
                 </th>
               ))}
-              <th style={thStyle}>Total</th> <th style={thStyle}>OT</th>{" "}
+              <th style={thStyle}>{autoLunch ? "Paid" : "Total"}</th>{" "}
+              <th style={thStyle}>OT</th>{" "}
               <th style={thStyle}>Status</th>{" "}
             </tr>{" "}
           </thead>{" "}
@@ -976,7 +1022,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                 const dt = addDays(weekStart, i);
                 const d = days[dt];
                 if (d) {
-                  totalMin += parseFloat(d.total_shift_minutes || 0);
+                  totalMin += paidMinutesOf(d);
                   totalOT += parseFloat(d.overtime_minutes || 0);
                   allStatuses.push(d.status);
                 }
@@ -1002,8 +1048,9 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                     const dt = addDays(weekStart, i);
                     const d = days[dt];
                     const hrs = d
-                      ? (parseFloat(d.total_shift_minutes || 0) / 60).toFixed(1)
+                      ? (paidMinutesOf(d) / 60).toFixed(1)
                       : "--";
+                    const lunchMin = d ? unpaidMinutesOf(d) : 0;
                     const color = !d
                       ? D.muted
                       : d.status === "approved"
@@ -1031,6 +1078,16 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                         >
                           {hrs}
                         </span>{" "}
+                        {d && d.no_lunch && (
+                          <div style={{ fontSize: 10, color: D.muted }}>
+                            no lunch
+                          </div>
+                        )}
+                        {d && !d.no_lunch && lunchMin > 0 && (
+                          <div style={{ fontSize: 10, color: D.muted }}>
+                            lunch -{(lunchMin / 60).toFixed(1)}
+                          </div>
+                        )}
                       </td>
                     );
                   })}
@@ -1085,6 +1142,71 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
           >
             Entries for {expanded.date}
           </div>
+          {autoLunch &&
+            (() => {
+              const day = byTech.find((t) => t.tech.id === expanded.techId)
+                ?.days[expanded.date];
+              if (!day) return null;
+              const lunchMin = unpaidMinutesOf(day);
+              const approved = day.status === "approved";
+              return (
+                <div
+                  data-testid="day-lunch-panel"
+                  style={{
+                    padding: "8px 0 12px",
+                    marginBottom: 8,
+                    borderBottom: `1px solid ${D.border}`,
+                  }}
+                >
+                  <div style={{ fontSize: 13, color: D.text, marginBottom: 8 }}>
+                    {day.no_lunch
+                      ? "No lunch: the full day is paid."
+                      : lunchMin > 0
+                        ? `Unpaid lunch: ${Math.round(lunchMin)} min taken off.`
+                        : "No unpaid lunch on this day."}
+                  </div>
+                  {approved ? (
+                    <div style={{ fontSize: 13, color: D.muted }}>
+                      This day is approved. Unlock the week to change lunch.
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        flexWrap: "wrap",
+                        alignItems: "center",
+                      }}
+                    >
+                      <input
+                        aria-label="Reason for the lunch change"
+                        placeholder="Reason (required)"
+                        value={lunchReason}
+                        onChange={(e) => setLunchReason(e.target.value)}
+                        style={{ ...sInput, flex: 1, minWidth: 200, width: "auto" }}
+                      />
+                      <button
+                        type="button"
+                        disabled={lunchBusy || !lunchReason.trim()}
+                        onClick={() =>
+                          setDayNoLunch(
+                            expanded.techId,
+                            expanded.date,
+                            !day.no_lunch,
+                          )
+                        }
+                        style={{
+                          ...sBtn(D.card, D.teal),
+                          opacity: lunchBusy || !lunchReason.trim() ? 0.5 : 1,
+                        }}
+                      >
+                        {day.no_lunch ? "Clear no lunch" : "Mark no lunch"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           {cellEntries.length === 0 ? (
             <div style={{ color: D.muted, fontSize: 12 }}>No entries</div>
           ) : (
@@ -5304,7 +5426,7 @@ function DocumentsTab({ showToast }) {
 // ===========================================================================
 // ApprovalsTab — weekly timesheet approval workflow
 // ===========================================================================
-function ApprovalsTab({ showToast }) {
+export function ApprovalsTab({ showToast }) {
   const lastMonday = useMemo(() => {
     return addDays(getMonday(new Date()), -7);
   }, []);
@@ -5578,8 +5700,23 @@ function ApprovalsTab({ showToast }) {
       {techs.map((t) => {
         const approved = t.status === "approved";
         const otHrs = parseFloat(t.overtime_minutes || 0) / 60;
-        const totalHrs = parseFloat(t.total_shift_minutes || 0) / 60;
+        // Paid hours when an unpaid lunch is on the week (regular + overtime
+        // from the server); otherwise the shift hours, as before.
+        const lunchHrs = parseFloat(t.unpaid_meal_minutes || 0) / 60;
+        const totalHrs =
+          lunchHrs > 0
+            ? (parseFloat(t.regular_minutes || 0) +
+                parseFloat(t.overtime_minutes || 0)) /
+              60
+            : parseFloat(t.total_shift_minutes || 0) / 60;
         const isExpanded = expanded === t.technician_id;
+        // The Lunch column appears only when a day in this week has one.
+        const showLunchCol =
+          isExpanded &&
+          !!detail &&
+          (detail.dailies || []).some(
+            (d) => d.no_lunch || unpaidMinutesOf(d) > 0,
+          );
         return (
           <div key={t.technician_id} style={sCard}>
             {" "}
@@ -5648,7 +5785,13 @@ function ApprovalsTab({ showToast }) {
                     ))}
                 </div>{" "}
               </div>{" "}
-              <Stat label="Hours" value={`${totalHrs.toFixed(1)}h`} />{" "}
+              <Stat
+                label={lunchHrs > 0 ? "Paid hours" : "Hours"}
+                value={`${totalHrs.toFixed(1)}h`}
+              />{" "}
+              {lunchHrs > 0 && (
+                <Stat label="Unpaid lunch" value={`${lunchHrs.toFixed(1)}h`} />
+              )}{" "}
               <Stat
                 label="OT"
                 value={`${otHrs.toFixed(1)}h`}
@@ -5724,6 +5867,9 @@ function ApprovalsTab({ showToast }) {
                             {" "}
                             <th style={{ padding: 8 }}>Date</th>{" "}
                             <th style={{ padding: 8 }}>Shift</th>{" "}
+                            {showLunchCol && (
+                              <th style={{ padding: 8 }}>Lunch</th>
+                            )}{" "}
                             <th style={{ padding: 8 }}>Jobs</th>{" "}
                             <th style={{ padding: 8 }}>OT</th>{" "}
                             <th style={{ padding: 8 }}>Revenue</th>{" "}
@@ -5743,6 +5889,19 @@ function ApprovalsTab({ showToast }) {
                               <td style={{ padding: 8 }}>
                                 {fmtHrs(d.total_shift_minutes)}
                               </td>{" "}
+                              {showLunchCol && (
+                                <td style={{ padding: 8 }}>
+                                  {d.no_lunch ? (
+                                    <span style={sBadge("#F1F5F9", D.text)}>
+                                      No lunch
+                                    </span>
+                                  ) : unpaidMinutesOf(d) > 0 ? (
+                                    `-${fmtHrs(unpaidMinutesOf(d))}`
+                                  ) : (
+                                    "--"
+                                  )}
+                                </td>
+                              )}{" "}
                               <td style={{ padding: 8 }}>{d.job_count || 0}</td>{" "}
                               <td
                                 style={{

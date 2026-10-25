@@ -462,6 +462,13 @@ async function getStatus(technicianId) {
     .where('status', '!=', 'voided')
     .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [today]);
 
+  const autoLunchOn = autoLunchLive();
+  const todayDay = autoLunchOn
+    ? await db('time_entry_daily_summary')
+      .where({ technician_id: technicianId, work_date: today })
+      .first('no_lunch')
+    : null;
+
   const todayShiftMin = todayEntries
     .filter(e => e.entry_type === 'shift')
     .reduce((sum, e) => sum + (parseFloat(e.duration_minutes) || 0), 0);
@@ -488,6 +495,10 @@ async function getStatus(technicianId) {
       jobMinutes: Math.round(todayJobMin * 100) / 100,
       jobCount: todayJobCount,
     },
+    // "No lunch today" control: the card shows it only while the gate is on.
+    autoLunch: autoLunchOn
+      ? { enabled: true, noLunch: Boolean(todayDay?.no_lunch) }
+      : { enabled: false, noLunch: false },
   };
 }
 
@@ -786,6 +797,33 @@ async function computeDailySummary(technicianId, date) {
   return summary;
 }
 
+// The unpaid meal of one work day from its entries (GATE_AUTO_LUNCH), in
+// payroll units. Shared by the daily compute and the weekly refresh so the
+// two cannot drift. Only completed breaks count.
+function dayUnpaidMealUnits(dayEntries, totalShiftUnits, noLunch, enabled) {
+  return unpaidMealUnits({
+    totalShiftUnits,
+    breakDurationUnits: dayEntries
+      .filter(e => e.entry_type === 'break' && e.status !== 'active')
+      .map(e => payrollUnits(e.duration_minutes)),
+    noLunch,
+    enabled,
+  });
+}
+
+// A DATE cell as YYYY-MM-DD. node-postgres builds DATE values at local
+// midnight, so read the local parts (a UTC read could shift the day).
+function dateCellYmd(value) {
+  if (value instanceof Date) {
+    return [
+      value.getFullYear(),
+      String(value.getMonth() + 1).padStart(2, '0'),
+      String(value.getDate()).padStart(2, '0'),
+    ].join('-');
+  }
+  return String(value).slice(0, 10);
+}
+
 /**
  * Mark one ET work day "No lunch today" (or undo it). The flag lives on the
  * day's summary row; computeDailySummaryInTransaction reads it and never
@@ -883,14 +921,12 @@ async function computeDailySummaryInTransaction(trx, technicianId, workDate) {
       .where({ technician_id: technicianId, work_date: workDate })
       .first('no_lunch')
     : null;
-  const unpaidMeal = payrollNumber(unpaidMealUnits({
+  const unpaidMeal = payrollNumber(dayUnpaidMealUnits(
+    breakEntries,
     totalShiftUnits,
-    breakDurationUnits: breakEntries
-      .filter(e => e.status !== 'active')
-      .map(e => payrollUnits(e.duration_minutes)),
-    noLunch: Boolean(existingDay?.no_lunch),
-    enabled: autoLunchOn,
-  }));
+    Boolean(existingDay?.no_lunch),
+    autoLunchOn,
+  ));
 
   const firstIn = shiftEntries.length > 0
     ? shiftEntries.reduce((min, e) => (e.clock_in < min ? e.clock_in : min), shiftEntries[0].clock_in)
@@ -968,6 +1004,51 @@ async function computeWeeklySummary(technicianId, weekStart) {
   return summary;
 }
 
+/**
+ * Re-derive the unpaid meal of every NON-approved day in a week from its
+ * entries and the CURRENT gate, so a gate flip (or a rule change) never leaves
+ * a stale deduction in the weekly totals. Writes the daily row when the value
+ * differs and updates the in-memory row the caller sums. An approved day keeps
+ * its stored snapshot. Runs under the caller's staff week lock.
+ *
+ * With the gate off and no stored deduction there is nothing to correct, so
+ * no query runs (the gate-off path stays byte-identical).
+ */
+async function refreshDailyUnpaidMeals(trx, technicianId, start, end, dailies) {
+  const open = dailies.filter(d => d.status !== 'approved');
+  const enabled = autoLunchLive();
+  if (!open.length) return;
+  if (!enabled && !open.some(d => payrollUnits(d.unpaid_meal_minutes) > 0n)) return;
+
+  const rows = await trx('time_entries')
+    .where({ technician_id: technicianId })
+    .where('status', '!=', 'voided')
+    .whereIn('entry_type', ['shift', 'break'])
+    .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
+    .select('entry_type', 'status', 'duration_minutes', trx.raw(`${STAFF_WORK_DATE_SQL}::text AS work_date`));
+  const byDate = new Map();
+  for (const row of rows) {
+    const key = String(row.work_date).slice(0, 10);
+    if (!byDate.has(key)) byDate.set(key, []);
+    byDate.get(key).push(row);
+  }
+
+  for (const daily of open) {
+    const dayEntries = byDate.get(dateCellYmd(daily.work_date)) || [];
+    const shiftUnits = dayEntries
+      .filter(e => e.entry_type === 'shift')
+      .reduce((sum, e) => sum + payrollUnits(e.duration_minutes), 0n);
+    const derived = dayUnpaidMealUnits(dayEntries, shiftUnits, Boolean(daily.no_lunch), enabled);
+    if (derived === payrollUnits(daily.unpaid_meal_minutes)) continue;
+    const value = payrollNumber(derived);
+    await trx('time_entry_daily_summary')
+      .where({ id: daily.id })
+      .whereRaw("status IS DISTINCT FROM 'approved'")
+      .update({ unpaid_meal_minutes: value, updated_at: new Date() });
+    daily.unpaid_meal_minutes = value;
+  }
+}
+
 async function computeWeeklySummaryInTransaction(
   trx,
   technicianId,
@@ -983,6 +1064,8 @@ async function computeWeeklySummaryInTransaction(
     .where('work_date', '<=', weekEndStr)
     .orderBy('work_date', 'asc')
     .forUpdate();
+
+  await refreshDailyUnpaidMeals(trx, technicianId, start, weekEndStr, dailies);
 
   const sumDailyUnits = (field) => dailies.reduce(
     (sum, daily) => sum + payrollUnits(daily[field]),

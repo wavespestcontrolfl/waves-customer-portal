@@ -158,6 +158,24 @@ export default function TechTimeTrackingCard({ nextStop, variant }) {
     }
   };
 
+  // "No lunch today": the unpaid 30-minute lunch comes off a day over 6 hours
+  // unless the tech taps this. Hidden while GATE_AUTO_LUNCH is off (the status
+  // read says so), so the card is unchanged then.
+  const setNoLunch = async (value) => {
+    if (busy) return;
+    setBusy('No lunch');
+    setFeedback(null);
+    try {
+      await request('/no-lunch', { method: 'POST', body: JSON.stringify({ noLunch: value }) });
+      setFeedback({ text: value ? 'No lunch recorded for today' : 'Lunch restored for today', isError: false });
+      await load();
+    } catch (error) {
+      setFeedback({ text: error.message, isError: true });
+    } finally {
+      setBusy('');
+    }
+  };
+
   if (loading) return null;
   if (!status) {
     return (
@@ -175,6 +193,9 @@ export default function TechTimeTrackingCard({ nextStop, variant }) {
   const clockedIn = status?.clockedIn === true;
   const currentJob = status?.currentJob || null;
   const onBreak = status?.onBreak === true;
+  const autoLunchOn = status?.autoLunch?.enabled === true;
+  const noLunchToday = status?.autoLunch?.noLunch === true;
+  const showNoLunch = autoLunchOn && (clockedIn || Number(status?.todaySummary?.shiftMinutes || 0) > 0);
   const nextStopIsOnSite = nextStop?.status === 'on_site';
   // Each disabled state decided once for its button's disabled + style.
   const breakBlocked = !!busy || !!currentJob;
@@ -238,6 +259,24 @@ export default function TechTimeTrackingCard({ nextStop, variant }) {
                   : 'Mark on site before starting timer'}
             </button>
           )}
+        </div>
+      )}
+
+      {showNoLunch && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+          <div style={{ flex: 1, color: P.muted, fontSize: 14 }}>
+            {noLunchToday
+              ? 'No lunch today: the full day is paid.'
+              : '30 minutes of lunch come off a day over 6 hours.'}
+          </div>
+          <button
+            type="button"
+            disabled={!!busy}
+            onClick={() => setNoLunch(!noLunchToday)}
+            style={{ ...look.action(P.amber, !!busy), flex: '0 0 auto' }}
+          >
+            {noLunchToday ? 'Undo no lunch' : 'No lunch today'}
+          </button>
         </div>
       )}
 

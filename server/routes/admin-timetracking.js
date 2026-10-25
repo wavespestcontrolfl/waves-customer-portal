@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
+const { autoLunchLive } = require('../config/feature-gates');
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
@@ -268,6 +269,8 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
       allTechs,
       today,
       weekStart: weekStartStr,
+      // The timesheet shows its "No lunch" control only while this is on.
+      autoLunch: autoLunchLive(),
     });
   } catch (err) {
     next(err);
