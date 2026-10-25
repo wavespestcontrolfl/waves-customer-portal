@@ -29,15 +29,15 @@ describe('the gate', () => {
 
 describe('rule 1: a card when the customer is neither named nor on screen', () => {
   const NAMED = id(1), SCREEN = id(2), FOUND = id(3), OTHER_PAGE = id(4);
-  const phoneEdit = customer_id => ({ customer_id, updates: { phone: '941-555-0100' } });
+  const nameEdit = customer_id => ({ customer_id, updates: { last_name: 'Sample' } });
   // A task context as owner-direct leaves it: the name typed in this message resolved to NAMED.
   const context = (extra = {}) => ({ targets: [], groundedCustomerIds: [NAMED], page: { ids: { customer_id: SCREEN } }, ...extra });
   const run = (tool, input, preview = null, ctx = context()) => OwnerDirect.executesWithoutCard(tool, input, preview, null, OwnerDirect.targetGrounding(ctx));
 
   test('gate off: nothing changes, whatever the message named', () => {
     expect(OwnerDirect.targetGrounding(context())).toBeNull();
-    expect(run('update_customer', phoneEdit(FOUND))).toBe(true);
-    expect(OwnerDirect.mayExecuteWithoutCard('update_customer', phoneEdit(FOUND))).toBe(true);
+    expect(run('update_customer', nameEdit(FOUND))).toBe(true);
+    expect(OwnerDirect.mayExecuteWithoutCard('update_customer', nameEdit(FOUND))).toBe(true);
   });
 
   describe('gate on', () => {
@@ -45,7 +45,7 @@ describe('rule 1: a card when the customer is neither named nor on screen', () =
 
     test('named / on-screen / model-found matrix for the four customer_id tools', () => {
       const inputs = {
-        update_customer: customer_id => phoneEdit(customer_id),
+        update_customer: customer_id => nameEdit(customer_id),
         update_customer_property: customer_id => ({ customer_id, property_id: id(50), relationship: 'rental' }),
         set_primary_property: customer_id => ({ customer_id, property_id: id(50) }),
         update_property_access: customer_id => ({ customer_id, parking_notes: 'Park on the street' }),
@@ -59,26 +59,32 @@ describe('rule 1: a card when the customer is neither named nor on screen', () =
     });
 
     test('a case-different id still matches; a missing id and a missing context card', () => {
-      expect(run('update_customer', phoneEdit(NAMED.toUpperCase()))).toBe(true);
-      expect(run('update_customer', { updates: { phone: '941-555-0100' } })).toBe(false);
+      expect(run('update_customer', nameEdit(NAMED.toUpperCase()))).toBe(true);
+      expect(run('update_customer', { updates: { last_name: 'Sample' } })).toBe(false);
       // The decision has no grounding to read: fail closed.
-      expect(OwnerDirect.executesWithoutCard('update_customer', phoneEdit(NAMED), null, null, null)).toBe(false);
-      expect(OwnerDirect.executesWithoutCard('update_customer', phoneEdit(NAMED))).toBe(false);
+      expect(OwnerDirect.executesWithoutCard('update_customer', nameEdit(NAMED), null, null, null)).toBe(false);
+      expect(OwnerDirect.executesWithoutCard('update_customer', nameEdit(NAMED))).toBe(false);
     });
 
     test('the customer a resolved target, the viewed customer record or the operator selection names counts', () => {
       const target = { customer_id: FOUND, label: 'Pat Example', provenance: 'operator_selection' };
-      expect(run('update_customer', phoneEdit(FOUND), null, context({ targets: [target], target }))).toBe(true);
-      expect(run('update_customer', phoneEdit(FOUND), null, { targets: [], page: { ids: {}, customer: { customer_id: FOUND, label: 'Pat Example' } } })).toBe(true);
+      expect(run('update_customer', nameEdit(FOUND), null, context({ targets: [target], target }))).toBe(true);
+      expect(run('update_customer', nameEdit(FOUND), null, { targets: [], page: { ids: {}, customer: { customer_id: FOUND, label: 'Pat Example' } } })).toBe(true);
     });
 
     test('the page decides the on-screen customer, not the input: a stale page record names nobody', () => {
-      expect(run('update_customer', phoneEdit(SCREEN), null, { targets: [], page: { ids: {} } })).toBe(false);
+      expect(run('update_customer', nameEdit(SCREEN), null, { targets: [], page: { ids: {} } })).toBe(false);
     });
 
     test('an address edit is carded for a named customer too (not weakened)', () => {
       expect(run('update_customer', { customer_id: NAMED, updates: { city: 'Venice' } })).toBe(false);
       expect(run('update_customer', { customer_id: NAMED, updates: { address_line1: '1 Example Way' } })).toBe(false);
+    });
+
+    test('a phone edit is carded for a named or on-screen customer too: the phone is the portal sign-in key (owner 2026-10-24)', () => {
+      expect(run('update_customer', { customer_id: NAMED, updates: { phone: '941-555-0100' } })).toBe(false);
+      expect(run('update_customer', { customer_id: SCREEN, updates: { phone: '941-555-0100' } })).toBe(false);
+      expect(OwnerDirect.mayExecuteWithoutCard('update_customer', { customer_id: NAMED, updates: { phone: '941-555-0100' } }, null, OwnerDirect.targetGrounding(context()))).toBe(false);
     });
 
     test('reschedule_appointment reads the pinned appointment owner', () => {
@@ -114,15 +120,15 @@ describe('rule 1: a card when the customer is neither named nor on screen', () =
 
     test('a carded-anyway call never counts toward the direct cap', () => {
       const grounding = OwnerDirect.targetGrounding(context());
-      const found = { name: 'update_customer', input: phoneEdit(FOUND) };
-      const named = { name: 'update_customer', input: phoneEdit(NAMED) };
+      const found = { name: 'update_customer', input: nameEdit(FOUND) };
+      const named = { name: 'update_customer', input: nameEdit(NAMED) };
       expect(OwnerDirect.mayExecuteWithoutCard('update_customer', found.input, null, grounding)).toBe(false);
       // Grounded customer tools join no up-front plan: each is counted as it commits, so carded calls use nothing.
       expect(OwnerDirect.messageDirectPlan([found, found, found, found, found, found, named], () => true, null, grounding).has('update_customer')).toBe(false);
     });
 
     test('the untrusted-read flag still wins', () => {
-      expect(OwnerDirect.executesWithoutCard('update_customer', phoneEdit(NAMED), null, { untrustedRead: true }, OwnerDirect.targetGrounding(context()))).toBe(false);
+      expect(OwnerDirect.executesWithoutCard('update_customer', nameEdit(NAMED), null, { untrustedRead: true }, OwnerDirect.targetGrounding(context()))).toBe(false);
     });
   });
 });
@@ -146,7 +152,7 @@ describe('rule 3: five direct edits per tool', () => {
     process.env[ON] = 'true';
     const CUSTOMER = id(1);
     const grounding = OwnerDirect.targetGrounding({ targets: [], groundedCustomerIds: [CUSTOMER], page: { ids: {} } });
-    const edit = n => ({ type: 'tool_use', name: 'update_customer', input: { customer_id: CUSTOMER, updates: { phone: `941-555-01${String(n).padStart(2, '0')}` } } });
+    const edit = n => ({ type: 'tool_use', name: 'update_customer', input: { customer_id: CUSTOMER, updates: { last_name: `Sample ${n}` } } });
     // Counted sequentially as they commit (Codex #6369 r26): no whole-message plan for grounded customer tools.
     const committed = new Map();
     const run = (calls) => calls.map(() => {
@@ -156,7 +162,7 @@ describe('rule 3: five direct edits per tool', () => {
       return 'direct';
     });
     expect(OwnerDirect.messageDirectPlan([1, 2, 3, 4, 5, 6].map(edit), () => true, null, grounding).size).toBe(0);
-    // 6 grounded phone edits: five run, only the sixth is refused.
+    // 6 grounded name edits: five run, only the sixth is refused.
     expect(run([1, 2, 3, 4, 5, 6])).toEqual(['direct', 'direct', 'direct', 'direct', 'direct', 'refused']);
     // 4 committed + 2 proposed: one runs, one is refused.
     committed.clear();
@@ -327,7 +333,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(resolved).toMatchObject({ code: 'target_clarification_required' });
     expect(resolved.typedCustomerIds).toEqual([]);
     const owner = Context.ownerDirectContext(resolved);
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: customers[1].id, updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: customers[1].id, updates: { last_name: 'Sample' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(false);
     // Directly: incomplete evidence is not named evidence.
     expect(await Context.typedCustomerIds('update Pat Example in Englewood notes', { matches: customers.slice(0, 26), complete: false })).toEqual([]);
   });
@@ -397,16 +403,16 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
       expect([prompt, resolved.groundedCustomerIds]).toEqual([prompt, []]);
       const owner = Context.ownerDirectContext(resolved);
       for (const customer_id of [id(100), id(400)]) {
-        expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id, updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(false);
+        expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id, updates: { last_name: 'Sample' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(false);
       }
     }
     // Failed identity evidence takes the on-screen customer's authority too (Codex #6369 r26)...
     const failed = Context.ownerDirectContext(await Context.resolve({ prompt: 'update Pat Example 941-777-0000 notes', pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
     expect(failed.pageGroundingBlocked).toBe(true);
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(failed))).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { last_name: 'Sample' } }, null, null, OwnerDirect.targetGrounding(failed))).toBe(false);
     // ...and the page stands when the message names nobody.
     const quiet = Context.ownerDirectContext(await Context.resolve({ prompt: 'update this customer phone', pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(quiet))).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { last_name: 'Sample' } }, null, null, OwnerDirect.targetGrounding(quiet))).toBe(true);
   });
 
   test('gate on: a city that picks one customer and a phone that belongs to the other is a conflict (pre-push audit)', async () => {
@@ -465,7 +471,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect([...await Context.typedCustomerIds('update Brandon Smith notes', named)]).toEqual([]);
     const resolved = await ask('update Brandon Smith notes');
     expect(resolved.typedCustomerIds).toEqual([]);
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(801), updates: { phone: '941-555-0100' } }, null, null, OwnerDirect.targetGrounding(Context.ownerDirectContext(resolved)))).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(801), updates: { last_name: 'Sample' } }, null, null, OwnerDirect.targetGrounding(Context.ownerDirectContext(resolved)))).toBe(false);
     // A real city after the name still picks the customer, including a city that repeats the first name.
     expect(await Context.typedCustomerIds('update Brandon Smith in Venice notes', named)).toEqual([id(800)]);
     expect(await Context.typedCustomerIds('update Brandon Smith in Brandon notes', named)).toEqual([id(801)]);
@@ -533,8 +539,8 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(Context.ownerDirectContext(second).sameNameNote).toBeUndefined();
     const grounding = OwnerDirect.targetGrounding(Context.ownerDirectContext(second));
     // Two rows share the typed name, so the name is not exactly the page customer: neither account runs direct.
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(101), updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(false);
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(101), updates: { last_name: 'Sample' } }, null, null, grounding)).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { last_name: 'Sample' } }, null, null, grounding)).toBe(false);
     // A viewed customer who is not among the matches changes nothing: the choices flow stays.
     const third = await withPage(id(200));
     expect(third.target).toBeNull();
@@ -594,7 +600,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     // Every write in this request needs the card, the on-screen pick included.
     const taint = OwnerDirect.newRequestTaint([]);
     const grounding = OwnerDirect.targetGrounding(owner);
-    const edit = { customer_id: id(101), updates: { phone: '941-555-0100' } };
+    const edit = { customer_id: id(101), updates: { last_name: 'Sample' } };
     // Even before the same-name flag, the page grounding is blocked: two rows share the typed name.
     expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, grounding)).toBe(false);
     OwnerDirect.noteSameNameContext(taint, owner);
@@ -620,7 +626,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     const taint = OwnerDirect.newRequestTaint([]);
     OwnerDirect.noteSameNameContext(taint, owner);
     expect(taint.sameNameCandidates).toBeUndefined();
-    const edit = { customer_id: id(100), updates: { phone: '941-555-0100' } };
+    const edit = { customer_id: id(100), updates: { last_name: 'Sample' } };
     expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, OwnerDirect.targetGrounding(owner))).toBe(true);
     // Gate off: neither the strip nor the flag applies.
     delete process.env[ON];
@@ -701,7 +707,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
   test('gate on: failed identity evidence takes the on-screen customer\'s authority too; the page stands when the message names nobody or exactly the page customer (Codex #6369 r26)', async () => {
     process.env[ON] = 'true';
     customers = [{ id: id(100), first_name: 'Bob', last_name: 'Example', city: 'Venice', phone: '9415550100', email: 'bob@example.test', updated_at: new Date('2026-01-01'), version: '2026-01-01' }];
-    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const edit = { customer_id: id(100), updates: { last_name: 'Sample' } };
     const viewingBob = async prompt => {
       const owner = Context.ownerDirectContext(await Context.resolve({ prompt, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
       return OwnerDirect.executesWithoutCard('update_customer', edit, null, null, OwnerDirect.targetGrounding(owner));
@@ -734,7 +740,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(await grounded("update Bob Example's notes to \"call first\"")).toEqual([id(100)]);
     // 2. Viewing Bob, a resolved name in a form namesRequested misses still takes the page's authority.
     customers = [row(100, 'Bob', 'Example', '9415550100'), row(101, 'Alice', 'Jones', '9415550101')];
-    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const edit = { customer_id: id(100), updates: { last_name: 'Sample' } };
     const viewingBob = async prompt => {
       const owner = Context.ownerDirectContext(await Context.resolve({ prompt, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
       return OwnerDirect.executesWithoutCard('update_customer', edit, null, null, OwnerDirect.targetGrounding(owner));
@@ -789,7 +795,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     process.env[ON] = 'true';
     const row = (n, first, last, phone) => ({ id: id(n), first_name: first, last_name: last, city: 'Venice', phone, email: `${first.toLowerCase()}@example.test`, updated_at: new Date('2026-01-01'), version: '2026-01-01' });
     customers = [row(100, 'Bob', 'Example', '9415550100'), row(101, 'Alice', 'Sample', '9415550101'), row(102, 'Carl', 'Other', '9415550102')];
-    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const edit = { customer_id: id(100), updates: { last_name: 'Sample' } };
     const viewingBob = async prompt => {
       const owner = Context.ownerDirectContext(await Context.resolve({ prompt, pageData: { customer_id: id(100) }, selectedTarget: null, ownerDirectScope: true }));
       return OwnerDirect.executesWithoutCard('update_customer', edit, null, null, OwnerDirect.targetGrounding(owner));
@@ -885,7 +891,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
       { id: OWN, customer_id: id(100), property_id: null, service_address_line1: '1 Example Way', updated_at: new Date('2026-01-01') },
       { id: OTHER, customer_id: id(101), property_id: null, service_address_line1: '2 Example Way', updated_at: new Date('2026-01-01') },
     ];
-    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const edit = { customer_id: id(100), updates: { last_name: 'Sample' } };
     // The page shows Bob and his visit OWN.
     const viewingBob = async prompt => {
       const owner = Context.ownerDirectContext(await Context.resolve({ prompt, pageData: { customer_id: id(100), appointment_id: OWN }, selectedTarget: null, ownerDirectScope: true }));
@@ -947,7 +953,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(taint.sameNameCandidates).toBeUndefined();
     expect(OwnerDirect.sameNameMarkerNeeded(taint)).toBe(false);
     // The selection grounds the chosen customer, as before.
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(101), updates: { phone: '941-555-0150' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(101), updates: { last_name: 'Sample' } }, null, null, OwnerDirect.targetGrounding(owner))).toBe(true);
   });
 
   test('gate on: every choice label is sanitized; a name like "Create: Customer Bob" cannot make an instruction button, and every tap is carded by its shape (Codex #6369 r31)', async () => {
@@ -1103,7 +1109,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     const pat = { ...sameName(1)[0], phone: '9415550100', email: 'pat@example.test' };
     const other = n => ({ ...sameName(1)[0], id: id(700 + n), first_name: `Other${n}`, last_name: 'Person', phone: '9415550777', email: `other${n}@example.test`, hiddenFromName: true });
     customers = [pat, other(1), other(2)];
-    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const edit = { customer_id: id(100), updates: { last_name: 'Sample' } };
     const direct = async (prompt) => {
       const resolved = await ask(prompt);
       return [OwnerDirect.executesWithoutCard('update_customer', edit, null, null, OwnerDirect.targetGrounding(Context.ownerDirectContext(resolved))), resolved.groundedCustomerIds];
@@ -1159,7 +1165,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(taint.sameNameCandidates).toBe(true);
     expect(OwnerDirect.sameNameMarkerNeeded(taint)).toBe(true); // the reply leaves the thread marker (r22)
     const grounding = OwnerDirect.targetGrounding(owner);
-    const edit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const edit = { customer_id: id(100), updates: { last_name: 'Sample' } };
     expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, taint, grounding)).toBe(false);
     expect(OwnerDirect.executesWithoutCard('create_customer', { first_name: 'Sam', last_name: 'Newcomer' }, null, taint, grounding)).toBe(false);
     // The model's view is slimmed whatever the group kind: no address, notes or phone.
@@ -1281,11 +1287,11 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     expect(replied.groundedCustomerIds).toEqual([]);
     const grounding = OwnerDirect.targetGrounding(Context.ownerDirectContext(replied));
     for (const customerId of typed) {
-      expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: customerId, updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(false);
+      expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: customerId, updates: { last_name: 'Sample' } }, null, null, grounding)).toBe(false);
     }
     // One grounded customer still grounds.
     const one = OwnerDirect.targetGrounding({ targets: [], groundedCustomerIds: [id(950)], page: { ids: {} } });
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(950), updates: { phone: '941-555-0100' } }, null, null, one)).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(950), updates: { last_name: 'Sample' } }, null, null, one)).toBe(true);
     // A name-resolved target is dropped with them; an on-screen customer still stands.
     const withTarget = OwnerDirect.targetGrounding({ targets: [{ customer_id: id(950), provenance: 'current_request_lookup' }], groundedCustomerIds: [], page: { ids: { customer_id: id(951) } } });
     expect(withTarget.ids.has(id(950))).toBe(false);
@@ -1344,7 +1350,7 @@ describe('rule 2: same-name customers (11 to 25 rows)', () => {
     const resolved = await ask('fix the notes on the customer who called this morning');
     expect(resolved.typedCustomerIds).toEqual([]);
     const grounding = OwnerDirect.targetGrounding(Context.ownerDirectContext(resolved));
-    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { phone: '941-555-0100' } }, null, null, grounding)).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', { customer_id: id(100), updates: { last_name: 'Sample' } }, null, null, grounding)).toBe(false);
   });
 });
 
@@ -1442,12 +1448,12 @@ describe('lead edits keep the old cap (Codex #6369 security P2)', () => {
 describe('update_customer notes edits are preview-decided and count as they commit (Codex #6369 r21)', () => {
   const NAMED = id(1);
   const notesEdit = n => ({ type: 'tool_use', name: 'update_customer', input: { customer_id: NAMED, updates: { notes: `Gate code ${n}` } } });
-  const phoneEdit = { type: 'tool_use', name: 'update_customer', input: { customer_id: NAMED, updates: { phone: '941-555-0150' } } };
+  const nameEdit = { type: 'tool_use', name: 'update_customer', input: { customer_id: NAMED, updates: { last_name: 'Sample' } } };
 
-  test('1 grounded phone edit + 5 notes edits over existing notes (carded): the phone edit is not capped; 6 eligible notes edits still cap', () => {
+  test('1 grounded name edit + 5 notes edits over existing notes (carded): the name edit is not capped; 6 eligible notes edits still cap', () => {
     process.env[ON] = 'true';
     const grounding = OwnerDirect.targetGrounding({ targets: [], groundedCustomerIds: [NAMED], page: { ids: {} } });
-    const calls = [phoneEdit, ...[1, 2, 3, 4, 5].map(notesEdit)];
+    const calls = [nameEdit, ...[1, 2, 3, 4, 5].map(notesEdit)];
     // Grounded customer tools join no up-front plan; each is counted as it commits.
     const plan = OwnerDirect.messageDirectPlan(calls, () => true, null, grounding);
     expect(plan.has('update_customer')).toBe(false);
@@ -1463,7 +1469,7 @@ describe('update_customer notes edits are preview-decided and count as they comm
       return 'direct';
     };
     expect([1, 2, 3, 4, 5].map(n => verdict(notesEdit(n), covered))).toEqual(['card', 'card', 'card', 'card', 'card']);
-    expect(verdict(phoneEdit, null)).toBe('direct');
+    expect(verdict(nameEdit, null)).toBe('direct');
     // 6 eligible notes edits (empty notes): five direct, the sixth hits the cap.
     committed.clear();
     expect([1, 2, 3, 4, 5, 6].map(n => verdict(notesEdit(n), empty))).toEqual(['direct', 'direct', 'direct', 'direct', 'direct', 'refused']);
@@ -1602,7 +1608,7 @@ describe('lead reads taint the request (Codex #6369 r7)', () => {
 
 describe('v2 untrusted-read marker (Codex #6369 r19)', () => {
   const IbThreads = require('../services/intelligence-bar/threads');
-  const edit = { customer_id: id(101), updates: { phone: '941-555-0100' } };
+  const edit = { customer_id: id(101), updates: { last_name: 'Sample' } };
   const grounding = () => OwnerDirect.targetGrounding({ targets: [], groundedCustomerIds: [id(101)], page: { ids: {} } });
   // A thread whose turns carry the given markers: the real marker argument decides.
   const loadWith = (markers) => {
@@ -1652,7 +1658,7 @@ describe('v2 untrusted-read marker (Codex #6369 r19)', () => {
 
 describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
   const IbThreads = require('../services/intelligence-bar/threads');
-  const edit = { customer_id: id(101), updates: { phone: '941-555-0100' } };
+  const edit = { customer_id: id(101), updates: { last_name: 'Sample' } };
   const owner = { target: { customer_id: id(101), provenance: 'current_request_lookup' }, targets: [], groundedCustomerIds: [id(101)], page: { ids: {} } };
   const load = (pending) => {
     jest.spyOn(IbThreads, 'hasUntrustedRead').mockResolvedValue(false);
@@ -1688,7 +1694,7 @@ describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
     process.env[ON] = 'true';
     const two = { ownerDirect: true, candidates: [{ customer_id: id(100), label: 'Pat Example' }, { customer_id: id(101), label: 'Pat Sample' }] };
     const grounding = OwnerDirect.targetGrounding({ targets: [], groundedCustomerIds: [], page: { ids: { customer_id: id(100) } } });
-    const viewedEdit = { customer_id: id(100), updates: { phone: '941-555-0150' } };
+    const viewedEdit = { customer_id: id(100), updates: { last_name: 'Sample' } };
     // Request 1: more than one candidate row reached the model, no buttons shown: the marker is left.
     const first = await load(false);
     OwnerDirect.noteSameNameContext(first, two);
