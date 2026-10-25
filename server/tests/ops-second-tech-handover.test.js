@@ -300,12 +300,31 @@ describe('tlsFor (connection TLS)', () => {
       const cfg = conn.client.config.connection;
       expect(cfg.connectionString).toBeUndefined();
       expect(cfg.ssl.rejectUnauthorized).toBe(true);
+      expect(cfg.enableChannelBinding).toBe(true);
       expect(cfg.host).toBe('example.proxy.rlwy.net');
     } finally {
       if (prior === undefined) delete process.env.PG_CA_FILE; else process.env.PG_CA_FILE = prior;
       fs.unlinkSync(file);
       conn.destroy();
     }
+  });
+
+  test('a remote login is SCRAM-SHA-256-PLUS only: cleartext, MD5 and unbound SCRAM requests are refused', () => {
+    const { EventEmitter } = require('events');
+    const { scramPlusOnly } = require('../../ops/agents/second-tech-handover.js');
+    const pg = { Client: class { _handleAuthSASL() { this.saslStarted = true; } } };
+    scramPlusOnly(pg);
+    const fake = () => { const c = new pg.Client(); c.connection = new EventEmitter(); c.errors = []; c.connection.on('error', (e) => c.errors.push(e.message)); return c; };
+    const a = fake(); a._handleAuthCleartextPassword({});
+    const b = fake(); b._handleAuthMD5Password({ salt: Buffer.alloc(4) });
+    const c = fake(); c._handleAuthSASL({ mechanisms: ['SCRAM-SHA-256'] });
+    const d = fake(); d._handleAuthSASL({ mechanisms: ['SCRAM-SHA-256-PLUS', 'SCRAM-SHA-256'] });
+    expect(a.errors).toEqual([expect.stringMatching(/cleartext.*SCRAM-SHA-256-PLUS only/)]);
+    expect(b.errors).toEqual([expect.stringMatching(/MD5.*SCRAM-SHA-256-PLUS only/)]);
+    expect(c.errors).toEqual([expect.stringMatching(/without channel binding/)]);
+    expect(c.saslStarted).toBeUndefined();
+    expect(d.errors).toEqual([]);
+    expect(d.saslStarted).toBe(true);
   });
 
   test('with a pinned root the chain is verified (rejectUnauthorized on); only the name check is skipped', () => {

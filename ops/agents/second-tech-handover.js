@@ -33,7 +33,10 @@
 //            Fetch it once and keep it outside the repo:
 //              railway run --service Postgres -- sh -c 'echo | openssl s_client -starttls postgres
 //                -connect "${DATABASE_PUBLIC_URL#*@}" -showcerts' (cut the host:port at the "/"),
-//            and save the LAST certificate block as the file.
+//            and save the LAST certificate block as the file. That first fetch is
+//            trust-on-first-use, so the login does not rely on it alone: the script
+//            allows only SCRAM-SHA-256-PLUS (see scramPlusOnly), which never sends the
+//            password and binds the login to this TLS session.
 //
 // What the plan decides (all from the real columns):
 //   NESTED   the outer run gives DATABASE_PUBLIC_URL, the inner run the portal's
@@ -523,10 +526,35 @@ function connectionFields(connectionString) {
   };
 }
 
+// The login, even if the pinned root were an impostor's: pg answers a server's cleartext
+// or MD5 password request by sending the password (or its MD5), and plain SCRAM can be
+// relayed to the real server. Allow only SCRAM-SHA-256-PLUS, whose channel binding ties
+// the exchange to this TLS session's certificate (production offers it; checked
+// 2026-10-25). Patches this process's pg client; applied only for a remote database.
+function scramPlusOnly(pg) {
+  const proto = pg.Client.prototype;
+  if (proto.scramPlusOnly) return;
+  const refuse = (what) => function refuseAuth() {
+    this.connection.emit('error', new Error(`refusing ${what}: SCRAM-SHA-256-PLUS only`));
+  };
+  const sasl = proto._handleAuthSASL;
+  proto._handleAuthCleartextPassword = refuse('a cleartext password request');
+  proto._handleAuthMD5Password = refuse('an MD5 password request');
+  proto._handleAuthSASL = function scramPlus(msg) {
+    if (!(msg && Array.isArray(msg.mechanisms) && msg.mechanisms.includes('SCRAM-SHA-256-PLUS'))) {
+      return refuse('a login without channel binding').call(this);
+    }
+    return sasl.call(this, msg);
+  };
+  proto.scramPlusOnly = true;
+}
+
 function readOnlyConn(connectionString) {
+  const ssl = tlsFor(connectionString);
+  if (ssl) scramPlusOnly(require('pg'));
   return require('knex')({
     client: 'pg',
-    connection: { ...connectionFields(connectionString), ssl: tlsFor(connectionString) },
+    connection: { ...connectionFields(connectionString), ssl, ...(ssl ? { enableChannelBinding: true } : {}) },
     pool: {
       min: 1,
       max: 1,
@@ -575,7 +603,7 @@ async function main() {
 module.exports = {
   MOVABLE_LINES, OPEN_STATUSES, TERMITE_BAIT_KEYS,
   parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries, isTermiteBaitAddon,
-  buildPlan, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields,
+  buildPlan, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields, scramPlusOnly,
 };
 
 if (require.main === module) {
