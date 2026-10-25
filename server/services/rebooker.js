@@ -4173,9 +4173,9 @@ class SmartRebooker {
           });
         }
         // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
-        // off): the anchor is the visit the staff check placed, so number
-        // its day in that order. Later occurrences keep today's handling.
-        if (isAnchor && updateData.window_start
+        // off): every occurrence this sweep moves was checked by the staff
+        // rule, so number its day in the order that check certified.
+        if (updateData.window_start
           && (useArrivalWindows || options.placeInRoute === true)
           && (sibDateChanges || anchorTechChanges
             || String(updateData.window_start).slice(0, 5) !== String(sib.window_start || '').slice(0, 5))) {

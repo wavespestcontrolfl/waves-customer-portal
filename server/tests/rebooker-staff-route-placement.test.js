@@ -183,7 +183,7 @@ describe('the series and Edit saves place only the visit the staff check placed 
   const path = require('path');
   const read = (file) => fs.readFileSync(path.join(__dirname, file), 'utf8');
 
-  test('rescheduleSeries places its anchor alone, after the anchor CAS write', () => {
+  test('rescheduleSeries places every occurrence it moves, after that occurrence\'s CAS write', () => {
     const src = read('../services/rebooker.js');
     const start = src.indexOf('async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {');
     const end = src.indexOf('// Read-only preview of what rescheduleSeries would touch', start);
@@ -192,7 +192,7 @@ describe('the series and Edit saves place only the visit the staff check placed 
     const call = body.indexOf(statement);
     expect(call).toBeGreaterThan(-1);
     expect(body.indexOf('placeMovedVisit(', call + statement.length)).toBe(-1);
-    const guard = body.lastIndexOf('if (isAnchor && updateData.window_start', call);
+    const guard = body.lastIndexOf('if (updateData.window_start\n          && (useArrivalWindows || options.placeInRoute === true)', call);
     expect(guard).toBeGreaterThan(body.indexOf('.update(updateData, SERIES_MOVE_SNAPSHOT_COLUMNS);'));
   });
 
