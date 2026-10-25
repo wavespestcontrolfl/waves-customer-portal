@@ -317,7 +317,8 @@ const squash = (key) => key.replace(/ /g, '');
 const keeps = (a, b) => (b.homes - a.homes) || (b.liveEntries - a.liveEntries) || (a.name.length - b.name.length) || (a.id < b.id ? -1 : 1);
 
 // entries: [{ id, name, county, homes, liveEntries }]; dismissed: Set of
-// "sourceId|targetId". Returns [{ source, target }], biggest kept entry first.
+// "sourceId|targetId" as answered (either order counts). Returns
+// [{ source, target }], biggest kept entry first.
 function groupSuggestions(entries, dismissed = new Set()) {
   const keyed = entries.map((e) => ({ ...e, key: familyKey(e.name) }));
   const known = new Set(keyed.map((e) => `${e.county}|${squash(e.key)}`));
@@ -335,7 +336,9 @@ function groupSuggestions(entries, dismissed = new Set()) {
     if (list.length < 2) continue;
     const [target, ...rest] = [...list].sort(keeps);
     for (const source of rest) {
-      if (!dismissed.has(`${source.id}|${target.id}`)) out.push({ source, target });
+      // "Not the same" is about the pair, whichever way the counts now point.
+      const answered = dismissed.has(`${source.id}|${target.id}`) || dismissed.has(`${target.id}|${source.id}`);
+      if (!answered) out.push({ source, target });
     }
   }
   const view = ({ id, name, county, homes, liveEntries }) => ({ id, name, county, propertyCount: homes, liveEntries });

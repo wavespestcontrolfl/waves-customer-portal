@@ -59,4 +59,13 @@ describe('groupSuggestions', () => {
     expect(pairs(list)).toEqual(['Heron Point Sub -> Heron Point Lwr', 'Heron Point at Lakewood Ranch -> Heron Point Lwr']);
     expect(pairs(list, new Set(['c|a']))).toEqual(['Heron Point at Lakewood Ranch -> Heron Point Lwr']);
   });
+
+  test('Not the same holds after the counts flip which entry is kept', () => {
+    const before = [entry('a', 'Heron Point', 3), entry('b', 'Heron Point Sub', 1)];
+    const answered = new Set(['b|a']);
+    expect(pairs(before, answered)).toEqual([]);
+    const after = [entry('a', 'Heron Point', 1), entry('b', 'Heron Point Sub', 4)];
+    expect(pairs(after)).toEqual(['Heron Point -> Heron Point Sub']);
+    expect(pairs(after, answered)).toEqual([]);
+  });
 });
