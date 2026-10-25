@@ -9709,6 +9709,20 @@ async function handleEstimateView(req, res, next) {
         logger.warn(`[estimate-view] phone-park routing check failed, forcing the React view: ${e.message}`);
       }
     }
+    // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE) lives ONLY in the React page (the notice card and the
+    // accept hold). The legacy server-HTML page has no notice step, so its accept would end in a refused 409
+    // consumer_notice_required with no way forward. An accept-active estimate with a termite line therefore always
+    // gets the React view, exactly like the acceptance-terms force above (holdback excluded, the /api/estimates
+    // mount redirects). Gate-tied, so the kill switch restores today's routing. A failed check fails toward React.
+    let consumerNoticeForcesReactView = false;
+    if (featureGates.estimateConsumerNoticeLive() && isEstimateAcceptActive(estimate)) {
+      try {
+        consumerNoticeForcesReactView = require('../services/estimate-consumer-notice').estimateNeedsConsumerNotice(estimate);
+      } catch (e) {
+        consumerNoticeForcesReactView = true;
+        logger.warn(`[estimate-view] consumer-notice routing check failed, forcing the React view: ${e.message}`);
+      }
+    }
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
@@ -9716,7 +9730,8 @@ async function handleEstimateView(req, res, next) {
       || estimatePdfRenderPass
       || acceptanceTermsForcesReactView
       || contactGapsForceReactView
-      || parkedForcesReactView;
+      || parkedForcesReactView
+      || consumerNoticeForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -9742,6 +9757,7 @@ async function handleEstimateView(req, res, next) {
       && !acceptanceTermsForcesReactView
       && !contactGapsForceReactView
       && !parkedForcesReactView
+      && !consumerNoticeForcesReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -9774,7 +9790,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView || consumerNoticeForcesReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }

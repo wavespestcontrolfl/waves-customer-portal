@@ -229,6 +229,48 @@ describe('handleEstimateView — SSR viewability gate', () => {
     });
   });
 
+  // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): only the React page can ask for the FDACS-13692, so an
+  // accept-active termite estimate never gets the legacy page, whose accept would be refused with nothing to sign.
+  describe('an estimate that needs the Florida consumer notice is never served the legacy page', () => {
+    const TERMITE_ROW = {
+      status: 'sent', expires_at: FUTURE, use_v2_view: false, sent_at: PAST, customer_id: 'cust-x', token: 'tok-ssr-gate',
+      estimate_data: { result: { recurring: { services: [{ service: 'termite_bait', name: 'Termite Bait Stations', monthly: 40 }] }, oneTime: { items: [] } } },
+    };
+    beforeEach(() => { process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'true'; });
+    afterEach(() => { delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE; });
+
+    test('explicit-v1 row on the /estimate/ mount falls through to the React view', async () => {
+      const { res, next } = await runView(TERMITE_ROW, ESTIMATE_MOUNT);
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(res.sent).toBe(false);
+    });
+
+    test('the /api/estimates mount redirects to the React URL instead of rendering the legacy page', async () => {
+      const { res, next } = await runView(TERMITE_ROW, API_MOUNT);
+      expect(next).not.toHaveBeenCalled();
+      expect(res.statusCode).toBe(302);
+      expect(res.redirectUrl).toBe('/estimate/tok-ssr-gate');
+      expect(res.sent).toBe(false);
+    });
+
+    test('a failed termite check fails toward the React view (the React page re-decides on its own /data)', async () => {
+      const spy = jest.spyOn(require('../services/estimate-consumer-notice'), 'estimateNeedsConsumerNotice')
+        .mockImplementation(() => { throw new Error('classify boom'); });
+      try {
+        const { res, next } = await runView({ ...TERMITE_ROW, estimate_data: { result: { recurring: { services: [] } } } }, ESTIMATE_MOUNT);
+        expect(next).toHaveBeenCalledTimes(1);
+        expect(res.sent).toBe(false);
+      } finally { spy.mockRestore(); }
+    });
+
+    test('an expired termite row cannot accept, so it keeps the personalized SSR expired page', async () => {
+      const { res, next } = await runView({ ...TERMITE_ROW, expires_at: PAST }, API_MOUNT);
+      expect(next).not.toHaveBeenCalled();
+      expect(res.statusCode).toBe(200);
+      expect(res.sent).toBe(true);
+    });
+  });
+
   test('unknown token still gets the generic not-found shell', async () => {
     currentRow = undefined;
     const req = makeReq(API_MOUNT);
