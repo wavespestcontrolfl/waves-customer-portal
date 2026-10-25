@@ -47,6 +47,9 @@ const SCHEMA = {
 const validate = new Ajv({ strict: false }).compile(SCHEMA);
 
 const md5 = (text) => crypto.createHash('md5').update(text, 'utf8').digest('hex');
+// Whether a cached verdict still answers for `hash`: the same evidence, and not a failed read whose retry pause
+// has ended. The one freshness rule the AI close's record check and this check share.
+const cacheFresh = (cached, hash, now) => !!cached && cached.evidence_hash === hash && (!cached.retry_after || new Date(cached.retry_after) > now);
 const iso = (value) => (value ? new Date(value).toISOString() : null);
 const quotesOf = (commitment) => (Array.isArray(commitment.evidence) ? commitment.evidence : [])
   .map((e) => String(e?.quote || '').slice(0, 600));
@@ -130,7 +133,7 @@ ${stringifySmsEvidence({ promise: { kind: commitment.kind, description: commitme
 async function checkLaterTexts(conn, { commitment, message, proof, readThrough, now = new Date(), cache = null, mayCall = () => true }) {
   const read = await readLaterTexts(conn, { commitment, message, proof, readThrough });
   if (read.hold) return { version: VERSION, verdict: 'unclear', reason: read.hold, evidence_hash: read.hash, retry_after: null };
-  if (cache?.version === VERSION && cache.evidence_hash === read.hash && (!cache.retry_after || new Date(cache.retry_after) > now)) return cache;
+  if (cache?.version === VERSION && cacheFresh(cache, read.hash, now)) return cache;
   if (!mayCall()) return null;
   const verdict = await askModel(commitment, proof, read.records);
   return { version: VERSION, ...verdict, evidence_hash: read.hash,
@@ -140,10 +143,9 @@ async function checkLaterTexts(conn, { commitment, message, proof, readThrough, 
 // Whether a cached verdict still answers for these later texts (no model call): the same proof, the same newest
 // human message and the same worded texts after it, and not a failed read whose retry pause has ended.
 async function laterVerdictCurrent(conn, { commitment, message, proof, readThrough, now = new Date(), cache = null }) {
-  if (cache?.version !== VERSION || !cache.evidence_hash) return false;
-  if (cache.retry_after && new Date(cache.retry_after) <= now) return false;
+  if (cache?.version !== VERSION) return false;
   const read = await readLaterTexts(conn, { commitment, message, proof, readThrough });
-  return read.hash === cache.evidence_hash;
+  return cacheFresh(cache, read.hash, now);
 }
 
-module.exports = { checkLaterTexts, laterVerdictCurrent, readLaterTexts, groundVerdict, VERSION, POLICY, LATER_LIMIT, TEXT_LIMIT };
+module.exports = { checkLaterTexts, laterVerdictCurrent, readLaterTexts, groundVerdict, cacheFresh, VERSION, POLICY, LATER_LIMIT, TEXT_LIMIT };

@@ -700,16 +700,17 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       expect((await row(w.commitment.id)).contact_check.ai_close.later_text_check).toMatchObject({ verdict: 'unclear', reason: 'long_later_text' });
     });
 
-    test('a hold cached before the gate is judged again once when the gate turns on', async () => {
+    test('a hold cached before the check existed (no record on it) is judged again once when the gate turns on', async () => {
       delete process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK;
       const w = await world();
       const text = await addSms(w);
       await addCustomerText(w, 'Ok thanks');
       recordThreadLater(w, text, laterSays('not_contradicted'));
       expect(await run(w)).toMatchObject({ closed: 0 });
-      const held = (await row(w.commitment.id)).contact_check.ai_close.fulfillment_check;
-      expect(held).toMatchObject({ reason: 'contradicted_by_later_text' });
-      expect(held.record_id).toBeUndefined();
+      // The shape a hold had before this change: no record_type, record_id or matched_at.
+      await db('call_commitments').where({ id: w.commitment.id }).update({ contact_check: db.raw(
+        "contact_check #- '{ai_close,fulfillment_check,record_type}' #- '{ai_close,fulfillment_check,record_id}' #- '{ai_close,fulfillment_check,matched_at}'") });
+      expect((await row(w.commitment.id)).contact_check.ai_close.fulfillment_check).toEqual(expect.not.objectContaining({ record_id: expect.anything() }));
       expect(askedLater(w)).toHaveLength(0);
       process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK = 'true';
       expect(await run(w)).toMatchObject({ closed: 1 });
@@ -731,7 +732,7 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       expect(askedLater(w)).toHaveLength(2);
     });
 
-    test('gate off: an "Ok" after the record still holds it, the later-text check is never asked, and the row is written as before', async () => {
+    test('gate off: an "Ok" after the record still holds it and the later-text check is never asked; the hold notes its record, never a quote', async () => {
       delete process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK;
       const w = await world();
       const text = await addSms(w);
@@ -741,7 +742,16 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       expect(askedLater(w)).toHaveLength(0);
       const ai = (await row(w.commitment.id)).contact_check.ai_close;
       expect(ai).not.toHaveProperty('later_text_check');
-      expect(Object.keys(ai.fulfillment_check).sort()).toEqual(['evidence_hash', 'reason', 'retry_after', 'verdict']);
+      expect(Object.keys(ai.fulfillment_check).sort()).toEqual(['evidence_hash', 'matched_at', 'reason', 'record_id', 'record_type', 'retry_after', 'verdict']);
+      expect(ai.fulfillment_check).toMatchObject({ reason: 'contradicted_by_later_text', record_type: 'sms', record_id: text });
+      // The same evidence on the next run: no model call and no new write.
+      const before = dispatchWithFallback.mock.calls.length;
+      const { updated_at: stamp, contact_check: kept } = await row(w.commitment.id);
+      expect(await run(w)).toMatchObject({ closed: 0, model_calls: 0 });
+      expect(dispatchWithFallback.mock.calls.length).toBe(before);
+      const after = await row(w.commitment.id);
+      expect(after.updated_at).toEqual(stamp);
+      expect(after.contact_check.ai_close.checked_at).toBe(kept.ai_close.checked_at);
     });
   });
 
