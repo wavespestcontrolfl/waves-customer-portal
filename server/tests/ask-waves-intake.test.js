@@ -466,12 +466,15 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     // "Instantly" / "in an instant" stay time words; only the product name is exempt.
     ['The kids can play outside instantly.', ''],
     ['You can re-enter in an instant.', 'What should I do after the treatment?'],
-    // A phone number is stripped, never the timing next to it; physical "get" / "use" stay access.
+    // A phone number or property size is stripped, never the timing next to it.
     ['Keep pets away for 2 hours, then call (941) 297-5749.', 'There is a big wasp nest by my front door.'],
     ['Call 941-297-5749. You can re-enter in 30 minutes.', 'When can I re-enter after treatment?'],
     ['Your dog can get back on the lawn in 30 minutes.', ''],
     ['Kids can get into the pool after 4 hours.', ''],
     ['Pets can get near the treated area after 1 hour.', ''],
+    ['You can use your backyard immediately.', 'What should I do after the treatment?'],
+    ['You can use a room immediately.', 'What should I do after the treatment?'],
+    ['Keep the kids off your 2,000 sq ft lawn for 2 hours.', ''],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -521,6 +524,7 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Yes, we offer subterranean termite bait protection and monitoring in Parrish. You can get an instant quote for termite protection; if you need a termite inspection or suspect an active infestation, call (941) 297-5749.', 'Do you treat for termites? We live in Parrish.'],
     ['Keep people and pets away from the front door and avoid disturbing or spraying the nest, since wasps may swarm when threatened. Wasp nest treatment requires a custom quote; call (941) 297-5749 for help.', 'There is a big wasp nest by my front door.'],
     ['You can use the instant quote right here, or call us at (941) 297-5749.', 'Do you do bed bugs?'],
+    ['You can get an instant quote for your 2,000-square-foot home on a 1/4 acre lot.', 'How much is lawn care for my yard?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });

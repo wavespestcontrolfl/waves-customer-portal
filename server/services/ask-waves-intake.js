@@ -567,10 +567,8 @@ const ACCESS_SIGNAL_RE = new RegExp([
   // inside to inspect two rooms").
   `(?<!\\b(?:technicians?|techs?|crews?|teams?|exterminators?|inspectors?|staff|workers?|specialists?|applicators?|we|we'll|we're|our\\s+(?:guys?|people))\\s+(?:(?:will|can|could|may|might|should|would|must|needs?\\s+to|ha(?:s|ve)\\s+to|(?:is|are)\\s+going\\s+to|to|also|then|first|just|usually|typically|only|briefly)\\s+){0,3}(?:(?:come|go|get|head|walk|be|coming|going|getting|heading|walking)\\s+)?)\\b(?:come|go|get|head)\\s+back\\s+(?:inside|indoors|into)\\b`,
   // a person/animal paired with an access verb
-  // ("get" and "use" only in their physical sense: "You can get an instant
-  // quote" and "You can use the instant quote" are the sales steer, not access)
   '\\b(?:let|allow|keep|bring|take)\\s+(?:your\\s+|the\\s+|my\\s+)?(?:pets?|dogs?|cats?|puppy|puppies|kittens?|animals?|kids?|children|child|family|people|everyone|you|yourself|guests)\\s+(?:\\S+\\s+){0,2}?(?:out|in|back|off|away|outside|inside|indoors|on)\\b',
-  '\\b(?:pets?|dogs?|cats?|puppy|puppies|kittens?|animals?|kids?|children|child|family|people|everyone|you|yourself|guests)\\s+(?:can|may|should|could|will\\s+be\\s+able\\s+to|are\\s+(?:free|ok|okay|fine)\\s+to|is\\s+(?:free|ok|okay|fine)\\s+to)\\s+(?:\\S+\\s+){0,2}?(?:go|come|be|play|walk|return|head|enter|touch|get(?=\\s+(?:back|in|inside|into|indoors|out|outside|outdoors|on|onto|off|near|close|to)\\b)|use(?=\\s+(?:the|your|my|our|their|his|her)\\s+(?:lawn|yard|grass|pool|patio|deck|porch|lanai|room|rooms|area|areas|kitchen|bathroom|bedroom|house|home|garden|space|treated|floors?|furniture)\\b))\\b',
+  '\\b(?:pets?|dogs?|cats?|puppy|puppies|kittens?|animals?|kids?|children|child|family|people|everyone|you|yourself|guests)\\s+(?:can|may|should|could|will\\s+be\\s+able\\s+to|are\\s+(?:free|ok|okay|fine)\\s+to|is\\s+(?:free|ok|okay|fine)\\s+to)\\s+(?:\\S+\\s+){0,2}?(?:go|come|be|play|walk|return|head|get|use|enter|touch)\\b',
   '\\b(?:stay|keep)\\s+(?:off|out\\s+of|away\\s+from|clear\\s+of)\\b',
   '\\b(?:use|walk\\s+on|walk\\s+in|play\\s+(?:on|in)|mow|sit\\s+(?:on|in)|swim\\s+in)\\s+(?:the|your|my|our|his|her|their)\\s+(?:lawn|yard|grass|room|area|pool|patio|deck|house|home|garden|kitchen|space|treated)\\b',
   '\\bwait\\w*\\s+(?:\\S+\\s+){0,3}?(?:before|until|after)\\b',
@@ -612,11 +610,14 @@ function durationWindow(sentence, index, length) {
 // matchers near the top of this file (EN and ES number words).
 // "Una vez que" is "once" (the condition), not the number one.
 const ANY_TIME_FIGURE_RE = new RegExp(`\\d|\\b(?!once\\b)(?!una\\s+vez\\s+que\\b)(?:${NUM_WORD}|${NUM_WORD_ES}|half|quarter|o'?clock|media|cuarto)\\b`, 'i');
-// A phone number is never a time window. The prompt has the model give the
-// office line for every job it cannot quote, and "(941) 297-5749" counted
-// as a re-entry figure once a reply had any access phrase (10-25 chat test).
+// A phone number or a property size is never a time window. The prompt has
+// the model give the office line for every job it cannot quote and echo the
+// visitor's home, so "(941) 297-5749" and "your 2,000 sq ft home" counted as
+// re-entry figures once a reply had any access phrase (10-25 chat test). Only
+// those figures are removed; a duration or clock time beside them still counts.
 const PHONE_NUMBER_RE = /(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\b\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
-const timeFigureIn = (text) => ANY_TIME_FIGURE_RE.test(String(text || '').replace(PHONE_NUMBER_RE, ' '));
+const PROPERTY_SIZE_RE = /\b\d[\d,./]*[-\s]*(?:sq\.?[-\s]*f(?:ee)?t\.?|sqft|square[-\s]+f(?:ee|oo)t|acres?)(?![a-z])/gi;
+const timeFigureIn = (text) => ANY_TIME_FIGURE_RE.test(String(text || '').replace(PHONE_NUMBER_RE, ' ').replace(PROPERTY_SIZE_RE, ' '));
 // Digital re-entry ("re-enter the portal", "volver a entrar a su cuenta") is a
 // login, not a room. Only the digital phrase itself is removed before the
 // access check — a mixed turn ("I can't log in to the portal; when can I
