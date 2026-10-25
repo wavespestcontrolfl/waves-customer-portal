@@ -25,8 +25,10 @@ const { etDateString } = require('../utils/datetime-et');
 // "Back to your estimate". A notice staff issued by hand never carries it.
 const SNAPSHOT_SOURCE = 'estimate_consumer_notice';
 const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
+// Every termite treatment family the estimate classifiers return (recurringServiceKey, classifyServiceFamilyText and the
+// seeder's serviceKeyFor), commercial bait monitoring included. Rodent bait and inspections are not termite treatments.
 const TERMITE_FAMILY_KEYS = new Set([
-  'termite_bait', 'termite_trenching', 'pre_slab_termiticide', 'termite_foam', 'foam_recurring', 'bora_care',
+  'termite_bait', 'commercial_termite_bait', 'termite_trenching', 'pre_slab_termiticide', 'termite_foam', 'foam_recurring', 'bora_care',
 ]);
 const SERVICE_NAME = 'Florida consumer notice (FDACS-13692)';
 const CALL_US = 'We couldn’t prepare the notice online. Please call us and we will finish it with you.';

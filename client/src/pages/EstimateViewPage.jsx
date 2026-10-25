@@ -9911,6 +9911,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
   const reviewContent = (
     <>
+          {/* The booking step (with the notice card) is hidden during review: a notice asked for after the customer
+              reached review (the gate turned on, or a refused accept) is signed right here. */}
+          {consumerNoticeBlocked ? <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} /> : null}
           <ConsumerNoticeHint blocked={consumerNoticeBlocked} />
           {existingAppointment ? (
             <>

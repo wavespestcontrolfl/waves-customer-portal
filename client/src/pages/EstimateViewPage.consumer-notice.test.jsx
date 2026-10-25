@@ -184,7 +184,9 @@ describe('a server refusal of the accept', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm booking' }));
     await waitFor(() => expect(screen.getByText(new RegExp(message.slice(0, 40)))).toBeInTheDocument());
     expect(fetchMock.count('/data')).toBeGreaterThanOrEqual(2);
-    // The refetched page now holds the accept controls off.
+    // The refetched page now holds the accept controls off, and the customer can sign right here in review.
     await waitFor(() => expect(screen.getAllByText(HINT).length).toBeGreaterThan(0));
+    expect(screen.getByRole('button', { name: 'Read and sign the notice' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
   });
 });
