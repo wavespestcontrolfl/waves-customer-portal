@@ -354,18 +354,21 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
         ? normalizeAmount(row[field]) !== normalizeAmount(ob[field])
         : (row[field] ?? null) !== (ob[field] ?? null)));
       if (!changed) continue;
-      await trx('tax_filing_calendar').where({ id: row.id }).update({
+      // The status check is in the UPDATE itself: the rows were read without a
+      // lock and the filings route does not take this advisory lock, so a row the
+      // owner marked filed or paid after the read must be left alone.
+      result.updated += await trx('tax_filing_calendar').where({ id: row.id, status: 'upcoming' }).update({
         title: ob.title, period_label: ob.period_label, due_date: ob.due_date,
         amount_due: ob.amount_due, notes: ob.notes, updated_at: trx.fn.now(),
       });
-      result.updated += 1;
     }
 
     const wanted = new Set(obligations.map((ob) => ob.source_key));
     const stale = existing.filter((row) => row.status === 'upcoming' && !wanted.has(row.source_key));
     if (stale.length) {
-      await trx('tax_filing_calendar').whereIn('id', stale.map((row) => row.id)).del();
-      result.deleted = stale.length;
+      // Same guard: never delete a row marked done after the read.
+      result.deleted = await trx('tax_filing_calendar')
+        .whereIn('id', stale.map((row) => row.id)).where('status', 'upcoming').del();
     }
     return result;
   });
