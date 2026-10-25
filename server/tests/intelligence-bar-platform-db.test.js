@@ -868,6 +868,39 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     }
   }, 30000);
 
+  test('target rules v2: pasted text cards an edit the owner\'s typed words would commit direct, and the saved task keeps the flag', async () => {
+    const owner = crypto.randomUUID();
+    const ownerEmail = `owner-${owner.slice(0, 8)}@synthetic.test`;
+    await db('technicians').insert({ id: owner, name: 'Synthetic IB owner', email: ownerEmail, role: 'admin', active: true, auth_token_version: 1 });
+    const ownerToken = require('jsonwebtoken').sign({ type: 'access', tokenVersion: 1, technicianId: owner }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    process.env.IB_FULL_ACCESS_EMAILS = ownerEmail;
+    process.env.GATE_IB_OWNER_DIRECT = 'true';
+    process.env.GATE_IB_TARGET_RULES_V2 = 'true';
+    try {
+      // Typed: the customer the message names gets the note with no card.
+      await db('customers').where('id', customerA).update({ crm_notes: null });
+      proposeNote(customerA, 'Typed note');
+      const typed = await api('/query', request(`update ${nameA} notes`, { session_id: crypto.randomUUID() }), ownerToken);
+      expect(typed.body.pendingActions).toEqual([]);
+      expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe('Typed note');
+
+      // The same message holding pasted text: the edit keeps its card and nothing is written.
+      await db('customers').where('id', customerA).update({ crm_notes: null });
+      proposeNote(customerA, 'Pasted note');
+      const pasted = await api('/query', request(`update ${nameA} notes`, { session_id: crypto.randomUUID(), pasted_text: true }), ownerToken);
+      expect(pasted.body.pendingActions).toHaveLength(1);
+      expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBeNull();
+      // A customer pick or a resume rebuilds the request from the saved task, so the flag rides with it.
+      const task = await db('ib_tasks').where('id', pasted.body.taskId).first('request');
+      expect((typeof task.request === 'string' ? JSON.parse(task.request) : task.request).pasted_text).toBe(true);
+      await db('ib_pending_actions').where('id', pasted.body.pendingActions[0].id).update({ status: 'cancelled' });
+    } finally {
+      delete process.env.IB_FULL_ACCESS_EMAILS;
+      delete process.env.GATE_IB_OWNER_DIRECT;
+      delete process.env.GATE_IB_TARGET_RULES_V2;
+    }
+  }, 30000);
+
   test('a stale customer approval cannot overwrite a newer edit', async () => {
     proposeNote(customerA, 'Old approved note');
     const proposed = await api('/query', request(`Add a note for ${nameA}: Old approved note`));

@@ -370,6 +370,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const dictationPending = useDictationPending();
   const dictationPendingRef = useRef(false);
   const dictationUsedRef = useRef(false); // a dictated chunk is in the message being composed
+  const pastedRef = useRef(false); // text pasted or dropped into the message being composed
   dictationPendingRef.current = dictationPending;
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
@@ -712,6 +713,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
       : {}),
     ...(dictationUsedRef.current ? { dictation_used: true } : {}),
+    ...(pastedRef.current ? { pasted_text: true } : {}),
   }), [conversationHistory, context, threadId, ibPageData, location.pathname, location.search, attachments]);
 
   // Applies a server reply to the conversation: the answer, its cards (added to
@@ -798,6 +800,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         // same request; only an answered one clears the composer.
         if (answered) {
           dictationUsedRef.current = false;
+          pastedRef.current = false;
           setPrompt("");
           resetAttachments();
         }
@@ -931,6 +934,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     startNewConversation();
     setResponse(null);
     dictationUsedRef.current = false;
+    pastedRef.current = false;
     setPrompt("");
     setShowThreads(false);
     resetAttachments();
@@ -943,6 +947,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     if (!text) return;
     dictationUsedRef.current = true;
     setPrompt((prev) => (prev ? `${prev.trimEnd()} ${text}` : text));
+  }, []);
+
+  // Text pasted or dropped into the message (a customer's email or text, say) is not all the
+  // operator's own words; the server then shows a card for every write (GATE_IB_TARGET_RULES_V2).
+  const notePastedText = useCallback((e) => {
+    if ((e.clipboardData || e.dataTransfer)?.getData("text/plain")) pastedRef.current = true;
   }, []);
 
   const close = () => setOpen(false);
@@ -985,6 +995,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         setPrompt={setPrompt}
         submit={submit}
         handleKeyDown={handleKeyDown}
+        notePastedText={notePastedText}
         loading={loading}
         response={response}
         pendingActions={pendingActions}
@@ -1077,6 +1088,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={notePastedText}
+              onDrop={notePastedText}
               placeholder="Ask anything..."
               autoFocus
               style={{
@@ -1314,6 +1327,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={notePastedText}
+              onDrop={notePastedText}
               placeholder="Follow up..."
               style={{
                 flex: 1,
@@ -1430,6 +1445,7 @@ function MobileSheet({
   setPrompt,
   submit,
   handleKeyDown,
+  notePastedText,
   loading,
   response,
   pendingActions,
@@ -1593,6 +1609,8 @@ function MobileSheet({
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={notePastedText}
+              onDrop={notePastedText}
               placeholder="Ask anything…"
               enterKeyHint="send"
               style={{

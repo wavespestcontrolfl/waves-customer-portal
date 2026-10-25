@@ -1656,6 +1656,30 @@ describe('v2 untrusted-read marker (Codex #6369 r19)', () => {
   });
 });
 
+// A full name inside pasted text (a customer's email or text) reads as the owner naming that
+// customer, so the bar marks a message with pasted text and the request is tainted like a read.
+describe('pasted text cards every write (owner 2026-10-24)', () => {
+  const edit = { customer_id: id(101), updates: { last_name: 'Sample' } };
+  const grounding = () => OwnerDirect.targetGrounding({ targets: [], groundedCustomerIds: [id(101)], page: { ids: {} } });
+
+  test('gate on: the named customer\'s edit runs direct from typed words and keeps its card once the message holds pasted text; the reply leaves the v2 marker', () => {
+    process.env[ON] = 'true';
+    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, OwnerDirect.newRequestTaint([]), grounding())).toBe(true);
+    const pasted = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.notePastedText(pasted);
+    expect(pasted).toMatchObject({ untrustedRead: true, untrustedV2: true, untrustedGeneral: false });
+    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, pasted, grounding())).toBe(false);
+    expect(OwnerDirect.mayExecuteWithoutCard('update_customer', edit, pasted, grounding())).toBe(false);
+  });
+
+  test('gate off: pasted text changes nothing (today)', () => {
+    const pasted = OwnerDirect.newRequestTaint([]);
+    OwnerDirect.notePastedText(pasted);
+    expect(pasted.untrustedRead).toBe(false);
+    expect(OwnerDirect.executesWithoutCard('update_customer', edit, null, pasted, null)).toBe(true);
+  });
+});
+
 describe('same-name choice marker on the thread (Codex #6369 r16)', () => {
   const IbThreads = require('../services/intelligence-bar/threads');
   const edit = { customer_id: id(101), updates: { last_name: 'Sample' } };

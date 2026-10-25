@@ -321,6 +321,17 @@ function noteUntrustedRead(taint, toolName, result) {
   else taint.untrustedV2 = true;
 }
 
+// PASTED TEXT (GATE_IB_TARGET_RULES_V2). A message the bar marks as holding text pasted or
+// dropped into it (a customer's email or text, say) is not all the owner's own words, yet a
+// full name inside it reads as the owner naming that customer (targetGrounding), so an
+// instruction in the pasted part could run a card-free edit. It taints the request like an
+// untrusted read: every write shows its card, and the reply's v2 marker keeps the thread carded.
+function notePastedText(taint) {
+  if (!taint || !ibTargetRulesV2Live()) return;
+  taint.untrustedRead = true;
+  taint.untrustedV2 = true;
+}
+
 // Pure: does a saved message history hold a tainting read that returned data?
 // A read with no saved result (the runner stopped between the call and its
 // result) counts as returned, so a resume fails closed.
@@ -718,4 +729,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { TRUSTED_READS, looksLikeChoiceReply, isChoiceLabelShape, noteSameNameContext, markSameNameChoices, sameNameMarkerNeeded, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { TRUSTED_READS, looksLikeChoiceReply, isChoiceLabelShape, noteSameNameContext, markSameNameChoices, sameNameMarkerNeeded, ownerDirectPrompt, dynamicCapReached, targetGrounding, bulkLimitResult, OWNER_DIRECT_TARGET_RULES_PROMPT, DIRECT_EDITS_V2, loadRequestTaint, newRequestTaint, noteUntrustedRead, notePastedText, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
