@@ -19,7 +19,7 @@ describe('priceMosquitoMisting install price', () => {
       service: 'mosquito_misting',
       tier: 'smart',
       solution: 'standard',
-      nozzles: 35,
+      nozzles: 30,
       risers: 0,
       extraNozzles: 0,
       extraRisers: 0,
@@ -30,38 +30,38 @@ describe('priceMosquitoMisting install price', () => {
       refillsBilledPerApplication: true,
       visitsPerYear: 12,
     });
-    expect(r.installation.price).toBe(4595);
-    expect(r.installation.retailValue).toBe(4595);
+    expect(r.installation.price).toBe(4195);
+    expect(r.installation.retailValue).toBe(4195);
   });
 
   test('essential tier price', () => {
     const r = priceMosquitoMisting(PROPERTY, { tier: 'essential' });
     expect(r.tier).toBe('essential');
-    expect(r.installation.price).toBe(3795);
+    expect(r.installation.price).toBe(2795);
   });
 
   test('extra nozzles add $75 each, whole dollars', () => {
-    const r = priceMosquitoMisting(PROPERTY, { tier: 'essential', nozzles: 50 });
+    const r = priceMosquitoMisting(PROPERTY, { tier: 'essential', nozzles: 25 });
     expect(r.extraNozzles).toBe(15);
-    expect(r.installation.price).toBe(3795 + 15 * 75);
+    expect(r.installation.price).toBe(2795 + 15 * 75);
     expect(Number.isInteger(r.installation.price)).toBe(true);
   });
 
-  test('risers: the first 10 are included, each one beyond adds $45', () => {
-    expect(priceMosquitoMisting(PROPERTY, { risers: 10 }).installation.price).toBe(4595);
+  test('risers: none are included, each one adds $75', () => {
+    expect(priceMosquitoMisting(PROPERTY, { risers: 0 }).installation.price).toBe(4195);
     const r = priceMosquitoMisting(PROPERTY, { risers: 14 });
-    expect(r.extraRisers).toBe(4);
-    expect(r.installation.price).toBe(4595 + 4 * 45);
+    expect(r.extraRisers).toBe(14);
+    expect(r.installation.price).toBe(4195 + 14 * 75);
   });
 
-  test('install cost basis: hardware + overage + 2 techs x 10 hours of labor', () => {
-    const r = priceMosquitoMisting(PROPERTY, { tier: 'smart', nozzles: 40, risers: 12 });
-    const material = 2600 + 5 * 22 + 2 * 14;
-    const labor = 2 * 10 * GLOBAL.LABOR_RATE;
+  test('install cost basis: hardware + overage + 2 techs x 6 hours of labor', () => {
+    const r = priceMosquitoMisting(PROPERTY, { tier: 'smart', nozzles: 35, risers: 12 });
+    const material = 2560 + 5 * 22 + 12 * 30;
+    const labor = 2 * 6 * GLOBAL.LABOR_RATE;
     expect(r.installation.materialCost).toBe(material);
     expect(r.installation.laborCost).toBe(labor);
     expect(r.installation.totalCost).toBe(material + labor);
-    const price = 4595 + 5 * 75 + 2 * 45;
+    const price = 4195 + 5 * 75 + 12 * 75;
     expect(r.installation.margin).toBe(Math.round(((price - material - labor) / price) * 1000) / 1000);
   });
 });
@@ -79,9 +79,9 @@ describe('priceMosquitoMisting plan and refills', () => {
   });
 
   test.each([
-    ['standard', 129, 45],
+    ['standard', 129, 70],
     ['natural', 219, 95],
-    ['premium', 319, 140],
+    ['premium', 319, 203],
   ])('%s refill: $%i per fill, product cost $%i', (solution, perFill, productCost) => {
     const r = priceMosquitoMisting(PROPERTY, { solution });
     expect(r.solution).toBe(solution);
@@ -141,13 +141,13 @@ describe('priceMosquitoMisting guards', () => {
   test('the maximum itself still prices', () => {
     const r = priceMosquitoMisting(PROPERTY, { nozzles: 80 });
     expect(r.quoteRequired).toBe(false);
-    expect(r.installation.price).toBe(4595 + 45 * 75);
+    expect(r.installation.price).toBe(4195 + 50 * 75);
   });
 
   test('unknown tier falls back to smart and records a reason', () => {
     const r = priceMosquitoMisting(PROPERTY, { tier: 'deluxe' });
     expect(r.tier).toBe('smart');
-    expect(r.installation.price).toBe(4595);
+    expect(r.installation.price).toBe(4195);
     expect(r.manualReviewReasons).toContain('mosquito_misting_unknown_tier');
     expect(r.requiresManualReview).toBe(true);
   });
@@ -161,7 +161,7 @@ describe('priceMosquitoMisting guards', () => {
 
   test.each([[NaN], ['abc'], [5], [9]])('invalid or too-small nozzle count %p falls back with a reason', (nozzles) => {
     const r = priceMosquitoMisting(PROPERTY, { nozzles });
-    expect(r.nozzles).toBe(35);
+    expect(r.nozzles).toBe(30);
     expect(r.manualReviewReasons).toContain('mosquito_misting_invalid_nozzles');
     expect(r.quoteRequired).toBe(false);
   });
@@ -172,16 +172,16 @@ describe('priceMosquitoMisting pricingKnobs and policy', () => {
     const k = priceMosquitoMisting(PROPERTY, { tier: 'essential', solution: 'natural' }).pricingKnobs;
     expect(k).toMatchObject({
       tier: 'essential',
-      tierPrice: 3795,
-      hardwareCost: 1800,
-      includedNozzles: 35,
+      tierPrice: 2795,
+      hardwareCost: 1620,
+      includedNozzles: 10,
       extraNozzlePrice: 75,
       extraNozzleCost: 22,
-      includedRisers: 10,
-      extraRiserPrice: 45,
-      extraRiserCost: 14,
+      includedRisers: 0,
+      extraRiserPrice: 75,
+      extraRiserCost: 30,
       installTechs: 2,
-      installHours: 10,
+      installHours: 6,
       laborRate: GLOBAL.LABOR_RATE,
       minNozzles: 10,
       maxNozzles: 80,

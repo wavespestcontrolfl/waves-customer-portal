@@ -20,7 +20,7 @@ const protocols = require('../config/protocols.json');
 
 const PROPERTY = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, propertyType: 'single_family' };
 const OPTS = { tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' };
-const INSTALL = 3795 + 5 * 75 + 2 * 45;
+const INSTALL = 2795 + 30 * 75 + 12 * 75; // compact, 40 nozzles (10 included), 12 risers (none included)
 const saved = process.env.GATE_MOSQUITO_MISTING;
 beforeEach(() => { process.env.GATE_MOSQUITO_MISTING = 'true'; });
 afterEach(() => {
@@ -118,8 +118,8 @@ describe('the plan converts to a monthly series under the catalog row', () => {
 describe('the install: a named line on the acceptance invoice and one office bell', () => {
   test('frozenMistingInstall reads the STORED one-time row (the quote figure), named by the tier label', () => {
     const data = estimateData();
-    expect(converter.frozenMistingInstall(data)).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation', lines: [{ amount: INSTALL, description: 'Essential system (drum) Installation' }] });
-    expect(converter.frozenMistingInstall(JSON.stringify(data))).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation', lines: [{ amount: INSTALL, description: 'Essential system (drum) Installation' }] });
+    expect(converter.frozenMistingInstall(data)).toMatchObject({ amount: INSTALL, description: 'Compact system (10-gallon) Installation', lines: [{ amount: INSTALL, description: 'Compact system (10-gallon) Installation' }] });
+    expect(converter.frozenMistingInstall(JSON.stringify(data))).toMatchObject({ amount: INSTALL, description: 'Compact system (10-gallon) Installation', lines: [{ amount: INSTALL, description: 'Compact system (10-gallon) Installation' }] });
     // a later price edit never moves a sent quote: the figure is the stored row
     const edited = JSON.parse(JSON.stringify(data));
     edited.result.oneTime.items.find((i) => i.service === 'mosquito_misting_installation').price = 4000;

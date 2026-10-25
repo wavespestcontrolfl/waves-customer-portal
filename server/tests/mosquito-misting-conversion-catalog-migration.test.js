@@ -1,7 +1,7 @@
 /**
  * 20261023100000: the three catalog rows an accepted mosquito misting estimate converts into (misting PR 2a): the one-time
  * install, the monthly service plan and the refill add-on. Self-healing, skip-if-exists, state recorded, down() removes only what
- * up() proved it inserted. Prices pinned to constants.js MOSQUITO_MISTING (the migration inlines them: a pushed migration is frozen).
+ * up() proved it inserted. Plan and refill prices pinned to constants.js MOSQUITO_MISTING (the migration inlines them: a pushed migration is frozen); the install row is pinned to its own 10-23 literals (20261025090000 moves them to Pynamite retail).
  */
 const migration = require('../models/migrations/20261023100000_mosquito_misting_catalog_rows');
 const { MOSQUITO_MISTING } = require('../services/pricing-engine/constants');
@@ -93,7 +93,7 @@ describe('the catalog rows', () => {
   test('install: one-time, variable, Smart list base, Essential list floor, a full day', () => {
     expect(byKey.mosquito_misting_install).toMatchObject({
       name: 'Mosquito Misting System Installation', billing_type: 'one_time', pricing_type: 'variable', default_duration_minutes: 480,
-      base_price: MOSQUITO_MISTING.tiers.smart.price, price_range_min: MOSQUITO_MISTING.tiers.essential.price, price_range_max: null,
+      base_price: 4595, price_range_min: 3795, price_range_max: null, // frozen 10-23 MistAway lists; 20261025090000 moves them to Pynamite retail
       engine_keys: ['mosquito_misting_installation'],
     });
     expect(byKey.mosquito_misting_install.internal_notes).toMatch(/priceMosquitoMisting/);

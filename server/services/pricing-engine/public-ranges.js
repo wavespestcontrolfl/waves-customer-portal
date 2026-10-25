@@ -407,10 +407,10 @@ function buildRows() {
 
   // Mosquito misting system rows publish only while GATE_MOSQUITO_MISTING is on
   // (the estimate engine's choke point). Draft prices; sweeps both tiers across
-  // typical nozzle counts.
+  // typical nozzle counts (10 is the compact system's included count, 30 the standard's).
   if (purchaseGateOn('mosquito_misting_install')) {
     const MISTING_SWEEP = Object.keys(constants.MOSQUITO_MISTING.tiers)
-      .flatMap((tier) => [20, 35, 50].map((nozzles) => ({ tier, nozzles })));
+      .flatMap((tier) => [10, 30, 50].map((nozzles) => ({ tier, nozzles })));
     add('mosquito_misting_install', () => rangeRow({
       key: 'mosquito_misting_install',
       name: 'Mosquito Misting System Installation',
@@ -419,7 +419,7 @@ function buildRows() {
         MISTING_SWEEP,
         (opts) => sp.priceMosquitoMisting({}, opts),
         (r) => (r.quoteRequired ? NaN : r.installation && r.installation.price)),
-      notes: 'Priced by system type (drum or tankless with app) and nozzle count; more nozzles and risers price higher.',
+      notes: 'Priced by system size (compact 10-gallon or standard 55-gallon) and nozzle and riser count.',
     }));
     add('mosquito_misting_plan', () => rangeRow({
       key: 'mosquito_misting_plan',
