@@ -276,6 +276,21 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       expect(await routeNumber(TARGET)).toBeNull();
     });
 
+    test('the save numbers the day from the office, the place its save probe checked from', async () => {
+      const savedStart = process.env.GATE_TECH_START_POINTS;
+      process.env.GATE_TECH_START_POINTS = 'true';
+      try {
+        // A start point two hours north: from there no order reaches the 8 AM stop in time.
+        await mockConn('technicians').where({ id: TECH }).update({ start_lat: 28.3, start_lng: -82.4 });
+        expect(await probe()).toEqual([]);
+        await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+        await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toEqual([NORTH, TARGET, SOUTH]);
+      } finally {
+        if (savedStart === undefined) delete process.env.GATE_TECH_START_POINTS;
+        else process.env.GATE_TECH_START_POINTS = savedStart;
+      }
+    });
+
     test('a visit id with no live partner is a single visit, and is numbered', async () => {
       await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY, visit_id: VISIT });
       await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toEqual([NORTH, TARGET, SOUTH]);

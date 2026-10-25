@@ -836,8 +836,9 @@ async function placeMovedVisit(conn, { serviceId } = {}) {
       const date = row ? dateOnly(row.scheduled_date) : '';
       if (!row?.technician_id || !row.window_start || !date) return null;
       if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return null;
-      // The tech's start point, as the times box plans the day.
-      const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id, startPoints: true });
+      // From the office, like every commit-time check (tech-start-point.js):
+      // the save probe certified this day from there, so the same order wins.
+      const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
       if (!context || context.grouped) return null;
       const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
         windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true });
