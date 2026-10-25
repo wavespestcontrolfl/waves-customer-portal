@@ -3463,6 +3463,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       .first();
 
     if (!svc) return ({ status: 404, body: { error: 'Service not found' } });
+    // A visit booked by address only has no customer yet: nothing below can record or bill it
+    // (service_records / invoices need a customer_id). Refused before any claim or write.
+    if (!svc.customer_id) {
+      const { VISIT_NO_CUSTOMER_CODE, VISIT_NO_CUSTOMER_MESSAGE } = require('./invoice-helpers');
+      return ({ status: 409, body: { error: VISIT_NO_CUSTOMER_MESSAGE, code: VISIT_NO_CUSTOMER_CODE } });
+    }
 
     // Visit-group guard (visit-group-scope.md §5 Gates, rev 5c): a row
     // attached to a non-dissolved visit must complete through the visit

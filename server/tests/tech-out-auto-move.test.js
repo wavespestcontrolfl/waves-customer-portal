@@ -213,6 +213,16 @@ describe('autoAssignParkedAlert', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
+  test('a visit with no customer yet (booked by address only): left parked as no_customer, the mover is never called', async () => {
+    const queue = [query(baseAlert()), query(baseStop({ customer_id: null })), query({})];
+    db.mockImplementation(() => queue.shift() || query({}));
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'no_customer' });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
   test('en_route status: out of scope, left parked with reason live_status', async () => {
     const queue = [query(baseAlert()), query(baseStop({ status: 'en_route' }))];
     db.mockImplementation(() => queue.shift() || query({}));

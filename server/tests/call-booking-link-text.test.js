@@ -82,6 +82,28 @@ const {
 } = require('../services/call-booking-link-text');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 
+// A visit the office stamped with a call (source_call_log_id) is answered by its OWN query on
+// scheduled_services, apart from the customer-joined booked-since-call reads (which stay as the
+// helper built them): `stamped` is what that one query finds. Returns the stamp query's builder.
+function stampedVisitQuery(conn, stamped) {
+  const build = conn.getMockImplementation();
+  const stampQueries = [];
+  conn.mockImplementation((table) => {
+    const chain = build(table);
+    if (table !== 'scheduled_services') return chain;
+    const read = chain.first;
+    const where = chain.where;
+    let isStampQuery = false;
+    chain.where = jest.fn((...args) => {
+      if (args[0] && args[0].source_call_log_id) { isStampQuery = true; stampQueries.push(chain); }
+      return where(...args);
+    });
+    chain.first = jest.fn(async () => (isStampQuery ? stamped : read()));
+    return chain;
+  });
+  return stampQueries;
+}
+
 // ── computeSendAt — 2h delay, 6pm ET cutoff → 8am ET next morning ─────────
 describe('computeSendAt', () => {
   test.each([
@@ -1731,6 +1753,24 @@ describe('neverSendRecheck', () => {
     });
   });
 
+  test('a visit stamped with this call blocks the send even with no customer to join it to', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi({ lead: { ...OPEN, customer_id: null } });
+    const stampQueries = stampedVisitQuery(conn, { id: 'visit-by-address' });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'visit_stamped_with_call' });
+    expect(stampQueries).toHaveLength(1);
+    expect(stampQueries[0].where).toHaveBeenCalledWith({ source_call_log_id: CALL_FOR_RECHECK.id });
+    expect(stampQueries[0].whereNotIn).toHaveBeenCalledWith('status', ['cancelled']);
+  });
+
+  test('no visit stamped with this call: the send proceeds as before', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi();
+    const stampQueries = stampedVisitQuery(conn, null);
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
+    expect(stampQueries).toHaveLength(1);
+  });
+
   test('booked since the call started blocks the send', async () => {
     // metadata.created_customer_id matches the lead's customer_id — THIS
     // call's own legacy path minted it, isolating this test from the new
@@ -2119,6 +2159,23 @@ describe('dispatchClaimedCall', () => {
     const conn = makeDb();
     const result = await dispatchClaimedCall(conn, outboundCall, NOW);
     expect(result.sent).toBe(true);
+  });
+
+  test('a visit stamped with this call (no customer yet) is skipped at dispatch, and the text never reaches the sender', async () => {
+    const conn = makeDb();
+    const stampQueries = stampedVisitQuery(conn, { id: 'visit-by-address' });
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.skipped).toBe('visit_stamped_with_call');
+    expect(stampQueries[0].where).toHaveBeenCalledWith({ source_call_log_id: CALL.id });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a call with no visit stamped on it still sends (the stamp read is the only new query)', async () => {
+    const conn = makeDb();
+    const stampQueries = stampedVisitQuery(conn, null);
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.sent).toBe(true);
+    expect(stampQueries.length).toBeGreaterThan(0);
   });
 
   test('booked since the call (any time after call end) blocks the send', async () => {

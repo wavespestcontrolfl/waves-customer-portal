@@ -28,6 +28,7 @@ const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, t
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
+const { VISIT_NO_CUSTOMER_CODE, VISIT_NO_CUSTOMER_MESSAGE } = require('../services/invoice-helpers');
 
 const { etDateString, addETDays, parseETDateTime, validScheduleDate, validCalendarDate, dateOnlyString } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
@@ -4057,7 +4058,8 @@ function recapStatusForReason(reason) {
   // Conflict: pest-control gate, a cancelled/skipped visit that can't be
   // recapped, or a stale recap against a job rescheduled to a future day.
   if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped'
-    || reason === 'future_scheduled_date' || reason === 'visit_identity_changed') return 409;
+    || reason === 'future_scheduled_date' || reason === 'visit_identity_changed'
+    || reason === VISIT_NO_CUSTOMER_CODE) return 409;
   return 400;
 }
 
@@ -4195,7 +4197,9 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
       expectedVisit: expectedVisit && typeof expectedVisit === 'object' && !Array.isArray(expectedVisit) ? expectedVisit : null,
     });
-    if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
+    if (!result.ok) return res.status(recapStatusForReason(result.reason)).json(result.reason === VISIT_NO_CUSTOMER_CODE
+      ? { error: VISIT_NO_CUSTOMER_MESSAGE, code: VISIT_NO_CUSTOMER_CODE }
+      : { error: result.reason });
     await settleRecapSupplies(req.params.serviceId, result);
     res.json(result);
   } catch (err) { next(err); }

@@ -20,7 +20,7 @@ const logger = require('./logger');
 // refusal reuses it rather than hand-rolling a second list: 'completed' is
 // deliberately absent (normal completion billing) and so is 'rescheduled'
 // (a pending reschedule REQUEST parks the same row — not yet terminal).
-const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
+const { VISIT_NEVER_RAN_STATUSES, visitHasNoCustomerError } = require('./invoice-helpers');
 
 // Shared pre-completion mint: advisory-lock + replay-check + create, WITH the
 // estimate-deposit roll-forward. Completion REUSES a pre-minted invoice instead
@@ -315,6 +315,9 @@ async function mintScheduledServiceInvoiceWithDeposit({
           e.status = 404;
           throw e;
         }
+        // A visit booked by address only has no customer to bill (invoices.customer_id is NOT NULL).
+        // Refused here, AFTER the caller's in-lock ownership recheck, so an unowned tech still gets 404.
+        if (!lockedSvc.customer_id) throw visitHasNoCustomerError();
         if (String(lockedSvc.customer_id) !== String(svc.customer_id)
           || String(lockedSvc.source_estimate_id || '') !== String(sourceEstimateId || '')
           // Codex round-6 P1: a sibling-coverage verdict (both the

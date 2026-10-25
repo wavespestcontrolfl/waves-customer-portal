@@ -628,6 +628,34 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a visit with no customer yet is refused with visit_has_no_customer — no transaction, no record, no SMS', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+    const build = knex.getMockImplementation();
+    knex.mockImplementation((table) => {
+      const api = build(table);
+      if (table === 'scheduled_services') api.first = jest.fn(async () => ({ ...CUSTOMER, customer_id: null }));
+      return api;
+    });
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'admin',
+      actorId: null,
+      technicianNotes: 'Should not be written.',
+      products: [{ product_name: 'Termidor' }],
+      customerRecap: 'Service complete.',
+      sendSms: true,
+      knex,
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'visit_has_no_customer' });
+    expect(knex.transaction).not.toHaveBeenCalled();
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(store.records).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('a reschedule committing while the submit waits on the row lock rejects the recap (TOCTOU)', async () => {
     // Pre-lock read sees today's date; by the time the FOR UPDATE lock is
     // acquired, a staff live-reschedule has moved the visit to a future
