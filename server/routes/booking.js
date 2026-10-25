@@ -4675,6 +4675,18 @@ async function createSelfBooking(payload = {}) {
       });
     }
 
+    // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow): log the technician the
+    // map would pick beside the one saved. Post-commit, never awaited, never throws;
+    // gate off = returns at once. A double-submit replay has no serviceRow: no row.
+    if (txResult?.serviceRow) {
+      const row = txResult.serviceRow;
+      void require('../services/scheduling/line-technician').recordLinePickShadow({
+        source: 'book', scheduledServiceId: row.id, customerId: row.customer_id, date: row.scheduled_date,
+        windowStart: row.window_start, windowEnd: row.window_end, serviceId: row.service_id, serviceKey: serviceKey || null,
+        serviceType: row.service_type, durationMinutes: row.estimated_duration_minutes, actualTechnicianId: row.technician_id,
+      });
+    }
+
     // New bookings mark their recovery intents converted INSIDE the transaction
     // above (atomic, race-free). This post-commit helper now only covers the
     // double-submit REPLAY path — the existing booking committed in an earlier

@@ -3,7 +3,10 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
-const { autoLunchLive, techWorkDaysLive } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+const { autoLunchLive, techWorkDaysLive } = featureGates;
+// Looked up at call time: a missing reader (a partial feature-gates mock) reads as off.
+const serviceLineShadow = () => typeof featureGates.serviceLineMapMode === 'function' && featureGates.serviceLineMapMode() === 'shadow';
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
@@ -737,7 +740,11 @@ async function listTechnicians(req, res, next) {
       };
       return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
     }));
-    res.json({ technicians: enriched, ...(techWorkDaysLive() ? { workDaysEnabled: true } : {}) });
+    res.json({
+      technicians: enriched,
+      ...(techWorkDaysLive() ? { workDaysEnabled: true } : {}),
+      ...(serviceLineShadow() ? { serviceLinesEnabled: true } : {}),
+    });
   } catch (err) { next(err); }
 }
 
@@ -1224,6 +1231,148 @@ async function putTechnicianCapabilities(req, res, next) {
 
 router.get('/technicians/:id/capabilities', requireAdmin, getTechnicianCapabilities);
 router.put('/technicians/:id/capabilities', requireAdmin, putTechnicianCapabilities);
+
+// ── Service-line map (GATE_SERVICE_LINE_MAP=shadow, owner 2026-10-25) ─────────
+// One home and one gap technician per service line. SHADOW ONLY: nothing reads this
+// to place a visit; the six booking choice points only log what it would pick
+// (services/scheduling/line-technician.js). Admin only; 404 while the gate is off.
+const SERVICE_LINE_KEYS = ['general', 'mosquito', 'lawn', 'rodent', 'termite'];
+const SERVICE_LINE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHADOW_SUMMARY_DEFAULT_DAYS = 14;
+const SHADOW_SUMMARY_MAX_DAYS = 90;
+
+function serviceLinesOff(res) {
+  if (serviceLineShadow()) return false;
+  res.status(404).json({ error: 'Not found' });
+  return true;
+}
+
+async function readServiceLines(conn) {
+  const rows = await conn('service_line_techs').select('service_category', 'home_technician_id', 'gap_technician_id', 'updated_at');
+  const byLine = new Map(rows.map((r) => [r.service_category, r]));
+  return SERVICE_LINE_KEYS.map((key) => {
+    const row = byLine.get(key);
+    return {
+      service_category: key,
+      home_technician_id: row ? row.home_technician_id : null,
+      gap_technician_id: row ? row.gap_technician_id : null,
+      updated_at: row ? row.updated_at : null,
+    };
+  });
+}
+
+// PUT body: { lines: [{ service_category, home_technician_id, gap_technician_id }] }.
+// Any subset of the five lines; a technician id is a uuid or null (cleared).
+function normalizeServiceLineEntries(input) {
+  if (!Array.isArray(input) || !input.length) return { error: 'lines must be a non-empty array' };
+  const seen = new Set();
+  const entries = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') return { error: 'Each line must be an object' };
+    const key = raw.service_category;
+    if (!SERVICE_LINE_KEYS.includes(key)) return { error: `service_category must be one of ${SERVICE_LINE_KEYS.join(', ')}` };
+    if (seen.has(key)) return { error: `service_category '${key}' appears more than once` };
+    seen.add(key);
+    const entry = { service_category: key };
+    for (const field of ['home_technician_id', 'gap_technician_id']) {
+      const value = raw[field] === '' ? null : raw[field];
+      if (value === undefined) return { error: `${field} is required (a technician id, or null for none)` };
+      if (value !== null && (typeof value !== 'string' || !SERVICE_LINE_UUID.test(value))) {
+        return { error: `${field} must be a technician id or null` };
+      }
+      entry[field] = value === null ? null : value.toLowerCase();
+    }
+    entries.push(entry);
+  }
+  return { entries };
+}
+
+router.get('/service-lines', requireAdmin, async (req, res, next) => {
+  try {
+    if (serviceLinesOff(res)) return undefined;
+    return res.json({ mode: 'shadow', lines: await readServiceLines(db) });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.put('/service-lines', requireAdmin, async (req, res, next) => {
+  try {
+    if (serviceLinesOff(res)) return undefined;
+    const normalized = normalizeServiceLineEntries((req.body || {}).lines);
+    if (normalized.error) return res.status(400).json({ error: normalized.error });
+    const { entries } = normalized;
+    const outcome = await db.transaction(async (trx) => {
+      const ids = [...new Set(entries.flatMap((e) => [e.home_technician_id, e.gap_technician_id]).filter(Boolean))];
+      const techs = ids.length
+        ? await trx('technicians').whereIn('id', ids).forShare().select('id', 'employment_status')
+        : [];
+      const found = new Map(techs.map((t) => [t.id, t]));
+      const stored = new Map((await trx('service_line_techs').select('service_category', 'home_technician_id', 'gap_technician_id'))
+        .map((r) => [r.service_category, r]));
+      for (const entry of entries) {
+        for (const field of ['home_technician_id', 'gap_technician_id']) {
+          const id = entry[field];
+          if (!id) continue;
+          const tech = found.get(id);
+          if (!tech) return { error: 'Technician not found' };
+          // A technician who has since left may stay where already saved, never be newly picked.
+          const unchanged = stored.get(entry.service_category)?.[field] === id;
+          if (tech.employment_status === 'inactive' && !unchanged) return { error: 'That technician is no longer active' };
+        }
+      }
+      for (const entry of entries) {
+        await trx('service_line_techs')
+          .insert({ ...entry, updated_by: req.technicianId || null, updated_at: trx.fn.now() })
+          .onConflict('service_category')
+          .merge(['home_technician_id', 'gap_technician_id', 'updated_by', 'updated_at']);
+      }
+      return { lines: await readServiceLines(trx) };
+    });
+    if (outcome.error) return res.status(400).json({ error: outcome.error });
+    // Event ids only: no names, no phone numbers.
+    logger.info(`[team] Updated service-line map by staff id=${req.technicianId} (${entries.map((e) => `${e.service_category}: home=${e.home_technician_id || 'none'} gap=${e.gap_technician_id || 'none'}`).join('; ')})`);
+    return res.json({ success: true, mode: 'shadow', lines: outcome.lines });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /service-lines/shadow-summary?days=14 — the read-out of service_line_pick_shadow:
+// rows by source, by (line, would_reason), and how many had the technician actually
+// chosen differ from the one the map would pick. Read only.
+router.get('/service-lines/shadow-summary', requireAdmin, async (req, res, next) => {
+  try {
+    if (serviceLinesOff(res)) return undefined;
+    const asked = Number.parseInt(req.query.days, 10);
+    const days = Number.isInteger(asked) && asked > 0 ? Math.min(asked, SHADOW_SUMMARY_MAX_DAYS) : SHADOW_SUMMARY_DEFAULT_DAYS;
+    const since = new Date(Date.now() - days * 86400000);
+    const recent = () => db('service_line_pick_shadow').where('created_at', '>=', since);
+    const [bySource, byLineReason, totals] = await Promise.all([
+      recent().select('source').count('* as count').groupBy('source').orderBy('source'),
+      recent().select('service_line', 'would_reason').count('* as count').groupBy('service_line', 'would_reason')
+        .orderBy([{ column: 'service_line' }, { column: 'would_reason' }]),
+      recent().first(
+        db.raw('COUNT(*)::int AS total'),
+        db.raw('COUNT(*) FILTER (WHERE actual_technician_id IS DISTINCT FROM would_technician_id)::int AS differs'),
+        db.raw('COUNT(*) FILTER (WHERE would_free IS TRUE)::int AS would_free_yes'),
+        db.raw('COUNT(*) FILTER (WHERE would_free IS FALSE)::int AS would_free_no'),
+      ),
+    ]);
+    const asNumber = (rows) => rows.map((r) => ({ ...r, count: Number(r.count) }));
+    return res.json({
+      days,
+      since: since.toISOString(),
+      total: Number(totals?.total) || 0,
+      differs: Number(totals?.differs) || 0,
+      wouldFree: { yes: Number(totals?.would_free_yes) || 0, no: Number(totals?.would_free_no) || 0 },
+      bySource: asNumber(bySource),
+      byLineReason: asNumber(byLineReason),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
 
 // GET /technicians/:id/earnings — hours × pay_rate breakdown for a
 // window. OT pays at 1.5×. Falls back to $35/hr if pay_rate is unset

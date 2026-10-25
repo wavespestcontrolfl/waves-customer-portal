@@ -116,6 +116,18 @@ async function logDecision(runId, opts = {}) {
   } catch (e) {
     logger.error(`[auto-dispatch] audit insert failed (${action}/${reason_code}): ${e.message}`);
   }
+
+  // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow): one row per night-run
+  // recommendation (dry_run) or applied move, beside the technician the engine chose.
+  // Never throws; gate off = returns at once.
+  if (service && (action === 'recommended' || action === 'changed')) {
+    await require('../scheduling/line-technician').recordLinePickShadow({
+      source: 'night_run', runId: String(runId), scheduledServiceId: row.scheduled_service_id, customerId: row.customer_id,
+      date: row.new_scheduled_date || row.old_scheduled_date, windowStart: row.new_window_start || row.old_window_start,
+      windowEnd: row.new_window_end || row.old_window_end, serviceId: service.service_id || null,
+      serviceType: service.service_type, actualTechnicianId: row.new_technician_id || row.old_technician_id,
+    });
+  }
 }
 
 async function completeRun(runId, { status, totals, error = null }) {

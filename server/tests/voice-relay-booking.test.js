@@ -26,8 +26,13 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
+jest.mock('../services/scheduling/line-technician', () => {
+  const actual = jest.requireActual('../services/scheduling/line-technician');
+  return { ...actual, recordLinePickShadow: jest.fn(actual.recordLinePickShadow) };
+});
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
+  serviceLineMapMode: () => (process.env.GATE_SERVICE_LINE_MAP === 'shadow' ? 'shadow' : 'off'),
   // Read at call time from the real env so the day-cap tests can flip it.
   selfBookDayCapEnabled: () => jest.requireActual('../config/feature-gates').selfBookDayCapEnabled(),
 }));
@@ -115,6 +120,7 @@ const { runOutboundReviewConfirmHook } = require('../services/outbound-review-co
 
 const { resolveCallBookingPropertyLinkage } = require('../services/call-recording-processor');
 
+const { recordLinePickShadow } = require('../services/scheduling/line-technician');
 const relayBooking = require('../services/voice-agent/relay-booking');
 const { activeTools, executeTool, BOOKING_TOOLS } = require('../services/voice-agent/relay-tools');
 const sourceActions = require('../services/call-booking-source-actions'); // REAL module on purpose
@@ -516,6 +522,42 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(out).toMatch(/NOT a confirmed appointment/i);
     expect(out).toMatch(/text or call/i);
     expect(out).toMatch(/Do NOT say the time is locked in/i);
+  });
+
+  // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow, owner 2026-10-25): the
+  // committed booking is logged beside the technician the map would pick.
+  describe('service-line map shadow (phone_live)', () => {
+    afterEach(() => { delete process.env.GATE_SERVICE_LINE_MAP; });
+
+    test('a committed booking records one phone_live row with the saved technician, after the transaction closed', async () => {
+      let open = 0;
+      const openAtCall = [];
+      db.transaction.mockImplementation(async (cb) => { open += 1; try { return await cb(trx); } finally { open -= 1; } });
+      recordLinePickShadow.mockImplementationOnce(() => { openAtCall.push(open); return Promise.resolve(null); });
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/Booking REQUEST submitted/);
+      expect(recordLinePickShadow).toHaveBeenCalledTimes(1);
+      expect(recordLinePickShadow).toHaveBeenCalledWith(expect.objectContaining({
+        source: 'phone_live', scheduledServiceId: 'ss-501', customerId: CUSTOMER.id, date: BOOK_DATE, windowStart: '09:00',
+        serviceId: 'svc-pest', serviceType: 'General Pest Control', actualTechnicianId: 't-1',
+      }));
+      expect(openAtCall).toEqual([0]);
+    });
+
+    test('a refused booking records nothing', async () => {
+      booking.buildBookingAvailability.mockResolvedValue({ slots: [{ ...SLOT, start_time: '13:00', startTime24: '13:00' }], days: [] });
+      await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(recordLinePickShadow).not.toHaveBeenCalled();
+    });
+
+    test('gate shadow with the log failing (every write outside the transaction throws): the booking answer is exactly the same', async () => {
+      const plain = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+      process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+      const withShadow = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+      expect(withShadow).toBe(plain);
+      expect(recordLinePickShadow).toHaveBeenCalledTimes(2);
+      await Promise.all(recordLinePickShadow.mock.results.map((r) => expect(r.value).resolves.toBeNull()));
+    });
   });
 
   test('invalid/stale slot (engine no longer offers it) → refused, nothing written', async () => {

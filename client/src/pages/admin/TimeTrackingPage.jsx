@@ -9,6 +9,7 @@ import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import PayGrowth from "../../components/payGrowth/PayGrowth";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import PayrollSettings from "../../components/payroll/PayrollSettings";
+import ServiceLinesCard from "./ServiceLinesCard";
 import usePayrollAvailable from "../../hooks/usePayrollAvailable";
 import {
   BarChart3,
@@ -2843,6 +2844,9 @@ export function TeamTab({ showToast }) {
   // GATE_TECH_WORK_DAYS: the server marks the roster response when the gate is
   // on; off, the Work days row and summary never render and nothing is sent.
   const [workDaysEnabled, setWorkDaysEnabled] = useState(false);
+  // GATE_SERVICE_LINE_MAP=shadow: the server marks the roster response; off, the
+  // Service lines card never renders and nothing is fetched.
+  const [serviceLinesEnabled, setServiceLinesEnabled] = useState(false);
   const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
@@ -2907,6 +2911,7 @@ export function TeamTab({ showToast }) {
       const res = await adminFetch("/admin/timetracking/technicians");
       setTechs(res.technicians || []);
       setWorkDaysEnabled(res.workDaysEnabled === true);
+      setServiceLinesEnabled(res.serviceLinesEnabled === true);
     } catch {
       /* ignore */
     }
@@ -3975,6 +3980,9 @@ export function TeamTab({ showToast }) {
           </tbody>{" "}
         </table></div>{" "}
       </div>
+      {isAdmin && serviceLinesEnabled && (
+        <ServiceLinesCard techs={techs} showToast={showToast} />
+      )}
       {earningsTech && (
         <EarningsModal
           tech={earningsTech}

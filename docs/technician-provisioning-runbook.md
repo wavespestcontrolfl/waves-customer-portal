@@ -165,6 +165,17 @@ the schedule save, board drag and assign go through and show a warning line
 ("<Name> does not work on Fridays."). The open-visit nudge still reaches a
 tech who really holds a visit on an off day. Gate off: the setting is ignored.
 
+## Service lines (`GATE_SERVICE_LINE_MAP=shadow`)
+
+With the gate on `shadow`, the Team tab shows a "Service lines" card (admin only): a
+Home tech and a Gap tech for each of General pest, Mosquito, Lawn / tree & shrub, Rodent
+and Termite / WDO. Set it once the hire exists, even as a prospective row (a prospective
+home tech reads as "not assignable", so the gap tech shows as the one it would pick).
+Shadow only: the map changes no booking and sends nothing. It only logs, after each
+booking, the technician actually chosen next to the one the map would pick
+(`service_line_pick_shadow`; read it at `/api/admin/timetracking/service-lines/shadow-summary`).
+Gate off: the card is hidden and nothing is logged.
+
 ## What the account can do
 
 A technician logs in to the admin app and lands on `/admin/today`; `/tech`
