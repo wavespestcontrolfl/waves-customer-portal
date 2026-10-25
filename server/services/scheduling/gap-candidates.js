@@ -105,7 +105,10 @@ function analyzeGapCandidate(candidate, rows, {
   const duration = workDuration({ ...service, planning_exempt: true });
   const sameRoute = toDateStr(service.scheduled_date) === date && service.technician_id === technicianId;
   const target = { ...service, technician_id: technicianId, scheduled_date: date, route_order: sameRoute ? service.route_order : null };
-  const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home };
+  // vanDepartureMin: with GATE_SCHEDULING_CAPACITY on the route opens at the
+  // van's departure (the Settings time; 08:00 with the day rules off), not at
+  // the 08:00 shift open, the way the night tool's arrival search plans it.
+  const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home, vanDepartureMin: modeledDepartureMinutes };
   const result = enumerateArrivalPlacements(context, { durationMinutes: duration, earliestStartMin: earliestStart,
     latestServiceEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES),
     dayEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES), departureMin: departure, returnByMin: returnBy });
