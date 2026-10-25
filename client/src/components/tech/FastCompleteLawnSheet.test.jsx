@@ -3037,11 +3037,17 @@ describe('suggested from this lawn', () => {
       }
       // An add-on no card can own is listed as ever.
       expect(within(addons()).getByRole('button', { name: 'Add Vel Fungicide' })).toBeTruthy();
-      // The search does not offer a way around the wait either.
-      searchFor('Art Fungicide');
-      expect(screen.queryByRole('button', { name: /^Art Fungicide/ })).toBeNull();
-      searchFor('Arena');
-      expect(screen.queryByRole('button', { name: /^Arena 50 WDG/ })).toBeNull();
+      // The search does not offer a way around the wait either: it lists them held, with the add-ons' line and no tap
+      // (owner 2026-10-24: a product left out of the search was replaced by a near match).
+      for (const [term, re] of [['Art Fungicide', /^Art Fungicide/], ['Arena', /^Arena 50 WDG/]]) {
+        searchFor(term);
+        const row = screen.getByRole('button', { name: re });
+        expect(row.disabled).toBe(true);
+        expect(row.textContent).toContain('Confirm the assessment first.');
+        fireEvent.click(row);
+      }
+      expect(screen.queryByRole('group', { name: 'Art Fungicide' })).toBeNull();
+      expect(screen.queryByRole('group', { name: 'Arena 50 WDG' })).toBeNull();
     });
 
     test('the answer unlocks them (a lawn with no findings: the entries and the list are the context\'s)', async () => {
@@ -3285,8 +3291,10 @@ describe('suggested from this lawn', () => {
       fireEvent.change(screen.getByLabelText('Search products'), { target: { value: term } });
       try {
         await waitFor(() => { if (!screen.queryByRole('button', { name: re })) throw new Error('none'); }, { timeout: 250 });
-        return 'addable';
       } catch { return 'hidden'; }
+      // Before the guide has answered a governed product is listed held: the add-ons' line, no tap.
+      const rows = screen.getAllByRole('button', { name: re });
+      return rows.every((row) => row.disabled && row.textContent.includes('Confirm the assessment first.')) ? 'waiting' : 'addable';
     };
     const probe = async () => ({
       art: listState('Art Fungicide'),
@@ -3310,9 +3318,9 @@ describe('suggested from this lawn', () => {
       ['guide off', async () => { await mxOpen(mxContext({ treatmentGuide: false })); await analyze(); },
         { art: 'addable', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'addable', vel: 'addable', weedEntry: 'addable', chinchEntry: 'hidden', ...NO_CARDS }],
       ['idle (before Confirm)', async () => { answer([]); await mxOpen(); },
-        { art: 'locked', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'locked', vel: 'addable', weedEntry: 'locked', chinchEntry: 'locked', ...NO_CARDS }],
+        { art: 'locked', artSearch: 'waiting', leadSearch: 'waiting', arenaSearch: 'waiting', talak: 'locked', vel: 'addable', weedEntry: 'locked', chinchEntry: 'locked', ...NO_CARDS }],
       ['pending (asked, not answered)', async () => { guideAnswer = NEVER; await mxOpen(); await analyze(); },
-        { art: 'locked', artSearch: 'hidden', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'locked', vel: 'addable', weedEntry: 'locked', chinchEntry: 'locked', ...NO_CARDS }],
+        { art: 'locked', artSearch: 'waiting', leadSearch: 'waiting', arenaSearch: 'waiting', talak: 'locked', vel: 'addable', weedEntry: 'locked', chinchEntry: 'locked', ...NO_CARDS }],
       ['answered, everything offered', async () => {
         guideAnswer = answerOf([CARDS.weeds(), CARDS.fungus(), CARDS.chinch(), CARDS.caterpillars(), CARDS.dry_spots()], MX_WEED, CLEAN_CHINCH);
         await mxOpen(); await analyze(); await suggested();
@@ -3401,6 +3409,32 @@ describe('suggested from this lawn', () => {
       await analyze();
       await waitFor(() => expect(footerNote()).toBe('Wait for the lawn guide to finish.'));
       expect(completeButton().disabled).toBe(true);
+    });
+
+    // Owner 2026-10-24: "Arena 50 WDG does not show up when I search". Typed before the guide answered, the search
+    // listed only the granules (no guide governs them), and the granules went on three visits.
+    test('while the guide decides, the search lists a governed product held after the others; once it answers, the same search adds it', async () => {
+      const P_GRANULE = 'cccccccc-0000-4000-8000-000000000010';
+      const catalog = [...MX_CATALOG, { id: P_GRANULE, name: 'Arena 0.25G', category: 'insecticide', formulation: 'granular', service_lines: ['lawn', 'pest'], default_rate_per_1000: 1.84, default_unit: 'lb' }];
+      let release;
+      guideAnswer = () => new Promise((resolve) => { release = resolve; });
+      await openSheet({ request: makeRequest({ ctx: mxContext() }), props: { catalog } });
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Arena' } });
+      const matches = await screen.findByRole('group', { name: 'Matching products' });
+      const rows = within(matches).getAllByRole('button');
+      expect(rows.map((row) => row.textContent)).toEqual([expect.stringMatching(/^Arena 0\.25G/), expect.stringMatching(/^Arena 50 WDG Confirm the assessment first\.$/)]);
+      const held = within(matches).getByRole('button', { name: /^Arena 50 WDG/ });
+      expect(held.disabled).toBe(true);
+      fireEvent.click(held);
+      expect(present('Arena 50 WDG')).toBe(false);
+      release(answerOf([], MX_WEED, CLEAN_CHINCH));
+      await suggested();
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Arena 50 WDG/ }).disabled).toBe(false));
+      expect(screen.getByRole('button', { name: /^Arena 50 WDG/ }).textContent).not.toContain('Confirm the assessment first.');
+      fireEvent.click(screen.getByRole('button', { name: /^Arena 50 WDG/ }));
+      expect(present('Arena 50 WDG')).toBe(true);
     });
 
     // Rows already on the sheet when a new decision arrives.
@@ -3597,13 +3631,17 @@ describe('suggested from this lawn', () => {
       const group = screen.queryByRole('group', { name: `Also in ${MONTH_LONG[month - 1]}’s protocol` });
       return !!group && !!within(group).queryByText('Head Fungicide');
     };
-    const inSearch = async () => {
+    const headRows = async () => {
       fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Head Fungicide' } });
       try {
         await waitFor(() => { if (!screen.queryByRole('button', { name: /^Head Fungicide/ })) throw new Error('none'); }, { timeout: 250 });
-        return true;
-      } catch { return false; }
+        return screen.getAllByRole('button', { name: /^Head Fungicide/ });
+      } catch { return []; }
     };
+    // In the search = a row that takes a tap; held = listed with the add-ons' line before the guide has answered.
+    const isHeld = (row) => row.disabled && row.textContent.includes('Confirm the assessment first.');
+    const inSearch = async () => (await headRows()).some((row) => !isHeld(row));
+    const heldInSearch = async () => (await headRows()).some(isHeld);
     const openTa = (month, line, pick) => openSheet({ request: makeRequest({ ctx: taContext(month, line, pick) }), props: { catalog: TA_CATALOG } });
     const takeAllHeld = () => card('fungus', {
       title: 'Fungus', finding: 'Photos show moderate fungus activity.', check: 'Check first: look at the blades and the edge of the patch.',
@@ -3627,6 +3665,7 @@ describe('suggested from this lawn', () => {
         if (_name !== 'before the guide has decided') await waitFor(() => expect(guideCalls()).toHaveLength(1));
         expect(inList(month)).toBe(expected.list);
         expect(await inSearch()).toBe(expected.search);
+        expect(await heldInSearch()).toBe(_name === 'before the guide has decided');
       });
     }
 
@@ -3652,6 +3691,8 @@ describe('suggested from this lawn', () => {
         if (name !== 'before the guide has decided') await waitFor(() => expect(guideCalls()).toHaveLength(1));
         expect(inList(10)).toBe(false);
         expect(await inSearch()).toBe(false);
+        // Not even listed held before the answer: the context's Group 11 hold is already a decision.
+        expect(await heldInSearch()).toBe(false);
       });
 
       test('the guide is OFF: the held row is still out of the protocol list and the search (a plain add-on without the hold)', async () => {
