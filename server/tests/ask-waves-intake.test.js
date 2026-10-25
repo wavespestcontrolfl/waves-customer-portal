@@ -475,7 +475,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['You can use your backyard immediately.', 'What should I do after the treatment?'],
     ['You can use a room immediately.', 'What should I do after the treatment?'],
     ['Keep the kids off your 2,000 sq ft lawn for 2 hours.', ''],
-    // A Spanish article is not a number, but a Spanish time with one still is.
+    // Spanish "un / una" stays a time figure: a word-list exemption for the article
+    // never converged (Codex #6674: "En una.", "En una aproximadamente.").
     ['Pueden volver dentro de casa en una hora.', '¿Qué hago después del tratamiento?'],
     ['Pueden volver a entrar a la una.', '¿Qué hago después del tratamiento?'],
     ['En una.', '¿En cuántas horas puedo volver a entrar después del tratamiento?'],
@@ -485,6 +486,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['En unas pocas.', '¿En cuántas horas puedo volver a entrar después del tratamiento?'],
     ['Pueden salir en una semanita.', '¿Qué hago después del tratamiento?'],
     ['Pueden volver en un par de horas.', '¿Qué hago después del tratamiento?'],
+    ['En una aproximadamente.', '¿En cuántas horas puedo volver a entrar después del tratamiento?'],
+    ['En una como máximo.', '¿En cuántas horas puedo volver a entrar después del tratamiento?'],
     ['You can use the backyard immediately after treatment.', 'What should I do after the treatment?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
@@ -536,9 +539,6 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Keep people and pets away from the front door and avoid disturbing or spraying the nest, since wasps may swarm when threatened. Wasp nest treatment requires a custom quote; call (941) 297-5749 for help.', 'There is a big wasp nest by my front door.'],
     ['You can use the instant quote right here, or call us at (941) 297-5749.', 'Do you do bed bugs?'],
     ['You can get an instant quote for your 2,000-square-foot home on a 1/4 acre lot.', 'How much is lawn care for my yard?'],
-    ['Sí, podemos ayudarle con las cucarachas en la cocina. Si son cucarachas alemanas o una infestación intensa dentro de casa, llame al (941) 297-5749 para una cotización personalizada.', 'Tengo cucarachas en la cocina, ¿pueden ayudarme?'],
-    ['¿Ve unas pocas cucarachas grandes? Si hay un par dentro de casa, podemos ayudarle con una cotización.', 'Tengo cucarachas en la cocina, ¿pueden ayudarme?'],
-    ['Si ve un ratón o una rata dentro de casa, llame al (941) 297-5749 para una inspección.', '¿Tienen servicio para ratones?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
