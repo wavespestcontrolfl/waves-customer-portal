@@ -10,7 +10,7 @@ jest.mock('../services/consumer-notices', () => ({
   findConsumerNotice: (...args) => mockFind(...args),
 }));
 
-const { templateIssueWithWarnings } = require('../services/new-construction-warranty');
+const { templateIssueWithWarnings, BUILDER_MASTER_AGREEMENT_KEY, BUILDER_LOT_ORDER_KEY } = require('../services/new-construction-warranty');
 
 const KEY = 'service_agreement.termite_new_construction_warranty';
 const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Owner', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' };
@@ -114,5 +114,72 @@ describe('gate on', () => {
   test('a basis date that is not a date stops before any lookup', async () => {
     await expect(issue(office('08/15/2026', 'soon'))).rejects.toMatchObject({ status: 400 });
     expect(mockFind).not.toHaveBeenCalled();
+  });
+});
+
+// The Builder Master Agreement is the contract the builder signs before any lot is treated
+// (Rule 5E-14.105(3)(c)), so the same notice must come first: one signed form covers the builder.
+describe('builder master agreement', () => {
+  const issuer = { name: 'Pat Office', title: 'Office Manager' };
+  const master = (consumer_notice_date) => ({ values: { agreement: { price_schedule: '$0.18 per sq ft of slab, $350.00 minimum per lot', consumer_notice_date }, issuer } });
+  const issueMaster = (body) => templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, body, customer, conn);
+
+  test('gate off: the typed date, and no lookup', async () => {
+    onDay('2027-01-01');
+    const { values, warnings } = await issueMaster(master('10/01/2026'));
+    expect(values.agreement.consumer_notice_date).toBe('10/01/2026');
+    expect(warnings).toEqual([]);
+    expect(mockFind).not.toHaveBeenCalled();
+  });
+
+  describe('gate on', () => {
+    beforeEach(() => { process.env.GATE_WARRANTY_13692_CHECK = 'true'; });
+
+    test('a notice on file prints its signed date; the typed one is ignored, even blank', async () => {
+      mockFind.mockResolvedValue({ source: 'esign', id: 'e1', signedOn: '10/20/2026' });
+      onDay('2026-10-25');
+      for (const typed of ['10/01/2026', '', undefined]) {
+        const { values, warnings } = await issueMaster(master(typed));
+        expect(values.agreement.consumer_notice_date).toBe('10/20/2026');
+        expect(warnings).toEqual([]);
+      }
+      // Waves signs the agreement today, so the notice must be dated today or earlier.
+      expect(mockFind.mock.calls[0][1]).toBe('cust-1');
+      expect(mockFind.mock.calls[0][2]).toEqual({ onOrBefore: { y: 2026, m: 10, d: 25 } });
+    });
+
+    test('none on file through the grace end: the typed date still works, with a warning', async () => {
+      mockFind.mockResolvedValue(null);
+      onDay('2026-11-24');
+      const { values, warnings } = await issueMaster(master('10/01/2026'));
+      expect(values.agreement.consumer_notice_date).toBe('10/01/2026');
+      expect(warnings).toEqual([expect.stringMatching(/the master agreement cannot be issued/)]);
+      // The typed date keeps its own checks.
+      await expect(issueMaster(master('13/01/2026'))).rejects.toMatchObject({ status: 400 });
+    });
+
+    test('none on file after the grace end: refuses with 409', async () => {
+      mockFind.mockResolvedValue(null);
+      onDay('2026-11-25');
+      await expect(issueMaster(master('10/01/2026'))).rejects.toMatchObject({
+        status: 409,
+        message: 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form), then issue the master agreement.',
+      });
+    });
+
+    test('a lot order never looks for a notice', async () => {
+      onDay('2026-11-25');
+      const lot = {
+        lot: {
+          agreement_date: '10/01/2026', lot_block: 'Lot 4, Block C', subdivision: 'Test Grove', address: '12 Test Lane, Bradenton, FL 34202',
+          permit: 'BP-1', structures: 'The new building', treatment: 'Liquid soil treatment', price_total: '387',
+          price_basis: '2,150 sq ft slab at $0.18 per sq ft', disturbed_soil_price: '$95', renewal_fee: '$149', scheduled_date: '12/01/2026',
+        },
+        issuer,
+      };
+      const { warnings } = await templateIssueWithWarnings(BUILDER_LOT_ORDER_KEY, { values: lot }, customer, conn);
+      expect(warnings).toEqual([]);
+      expect(mockFind).not.toHaveBeenCalled();
+    });
   });
 });
