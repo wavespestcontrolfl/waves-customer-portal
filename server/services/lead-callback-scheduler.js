@@ -101,9 +101,11 @@ async function sendReminders(now) {
 // process stopped between the claim and the Twilio request (either ring
 // path). It closes as failed with its "Missed call request" bell.
 async function settleStrandedRings(now) {
+  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const { LEAD_CALL_REPLY_RING_SOURCE, settleUnstartedRing } = require('./lead-call-reply-ring');
   const rows = await db('call_log')
     .where({ source: LEAD_CALL_REPLY_RING_SOURCE, direction: 'outbound', status: 'initiated' })
+    .modify((q) => whereNotSandboxCall(q))
     .whereNull('twilio_call_sid')
     .where('created_at', '<', new Date(now.getTime() - STALE_RING_CLAIM_MS))
     .where('created_at', '>', new Date(now.getTime() - 24 * 60 * 60 * 1000))
