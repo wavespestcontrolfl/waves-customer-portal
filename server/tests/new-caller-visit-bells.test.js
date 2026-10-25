@@ -57,13 +57,15 @@ describe('when a waiting visit\'s bell is due', () => {
   });
 });
 
-// Answers the sweep's two reads: the waiting visits, then their calls.
-function fakeConn(visits, calls) {
+// Answers the sweep's two list reads (the waiting visits, then their calls)
+// and, per bell, the visit re-read under a lock: `now` gives a visit's row as
+// it stands at that moment (waiting unless a case says otherwise).
+function fakeConn(visits, calls, now = () => ({ customer_id: null, status: 'pending' })) {
   const reads = [];
   const conn = (table) => {
     const steps = [];
     const chain = {};
-    for (const method of ['where', 'whereNull', 'whereNotIn', 'whereIn', 'whereRaw', 'orderBy', 'limit']) {
+    for (const method of ['where', 'whereNull', 'whereNotIn', 'whereIn', 'whereRaw', 'orderBy', 'limit', 'forShare']) {
       chain[method] = (...args) => { steps.push([method, ...args]); return chain; };
     }
     chain.modify = (fn) => { fn(chain); return chain; };
@@ -71,8 +73,13 @@ function fakeConn(visits, calls) {
       reads.push({ table, steps });
       return table === 'scheduled_services' ? visits : calls;
     };
+    chain.first = async () => {
+      reads.push({ table, steps });
+      return now(steps.find(([m]) => m === 'where')[1].id);
+    };
     return chain;
   };
+  conn.transaction = async (fn) => fn(conn);
   conn.reads = reads;
   return conn;
 }
@@ -109,6 +116,7 @@ describe('the sweep', () => {
     expect(conn.reads[1].steps).toEqual(expect.arrayContaining([['whereIn', 'id', ['call-young', 'call-old']], ['whereRaw', "COALESCE(??, '') <> ?", expect.any(Array)]]));
     expect(notify).toHaveBeenCalledTimes(2);
     expect(notify).toHaveBeenCalledWith('schedule', "Schedule — link the new caller's visit on Wed Mar 12", _private.WHY.no_call, expect.objectContaining({
+      trx: conn,
       dedupeKey: `new-caller-visit:${noCall.id}`,
       bellDefault: true,
       link: `/admin/dispatch?tab=schedule&date=2031-03-12&appointment=${noCall.id}`,
@@ -131,6 +139,16 @@ describe('the sweep', () => {
     expect(opts.ringOnRefresh({ created_at: '2031-03-06T09:00:00Z' }, {})).toBe(true);
     expect(opts.ringOnRefresh({ created_at: '2031-03-01T09:00:00Z' }, { rungAt: '2031-03-06T19:00:00Z' })).toBe(false);
     expect(opts.ringOnRefresh({ created_at: '2031-03-06T14:30:00Z' }, {})).toBe(false);
+  });
+
+  test('the list is a snapshot: a visit linked or cancelled since it was read gets no bell', async () => {
+    const linked = visit({ id: 'v-linked', source_call_log_id: null });
+    const cancelled = visit({ id: 'v-cancelled', source_call_log_id: null });
+    const conn = fakeConn([linked, cancelled], [], (id) => (id === 'v-linked' ? { customer_id: 'cust-1', status: 'pending' } : { customer_id: null, status: 'cancelled' }));
+
+    await expect(runNewCallerVisitBells({ now: NOW, conn })).resolves.toEqual({ waiting: 2, due: 2, rung: 0 });
+    expect(conn.reads.filter((r) => r.steps.some(([m]) => m === 'forShare'))).toHaveLength(2);
+    expect(notify).not.toHaveBeenCalled();
   });
 
   test('a row that already shows the stage counts as no ring; a bell that fails never stops the sweep', async () => {
@@ -211,5 +229,12 @@ maybeDescribe('the timed bell on Postgres', () => {
     await service.linkNewCallerVisit({ visitId: booked.visit.id, customerId });
     const [closed] = await rows();
     expect(closed.done_at).not.toBeNull();
+
+    // A sweep that listed the visit before the link, ringing its last-day bell after it: no reopen.
+    const stale = { ...booked.visit, customer_id: null, scheduled_date: new Date(Date.now() + 2 * 3600 * 1000).toISOString().slice(0, 10) };
+    await expect(_private.ringVisit(db, stale, 'soon')).resolves.toEqual({ waits: false });
+    const after = await rows();
+    expect(after).toHaveLength(1);
+    expect(after[0].done_at).not.toBeNull();
   });
 });

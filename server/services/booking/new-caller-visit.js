@@ -71,6 +71,21 @@ const bookedSlot = (visit) => ({
 });
 const newCallerVisitLink = (visit) => `/admin/dispatch?tab=schedule&date=${bookedSlot(visit).date}&appointment=${encodeURIComponent(visit.id)}`;
 
+// Writes a waiting visit's bell only while the visit still waits for its
+// customer: the visit row is read again under a share lock, held to commit,
+// in the transaction `raise(trx)` writes the bell on. The link updates that
+// row and closes the bell after its commit, so it either waits for this bell
+// and closes it, or lands first and no bell is written. Returns { waits:
+// false } for a visit that has its customer or was closed out, else
+// { waits: true, raised }.
+async function raiseWhileVisitWaits(conn, visitId, raise) {
+  return conn.transaction(async (trx) => {
+    const row = await trx('scheduled_services').where({ id: visitId }).forShare().first('customer_id', 'status');
+    if (!row || row.customer_id || ['cancelled', 'rescheduled'].includes(row.status)) return { waits: false };
+    return { waits: true, raised: await raise(trx) };
+  });
+}
+
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM = /^\d{2}:\d{2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -478,4 +493,5 @@ module.exports = {
   slotWords,
   bookedSlot,
   newCallerVisitLink,
+  raiseWhileVisitWaits,
 };

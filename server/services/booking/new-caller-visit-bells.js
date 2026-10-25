@@ -24,7 +24,7 @@ const { callEndedAt } = require('../../utils/call-timeline');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { raiseAdminAlert } = require('../admin-alert-compose');
 const {
-  NEW_CALLER_SOURCE_ACTION, newCallerVisitAlertKey, newCallerVisitLink, slotWords, bookedSlot,
+  NEW_CALLER_SOURCE_ACTION, newCallerVisitAlertKey, newCallerVisitLink, slotWords, bookedSlot, raiseWhileVisitWaits,
 } = require('./new-caller-visit');
 
 const NO_RECORDING_MS = 90 * 60 * 1000;
@@ -68,7 +68,10 @@ function stageOf(visit, call, nowMs, completedStatuses) {
   return visitStart(visit) - nowMs <= SOON_MS ? 'soon' : stage;
 }
 
-async function ringVisit(visit, stage) {
+// The sweep's list is a snapshot: the bell is written only while the visit
+// still waits (raiseWhileVisitWaits), so a link that lands after the list
+// was read never gets a new or reopened bell.
+async function ringVisit(conn, visit, stage) {
   const { day } = slotWords(bookedSlot(visit).date, '');
   // The day-before ring: a row whose last ring came before the visit's final
   // day rings again; one already rung inside it only takes the new words.
@@ -76,7 +79,7 @@ async function ringVisit(visit, stage) {
   const soon = stage === 'soon'
     ? { refreshOnDedupe: true, ringOnRefresh: (existing, meta) => new Date(meta?.rungAt || existing.created_at).getTime() < finalDayFrom }
     : {};
-  return raiseAdminAlert('schedule', {
+  return raiseWhileVisitWaits(conn, visit.id, (trx) => raiseAdminAlert('schedule', {
     area: 'Schedule',
     action: day ? `link the new caller's visit on ${day}` : "link the new caller's visit",
     why: WHY[stage],
@@ -86,12 +89,13 @@ async function ringVisit(visit, stage) {
     doneWhen: 'visit_linked',
     who: 'person',
   }, {
+    trx,
     dedupeKey: newCallerVisitAlertKey(visit.id),
     bellDefault: true,
     ...soon,
     detail: `${DETAIL[stage]}\nOpen the visit on Dispatch and use Link customer. The reminders and the confirmation go out then.`,
     metadata: { scheduled_service_id: visit.id, call_log_id: visit.source_call_log_id || null, stage },
-  });
+  }));
 }
 
 /**
@@ -125,7 +129,7 @@ async function runNewCallerVisitBells({ now = new Date(), conn = db } = {}) {
     result.due += 1;
     if (result.rung >= MAX_ALERTS_PER_RUN) continue;
     try {
-      const raised = await ringVisit(visit, stage);
+      const { raised } = await ringVisit(conn, visit, stage);
       if (raised && !raised.suppressed && (!raised.deduped || raised.rung)) result.rung += 1;
     } catch (err) {
       logger.warn(`[new-caller-bells] bell for visit ${visit.id} failed: ${err.code || err.name || 'error'}`);
@@ -134,4 +138,4 @@ async function runNewCallerVisitBells({ now = new Date(), conn = db } = {}) {
   return result;
 }
 
-module.exports = { runNewCallerVisitBells, _private: { stageOf, WHY } };
+module.exports = { runNewCallerVisitBells, _private: { stageOf, ringVisit, WHY } };
