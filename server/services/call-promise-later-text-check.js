@@ -31,7 +31,6 @@ const { scrubSegments } = require('../utils/pan-scrub');
 const VERSION = 'call-promise-later-text-v1';
 // Internal structured classification, the policy the thread check and the contact check use.
 const POLICY = MODELS.TEXT_POLICIES.fastStructured;
-const LANE = 'call-promise-later-text-check';
 const PROVIDER_RETRY_MS = 3600000;
 const QUOTE_LIMIT = 300;
 // Every later message is read whole: more than this many on one side, or one text longer than this, holds.
@@ -119,7 +118,7 @@ For contradicted, give the record_ref of the later text that says it. Otherwise 
 ${stringifySmsEvidence({ promise: { kind: commitment.kind, description: commitment.description },
     proof: { type: proof.record_type, at: iso(proof.matched_at), quote: String(proof.quote || '').slice(0, QUOTE_LIMIT) },
     later_texts: records.map(({ ref, who, created_at: at, text }) => ({ ref, who, at: iso(at), text })) })}`,
-    jsonSchema: SCHEMA, maxTokens: 512, laneId: LANE, promptVersion: VERSION,
+    jsonSchema: SCHEMA, maxTokens: 512, laneId: 'call-promise-later-text-check', promptVersion: VERSION,
   });
   if (!result.ok) return { verdict: 'unclear', reason: 'provider_failed' };
   return groundVerdict(result.json, records);
@@ -147,4 +146,4 @@ async function laterVerdictCurrent(conn, { commitment, message, proof, readThrou
   return read.hash === cache.evidence_hash;
 }
 
-module.exports = { checkLaterTexts, laterVerdictCurrent, readLaterTexts, groundVerdict, VERSION, LANE, POLICY, LATER_LIMIT, TEXT_LIMIT };
+module.exports = { checkLaterTexts, laterVerdictCurrent, readLaterTexts, groundVerdict, VERSION, POLICY, LATER_LIMIT, TEXT_LIMIT };
