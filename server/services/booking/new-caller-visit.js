@@ -340,8 +340,9 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
 // customer's account yet becomes one of its properties, and the visit points
 // at it. The visit's bell closes. armLinkedVisitComms arms the reminders and
 // the confirmation after the commit. propertySource labels a property the
-// link adds: 'manual' for the office, 'call_pipeline' for the agent.
-async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, propertySource = 'manual', conn = db } = {}) {
+// link adds: 'manual' for the office, 'call_pipeline' for the agent. The
+// agent also passes its claimFence ({ callLogId, procToken }).
+async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, propertySource = 'manual', claimFence = null, conn = db } = {}) {
   if (!isEnabled('newCallerBooking')) throw httpError(404, 'Not found');
   matchOrThrow(visitId, UUID, 'Open the visit again.');
   matchOrThrow(customerId, UUID, 'Pick the customer again.');
@@ -360,6 +361,20 @@ async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, pro
     if (!customer) throw httpError(400, 'That customer was not found. Pick the customer again.');
     if (customer.deleted_at) {
       throw httpError(409, 'That customer was merged into another account. Search again and pick the current one.');
+    }
+    // The agent's claim fence, customers row then the call_log row (the order
+    // recordCallProperty's fence takes): a pass that lost its claim, or a call
+    // an operator relinked to another customer meanwhile, links nothing.
+    if (claimFence) {
+      const owned = await trx('call_log')
+        .where({ id: claimFence.callLogId, processing_token: claimFence.procToken })
+        .forUpdate()
+        .first('customer_id');
+      if (!owned || String(owned.customer_id) !== String(customerId)) {
+        throw Object.assign(httpError(409, 'The call changed while the visit was being linked.'), {
+          code: owned ? 'call_customer_moved' : 'call_claim_lost',
+        });
+      }
     }
     const address = {
       address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
@@ -400,7 +415,10 @@ async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, pro
       customer_id: customerId,
       action: 'new_caller_visit_linked',
       description: `Visit ${row.id} booked by address is linked to its customer.`,
-      metadata: JSON.stringify({ scheduled_service_id: row.id, call_log_id: row.source_call_log_id || null, property_added: recorded.created === true }),
+      metadata: JSON.stringify({
+        scheduled_service_id: row.id, call_log_id: row.source_call_log_id || null, property_added: recorded.created === true,
+        linked_by: claimFence ? 'call_recording' : 'office',
+      }),
     });
     return { visit: row, addedProperty: recorded.created === true };
   });

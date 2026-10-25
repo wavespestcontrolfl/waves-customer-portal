@@ -7081,16 +7081,18 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
 }
 
 // GATE_NEW_CALLER_BOOKING: a visit the office booked by address for THIS call
-// before the customer existed (booking/new-caller-visit.js: customer_id NULL,
-// source_action 'admin_new_caller', stamped with the call). Every lookup here
-// is customer-scoped and misses it, so without this the pipeline would insert
-// a second visit for the same call. Not gated: such a row exists only if the
-// gate was on when it was booked, and it must stay single after a kill.
+// before the customer existed (booking/new-caller-visit.js: source_action
+// 'admin_new_caller', stamped with the call). Every lookup here is
+// customer-scoped and misses it while it has no customer, so without this the
+// pipeline would insert a second visit for the same call. Linked or not: once
+// linked, findExistingCallAppointment reuses it for its own customer, and a
+// visit linked to ANOTHER customer (an operator relinked the call while this
+// pass ran) must hold too. Not gated: such a row exists only if the gate was
+// on when it was booked, and it must stay single after a kill.
 async function findNewCallerVisitForCall({ call, trx = db }) {
   if (!call?.id) return null;
   return trx('scheduled_services')
     .where({ source_call_log_id: call.id, source_action: require('./booking/new-caller-visit').NEW_CALLER_SOURCE_ACTION })
-    .whereNull('customer_id')
     .whereNull('parent_service_id')
     .whereNotIn('status', ['cancelled', 'rescheduled'])
     .orderBy('created_at', 'asc')
@@ -16502,6 +16504,22 @@ const CallRecordingProcessor = {
     });
     if (!checkpointRows) return abandonToPeer('the customer checkpoint write');
 
+    // GATE_NEW_CALLER_BOOKING (booking/new-caller-link-from-call.js): a visit
+    // the office booked by address for this call, before the customer existed,
+    // gets the customer this checkpoint just wrote; its reminders and
+    // confirmation go out at the link. The booking branch below then reuses
+    // the linked visit and sends nothing. Never throws.
+    await require('./booking/new-caller-link-from-call').linkOfficeVisitFromCall({
+      call,
+      procToken,
+      text: {
+        passBlocked: v2SmsBlocked,
+        extraction: v2ApprovedExtraction || v2CanonicalExtraction || null,
+        impliedConsent: isEnabled('callInboundImpliedConsent') && outboundImpliedConsentEligible(call, outboundReturnMessagesEligible),
+        callerPhone: contactPhone,
+      },
+    });
+
     const v2ExtractionForAudit = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
       ? v2Result.extraction
       : null;
@@ -20769,8 +20787,10 @@ const CallRecordingProcessor = {
                 // rows → hold for human review; a property mismatch falls
                 // through (a different property's visit is not a duplicate).
                 // The office already booked this call by address, before the
-                // customer existed: never a second visit. Hold for the office;
-                // the link step (a later PR, same gate) attaches the customer.
+                // customer existed: never a second visit. The link step after
+                // the customer checkpoint gives such a visit its customer, and
+                // findExistingCallAppointment above then reuses it; one still
+                // waiting, or linked to another customer, holds for the office.
                 const newCallerVisit = await findNewCallerVisitForCall({ call, trx });
                 if (newCallerVisit) {
                   return {
