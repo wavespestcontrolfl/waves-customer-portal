@@ -556,8 +556,12 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
 
   test('a customer task cannot propose moving an unrelated customerless reservation hold', async () => {
     const hold = crypto.randomUUID();
-    const date = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
-    const nextDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 8 * 86400000));
+    // Calendar days, not 24-hour blocks: across the fall clock change, +7 and
+    // +8 days of milliseconds can both land on the same ET date.
+    const { addETDays, etDateString } = require('../utils/datetime-et');
+    const now = new Date();
+    const date = etDateString(addETDays(now, 7));
+    const nextDate = etDateString(addETDays(now, 8));
     await db('scheduled_services').insert({ id: hold, customer_id: null, scheduled_date: date,
       service_type: 'Synthetic reservation', status: 'pending', window_start: '12:00:00', window_end: '14:00:00' });
     const before = await db('scheduled_services').where('id', hold).first();
