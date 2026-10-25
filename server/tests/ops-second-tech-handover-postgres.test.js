@@ -22,6 +22,7 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
   const ownerId = randomUUID();
   const hireId = randomUUID();
   const customerIds = [];
+  const extraTechIds = [];
   const visitGroupIds = [];
   const START = '2099-07-06';
   const TODAY = '2099-06-30';
@@ -66,7 +67,7 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
       await knex('scheduled_services').whereIn('customer_id', customerIds).del();
       await knex('customers').whereIn('id', customerIds).del();
     }
-    await knex('technicians').whereIn('id', [ownerId, hireId]).del();
+    await knex('technicians').whereIn('id', [ownerId, hireId, ...extraTechIds]).del();
     await knex.destroy();
   });
 
@@ -125,6 +126,50 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     expect(plan.skipped.not_open.visits).toBe(2);
     expect(plan.notices_to_suppress).toBe(5);
     expect(JSON.stringify(plan)).not.toMatch(/Syn|example\.invalid|\+1999/);
+  });
+
+  test("a series is classified by its CURRENT template (recurring_template_overrides), under the app's own gate", async () => {
+    // Its own owner, so this plan holds only these rows.
+    const ownerB = randomUUID();
+    await knex('technicians').insert(tech(ownerB));
+    extraTechIds.push(ownerB);
+    const on = (o) => ({ technician_id: ownerB, ...o });
+    // A pest series later changed to lawn: the parent keeps "Quarterly Pest Control".
+    const changed = await series(await customer(), on({ recurring_template_overrides: JSON.stringify({ service_type: 'Lawn Care Program' }) }));
+    await child(changed, '2099-07-06', on({ service_type: 'Lawn Care Program' }));
+    // A WDO inspection series later changed to a bait program: its customer's pest series stays.
+    const baitCustomer = await customer();
+    const wdo = await series(baitCustomer, on({
+      service_type: 'WDO Inspection',
+      recurring_template_overrides: JSON.stringify({ service_type: 'Quarterly Termite Active Bait Station Service' }),
+    }));
+    await child(wdo, '2099-07-07', on({ service_type: 'Quarterly Termite Active Bait Station Service' }));
+    const pest = await series(baitCustomer, on());
+    await child(pest, '2099-07-08', on());
+
+    const loadWith = (value) => {
+      const prior = process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE;
+      let mod;
+      jest.isolateModules(() => {
+        process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE = value;
+        mod = require(path.join(__dirname, '..', '..', 'ops', 'agents', 'second-tech-handover.js'));
+      });
+      if (prior === undefined) delete process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE; else process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE = prior;
+      return mod;
+    };
+
+    const current = await loadWith('true').planHandover(knex, { from: ownerB, start: START, today: TODAY });
+    expect(current.template_overrides).toBe('applied');
+    expect(current.would_change.visits).toBe(0);
+    expect(current.skipped.other_line).toEqual({ series: 2, visits: 2 }); // the lawn change and the bait series
+    expect(current.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+
+    // Gate off: the app ignores the overrides, and so does the plan.
+    const historical = await loadWith('false').planHandover(knex, { from: ownerB, start: START, today: TODAY });
+    expect(historical.template_overrides).toBe('not_applied_gate_off');
+    expect(new Set(historical.ids.series)).toEqual(new Set([changed.id, pest.id]));
+    expect(historical.skipped.other_line).toEqual({ series: 1, visits: 1 }); // the WDO inspection (termite line)
+    expect(historical.skipped.termite_bait_customer).toBeUndefined();
   });
 
   test('without --to the plan says the target is not set and assumes Mon-Thu', async () => {

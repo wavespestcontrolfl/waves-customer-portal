@@ -10,7 +10,8 @@
 // read-only transaction on a read-only session. A later PR adds `--execute`
 // after the owner has read this output.
 //
-//   railway run --service Postgres node ops/agents/second-tech-handover.js \
+//   railway run --service Postgres -- railway run --service waves-customer-portal \
+//     node ops/agents/second-tech-handover.js \
 //     --from <technician uuid> [--to <technician uuid>] [--start YYYY-MM-DD] \
 //     [--lines general,rodent,mosquito] [--list] [--json]
 //   node ops/agents/second-tech-handover.js --list-techs     # id, role, work days only
@@ -26,6 +27,8 @@
 //   --json   machine-readable output.
 //
 // What the plan decides (all from the real columns):
+//   NESTED   the outer run gives DATABASE_PUBLIC_URL, the inner run the portal's
+//            GATE_* variables, so the template overlay below reads production's gate.
 //   SERIES   scheduled_services parent rows: is_recurring, recurring_parent_id IS
 //            NULL, status <> 'cancelled'. ACTIVE = recurring_ongoing, or at least
 //            one open visit (below) on or after today (the app's own test,
@@ -35,7 +38,11 @@
 //            recurring_technician_id, else the parent's technician_id
 //            (admin-schedule recurringTemplateTechnicianId).
 //   LINE     serviceLineFor() from services/scheduling/line-technician.js on the
-//            parent's service_id / service_key_snapshot / service_type.
+//            series' CURRENT service: the parent's service_id / service_key_snapshot
+//            / service_type with recurring_template_overrides laid over them (the
+//            completed first visit keeps its original service; the schedulers apply
+//            the same gated overlay, recurring-template-overrides.js). Bait
+//            detection reads the same overlaid fields.
 //   VISITS   the parent row (when still ahead) plus its children
 //            (recurring_parent_id = parent). OPEN = status pending | confirmed |
 //            rescheduled (the app's "not started" set) and track_state not
@@ -62,6 +69,8 @@ const root = path.join(__dirname, '..', '..', 'server');
 const { serviceLineFor } = require(path.join(root, 'services', 'scheduling', 'line-technician'));
 const { normalizeWorkDays, dayOfWeekOfDate } = require(path.join(root, 'services', 'technician-eligibility'));
 const { etDateString, etWeekStart, addETDays, parseETDateTime } = require(path.join(root, 'utils', 'datetime-et'));
+const { overlayRecurringTemplateOverrides } = require(path.join(root, 'services', 'recurring-template-overrides'));
+const { isEnabled } = require(path.join(root, 'config', 'feature-gates'));
 
 const MOVABLE_LINES = ['general', 'rodent', 'mosquito'];
 const OPEN_STATUSES = ['pending', 'confirmed', 'rescheduled'];
@@ -292,13 +301,17 @@ async function loadTechnician(db, id) {
 
 const chunks = (list, n) => { const out = []; for (let i = 0; i < list.length; i += n) out.push(list.slice(i, i + n)); return out; };
 
+// Each series with its CURRENT service template laid over the parent's own fields.
 async function loadParents(db) {
-  return db('scheduled_services')
+  const cols = await db('scheduled_services').columnInfo();
+  const rows = await db('scheduled_services')
     .where({ is_recurring: true })
     .whereNull('recurring_parent_id')
     .whereNot('status', 'cancelled')
     .select('id', 'customer_id', 'service_id', 'service_key_snapshot', 'service_type', 'technician_id',
-      'recurring_technician_id', 'recurring_technician_override', 'recurring_ongoing');
+      'recurring_technician_id', 'recurring_technician_override', 'recurring_ongoing',
+      ...(cols.recurring_template_overrides ? ['recurring_template_overrides'] : []));
+  return rows.map((p) => overlayRecurringTemplateOverrides(p, cols));
 }
 
 async function loadVisits(db, parentIds, today) {
@@ -336,7 +349,10 @@ async function planHandover(db, { from, to = null, start, today = etDateString()
     p.line = cache.get(key);
   }
   const visits = await loadVisits(db, parents.map((p) => p.id), today);
-  return buildPlan({ from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits });
+  const plan = buildPlan({ from, to: toRow ? { id: toRow.id, work_days: toRow.work_days } : null, start, today, lines, parents, visits });
+  // The overlay follows GATE_EDIT_APPT_PRICE_SERVICE_SCOPE, as in the app.
+  plan.template_overrides = isEnabled('editApptPriceServiceScope') ? 'applied' : 'not_applied_gate_off';
+  return plan;
 }
 
 // ---- output -----------------------------------------------------------------
@@ -359,6 +375,9 @@ function printPlan(plan, { list }) {
     technician_row_every_day: 'target row has no work days: every day',
   }[plan.target_work_days_source];
   out.push(`  target work days: ${plan.target_work_days.join(', ')} (${src})`);
+  out.push(plan.template_overrides === 'applied'
+    ? '  series templates: current service (recurring_template_overrides applied)'
+    : '  series templates: NOT applied: GATE_EDIT_APPT_PRICE_SERVICE_SCOPE is not \'true\' here (run nested with the portal\'s variables to match production)');
   out.push('');
   out.push(`Series: ${plan.series.active} active, ${plan.series.on_from} on the owner, ${plan.series.in_lines} in these lines`);
   out.push(`  ${plan.series.retemplate} series would change technician template (future visits seed to the target)`);
@@ -414,7 +433,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const conn = process.env.DATABASE_PUBLIC_URL;
   if (!conn) {
-    console.error('DATABASE_PUBLIC_URL not set — run via: railway run --service Postgres node ops/agents/second-tech-handover.js --from <uuid>');
+    console.error('DATABASE_PUBLIC_URL not set — run via: railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/second-tech-handover.js --from <uuid>');
     process.exit(2);
   }
   const db = readOnlyConn(conn);
