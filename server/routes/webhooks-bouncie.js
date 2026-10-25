@@ -223,6 +223,7 @@ async function processTrackingEvent({ logId, eventType, payload }) {
           eventType: normalizedEventType,
           point,
           arrival,
+          logId,
         });
       } catch (err) {
         logger.error(`[webhooks-bouncie] truck clock-in failed: ${err.message}`);

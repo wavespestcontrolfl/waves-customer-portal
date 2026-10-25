@@ -74,13 +74,43 @@ async function lockActiveTechnician(trx, technicianId) {
   }
 }
 
-async function insertShift(trx, technicianId, { lat, lng, notes, source } = {}) {
+// A caller that knows when the shift really began (the truck clock-in, whose GPS
+// event can reach us late) may pass `clockInAt`. It is bounded so a bad value can
+// never backdate or postdate a shift: at most 2 minutes ahead of now and at most
+// 30 minutes behind. `clock_in`, and so the Staff work date, comes from it.
+const CLOCK_IN_AT_FUTURE_MS = 2 * 60 * 1000;
+const CLOCK_IN_AT_PAST_MS = 30 * 60 * 1000;
+
+function resolveClockInAt(clockInAt, now = new Date()) {
+  if (clockInAt === undefined || clockInAt === null) return now;
+  const at = clockInAt instanceof Date ? clockInAt : new Date(clockInAt);
+  const ms = at.getTime();
+  if (!Number.isFinite(ms)) {
+    const error = staffTimeHttpError(400, 'Clock-in time is not a valid date.');
+    error.code = 'INVALID_CLOCK_IN_AT';
+    throw error;
+  }
+  if (ms - now.getTime() > CLOCK_IN_AT_FUTURE_MS) {
+    const error = staffTimeHttpError(400, 'Clock-in time is in the future.');
+    error.code = 'CLOCK_IN_AT_FUTURE';
+    throw error;
+  }
+  if (now.getTime() - ms > CLOCK_IN_AT_PAST_MS) {
+    const error = staffTimeHttpError(400, 'Clock-in time is more than 30 minutes ago.');
+    error.code = 'CLOCK_IN_AT_TOO_OLD';
+    throw error;
+  }
+  return at;
+}
+
+async function insertShift(trx, technicianId, { lat, lng, notes, source, clockInAt } = {}) {
+  const clockInTime = resolveClockInAt(clockInAt);
   const [created] = await trx('time_entries')
     .insert({
       technician_id: technicianId,
       entry_type: 'shift',
       status: 'active',
-      clock_in: new Date(),
+      clock_in: clockInTime,
       clock_in_lat: lat || null,
       clock_in_lng: lng || null,
       notes: notes || null,
@@ -92,23 +122,34 @@ async function insertShift(trx, technicianId, { lat, lng, notes, source } = {}) 
 }
 
 /**
+ * The clock-in body, inside the caller's transaction: lock the account, refuse
+ * a second active shift (error.code ALREADY_CLOCKED_IN, thrown before any write),
+ * insert the shift. `clockInAt` (optional Date) sets clock_in; see resolveClockInAt.
+ */
+async function clockInInTransaction(trx, technicianId, { lat, lng, notes, source, clockInAt } = {}) {
+  // Validate first: a bad time must not leave the technician row locked for nothing.
+  resolveClockInAt(clockInAt);
+  await lockActiveTechnician(trx, technicianId);
+
+  const existing = await trx('time_entries')
+    .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
+    .first();
+  if (existing) {
+    const alreadyClockedIn = new Error('Already clocked in. Clock out before starting a new shift.');
+    alreadyClockedIn.code = 'ALREADY_CLOCKED_IN';
+    throw alreadyClockedIn;
+  }
+
+  return insertShift(trx, technicianId, { lat, lng, notes, source, clockInAt });
+}
+
+/**
  * Clock in a technician for a new shift.
  */
-async function clockIn(technicianId, { lat, lng, notes, source } = {}) {
-  const entry = await db.transaction(async (trx) => {
-    await lockActiveTechnician(trx, technicianId);
-
-    const existing = await trx('time_entries')
-      .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
-      .first();
-    if (existing) {
-      const alreadyClockedIn = new Error('Already clocked in. Clock out before starting a new shift.');
-      alreadyClockedIn.code = 'ALREADY_CLOCKED_IN';
-      throw alreadyClockedIn;
-    }
-
-    return insertShift(trx, technicianId, { lat, lng, notes, source });
-  });
+async function clockIn(technicianId, { lat, lng, notes, source, clockInAt } = {}) {
+  const entry = await db.transaction((trx) => clockInInTransaction(
+    trx, technicianId, { lat, lng, notes, source, clockInAt },
+  ));
 
   logger.info(`[time-tracking] Tech ${technicianId} clocked in`, { entryId: entry.id });
   return entry;
@@ -1109,6 +1150,7 @@ async function autoClockOutCheck() {
 
 module.exports = {
   clockIn,
+  clockInInTransaction,
   clockOut,
   startJob,
   endJob,
