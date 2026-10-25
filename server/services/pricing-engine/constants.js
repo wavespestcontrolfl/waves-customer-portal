@@ -1900,12 +1900,15 @@ const SPECIALTY = {
           'Good default option for standard trenching when a fipronil barrier is desired.',
         ],
       },
+      // Bifen I/T is the same Atticus Talak 7.9 F bottle (owner 2026-09-11; 2026-10-25 "bifen i/t
+      // as talak is fine"), so bifen_it prices exactly like talstar_p. The key stays so saved
+      // estimates replay; the estimate tool lists Talak once (talstar_p).
       bifen_it: {
-        label: 'Bifen I/T - Bifenthrin',
+        label: 'Talak 7.9 F - Bifenthrin',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
         positioning: 'standard_repellent',
-        containerCost: 55.00,
+        containerCost: 41.57,
         containerOz: 96,
         productOzPerFinishedGallonAtStandardRate: 1.0,
         productOzPerFinishedGallonAtHighRate: 2.0,
@@ -1914,7 +1917,7 @@ const SPECIALTY = {
         defaultWarrantyPositioning: 'limited',
         warrantyRisk: 'high_for_long_warranty',
         warnings: [
-          'Repellent bifenthrin barrier; not equivalent to non-repellent fipronil positioning.',
+          'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).',
           'Do not attach long repair-and-retreat warranty without admin approval.',
         ],
       },
@@ -2066,23 +2069,27 @@ const SPECIALTY = {
           'Confirm exact Taurus SC label and finished dilution volume before treatment.',
         ],
       },
+      // Bifen I/T is the same Atticus Talak 7.9 F bottle (owner 2026-09-11; 2026-10-25 "bifen i/t
+      // as talak is fine"); the Bifen I/T catalog row is inactive. bifen_it prices exactly like
+      // talstar_p from the Talak row. The key stays so saved estimates replay; the estimate tool
+      // lists Talak once (talstar_p).
       bifen_it: {
-        label: 'Bifen I/T - Bifenthrin',
-        catalogProductName: 'Bifen I/T',
-        packageLabel: '1 gallon / 128 oz',
+        label: 'Talak 7.9 F - Bifenthrin',
+        catalogProductName: 'Atticus Talak 7.9 F',
+        packageLabel: '96 fl oz',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
         positioning: 'standard_repellent',
-        containerCost: 41.53,
-        containerOz: 128,
+        containerCost: 41.57,
+        containerOz: 96,
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.5294,  // 0.45 / 0.85 — 15% across-the-board price cut (margin ~47%)
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
-          'Repellent pyrethroid barrier; not equivalent to non-repellent fipronil positioning.',
-          'Use only when the exact Bifen I/T label supports pre-construction subterranean termite treatment.',
+          'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).',
+          'Use only when the Talak 7.9 F label supports pre-construction subterranean termite treatment.',
         ],
       },
       // The bottle is Atticus Talak 7.9 F, 96 fl oz (owner 2026-10-24: "swap talstar

@@ -82,7 +82,7 @@ const GRASS_CHOICES = [
 const TRENCHING_PRODUCT_OPTIONS = [
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
-  { value: "bifen_it", label: "Bifen I/T - Bifenthrin, standard repellent barrier" },
+  // bifen_it is the same Talak bottle (owner 2026-10-25), so Talak is listed once.
   { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
 ];
 
@@ -96,8 +96,8 @@ const TRENCHING_PRODUCT_META = {
     config: "78 oz @ $85 | 0.8 oz / finished gal standard",
   },
   bifen_it: {
-    warning: "Repellent bifenthrin barrier. 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
-    config: "96 oz @ $55 | 1.0 oz / finished gal standard",
+    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "96 oz @ $41.57 | 1.0 oz / finished gal standard",
   },
   talstar_p: {
     warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
@@ -108,7 +108,7 @@ const TRENCHING_PRODUCT_META = {
 const PRE_SLAB_PRODUCT_OPTIONS = [
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
-  { value: "bifen_it", label: "Bifen I/T - Bifenthrin, standard repellent barrier" },
+  // bifen_it is the same Talak bottle (owner 2026-10-25), so Talak is listed once.
   { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
 ];
 
@@ -128,8 +128,8 @@ const PRE_SLAB_PRODUCT_META = {
     config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   bifen_it: {
-    warning: "Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.",
-    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
+    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.",
+    config: "96 oz @ $41.57 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   talstar_p: {
     warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.",

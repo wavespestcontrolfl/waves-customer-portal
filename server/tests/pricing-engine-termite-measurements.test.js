@@ -176,7 +176,8 @@ describe('termite measurement overrides and safeguards', () => {
     const base = { measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 }, concreteVolumePadPct: 0, trenchDepthFt: 1 };
     expect(priceTrenching({}, { ...base, productKey: 'termidor_sc' }).chemicalCostPerLF).toBeCloseTo(1.54, 2);
     expect(priceTrenching({}, { ...base, productKey: 'taurus_sc' }).chemicalCostPerLF).toBeCloseTo(0.35, 2);
-    expect(priceTrenching({}, { ...base, productKey: 'bifen_it' }).chemicalCostPerLF).toBeCloseTo(0.23, 2);
+    // bifen_it is the same Talak bottle as talstar_p (owner 2026-10-25).
+    expect(priceTrenching({}, { ...base, productKey: 'bifen_it' }).chemicalCostPerLF).toBeCloseTo(0.17, 2);
     // talstar_p is the Talak 7.9 F bottle: $41.57 / 96 fl oz x 0.4 oz per LF = $0.17.
     expect(priceTrenching({}, { ...base, productKey: 'talstar_p' }).chemicalCostPerLF).toBeCloseTo(0.17, 2);
   });
@@ -435,11 +436,12 @@ describe('termite measurement overrides and safeguards', () => {
     expect(taurus.productCost).toBe(243.59);
     expect(taurus.price).toBe(701);
 
+    // bifen_it is the same Talak bottle as talstar_p (owner 2026-10-25): 96 fl oz at $41.57.
     const bifen = pricePreSlabTermiticide(2500, { productKey: 'bifen_it', labelConfirmed: true });
     expect(bifen.productOz).toBe(250);
-    expect(bifen.units).toBe(2);
-    expect(bifen.productCost).toBe(81.11);
-    expect(bifen.rawPrice).toBe(394);
+    expect(bifen.units).toBe(3);
+    expect(bifen.productCost).toBe(108.26);
+    expect(bifen.rawPrice).toBe(445);
     expect(bifen.price).toBe(510);
 
     // talstar_p is the Talak 7.9 F bottle: 96 fl oz at $41.57.
@@ -459,7 +461,7 @@ describe('termite measurement overrides and safeguards', () => {
       labelConfirmed: true,
     });
     expect(standalone.productOz).toBe(10);
-    expect(standalone.productCost).toBe(3.24);
+    expect(standalone.productCost).toBe(4.33);
     expect(standalone.contextualFloor).toBe(191);
     expect(standalone.price).toBe(191);
     expect(standalone.price).not.toBe(600);
@@ -470,7 +472,7 @@ describe('termite measurement overrides and safeguards', () => {
       labelConfirmed: true,
     });
     expect(builderBatch.contextualFloor).toBe(128);
-    expect(builderBatch.price).toBe(148);
+    expect(builderBatch.price).toBe(150);
     expect(builderBatch.price).not.toBe(600);
 
     const sameTripAddOn = pricePreSlabTermiticide(100, {
@@ -479,7 +481,7 @@ describe('termite measurement overrides and safeguards', () => {
       labelConfirmed: true,
     });
     expect(sameTripAddOn.contextualFloor).toBe(106);
-    expect(sameTripAddOn.price).toBe(148);
+    expect(sameTripAddOn.price).toBe(150);
     expect(sameTripAddOn.price).not.toBe(600);
   });
 
