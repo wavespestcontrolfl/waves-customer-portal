@@ -90,7 +90,7 @@ describe('lawn and landscape tax (GATE_LAWN_SPRAY_NO_TAX)', () => {
 
   test('gate on: building pest work, mosquito work and a combined visit keep the commercial tax', async () => {
     process.env.GATE_LAWN_SPRAY_NO_TAX = 'true';
-    for (const name of ['Recurring Pest Control', 'Monthly Mosquito Control Service', 'Lawn & Mosquito Program', 'Lawn Care Visit #4 + Quarterly Pest Control', 'Mosquito Misting System Installation', 'Termite Trenching', 'Palmetto Bug Treatment']) {
+    for (const name of ['Recurring Pest Control', 'Monthly Mosquito Control Service', 'Lawn & Mosquito Program', 'Lawn Care Visit #4 + Quarterly Pest Control', 'Lawn Care Visit #4 + Palmetto Bug Treatment', 'Mosquito Misting System Installation', 'Termite Trenching', 'Palmetto Bug Treatment']) {
       expect(await tax(name)).toMatchObject({ rate: 0.07, amount: 7, taxable: true });
     }
   });
@@ -124,6 +124,12 @@ describe('isGroundsTreatment', () => {
     ['lawn_pest_knockdown', true],
     ['Lawn & Pest Control', false],
     ['Lawn Pest Knockdown + Quarterly Pest Control', false],
+    ['Lawn Care Visit #4 + Palmetto Bug Treatment', false],
+    ['Lawn Care Visit + Tree & Shrub Care', true],
+    ['Lawn Care + Fire Ant Treatment', true],
+    ['Lawn & Spider Control', false],
+    ['Lawn Care and Ant Control', false],
+    ['+', false],
     ['Lawn Care Visit #4 + Quarterly Pest Control', false],
     ['Seasonal Mosquito Control Service', false],
     ['Mosquito Barrier Treatment', false],

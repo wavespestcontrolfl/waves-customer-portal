@@ -12,6 +12,11 @@ const CANONICAL_COUNTY_KEYS = new Map(
   ['Manatee', 'Sarasota', 'Charlotte', 'Lee', 'Collier', 'DeSoto'].map((county) => [county.toLowerCase(), county]),
 );
 
+// isGroundsTreatment's vocabulary: lawn and landscape work, and the building
+// pest work (or mosquito work) that keeps a service taxable.
+const GROUNDS_TERMS = /\b(?:lawns?|turf|sod|trees?|shrubs?|palms?|weeds?|fertili[sz]\w*|pre-?emergent|fire\s?ants?|dethatch\w*|top-?dress\w*|plugging|aerat\w*)\b/i;
+const BUILDING_PEST_TERMS = /\b(?:pests?|termites?|rodents?|rats?|mice|mouse|(?:cock)?roach(?:es)?|palmetto|bed\s?bugs?|fleas?|ticks?|bees?|wasps?|hornets?|ants?|spiders?|silverfish|scorpions?|crickets?|wdo|mosquito(?:es)?|misting)\b/i;
+
 const TaxCalculator = {
 
   /**
@@ -183,18 +188,19 @@ const TaxCalculator = {
   /**
    * A lawn or landscape treatment: the name names a lawn, turf, sod, trees,
    * shrubs, palms, weeds, fertilizer, pre-emergent or fire ants, or
-   * dethatching, topdressing, plugging or aeration. A name that also names
-   * building pest work (pests, termites, rodents, roaches, bed bugs, fleas,
-   * bees, wasps, a WDO inspection) or mosquitoes is left to the normal rules,
-   * so a combined visit keeps its tax. "Lawn pest" (turf insects, as in Lawn
-   * Pest Knockdown) is lawn work, not building pest work. Underscores count as
-   * spaces, so a service key reads like its name.
+   * dethatching, topdressing, plugging or aeration. A combined visit ("A + B")
+   * qualifies only when every part does, and a part that also names building
+   * pest work or mosquitoes is left to the normal rules, so a combined visit
+   * keeps its tax. "Lawn pest" (turf insects, as in Lawn Pest Knockdown) and
+   * fire ants are lawn work. Underscores count as spaces, so a service key
+   * reads like its name.
    */
   isGroundsTreatment(serviceType) {
     const name = String(serviceType || '').replace(/_/g, ' ');
-    const rest = name.replace(/\b(?:lawn|turf)\s+pests?\b/gi, 'lawn');
-    return /\b(?:lawns?|turf|sod|trees?|shrubs?|palms?|weeds?|fertili[sz]\w*|pre-?emergent|fire\s?ants?|dethatch\w*|top-?dress\w*|plugging|aerat\w*)\b/i.test(name)
-      && !/\b(?:pests?|termites?|rodents?|(?:cock)?roach(?:es)?|bed\s?bugs?|fleas?|bees?|wasps?|wdo|mosquito(?:es)?|misting)\b/i.test(rest);
+    return name.split('+').every((part) => {
+      const rest = part.replace(/\b(?:lawn|turf)\s+pests?\b/gi, 'lawn').replace(/\bfire\s?ants?\b/gi, 'fireant');
+      return GROUNDS_TERMS.test(part) && !BUILDING_PEST_TERMS.test(rest);
+    });
   },
 
   /**
