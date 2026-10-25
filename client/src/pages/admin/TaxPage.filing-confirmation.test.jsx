@@ -9,8 +9,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { FilingCalendarTab } from './TaxPage.jsx';
 
 const filings = [
-  { id: 'f-open', filingType: 'payroll_941', title: 'Form 941 — Q1 2099', periodLabel: 'Q1 2099', dueDate: '2099-04-30', status: 'upcoming', amountDue: 120.5, amountPaid: null, filedDate: null, paidDate: null, confirmationNumber: null, notes: null },
-  { id: 'f-done', filingType: 'payroll_941', title: 'Form 941 — Q4 2098', periodLabel: 'Q4 2098', dueDate: '2099-01-31', status: 'filed', amountDue: null, amountPaid: null, filedDate: '2099-01-20', paidDate: null, confirmationNumber: 'EFT-998877', notes: null },
+  { id: 'f-open', filingType: 'payroll_941', title: 'Form 941 — Q1 2099', periodLabel: 'Q1 2099', dueDate: '2099-04-30', status: 'upcoming', amountDue: 120.5, amountPaid: null, filedDate: null, paidDate: null, confirmationNumber: null, notes: 'Pay on EFTPS by 8 PM ET the day before the due date.' },
+  { id: 'f-done', filingType: 'payroll_941', title: 'Form 941 — Q4 2098', periodLabel: 'Q4 2098', dueDate: '2099-01-31', status: 'filed', amountDue: null, amountPaid: null, filedDate: '2099-01-20', paidDate: null, confirmationNumber: 'EFT-998877', notes: 'A pay run changed after this was marked done.' },
 ];
 let puts;
 
@@ -36,6 +36,12 @@ const markFiled = async () => {
 it('shows the confirmation number on a completed row', async () => {
   render(<FilingCalendarTab />);
   await waitFor(() => expect(screen.getByText('Conf. EFT-998877')).toBeInTheDocument());
+});
+
+it('shows the notes on both the upcoming and the completed cards', async () => {
+  render(<FilingCalendarTab />);
+  await waitFor(() => expect(screen.getByText('Pay on EFTPS by 8 PM ET the day before the due date.')).toBeInTheDocument());
+  expect(screen.getByText('A pay run changed after this was marked done.')).toBeInTheDocument();
 });
 
 it('sends the trimmed confirmation number when marking filed', async () => {

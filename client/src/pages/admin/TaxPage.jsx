@@ -1940,6 +1940,18 @@ export function FilingCalendarTab() {
                 </Select>
               </Field>{" "}
             </div>{" "}
+            {f.notes && (
+              <div
+                style={{
+                  fontSize: 14,
+                  color: "#71717A",
+                  marginTop: 6,
+                  overflowWrap: "anywhere",
+                }}
+              >
+                {f.notes}
+              </div>
+            )}
           </Card>
         );
       })}
@@ -1965,6 +1977,7 @@ export function FilingCalendarTab() {
               key={f.id}
               style={{
                 display: "flex",
+                flexWrap: "wrap",
                 alignItems: "center",
                 gap: 10,
                 padding: "8px 12px",
@@ -2020,6 +2033,18 @@ export function FilingCalendarTab() {
                 >
                   Conf. {f.confirmationNumber}
                 </span>
+              )}
+              {f.notes && (
+                <div
+                  style={{
+                    fontSize: 14,
+                    color: "#71717A",
+                    flexBasis: "100%",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {f.notes}
+                </div>
               )}
             </Card>
           ))}

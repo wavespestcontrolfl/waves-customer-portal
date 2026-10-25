@@ -31,7 +31,14 @@
  * A row that carries an amount and was marked done is a payment on record. If
  * a pay run later changes the liability above what the marked rows cover, a
  * new 'upcoming' balance row (key '<row>:balance:<n>') holds the difference.
+ * Every row built from checks stores source_digest, a hash of exactly those
+ * checks. If a Form 941, RT-6, 940 or W-2/W-3 row was marked done and its
+ * checks have since changed (a void and replacement), a review row (key
+ * '<row>:review:<digest prefix>') asks the owner to check the figures; marking
+ * it done stores the current digest and ends the ask. A marked row with no
+ * digest (not written by this sync) never gets a review row.
  */
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { payrollTaxCalendarLive } = require('../config/feature-gates');
@@ -43,6 +50,11 @@ const NEW_HIRE_DAYS = 20;
 // A FUTA deposit is due once the year's running total passes $500.00.
 const FUTA_ALERT_THRESHOLD_CENTS = 50000;
 const BALANCE_SEPARATOR = ':balance:';
+const REVIEW_SEPARATOR = ':review:';
+// Filings whose figures come from the checks but carry no amount of their own.
+// If the checks behind one change after it was marked done, a review row asks
+// the owner to look. A deposit is money only, so it never gets a review row.
+const REVIEW_TYPES = new Set(['payroll_941', 'payroll_rt6', 'payroll_940', 'payroll_w2']);
 const SOURCE_PREFIX = 'payroll:';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -155,6 +167,18 @@ const TAX_COLUMNS = [
   'federal_income_tax_cents', 'social_security_cents', 'medicare_cents',
   'additional_medicare_cents', 'employer_social_security_cents', 'employer_medicare_cents',
 ];
+// Every money column of payroll_checks; the digest covers all of them.
+const DIGEST_COLUMNS = [
+  'gross_cents', 'regular_pay_cents', 'overtime_pay_cents', 'overtime_premium_cents',
+  ...TAX_COLUMNS, 'net_cents', 'futa_cents', 'fl_reemployment_cents', 'ytd_gross_before_cents',
+];
+// sha256 (first 32 hex) of the sorted [id, pay_date, money columns] list.
+function digestOf(checks) {
+  const list = checks
+    .map((check) => [String(check.id ?? ''), String(check.pay_date).slice(0, 10), ...DIGEST_COLUMNS.map((col) => num(check[col]))])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return crypto.createHash('sha256').update(JSON.stringify(list)).digest('hex').slice(0, 32);
+}
 const taxCents = (check) => TAX_COLUMNS.reduce((sum, col) => sum + num(check[col]), 0);
 
 // Totals by month, quarter and year, keyed from the pay date.
@@ -163,7 +187,8 @@ function totalsOf(checks) {
   const quarters = new Map();
   const years = new Map();
   const bump = (map, key, check, extra) => {
-    const t = map.get(key) || { tax: 0, futa: 0, reemployment: 0 };
+    const t = map.get(key) || { tax: 0, futa: 0, reemployment: 0, checks: [] };
+    t.checks.push(check);
     t.tax += taxCents(check);
     t.futa += num(check.futa_cents);
     t.reemployment += num(check.fl_reemployment_cents);
@@ -191,6 +216,7 @@ function depositRow(t) {
     period_label: label,
     due_date: rollIrs(nextMonthDay(t.year, t.month, 15)),
     amount_due: dollars(t.tax),
+    source_digest: digestOf(t.checks),
     notes: 'Pay on EFTPS by 8 PM ET the day before the due date (or IRS Direct Pay). Withheld federal income tax plus both halves of Social Security and Medicare.',
   };
 }
@@ -198,12 +224,14 @@ function depositRow(t) {
 // b. and c. Form 941 and Florida RT-6 for one quarter (t has no checks: zeros).
 function quarterRows(year, q, t) {
   const label = quarterLabel(year, q);
+  const source_digest = digestOf(t.checks);
   return [{
     source_key: `${SOURCE_PREFIX}941:${quarterKey(year, q)}`,
     filing_type: 'payroll_941',
     title: `Form 941 — ${label}`,
     period_label: label,
     due_date: rollIrs(afterQuarterDue(year, q)),
+    source_digest,
     notes: `Total tax for the quarter: $${dollars(t.tax)}. The monthly deposit rows hold the payments. File by mail or e-file.`,
   }, {
     source_key: `${SOURCE_PREFIX}rt6:${quarterKey(year, q)}`,
@@ -212,6 +240,7 @@ function quarterRows(year, q, t) {
     period_label: label,
     due_date: rollFlorida(afterQuarterDue(year, q)),
     amount_due: dollars(t.reemployment),
+    source_digest,
     notes: 'File and pay on the Florida Department of Revenue site. E-pay by 5 PM ET on the business day before the due date. File even with no wages.',
   }];
 }
@@ -262,6 +291,7 @@ function yearRows(year, yearTotals, quarters) {
     period_label: `Tax Year ${year}`,
     due_date: jan31,
     amount_due: dollars(yearTotals.futa),
+    source_digest: digestOf(yearTotals.checks),
     notes: `FUTA for the year: $${dollars(yearTotals.futa)}. Deposits already made reduce what is paid with the return. File by mail or e-file.`,
   }, {
     source_key: `${SOURCE_PREFIX}w2:${year}`,
@@ -269,6 +299,7 @@ function yearRows(year, yearTotals, quarters) {
     title: `W-2 and W-3 — Tax Year ${year}`,
     period_label: `Tax Year ${year}`,
     due_date: jan31,
+    source_digest: digestOf(yearTotals.checks),
     notes: 'File W-2s and the W-3 on SSA Business Services Online; give each employee a W-2 by the same date.',
   });
   return rows;
@@ -299,7 +330,7 @@ function payrollObligations({ checks = [], hires = [], today }) {
   const rows = [...months.values()].map(depositRow);
   if (quarters.size) {
     for (const [year, q] of quarterSpan(quarters, today)) {
-      rows.push(...quarterRows(year, q, quarters.get(quarterKey(year, q)) || { tax: 0, reemployment: 0 }));
+      rows.push(...quarterRows(year, q, quarters.get(quarterKey(year, q)) || { tax: 0, reemployment: 0, checks: [] }));
     }
   }
   for (const [year, t] of years) rows.push(...yearRows(Number(year), t, quarters));
@@ -308,7 +339,7 @@ function payrollObligations({ checks = [], hires = [], today }) {
     if (row) rows.push(row);
   }
   return rows
-    .map((row) => ({ amount_due: null, ...row }))
+    .map((row) => ({ amount_due: null, source_digest: null, ...row }))
     .sort((a, b) => a.due_date.localeCompare(b.due_date) || a.source_key.localeCompare(b.source_key));
 }
 
@@ -324,11 +355,15 @@ const toCents = (v) => Math.round(Number(v) * 100) || 0;
  *   - Marked rows and an amount: what the marked rows cover (amount_paid, else
  *     amount_due) comes off the liability. A positive rest becomes a balance
  *     row '<base>:balance:<count of marked rows>'; otherwise nothing.
+ *   - A filing in REVIEW_TYPES with marked rows, none of them holding the
+ *     current source_digest, and at least one holding some digest: a review
+ *     row '<base>:review:<first 12 of the digest>' (no amount).
+ * Both can apply to one duty (RT-6, Form 940).
  */
 function withBalances(obligations, markedRows) {
   const marked = new Map();
   for (const row of markedRows) {
-    const duty = String(row.source_key).split(BALANCE_SEPARATOR)[0];
+    const duty = String(row.source_key).split(BALANCE_SEPARATOR)[0].split(REVIEW_SEPARATOR)[0];
     if (!marked.has(duty)) marked.set(duty, []);
     marked.get(duty).push(row);
   }
@@ -336,6 +371,17 @@ function withBalances(obligations, markedRows) {
   for (const ob of obligations) {
     const done = marked.get(ob.source_key);
     if (!done) { wanted.push(ob); continue; }
+    if (REVIEW_TYPES.has(ob.filing_type) && ob.source_digest
+      && !done.some((row) => row.source_digest === ob.source_digest)
+      && done.some((row) => row.source_digest)) {
+      wanted.push({
+        ...ob,
+        source_key: `${ob.source_key}${REVIEW_SEPARATOR}${ob.source_digest.slice(0, 12)}`,
+        title: `${ob.title} — figures changed after it was marked done`,
+        amount_due: null,
+        notes: 'A pay run changed after this was marked done. Check the figures; a corrected return may be needed (941-X, RT-8A, amended 940 or W-2c).',
+      });
+    }
     if (ob.amount_due === null || ob.amount_due === undefined) continue;
     const covered = done.reduce((sum, row) => sum + toCents(row.amount_paid ?? row.amount_due ?? 0), 0);
     const rest = toCents(ob.amount_due) - covered;
@@ -351,7 +397,7 @@ function withBalances(obligations, markedRows) {
   return wanted;
 }
 
-const CHANGED_FIELDS = ['title', 'period_label', 'due_date', 'amount_due', 'notes'];
+const CHANGED_FIELDS = ['title', 'period_label', 'due_date', 'amount_due', 'notes', 'source_digest'];
 const normalizeAmount = (v) => (v === null || v === undefined ? null : Number(v).toFixed(2));
 
 /**
@@ -364,8 +410,7 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
   return conn.transaction(async (trx) => {
     await trx.raw("SELECT pg_advisory_xact_lock(hashtext('payroll-tax-calendar'))");
     const checks = await trx('payroll_checks').where({ status: 'finalized' }).select(
-      trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"),
-      ...TAX_COLUMNS, 'futa_cents', 'fl_reemployment_cents',
+      'id', trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"), ...DIGEST_COLUMNS,
     );
     const hires = await trx('technicians')
       .where({ employment_type: 'w2' })
@@ -375,7 +420,7 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
       .select('id', 'name', 'employment_type', 'employment_status', trx.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"));
     const existing = await trx('tax_filing_calendar')
       .where('source_key', 'like', `${SOURCE_PREFIX}%`)
-      .select('id', 'source_key', 'status', 'title', 'period_label', 'amount_due', 'amount_paid', 'notes',
+      .select('id', 'source_key', 'status', 'title', 'period_label', 'amount_due', 'amount_paid', 'notes', 'source_digest',
         trx.raw("to_char(due_date, 'YYYY-MM-DD') AS due_date"));
     const obligations = withBalances(
       payrollObligations({ checks, hires, today }),
@@ -390,7 +435,7 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
         await trx('tax_filing_calendar').insert({
           filing_type: ob.filing_type, title: ob.title, period_label: ob.period_label,
           due_date: ob.due_date, status: 'upcoming', amount_due: ob.amount_due,
-          notes: ob.notes, source_key: ob.source_key,
+          notes: ob.notes, source_key: ob.source_key, source_digest: ob.source_digest,
         });
         result.inserted += 1;
         continue;
@@ -405,7 +450,7 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
       // owner marked filed or paid after the read must be left alone.
       result.updated += await trx('tax_filing_calendar').where({ id: row.id, status: 'upcoming' }).update({
         title: ob.title, period_label: ob.period_label, due_date: ob.due_date,
-        amount_due: ob.amount_due, notes: ob.notes, updated_at: trx.fn.now(),
+        amount_due: ob.amount_due, notes: ob.notes, source_digest: ob.source_digest, updated_at: trx.fn.now(),
       });
     }
 

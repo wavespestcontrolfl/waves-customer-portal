@@ -7,7 +7,9 @@ const {
   NEW_HIRE_FLOOR, legalHolidaysIrs, legalHolidaysFlorida, rollIrs, rollFlorida, payrollObligations, withBalances,
 } = require('../services/payroll-tax-calendar');
 
+let nextId = 0;
 const check = (payDate, patch = {}) => ({
+  id: `check-${nextId += 1}`,
   pay_date: payDate,
   federal_income_tax_cents: 10000,
   social_security_cents: 6200,
@@ -228,5 +230,90 @@ describe('withBalances', () => {
   test('an unrelated marked row does not hide another duty', () => {
     const feb = { ...deposit('300.00'), source_key: 'payroll:941_deposit:2027-02' };
     expect(withBalances([feb], [marked(BASE, { amount_paid: '600.00' })])).toEqual([feb]);
+  });
+});
+
+describe('source digest and review rows', () => {
+  const Q1_941 = 'payroll:941:2027-Q1';
+  const obsFor = (checks) => byKey(payrollObligations({ checks, hires: [], today: '2027-03-01' }));
+  const first = [check('2027-01-08'), check('2027-02-05')];
+  const marked = (key, source_digest, patch = {}) => ({ source_key: key, source_digest, amount_paid: null, amount_due: null, ...patch });
+  const reviewsOf = (rows) => rows.filter((r) => r.source_key.includes(':review:'));
+
+  test('rows built from checks carry a digest of exactly those checks; hire and alert rows carry none', () => {
+    const a = obsFor(first);
+    expect(a[Q1_941].source_digest).toMatch(/^[0-9a-f]{32}$/);
+    expect(a[Q1_941].source_digest).toBe(a['payroll:rt6:2027-Q1'].source_digest);
+    expect(a['payroll:941_deposit:2027-01'].source_digest).not.toBe(a['payroll:941_deposit:2027-02'].source_digest);
+    expect(a['payroll:w2:2027'].source_digest).toBe(a['payroll:940:2027'].source_digest);
+    expect(obsFor([...first].reverse())[Q1_941].source_digest).toBe(a[Q1_941].source_digest);
+    const hire = payrollObligations({
+      checks: [], today: '2026-11-01', hires: [{ id: 't1', name: 'Sample Employee', employment_type: 'w2', hire_date: '2026-11-01' }],
+    });
+    expect(hire[0].source_digest).toBeNull();
+    const alert = payrollObligations({ checks: [check('2027-01-08', { futa_cents: 60000 })], hires: [], today: '2027-03-01' })
+      .find((r) => r.filing_type === 'payroll_futa_alert');
+    expect(alert.source_digest).toBeNull();
+  });
+
+  test('the same figures on a replacement check (new id) or a changed figure change the digest', () => {
+    const base = obsFor(first)[Q1_941].source_digest;
+    expect(obsFor([check('2027-01-08'), first[1]])[Q1_941].source_digest).not.toBe(base);
+    expect(obsFor([{ ...first[0], gross_cents: 1 }, first[1]])[Q1_941].source_digest).not.toBe(base);
+  });
+
+  test('a marked 941 with changed checks gets one review row; unchanged checks get none', () => {
+    const old = obsFor(first)[Q1_941];
+    const now = payrollObligations({ checks: [check('2027-01-08'), first[1]], hires: [], today: '2027-03-01' });
+    const rows = withBalances(now, [marked(Q1_941, old.source_digest, { status: 'filed' })]);
+    const reviews = reviewsOf(rows);
+    expect(reviews).toHaveLength(1);
+    const current = now.find((r) => r.source_key === Q1_941).source_digest;
+    expect(reviews[0]).toMatchObject({
+      source_key: `${Q1_941}:review:${current.slice(0, 12)}`,
+      filing_type: 'payroll_941',
+      period_label: 'Q1 2027',
+      title: 'Form 941 — Q1 2027 — figures changed after it was marked done',
+      amount_due: null,
+      source_digest: current,
+    });
+    expect(reviews[0].notes).toContain('941-X, RT-8A, amended 940 or W-2c');
+    const same = payrollObligations({ checks: first, hires: [], today: '2027-03-01' });
+    expect(reviewsOf(withBalances(same, [marked(Q1_941, old.source_digest)]))).toEqual([]);
+  });
+
+  test('a marked review row holding the current digest ends the ask; a second change makes a new key', () => {
+    const v1 = obsFor(first)[Q1_941].source_digest;
+    const secondChecks = [check('2027-01-08'), first[1]];
+    const v2 = obsFor(secondChecks)[Q1_941];
+    const done = [marked(Q1_941, v1), marked(`${Q1_941}:review:${v2.source_digest.slice(0, 12)}`, v2.source_digest)];
+    const now2 = payrollObligations({ checks: secondChecks, hires: [], today: '2027-03-01' });
+    expect(reviewsOf(withBalances(now2, done))).toEqual([]);
+    const now3 = payrollObligations({ checks: [check('2027-01-08'), secondChecks[1]], hires: [], today: '2027-03-01' });
+    const reviews = reviewsOf(withBalances(now3, done));
+    expect(reviews).toHaveLength(1);
+    const v3 = now3.find((r) => r.source_key === Q1_941).source_digest;
+    expect(reviews[0].source_key).toBe(`${Q1_941}:review:${v3.slice(0, 12)}`);
+    expect(reviews[0].source_key).not.toContain(v2.source_digest.slice(0, 12));
+  });
+
+  test('a marked row with no digest (not written by this sync) gets no review row', () => {
+    const now = payrollObligations({ checks: first, hires: [], today: '2027-03-01' });
+    expect(reviewsOf(withBalances(now, [marked(Q1_941, null)]))).toEqual([]);
+  });
+
+  test('a deposit is money only: a changed digest with the same amount adds no row', () => {
+    const key = 'payroll:941_deposit:2027-01';
+    const now = payrollObligations({ checks: [check('2027-01-08')], hires: [], today: '2027-01-20' });
+    const dep = now.find((r) => r.source_key === key);
+    expect(withBalances(now, [marked(key, 'old-digest', { amount_paid: dep.amount_due })]).filter((r) => r.source_key.startsWith(key))).toEqual([]);
+  });
+
+  test('RT-6 and Form 940 can get a balance row and a review row together', () => {
+    const now = payrollObligations({ checks: [check('2027-01-08', { fl_reemployment_cents: 5000 })], hires: [], today: '2027-03-01' });
+    const rows = withBalances(now, [marked('payroll:rt6:2027-Q1', 'old-digest', { amount_paid: '1.00', amount_due: '1.00' })]);
+    const keys = rows.map((r) => r.source_key).filter((k) => k.startsWith('payroll:rt6:2027-Q1'));
+    expect(keys.some((k) => k.includes(':review:'))).toBe(true);
+    expect(keys).toContain('payroll:rt6:2027-Q1:balance:1');
   });
 });

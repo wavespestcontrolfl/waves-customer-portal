@@ -237,6 +237,30 @@ postgres('payroll tax calendar sync', () => {
     });
   });
 
+  it('asks for a review when the checks behind a filed Form 941 change, and only once', async () => {
+    const KEY = 'payroll:941:2027-Q1';
+    const first = await finalCheck(W1, '2027-01-15');
+    await sync();
+    const before = await rowFor(KEY);
+    expect(before.source_digest).toMatch(/^[0-9a-f]{32}$/);
+    await trx('tax_filing_calendar').where({ source_key: KEY }).update({ status: 'filed', filed_date: '2027-04-20' });
+    await trx('payroll_checks').where({ id: first.checkId }).update({ status: 'voided' });
+    await trx('payroll_runs').where({ id: first.runId }).update({ status: 'voided' });
+    await finalCheck(W1, '2027-01-15'); // same figures, a new check
+    await sync();
+    const rows = await trx('tax_filing_calendar').where('source_key', 'like', `${KEY}%`).orderBy('source_key');
+    expect(rows.map((r) => [r.status, r.amount_due])).toEqual([['filed', null], ['upcoming', null]]);
+    expect(rows[0]).toMatchObject({ source_key: KEY, source_digest: before.source_digest });
+    expect(rows[1].source_key).toBe(`${KEY}:review:${rows[1].source_digest.slice(0, 12)}`);
+    expect(rows[1].source_digest).not.toBe(before.source_digest);
+    expect(rows[1].title).toBe('Form 941 — Q1 2027 — figures changed after it was marked done');
+    expect(await sync()).toEqual({ inserted: 0, updated: 0, deleted: 0 });
+    // The owner marks the review row done: it stops asking.
+    await trx('tax_filing_calendar').where({ id: rows[1].id }).update({ status: 'filed', filed_date: '2027-04-25' });
+    expect(await sync()).toEqual({ inserted: 0, updated: 0, deleted: 0 });
+    expect(await trx('tax_filing_calendar').where('source_key', 'like', `${KEY}%`)).toHaveLength(2);
+  });
+
   it('writes one FUTA alert row when the year passes $500, and no FUTA deposit rows', async () => {
     await finalCheck(W1, '2027-01-15', { futa_cents: 30000 });
     await finalCheck(W2, '2027-01-22', { futa_cents: 30000 });
