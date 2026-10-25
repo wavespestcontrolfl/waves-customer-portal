@@ -54,6 +54,7 @@
  *   GATE_NEIGHBORHOOD_ADDRESS_LOOKUP=true (when a home's stored pin sits on another lot, the neighborhood naming asks the county roll for the home's own address and links it only when the lots at that house number, full street and ZIP all name one community; also reads a '#201' unit tail as a unit; read at call time via neighborhoodAddressLookupLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_NAMING is live; off = the pin-only match as before. No message, no bell.)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
  *   GATE_HIRED_PACKET=true (owner ruling 2026-10-25, D7: the "Hired" button on the Staff page. On a prospective placeholder row an admin enters the hire's name, email, first day and pay, and one click makes the row an active staff account and emails the hire a set-password link (works 7 days) with a pointer to the Onboarding card. A "Resend link" action appears while the hire has not set a password yet. It never changes a customer; it sends ONE staff email per click. Strict opt-in: exactly 'true' in every environment, read at call time via hiredPacketLive(). Ships DARK; off = no button, both endpoints answer 404 before any database work and the Staff list is unchanged. The manual steps (rename, email, Active, Forgot password) still work.)
+ *   GATE_STAFF_DOC_PREFILL=true (owner ruling 2026-10-25: a NEW staff form record opens with fields filled from the staff record, for the Vehicle Use & Commuting Agreement: assigned vehicle, home address and start date from the technicians row. The signer checks each value and saves; a typed value always wins. Never a checkbox, never a typed signature. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffDocPrefillLive(). Ships DARK; off = GET /versions/:id/prefill answers 404 { enabled: false } before any query and the form opens empty. Reads only; sends nothing to anyone.)
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer.)
  *   GATE_TRUCK_CLOCK_IN=shadow (owner 2026-10-25, "this works": the rule is that a technician's shift starts by itself from the truck's GPS; THIS RELEASE ONLY RECORDS what that rule would do. The first of two triggers each Eastern work day wins: the truck's first GPS arrival at one of that technician's visits, or the start of the truck's first trip of the day (no earlier trip-start of a different trip for that truck in bouncie_webhook_log that Eastern day) within 200 m of the office. It notes whether the technician has no active shift and has a completed Vehicle Use & Commuting Agreement. Training days stay by hand (a trainee rides in the trainer's truck). Read at call time via truckClockInMode(): exactly 'shadow' (trimmed, any case) = decide and record one truck_clock_in_shadow row a day, never write time_entries; anything else, including 'true', = off, no code path runs. 'true' is not a value yet: live clock-in is a separate later change. Clock-out, the 9 PM reminder and the 11 PM close are unchanged. Sends nothing to a customer or staff member.)
@@ -4404,6 +4405,9 @@ const gates = {
   // reads at call time via hiredPacketLive(). Emails one staff member a
   // set-password link per click. Kill switch: unset.
   hiredPacket: gateEnvValue('GATE_HIRED_PACKET'),
+  // Staff form prefill from the staff record (owner 2026-10-25). Default off; reads at
+  // call time via staffDocPrefillLive(). Reads only; sends nothing.
+  staffDocPrefill: gateEnvValue('GATE_STAFF_DOC_PREFILL'),
   // Field Team Program rev 2b: evidence and simulation only; never payroll.
   fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
   // Auto lunch (owner 2026-10-25): paid hours drop the unpaid meal. A completed
@@ -5717,6 +5721,12 @@ function ibStaffAutopayOffLive() {
 // Each click emails ONE staff member a set-password link, never a customer.
 function hiredPacketLive() {
   return process.env.GATE_HIRED_PACKET === 'true';
+}
+
+// Staff form prefill (routes/tech-staff-documents.js GET /versions/:id/prefill), read at
+// CALL time. Strict `=== 'true'`, dark in every environment. Reads only.
+function staffDocPrefillLive() {
+  return process.env.GATE_STAFF_DOC_PREFILL === 'true';
 }
 
 // Intelligence Bar accept_estimate (services/intelligence-bar/estimate-accept-tools.js),
@@ -7755,6 +7765,8 @@ module.exports.contactLoginLive = contactLoginLive;
 module.exports.ibStaffAutopayOffLive = ibStaffAutopayOffLive;
 // GATE_HIRED_PACKET reader, on its own line.
 module.exports.hiredPacketLive = hiredPacketLive;
+// GATE_STAFF_DOC_PREFILL reader, on its own line.
+module.exports.staffDocPrefillLive = staffDocPrefillLive;
 // GATE_IB_ACCEPT_ESTIMATE reader, on its own line.
 module.exports.ibAcceptEstimateLive = ibAcceptEstimateLive;
 // GATE_IB_RECORD_PAYMENT reader, on its own line.
