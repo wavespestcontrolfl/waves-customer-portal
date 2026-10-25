@@ -2599,6 +2599,9 @@ const EMPTY_TECH_FORM = {
   // Field eligibility is separate from employment: an office admin stays
   // active without ever appearing as a dispatch target.
   fieldDispatchable: false,
+  // GATE_TECH_MOVE_SWITCH: a technician added now cannot move visits until the
+  // owner ticks this (owner 2026-10-25).
+  canMoveVisits: false,
   autoFlipEnabled: true,
   // Payroll profile
   payRate: "",
@@ -2809,6 +2812,9 @@ export function TeamTab({ showToast }) {
       employmentStatus: tech.employment_status || (tech.active ? "active" : "inactive"),
       twilioNumber: tech.twilio_number || "",
       fieldDispatchable: tech.field_dispatchable === true,
+      // Unknown (an older response without the column) stays unsent, so an
+      // ordinary edit can never switch moves off by accident.
+      canMoveVisits: typeof tech.can_move_visits === "boolean" ? tech.can_move_visits : undefined,
       autoFlipEnabled: tech.auto_flip_enabled !== false, // default true if undefined
       payRate: tech.pay_rate != null ? String(tech.pay_rate) : "",
       hireDate: tech.hire_date ? String(tech.hire_date).split("T")[0] : "",
@@ -3082,6 +3088,33 @@ export function TeamTab({ showToast }) {
             </span>{" "}
             <span style={{ fontSize: 11, color: D.muted }}>
               (off: never offered as a booking slot or a dispatch target)
+            </span>{" "}
+          </label>
+          {/* GATE_TECH_MOVE_SWITCH (owner 2026-10-25): may this person move
+              their visits (Quick Move, Reschedule)? Admins always can. */}
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginBottom: 12,
+              cursor: "pointer",
+            }}
+          >
+            {" "}
+            <input
+              type="checkbox"
+              checked={form.canMoveVisits === true}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, canMoveVisits: e.target.checked }))
+              }
+              style={{ width: 14, height: 14, cursor: "pointer" }}
+            />{" "}
+            <span style={{ fontSize: 12, color: D.heading }}>
+              Can move visits
+            </span>{" "}
+            <span style={{ fontSize: 11, color: D.muted }}>
+              (off: Quick Move and Reschedule say to ask the office)
             </span>{" "}
           </label>
           {/* Auto-flip opt-out (Phase 2E). Default ON. When OFF, the

@@ -86,6 +86,8 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'bouncie_imei', 'bouncie_vin', 'vehicle_name',
   // Start-of-day point (home address is staff PII: admin-only, never logged).
   'start_address', 'start_lat', 'start_lng',
+  // Team tab "Can move visits" switch (GATE_TECH_MOVE_SWITCH).
+  'can_move_visits',
 ];
 
 function pickTechResponseFields(tech, fields) {
@@ -828,7 +830,7 @@ function uniqueViolationBody(err) {
 async function createTechnician(req, res, next) {
   try {
     const body = req.body || {};
-    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable } = body;
+    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable, canMoveVisits } = body;
     if (typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Name is required' });
     }
@@ -841,6 +843,9 @@ async function createTechnician(req, res, next) {
     }
     if (fieldDispatchable !== undefined && typeof fieldDispatchable !== 'boolean') {
       return res.status(400).json({ error: 'fieldDispatchable must be a boolean' });
+    }
+    if (canMoveVisits !== undefined && typeof canMoveVisits !== 'boolean') {
+      return res.status(400).json({ error: 'canMoveVisits must be a boolean' });
     }
     const normalizedEmail = normalizeTechnicianEmail(email);
     if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
@@ -862,6 +867,9 @@ async function createTechnician(req, res, next) {
       // Field eligibility is granted deliberately on the Team tab, never by
       // the row existing (Field Team Program: assignment ≠ employment).
       field_dispatchable: fieldDispatchable === true,
+      // A technician added now starts unable to move visits (the column default)
+      // unless the owner ticks the switch in the add form.
+      can_move_visits: canMoveVisits === true,
     };
     // Honor the create-form's auto-flip checkbox. Without this, an
     // operator unchecking "Auto-flip enabled" during creation would
@@ -908,7 +916,7 @@ router.post('/technicians', requireAdmin, createTechnician);
 async function updateTechnician(req, res, next) {
   try {
     const body = req.body || {};
-    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable } = body;
+    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable, canMoveVisits } = body;
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
       return res.status(400).json({ error: 'Name cannot be empty' });
     }
@@ -920,6 +928,9 @@ async function updateTechnician(req, res, next) {
     }
     if (fieldDispatchable !== undefined && typeof fieldDispatchable !== 'boolean') {
       return res.status(400).json({ error: 'fieldDispatchable must be a boolean' });
+    }
+    if (canMoveVisits !== undefined && typeof canMoveVisits !== 'boolean') {
+      return res.status(400).json({ error: 'canMoveVisits must be a boolean' });
     }
     // Legacy `active` boolean input maps onto employment status; an explicit
     // employmentStatus wins when both are sent.
@@ -981,6 +992,7 @@ async function updateTechnician(req, res, next) {
       if (email !== undefined) updates.email = normalizedEmail.value;
       if (requestedStatus !== undefined) Object.assign(updates, employmentPatch(requestedStatus));
       if (fieldDispatchable !== undefined) updates.field_dispatchable = fieldDispatchable;
+      if (canMoveVisits !== undefined) updates.can_move_visits = canMoveVisits;
       Object.assign(updates, techLine.patch);
       Object.assign(updates, startPoint.patch);
 

@@ -3938,6 +3938,17 @@ const gates = {
   // unset — every route starts and ends at the office, as before.
   techStartPoints: gateEnvValue('GATE_TECH_START_POINTS'),
 
+  // Technician "can move visits" switch (owner 2026-10-25, the way ServiceTitan
+  // gates technician rescheduling): on, a non-admin technician whose Team tab
+  // switch (technicians.can_move_visits) is off cannot move a visit: Quick Move
+  // in the tech app and Quick Move / Reschedule from the dispatch routes answer
+  // "Ask the office to move this visit." Every technician on file when the
+  // column landed keeps moves on; a technician added later starts off. Admins
+  // are never refused. OFF in every environment; read through gateEnvValue()
+  // at call time (scheduling/tech-move-permission.js). Kill switch: unset —
+  // every technician can move their own visits, as before.
+  techMoveSwitch: gateEnvValue('GATE_TECH_MOVE_SWITCH'),
+
   // Customer rain rank (owner 2026-10-08): the same rain-fit rule on the
   // customer booking surfaces. buildBookingAvailability (routes/booking.js:
   // /book, the inspection link, public reschedule) ranks its recommended

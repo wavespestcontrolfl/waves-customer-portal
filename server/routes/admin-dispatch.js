@@ -22,6 +22,7 @@ const crypto = require('crypto');
 const NO_SHOW_OCCURRENCE_FIELDS = ['scheduled_date', 'window_start', 'window_end', 'service_type', 'service_id', 'property_id'];
 const router = express.Router();
 const db = require('../models/db');
+const { techMoveRefusal } = require('../services/scheduling/tech-move-permission');
 const { applyAssignable } = require('../services/technician-eligibility');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
@@ -4730,6 +4731,9 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
 // GET /api/admin/dispatch/:serviceId/reschedule-options
 router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
+    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees why.
+    const refusal = await techMoveRefusal(req);
+    if (refusal) return res.status(refusal.status).json(refusal.payload);
     const options = await SmartRebooker.findRescheduleOptions(req.params.serviceId);
     res.json({ options });
   } catch (err) { next(err); }
@@ -4748,6 +4752,12 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
       .where({ id: req.params.serviceId })
       .first('id', 'scheduled_date', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees
+    // why, not move choices the commit would refuse.
+    {
+      const refusal = await techMoveRefusal(req);
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
+    }
 
     // Same stale-tap guard as the tech route: the moved-first rain-out
     // is a same-day "weather is hitting the route now" action. A job
@@ -5328,6 +5338,11 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
         assignedTechnicianId: svc.technician_id,
       });
       if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer.
+    {
+      const refusal = await techMoveRefusal(req);
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
     }
 
     if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
@@ -6574,6 +6589,12 @@ async function runPlannedVisitMove({ plan, serviceId, newDate, reasonCode, reaso
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer. First, so a refused
+    // technician takes no row lock below.
+    {
+      const refusal = await techMoveRefusal(req);
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
+    }
     // Ownership: this route found the anchor visit by bare id with no
     // ownership predicate — a technician token could move any customer's
     // (or a whole recurring plan's) visit (ADMIN-BUG-R35). Admin requests
