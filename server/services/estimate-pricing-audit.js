@@ -55,9 +55,11 @@ const SERVICE_MAP = {
     serviceTypes: ['One-Time Mosquito', 'Mosquito Treatment - Essential Barrier', 'Mosquito Treatment - IGR'],
     areaField: 'lotSqFt',
   },
+  // The registry files Bora-Care under "Bora-Care Treatment" (and the public product page
+  // groups by that label), so the audit reads it rather than renaming the row.
   bora_care: {
     label: 'Bora-Care',
-    serviceTypes: ['Bora-Care', 'Bora Care'],
+    serviceTypes: ['Bora-Care', 'Bora Care', 'Bora-Care Treatment'],
     areaField: 'homeSqFt',
   },
   pre_slab_termidor: {
@@ -100,19 +102,22 @@ const SERVICE_MAP = {
     serviceTypes: ['Stinging Insect', 'Wasp Treatment'],
     areaField: 'homeSqFt',
   },
+  // The registry files roach products under "German Roach Cleanout" and "Cockroach Treatment"
+  // (the public product page groups by those labels); without them the audit costed roach
+  // lines at $0 product.
   german_roach: {
     label: 'German Roach',
-    serviceTypes: ['German Roach', 'Roach Treatment'],
+    serviceTypes: ['German Roach', 'German Roach Cleanout', 'Roach Treatment'],
     areaField: 'homeSqFt',
   },
   german_roach_initial: {
     label: 'German Roach Initial',
-    serviceTypes: ['German Roach', 'Roach Treatment'],
+    serviceTypes: ['German Roach', 'German Roach Cleanout', 'Roach Treatment'],
     areaField: 'homeSqFt',
   },
   pest_initial_roach: {
     label: 'Cockroach Treatment Service',
-    serviceTypes: ['Roach Treatment', 'Pest Control'],
+    serviceTypes: ['Roach Treatment', 'Cockroach Treatment', 'Pest Control'],
     areaField: 'homeSqFt',
   },
 };
