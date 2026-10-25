@@ -908,6 +908,7 @@ app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/colle
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));
+app.use('/api/admin/schedule/new-caller', require('./routes/admin-schedule-new-caller'));
 app.use('/api/admin/schedule', require('./routes/admin-schedule'));
 // Standalone technicians list — used by CreateAppointmentModal and other components.
 // Assignable rows only: the modal's picker feeds the save-time eligibility
