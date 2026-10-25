@@ -112,6 +112,15 @@ const PRE_SLAB_PRODUCT_OPTIONS = [
   { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
 ];
 
+// A saved estimate that still carries bifen_it keeps one matching entry, so the select shows the
+// product the estimate prices (Talak) instead of falling back to the first option.
+const LEGACY_BIFEN_OPTION = { value: "bifen_it", label: "Talak 7.9 F - Bifenthrin, repellent barrier (saved as Bifen I/T)" };
+
+export function termiticideProductOptions(kind, selectedKey) {
+  const options = kind === "trenching" ? TRENCHING_PRODUCT_OPTIONS : PRE_SLAB_PRODUCT_OPTIONS;
+  return selectedKey === "bifen_it" ? [...options, LEGACY_BIFEN_OPTION] : options;
+}
+
 const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
   { value: "standalone", label: "Standalone one-off job" },
   { value: "builderBatch", label: "Builder batch / same site" },
@@ -7277,7 +7286,7 @@ export default function EstimateToolViewV2({
                       <Field label="Trenching Product" id="estimate-trenchingProductKey" className="mb-4">
                         <SelectV2
                           k="trenchingProductKey"
-                          options={TRENCHING_PRODUCT_OPTIONS}
+                          options={termiticideProductOptions("trenching", form.trenchingProductKey)}
                         />
                       </Field>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -7399,7 +7408,7 @@ export default function EstimateToolViewV2({
                       <Field label="Product" id="estimate-preslabProductKey" className="mb-4">
                         <SelectV2
                           k="preslabProductKey"
-                          options={PRE_SLAB_PRODUCT_OPTIONS}
+                          options={termiticideProductOptions("preslab", form.preslabProductKey)}
                         />
                       </Field>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
