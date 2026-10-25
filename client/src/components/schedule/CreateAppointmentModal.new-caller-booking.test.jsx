@@ -228,6 +228,12 @@ describe('CreateAppointmentModal new-caller Book', () => {
     expect(screen.getByText('First visit only')).toBeTruthy();
     expect(screen.queryByLabelText(/Repeats for/)).toBeNull();
     expect(screen.queryByText('Booster months (optional)')).toBeNull();
+    // Series controls Book ignores stay hidden too: the visit count, its dates preview and the weekend rule.
+    expect(screen.queryByText('Visits (leave blank for ongoing)')).toBeNull();
+    expect(screen.queryByText(/then auto-extends/)).toBeNull();
+    expect(screen.queryByText(/Weekend rule/i)).toBeNull();
+    // Book texts nobody: no confirmation choice in Book mode.
+    expect(screen.queryByText('Send confirmation SMS')).toBeNull();
     const book = await screen.findByRole('button', { name: 'Book' });
     await waitFor(() => expect(book.disabled).toBe(false));
     fireEvent.click(book);
@@ -245,6 +251,8 @@ describe('CreateAppointmentModal new-caller Book', () => {
     fireEvent.change(firstNameInput(), { target: { value: 'Pat' } });
     const repeats = await screen.findByLabelText(/Repeats for Quarterly Pest Control/);
     expect(repeats.value).not.toBe('one_time');
+    expect(screen.getByText('Visits (leave blank for ongoing)')).toBeTruthy();
+    expect(screen.getByText('Send confirmation SMS')).toBeTruthy();
   });
 
   it('two services stop Book with a reason', async () => {

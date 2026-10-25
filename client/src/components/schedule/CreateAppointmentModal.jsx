@@ -5959,7 +5959,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             style={{ marginBottom: 10 }}
           />
 
-          {hasRecurringServices && firstCustomRecurringIndex < 0 && (
+          {!newCallerBookMode && hasRecurringServices && firstCustomRecurringIndex < 0 && (
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 10, marginTop: 4 }}>
               {weekendRuleControl()}
             </div>
@@ -6738,7 +6738,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           {/* Visit count — applies to every recurring cadence group on
               this appointment. Empty = ongoing (auto-extends). A finite
               number caps the series at that many visits. */}
-          {services.some((s) => s.cadence && s.cadence !== 'one_time') && (
+          {!newCallerBookMode && services.some((s) => s.cadence && s.cadence !== 'one_time') && (
             <div style={{ borderTop: `1px solid ${D.border}`, marginTop: 12, paddingTop: 12 }}>
               <label style={labelStyle}>Visits (leave blank for ongoing)</label>
               <input
@@ -6997,6 +6997,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <label style={{ ...labelStyle, color: D.amber }}>Internal Notes (Admin only)</label>
             <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
+          {/* Book sends nothing to the caller: the confirmation goes out once the customer is linked. */}
+          {!newCallerBookMode && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 14 }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44 }}>
               <input type="checkbox" checked={sendSms} onChange={e => setSendSms(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
@@ -7015,6 +7017,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </div>
             )}
           </div>
+          )}
           {!isMobile && (
             <button disabled={!saveEnabled} onClick={handleSave} style={{
               width: '100%', padding: '14px 20px', background: D.text, color: D.white,
