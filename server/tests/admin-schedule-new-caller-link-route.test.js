@@ -45,34 +45,40 @@ async function put(body) {
 beforeEach(() => {
   jest.clearAllMocks();
   service.linkNewCallerVisit.mockResolvedValue({ visit: linkedVisit, addedProperty: true });
-  service.armLinkedVisitComms.mockResolvedValue(true);
+  service.armLinkedVisitComms.mockResolvedValue({ remindersArmed: true, confirmationSent: true });
 });
 
 test('links the visit, then arms reminders and sends the confirmation by default', async () => {
   const { status, json } = await put({ customerId: CUSTOMER_ID });
 
   expect(status).toBe(200);
-  expect(json).toEqual({ ok: true, id: VISIT_ID, customerId: CUSTOMER_ID, addedProperty: true, confirmationSent: true, warning: null });
+  expect(json).toEqual({ ok: true, id: VISIT_ID, customerId: CUSTOMER_ID, addedProperty: true, remindersArmed: true, confirmationSent: true, warning: null });
   expect(service.linkNewCallerVisit).toHaveBeenCalledWith({ visitId: VISIT_ID, customerId: CUSTOMER_ID, adminUserId: 'admin-1' });
   expect(service.armLinkedVisitComms).toHaveBeenCalledWith({ visit: linkedVisit, sendConfirmation: true });
 });
 
-test('an unticked confirmation arms the reminders without the text', async () => {
-  service.armLinkedVisitComms.mockResolvedValue(false);
+test('an unticked confirmation arms the reminders without the text, and warns about nothing', async () => {
+  service.armLinkedVisitComms.mockResolvedValue({ remindersArmed: true, confirmationSent: false });
 
   const { json } = await put({ customerId: CUSTOMER_ID, sendConfirmation: false });
 
   expect(service.armLinkedVisitComms).toHaveBeenCalledWith({ visit: linkedVisit, sendConfirmation: false });
-  expect(json.confirmationSent).toBe(false);
+  expect(json).toMatchObject({ remindersArmed: true, confirmationSent: false, warning: null });
 });
 
-test('a reminder or text failure after the link answers 200 with a warning: the link stands', async () => {
-  service.armLinkedVisitComms.mockRejectedValue(new Error('provider down'));
-
-  const { status, json } = await put({ customerId: CUSTOMER_ID });
-
-  expect(status).toBe(200);
-  expect(json).toMatchObject({ ok: true, confirmationSent: false, warning: 'The visit is linked, but its reminders or confirmation did not go out. Check the visit.' });
+test('after a committed link, every comms shortfall answers 200 with a warning: the link stands', async () => {
+  const cases = [
+    [{ remindersArmed: false, confirmationSent: false }, 'The visit is linked, but its reminders were not set up and no confirmation went out. Check the visit.'],
+    [{ remindersArmed: true, confirmationSent: false }, 'The visit is linked. The confirmation text did not go out; the customer may not take texts. Check the visit.'],
+    [new Error('provider down'), 'The visit is linked, but its reminders were not set up and no confirmation went out. Check the visit.'],
+  ];
+  for (const [outcome, warning] of cases) {
+    if (outcome instanceof Error) service.armLinkedVisitComms.mockRejectedValueOnce(outcome);
+    else service.armLinkedVisitComms.mockResolvedValueOnce(outcome);
+    const { status, json } = await put({ customerId: CUSTOMER_ID });
+    expect(status).toBe(200);
+    expect(json).toMatchObject({ ok: true, warning });
+  }
 });
 
 test('a refused link answers its own status and message and arms nothing', async () => {

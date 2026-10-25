@@ -60,15 +60,17 @@ router.put('/:visitId/link', async (req, res, next) => {
       adminUserId: req.technicianId || null,
     });
     // The link is committed: a reminder or text failure is reported, never undone.
-    let confirmationSent = false;
-    let warning = null;
+    const wantsText = req.body?.sendConfirmation !== false;
+    let outcome = { remindersArmed: false, confirmationSent: false };
     try {
-      confirmationSent = await armLinkedVisitComms({ visit, sendConfirmation: req.body?.sendConfirmation !== false });
+      outcome = await armLinkedVisitComms({ visit, sendConfirmation: wantsText });
     } catch (err) {
       logger.error(`[new-caller] reminders/confirmation after link failed for visit ${visit.id}: ${err.message}`);
-      warning = 'The visit is linked, but its reminders or confirmation did not go out. Check the visit.';
     }
-    res.json({ ok: true, id: visit.id, customerId: visit.customer_id, addedProperty, confirmationSent, warning });
+    let warning = null;
+    if (!outcome.remindersArmed) warning = 'The visit is linked, but its reminders were not set up and no confirmation went out. Check the visit.';
+    else if (wantsText && !outcome.confirmationSent) warning = 'The visit is linked. The confirmation text did not go out; the customer may not take texts. Check the visit.';
+    res.json({ ok: true, id: visit.id, customerId: visit.customer_id, addedProperty, ...outcome, warning });
   } catch (err) {
     if (err?.isOperational && (err.status || err.statusCode)) return sendOperational(res, err);
     next(err);

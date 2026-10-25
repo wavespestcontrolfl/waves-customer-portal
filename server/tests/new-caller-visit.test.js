@@ -11,7 +11,7 @@ const mockAdminAuth = {
   adminAuthenticate: jest.fn((req, res, next) => next()),
   requireAdmin: jest.fn((req, res, next) => next()),
 };
-jest.mock('../middleware/admin-auth', () => mockAdminAuth);
+jest.mock('../middleware/admin-auth', () => ({ ...jest.requireActual('../middleware/admin-auth'), ...mockAdminAuth }));
 
 let mockNewCallerGate = true;
 jest.mock('../config/feature-gates', () => {
@@ -32,6 +32,7 @@ const {
   stillPickable,
   bookNewCallerVisit,
   linkNewCallerVisit,
+  armLinkedVisitComms,
 } = require('../services/booking/new-caller-visit');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 
@@ -189,6 +190,36 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     expect(link.indexOf('await lockCustomerComms(trx, customerId);')).toBeLessThan(link.indexOf('recordCallProperty('));
   });
 
+  test('after a link, the outcome is read from the helpers\' own answers (they catch their failures)', async () => {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const register = jest.spyOn(AppointmentReminders, 'registerAppointment');
+    const confirm = jest.spyOn(AppointmentReminders, 'sendConfirmation');
+    const visit = { id: 'svc-1', customer_id: 'cust-1', scheduled_date: '2031-03-07', window_start: '13:00:00', service_type: 'Waves Assessment' };
+    try {
+      register.mockResolvedValueOnce(null);
+      await expect(armLinkedVisitComms({ visit })).resolves.toEqual({ remindersArmed: false, confirmationSent: false });
+      expect(confirm).not.toHaveBeenCalled();
+
+      register.mockResolvedValueOnce({ record: { id: 'r1' }, inserted: true });
+      confirm.mockResolvedValueOnce(false);
+      await expect(armLinkedVisitComms({ visit })).resolves.toEqual({ remindersArmed: true, confirmationSent: false });
+
+      register.mockResolvedValueOnce({ record: { id: 'r1' }, inserted: true });
+      confirm.mockResolvedValueOnce(true);
+      await expect(armLinkedVisitComms({ visit })).resolves.toEqual({ remindersArmed: true, confirmationSent: true });
+      expect(register).toHaveBeenLastCalledWith('svc-1', 'cust-1', '2031-03-07T13:00', 'Waves Assessment', 'admin_manual',
+        { sendConfirmation: true, deferConfirmation: true, closeReminderWindows: false, fromCommittedRow: true });
+
+      confirm.mockClear();
+      register.mockResolvedValueOnce({ record: { id: 'r1' }, inserted: true });
+      await expect(armLinkedVisitComms({ visit, sendConfirmation: false })).resolves.toEqual({ remindersArmed: true, confirmationSent: false });
+      expect(confirm).not.toHaveBeenCalled();
+    } finally {
+      register.mockRestore();
+      confirm.mockRestore();
+    }
+  });
+
   test('Link refuses with a 404 while the gate is off, and a 400 for a bad id, before any read', async () => {
     const conn = () => { throw new Error('no query expected'); };
     const VISIT = '0f8b9d1e-2c3a-4b5d-8e6f-7a8b9c0d1e2f';
@@ -300,7 +331,7 @@ maybeDescribe('new-caller booking on Postgres', () => {
     await db.destroy();
   });
 
-  test('Link gives the visit its customer, adds the booked address as a property and points the visit at it; a second Link is refused', async () => {
+  test('Link gives the visit its customer, adds the booked address beside the customer\'s own home and points the visit at it; a second Link is refused', async () => {
     const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
     const customerId = require('crypto').randomUUID();
     await db('customers').insert({
@@ -315,7 +346,10 @@ maybeDescribe('new-caller booking on Postgres', () => {
     expect(visit.customer_id).toBe(customerId);
     expect(addedProperty).toBe(true);
     const property = await db('customer_properties').where({ id: visit.property_id }).first();
-    expect(property).toMatchObject({ customer_id: customerId, address_line1: '100 Example Way', zip: '34200' });
+    expect(property).toMatchObject({ customer_id: customerId, address_line1: '100 Example Way', zip: '34200', is_primary: false });
+    // The customer had no property row: their own home became the primary first, never the booked address.
+    const primary = await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first();
+    expect(primary).toMatchObject({ address_line1: '1 Synthetic Ln' });
     expect(visit.internal_notes).toContain('Linked to its customer after the call.');
     const logged = await db('activity_log').where({ action: 'new_caller_visit_linked' }).whereRaw("metadata->>'scheduled_service_id' = ?", [visit.id]).first();
     expect(logged).toBeTruthy();

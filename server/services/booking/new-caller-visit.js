@@ -29,7 +29,7 @@ const mistingRefill = require('../misting-refill');
 const logger = require('../logger');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 const { dateOnlyString } = require('../../utils/datetime-et');
-const { recordCallProperty } = require('../customer-properties');
+const { ensurePrimaryProperty, recordCallProperty } = require('../customer-properties');
 const { addressKey } = require('../customer-property-address-keys');
 const { closeAdminAlertKeys } = require('../admin-alert-episodes');
 
@@ -339,8 +339,9 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
 // processor's booking on the visit's call. D6: an address that is not on the
 // customer's account yet becomes one of its properties, and the visit points
 // at it. The visit's bell closes. armLinkedVisitComms arms the reminders and
-// the confirmation after the commit.
-async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, conn = db } = {}) {
+// the confirmation after the commit. propertySource labels a property the
+// link adds: 'manual' for the office, 'call_pipeline' for the agent.
+async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, propertySource = 'manual', conn = db } = {}) {
   if (!isEnabled('newCallerBooking')) throw httpError(404, 'Not found');
   matchOrThrow(visitId, UUID, 'Open the visit again.');
   matchOrThrow(customerId, UUID, 'Pick the customer again.');
@@ -360,8 +361,11 @@ async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, con
       address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
       city: visit.service_address_city, state: visit.service_address_state, zip: visit.service_address_zip,
     };
+    // The customer's own home first (an older customer may have no property row
+    // yet), so a different booked address is added beside it, never as its primary.
+    await ensurePrimaryProperty(customerId, { conn: trx });
     const recorded = await recordCallProperty({
-      customerId, ...address, latitude: visit.lat, longitude: visit.lng, source: 'new_caller_link', conn: trx,
+      customerId, ...address, latitude: visit.lat, longitude: visit.lng, source: propertySource, conn: trx,
     });
     const key = addressKey(address);
     const properties = await trx('customer_properties').where({ customer_id: customerId, active: true })
@@ -395,19 +399,21 @@ async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, con
 }
 
 // After a link: the calls the office create route makes for a new visit
-// (registerAppointment, then the deferred sendConfirmation). Returns whether
-// the confirmation went out.
+// (registerAppointment, then the deferred sendConfirmation). Both catch their
+// own failures and answer null / false, so the outcome is read from their
+// answers: { remindersArmed, confirmationSent }.
 async function armLinkedVisitComms({ visit, sendConfirmation = true }) {
   const AppointmentReminders = require('../appointment-reminders');
   const windowStart = visit.window_start ? String(visit.window_start).slice(0, 5) : null;
-  await AppointmentReminders.registerAppointment(
+  const registered = await AppointmentReminders.registerAppointment(
     visit.id, visit.customer_id,
     `${dateOnlyString(visit.scheduled_date)}T${windowStart || '08:00'}`,
     visit.service_type, 'admin_manual',
     { sendConfirmation, deferConfirmation: true, closeReminderWindows: !windowStart, fromCommittedRow: true },
   );
-  if (!sendConfirmation) return false;
-  return (await AppointmentReminders.sendConfirmation(visit.id)) === true;
+  if (!registered) return { remindersArmed: false, confirmationSent: false };
+  if (!sendConfirmation) return { remindersArmed: true, confirmationSent: false };
+  return { remindersArmed: true, confirmationSent: (await AppointmentReminders.sendConfirmation(visit.id)) === true };
 }
 
 module.exports = {
