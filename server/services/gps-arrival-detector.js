@@ -517,16 +517,26 @@ function isOpenWithoutArrival(service) {
     && !['on_site', 'completed', 'cancelled', 'skipped', 'no_show'].includes(service.status);
 }
 
-// Re-read after a thrown mark. An unreadable row records nothing: a miss
-// that cannot be confirmed is not written as one.
-async function stillOpenWithoutArrival(serviceId) {
+// Re-read after a mark that failed or threw: the persisted row decides.
+//   'open'     still en route with no arrival: a real miss
+//   'arrived'  on property for this technician: the flip committed during
+//              this call (the visit was en route when it was loaded)
+//   'unknown'  unreadable, gone, reassigned or closed some other way
+// An unknown row records nothing and confirms nothing: a miss that cannot
+// be confirmed is not written as one, and neither is an arrival.
+async function persistedArrivalOutcome(serviceId, techId) {
+  let fresh;
   try {
-    const fresh = await loadCurrentService(serviceId);
-    return Boolean(fresh) && isOpenWithoutArrival(fresh);
+    fresh = await loadCurrentService(serviceId);
   } catch (err) {
     logger.warn(`[gps-arrival] arrival re-read failed for ${serviceId}: ${err.message}`);
-    return false;
+    return 'unknown';
   }
+  if (!fresh) return 'unknown';
+  if (isOpenWithoutArrival(fresh)) return 'open';
+  const reassigned = fresh.technician_id && techId && fresh.technician_id !== techId;
+  if (fresh.track_state === 'on_property' && !fresh.cancelled_at && !reassigned) return 'arrived';
+  return 'unknown';
 }
 
 async function markAndAudit({ service, techStatus, destination, distance, point, decision, config }) {
@@ -541,7 +551,8 @@ async function markAndAudit({ service, techStatus, destination, distance, point,
     // miss. Judge by the returned state, not result.ok alone.
     // Any other returned failure is judged by the persisted row too: a
     // concurrent request can have arrived and completed the visit meanwhile.
-    if (!result?.ok && result?.state !== 'on_property' && await stillOpenWithoutArrival(service.id)) {
+    if (!result?.ok && result?.state !== 'on_property'
+      && await persistedArrivalOutcome(service.id, techStatus.tech_id) === 'open') {
       await recordNotMarked({
         service, techStatus, point, config, destination, distance,
         reason: 'mark_on_property_failed', detail: result?.reason || null,
@@ -563,14 +574,24 @@ async function markAndAudit({ service, techStatus, destination, distance, point,
     logger.error(`[gps-arrival] markOnProperty failed for ${service.id}: ${err.message}`);
     await auditArrival({ service, techStatus, destination, distance, point, decision, result, error: err });
     // markOnProperty can commit the flip and then throw in its post-flip work,
-    // so the throw alone does not prove a miss: judge by the persisted row.
-    if (await stillOpenWithoutArrival(service.id)) {
+    // so the throw alone proves neither a miss nor an arrival: judge by the
+    // persisted row. A committed flip still counts as this call's arrival
+    // (truck clock-in): later samples cannot recover it, since the visit is
+    // no longer en route.
+    const persisted = await persistedArrivalOutcome(service.id, techStatus.tech_id);
+    if (persisted === 'open') {
       await recordNotMarked({
         service, techStatus, point, config, destination, distance,
         reason: 'mark_on_property_failed', detail: err.message,
       });
     }
-    return { ok: false, reason: 'mark_on_property_threw', distanceMeters: distance, arrivalMarked: false, serviceId: service.id };
+    return {
+      ok: false,
+      reason: 'mark_on_property_threw',
+      distanceMeters: distance,
+      arrivalMarked: persisted === 'arrived',
+      serviceId: service.id,
+    };
   }
 }
 

@@ -765,7 +765,7 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     expect(notMarkedWrites()).toHaveLength(0);
   });
 
-  test('a mark that committed the flip and then threw is not a miss (persisted row is re-read)', async () => {
+  test('a mark that committed the flip and then threw is not a miss and still counts as the arrival (persisted row is re-read)', async () => {
     const service = baseService();
     trackTransitions.markOnProperty.mockImplementation(async () => {
       // post-flip failure: the row is already on property when the throw happens
@@ -776,6 +776,37 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
     const result = await run(service);
 
+    // Truck clock-in reads arrivalMarked: later samples cannot recover this
+    // arrival, because the visit is no longer en route.
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_threw', arrivalMarked: true, serviceId: 'svc-1' });
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('a thrown mark whose row is now on property for ANOTHER technician is neither a miss nor this truck\'s arrival', async () => {
+    const service = baseService();
+    trackTransitions.markOnProperty.mockImplementation(async () => {
+      service.track_state = 'on_property';
+      service.technician_id = 'tech-2';
+      throw new Error('arrival claim update failed');
+    });
+
+    const result = await run(service);
+
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_threw', arrivalMarked: false });
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('a thrown mark whose re-read also fails confirms nothing: no miss, no arrival', async () => {
+    const service = baseService();
+    const query = installServiceLookup(service);
+    query.first.mockResolvedValueOnce(service).mockRejectedValueOnce(new Error('db down'));
+    trackTransitions.markOnProperty.mockRejectedValue(new Error('lock timeout'));
+
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(), point: basePoint(), configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(query.first).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_threw', arrivalMarked: false });
     expect(notMarkedWrites()).toHaveLength(0);
   });
