@@ -121,6 +121,21 @@ describe('email government-sender guard (outside review 2026-10-25)', () => {
     expect(shouldSkipAutoAction('spam', 'licensing@fdacs.gov', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example; dkim=none')).toBe(false);
   });
 
+  test('a quoted MAIL FROM forgery never earns the exemption, even with GATE_EMAIL_AUTH_STRICT dark (Codex security P2, #6668)', () => {
+    const saved = process.env.GATE_EMAIL_AUTH_STRICT;
+    delete process.env.GATE_EMAIL_AUTH_STRICT;
+    try {
+      const forged = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=fdacs.gov y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=fdacs.gov y"@evil.example';
+      const real = 'mx.google.com; dkim=pass header.i=@fdacs.gov header.s=s1 header.b=abc; spf=pass (google.com: domain of bounce@fdacs.gov designates 192.0.2.1 as permitted sender) smtp.mailfrom=bounce@fdacs.gov; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=fdacs.gov';
+      expect(shouldSkipAutoAction('spam', 'licensing@fdacs.gov', forged)).toBe(false);
+      expect(shouldSkipAutoAction('marketing_newsletter', 'licensing@fdacs.gov', forged)).toBe(false);
+      expect(shouldSkipAutoAction('spam', 'licensing@fdacs.gov', real)).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_EMAIL_AUTH_STRICT;
+      else process.env.GATE_EMAIL_AUTH_STRICT = saved;
+    }
+  });
+
   test('non-destructive categories still run for government senders', () => {
     expect(shouldSkipAutoAction('regulatory', 'licensing@fdacs.gov', GOOG('fdacs.gov'))).toBe(false);
     expect(shouldSkipAutoAction('vendor_invoice', 'billing@myflorida.com', GOOG('myflorida.com'))).toBe(false);

@@ -432,6 +432,7 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
         const chain = {
           where: jest.fn(() => chain),
           whereRaw: jest.fn(() => chain),
+          whereNull: jest.fn(() => chain),
           first: jest.fn(async () => ({ id: 'g1', reason: 'spam_auto', email_address: 'licensing@fdacs.gov', gmail_filter_id: null, created_at: '2026-07-01T00:00:00Z' })),
           del,
         };
@@ -455,6 +456,31 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
             return { first: jest.fn(async () => ({ id: 'g2', reason: 'manual', email_address: 'licensing@fdacs.gov' })) };
           }),
         };
+      }
+      return noIdentity(table);
+    });
+
+    await expect(isBlocked('licensing@fdacs.gov')).resolves.toBe(true);
+    expect(increment).toHaveBeenCalledWith('blocked_count', 1);
+  });
+
+  test('a MANUAL admin block of a whole government domain still stands (Codex P2, #6668)', async () => {
+    const increment = jest.fn(async () => {});
+    db.mockImplementation((table) => {
+      if (table === 'blocked_email_senders') {
+        const chain = {
+          where: jest.fn((arg) => {
+            if (arg && arg.id === 'gd1') return { increment };
+            if (arg === 'email_address') chain.scope = 'exact';
+            if (arg === 'domain') chain.scope = 'domain';
+            return chain;
+          }),
+          whereNull: jest.fn(() => chain),
+          first: jest.fn(async () => (chain.scope === 'domain'
+            ? { id: 'gd1', reason: 'manual', domain: 'fdacs.gov', email_address: null }
+            : null)),
+        };
+        return chain;
       }
       return noIdentity(table);
     });

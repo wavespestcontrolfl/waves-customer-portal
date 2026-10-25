@@ -663,10 +663,11 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
     .where('email_address', normalized)
     .first();
 
+  // A government sender is an identity too: a stale AUTOMATIC block on an
+  // agency address is removed; a manual admin block still stands.
+  const governmentSender = isGovernmentDomain(domain);
   const identity = isOperationalDomain(domain)
-    // A government sender is an identity too: a stale AUTOMATIC block on an
-    // agency address is removed; a manual admin block still stands.
-    || isGovernmentDomain(domain)
+    || governmentSender
     // Live customers only — a soft-deleted customer is no longer a protected
     // identity (mirrors isKnownSender), so their block stays enforced.
     || !!(await db('customers').whereRaw('LOWER(email) = ?', [normalized]).whereNull('deleted_at').first())
@@ -683,6 +684,19 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
       return true;
     }
     if (exactBlocked) await removeStaleAutoBlock(normalized, { untrashGmailId: gmailId });
+    // The government identity only voids AUTOMATIC blocks: an admin's manual
+    // block of the whole domain (validateManualBlockScope accepts fdacs.gov)
+    // stays enforced, as an exact manual block does above (Codex P2, #6668).
+    if (governmentSender) {
+      const domainBlock = await db('blocked_email_senders')
+        .where('domain', domain)
+        .whereNull('email_address')
+        .first();
+      if (domainBlock && domainBlock.reason !== 'spam_auto') {
+        await db('blocked_email_senders').where({ id: domainBlock.id }).increment('blocked_count', 1);
+        return true;
+      }
+    }
     return false;
   }
 

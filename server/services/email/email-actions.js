@@ -29,7 +29,8 @@ function shouldSkipAutoAction(category, fromAddress, authResults) {
   // below: a regulator's notice is never quarantined or unsubscribed on a
   // classifier verdict, while a spoofed .gov that fails auth still is.
   const senderDomain = domainFromAddress(fromAddress);
-  if (!isOperationalDomain(senderDomain) && !isGovernmentDomain(senderDomain)) return false;
+  const governmentSender = isGovernmentDomain(senderDomain);
+  if (!isOperationalDomain(senderDomain) && !governmentSender) return false;
   // Gmail stamps EVERY inbound SMTP message with a trusted
   // Authentication-Results header, so:
   //   - header present → this is inbound; the skip only applies when it
@@ -41,7 +42,12 @@ function shouldSkipAutoAction(category, fromAddress, authResults) {
   //     archive/quarantine our own outbox.
   if (authResults == null) return true;
   const { hasAlignedAuth } = require('./inbox-hygiene');
-  return hasAlignedAuth(authResults, domainFromAddress(fromAddress));
+  // The government exemption always reads the strict parser. With
+  // GATE_EMAIL_AUTH_STRICT dark, the legacy whole-string match aligns a quoted
+  // MAIL FROM local part ("x dkim=pass header.d=fdacs.gov y"@evil.example)
+  // that Gmail echoes into its header, and a spoof the model called spam
+  // would stay out of quarantine (Codex security P2, #6668).
+  return hasAlignedAuth(authResults, senderDomain, { strict: governmentSender });
 }
 
 // ── Email → draft-estimate (GATE_EMAIL_QUOTE_DRAFTS, default OFF) ────────
