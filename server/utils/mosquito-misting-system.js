@@ -143,6 +143,10 @@ const MISTING_PROPOSAL_KEY_PATTERN = /^mosquito_misting(?!_system$)(?:_[a-z0-9_]
 // (the free design visit) is deliberately NOT here.
 const MISTING_PROPOSAL_TEXT_PATTERN = /misting\s+service\s+plan|misting\s+system\s*\(commercial\)|misting\s+system\s+(?:refill|maintenance)\b/i;
 const MISTING_PROPOSAL_INSTALL_TEXT_PATTERN = /misting\s+system\s+installation\b/i;
+// The two tier labels of the MistAway-model table, before the Pynamite retail change (2026-10-25). Code-owned and frozen: a
+// proposal or quote row stored under "<label> Installation" (or the bare label) keeps its misting identity, so the acceptance-pending
+// refusal, the gate detection and the install resolver still see it. The live labels come from the tier table above; these never change.
+const MISTING_LEGACY_TIER_LABELS = Object.freeze(['essential system (drum)', 'smart system (tankless + app)']);
 function mistingProposalIdentity(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const keys = [raw.service, raw.serviceKey, raw.service_key, raw.originalRequestedService, raw.identity, raw.family]
@@ -156,7 +160,10 @@ function mistingProposalIdentity(raw) {
   // fully rebuilt line is still recognized by its text.
   const lowered = text.toLowerCase();
   const { MOSQUITO_MISTING } = require('../services/pricing-engine/constants');
-  const installLabels = Object.values(MOSQUITO_MISTING.tiers).map((tier) => `${tier.label} Installation`.toLowerCase());
+  const installLabels = [
+    ...Object.values(MOSQUITO_MISTING.tiers).map((tier) => `${tier.label} Installation`.toLowerCase()),
+    ...MISTING_LEGACY_TIER_LABELS,
+  ];
   return installLabels.some((label) => lowered.includes(label)) ? 'mosquito_misting_installation' : null;
 }
 

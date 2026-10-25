@@ -81,7 +81,7 @@ describe('replay: a sent misting quote keeps the prices it was priced with', () 
     config.applyMosquitoMistingPricingConfig(data);
     const fresh = quote();
     expect(figures(fresh)).not.toEqual(figures(first));
-    expect(fresh.installation.price).toBe(3000 + 5 * 90 + 2 * 60);
+    expect(fresh.installation.price).toBe(3000 + 30 * 90 + 12 * 60);
     expect(fresh.annual).toBe(700);
     const replay = quote(first.pricingKnobs);
     expect(figures(replay)).toEqual(figures(first));
@@ -113,7 +113,7 @@ describe('replay: a sent misting quote keeps the prices it was priced with', () 
     const replay = generateEstimate({ ...PROPERTY, services: { mosquitoMisting: OPTS }, mistingPricingKnobs: stamp });
     const line = replay.lineItems.find((l) => l.service === 'mosquito_misting');
     expect(line.perApp).toBe(59);
-    expect(line.installation.price).toBe(3795 + 5 * 75 + 2 * 45);
+    expect(line.installation.price).toBe(2795 + 30 * 75 + 12 * 75);
     const mapped = mapper.mapV1ToLegacyShape(first);
     expect(mapped.recurring.services.find((s) => s.service === 'mosquito_misting').pricingKnobs).toEqual(stamp);
     expect(mapped.oneTime.items.find((i) => i.service === 'mosquito_misting_installation').pricingKnobs).toEqual(stamp);
@@ -511,7 +511,7 @@ describe('the proposal editor cannot launder the misting identity away', () => {
 
   test('a corrective-work row with no service persists the inferred misting identity, so a later rename keeps it', () => {
     const { normalizeCorrectiveWork } = require('../services/estimate-proposal');
-    const first = { enabled: true, buildings: [], correctiveWork: normalizeCorrectiveWork([{ id: 'cw-9', label: 'Smart system (tankless + app) Installation', amount: 4595 }]) };
+    const first = { enabled: true, buildings: [], correctiveWork: normalizeCorrectiveWork([{ id: 'cw-9', label: 'Standard system (55-gallon) Installation', amount: 4195 }]) };
     expect(first.correctiveWork[0].service).toBe('mosquito_misting_installation');
     const renamed = normalizeCorrectiveWork(carryMistingIdentity({ correctiveWork: [{ id: 'cw-9', label: 'Install the system', amount: 4595 }] }, first).correctiveWork);
     expect(renamed[0].service).toBe('mosquito_misting_installation');
@@ -520,10 +520,27 @@ describe('the proposal editor cannot launder the misting identity away', () => {
     expect(normalizeCorrectiveWork([{ label: 'Gutter guard', amount: 50 }])[0].service).toBeNull();
   });
 
+  test('a corrective-work row stored under an old MistAway tier label still resolves to the install identity', () => {
+    const { normalizeCorrectiveWork } = require('../services/estimate-proposal');
+    for (const label of ['Smart system (tankless + app) Installation', 'Essential system (drum) Installation']) {
+      expect(normalizeCorrectiveWork([{ id: 'cw-legacy', label, amount: 4595 }])[0].service).toBe('mosquito_misting_installation');
+    }
+    expect(normalizeCorrectiveWork([{ id: 'cw-new', label: 'Standard system (55-gallon) Installation', amount: 4195 }])[0].service).toBe('mosquito_misting_installation');
+  });
+
   test('text fallback: the install labels the mapper emits are recognized without any service field', () => {
-    for (const label of ['Essential system (drum) Installation', 'Smart system (tankless + app) Installation']) {
+    for (const label of ['Compact system (10-gallon) Installation', 'Standard system (55-gallon) Installation']) {
       expect(mistingProposalIdentity({ description: label })).toBe('mosquito_misting_installation');
     }
+    // stored quotes and proposal lines named under the MistAway-era tier labels keep their identity (code-owned legacy list)
+    for (const label of ['Essential system (drum) Installation', 'Smart system (tankless + app) Installation', 'Essential system (drum)', 'smart system (tankless + app)']) {
+      expect(mistingProposalIdentity({ description: label })).toBe('mosquito_misting_installation');
+      expect(mistingProposalIdentity({ label })).toBe('mosquito_misting_installation');
+      expect(mistingProposalIdentity({ name: label })).toBe('mosquito_misting_installation');
+    }
+    // the bare live tier labels are not claimed (only "<label> Installation" is), and unrelated text is still null
+    expect(mistingProposalIdentity({ description: 'Compact system (10-gallon)' })).toBeNull();
+    expect(mistingProposalIdentity({ description: 'Quarterly pest control' })).toBeNull();
     const mapped = mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { mosquitoMisting: OPTS } }));
     const item = mapped.oneTime.items.find((i) => i.service === 'mosquito_misting_installation');
     expect(mistingProposalIdentity({ description: item.name })).toBe('mosquito_misting_installation');
@@ -668,7 +685,7 @@ describe('Codex round 8: whole-number counts, one commercial misting key', () =>
 
   test('a fractional nozzle or riser count is invalid (reason + fallback), never rounded into a different quote', () => {
     const n = priceMosquitoMisting({}, { tier: 'smart', nozzles: 35.5 });
-    expect(n.nozzles).toBe(35);
+    expect(n.nozzles).toBe(30);
     expect(n.manualReviewReasons).toContain('mosquito_misting_invalid_nozzles');
     const r = priceMosquitoMisting({}, { tier: 'smart', risers: 2.5 });
     expect(r.risers).toBe(0);
@@ -824,7 +841,7 @@ describe('Codex round 11: invalid choices replay as stamped; cents survive', () 
     const row = JSON.parse(JSON.stringify(mosquitoMistingPricingDefaults()));
     row.tiers.smart.price = 4595.49; row.extraNozzlePrice = 75.25;
     expect(applyMosquitoMistingPricingConfig(row, MOSQUITO_MISTING).applied).toBe(true);
-    const r = priceMosquitoMisting({}, { tier: 'smart', nozzles: 37 });
+    const r = priceMosquitoMisting({}, { tier: 'smart', nozzles: 32 }); // 30 included + 2 extra
     expect(r.installation.price).toBe(4745.99);
   });
 });

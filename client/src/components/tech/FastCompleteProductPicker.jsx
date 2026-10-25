@@ -60,21 +60,24 @@ function optionDetail(product, common) {
   return [categoryLabel(product), usual && `usually ${usual}`].filter(Boolean).join(' · ');
 }
 
-function ProductOption({ product, common, onSheet, onPick }) {
+// `waitingNote`: a product the sheet lists but holds (the lawn sheet's guide-governed products before the
+// guide has answered): it says the note and takes no tap.
+function ProductOption({ product, common, onSheet, onPick, waitingNote = null }) {
+  const waiting = !onSheet && !!waitingNote;
   return (
     <Button
       type="button"
       variant="secondary"
       className="tech-visit-action tech-product-option"
-      disabled={onSheet}
-      onClick={() => onPick(product)}
+      disabled={onSheet || waiting}
+      onClick={() => { if (!waiting) onPick(product); }}
     >
       <span className="tech-product-option-text">
         <span className="tech-product-option-name">{product.name}</span>
         {' '}
-        <span className="tech-product-option-detail">{onSheet ? 'Already on the sheet' : optionDetail(product, common)}</span>
+        <span className="tech-product-option-detail">{onSheet ? 'Already on the sheet' : waiting ? waitingNote : optionDetail(product, common)}</span>
       </span>
-      {!onSheet && isOutOfStock(product) && <span className="tech-product-pill"><WarningIcon />0 in stock</span>}
+      {!onSheet && !waiting && isOutOfStock(product) && <span className="tech-product-pill"><WarningIcon />0 in stock</span>}
       {onSheet && <CheckIcon />}
     </Button>
   );
@@ -128,15 +131,25 @@ function BrowseLists({ lists, showOther, groupProps, titles }) {
 // lawn visit never lists a termiticide or a roach bait (owner 2026-10-05).
 // When matches first show for a typed query the list is scrolled into view
 // (nearest edge), so it is not left under the sheet's bottom bar.
-function InlineProductSearch({ line, products, commonProducts, onSheetIds, locked, onPick }) {
+// `waiting` (the lawn sheet): the products its treatment guide governs, while the guide has not answered.
+// A search lists the matching ones after the others, held with `waitingNote`, so the tech sees the product
+// is there and waits for the guide instead of taking a near match (owner 2026-10-24: Arena 50 WDG was out
+// of the search, and the Arena granules went on three visits).
+const NO_PRODUCTS = [];
+function InlineProductSearch({ line, products, waiting = NO_PRODUCTS, waitingNote = null, commonProducts, onSheetIds, locked, onPick }) {
   const searchId = useId();
   const [query, setQuery] = useState('');
   const lawn = line === 'lawn';
   const lists = useMemo(() => pickerLists(products, commonProducts, lawn ? lawnProductGroup : productGroup), [products, commonProducts, lawn]);
+  const waitingLists = useMemo(() => pickerLists(waiting, NO_PRODUCTS, lawn ? lawnProductGroup : productGroup), [waiting, lawn]);
   const q = query.trim().toLowerCase();
   const results = q ? rankProducts(lawn ? lists.primary : lists.listed, q) : null;
+  const shownIds = new Set((results || []).map((product) => String(product.id)));
+  const waitingResults = q && waitingNote
+    ? rankProducts(lawn ? waitingLists.primary : waitingLists.listed, q).filter((product) => !shownIds.has(String(product.id)))
+    : NO_PRODUCTS;
   const resultsRef = useRef(null);
-  const hasResults = !!results && results.length > 0;
+  const hasResults = !!results && results.length + waitingResults.length > 0;
   useEffect(() => {
     if (hasResults) resultsRef.current?.scrollIntoView?.({ block: 'nearest' });
   }, [q, hasResults]);
@@ -155,7 +168,7 @@ function InlineProductSearch({ line, products, commonProducts, onSheetIds, locke
         value={query}
         onChange={(event) => setQuery(event.target.value)}
       />
-      {results && results.length > 0 && (
+      {hasResults && (
         <div ref={resultsRef} role="group" aria-label="Matching products" className="tech-product-list tech-product-inline-results">
           {results.map((product) => (
             <ProductOption
@@ -166,9 +179,18 @@ function InlineProductSearch({ line, products, commonProducts, onSheetIds, locke
               onPick={(picked) => { setQuery(''); onPick(picked); }}
             />
           ))}
+          {waitingResults.map((product) => (
+            <ProductOption
+              key={product.id}
+              product={product}
+              onSheet={onSheetIds.has(String(product.id))}
+              waitingNote={waitingNote}
+              onPick={onPick}
+            />
+          ))}
         </div>
       )}
-      {results && !results.length && <p className="tech-visit-muted">No products match.</p>}
+      {results && !hasResults && <p className="tech-visit-muted">No products match.</p>}
     </div>
   );
 }

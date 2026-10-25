@@ -34,7 +34,7 @@ describe('translateV2CallToV1Input: the misting selection', () => {
   test('gate on: the typed layout prices as the engine prices it, with the tier label on the install', () => {
     const mapped = price({ mosquitoMisting: { tier: 'essential', nozzles: '40', risers: '12', solution: 'natural', refillsPerYear: '6' } });
     expect(plan(mapped)).toMatchObject({ mo: 59, annual: 708, quoteRequired: false, manualReviewReasons: [] });
-    expect(install(mapped).name).toBe('Essential system (drum) Installation');
+    expect(install(mapped).name).toBe('Compact system (10-gallon) Installation');
     expect(plan(mapped).detail).toContain('40 nozzles');
     expect(plan(mapped).detail).toContain('per refill application');
   });
@@ -44,7 +44,7 @@ describe('translateV2CallToV1Input: the misting selection', () => {
     const bare = price({});
     expect(plan(blank)).toMatchObject({ mo: 59, quoteRequired: false });
     expect(install(bare).price).toBe(install(blank).price);
-    expect(install(bare).name).toBe('Smart system (tankless + app) Installation');
+    expect(install(bare).name).toBe('Standard system (55-gallon) Installation');
   });
 
   test('what the rep typed is never rounded: a fractional count is a reason, not another quote', () => {

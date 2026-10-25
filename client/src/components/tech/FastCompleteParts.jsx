@@ -574,7 +574,8 @@ export function OtherProductButton({ buttonRef, locked, onClick, hasPicker, expa
 // `inline` (the lawn sheet) also returns `inlineSearch`: a search box that
 // lives in the Products section itself and adds a product on one tap, with no
 // sheet to open. With no catalog it is null and the button's full-form hand-off stays.
-export function useProductPicker({ products, commonProducts, rows, locked, isMobile, onFullForm, onPick, line, inline = false }) {
+// `waiting` + `waitingNote` (the lawn sheet's inline search only): products listed but held, see FastCompleteProductPicker.
+export function useProductPicker({ products, waiting = null, waitingNote = null, commonProducts, rows, locked, isMobile, onFullForm, onPick, line, inline = false }) {
   const buttonRef = useRef(null);
   const [open, setOpen] = useState(false);
   const hasCatalog = products.length > 0;
@@ -597,6 +598,7 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
     <FastCompleteProductPicker
       variant="inline"
       {...(line ? { line } : {})}
+      {...(waiting?.length && waitingNote ? { waiting, waitingNote } : {})}
       products={products}
       commonProducts={commonProducts}
       onSheetIds={onSheetIds}

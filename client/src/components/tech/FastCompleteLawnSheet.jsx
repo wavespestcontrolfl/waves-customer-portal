@@ -543,6 +543,8 @@ function cardOwnedIds(guide, checks) {
 //   hidden    kept out of the add-ons list (every governed product that is not released to the
 //             generic list)                   locked   no decision yet: the taps wait
 //   searchable  what the search lists of the governed products (searchReach)
+//   waiting   before the decision is in: the governed products less the Group 11 holds; the search lists
+//             them held with CONFIRM_FIRST (no tap), so the tech sees the product and waits for the guide
 // A pick is RELEASED to the generic list when nothing blocked or holds it and no visible card owns
 // it: a clean answer with no finding for it ("the technician can still treat what he sees"), or a
 // card he dismissed. A blocked pick (a limit or a city hold that was READ) never is.
@@ -550,7 +552,7 @@ function cardOwnedIds(guide, checks) {
 // cannot vouch for it), but it is released to the search (and, for a pick, the list) and a row of it
 // is neither dropped nor holds Complete, because the sheet has no Full form control: hiding it would
 // leave no way to record a real application. Completion records the visit and flags it to the office.
-const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), searchable: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), searchable: new Set(), waiting: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
 
 // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
 function unreadableIds({ guide, weedMix, chinch, weedGroup }) {
@@ -662,6 +664,8 @@ function guideGovernance({ ctx, guide, status, checks }) {
     hidden: new Set(hiddenIds({ governed, searchOnly, free, unreadable, owned })),
     // What the search lists of the governed products (searchReach).
     searchable: new Set(searchable),
+    // Before the decision: what the search lists held (the context's Group 11 holds stay out, as they will after it).
+    waiting: new Set(settled ? [] : governed.filter((id) => !blocked.includes(id))),
     takeAll: new Set(takeAll),
     unreadable: new Set(unreadable),
     unreadableNote: answered ? guide.unreadableNote : '',
@@ -1747,9 +1751,17 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
     };
     return held.length || gov.governed.size ? catalog.filter((product) => !hidden(product)) : catalog;
   }, [catalog, weedMix, gov]);
+  // Until the guide has answered, the search still lists the products it governs, held with the add-ons' own
+  // line (CONFIRM_FIRST, no tap): the tech sees the product and waits, instead of taking a near match (owner
+  // 2026-10-24: Arena 50 WDG was out of the search, so the Arena granules went on three visits).
+  const waitingCatalog = useMemo(() => (gov.waiting.size
+    ? catalog.filter((product) => gov.waiting.has(String(product.id).toLowerCase()))
+    : NO_WAITING), [catalog, gov]);
   const picker = useProductPicker({
     line: 'lawn',
     products: searchCatalog,
+    waiting: waitingCatalog,
+    waitingNote: CONFIRM_FIRST,
     commonProducts: [],
     rows,
     locked: locked || dictationPending,
@@ -2087,8 +2099,9 @@ function AddOnLine({ item, sod, onSheet, waiting, unreadableNote = '', locked, o
   );
 }
 
-// What a guide-governed tap says until the fresh guide has answered (the sheet's order is assessment first).
+// What a guide-governed tap (and a held search row) says until the fresh guide has answered (the sheet's order is assessment first).
 const CONFIRM_FIRST = 'Confirm the assessment first.';
+const NO_WAITING = [];
 
 // "Weed spots": the server's one entry for the weed mix (lib: lawn-weed-mix.js). One tap
 // opens the rows it names (each seeded from its own plan item, as a single add-on is) and

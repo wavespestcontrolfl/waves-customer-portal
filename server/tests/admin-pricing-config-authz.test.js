@@ -189,7 +189,7 @@ test('misting availability follows the gate at request time and carries labels a
       expect(on.json.featureAvailable).toBe(true);
       expect(on.json.misting).toEqual({
         enabled: true,
-        tiers: [{ key: 'essential', label: 'Essential system (drum)' }, { key: 'smart', label: 'Smart system (tankless + app)' }],
+        tiers: [{ key: 'essential', label: 'Compact system (10-gallon)' }, { key: 'smart', label: 'Standard system (55-gallon)' }],
         solutions: [
           { key: 'standard', label: expect.stringContaining('permethrin') },
           { key: 'natural', label: expect.stringContaining('botanical') },

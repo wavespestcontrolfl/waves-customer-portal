@@ -97,15 +97,19 @@ const VARIANT_TEXT = {
   ),
   // Every customer surface (this document, the terminal card, the SSR banner)
   // names the shared account-manager constant (codex #3297 r1/r3).
-  authored: ({ estimateUrl }) => (
+  // `onPage` (the estimate page's own What happens next card): the customer is
+  // already on the live estimate, so the "stays available at" sentence is
+  // dropped, and the Accept & sign card sits below the card, not above it.
+  authored: ({ estimateUrl, onPage }) => (
     <>{WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer
       questions and finalize this proposal — or call {WAVES_SUPPORT_PHONE_DISPLAY} any time.
-      {' '}Your live estimate stays available at {link(estimateUrl, estimateUrl)}.</>
+      {onPage ? null : <>{' '}Your live estimate stays available at {link(estimateUrl, estimateUrl)}.</>}</>
   ),
-  authored_sign: ({ estimateUrl, primaryLabel }) => (
-    <>To go ahead, tap <strong>{primaryLabel}</strong> above to review and sign your service agreement online,
+  authored_sign: ({ estimateUrl, primaryLabel, onPage }) => (
+    <>To go ahead, tap <strong>{primaryLabel}</strong> {onPage ? 'below' : 'above'} to review and sign your service agreement online,
       {' '}or call {WAVES_SUPPORT_PHONE_DISPLAY}. Signing does not start service or bill you; {WAVES_ACCOUNT_MANAGER_FIRST_NAME},
-      {' '}your Waves account manager, follows up to schedule. Your live estimate stays available at {link(estimateUrl, estimateUrl)}.</>
+      {' '}your Waves account manager, follows up to schedule.
+      {onPage ? null : <>{' '}Your live estimate stays available at {link(estimateUrl, estimateUrl)}.</>}</>
   ),
   team_confirms: ({ estimateUrl }) => (
     <>Our team will confirm the final details and scheduling with you — call {WAVES_SUPPORT_PHONE_DISPLAY} any
@@ -126,11 +130,11 @@ const VARIANT_TEXT = {
 };
 
 // The Next steps paragraphs (the section header stays in the document).
-export function NextSteps({ cta = {}, authoredProposal = false, acceptanceMode = 'standard_slot_pick', estimateUrl, estimateNumber, validThroughText = '' }) {
+export function NextSteps({ cta = {}, authoredProposal = false, acceptanceMode = 'standard_slot_pick', estimateUrl, estimateNumber, validThroughText = '', onPage = false }) {
   const { variant, primaryLabel } = resolveDocNextSteps({ cta, authoredProposal, acceptanceMode });
   return (
     <>
-      <p style={NEXT_STEP_P}>{VARIANT_TEXT[variant]({ estimateUrl, estimateNumber, acceptanceMode, primaryLabel })}</p>
+      <p style={NEXT_STEP_P}>{VARIANT_TEXT[variant]({ estimateUrl, estimateNumber, acceptanceMode, primaryLabel, onPage })}</p>
       {!cta.terminalState && validThroughText ? (
         <p data-testid="doc-valid-through-line" style={NEXT_STEP_P}>Price valid through {validThroughText}.</p>
       ) : null}

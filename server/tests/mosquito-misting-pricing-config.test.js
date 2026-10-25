@@ -15,6 +15,7 @@ const { syncConstantsFromDB } = require('../services/pricing-engine/db-bridge');
 const config = require('../services/pricing-engine/mosquito-misting-config');
 const { priceMosquitoMisting } = require('../services/pricing-engine/service-pricing');
 const migration = require('../models/migrations/20261023000010_mosquito_misting_pricing_config');
+const retailMigration = require('../models/migrations/20261025090000_mosquito_misting_pynamite_retail_prices');
 
 const CODE_OWNED = ['label', 'minNozzles', 'maxNozzles', 'maxRisers', 'maxRefillsPerYear', 'defaultTier', 'defaultSolution', 'defaultRefillsPerYear'];
 
@@ -41,14 +42,34 @@ beforeAll(() => { pristine = live(); });
 afterEach(() => { config.rebaseMosquitoMisting(); });
 
 describe('the seed row is the code table, and the code table is the default', () => {
-  test('the migration seeds exactly the in-code values and no code-owned field', () => {
-    expect(migration.SEED).toEqual(seed());
-    expect(migration.SEED.tiers.smart).toEqual({ price: 4595, hardwareCost: 2600, includedNozzles: 35 });
-    expect(migration.SEED.refills.natural).toEqual({ price: 219, productCost: 95 });
+  test('the frozen 10-23 migration keeps its own MistAway literals (history), and no code-owned field', () => {
+    // 20261023000010 is frozen: its SEED is pinned to its own values, not to the live constants (20261025090000 moves them on).
+    expect(migration.SEED.tiers).toEqual({
+      essential: { price: 3795, hardwareCost: 1800, includedNozzles: 35 },
+      smart: { price: 4595, hardwareCost: 2600, includedNozzles: 35 },
+    });
+    expect(migration.SEED).toMatchObject({
+      extraNozzlePrice: 75, extraNozzleCost: 22, includedRisers: 10, extraRiserPrice: 45, extraRiserCost: 14,
+      install: { techs: 2, hours: 10 }, serviceCallNoPlan: 149,
+      refills: { standard: { price: 129, productCost: 45 }, natural: { price: 219, productCost: 95 }, premium: { price: 319, productCost: 140 } },
+    });
     expect(migration.SEED.plan).toEqual({ monthly: 59, visitsPerYear: 12, laborMinutesPerVisit: 25, partsReservePerMonth: 10 });
     const flat = JSON.stringify(migration.SEED);
     for (const field of CODE_OWNED) expect(flat).not.toContain(`"${field}"`);
     expect(config.normalizeMosquitoMistingPricingConfig(migration.SEED)).toMatchObject({ ok: true });
+  });
+
+  test('the Pynamite retail migration NEXT is exactly the in-code values and no code-owned field', () => {
+    expect(retailMigration.NEXT).toEqual(seed());
+    expect(retailMigration.NEXT).toEqual(constants.mosquitoMistingPricingDefaults());
+    expect(retailMigration.SEED).toBe(migration.SEED);
+    expect(retailMigration.NEXT.tiers.smart).toEqual({ price: 4195, hardwareCost: 2560, includedNozzles: 30 });
+    expect(retailMigration.NEXT.tiers.essential).toEqual({ price: 2795, hardwareCost: 1620, includedNozzles: 10 });
+    expect(retailMigration.NEXT).toMatchObject({ includedRisers: 0, extraRiserPrice: 75, extraRiserCost: 30, install: { techs: 2, hours: 6 } });
+    expect(retailMigration.NEXT.refills).toEqual({ standard: { price: 129, productCost: 70 }, natural: { price: 219, productCost: 95 }, premium: { price: 319, productCost: 203 } });
+    const flat = JSON.stringify(retailMigration.NEXT);
+    for (const field of CODE_OWNED) expect(flat).not.toContain(`"${field}"`);
+    expect(config.normalizeMosquitoMistingPricingConfig(retailMigration.NEXT)).toMatchObject({ ok: true });
   });
 
   test('the frozen defaults are the table as written, not a view of the live one', () => {
@@ -193,7 +214,7 @@ describe('the sync: the row drives the price, a bad or missing row leaves the co
     data.refills.natural.price = 250;
     await sync(data);
     const after = base();
-    expect(after.installation.price).toBe(3000 + 5 * 100 + 2 * 60);
+    expect(after.installation.price).toBe(3000 + 30 * 100 + 12 * 60);
     expect(after.monthly).toBe(70);
     expect(after.perApp).toBe(70);
     expect(after.annual).toBe(840);
@@ -211,7 +232,7 @@ describe('the sync: the row drives the price, a bad or missing row leaves the co
     await sync(data);
     const r = base();
     expect(r.installation.laborCost).toBe(3 * 8 * constants.GLOBAL.LABOR_RATE);
-    expect(r.installation.materialCost).toBe(2000 + 5 * 22 + 2 * 14);
+    expect(r.installation.materialCost).toBe(2000 + 30 * 22 + 12 * 30);
   });
 
   test('a malformed row is ignored WHOLE: the valid fields beside the bad one are not applied either', async () => {
