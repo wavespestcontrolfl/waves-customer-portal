@@ -107,6 +107,9 @@ postgres('Hired button on migrated PostgreSQL', () => {
     await mockDatabase('technicians').insert({
       id: adminId, name: 'Fixture Admin', email: `fixture-admin-${adminId}@example.test`, role: 'admin', active: true,
       employment_status: 'active',
+      // An established admin who set a password long ago: no hire action.
+      password_hash: 'fixture-not-a-real-hash',
+      password_changed_at: new Date('2026-01-01T12:00:00Z'),
     });
     const app = express();
     app.use(express.json());
