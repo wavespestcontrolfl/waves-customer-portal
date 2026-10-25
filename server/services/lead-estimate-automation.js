@@ -15,6 +15,12 @@ const {
   hasPrimaryStreetNumber,
   commercialTextSignal,
 } = require('./estimator-engine/unit-scope-model');
+const {
+  cachedLeadMeasurements,
+  MEASUREMENTS_SOURCE,
+  DEFAULTED_REVIEW,
+  FROM_COUNTY_REVIEW,
+} = require('./lead-draft-measurements');
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -250,8 +256,8 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
   };
 }
 
-function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services = {} } = {}) {
-  const homeSqFt = numberOrNull(
+function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services = {}, measurements = null } = {}) {
+  const statedHomeSqFt = numberOrNull(
     body.homeSqFt,
     body.home_sqft,
     body.squareFootage,
@@ -259,15 +265,26 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
     customer.property_sqft,
     customer.home_sqft
   );
-  const lotSqFt = numberOrNull(
+  const statedLotSqFt = numberOrNull(
     body.lotSqFt,
     body.lot_sqft,
     body.lotSize,
     body.lot_size,
     customer.lot_sqft
   );
+  // County-assessed sizes (lead-draft-measurements.js) stand in only for a
+  // lead that gave neither figure: a stated figure is never replaced by a
+  // county one or mixed with one.
+  const county = !statedHomeSqFt && !statedLotSqFt && measurements?.homeSqFt && measurements?.lotSqFt
+    ? measurements
+    : null;
+  const homeSqFt = statedHomeSqFt || county?.homeSqFt || null;
+  const lotSqFt = statedLotSqFt || county?.lotSqFt || null;
   const review = [];
-  if (!homeSqFt || !lotSqFt) review.push('property_measurements_defaulted');
+  if (!homeSqFt || !lotSqFt) review.push(DEFAULTED_REVIEW);
+  // A review reason like any other: the auto-send lane parks the draft
+  // until LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS names it.
+  if (county) review.push(FROM_COUNTY_REVIEW);
   // Gate ON: an unresolved type stays literal 'unknown' — the pricing
   // engine's own normalizer prices it at the neutral default AND stamps
   // propertyTypeWasDefaulted/invalid_property_type warnings, so the default
@@ -322,10 +339,17 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       },
       services,
       leadSource: 'lead_webhook',
-      address: intake.fullAddress || customer.address || customer.address_line1 || null,
+      address: leadDraftAddress({ intake, customer }),
     },
     review,
+    // 'lead': the form or the customer row gave a size; 'county_assessed':
+    // both from the county record; 'default': neither, so both defaults.
+    sizeSource: county ? MEASUREMENTS_SOURCE : (statedHomeSqFt || statedLotSqFt ? 'lead' : 'default'),
   };
+}
+
+function leadDraftAddress({ intake = {}, customer = {} } = {}) {
+  return intake.fullAddress || customer.address || customer.address_line1 || null;
 }
 
 function rodentEligibilityFreeze(item = {}) {
@@ -463,7 +487,12 @@ function mapServiceKeyToEstimateServices(serviceKey, { instant = null } = {}) {
   return { services, supported: true, unsupportedReason: null, review: [] };
 }
 
-async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}, readiness = {} } = {}) {
+// `measurements`: county-assessed { homeSqFt, lotSqFt } or null, read by the
+// caller (the webhook reads the cache before its phone lock; the background
+// lookup passes its own; lead-draft-measurements.js). Left undefined, the
+// build reads the lookup cache itself (free; null while
+// GATE_LEAD_DRAFT_PROPERTY_LOOKUP is off).
+async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}, readiness = {}, measurements } = {}) {
   const serviceInterest = firstNonEmpty(readiness.serviceInterest, intake.serviceInterest, customer.service_interest);
   const serviceKey = readiness.serviceKey || null;
   // A key that was submitted but never verified (catalog read failed, or not
@@ -495,8 +524,24 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
     return { automation, estimateData: { automation: { leadEstimateAutomation: readiness, draftEstimateAutomation: automation } } };
   }
 
-  const engineInput = buildLeadEngineInput({ intake, customer, body, services: mapped.services });
+  const county = measurements !== undefined
+    ? measurements
+    : await cachedLeadMeasurements(leadDraftAddress({ intake, customer }));
+  const engineInput = buildLeadEngineInput({ intake, customer, body, services: mapped.services, measurements: county });
   automation.review.push(...engineInput.review);
+  automation.sizeSource = engineInput.sizeSource;
+  // The intake record (readiness) flagged the missing size before the
+  // county answered; on a county-sized draft that flag names the county
+  // size instead, so staff never read "default size" on a real one.
+  let gateRecord = readiness;
+  if (engineInput.sizeSource === MEASUREMENTS_SOURCE) {
+    automation.measurements = { source: MEASUREMENTS_SOURCE, homeSqFt: county.homeSqFt, lotSqFt: county.lotSqFt };
+    gateRecord = {
+      ...readiness,
+      review: [...new Set((readiness.review || []).map((reason) => (reason === DEFAULTED_REVIEW ? FROM_COUNTY_REVIEW : reason)))],
+    };
+    automation.readiness = gateRecord;
+  }
   // Persist the reproducible business inputs only. catalogPricing remains a
   // transient server-owned overlay and is frozen into the generated line's
   // pricing witnesses below, never into a replayable client-visible input.
@@ -580,7 +625,7 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
           waveGuard: estimate?.waveGuard || null,
         },
         automation: {
-          leadEstimateAutomation: readiness,
+          leadEstimateAutomation: gateRecord,
           draftEstimateAutomation: automation,
         },
       },
@@ -592,7 +637,7 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
       automation,
       estimateData: {
         automation: {
-          leadEstimateAutomation: readiness,
+          leadEstimateAutomation: gateRecord,
           draftEstimateAutomation: automation,
         },
       },

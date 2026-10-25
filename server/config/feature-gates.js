@@ -1915,6 +1915,14 @@ const gates = {
   // flowing while quoting stays manual.
   leadEstimateAutomation: process.env.GATE_LEAD_ESTIMATE_AUTOMATION === 'true',
 
+  // Lead draft county size (owner 2026-10-24, option A of the lead draft
+  // page): a lead draft priced on the default home size gets the county-
+  // assessed home and lot size from the property lookup (a free cache read at
+  // build time; one paid lookup in the background, then a guarded re-price of
+  // an untouched draft). Exactly `true`. Read at call time in
+  // services/lead-draft-measurements.js; this entry is for logGateStatus only.
+  leadDraftPropertyLookup: process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP === 'true',
+
   // Lead Estimate Auto-Send — sends generated lead-webhook draft estimates
   // after a delay. Requires leadEstimateAutomation in the scheduler too.
   leadEstimateAutoSend: process.env.GATE_LEAD_ESTIMATE_AUTO_SEND === 'true',
@@ -6620,6 +6628,11 @@ function accessCodesFoundBellLive() {
   return process.env.GATE_ACCESS_CODES_FOUND_BELL === 'true';
 }
 
+// GATE_LEAD_DRAFT_PROPERTY_LOOKUP read at CALL time (so a flip needs no redeploy); strict 'true'.
+function leadDraftPropertyLookupLive() {
+  return process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP === 'true';
+}
+
 // GATE_QUIET_OVERDUE_LIST read at CALL time (so a flip needs no redeploy); strict 'true'.
 function quietOverdueListLive() {
   return process.env.GATE_QUIET_OVERDUE_LIST === 'true';
@@ -7965,3 +7978,5 @@ module.exports.callAddressFamilyCardLive = callAddressFamilyCardLive;
 module.exports.accessCodesFoundBellLive = accessCodesFoundBellLive;
 // GATE_PLAN_RATE_LEDGER_RECONCILE reader, on its own line so gate PRs never conflict.
 module.exports.planRateLedgerReconcileLive = planRateLedgerReconcileLive;
+// GATE_LEAD_DRAFT_PROPERTY_LOOKUP reader, on its own line so gate PRs never conflict.
+module.exports.leadDraftPropertyLookupLive = leadDraftPropertyLookupLive;
