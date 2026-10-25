@@ -89,6 +89,11 @@ function fixtureFor(url, options = {}) {
   if (path === "/admin/schedule/blackout-dates/weekly") return { weeklyDaysOff: [0, 6] };
   if (path === "/admin/schedule/blackout-dates/holidays") return { success: true, closedHolidays: JSON.parse(options.body).closed };
   if (path.startsWith("/admin/schedule/blackout-dates/")) return { ok: true };
+  if (path === "/admin/schedule/departure-time") {
+    return options.method === "PUT"
+      ? { success: true, departureTime: JSON.parse(options.body).departureTime, inUse: false }
+      : { departureTime: "07:30", saved: false, inUse: false, earliest: "06:00", latest: "08:00", stepMinutes: 15 };
+  }
   if (path === "/admin/gbp/locations") return { locations: [{ id: "bradenton", name: "Bradenton", hasCredentials: true }] };
   if (path === "/admin/settings/linkedin/status") return { configured: true, connected: true, orgVerified: true, hasRefreshToken: true };
   if (path === "/admin/integrations/health") return integrationCatalog;
@@ -184,6 +189,39 @@ describe("Settings new UI foundation", () => {
       url === "/api/admin/schedule/blackout-dates"
       && options?.method === "POST"
       && options.body === JSON.stringify({ date: "2026-12-31", reason: "Office closed" }))).toBe(true));
+  });
+
+  it("saves the van departure time from the Day start tab", async () => {
+    mount("day-start");
+    const select = await screen.findByLabelText("Van leaves at");
+    await waitFor(() => expect(select).toHaveValue("07:30"));
+    expect(select.querySelectorAll("option")).toHaveLength(9);
+    expect(screen.getByText(/Not in use yet/)).toBeInTheDocument();
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    fireEvent.change(select, { target: { value: "07:00" } });
+    expect(save).not.toBeDisabled();
+    fireEvent.click(save);
+    await screen.findByText("Saved.");
+    const call = fetch.mock.calls.find(([url, options]) =>
+      url === "/api/admin/schedule/departure-time" && options?.method === "PUT");
+    expect(JSON.parse(call[1].body)).toEqual({ departureTime: "07:00" });
+  });
+
+  it("shows the server's refusal when the departure time does not save", async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options = {}) => (
+      String(url) === "/api/admin/schedule/departure-time" && options.method === "PUT"
+        ? response({ error: "departureTime must be a time from 06:00 to 08:00 in 15-minute steps" }, 400)
+        : base(url, options)
+    ));
+    mount("day-start");
+    const select = await screen.findByLabelText("Van leaves at");
+    await waitFor(() => expect(select).toHaveValue("07:30"));
+    fireEvent.change(select, { target: { value: "06:45" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("15-minute steps");
+    expect(screen.queryByText("Saved.")).not.toBeInTheDocument();
   });
 
   it("lists the holidays open by default and saves a holiday closure", async () => {

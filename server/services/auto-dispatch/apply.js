@@ -21,10 +21,11 @@ const moveLimit = require('./move-limit');
 const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
-const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
+const { violatesPreferredTime, _internals: { isSaturday, isWeekendDay } } = require('./candidate-slots');
 const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { assertScoredStartPoints } = require('./start-point-fence');
+const { techChangeBlocked } = require('./keep-tech');
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
 // backlog item 3): total placements tried per visit, including the first —
@@ -513,9 +514,9 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     await checkMemberEligibility(rows, best, eligCtx, trx, refuse);
     // A grouped unit moves only if every member is under the move limit.
     await moveLimit.assertUnderLimit(trx, rows, config, refuse);
-    if (isSaturday(best.date)) {
+    if (isWeekendDay(best.date)) {
       const weekend = rows.find((r) => r.skip_weekends === true);
-      if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a Saturday`);
+      if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a ${isSaturday(best.date) ? 'Saturday' : 'Sunday'}`);
     }
     if (guardMode === 'tiers') {
       await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse);
@@ -779,6 +780,9 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   if (Number.isFinite(config.remainingChanges)) options.maxUnitSize = Math.max(0, config.remainingChanges);
   const techChanged = !!best.technician_id
     && String(best.technician_id) !== String(service.technician_id || '');
+  // GATE_AUTO_DISPATCH_KEEP_TECH (config.keepTech): a visit that has a
+  // technician never changes it here; refused before any write (keep-tech.js).
+  if (techChanged && config.keepTech === true && service.technician_id) throw techChangeBlocked();
   if (techChanged) options.technicianId = best.technician_id;
   // Every grouped member re-passes the apply-time hard guards under the
   // unit mover's stop lock, or the grouped move is refused (codex r13 P1).

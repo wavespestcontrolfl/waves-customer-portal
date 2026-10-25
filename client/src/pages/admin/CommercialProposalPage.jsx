@@ -11,7 +11,7 @@ import ProposalBidForm from '../../components/estimates/ProposalBidForm';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
 import ProposalProjectCosting from '../../components/estimates/ProposalProjectCosting';
 import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
-import { AGREEMENT_TERMS } from '@commercial-agreement-terms';
+import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS } from '@commercial-agreement-terms';
 import { formatETDateTime } from '../../lib/timezone';
 
 // Commercial proposal builder — the full-page surface for authoring the
@@ -83,14 +83,15 @@ function taxAutofillPct({ locked, operatorEdited, currentPct, anyTaxable, sugges
 
 // Prefill for the structured terms (owner 2026-10-24). A proposal that never had terms starts with the agreement's own
 // texts (shared/commercial-agreement-terms.cjs, the same constants online signing checks against), so the operator edits
-// from the standard instead of typing it. Net 30 only on a Bill-by-invoice proposal: the server rejects a payment term
-// on any other (the select stays "Not set"). Returns null when the proposal is locked or ANY term is already authored.
+// from the standard instead of typing it. Payment: Net 30 on a Bill-by-invoice proposal; on any other, Auto Pay (the
+// commercial default, owner "autopay default", GATE_COMMERCIAL_AUTOPAY) or "Not set" with that gate off (the server
+// rejects a Net term there). Returns null when the proposal is locked or ANY term is already authored.
 const TERM_FIELDS = ['paymentTerms', 'initialTermMonths', 'renewal', 'priceAdjustment', 'cancellation', 'accessRequirements'];
-function commercialTermsPrefill({ locked, saved, billByInvoice }) {
+function commercialTermsPrefill({ locked, saved, billByInvoice, autopayEnabled = false }) {
   if (locked) return null;
   if (TERM_FIELDS.some((key) => saved?.[key] != null && saved[key] !== '')) return null;
   return {
-    paymentTerms: billByInvoice ? AGREEMENT_TERMS.paymentTerms : '',
+    paymentTerms: billByInvoice ? INVOICE_PAYMENT_TERMS : (autopayEnabled ? AUTOPAY_PAYMENT_TERMS : ''),
     initialTermMonths: String(AGREEMENT_TERMS.initialTermMonths),
     renewal: AGREEMENT_TERMS.renewal,
     priceAdjustment: AGREEMENT_TERMS.priceAdjustment,
@@ -252,6 +253,7 @@ function CommercialProposalEditor() {
   // The SAVED fixed date — the one the server enforces on send and Mark won.
   const [savedValidThrough, setSavedValidThrough] = useState('');
   const [bidToolsEnabled, setBidToolsEnabled] = useState(false);
+  const [autopayEnabled, setAutopayEnabled] = useState(false);
   // "Bid tools" switch: shows the Required bid form and Project cost sheet
   // sections. Visibility only; the sections stay mounted and their data stays
   // in state, so hiding never drops or resets anything. Defaults ON when the
@@ -336,6 +338,7 @@ function CommercialProposalEditor() {
     setProjectCosting(data.projectCosting || { revenueYears: 1, rows: [] });
     setSavedValidThrough(p.validThrough || '');
     setBidToolsEnabled(data.bidToolsEnabled === true);
+    setAutopayEnabled(data.commercialAutopayEnabled === true);
     if (!bidToolsChosenRef.current) {
       setBidToolsOpen(
         (data.projectCosting?.rows?.length || 0) > 0
@@ -402,7 +405,7 @@ function CommercialProposalEditor() {
     setResponsibilitiesText((p.customerResponsibilities || []).join('\n'));
     // Prefill only on the first load of an estimate: a reload after Save must not put back terms the operator cleared.
     const prefill = est && termsPrefilledForRef.current !== est.id
-      ? commercialTermsPrefill({ locked: lockReason(est), saved: p.commercialTerms, billByInvoice: !!est.billByInvoice })
+      ? commercialTermsPrefill({ locked: lockReason(est), saved: p.commercialTerms, billByInvoice: !!est.billByInvoice, autopayEnabled: data.commercialAutopayEnabled === true })
       : null;
     if (est) termsPrefilledForRef.current = est.id;
     setCommercialTerms(prefill || {
@@ -1672,23 +1675,32 @@ function CommercialProposalEditor() {
                   <span className={LABEL}>Payment terms</span>
                   {/* Canonical payer vocabulary only (server rejects free
                       text) — billing derives due dates from these tokens,
-                      which only exists for invoice-mode proposals. */}
+                      which only exists for invoice-mode proposals. Auto Pay
+                      (GATE_COMMERCIAL_AUTOPAY) is the one term for a proposal
+                      that does NOT bill by invoice: the customer's Auto Pay
+                      collects after each service, and the server refuses it
+                      beside Bill by invoice. */}
                   {/* Stays ENABLED when a stored term exists on a
                       non-invoice proposal so the operator can CLEAR the
                       stale term (the PUT rejects setting a new one). */}
                   <Select
                     size="sm" className="mt-1" value={commercialTerms.paymentTerms}
-                    disabled={!!locked || (!estimate?.billByInvoice && !commercialTerms.paymentTerms)}
+                    disabled={!!locked || (!estimate?.billByInvoice && !autopayEnabled && !commercialTerms.paymentTerms)}
                     onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, paymentTerms: e.target.value })); }}
                   >
                     <option value="">Not set</option>
-                    <option value="due_on_receipt">Due on receipt</option>
-                    <option value="net15">Net-15</option>
-                    <option value="net30">Net-30</option>
+                    {!estimate?.billByInvoice && (autopayEnabled || commercialTerms.paymentTerms === AUTOPAY_PAYMENT_TERMS) && (
+                      <option value={AUTOPAY_PAYMENT_TERMS}>Auto Pay</option>
+                    )}
+                    <option value="due_on_receipt" disabled={!estimate?.billByInvoice}>Due on receipt</option>
+                    <option value="net15" disabled={!estimate?.billByInvoice}>Net-15</option>
+                    <option value="net30" disabled={!estimate?.billByInvoice}>Net-30</option>
                   </Select>
                   {!estimate?.billByInvoice && (
                     <span className="mt-1 block text-11 text-zinc-400">
-                      Requires Bill by invoice — for manually billed agreements, put payment language in Additional terms.
+                      {autopayEnabled
+                        ? 'Auto Pay charges the saved card or bank account after each service. Net terms require Bill by invoice.'
+                        : 'Requires Bill by invoice — for manually billed agreements, put payment language in Additional terms.'}
                     </span>
                   )}
                 </label>

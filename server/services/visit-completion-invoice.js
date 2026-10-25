@@ -4,10 +4,12 @@
 // and member links share the caller's transaction. No delivery or charge here.
 const db = require('../models/db');
 const InvoiceService = require('./invoice');
-const { acquireScheduledInvoiceMintLock, TERMINAL_INVOICE_STATUSES } = require('./scheduled-invoice-mint');
+const {
+  acquireScheduledInvoiceMintLock, assertScheduledInvoiceNotBilledElsewhere, TERMINAL_INVOICE_STATUSES,
+} = require('./scheduled-invoice-mint');
 const { lockStop, dateOnly } = require('./visit-groups');
 const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane');
-const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cost-visit-types');
 const { parkSetupFeeStampForOffice, isPlanApplicationRow } = require('./setup-fee-obligation');
 const { acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
 
@@ -59,6 +61,15 @@ async function memberBillingEligibility(member, customer, trx) {
       || ['inspection_only', 'customer_declined'].includes(notes.visitOutcome)) return { lineItems: [] };
   if (member.record_status !== 'completed') return office('record_not_completed', member.id);
   if (notes.oneTimeRecapOnly) return { lineItems: [] };
+  // Billing Recovery "Billed elsewhere": another live invoice already bills
+  // this member. The combined invoice links only its first member, so every
+  // member is checked here, under the mint locks the packet mint holds.
+  try {
+    await assertScheduledInvoiceNotBilledElsewhere(trx, member.id);
+  } catch (err) {
+    if (err?.code === 'VISIT_BILLED_ELSEWHERE') return office('member_billed_elsewhere', member.id);
+    throw err;
+  }
   if (['monthly_membership', 'annual_prepay'].includes(resolveBillingLane(customer).mode)) {
     return office('covered_billing_lane');
   }
@@ -90,6 +101,8 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
     // so primary_line_price is on the row — pass it or a fully-discounted $0
     // packet member falls back to the acceptance fee here too.
     primaryLinePrice: member.primary_line_price,
+    // A consultation (Waves Assessment) never takes the per-application fee.
+    serviceType: member.service_type,
   });
   const eligible = require('./complete-scheduled-service').shouldAutoInvoiceCompletion({
     invoiceAmount: amount, createInvoiceOnComplete: member.create_invoice_on_complete,
@@ -101,6 +114,9 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
     autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
   });
   if (isAlwaysFreeServiceType(member.service_type) || (member.is_callback && !eligible)) return { lineItems: [] };
+  // A consultation (Waves Assessment) with no row price of its own bills
+  // nothing and needs no office review (completionInvoiceAmount).
+  if (isConsultationServiceType(member.service_type) && !(price > 0)) return { lineItems: [] };
   // A combined plan's customer-level fallback is not a price for each member.
   // Explicit zero is allowed only when the canonical lane also says zero.
   if (!Number.isFinite(price)) {

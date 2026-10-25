@@ -148,6 +148,30 @@ test('the write goes through the booking contract with the caller\'s source, the
   expect(registerAppointment).toHaveBeenCalledWith('fu-1', 'cust-1', '2026-10-05T09:00', 'Bed Bug Treatment', 'booking_followup', { sendConfirmation: false });
 });
 
+// GATE_TECH_WORK_DAYS (owner 2026-10-25): an inherited technician is an automatic
+// placement, so a day they do not work lands the follow-up unassigned; an admin's
+// explicit technician is an office choice, which never blocks.
+test('an inherited technician is checked with workDays (an off day lands the follow-up unassigned); an admin override is not', async () => {
+  install();
+  await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true });
+  expect(assertAssignableTechnician).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ workDays: true }));
+  assertAssignableTechnician.mockRejectedValueOnce(Object.assign(new Error('off day'), { code: 'TECH_NOT_ASSIGNABLE', offDay: true }));
+  const out = await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true });
+  expect(out.body.wouldBook.technicianId).toBeNull();
+
+  await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true, technicianId: 'tech-9' });
+  expect(assertAssignableTechnician).toHaveBeenLastCalledWith('tech-9', expect.objectContaining({ workDays: false }));
+});
+
+test('the write checks an inherited technician with workDays, and an off day books the follow-up unassigned', async () => {
+  const { writes } = install();
+  assertAssignableTechnician.mockRejectedValueOnce(Object.assign(new Error('off day'), { code: 'TECH_NOT_ASSIGNABLE', offDay: true }));
+  const out = await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, isAdmin: false });
+  expect(out.status).toBe(200);
+  expect(assertAssignableTechnician).toHaveBeenCalledWith('tech-1', expect.objectContaining({ workDays: true }));
+  expect(writes[0].row.technician_id).toBeNull();
+});
+
 test('expectedTechnicianId refuses when the technician resolved under the lock differs from the approval', async () => {
   const { writes } = install();
   assertAssignableTechnician.mockRejectedValueOnce(Object.assign(new Error('out'), { code: 'TECH_NOT_ASSIGNABLE' }));

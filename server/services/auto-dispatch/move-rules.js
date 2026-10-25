@@ -25,9 +25,20 @@
  *     the least drive. A slot that adds more than
  *     config.conflictMaxAddedDriveMinutes is never taken: the visit stays
  *     and the audit row says CONFLICT_NO_NEAR_SLOT (a person decides).
+ *
+ * Sunday is the last resort (owner 2026-10-24, "think sundays should be a
+ * last resort", with GATE_AUTO_DISPATCH_DAY_RULES opening Sundays to the
+ * search): a Sunday slot ranks after every qualifying Monday-Saturday slot,
+ * whatever its gain, so it is taken only when no other day qualifies. A free
+ * hour on the visit's own day still comes first for an overlap.
  */
+const { weekdayOf } = require('./scoring');
 
 function round2(v) { return Math.round(v * 100) / 100; }
+
+function isSundayDate(date) {
+  return weekdayOf(date) === 0;
+}
 
 function isUnplacedDueDate(service) {
   return !!(service.recurring_dispatch_due_date && !service.window_start);
@@ -108,11 +119,14 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
       saving: driveSavingMinutes(current, cand),
       qualifies: forced ? ceilingOk : (floorOk && gain >= threshold),
       sameDay: !isDayMove(current, cand),
+      sunday: isSundayDate(cand.date),
     };
   });
   // Stable: ties keep encounter order (Array#sort is stable in V8). A
-  // conflict move ranks by least added drive before score.
+  // conflict move ranks by least added drive before score. A Sunday ranks
+  // after every other day (the last resort, see the header).
   const byGain = (a, b) => (sameDayFirst ? Number(b.sameDay) - Number(a.sameDay) : 0)
+    || Number(a.sunday) - Number(b.sunday)
     || (conflict ? b.saving - a.saving : 0) || b.gain - a.gain || a.index - b.index;
   const qualifying = rows.filter((r) => r.qualifies).sort(byGain);
   // Nothing qualifies: the audit shows the nearest miss.
@@ -141,10 +155,12 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
 function normalBestOf(conflict, rows) {
   if (!conflict) return {};
   // A past_cap slot is in the list only for the conflict repair (legacyCap).
-  const top = rows.filter((r) => r.normalOk && !r.cand.past_cap).sort((a, b) => b.gain - a.gain || a.index - b.index)[0];
+  const top = rows.filter((r) => r.normalOk && !r.cand.past_cap)
+    .sort((a, b) => Number(a.sunday) - Number(b.sunday) || b.gain - a.gain || a.index - b.index)[0];
   return top ? { normalBest: top.cand, normalBestScore: top.sc } : {};
 }
 
 module.exports = {
   isUnplacedDueDate, isDayMove, driveSavingMinutes, moveGain, meetsDriveFloor, withinConflictCeiling, mustMove, rankCandidates,
+  isSundayDate,
 };

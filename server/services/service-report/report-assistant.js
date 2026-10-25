@@ -254,7 +254,7 @@ function reportEnumLabel(value) {
   const labels = {
     ghost_ant: 'ghost ants',
     american_roach: 'American roaches',
-    german_roach: 'German roaches',
+    german_roach: 'german roaches',
     roach: 'roaches',
     ant: 'ants',
     spider: 'spiders',

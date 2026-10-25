@@ -223,7 +223,7 @@ describe('ensurePackageFollowUpVisit', () => {
     expect(insertData.confirmed_at).toBeInstanceOf(Date);
     expect(insertData.notes).toMatch(/Treatment 2 of 2/);
     expect(insertData.source_estimate_id).toBeUndefined(); // never correlates as an accept retry
-    expect(assertAssignableTechnician).toHaveBeenCalledWith('tech-1', { conn: trx, date: '2026-10-19' });
+    expect(assertAssignableTechnician).toHaveBeenCalledWith('tech-1', { conn: trx, date: '2026-10-19', workDays: true });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 

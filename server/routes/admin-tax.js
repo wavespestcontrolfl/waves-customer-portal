@@ -1849,7 +1849,8 @@ const sharedBills = require('../services/tax-shared-bills');
 const taxYears = require('../services/tax-years');
 const returnEngine = require('../services/tax-return-engine');
 const { hasYearConstants, YEARS: TAX_YEAR_CONSTANTS } = require('../services/tax-year-constants');
-const { gateEnvValue, taxReturnEngineLive } = require('../config/feature-gates');
+const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive } = require('../config/feature-gates');
+const worksheets = require('../services/tax-worksheets');
 
 const MAX_STATEMENT_BYTES = 2 * 1024 * 1024;
 
@@ -3488,6 +3489,26 @@ router.post('/tax-years/:year/unfile', async (req, res, next) => {
 
 router.get('/tax-years/:year/return', async (req, res, next) => {
   try { res.json(await returnEngine.computeYear(req.params.year)); } catch (err) { sharedBillsError(err, res, next); }
+});
+
+// ── Tax worksheets (GATE_TAX_WORKSHEETS, nested under GATE_BANK_IMPORT) ──
+// Sales tax (DR-15) and the 1099-NEC list, read-only. /status answers
+// {enabled:false} when dark; the rest 404 when dark.
+router.get('/worksheets/status', (req, res) => {
+  res.json({ enabled: !!taxWorksheetsLive() });
+});
+
+router.use('/worksheets', (req, res, next) => {
+  if (!taxWorksheetsLive()) return res.status(404).json({ error: 'not found' });
+  next();
+});
+
+router.get('/worksheets/sales-tax', async (req, res, next) => {
+  try { res.json(await worksheets.salesTaxSheet(req.query)); } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.get('/worksheets/1099', async (req, res, next) => {
+  try { res.json(await worksheets.form1099List(req.query.year)); } catch (err) { sharedBillsError(err, res, next); }
 });
 
 module.exports = router;

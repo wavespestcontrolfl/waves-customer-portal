@@ -17,6 +17,7 @@ const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
 const { pestReportVoiceLive, pestQuietVisitLive } = require('../config/feature-gates');
+const { specialtyReportVoiceLive, techWorkDaysLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
@@ -108,7 +109,7 @@ const {
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
-const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const { isAlwaysFreeServiceType, isConsultationServiceType } = require('../services/no-cost-visit-types');
 const SeriesPriceGuards = require('../services/series-price-guards');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -145,7 +146,7 @@ const { technicianReportCustomerCopy, containsReportAccessCode } = require('../s
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, observedAndReportedLines, writerRulesRejection,
   noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
-  activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation,
+  activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation, lowercaseGermanRoach,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
@@ -2311,17 +2312,26 @@ function recurringTemplateTechnicianId(parent) {
 // whole call because ONE occurrence lands on a marked-out day — that child
 // is simply seeded unassigned, same as any other not-assignable case.
 // Omitting `date` keeps every caller byte-identical to before this check.
+//
+// Work days (GATE_TECH_WORK_DAYS on): a `date` that falls on a weekday the
+// technician does not work (technicians.work_days) seeds the child unassigned
+// the same way, for the owner to place. Gate off: no extra column read.
 async function assignableRecurringTemplateTechnicianId(conn, parent, date) {
   const techId = recurringTemplateTechnicianId(parent);
   if (!techId) return null;
   let q = conn('technicians').where({ id: techId });
   if (conn.isTransaction) q = q.forShare();
-  const tech = await q.first('id', 'employment_status', 'field_dispatchable');
+  const workDaysLive = techWorkDaysLive();
+  const tech = await q.first('id', 'employment_status', 'field_dispatchable', ...(workDaysLive ? ['work_days'] : []));
   if (!isAssignable(tech)) {
     logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
     return null;
   }
   if (date) {
+    if (workDaysLive && require('../services/technician-eligibility').isOffDay(tech, date)) {
+      logger.warn(`[recurring] parent=${parent?.id} technician ${techId} does not work on ${date}; seeding child unassigned`);
+      return null;
+    }
     const absence = await conn('technician_absences')
       .where({ technician_id: techId, absence_date: date })
       .whereNull('cleared_at')
@@ -2459,6 +2469,7 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     }
   }
 
+  const assignmentWarnings = new Set();
   for (const targetId of targetIds) {
     const assignment = await assignDispatchJob({
       jobId: targetId,
@@ -2472,6 +2483,7 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     });
     if (assignment.technicianName) technicianName = assignment.technicianName;
     if (assignment.changed) changedJobIds.push(targetId);
+    for (const line of assignment.warnings || []) assignmentWarnings.add(line);
   }
 
   if (scope !== 'this_only' && parentId) {
@@ -2499,6 +2511,7 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     templateChanged,
     changed: changedJobIds.length > 0 || templateChanged,
     technicianName,
+    ...(assignmentWarnings.size ? { warnings: [...assignmentWarnings] } : {}),
   };
 }
 
@@ -6388,6 +6401,18 @@ router.get('/held-visits', requireAdmin, async (req, res) => {
 });
 
 // GET /api/admin/schedule — day view (board + dispatch)
+// GATE_NEW_CALLER_BOOKING: a visit booked by address before its customer
+// exists reads "New caller" and offers Link customer on the visit sheet (PUT
+// /api/admin/schedule/new-caller/:id/link). The day and the week feed both
+// open that sheet, so both carry these fields.
+function newCallerRowFields(s) {
+  const awaitingCustomerLink = !s.customer_id && s.source_action === 'admin_new_caller';
+  return {
+    customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || (awaitingCustomerLink ? 'New caller' : null),
+    awaitingCustomerLink,
+  };
+}
+
 router.get('/', async (req, res, next) => {
   try {
     const date = req.query.date || etDateString();
@@ -6924,7 +6949,7 @@ router.get('/', async (req, res, next) => {
         linkedProjectLookupFailed: projectCompletionContext.linkedProjectLookupFailed === true,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
-        customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
+        ...newCallerRowFields(s),
         customerId: s.customer_id,
         // propertyId, address, city, state, lat, lng, customerPhone and
         // checkInTime: shared with the week feed (visitPremiseFields).
@@ -7121,6 +7146,10 @@ router.get('/', async (req, res, next) => {
       visitCloseout: legacyCloseoutEnabled,
       // GATE_NEW_APPT_ADDRESS_TIMES: New Appointment's time box answers on a new caller's address alone.
       addressFirstTimes: isEnabled('newApptAddressTimes'),
+      // GATE_NEW_APPT_PHONE_MATCH: New Appointment matches a new caller's phone as it is typed, and one Save adds and books them.
+      newCustomerPhoneMatch: isEnabled('newApptPhoneMatch'),
+      // GATE_NEW_CALLER_BOOKING: New Appointment's Book saves a new caller's visit by address, no customer yet.
+      newCallerBooking: isEnabled('newCallerBooking'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -7180,7 +7209,7 @@ router.get('/week', async (req, res, next) => {
         .leftJoin('visit_completion_packets as closeout_packet', 'closeout_packet.visit_id', 'scheduled_services.visit_id')
         .leftJoin('service_visits as closeout_visit', 'closeout_visit.id', 'scheduled_services.visit_id')
         .joinRaw(`LEFT JOIN payers AS bill_to_payer ON bill_to_payer.id = ${effectiveBillToSql} AND bill_to_payer.active = true`)
-        .select('scheduled_services.id', 'scheduled_services.customer_id',
+        .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.source_action',
           'scheduled_services.visit_id', 'closeout_packet.id as closeout_packet_id', 'closeout_packet.status as closeout_packet_status',
           'closeout_visit.behavior_version as visit_behavior_version',
           'bill_to_payer.id as billed_to_payer_id',
@@ -7451,7 +7480,7 @@ router.get('/week', async (req, res, next) => {
         return {
           id: s.id,
           customerId: s.customer_id,
-          customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
+          ...newCallerRowFields(s),
           // propertyId and the rest of the premise the day feed carries: the
           // Fast Complete rules and sheets read them off this row too.
           ...visitPremiseFields(s),
@@ -9375,6 +9404,14 @@ async function scheduleCreateHandler(req, res, next) {
           await assertAssignableTechnician(resolvedTechId, { conn: trx, date: occDate });
         }
       }
+      // Work days (GATE_TECH_WORK_DAYS): the office may put a technician on a day
+      // they do not work; the save proceeds and the response says so, for the
+      // parent date and every child/booster date.
+      if (resolvedTechId && techWorkDaysLive()) {
+        const { offDayWarningsFor } = require('../services/technician-eligibility');
+        const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
+        bookingWarnings.push(...await offDayWarningsFor(resolvedTechId, offDayDates, { conn: trx }));
+      }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -10299,6 +10336,16 @@ async function scheduleCreateHandler(req, res, next) {
           void techNotices.notifyTechVisitChange({
             visitId: svc.id, kind: 'assigned', technicianId: resolvedTechId, actorId: req.technicianId || null,
             snapshot: { date: scheduledDate, windowStart: windowStart || null, windowEnd: windowEnd || null },
+          });
+        }
+        // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow): the office left the
+        // technician to Auto / unassigned. Log the one the map would pick beside the one
+        // saved (parent visit only; series children copy it). Never throws; gate off = no-op.
+        if (assignmentMode === 'auto' || !technicianId) {
+          void require('../services/scheduling/line-technician').recordLinePickShadow({
+            source: 'office_auto', scheduledServiceId: svc.id, customerId, date: scheduledDate, windowStart, windowEnd,
+            serviceId: serviceId || null, serviceKey: serviceRecord?.service_key, serviceType: svc.service_type || serviceType,
+            durationMinutes: duration, actualTechnicianId: svc.technician_id || resolvedTechId,
           });
         }
         // Fire the deferred confirmation SMS for any appointment that wants one
@@ -14845,6 +14892,13 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         if (finalTechnicianId && (finalDateChanging || finalTechChanging)) {
           const finalDate = finalDateChanging ? dateOnly(updates.scheduled_date) : (eligibilityRow?.day || null);
           await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
+          // Work days (GATE_TECH_WORK_DAYS): an office save onto a day the
+          // technician does not work still goes through; the modal is told.
+          if (techWorkDaysLive()) {
+            const { offDayWarningFor } = require('../services/technician-eligibility');
+            const offDayLine = await offDayWarningFor(finalTechnicianId, finalDate, { conn: trx });
+            if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
+          }
         }
       }
       // Match customer editors and grouping: maintenance/comms,
@@ -17903,6 +17957,7 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
       assignmentScope,
       assignmentUpdatedCount: result.changedJobIds?.length || 0,
       job,
+      ...(result.warnings ? { warnings: result.warnings } : {}),
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
@@ -18166,7 +18221,10 @@ async function resolveScheduledServiceCharge({
   // explicit non-monthly per_visit/one_time lanes never fall back to
   // anything besides an explicit price either (completionInvoiceAmount
   // returns 0 for them regardless), so they have no fee to lose this way.
-  if (billingMode === 'per_application' && !isCallback && !isAlwaysFreeServiceType(serviceType) && !hasOwnPrice) {
+  // An unpriced consultation (Waves Assessment) bills nothing at completion
+  // either — no fee to lose — so it is not refused.
+  if (billingMode === 'per_application' && !isCallback && !isAlwaysFreeServiceType(serviceType)
+    && !isConsultationServiceType(serviceType) && !hasOwnPrice) {
     return {
       refused: true,
       reason: 'per_application_fee_at_completion',
@@ -18179,6 +18237,8 @@ async function resolveScheduledServiceCharge({
     monthlyRate,
     billingMode,
     primaryLinePrice,
+    // Same inputs completion reads: a consultation never takes the rate.
+    serviceType,
   });
 }
 
@@ -26262,7 +26322,9 @@ router.post('/generate-report', async (req, res) => {
     // GATE_REPORT_WRITER_RULES, read once per request. It applies only to
     // writers in its scope (never lawn or tree/shrub/palm — owner
     // 2026-09-30, another lane owns them); see report-writer-rules.js.
-    const { selectReportCopyPrompt, writerRulesInScope, pestVoiceServes } = require('../services/service-report/lawn-report-copy-prompt');
+    const {
+      selectReportCopyPrompt, writerRulesInScope, pestVoiceServes, specialtyVoiceServes,
+    } = require('../services/service-report/lawn-report-copy-prompt');
     const writerRulesGate = reportWriterRulesLive();
 
     // A technician writes a report only for a visit of their own: the id-less
@@ -27165,12 +27227,20 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     }
 
     const promptContext = writerRulesOn
-      ? { ...reportPromptContext, writerRules: true, pestVoice: pestReportVoiceLive(), pestQuietVisit: pestQuietVisitLive() }
+      ? {
+        ...reportPromptContext,
+        writerRules: true,
+        pestVoice: pestReportVoiceLive(),
+        pestQuietVisit: pestQuietVisitLive(),
+        specialtyVoice: specialtyReportVoiceLive(),
+      }
       : reportPromptContext;
     const selectedSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, promptContext);
-    // GATE_PEST_QUIET_VISIT trims empty inputs under the one-voice pest prompt only.
+    // GATE_PEST_QUIET_VISIT trims empty inputs under the one-voice pest prompt,
+    // and GATE_SPECIALTY_REPORT_VOICE the same lines under its one-voice prompt.
     const inputLines = observedAndReportedLines({
-      quiet: promptContext.pestQuietVisit === true && pestVoiceServes(groundingServiceType, promptContext),
+      quiet: (promptContext.pestQuietVisit === true && pestVoiceServes(groundingServiceType, promptContext))
+        || specialtyVoiceServes(promptContext),
       observations: promptObs,
       stationObserved: stationLines.observed,
       interaction: customerInteraction,
@@ -27264,7 +27334,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
     // Under the writer rules a cached draft is screened again below before it
     // is served.
-    if (cached && !writerRulesOn) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    if (cached && !writerRulesOn) return res.json({ report: lowercaseGermanRoach(cached), cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
@@ -27367,7 +27437,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // The chip tapped off: a draft that still claims the sweep is never served.
     const sweepClaimRefused = (text) => sweepNotDone === true && reportClaimsSweep(text);
     if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached) && !sweepClaimRefused(cached)) {
-      return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+      return res.json({ report: lowercaseGermanRoach(cached), cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
     }
     // The same wall-clock ceiling the provider chain keeps: the last-resort
     // copy's meaning check below is charged against it too.
@@ -27475,7 +27545,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // No photoGroundingUsed here (Codex #5145 r5): the deterministic
       // fallback is built from structured actions only and never reads the
       // photo captions, so the client must not treat captions as inputs to it.
-      return res.json({ report: fallbackReport, fallback: true, deterministic: true });
+      return res.json({ report: lowercaseGermanRoach(fallbackReport), fallback: true, deterministic: true });
     }
 
     const { report } = generated;
@@ -27489,7 +27559,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       ...(writerRulesOn ? { writerRules: true } : {}),
       ...contextSignals,
     });
-    res.json({ report, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    // "german cockroaches" with a small g (lowercaseGermanRoach), on every path.
+    res.json({ report: lowercaseGermanRoach(report), ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
   } catch (err) {
     logger.error('[generate-report] AI failed', {
       message: err.message,
@@ -28694,6 +28765,55 @@ router.put('/blackout-dates/holidays', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The time the van leaves its start point (owner 2026-10-24: leave 7:30 so a
+// first visit 30 minutes away still starts at 8:00; "make this editable in the
+// admin portal"). Stored in system_settings; read by the night tool, the 04:20
+// route pass and the day reports only while GATE_AUTO_DISPATCH_DAY_RULES is on
+// (scheduling/departure-time.js). Booking does not read it, so no slot cache
+// flush or route-quality refresh follows a save.
+router.get('/departure-time', requireAdmin, async (req, res, next) => {
+  try {
+    const departure = require('../services/scheduling/departure-time');
+    const setting = await departure.readDepartureSetting(db);
+    res.json({
+      // The time the readers use while the gate is on.
+      departureTime: departure.formatDepartureTime(departure.effectiveDepartureMinutes(setting)),
+      saved: setting.saved,
+      inUse: require('../config/feature-gates').autoDispatchDayRulesLive(),
+      earliest: departure.formatDepartureTime(departure.EARLIEST_DEPARTURE_MINUTES),
+      latest: departure.formatDepartureTime(departure.LATEST_DEPARTURE_MINUTES),
+      stepMinutes: departure.DEPARTURE_STEP_MINUTES,
+    });
+  } catch (err) { next(err); }
+});
+
+router.put('/departure-time', requireAdmin, async (req, res, next) => {
+  try {
+    const departure = require('../services/scheduling/departure-time');
+    const raw = req.body?.departureTime;
+    const minutes = typeof raw === 'string' ? departure.parseDepartureTime(raw) : null;
+    if (minutes == null) {
+      return res.status(400).json({ error: 'departureTime must be a time from 06:00 to 08:00 in 15-minute steps' });
+    }
+    const departureTime = departure.formatDepartureTime(minutes);
+    await db('system_settings')
+      .insert({
+        key: departure.DEPARTURE_TIME_KEY,
+        value: JSON.stringify(departureTime),
+        category: 'scheduling',
+        description: 'The time the van leaves its start point (HH:MM). Read by the night tool, the 04:20 route pass and the day reports while GATE_AUTO_DISPATCH_DAY_RULES is on.',
+      })
+      .onConflict('key')
+      .merge({ value: JSON.stringify(departureTime), updated_at: db.fn.now() });
+    logger.info(`[schedule] departure time set to ${departureTime}`);
+    res.json({
+      success: true,
+      departureTime,
+      inUse: require('../config/feature-gates').autoDispatchDayRulesLive(),
+    });
+  } catch (err) { next(err); }
+});
+
 router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
   try {
     const date = typeof req.body?.date === 'string' ? req.body.date.trim() : '';
@@ -29064,6 +29184,11 @@ module.exports.recurringWithoutBillableAmount = recurringWithoutBillableAmount;
 // create_appointment proposal and executor, so an IB booking carries exactly
 // the price a Schedule-screen booking would (owner 2026-09-27).
 module.exports.buildAppointmentPricing = buildAppointmentPricing;
+// The zone the create route stamps for an address — also used by the
+// new-caller booking route (admin-schedule-new-caller.js), which books by
+// address before a customer exists.
+module.exports.getZone = getZone;
+module.exports.newCallerRowFields = newCallerRowFields;
 // The percent-discount exclusion predicate (termite bond, rodent bait,
 // bed bug, Bora-Care, pre-slab, ...) — consumed lazily by the IB
 // create_appointment member-discount auto-apply (tools.js) so its automatic

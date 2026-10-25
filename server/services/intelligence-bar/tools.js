@@ -439,7 +439,8 @@ async function executeTool(toolName, input, actionContext = {}) {
         Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null,
         input._rate_family ? { family: input._rate_family, ledgerPin: input._rate_ledger_pin } : null,
         input._tier_upgrade_email ? { pin: input._tier_upgrade_email, operationId: actionContext.operationId } : null,
-        input._ib_billing_pin));
+        input._ib_billing_pin,
+        Object.prototype.hasOwnProperty.call(input, '_ib_phone_before') ? { value: input._ib_phone_before } : null));
       case 'bulk_update_customers': return await nameIndexStale(bulkUpdateCustomers(input.customer_ids, input.updates));
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -1596,7 +1597,7 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, tierEmailPin = null, billingPin) {
+async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, tierEmailPin = null, billingPin, phonePin = null) {
   // Billing type + per-application fee (GATE_IB_BILLING_MODE_EDIT, owner D5
   // 2026-10-06): only from a card that pinned them (billing-mode-change.js).
   const BillingModeChange = require('./billing-mode-change');
@@ -1752,6 +1753,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
       // (Codex r3 on #5675).
       if (notesPin && clean.crm_notes !== undefined && (lockedBefore.crm_notes ?? null) !== (notesPin.value ?? null)) {
         const err = new Error('This customer\'s notes changed since this action was prepared. Review a fresh proposal.');
+        err.previewChanged = true;
+        throw err;
+      }
+      // The number the phone card showed as replaced is still the stored
+      // one, compared by value on the locked row like the notes above.
+      if (phonePin && clean.phone !== undefined && (lockedBefore.phone ?? null) !== (phonePin.value ?? null)) {
+        const err = new Error('This customer\'s phone number changed since this action was prepared. Review a fresh proposal.');
         err.previewChanged = true;
         throw err;
       }

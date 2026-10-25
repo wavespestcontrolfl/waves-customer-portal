@@ -53,6 +53,8 @@ jest.mock('../services/auto-dispatch/audit', () => ({
 }));
 
 jest.mock('../services/auto-dispatch/check-down-notice', () => ({ noteRun: jest.fn(async () => ({ action: 'none' })) }));
+// The van's departure (GATE_AUTO_DISPATCH_DAY_RULES): read only when the run's day rules are on.
+jest.mock('../services/scheduling/departure-time', () => ({ dayDepartureMinutes: jest.fn(async () => 450) }));
 
 jest.mock('../services/tech-visit-notifications', () => ({
   pushAutoDispatchSummary: jest.fn(async () => ({ pushed: 1 })),
@@ -1988,5 +1990,114 @@ describe('arrival search (GATE_AUTO_DISPATCH_ARRIVAL_SEARCH)', () => {
     });
     expect(await runAutoDispatch({ mode: 'dry_run', arrivalSearch: 'shadow' })).toMatchObject({ evaluated: 1 });
     expect(lastDecision('no_change')).toMatchObject({ reason_code: 'NO_VALID_SLOT', constraints: { arrival_search: { would: 'error', error: 'ECONNRESET' } } });
+  });
+});
+
+// GATE_AUTO_DISPATCH_KEEP_TECH (owner 2026-10-25; config.keepTech).
+describe('keep technician (GATE_AUTO_DISPATCH_KEEP_TECH)', () => {
+  const searches = () => candidateSlots.findValidCandidateSlots.mock.calls.map((c) => c[2]);
+  const applyMode = async (fn) => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try { await fn(); } finally {
+      if (prev === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY; else process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  };
+
+  test('on: the run hands the search keepTech on its ctx, once per run; off: false', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'dry_run', keepTech: true });
+    expect(searches().map((ctx) => ctx.keepTech)).toEqual([true]);
+    candidateSlots.findValidCandidateSlots.mockClear();
+    await runAutoDispatch({ mode: 'dry_run', keepTech: false });
+    expect(searches().map((ctx) => ctx.keepTech)).toEqual([false]);
+  });
+
+  test('the write refused a technician change: nothing moves, no_change TECH_CHANGE_BLOCKED, not a failed run', async () => {
+    await applyMode(async () => {
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('keep tech'), { code: 'TECH_CHANGE_BLOCKED', statusCode: 409 }));
+      const res = await runAutoDispatch({ mode: 'apply', keepTech: true });
+      expect(res).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('TECH_CHANGE_BLOCKED');
+      expect(lastDecision('failed')).toBeUndefined();
+      expect(apply.applyAutoDispatchMove.mock.calls[0][3].keepTech).toBe(true);
+    });
+  });
+});
+
+describe('day rules (GATE_AUTO_DISPATCH_DAY_RULES, owner 2026-10-24)', () => {
+  const departureTime = require('../services/scheduling/departure-time');
+  const searches = () => candidateSlots.findValidCandidateSlots.mock.calls.map((c) => c[2]);
+  const withApply = async (fn) => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try { await fn(); } finally {
+      if (prev === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY; else process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  };
+  // 2026-08-09 is a Sunday, 2026-08-10 the Monday after.
+  const SUNDAY = { ...CAND_BIG, date: '2026-08-09' };
+  const SUNDAY_LESS = { ...CAND_BIG, date: '2026-08-09', start_time: '10:00', detour_minutes: 2 };
+  const MONDAY = { ...CAND_BIG, date: '2026-08-10', detour_minutes: 4 };
+
+  test('off: no departure read, no day rules on the search, nothing new in the run snapshot', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'dry_run', dayRules: false });
+    expect(departureTime.dayDepartureMinutes).not.toHaveBeenCalled();
+    expect(searches()[0]).toMatchObject({ dayRules: false });
+    expect(searches()[0].departureMinutes).toBeUndefined();
+    expect(audit.startRun.mock.calls[0][0]).not.toHaveProperty('departureMinutes');
+  });
+
+  test('on: the departure is read once per run, kept in the run snapshot and carried by every search', async () => {
+    servicesResult = [svc(), svc({ id: 's2', customer_id: 'c2' })];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'dry_run', dayRules: true });
+    expect(departureTime.dayDepartureMinutes).toHaveBeenCalledTimes(1);
+    expect(departureTime.dayDepartureMinutes.mock.calls[0][1]).toEqual({ enabled: true });
+    expect(audit.startRun.mock.calls[0][0]).toMatchObject({ dayRules: true, departureMinutes: 450, maxSundayMovesPerRun: 2 });
+    expect(searches()).toHaveLength(2);
+    expect(searches().every((ctx) => ctx.dayRules === true && ctx.departureMinutes === 450)).toBe(true);
+  });
+
+  test('past the Sunday cap a Sunday move is held as a valid move, and a weekday move still lands', async () => {
+    await withApply(async () => {
+      servicesResult = [svc(), svc({ id: 's2', customer_id: 'c2' }), svc({ id: 's3', customer_id: 'c3' })];
+      const bySvc = { s1: SUNDAY, s2: SUNDAY_LESS, s3: MONDAY };
+      candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({ current: CURRENT, candidates: [bySvc[service.id]] }));
+      const res = await runAutoDispatch({ mode: 'apply', dayRules: true, maxSundayMovesPerRun: 1 });
+      expect(res).toMatchObject({ changed: 2, recommended: 1 });
+      expect(apply.applyAutoDispatchMove.mock.calls.map(([service, best]) => [service.id, best.date]))
+        .toEqual([['s1', '2026-08-09'], ['s3', '2026-08-10']]);
+      const held = lastDecision('recommended');
+      expect(held).toMatchObject({ reason_code: 'SUNDAY_CAP_REACHED', service: expect.objectContaining({ id: 's2' }) });
+      expect(held.reason_description).toMatch(/Sunday move cap 1 reached/);
+    });
+  });
+
+  test('past the Sunday cap no fallback slot is a Sunday: the alternates and the re-check after a taken slot drop them', async () => {
+    await withApply(async () => {
+      servicesResult = [svc(), svc({ id: 's2', customer_id: 'c2' })];
+      const bySvc = { s1: [SUNDAY], s2: [{ ...MONDAY, detour_minutes: 1 }, SUNDAY_LESS] };
+      candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({ current: CURRENT, candidates: bySvc[service.id] }));
+      await runAutoDispatch({ mode: 'apply', dayRules: true, maxSundayMovesPerRun: 1 });
+      const [, best, , options] = apply.applyAutoDispatchMove.mock.calls.find(([service]) => service.id === 's2');
+      expect(best.date).toBe('2026-08-10');
+      expect(options.alternateCandidates.map((c) => c.date)).not.toContain('2026-08-09');
+      const again = await options.rescore();
+      expect(again.kind).toBe('move');
+      expect(again.rankedCandidates.map((c) => c.date)).not.toContain('2026-08-09');
+    });
+  });
+
+  test('a re-time on a visit already on a Sunday is not a move onto a Sunday: the cap does not hold it', async () => {
+    await withApply(async () => {
+      const onSunday = { ...CURRENT, date: '2026-08-09' };
+      servicesResult = [svc({ scheduled_date: '2026-08-09' })];
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: onSunday, candidates: [{ ...SUNDAY, start_time: '13:00' }] });
+      const res = await runAutoDispatch({ mode: 'apply', dayRules: true, maxSundayMovesPerRun: 0 });
+      expect(res).toMatchObject({ changed: 1 });
+      expect(lastDecision('recommended')).toBeUndefined();
+    });
   });
 });

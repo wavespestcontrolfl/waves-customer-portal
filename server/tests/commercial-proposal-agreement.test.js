@@ -13,15 +13,19 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../routes/estimate-public', () => ({ commercialAgreementBlockedFor: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
+jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn(), billingLaneSupported: jest.fn(() => true) }));
 
 const NotificationService = require('../services/notification-service');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   TEMPLATE_KEY, SNAPSHOT_SOURCE, START_DATE_TEXT, ensureAgreement, agreementStateForEstimate, agreementCtaFor, agreementAdminStatus,
   signEligibility, agreementTermsConflict, AGREEMENT_TERMS, lockEstimateForSign, refuseStaleSignature, handleAgreementSigned,
+  AGREEMENT_PAYMENT_TEXT, autopayNextStep, STALE_PROPOSAL_MESSAGE, quoteFingerprint, buildAgreementValues, signableProposal,
 } = require('../services/commercial-proposal-agreement');
+const { requestAutopaySetupLink, billingLaneSupported } = require('../services/autopay-setup-link');
+const AutopayEligibility = require('../services/autopay-eligibility');
 
-const { TEMPLATE, VERSION, CUSTOMER, estimateRow, makeDb } = require('./helpers/commercial-agreement-fake-db');
+const { BODY, TEMPLATE, VERSION, CUSTOMER, estimateRow, makeDb } = require('./helpers/commercial-agreement-fake-db');
 
 const req = { ip: '203.0.113.9', get: () => 'jest-agent' };
 const estimateWrites = (state) => state.writes.filter((w) => w.table === 'estimates');
@@ -245,7 +249,6 @@ describe('agreement terms: online signing only when EVERY structured term agrees
   test('the server reads the same constants the proposal builder prefills (shared module), word for word', () => {
     expect(AGREEMENT_TERMS).toBe(require('../../shared/commercial-agreement-terms.cjs').AGREEMENT_TERMS);
     expect(AGREEMENT_TERMS).toEqual({
-      paymentTerms: 'net30',
       initialTermMonths: 12,
       renewal: 'Renews automatically for 12-month terms unless either party gives written notice at least 30 days before the term ends.',
       priceAdjustment: "Pricing may be adjusted at renewal or with at least 30 days' written notice.",
@@ -358,6 +361,247 @@ describe('agreement terms: online signing only when EVERY structured term agrees
     expect(await agreementAdminStatus(changed, database)).toMatchObject({ state: 'signed' });
     expect(await agreementAdminStatus(changed, database)).not.toHaveProperty('signingBlocked');
     expect(await agreementCtaFor(changed, database)).toEqual({ canSign: false, state: 'signed' });
+  });
+});
+
+describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () => {
+  const NOTE = (detail) => `Online signing needs the proposal terms to match the agreement: ${detail}.`;
+  // Version 2 as the migration builds it: version 1's paragraph replaced by the slot.
+  const { V1_PAYMENT: V1, V2_PAYMENT: V2 } = require('../models/migrations/20261025120000_commercial_agreement_payment_terms');
+  const SLOT_BODY = BODY.replace(V1, V2);
+  const slotDb = (estimate) => makeDb({
+    estimate,
+    version: { ...VERSION, id: 'ver-2', version_number: 2, body: SLOT_BODY },
+    template: { ...TEMPLATE, active_version_id: 'ver-2' },
+  });
+  const autopay = (overrides = {}, proposal = {}) => estimateRow(overrides, { commercialTerms: { paymentTerms: 'autopay' }, ...proposal });
+  const { commercialAgreementBlockedFor } = require('../routes/estimate-public');
+  const ORIGINAL_AUTOPAY_GATE = process.env.GATE_COMMERCIAL_AUTOPAY;
+  beforeEach(() => {
+    process.env.GATE_COMMERCIAL_AUTOPAY = 'true';
+    commercialAgreementBlockedFor.mockReset().mockResolvedValue(false);
+  });
+  afterEach(() => {
+    if (ORIGINAL_AUTOPAY_GATE === undefined) delete process.env.GATE_COMMERCIAL_AUTOPAY;
+    else process.env.GATE_COMMERCIAL_AUTOPAY = ORIGINAL_AUTOPAY_GATE;
+  });
+
+  test('the two paragraphs are the owner-approved texts, word for word (autopay 2026-10-24, Net 30 2026-06-24)', () => {
+    expect(AGREEMENT_PAYMENT_TEXT).toBe(require('../../shared/commercial-agreement-terms.cjs').AGREEMENT_PAYMENT_TEXT);
+    expect(AGREEMENT_PAYMENT_TEXT).toEqual({
+      autopay: "You authorize Waves to charge the card or bank account on file after each service is completed, plus applicable tax. You may change the payment method any time, and cancel autopay with 30 days' written notice, after which invoices are due Net 30.",
+      net30: 'Services are invoiced on Net 30 terms \u2014 payment is due within thirty (30) days of the invoice date. Past-due balances may be subject to a late fee and/or suspension of service until the account is brought current.',
+    });
+  });
+
+  test('an Auto Pay agreement prints the Auto Pay paragraph in the payment slot', async () => {
+    const estimate = autopay();
+    const { database, state } = slotDb(estimate);
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: true, status: 201 });
+    expect(state.contracts[0].contract_text_snapshot).toContain(`Billing and payment: ${AGREEMENT_PAYMENT_TEXT.autopay} Pricing may be adjusted`);
+    expect(JSON.parse(state.contracts[0].document_variables_snapshot).agreement.payment_terms).toBe(AGREEMENT_PAYMENT_TEXT.autopay);
+  });
+
+  test('a Net 30 agreement prints the paragraph version 1 fixed, word for word', async () => {
+    const { V1_PAYMENT } = require('../models/migrations/20261025120000_commercial_agreement_payment_terms');
+    const { database, state } = slotDb(estimateRow());
+    expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: true, status: 201 });
+    expect(state.contracts[0].contract_text_snapshot).toContain(V1_PAYMENT);
+  });
+
+  test('Auto Pay on a version without the payment slot is refused and writes nothing; Net 30 still issues there', async () => {
+    const estimate = autopay();
+    const { database, state } = makeDb({ estimate });
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: false, status: 409, code: 'template_unavailable' });
+    expect(state.contracts).toHaveLength(0);
+    const net30 = makeDb();
+    expect(await ensureAgreement({ estimate: estimateRow(), req, database: net30.database })).toMatchObject({ ok: true, status: 201 });
+  });
+
+  test('Auto Pay is signable only with the gate on and Bill by invoice off; the builder line names both terms', async () => {
+    expect(signEligibility(autopay())).toMatchObject({ ok: true });
+    expect(await agreementCtaFor(autopay(), slotDb(autopay()).database)).toEqual({ canSign: true, state: 'none' });
+    expect(signEligibility(autopay({ bill_by_invoice: true }))).toMatchObject({
+      ok: false, reason: 'terms_conflict', field: 'paymentTerms', note: NOTE('payment terms Auto Pay, or Net 30 with Bill by invoice'),
+    });
+    expect(signEligibility(estimateRow({}, { commercialTerms: { paymentTerms: 'net15' } }))).toMatchObject({
+      note: NOTE('payment terms Auto Pay, or Net 30 with Bill by invoice'),
+    });
+    delete process.env.GATE_COMMERCIAL_AUTOPAY;
+    expect(signEligibility(autopay())).toMatchObject({ ok: false, reason: 'terms_conflict', field: 'paymentTerms', note: NOTE('payment terms Net 30') });
+  });
+
+  test('changing the payment term after issue supersedes the open agreement (the fingerprint covers it)', async () => {
+    const { database, state } = slotDb(estimateRow());
+    await ensureAgreement({ estimate: estimateRow(), req, database });
+    state.estimate = autopay();
+    expect(await ensureAgreement({ estimate: autopay(), req, database })).toMatchObject({ ok: true, status: 201, created: true });
+    expect(state.contracts[0]).toMatchObject({ status: 'cancelled', share_token_hash: null });
+    expect(state.contracts[1].contract_text_snapshot).toContain(AGREEMENT_PAYMENT_TEXT.autopay);
+  });
+
+  test('the Auto Pay gate thrown while the issue waited on the CONTRACT row lock (the last lock): 404, nothing written', async () => {
+    const estimate = autopay();
+    const { database, state } = slotDb(estimate);
+    state.onContractLock = async () => { delete process.env.GATE_COMMERCIAL_AUTOPAY; };
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: false, status: 404, code: 'not_signable' });
+    expect(state.contracts).toHaveLength(0);
+    expect(state.writes).toEqual([]);
+  });
+
+  test('the same flip does not re-open an open Auto Pay agreement (its link is not rotated)', async () => {
+    const estimate = autopay();
+    const { database, state } = slotDb(estimate);
+    await ensureAgreement({ estimate, req, database });
+    const hashBefore = state.contracts[0].share_token_hash;
+    const writesBefore = state.writes.length;
+    state.onContractLock = async () => { delete process.env.GATE_COMMERCIAL_AUTOPAY; };
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: false, status: 404 });
+    expect(state.contracts[0].share_token_hash).toBe(hashBefore);
+    expect(state.writes).toHaveLength(writesBefore);
+  });
+
+  test('the fingerprint ignores the payment paragraph text, so an agreement issued before it existed keeps a valid link', async () => {
+    const estimate = estimateRow();
+    const { proposal, totals } = signableProposal(estimate);
+    const values = buildAgreementValues(estimate, proposal, totals);
+    expect(values.agreement.payment_terms).toBe(AGREEMENT_PAYMENT_TEXT.net30);
+    const { payment_terms: _dropped, ...preChangeAgreement } = values.agreement;
+    const args = { proposal, totals, customerId: 'cust-1', templateVersionId: 'ver-1' };
+    expect(quoteFingerprint({ ...args, values })).toBe(quoteFingerprint({ ...args, values: { ...values, agreement: preChangeAgreement } }));
+    // At the sign boundary: a Net 30 contract whose snapshot predates the paragraph signs.
+    const made = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database: made.database });
+    const contract = made.state.contracts[0];
+    const snapshot = JSON.parse(contract.document_variables_snapshot);
+    delete snapshot.agreement.payment_terms;
+    contract.document_variables_snapshot = JSON.stringify(snapshot);
+    const estimateLock = await lockEstimateForSign(made.database, contract);
+    expect(await refuseStaleSignature({ trx: made.database, contract, estimateLock, req })).toBeNull();
+  });
+
+  test('the gate turned off after an Auto Pay agreement was issued refuses the signature and cancels it', async () => {
+    const estimate = autopay();
+    const made = slotDb(estimate);
+    await ensureAgreement({ estimate, req, database: made.database });
+    delete process.env.GATE_COMMERCIAL_AUTOPAY;
+    const contract = made.state.contracts[0];
+    const estimateLock = await lockEstimateForSign(made.database, contract);
+    expect(await refuseStaleSignature({ trx: made.database, contract, estimateLock, req })).toBe(STALE_PROPOSAL_MESSAGE);
+    expect(made.state.contracts[0].status).toBe('cancelled');
+  });
+
+  describe('the office alert says how the customer pays', () => {
+    async function signedAutopay() {
+      const estimate = autopay();
+      const made = slotDb(estimate);
+      await ensureAgreement({ estimate, req, database: made.database });
+      Object.assign(made.state.contracts[0], { status: 'signed', signed_at: new Date('2026-10-24T15:00:00Z') });
+      return made;
+    }
+    afterEach(() => jest.restoreAllMocks());
+
+    test('Auto Pay with no saved method yet: the office is told to send a setup link if none is saved before the first visit', async () => {
+      jest.spyOn(AutopayEligibility, 'customerOnAutopay').mockResolvedValue(false);
+      const { database } = await signedAutopay();
+      await handleAgreementSigned({ contractId: 'contract-1', database });
+      const { detail } = NotificationService.notifyAdmin.mock.calls[0][3];
+      expect(detail).toContain('Payment: Auto Pay, but no card or bank account is saved yet.');
+      expect(detail).toContain('send an Auto Pay setup link from the customer page');
+      expect(detail).toContain('no visit, invoice or charge was created');
+    });
+
+    test('Auto Pay already on: the alert says a method is saved', async () => {
+      jest.spyOn(AutopayEligibility, 'customerOnAutopay').mockResolvedValue(true);
+      const { database } = await signedAutopay();
+      await handleAgreementSigned({ contractId: 'contract-1', database });
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toContain('Payment: Auto Pay, and a card or bank account is saved. ');
+    });
+
+    test('Auto Pay on, but the billing type does not charge each completed service: the alert says to check it', async () => {
+      jest.spyOn(AutopayEligibility, 'customerOnAutopay').mockResolvedValue(true);
+      billingLaneSupported.mockReturnValueOnce(false);
+      const { database } = await signedAutopay();
+      await handleAgreementSigned({ contractId: 'contract-1', database });
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].detail)
+        .toContain("but this account's billing type does not charge each completed service: check it on the customer page before the first visit.");
+    });
+
+    test('an unreadable Auto Pay state never reads as on', async () => {
+      jest.spyOn(AutopayEligibility, 'customerOnAutopay').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+      const { database } = await signedAutopay();
+      await handleAgreementSigned({ contractId: 'contract-1', database });
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toContain('but no card or bank account is saved yet');
+    });
+
+    test('Net 30: the alert says Net 30 by invoice', async () => {
+      const { database, state } = makeDb();
+      await ensureAgreement({ estimate: estimateRow(), req, database });
+      Object.assign(state.contracts[0], { status: 'signed', signed_at: new Date() });
+      await handleAgreementSigned({ contractId: 'contract-1', database });
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toContain('Payment: Net 30 by invoice.');
+    });
+  });
+
+  describe('autopayNextStep: the signing page\'s next step after an Auto Pay agreement is signed', () => {
+    async function signed(estimate = autopay()) {
+      const made = slotDb(estimate);
+      await ensureAgreement({ estimate, req, database: made.database });
+      Object.assign(made.state.contracts[0], { status: 'signed', signed_at: new Date() });
+      return made;
+    }
+    beforeEach(() => requestAutopaySetupLink.mockReset());
+
+    test('mints the standalone Auto Pay setup link INLINE for the contract\'s customer (nothing is sent) and returns its URL', async () => {
+      requestAutopaySetupLink.mockResolvedValue({ requested: true, action: 'link_created', reason: 'created', secureUrl: 'https://portal.example/secure/tok' });
+      const { database } = await signed();
+      expect(await autopayNextStep({ contractId: 'contract-1', database })).toEqual({ state: 'setup', url: 'https://portal.example/secure/tok' });
+      expect(requestAutopaySetupLink).toHaveBeenCalledWith({ customerId: 'cust-1', delivery: 'inline', trigger: 'commercial_proposal_sign' });
+    });
+
+    test.each([
+      ['a consented saved card the link service enrolled', { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' }],
+      ['Auto Pay already active', { requested: false, action: 'skipped', reason: 'autopay_already_active' }],
+    ])('%s: Auto Pay is on, no link', async (_label, result) => {
+      requestAutopaySetupLink.mockResolvedValue(result);
+      const { database } = await signed();
+      expect(await autopayNextStep({ contractId: 'contract-1', database })).toEqual({ state: 'on' });
+    });
+
+    test('an account already on Auto Pay whose billing type does not charge each completed service gets no "Auto Pay is set up"', async () => {
+      requestAutopaySetupLink.mockResolvedValue({ requested: false, action: 'skipped', reason: 'autopay_already_active' });
+      billingLaneSupported.mockReturnValueOnce(false);
+      const { database } = await signed();
+      expect(await autopayNextStep({ contractId: 'contract-1', database })).toBeNull();
+      expect(billingLaneSupported).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }));
+    });
+
+    test('a declined link (payer-billed, gate off, unsupported lane) is no next step', async () => {
+      requestAutopaySetupLink.mockResolvedValue({ requested: false, action: 'skipped', reason: 'payer_billed' });
+      const { database } = await signed();
+      expect(await autopayNextStep({ contractId: 'contract-1', database })).toBeNull();
+    });
+
+    test('a Net 30 agreement, an unsigned one, one this feature did not issue, or the gate off: no link is minted', async () => {
+      const net30 = await signed(estimateRow());
+      expect(await autopayNextStep({ contractId: 'contract-1', database: net30.database })).toBeNull();
+      const open = await signed();
+      open.state.contracts[0].status = 'sent';
+      expect(await autopayNextStep({ contractId: 'contract-1', database: open.database })).toBeNull();
+      const byHand = await signed();
+      byHand.state.contracts[0].document_variables_snapshot = JSON.stringify({ customer: { name: 'Hand Issued LLC' } });
+      expect(await autopayNextStep({ contractId: 'contract-1', database: byHand.database })).toBeNull();
+      const dark = await signed();
+      delete process.env.GATE_COMMERCIAL_AUTOPAY;
+      expect(await autopayNextStep({ contractId: 'contract-1', database: dark.database })).toBeNull();
+      expect(requestAutopaySetupLink).not.toHaveBeenCalled();
+    });
+
+    test('never throws', async () => {
+      requestAutopaySetupLink.mockRejectedValue(new Error('stripe down'));
+      const { database } = await signed();
+      await expect(autopayNextStep({ contractId: 'contract-1', database })).resolves.toBeNull();
+    });
   });
 });
 

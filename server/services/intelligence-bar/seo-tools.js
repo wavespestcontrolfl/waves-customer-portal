@@ -1045,7 +1045,7 @@ const CONCEPT_CLUSTERS = {
       'A/C line entry points and soffit gaps as common access',
       'Signs of rodent activity: droppings, rub marks, gnaw marks, sounds',
     ],
-    product_entities: ['Contrac', 'Final Blox', 'Trapper T-Rex snap traps'],
+    product_entities: ['Contrac', 'Final Blox', 'Victor snap traps'],
     institutional_entities: ['CDC', 'FL DOH', 'NPMA'],
     species_entities: ['Roof rats (Rattus rattus)', 'Norway rats (Rattus norvegicus)', 'House mice'],
     geographic_signals: ['Florida attic construction (truss roof, no basement)', 'Citrus/fruit tree proximity attracting rodents', 'Warm climate = year-round activity'],

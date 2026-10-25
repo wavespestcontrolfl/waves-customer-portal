@@ -7,6 +7,7 @@ import { initNativePush } from './native/nativePush';
 import { initNativeLinks } from './native/nativeLinks';
 import { clearStaffDeviceData, getAdminAuthToken } from './lib/adminAuth';
 import { installStaffSessionGuard } from './lib/staffSessionGuard';
+import { handleVitePreloadError } from './lib/staleChunkReload';
 
 // A staff session the server refuses anywhere in the app (admin pages too)
 // deletes the offline route copy and offline pass, so a later no-signal
@@ -19,17 +20,10 @@ installStaffSessionGuard({ getToken: getAdminAuthToken, onRejected: clearStaffDe
 // to the error screen (2026-07-23: /admin/dispatch chunk 404s post-deploy).
 // Vite emits vite:preloadError for exactly this case — reuse lazyWithRetry's
 // one-shot sessionStorage guard (App.jsx clears it on a successful load) so a
-// genuine outage still surfaces instead of reload-looping.
-window.addEventListener('vite:preloadError', (event) => {
-  try {
-    if (sessionStorage.getItem('chunk-reload-attempted')) return;
-    sessionStorage.setItem('chunk-reload-attempted', '1');
-  } catch {
-    return;
-  }
-  event.preventDefault();
-  window.location.reload();
-});
+// genuine outage still surfaces instead of reload-looping. The handler also
+// marks the reload pending so the import it swallows (it resolves undefined)
+// shows a loading placeholder, not the crash screen — see staleChunkReload.js.
+window.addEventListener('vite:preloadError', (event) => handleVitePreloadError(event));
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

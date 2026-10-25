@@ -131,8 +131,13 @@ async function resolveCatalogIdentity(conn, insertData) {
  *     payload doesn't already carry them
  *   - allowNullCustomer: true only for the estimate slot-hold shape
  *     (reserveSlot inserts customer_id NULL by design)
+ *   - allowNewCallerVisit: true only for the new-caller visit shape
+ *     (GATE_NEW_CALLER_BOOKING, booking/new-caller-visit.js): an explicit
+ *     customer_id null, source_action 'admin_new_caller', a service address
+ *     and no reservation expiry. The call-recording agent links the customer
+ *     after the call.
  */
-async function completeScheduledServiceInsert(insertData, { trx, cols, source, allowNullCustomer = false } = {}) {
+async function completeScheduledServiceInsert(insertData, { trx, cols, source, allowNullCustomer = false, allowNewCallerVisit = false } = {}) {
   if (!insertData || typeof insertData !== 'object') throw contractError('insertData is required');
   if (!trx) throw contractError('trx (knex connection) is required');
   if (!cols || typeof cols !== 'object') throw contractError('cols (scheduled_services columnInfo) is required');
@@ -153,8 +158,16 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
       && insertData.customer_id === null
       && insertData.reservation_expires_at
       && insertData.source_estimate_id != null && String(insertData.source_estimate_id).trim() !== '';
-    if (!explicitHold) {
-      throw contractError('customer_id is required (allowNullCustomer admits only the explicit slot-hold shape: customer_id null + reservation_expires_at + source_estimate_id)');
+    // A new-caller visit is a committed booking that waits for its customer:
+    // no hold expiry (the sweep must never delete it), its own attribution
+    // and the address the office picked, so every reader still has a stop.
+    const explicitNewCaller = allowNewCallerVisit
+      && insertData.customer_id === null
+      && !insertData.reservation_expires_at
+      && insertData.source_action === 'admin_new_caller'
+      && typeof insertData.service_address_line1 === 'string' && insertData.service_address_line1.trim() !== '';
+    if (!explicitHold && !explicitNewCaller) {
+      throw contractError('customer_id is required (allowNullCustomer admits only the explicit slot-hold shape: customer_id null + reservation_expires_at + source_estimate_id; allowNewCallerVisit admits only customer_id null + source_action admin_new_caller + service_address_line1, no reservation_expires_at)');
     }
   }
   if (!insertData.scheduled_date) throw contractError('scheduled_date is required');

@@ -162,6 +162,26 @@ test('update_customer email/name/phone changes carry the mandatory fan-out discl
   expect(only.effects.map((e) => e.label)).not.toContainEqual(EMAIL_FANOUT_DISCLOSURE);
 });
 
+test('a phone card names the number it replaces (owner 2026-10-24): one before → after line, never the bare new number too', () => {
+  const card = (before, phone) => buildContract({
+    toolName: 'update_customer',
+    params: { customer_id: 'c9', updates: { phone, first_name: 'Ada' } },
+    displayParams: { customer_id: 'c9', updates: { phone, first_name: 'Ada' } },
+    preview: { phone_replaced: { before } },
+  });
+  const changed = card('+19415550101', '+19415550172');
+  const labels = changed.effects.map((e) => e.label);
+  expect(labels).toContainEqual('phone: +19415550101 → +19415550172');
+  expect(changed.effects.find((e) => e.label.startsWith('phone:'))).toMatchObject({ before: '+19415550101', after: '+19415550172' });
+  expect(labels).not.toContainEqual('phone: +19415550172');
+  expect(labels).toContainEqual('first name: Ada'); // the other fields keep their own lines
+  // Bound into the hash: a different stored number is a different contract.
+  expect(changed.pinned_phone_replaced).toEqual({ before: '+19415550101' });
+  expect(contractHash(changed)).not.toBe(contractHash(card('+19415550102', '+19415550172')));
+  expect(card(null, '+19415550172').effects.map((e) => e.label)).toContainEqual('phone: (none) → +19415550172');
+  expect(card('+19415550101', null).effects.map((e) => e.label)).toContainEqual('phone: +19415550101 → (cleared)');
+});
+
 test('codex round-5 P2: a name-only update_customer edit discloses the fan-out WITHOUT promising a hold lift it never does', () => {
   const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require('../services/customer-contact-fanout');
   const c = buildContract({

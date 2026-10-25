@@ -25,6 +25,12 @@ export const MOBILE_SETTINGS_SECTIONS = [
     adminOnly: true,
   },
   {
+    key: "day-start",
+    label: "Day start",
+    to: "/admin/settings?tab=day-start",
+    adminOnly: true,
+  },
+  {
     key: "link-library",
     label: "Links",
     to: "/admin/settings?tab=link-library",

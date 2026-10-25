@@ -22,12 +22,14 @@ const crypto = require('crypto');
 const NO_SHOW_OCCURRENCE_FIELDS = ['scheduled_date', 'window_start', 'window_end', 'service_type', 'service_id', 'property_id'];
 const router = express.Router();
 const db = require('../models/db');
+const { techMoveRefusal } = require('../services/scheduling/tech-move-permission');
 const { applyAssignable } = require('../services/technician-eligibility');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
+const { VISIT_NO_CUSTOMER_CODE, VISIT_NO_CUSTOMER_MESSAGE } = require('../services/invoice-helpers');
 
 const { etDateString, addETDays, parseETDateTime, validScheduleDate, validCalendarDate, dateOnlyString } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
@@ -4057,7 +4059,8 @@ function recapStatusForReason(reason) {
   // Conflict: pest-control gate, a cancelled/skipped visit that can't be
   // recapped, or a stale recap against a job rescheduled to a future day.
   if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped'
-    || reason === 'future_scheduled_date' || reason === 'visit_identity_changed') return 409;
+    || reason === 'future_scheduled_date' || reason === 'visit_identity_changed'
+    || reason === VISIT_NO_CUSTOMER_CODE) return 409;
   return 400;
 }
 
@@ -4195,7 +4198,9 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
       expectedVisit: expectedVisit && typeof expectedVisit === 'object' && !Array.isArray(expectedVisit) ? expectedVisit : null,
     });
-    if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
+    if (!result.ok) return res.status(recapStatusForReason(result.reason)).json(result.reason === VISIT_NO_CUSTOMER_CODE
+      ? { error: VISIT_NO_CUSTOMER_MESSAGE, code: VISIT_NO_CUSTOMER_CODE }
+      : { error: result.reason });
     await settleRecapSupplies(req.params.serviceId, result);
     res.json(result);
   } catch (err) { next(err); }
@@ -4726,6 +4731,9 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
 // GET /api/admin/dispatch/:serviceId/reschedule-options
 router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
+    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees why.
+    const refusal = await techMoveRefusal(req);
+    if (refusal) return res.status(refusal.status).json(refusal.payload);
     const options = await SmartRebooker.findRescheduleOptions(req.params.serviceId);
     res.json({ options });
   } catch (err) { next(err); }
@@ -4744,6 +4752,12 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
       .where({ id: req.params.serviceId })
       .first('id', 'scheduled_date', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees
+    // why, not move choices the commit would refuse.
+    {
+      const refusal = await techMoveRefusal(req);
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
+    }
 
     // Same stale-tap guard as the tech route: the moved-first rain-out
     // is a same-day "weather is hitting the route now" action. A job
@@ -5324,6 +5338,11 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
         assignedTechnicianId: svc.technician_id,
       });
       if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer.
+    {
+      const refusal = await techMoveRefusal(req);
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
     }
 
     if (trackTransitions.isFutureScheduledDate(svc.scheduled_date)) {
@@ -6570,6 +6589,12 @@ async function runPlannedVisitMove({ plan, serviceId, newDate, reasonCode, reaso
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer. First, so a refused
+    // technician takes no row lock below.
+    {
+      const refusal = await techMoveRefusal(req);
+      if (refusal) return res.status(refusal.status).json(refusal.payload);
+    }
     // Ownership: this route found the anchor visit by bare id with no
     // ownership predicate — a technician token could move any customer's
     // (or a whole recurring plan's) visit (ADMIN-BUG-R35). Admin requests
@@ -6878,6 +6903,20 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       today_completed: parseInt(r.today_completed, 10) || 0,
       out_today: !!r.out_today,
     })));
+    // Work days (GATE_TECH_WORK_DAYS): a technician who does not work today
+    // shows "Off" on the board. Unlike out_today it is information only: the
+    // card stays a valid drop target (an office placement warns, never blocks).
+    // The key exists only with the gate on, so gate off is byte-identical.
+    if (require('../config/feature-gates').techWorkDaysLive() && techs.length) {
+      try {
+        const { isOffDay } = require('../services/technician-eligibility');
+        const workRows = await db('technicians').whereIn('id', techs.map((t) => t.id)).select('id', 'work_days');
+        const workDaysById = new Map(workRows.map((w) => [String(w.id), w]));
+        for (const t of techs) t.off_today = isOffDay(workDaysById.get(String(t.id)), today);
+      } catch (err) {
+        logger.warn(`[dispatch/board] work days lookup failed (no Off flag): ${err.message}`);
+      }
+    }
 
     const jobs = (jobRows.rows || []).map((r) => {
       // Address normalization at the API boundary. Clients render this
@@ -7354,6 +7393,21 @@ router.get('/technicians', requireAdmin, async (req, res, next) => {
       })
       .select('technicians.id', 'technicians.name', 'technicians.role')
       .orderBy('name', 'asc');
+    // Work days (GATE_TECH_WORK_DAYS, with ?date): a technician who does not
+    // work that weekday stays in the list (office placements warn, never block)
+    // and is flagged offDay so the picker can say so. Gate off: no key, no read.
+    if (date && require('../config/feature-gates').techWorkDaysLive() && techs.length) {
+      try {
+        const { isOffDay } = require('../services/technician-eligibility');
+        const workRows = await db('technicians').whereIn('id', techs.map((t) => t.id)).select('id', 'work_days');
+        const workDaysById = new Map(workRows.map((w) => [String(w.id), w]));
+        for (const t of techs) {
+          if (isOffDay(workDaysById.get(String(t.id)), date)) t.offDay = true;
+        }
+      } catch (err) {
+        logger.warn(`[dispatch/technicians] work days lookup failed (no Off flag): ${err.message}`);
+      }
+    }
     res.json({ technicians: techs });
   } catch (err) {
     logger.error(`[dispatch/technicians] list failed: ${err.message}`);
@@ -7391,7 +7445,7 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
       technicianId: req.body ? req.body.technicianId : undefined,
       actorId: req.technicianId,
     });
-    res.json({ job: result.job });
+    res.json({ job: result.job, ...(result.warnings ? { warnings: result.warnings } : {}) });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[dispatch/jobs/assign] failed for ${req.params.id}: ${err.message}`);

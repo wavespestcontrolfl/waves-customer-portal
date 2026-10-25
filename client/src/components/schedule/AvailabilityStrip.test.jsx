@@ -178,6 +178,26 @@ describe('calendar facts on the days', () => {
     expect(screen.getByText('Wed Jan 3 (closed day)')).toBeTruthy();
   });
 
+  it('a last-resort Sunday is offered only when no other day has room, and its pill is not "closed"', () => {
+    const sunday = { date: '2035-01-03', status: 'open', last_resort: true, hours: [hour('2035-01-03', '09:00', 1)] };
+    const full = { date: '2035-01-04', status: 'overcommitted', hours: [] };
+    // Another day has room: the nearer, cheaper last-resort day is skipped.
+    const withRoom = answer(null, [offDay, sunday, openDay]);
+    expect(starts(availabilityVerdict(withRoom, at('2035-01-02', '09:00')))).toEqual(['05 10:00']);
+    // Nothing else has room: the last-resort day is offered.
+    const alone = answer(null, [offDay, sunday, full]);
+    expect(starts(availabilityVerdict(alone, at('2035-01-02', '09:00')))).toEqual(['03 09:00']);
+    // A closed day is still never offered, even as the last resort.
+    const closedOnly = answer(null, [offDay, { ...sunday, closed: true }, full]);
+    expect(availabilityVerdict(closedOnly, at('2035-01-02', '09:00')).offers).toEqual([]);
+
+    render(<AvailabilityStrip availability={alone} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    const pills = screen.getAllByTestId('availability-day').map((pill) => pill.textContent);
+    expect(pills[1]).toBe('Wed31 open');
+    fireEvent.click(screen.getAllByTestId('availability-day')[1]);
+    expect(screen.getByText('Wed Jan 3 (last resort)')).toBeTruthy();
+  });
+
   it('a pick on a closed day says so in the verdict', () => {
     const availability = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 1 }, [closedDay]);
     expect(availabilityVerdict(availability, at('2035-01-03', '09:00')).detail).toBe('Adds +1 min to the day · estimated. Wed Jan 3 is a closed day.');

@@ -1683,6 +1683,55 @@ describe('findAttachableCallAppointment (attach to a human booking instead of in
   });
 });
 
+describe('findNewCallerVisitForCall (GATE_NEW_CALLER_BOOKING: the office booked this call by address)', () => {
+  const { findNewCallerVisitForCall } = CallRecordingProcessor._test;
+  const officeVisit = { id: 'svc-nc1', status: 'pending', service_type: 'Pest Control' };
+
+  function fakeFirstConn(row, log) {
+    return (table) => {
+      log.push(['table', table]);
+      const chain = {};
+      for (const method of ['where', 'whereNull', 'whereNotIn', 'orderBy']) {
+        chain[method] = (...args) => {
+          log.push([method, ...args]);
+          return chain;
+        };
+      }
+      chain.first = async (...columns) => {
+        log.push(['first', ...columns]);
+        return row;
+      };
+      return chain;
+    };
+  }
+
+  test('finds the live visit the office booked for this call, linked or not, whoever the customer turns out to be', async () => {
+    const log = [];
+    await expect(findNewCallerVisitForCall({ call: { id: 'call-1' }, trx: fakeFirstConn(officeVisit, log) })).resolves.toBe(officeVisit);
+    expect(log).toContainEqual(['table', 'scheduled_services']);
+    expect(log).toContainEqual(['where', { source_call_log_id: 'call-1', source_action: 'admin_new_caller' }]);
+    // A visit the link step gave to another customer (an operator relinked the call mid-pass) holds as well.
+    expect(log).not.toContainEqual(['whereNull', 'customer_id']);
+    expect(log).toContainEqual(['whereNull', 'parent_service_id']);
+    expect(log).toContainEqual(['whereNotIn', 'status', ['cancelled', 'rescheduled']]);
+  });
+
+  test('a call with no id reads nothing', async () => {
+    const log = [];
+    await expect(findNewCallerVisitForCall({ call: {}, trx: fakeFirstConn(officeVisit, log) })).resolves.toBeNull();
+    expect(log).toHaveLength(0);
+  });
+
+  test('the booking transaction holds on it before the attach lookup, so no second visit is inserted', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const guard = src.indexOf('const newCallerVisit = await findNewCallerVisitForCall({ call, trx });');
+    const attach = src.indexOf('const attachable = await findAttachableCallAppointment({');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(attach);
+    expect(src.slice(guard, attach)).toMatch(/if \(newCallerVisit\) \{\s*return \{\s*__held: \{\s*reason: 'ambiguous_existing_appointment',\s*existingId: newCallerVisit\.id,/);
+  });
+});
+
 describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
   const { attachCandidateMatchesProperty } = CallRecordingProcessor._test;
 

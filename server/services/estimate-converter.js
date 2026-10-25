@@ -5429,6 +5429,20 @@ function buildCommercialSchedulePayload({ customer, customerId, estimateId, sche
   };
 }
 
+// Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow, owner 2026-10-25): log the
+// technician the map would pick beside the one this accept left on a visit. `database`
+// is the caller's transaction: the write waits for its OUTERMOST commit and is dropped
+// on rollback. Never awaited, never throws; gate off = returns at once.
+function recordEstimateLinePick(database, visit) {
+  if (!visit) return;
+  void require('./scheduling/line-technician').recordLinePickShadow({
+    source: 'estimate_accept', trx: database, scheduledServiceId: visit.id, customerId: visit.customer_id,
+    date: visit.scheduled_date, windowStart: visit.window_start, windowEnd: visit.window_end,
+    serviceId: visit.service_id, serviceKey: visit.service_key_snapshot, serviceType: visit.service_type,
+    durationMinutes: visit.estimated_duration_minutes, actualTechnicianId: visit.technician_id,
+  });
+}
+
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -6630,6 +6644,9 @@ const EstimateConverter = {
       termStartDate = reservedStart?.scheduled_date || null;
       firstScheduledServiceId = reservedStart?.id || null;
       scheduledCount = reservedRows.length;
+      // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow): one row per reserved line,
+      // written after the accept commits. Gate off = returns at once.
+      for (const reservedRow of reservedRows) recordEstimateLinePick(database, reservedRow);
 
       // Combined routing reaches reserved rows too: rewrite the slot row to
       // the combined service (type/service_id/duration — the customer's
@@ -7231,6 +7248,7 @@ const EstimateConverter = {
               continue;
             }
             const { parentRow, seedResult } = outcome;
+            recordEstimateLinePick(database, parentRow);
             if (combinedCapacity && sameTrip) capacityMembers.push(parentRow);
             // Same-day promoted sibling: this is exactly the membership
             // the combined first-application invoice's stamp should cover
@@ -7887,6 +7905,7 @@ const EstimateConverter = {
             }
             continue;
           }
+          if (outcome.insertedId) recordEstimateLinePick(database, { ...row, id: outcome.insertedId });
           if (outcome.insertedId && recurringUnitCount > 1 && unitPerVisit == null) {
             unpricedAutoScheduledParentIds.push(outcome.insertedId);
           }

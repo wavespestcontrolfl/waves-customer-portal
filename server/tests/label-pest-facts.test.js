@@ -74,10 +74,12 @@ describe('labelFactPests', () => {
 });
 
 test('displayTerm keeps a proper first word and lowers the rest; joinTerms reads as a list', () => {
-  expect(displayTerm('German cockroaches')).toBe('German cockroaches');
+  // owner 2026-10-25, "dont capitalize German"
+  expect(displayTerm('German cockroaches')).toBe('german cockroaches');
+  expect(displayTerm('American cockroaches')).toBe('American cockroaches');
   expect(displayTerm('Ghost ants')).toBe('ghost ants');
   expect(displayTerm('ants')).toBe('ants');
   expect(joinTerms(['ants'])).toBe('ants');
   expect(joinTerms(['ants', 'spiders'])).toBe('ants and spiders');
-  expect(joinTerms(['ants', 'spiders', 'German cockroaches'])).toBe('ants, spiders and German cockroaches');
+  expect(joinTerms(['ants', 'spiders', 'german cockroaches'])).toBe('ants, spiders and german cockroaches');
 });

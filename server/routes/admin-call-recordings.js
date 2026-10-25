@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { techMoveRefusal } = require('../services/scheduling/tech-move-permission');
 const logger = require('../services/logger');
 const {
   adminAuthenticate,
@@ -294,6 +295,10 @@ router.get('/proposals', async (req, res, next) => {
 router.post('/proposals/:id/preview', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id) || (req.body?.visit_id && !UUID_RE.test(req.body.visit_id))) return res.status(400).json({ error: 'Invalid proposal or visit id' });
+    // GATE_TECH_MOVE_SWITCH: applying a proposal moves the visit, so a
+    // technician whose Team tab switch is off sees why before applying.
+    const refusal = await techMoveRefusal(req);
+    if (refusal) return res.status(refusal.status).json(refusal.payload);
     const p = await require('../services/call-reschedule-proposals').previewProposal(db, req.params.id, { visitId: req.body?.visit_id });
     // Render the identity covered by this hash, not a potentially older list row.
     const { id, status, scheduled_date, current_window, service_name, property } = p.selected;
@@ -312,6 +317,9 @@ router.post('/proposals/:id/apply', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id) || !UUID_RE.test(String(req.body?.visit_id || ''))
       || !/^[a-f0-9]{64}$/.test(String(req.body?.preview_hash || ''))) return res.status(400).json({ error: 'Preview the selected visit before applying' });
+    // GATE_TECH_MOVE_SWITCH: the apply is the enforcer.
+    const refusal = await techMoveRefusal(req);
+    if (refusal) return res.status(refusal.status).json(refusal.payload);
     const result = await require('../services/call-reschedule-proposals').applyProposal(db, req.params.id, {
       actorId: req.technicianId, visitId: req.body.visit_id, previewHash: req.body.preview_hash,
     });

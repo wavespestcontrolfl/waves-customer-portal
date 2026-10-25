@@ -7080,6 +7080,25 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   return query.first();
 }
 
+// GATE_NEW_CALLER_BOOKING: a visit the office booked by address for THIS call
+// before the customer existed (booking/new-caller-visit.js: source_action
+// 'admin_new_caller', stamped with the call). Every lookup here is
+// customer-scoped and misses it while it has no customer, so without this the
+// pipeline would insert a second visit for the same call. Linked or not: once
+// linked, findExistingCallAppointment reuses it for its own customer, and a
+// visit linked to ANOTHER customer (an operator relinked the call while this
+// pass ran) must hold too. Not gated: such a row exists only if the gate was
+// on when it was booked, and it must stay single after a kill.
+async function findNewCallerVisitForCall({ call, trx = db }) {
+  if (!call?.id) return null;
+  return trx('scheduled_services')
+    .where({ source_call_log_id: call.id, source_action: require('./booking/new-caller-visit').NEW_CALLER_SOURCE_ACTION })
+    .whereNull('parent_service_id')
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .orderBy('created_at', 'asc')
+    .first('id', 'status', 'service_type');
+}
+
 // Card-on-file spec §3 Phase 5.5: the guard above only sees THIS call's own
 // rows. A visit booked by a HUMAN through another channel while the call was
 // still being processed (the office books it in the portal mid-call; the
@@ -16485,6 +16504,24 @@ const CallRecordingProcessor = {
     });
     if (!checkpointRows) return abandonToPeer('the customer checkpoint write');
 
+    // GATE_NEW_CALLER_BOOKING (booking/new-caller-link-from-call.js): a visit
+    // the office booked by address for this call, before the customer existed,
+    // gets the customer this checkpoint just wrote; its reminders and
+    // confirmation go out at the link. The booking branch below then reuses
+    // the linked visit and sends nothing. Never throws.
+    await require('./booking/new-caller-link-from-call').linkOfficeVisitFromCall({
+      call,
+      procToken,
+      extracted,
+      createdCustomerId: createdCustomerFromCall ? customerId : null,
+      text: {
+        passBlocked: v2SmsBlocked,
+        extraction: v2ApprovedExtraction || v2CanonicalExtraction || null,
+        impliedConsent: isEnabled('callInboundImpliedConsent') && outboundImpliedConsentEligible(call, outboundReturnMessagesEligible),
+        callerPhone: contactPhone,
+      },
+    });
+
     const v2ExtractionForAudit = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
       ? v2Result.extraction
       : null;
@@ -20182,7 +20219,7 @@ const CallRecordingProcessor = {
                       // (dated absences), same check the package helper runs.
                       if (followUpTechId && packageFollowUp) {
                         try {
-                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate });
+                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate, workDays: true });
                         } catch (eligErr) {
                           if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                           logger.warn(`[call-proc] package visit 2 technician ${followUpTechId} not assignable on ${fuPlan.scheduledDate}; seeding unassigned`);
@@ -20483,7 +20520,7 @@ const CallRecordingProcessor = {
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = reuseCandidateTechId;
                     try {
-                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day });
+                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true });
                       // A PICKED technician passed the capability filter on a
                       // plain read; re-read it under the technician share lock
                       // so an Off saved since cannot receive this visit.
@@ -20751,6 +20788,22 @@ const CallRecordingProcessor = {
                 // linked lookup) instead of inserting; several plausible
                 // rows → hold for human review; a property mismatch falls
                 // through (a different property's visit is not a duplicate).
+                // The office already booked this call by address, before the
+                // customer existed: never a second visit. The link step after
+                // the customer checkpoint gives such a visit its customer, and
+                // findExistingCallAppointment above then reuses it; one still
+                // waiting, or linked to another customer, holds for the office.
+                const newCallerVisit = await findNewCallerVisitForCall({ call, trx });
+                if (newCallerVisit) {
+                  return {
+                    __held: {
+                      reason: 'ambiguous_existing_appointment',
+                      existingId: newCallerVisit.id,
+                      existingStatus: newCallerVisit.status,
+                      existingService: newCallerVisit.service_type,
+                    },
+                  };
+                }
                 const attachable = await findAttachableCallAppointment({
                   customerId, scheduledDate, serviceType, trx,
                 });
@@ -21281,7 +21334,7 @@ const CallRecordingProcessor = {
                 // triage note already says who was auto-assigned (or nobody).
                 if (insertData.technician_id) {
                   try {
-                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10) });
+                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10), workDays: true });
                     // A PICKED technician passed the capability filter on a
                     // plain read; re-read it under the technician share lock
                     // so an Off saved since cannot receive this visit.
@@ -21617,6 +21670,16 @@ const CallRecordingProcessor = {
                     snapshot: { date: row.scheduled_date, windowStart: row.window_start || null, windowEnd: row.window_end || null },
                   });
                 }
+              }
+              // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow): the booking is committed;
+              // log the technician the map would pick beside the one saved. A fresh insert, or a
+              // reused row this run assigned a technician to. Never awaited, never throws.
+              if (!reusedExistingSchedule || reuseAssignedTechId) {
+                void require('./scheduling/line-technician').recordLinePickShadow({
+                  source: 'after_call', scheduledServiceId: svc.id, customerId: svc.customer_id, date: svc.scheduled_date,
+                  windowStart: svc.window_start, windowEnd: svc.window_end, serviceId: svc.service_id,
+                  serviceType: svc.service_type, durationMinutes: svc.estimated_duration_minutes, actualTechnicianId: svc.technician_id,
+                });
               }
               if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {
                 // (A street-level address hold is never activated by a pipeline
@@ -25719,6 +25782,7 @@ CallRecordingProcessor._test = {
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,
   findAttachableCallAppointment,
+  findNewCallerVisitForCall,
   attachCandidateMatchesProperty,
   attachCandidateSlotAgrees,
   classifyCallerAccount,

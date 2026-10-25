@@ -91,6 +91,9 @@ function reviewSnapshotToken({ weekly, dailies, entries }) {
       total_drive_minutes: number(weekly.total_drive_minutes),
       regular_minutes: number(weekly.regular_minutes),
       overtime_minutes: number(weekly.overtime_minutes),
+      // Unpaid meal joins the token only when there is one, so a week without
+      // it (gate off) keeps the token it had before this field existed.
+      ...(number(weekly.unpaid_meal_minutes) ? { unpaid_meal_minutes: number(weekly.unpaid_meal_minutes) } : {}),
       days_worked: Number(weekly.days_worked || 0),
       job_count: Number(weekly.job_count || 0),
       total_revenue: number(weekly.total_revenue),
@@ -114,6 +117,8 @@ function reviewSnapshotToken({ weekly, dailies, entries }) {
         total_break_minutes: number(daily.total_break_minutes),
         total_admin_minutes: number(daily.total_admin_minutes),
         overtime_minutes: number(daily.overtime_minutes),
+        ...(number(daily.unpaid_meal_minutes) ? { unpaid_meal_minutes: number(daily.unpaid_meal_minutes) } : {}),
+        ...(daily.no_lunch ? { no_lunch: true } : {}),
         job_count: Number(daily.job_count || 0),
         revenue_generated: number(daily.revenue_generated),
         status: daily.status || 'pending',
@@ -800,6 +805,13 @@ async function unlockWeek({ technicianId, weekStart, adminId, reason, reviewToke
       );
     }
 
+    // A finalized paycheck was worked out from these hours (GATE_PAYROLL pay
+    // runs). Reopening the week would leave the check without its hours.
+    const paid = await trx('payroll_checks')
+      .where({ technician_id: technicianId, week_start: start, status: 'finalized' })
+      .first('id');
+    if (paid) throw approvalHttpError(409, 'Void the pay run for this week first.');
+
     await trx('time_entries')
       .where({ technician_id: technicianId })
       .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
@@ -909,19 +921,24 @@ async function generateWeeklyPayrollExport(weekStart, now = new Date()) {
 
     const headers = [
       'Tech', 'Week Start', 'Regular Hours', 'OT Hours', 'Total Hours',
-      'Jobs', 'Revenue', 'RPMH', 'Utilization %', 'Status',
+      'Unpaid Lunch Hours', 'Jobs', 'Revenue', 'RPMH', 'Utilization %', 'Status',
     ];
 
     const csvRows = rows.map(r => {
-      const totalMin = parseFloat(r.total_shift_minutes || 0);
+      // Paid hours: regular and OT are already split on paid minutes (shift
+      // less the unpaid meal), so Total Hours is their sum. The unpaid lunch
+      // is shown beside it; with GATE_AUTO_LUNCH off it is 0.00 and Total
+      // Hours equals the shift hours, as before.
+      const regMin = parseFloat(r.regular_minutes || 0);
       const otMin = parseFloat(r.overtime_minutes || 0);
-      const regMin = Math.max(0, totalMin - otMin);
+      const unpaidMin = parseFloat(r.unpaid_meal_minutes || 0);
       return [
         (r.tech_name || '').replace(/,/g, ' '),
         dateOnly(r.week_start),
         (regMin / 60).toFixed(2),
         (otMin / 60).toFixed(2),
-        (totalMin / 60).toFixed(2),
+        ((regMin + otMin) / 60).toFixed(2),
+        (unpaidMin / 60).toFixed(2),
         r.job_count || 0,
         parseFloat(r.total_revenue || 0).toFixed(2),
         parseFloat(r.avg_rpmh || 0).toFixed(2),

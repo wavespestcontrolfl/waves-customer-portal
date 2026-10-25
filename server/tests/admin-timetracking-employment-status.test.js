@@ -97,6 +97,8 @@ describe('createTechnician', () => {
     expect(res.statusCode).toBe(200);
     expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({
       employment_status: 'active', active: true, field_dispatchable: false,
+      // GATE_TECH_MOVE_SWITCH (owner 2026-10-25): a new technician cannot move visits until switched on.
+      can_move_visits: false,
     }));
   });
 
@@ -117,6 +119,7 @@ describe('createTechnician', () => {
     expect((await invoke(createTechnician, { body: { name: 'X', employmentStatus: 'inactive' } })).statusCode).toBe(400);
     expect((await invoke(createTechnician, { body: { name: 'X', employmentStatus: 'fired' } })).statusCode).toBe(400);
     expect((await invoke(createTechnician, { body: { name: 'X', employmentStatus: 'prospective', fieldDispatchable: 'yes' } })).statusCode).toBe(400);
+    expect((await invoke(createTechnician, { body: { name: 'X', employmentStatus: 'prospective', canMoveVisits: 'yes' } })).statusCode).toBe(400);
     expect(db.transaction).not.toHaveBeenCalled();
   });
 });
@@ -224,9 +227,22 @@ describe('updateTechnician', () => {
     expect(res.body.futureAssignedVisits).toEqual([]);
   });
 
-  test('a bad employmentStatus or fieldDispatchable is rejected before any read', async () => {
+  test('the "Can move visits" switch writes its column only and never rotates credentials', async () => {
+    const target = makeChain({ first: { ...ADAM, id: 'tech-9', role: 'technician', can_move_visits: false } });
+    const write = makeChain();
+    const reread = makeChain({ first: { ...ADAM, id: 'tech-9', can_move_visits: true } });
+    installTransaction([target, write, reread]);
+    const res = await invoke(updateTechnician, { params: { id: 'tech-9' }, body: { canMoveVisits: true }, technicianId: 'adam' });
+    expect(res.statusCode).toBe(200);
+    expect(write.update.mock.calls[0][0]).toMatchObject({ can_move_visits: true });
+    expect(write.update.mock.calls[0][0]).not.toHaveProperty('auth_token_version');
+    expect(res.body.technician).toMatchObject({ can_move_visits: true });
+  });
+
+  test('a bad employmentStatus, fieldDispatchable or canMoveVisits is rejected before any read', async () => {
     expect((await invoke(updateTechnician, { params: { id: 'x' }, body: { employmentStatus: 'quit' } })).statusCode).toBe(400);
     expect((await invoke(updateTechnician, { params: { id: 'x' }, body: { fieldDispatchable: 1 } })).statusCode).toBe(400);
+    expect((await invoke(updateTechnician, { params: { id: 'x' }, body: { canMoveVisits: 'on' } })).statusCode).toBe(400);
     expect(db.transaction).not.toHaveBeenCalled();
   });
 });
@@ -268,3 +284,96 @@ describe('deactivateTechnician', () => {
     expect(write.del).toBeUndefined();
   });
 });
+
+// GATE_TECH_WORK_DAYS (owner 2026-10-25): the Team tab "Work days" row.
+describe('workDays on create and update', () => {
+  afterEach(() => { delete process.env.GATE_TECH_WORK_DAYS; });
+  const gateOn = () => { process.env.GATE_TECH_WORK_DAYS = 'true'; };
+  const createWith = async (workDays) => {
+    const insert = makeChain({ returning: [{ ...ADAM, id: 'new', work_days: Array.isArray(workDays) && workDays.length < 7 ? [...workDays].sort() : null }] });
+    installTransaction([makeChain({ first: undefined }), insert]);
+    const res = await invoke(createTechnician, { body: { name: 'Casey', email: 'casey@example.com', workDays } });
+    return { res, insert };
+  };
+
+  test('create, gate on: a Monday-to-Thursday week is stored sorted, 0 = Sunday, and returned as work_days', async () => {
+    gateOn();
+    const { res, insert } = await createWith([4, 2, 1, 3]);
+    expect(res.statusCode).toBe(200);
+    expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({ work_days: [1, 2, 3, 4] }));
+    expect(res.body.technician.work_days).toEqual([1, 2, 3, 4]);
+  });
+
+  test('create, gate on: all seven days and null both store NULL (works every day)', async () => {
+    gateOn();
+    const all = await createWith([0, 1, 2, 3, 4, 5, 6]);
+    expect(all.insert.insert).toHaveBeenCalledWith(expect.objectContaining({ work_days: null }));
+    const none = await createWith(null);
+    expect(none.insert.insert).toHaveBeenCalledWith(expect.objectContaining({ work_days: null }));
+  });
+
+  test('create, gate on: an omitted workDays leaves the column out of the insert', async () => {
+    gateOn();
+    const insert = makeChain({ returning: [{ ...ADAM, id: 'new' }] });
+    installTransaction([makeChain({ first: undefined }), insert]);
+    await invoke(createTechnician, { body: { name: 'Casey', email: 'casey@example.com' } });
+    expect(insert.insert.mock.calls[0][0]).not.toHaveProperty('work_days');
+  });
+
+  test.each([
+    ['an empty list', [], 'Pick at least one work day'],
+    ['a repeated day', [1, 1, 2], 'workDays must be'],
+    ['a day above 6', [1, 7], 'workDays must be'],
+    ['a negative day', [-1, 2], 'workDays must be'],
+    ['a fractional day', [1.5], 'workDays must be'],
+    ['a day name', ['mon', 'tue'], 'workDays must be'],
+    ['a string of days', '1,2,3', 'workDays must be'],
+  ])('create and update, gate on: %s is a 400 before any transaction', async (_label, workDays, message) => {
+    gateOn();
+    const created = await invoke(createTechnician, { body: { name: 'Casey', email: 'casey@example.com', workDays } });
+    expect(created.statusCode).toBe(400);
+    expect(created.body.error).toContain(message);
+    const updated = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { workDays }, technicianId: 'adam' });
+    expect(updated.statusCode).toBe(400);
+    expect(updated.body.error).toContain(message);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('update, gate on: workDays writes work_days, and null clears it', async () => {
+    gateOn();
+    const write = makeChain();
+    installTransaction([makeChain({ first: ADAM }), write, makeChain({ first: { ...ADAM, work_days: [1, 2, 3, 4] } })]);
+    const res = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { workDays: [1, 2, 3, 4] }, technicianId: 'admin-1' });
+    expect(res.statusCode).toBe(200);
+    expect(write.update).toHaveBeenCalledWith(expect.objectContaining({ work_days: [1, 2, 3, 4] }));
+    expect(res.body.technician.work_days).toEqual([1, 2, 3, 4]);
+
+    const clear = makeChain();
+    installTransaction([makeChain({ first: { ...ADAM, work_days: [1, 2, 3, 4] } }), clear, makeChain({ first: { ...ADAM, work_days: null } })]);
+    await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { workDays: null }, technicianId: 'admin-1' });
+    expect(clear.update).toHaveBeenCalledWith(expect.objectContaining({ work_days: null }));
+  });
+
+  test('update, gate on: an edit that omits workDays leaves work_days alone', async () => {
+    gateOn();
+    const write = makeChain();
+    installTransaction([makeChain({ first: ADAM }), write, makeChain({ first: ADAM })]);
+    await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { name: 'Adam B' }, technicianId: 'admin-1' });
+    expect(write.update.mock.calls[0][0]).not.toHaveProperty('work_days');
+  });
+
+  test('gate off: workDays is ignored on create and update (even an invalid value), and work_days is not returned', async () => {
+    const created = await createWith([1, 2, 3, 4]);
+    expect(created.res.statusCode).toBe(200);
+    expect(created.insert.insert.mock.calls[0][0]).not.toHaveProperty('work_days');
+    expect(created.res.body.technician).not.toHaveProperty('work_days');
+
+    const write = makeChain();
+    installTransaction([makeChain({ first: ADAM }), write, makeChain({ first: { ...ADAM, work_days: [1, 2] } })]);
+    const res = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { workDays: [] }, technicianId: 'admin-1' });
+    expect(res.statusCode).toBe(200);
+    expect(write.update.mock.calls[0][0]).not.toHaveProperty('work_days');
+    expect(res.body.technician).not.toHaveProperty('work_days');
+  });
+});
+

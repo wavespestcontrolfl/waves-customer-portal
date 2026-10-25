@@ -3806,6 +3806,10 @@ const AppointmentReminders = {
 
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {
     try {
+      // A visit booked by address only has no customer yet: nobody to remind or confirm, and the
+      // same-slot dedup below would match NULL to NULL and merge two such visits at the same hour
+      // (the second suppressed_by_sibling forever). The row is written when the customer is linked.
+      if (!customerId) return null;
       let apptTime = parseETDateTime(appointmentTime);
       if (isNaN(apptTime.getTime())) {
         logger.error(`[appt-remind] Invalid appointment time: ${appointmentTime}`);
@@ -4021,6 +4025,10 @@ const AppointmentReminders = {
    */
   async sendConfirmation(scheduledServiceId) {
     try {
+      // A visit booked by address only has no customer yet: nobody to text, and no reminder row exists
+      // for it (registerAppointment skips it). A quiet no-op, not a "no reminder row" warning.
+      const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+      if (visit && !visit.customer_id) return false;
       const record = await db('appointment_reminders')
         .where({ scheduled_service_id: scheduledServiceId })
         .first();

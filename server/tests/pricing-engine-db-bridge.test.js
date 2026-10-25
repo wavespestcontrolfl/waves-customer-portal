@@ -609,7 +609,7 @@ describe('pricing engine DB bridge', () => {
     // A sane price backed by an ACTIVE, APPROVED vendor row flows into the
     // engine (containerCost AND containerOz come from the catalog together).
     await expect(syncConstantsFromDB(linkDb(
-      [{ name: 'Talstar P', best_price: 45.5, unit_size_oz: 128, best_vendor_pricing_id: 'vp-approved' }],
+      [{ name: 'Atticus Talak 7.9 F', best_price: 45.5, unit_size_oz: 128, best_vendor_pricing_id: 'vp-approved' }],
       [{ id: 'vp-approved' }],
     ))).resolves.toBe(true);
     expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).toBe(45.5);
@@ -623,12 +623,15 @@ describe('pricing engine DB bridge', () => {
     await expect(syncConstantsFromDB(linkDb(
       [
         { name: 'Taurus SC', best_price: 99, unit_size_oz: 78, best_vendor_pricing_id: 'vp-pending' },
-        { name: 'Bifen I/T', best_price: 44, unit_size_oz: 128, best_vendor_pricing_id: null },
+        { name: 'Atticus Talak 7.9 F', best_price: 44, unit_size_oz: 128, best_vendor_pricing_id: null },
       ],
       [], // the approval-filtered lookup returns nothing
     ))).resolves.toBe(true);
     expect(constants.SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost).toBe(95.00);
-    expect(constants.SPECIALTY.preSlabTermiticide.products.bifen_it.containerCost).toBe(41.53);
+    // bifen_it and talstar_p both link to the Talak row (owner 2026-10-25): a Talak price with no
+    // approved backing row never applies to either.
+    expect(constants.SPECIALTY.preSlabTermiticide.products.bifen_it.containerCost).not.toBe(44);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).not.toBe(44);
 
     // Fat-finger guard: a per-oz price outside [0.5x, 2x] of config is
     // ignored even when approved ($152.10 against a 20 oz unit size is

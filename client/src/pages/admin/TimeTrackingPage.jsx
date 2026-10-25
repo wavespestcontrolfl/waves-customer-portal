@@ -8,6 +8,9 @@ import StaffDocumentLibrary from "../../components/staffDocuments/Library";
 import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import PayGrowth from "../../components/payGrowth/PayGrowth";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
+import PayrollSettings from "../../components/payroll/PayrollSettings";
+import ServiceLinesCard from "./ServiceLinesCard";
+import usePayrollAvailable from "../../hooks/usePayrollAvailable";
 import {
   BarChart3,
   CheckCircle2,
@@ -16,6 +19,7 @@ import {
   LayoutDashboard,
   List,
   Users,
+  Wallet,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import "./TimeTrackingPage.css";
@@ -58,6 +62,17 @@ const D = {
 const MONO = "'JetBrains Mono', monospace";
 const LABOR_RATE = 35;
 
+// Unpaid lunch (GATE_AUTO_LUNCH): paid minutes are shift minutes less the
+// day's unpaid meal. A row without the field (restricted viewer projection,
+// gate off) has none, so every figure equals the shift figure as before.
+const unpaidMinutesOf = (d) =>
+  Math.min(
+    parseFloat(d.total_shift_minutes || 0),
+    parseFloat(d.unpaid_meal_minutes || 0),
+  );
+const paidMinutesOf = (d) =>
+  Math.max(0, parseFloat(d.total_shift_minutes || 0) - unpaidMinutesOf(d));
+
 function adminFetch(path, opts = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...opts,
@@ -71,8 +86,19 @@ function adminFetch(path, opts = {}) {
         ? opts.body
         : JSON.stringify(opts.body)
       : undefined,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // The message stays "HTTP <status>"; the status and the server's JSON
+      // body ride along for callers that show the server's own reason.
+      const error = new Error(`HTTP ${r.status}`);
+      error.status = r.status;
+      try {
+        error.data = typeof r.json === "function" ? await r.json() : null;
+      } catch {
+        error.data = null;
+      }
+      throw error;
+    }
     return r.json();
   });
 }
@@ -163,6 +189,7 @@ const STAFF_SECTIONS = [
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
   { key: "pay-growth", label: "Growth", Icon: BarChart3 },
+  { key: "payroll", label: "Payroll", Icon: Wallet },
 ];
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf
@@ -180,7 +207,7 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents", "pay-growth"],
+    tabs: ["team", "documents", "pay-growth", "payroll"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -194,7 +221,13 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 // other invalid/role-gated deep link. While an admin's availability request
 // is still pending (null) the tab is unresolved: rendering Team meanwhile
 // would flash the wrong view and could flush a false Team usage beacon.
-export function resolveStaffTab(rawTab, payGrowthAvailable, role) {
+//
+// The payroll tab (GATE_PAYROLL) follows the same rule from its own status probe.
+export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailable = false) {
+  if (rawTab === "payroll") {
+    if (role !== "admin" || payrollAvailable === false) return "team";
+    return payrollAvailable === true ? "payroll" : null;
+  }
   if (rawTab !== "pay-growth") return rawTab;
   if (role !== "admin" || payGrowthAvailable === false) return "team";
   return payGrowthAvailable === true ? "pay-growth" : null;
@@ -203,12 +236,14 @@ export function resolveStaffTab(rawTab, payGrowthAvailable, role) {
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
   const payGrowthAvailable = usePayGrowthAvailable();
+  const payrollAvailable = usePayrollAvailable(readStaffRole() === "admin");
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
   const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
   // null = pay-growth requested by an admin while availability is still
   // unknown: no leaf renders and no beacon fires until it resolves.
-  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole());
+  const payrollGateOpen = payrollAvailable === true && readStaffRole() === "admin";
+  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole(), payrollAvailable);
   const setTab = (value) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
@@ -247,6 +282,7 @@ export default function TimeTrackingPage() {
           activeGroup.tabs.length > 1
             ? activeGroup.tabs
                 .filter((key) => key !== "pay-growth" || payGrowthGateOpen)
+                .filter((key) => key !== "payroll" || payrollGateOpen)
                 .map((key) => STAFF_LEAF_BY_KEY[key])
             : []
         }
@@ -273,7 +309,8 @@ export default function TimeTrackingPage() {
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
       {tab === "pay-growth" && <PayGrowth manage />}
-      {tab === null && <p role="status" style={{ color: "#71717A" }}>Checking pay and growth availability…</p>}
+      {tab === "payroll" && <PayrollSettings />}
+      {tab === null && <p role="status" style={{ color: "#71717A" }}>{rawTab === "payroll" ? "Checking payroll availability…" : "Checking pay and growth availability…"}</p>}
       <div
         style={{
           position: "fixed",
@@ -353,6 +390,7 @@ export function DashboardTab({ showToast }) {
     (s, d) => s + parseFloat(d.total_shift_minutes || 0),
     0,
   );
+  const todayPaidMin = todaySummaries.reduce((s, d) => s + paidMinutesOf(d), 0);
   const todayJobMin = todaySummaries.reduce(
     (s, d) => s + parseFloat(d.total_job_minutes || 0),
     0,
@@ -372,20 +410,20 @@ export function DashboardTab({ showToast }) {
       tech && parseFloat(tech.pay_rate) > 0
         ? parseFloat(tech.pay_rate)
         : LABOR_RATE;
-    return s + (parseFloat(d.total_shift_minutes || 0) / 60) * rate;
+    return s + (paidMinutesOf(d) / 60) * rate;
   }, 0);
   const todayUtil = todayShiftMin > 0 ? (todayJobMin / todayShiftMin) * 100 : 0;
 
   // This week totals
-  const weekShiftMin = weekDailies.reduce(
-    (s, d) => s + parseFloat(d.total_shift_minutes || 0),
+  const weekPaidMin = weekDailies.reduce(
+    (s, d) => s + paidMinutesOf(d),
     0,
   );
   const weekRevenue = weekDailies.reduce(
     (s, d) => s + parseFloat(d.revenue_generated || 0),
     0,
   );
-  const weekOT = Math.max(0, weekShiftMin - 2400);
+  const weekOT = Math.max(0, weekPaidMin - 2400);
   // Only show techs with activity — hide inactive techs with 0 hours/jobs
   const liveTechs = allTechs.filter((tech) => {
     const active = activeShifts.find((s) => s.technician_id === tech.id);
@@ -548,7 +586,7 @@ export function DashboardTab({ showToast }) {
         {" "}
         <StatCard
           label="Total Hours"
-          value={fmtHrs(todayShiftMin)}
+          value={fmtHrs(todayPaidMin)}
           color={D.teal}
         />{" "}
         <StatCard
@@ -593,7 +631,7 @@ export function DashboardTab({ showToast }) {
         >
           {" "}
           <span style={{ fontSize: 12, color: D.muted }}>
-            Week total: {fmtHrs(weekShiftMin)}
+            Week total: {fmtHrs(weekPaidMin)}
             {!isRestrictedViewer && <> | Revenue: {fmt(weekRevenue)}</>}
             {/* overtime_minutes is a per-tech field the server never sends a
                 restricted viewer (techSafeDailySummary) — this weekly OT
@@ -702,10 +740,7 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
             d.work_date === dateStr ||
             (d.work_date && d.work_date.split("T")[0] === dateStr),
         );
-        const shiftMin = dayData.reduce(
-          (s, d) => s + parseFloat(d.total_shift_minutes || 0),
-          0,
-        );
+        const shiftMin = dayData.reduce((s, d) => s + paidMinutesOf(d), 0);
         // codex round-3 P2: overtime_minutes is never sent to a restricted
         // (technician) viewer (techSafeDailySummary) — reading it as 0
         // wouldn't fabricate a number, but the OT/regular split it drives
@@ -800,13 +835,18 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
 // =============================================================================
 // TIMESHEET TAB
 // =============================================================================
-function TimesheetTab({ showToast, onOpenApprovals }) {
+export function TimesheetTab({ showToast, onOpenApprovals }) {
   const [weekStart, setWeekStart] = useState(() => getMonday(new Date()));
   const [dailies, setDailies] = useState([]);
   const [techs, setTechs] = useState([]);
   const [expanded, setExpanded] = useState(null); // { techId, date }
   const [cellEntries, setCellEntries] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Unpaid lunch controls show only while GATE_AUTO_LUNCH is on (the
+  // dashboard read says so).
+  const [autoLunch, setAutoLunch] = useState(false);
+  const [lunchReason, setLunchReason] = useState("");
+  const [lunchBusy, setLunchBusy] = useState(false);
 
   const weekEnd = useMemo(() => addDays(weekStart, 6), [weekStart]);
 
@@ -821,6 +861,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
       ]);
       setDailies(dailyRes);
       setTechs(dashRes.allTechs || []);
+      setAutoLunch(dashRes.autoLunch === true);
     } catch (e) {
       showToast("Failed to load timesheet");
     }
@@ -838,6 +879,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
         return;
       }
       setExpanded({ techId, date });
+      setLunchReason("");
       try {
         const res = await adminFetch(
           `/admin/timetracking/entries?technicianId=${techId}&startDate=${date}&endDate=${date}`,
@@ -848,6 +890,35 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
       }
     },
     [expanded],
+  );
+
+  // Admin set/clear of a day's "No lunch" flag. The reason is required and is
+  // recorded on the day; an approved day or week is refused by the server.
+  const setDayNoLunch = useCallback(
+    async (techId, date, noLunch) => {
+      if (!lunchReason.trim()) return;
+      setLunchBusy(true);
+      try {
+        await adminFetch(
+          `/admin/timetracking/daily/${techId}/${date}/no-lunch`,
+          {
+            method: "PUT",
+            body: { noLunch, edit_reason: lunchReason.trim() },
+          },
+        );
+        showToast(noLunch ? "No lunch recorded" : "Lunch restored");
+        setLunchReason("");
+        await load();
+      } catch (e) {
+        showToast(
+          e.message === "HTTP 409"
+            ? "That day or week is approved. Unlock it first."
+            : `Lunch change failed: ${e.message}`,
+        );
+      }
+      setLunchBusy(false);
+    },
+    [lunchReason, load, showToast],
   );
 
   const exportCSV = useCallback(() => {
@@ -963,7 +1034,8 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                   </span>
                 </th>
               ))}
-              <th style={thStyle}>Total</th> <th style={thStyle}>OT</th>{" "}
+              <th style={thStyle}>{autoLunch ? "Paid" : "Total"}</th>{" "}
+              <th style={thStyle}>OT</th>{" "}
               <th style={thStyle}>Status</th>{" "}
             </tr>{" "}
           </thead>{" "}
@@ -976,7 +1048,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                 const dt = addDays(weekStart, i);
                 const d = days[dt];
                 if (d) {
-                  totalMin += parseFloat(d.total_shift_minutes || 0);
+                  totalMin += paidMinutesOf(d);
                   totalOT += parseFloat(d.overtime_minutes || 0);
                   allStatuses.push(d.status);
                 }
@@ -1002,8 +1074,9 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                     const dt = addDays(weekStart, i);
                     const d = days[dt];
                     const hrs = d
-                      ? (parseFloat(d.total_shift_minutes || 0) / 60).toFixed(1)
+                      ? (paidMinutesOf(d) / 60).toFixed(1)
                       : "--";
+                    const lunchMin = d ? unpaidMinutesOf(d) : 0;
                     const color = !d
                       ? D.muted
                       : d.status === "approved"
@@ -1031,6 +1104,16 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                         >
                           {hrs}
                         </span>{" "}
+                        {d && d.no_lunch && lunchMin === 0 && (
+                          <div style={{ fontSize: 10, color: D.muted }}>
+                            no lunch
+                          </div>
+                        )}
+                        {d && lunchMin > 0 && (
+                          <div style={{ fontSize: 10, color: D.muted }}>
+                            lunch -{(lunchMin / 60).toFixed(1)}
+                          </div>
+                        )}
                       </td>
                     );
                   })}
@@ -1085,6 +1168,83 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
           >
             Entries for {expanded.date}
           </div>
+          {autoLunch &&
+            (() => {
+              const day = byTech.find((t) => t.tech.id === expanded.techId)
+                ?.days[expanded.date];
+              if (!day) return null;
+              const lunchMin = unpaidMinutesOf(day);
+              const approved = day.status === "approved";
+              // Recorded meal breaks (30 min or more) stay unpaid whatever
+              // the No lunch flag says; No lunch waives only the automatic 30.
+              const recordedMeal = cellEntries
+                .filter(
+                  (e) =>
+                    e.entry_type === "break" &&
+                    e.status !== "active" &&
+                    parseFloat(e.duration_minutes || 0) >= 30,
+                )
+                .reduce((sum, e) => sum + parseFloat(e.duration_minutes), 0);
+              return (
+                <div
+                  data-testid="day-lunch-panel"
+                  style={{
+                    padding: "8px 0 12px",
+                    marginBottom: 8,
+                    borderBottom: `1px solid ${D.border}`,
+                  }}
+                >
+                  <div style={{ fontSize: 13, color: D.text, marginBottom: 8 }}>
+                    {day.no_lunch
+                      ? recordedMeal > 0
+                        ? `No lunch waives only the automatic 30 minutes. Recorded lunch ${Math.round(recordedMeal)} min stays unpaid.`
+                        : "No lunch: the automatic 30-minute deduction is waived."
+                      : lunchMin > 0
+                        ? `Unpaid lunch: ${Math.round(lunchMin)} min taken off${recordedMeal > 0 ? " (recorded lunch)" : ""}.`
+                        : "No unpaid lunch on this day."}
+                  </div>
+                  {approved ? (
+                    <div style={{ fontSize: 13, color: D.muted }}>
+                      This day is approved. Unlock the week to change lunch.
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        flexWrap: "wrap",
+                        alignItems: "center",
+                      }}
+                    >
+                      <input
+                        aria-label="Reason for the lunch change"
+                        placeholder="Reason (required)"
+                        value={lunchReason}
+                        onChange={(e) => setLunchReason(e.target.value)}
+                        style={{ ...sInput, flex: 1, minWidth: 200, width: "auto" }}
+                      />
+                      <button
+                        type="button"
+                        disabled={lunchBusy || !lunchReason.trim()}
+                        onClick={() =>
+                          setDayNoLunch(
+                            expanded.techId,
+                            expanded.date,
+                            !day.no_lunch,
+                          )
+                        }
+                        style={{
+                          ...sBtn(D.card, D.teal),
+                          opacity: lunchBusy || !lunchReason.trim() ? 0.5 : 1,
+                        }}
+                      >
+                        {day.no_lunch ? "Clear no lunch" : "Mark no lunch"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           {cellEntries.length === 0 ? (
             <div style={{ color: D.muted, fontSize: 12 }}>No entries</div>
           ) : (
@@ -2599,6 +2759,9 @@ const EMPTY_TECH_FORM = {
   // Field eligibility is separate from employment: an office admin stays
   // active without ever appearing as a dispatch target.
   fieldDispatchable: false,
+  // GATE_TECH_MOVE_SWITCH: a technician added now cannot move visits until the
+  // owner ticks this (owner 2026-10-25).
+  canMoveVisits: false,
   autoFlipEnabled: true,
   // Payroll profile
   payRate: "",
@@ -2617,7 +2780,42 @@ const EMPTY_TECH_FORM = {
   startMode: "office",
   startText: "",
   startPoint: null,
+  // GATE_TECH_WORK_DAYS: weekdays this person works, stored 0 = Sunday. All
+  // seven = every day (sent as null). Only sent while the server says the
+  // gate is on (workDaysEnabled).
+  workDays: [0, 1, 2, 3, 4, 5, 6],
 };
+
+// Work-days toggles in display order (Mon to Sun); values are stored 0 = Sunday.
+const WORK_DAY_OPTIONS = [
+  { day: 1, label: "Mon" },
+  { day: 2, label: "Tue" },
+  { day: 3, label: "Wed" },
+  { day: 4, label: "Thu" },
+  { day: 5, label: "Fri" },
+  { day: 6, label: "Sat" },
+  { day: 0, label: "Sun" },
+];
+
+// "Mon–Thu" for a run of days, "Mon, Wed, Fri" for a gap. Empty when the
+// list is missing or covers all seven days (works every day: nothing to say).
+function describeWorkDays(workDays) {
+  if (!Array.isArray(workDays) || !workDays.length) return "";
+  const set = new Set(workDays.map(Number));
+  const picked = WORK_DAY_OPTIONS.map((o, i) => (set.has(o.day) ? i : -1)).filter((i) => i >= 0);
+  if (!picked.length || picked.length === 7) return "";
+  const runs = [];
+  for (const i of picked) {
+    const last = runs[runs.length - 1];
+    if (last && i === last[1] + 1) last[1] = i;
+    else runs.push([i, i]);
+  }
+  return runs
+    .map(([from, to]) => (from === to
+      ? WORK_DAY_OPTIONS[from].label
+      : `${WORK_DAY_OPTIONS[from].label}–${WORK_DAY_OPTIONS[to].label}`))
+    .join(", ");
+}
 
 // Wire shape for `startPoint` on PUT: null (office) or { address, lat, lng }.
 // A typed-but-unpicked address has no coordinates and is never sent.
@@ -2625,6 +2823,14 @@ function buildStartPointPayload(form) {
   if (form.startMode !== "home") return null;
   const p = form.startPoint;
   return p ? { address: p.address, lat: p.lat, lng: p.lng } : null;
+}
+
+// `workDays` on the wire: nothing while the gate is off; null when all seven
+// days are on (works every day); otherwise the picked days, stored 0 = Sunday.
+function buildWorkDaysPayload(enabled, workDays) {
+  if (!enabled) return {};
+  const days = [...new Set(workDays || [])].sort((a, b) => a - b);
+  return { workDays: days.length === 7 ? null : days };
 }
 
 function startPointNeedsPick(form) {
@@ -2646,6 +2852,12 @@ export function TeamTab({ showToast }) {
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_TECH_FORM);
+  // GATE_TECH_WORK_DAYS: the server marks the roster response when the gate is
+  // on; off, the Work days row and summary never render and nothing is sent.
+  const [workDaysEnabled, setWorkDaysEnabled] = useState(false);
+  // GATE_SERVICE_LINE_MAP=shadow: the server marks the roster response; off, the
+  // Service lines card never renders and nothing is fetched.
+  const [serviceLinesEnabled, setServiceLinesEnabled] = useState(false);
   const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
@@ -2654,6 +2866,14 @@ export function TeamTab({ showToast }) {
   const [deactivateError, setDeactivateError] = useState("");
   const [deactivating, setDeactivating] = useState(false);
   const deactivateInFlightRef = useRef(false);
+  // GATE_HIRED_PACKET: the server sets t.hire_action ("hire" | "resend") on a
+  // row only for an admin while the gate is on; no hire_action = no Hired /
+  // Resend link UI.
+  const [hireTech, setHireTech] = useState(null);
+  const [hireError, setHireError] = useState("");
+  const [hiring, setHiring] = useState(false);
+  const hireInFlightRef = useRef(false);
+  const [resendingId, setResendingId] = useState(null);
   // The capabilities routes are admin-only; the roster itself is readable by
   // technicians, so the action is hidden for them rather than 403ing.
   const isAdmin = useMemo(() => readStaffRole() === "admin", []);
@@ -2709,6 +2929,8 @@ export function TeamTab({ showToast }) {
     try {
       const res = await adminFetch("/admin/timetracking/technicians");
       setTechs(res.technicians || []);
+      setWorkDaysEnabled(res.workDaysEnabled === true);
+      setServiceLinesEnabled(res.serviceLinesEnabled === true);
     } catch {
       /* ignore */
     }
@@ -2721,13 +2943,17 @@ export function TeamTab({ showToast }) {
 
   const handleSave = async () => {
     if (!form.name.trim()) return;
+    if (workDaysEnabled && form.workDays.length === 0) {
+      showToast("Pick at least one work day");
+      return;
+    }
     setSaving(true);
     try {
       if (editingId) {
-        const { startMode, startText, startPoint, ...rest } = form;
+        const { startMode, startText, startPoint, workDays, ...rest } = form;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
-          body: JSON.stringify({ ...rest, startPoint: buildStartPointPayload(form) }),
+          body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays), startPoint: buildStartPointPayload(form) }),
         });
         // Leaving the dispatch pool through Edit (Employment → Inactive or
         // Prospective, or field eligibility removed) surfaces the same
@@ -2740,10 +2966,10 @@ export function TeamTab({ showToast }) {
             : "Technician updated",
         );
       } else {
-        const { startMode, startText, startPoint, ...rest } = form;
+        const { startMode, startText, startPoint, workDays, ...rest } = form;
         await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
-          body: JSON.stringify(rest),
+          body: JSON.stringify({ ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays) }),
         });
         showToast("Technician added");
       }
@@ -2800,6 +3026,62 @@ export function TeamTab({ showToast }) {
     }
   };
 
+  // Toast for the welcome email result of Hired / Resend link.
+  const welcomeToast = (emailed, email) => {
+    if (emailed === true) return `Welcome email sent to ${email}.`;
+    if (emailed === "uncertain") {
+      return "Hired. The email may not have gone out. Use Resend link if it does not arrive.";
+    }
+    return "Hired, but the email failed. Use Resend link.";
+  };
+
+  const handleHire = async (tech, fields) => {
+    if (hireInFlightRef.current) return;
+    hireInFlightRef.current = true;
+    setHiring(true);
+    setHireError("");
+    try {
+      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire`, {
+        method: "POST",
+        body: JSON.stringify(fields),
+      });
+      showToast(welcomeToast(res && res.emailed, fields.email.trim()));
+      setHireTech(null);
+      load();
+    } catch (e) {
+      setHireError(
+        (e && e.data && e.data.error) || "Could not hire: " + String((e && e.message) || "Unknown error"),
+      );
+    } finally {
+      hireInFlightRef.current = false;
+      setHiring(false);
+    }
+  };
+
+  const handleResendLink = async (tech) => {
+    if (resendingId !== null) return;
+    setResendingId(tech.id);
+    try {
+      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire/resend`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      const emailed = res && res.emailed;
+      showToast(
+        emailed === true
+          ? `Welcome email sent to ${tech.email}.`
+          : emailed === "uncertain"
+            ? "The email may not have gone out. Use Resend link again if it does not arrive."
+            : "The email failed. Use Resend link to try again.",
+      );
+      load();
+    } catch (e) {
+      showToast("Failed: " + ((e && e.data && e.data.error) || (e && e.message) || "Unknown error"));
+    } finally {
+      setResendingId(null);
+    }
+  };
+
   const startEdit = (tech) => {
     setEditingId(tech.id);
     setForm({
@@ -2809,6 +3091,9 @@ export function TeamTab({ showToast }) {
       employmentStatus: tech.employment_status || (tech.active ? "active" : "inactive"),
       twilioNumber: tech.twilio_number || "",
       fieldDispatchable: tech.field_dispatchable === true,
+      // Unknown (an older response without the column) stays unsent, so an
+      // ordinary edit can never switch moves off by accident.
+      canMoveVisits: typeof tech.can_move_visits === "boolean" ? tech.can_move_visits : undefined,
       autoFlipEnabled: tech.auto_flip_enabled !== false, // default true if undefined
       payRate: tech.pay_rate != null ? String(tech.pay_rate) : "",
       hireDate: tech.hire_date ? String(tech.hire_date).split("T")[0] : "",
@@ -2819,6 +3104,9 @@ export function TeamTab({ showToast }) {
       emergencyContactName: tech.emergency_contact_name || "",
       emergencyContactPhone: tech.emergency_contact_phone || "",
       ssnLast4: tech.ssn_last4 || "",
+      workDays: Array.isArray(tech.work_days) && tech.work_days.length
+        ? tech.work_days.map(Number)
+        : [0, 1, 2, 3, 4, 5, 6],
       ...(tech.start_address && tech.start_lat != null && tech.start_lng != null
         ? {
             startMode: "home",
@@ -3053,6 +3341,48 @@ export function TeamTab({ showToast }) {
                 )}
               </div>
             )}
+            {/* Work days (GATE_TECH_WORK_DAYS): the weekdays this person works.
+                All seven on = every day. Off days are skipped by slot offers
+                and automatic booking; the office can still place work there
+                and gets a warning. */}
+            {workDaysEnabled && (
+              <div style={{ gridColumn: "1 / -1" }}>
+                {" "}
+                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                  Work days
+                </div>{" "}
+                <div role="group" aria-label="Work days" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {WORK_DAY_OPTIONS.map(({ day, label }) => {
+                    const on = form.workDays.includes(day);
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() =>
+                          setForm((f) => ({
+                            ...f,
+                            workDays: on ? f.workDays.filter((d) => d !== day) : [...f.workDays, day],
+                          }))
+                        }
+                        style={{
+                          ...sBtn(on ? D.green : "transparent", on ? D.white : D.muted),
+                          border: `1px solid ${on ? D.green : D.border}`,
+                          minWidth: 44,
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>{" "}
+                {form.workDays.length === 0 && (
+                  <div role="alert" style={{ fontSize: 11, color: D.amber, marginTop: 4 }}>
+                    Pick at least one work day
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           {/* Field eligibility (Field Team Program, Phase 0). Employment
               says whether someone is on staff; this says whether they may
@@ -3082,6 +3412,33 @@ export function TeamTab({ showToast }) {
             </span>{" "}
             <span style={{ fontSize: 11, color: D.muted }}>
               (off: never offered as a booking slot or a dispatch target)
+            </span>{" "}
+          </label>
+          {/* GATE_TECH_MOVE_SWITCH (owner 2026-10-25): may this person move
+              their visits (Quick Move, Reschedule)? Admins always can. */}
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginBottom: 12,
+              cursor: "pointer",
+            }}
+          >
+            {" "}
+            <input
+              type="checkbox"
+              checked={form.canMoveVisits === true}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, canMoveVisits: e.target.checked }))
+              }
+              style={{ width: 14, height: 14, cursor: "pointer" }}
+            />{" "}
+            <span style={{ fontSize: 12, color: D.heading }}>
+              Can move visits
+            </span>{" "}
+            <span style={{ fontSize: 11, color: D.muted }}>
+              (off: Quick Move and Reschedule say to ask the office)
             </span>{" "}
           </label>
           {/* Auto-flip opt-out (Phase 2E). Default ON. When OFF, the
@@ -3376,10 +3733,10 @@ export function TeamTab({ showToast }) {
             {" "}
             <button
               onClick={handleSave}
-              disabled={saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form))}
+              disabled={saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0)}
               style={{
                 ...sBtn(D.green, D.white),
-                opacity: saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) ? 0.5 : 1,
+                opacity: saving || !form.name.trim() || (!!editingId && startPointNeedsPick(form)) || (workDaysEnabled && form.workDays.length === 0) ? 0.5 : 1,
               }}
             >
               {saving ? "Saving..." : editingId ? "Update" : "Add"}
@@ -3499,6 +3856,11 @@ export function TeamTab({ showToast }) {
                       {describeStartPoint(t)}
                     </div>
                   )}
+                  {workDaysEnabled && describeWorkDays(t.work_days) && (
+                    <div style={{ fontSize: 11, fontWeight: 400, color: D.muted, marginTop: 2 }}>
+                      {`Works ${describeWorkDays(t.work_days)}`}
+                    </div>
+                  )}
                   {(t.job_title || t.pay_rate) && (
                     <div
                       style={{
@@ -3568,6 +3930,11 @@ export function TeamTab({ showToast }) {
                   {t.employment_status === "active" && t.field_dispatchable && (
                     <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
                       Field dispatchable
+                    </div>
+                  )}
+                  {t.hire_action === "resend" && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                      {t.hire_link_pending ? "Waiting for first password" : "Link expired or not sent"}
                     </div>
                   )}
                   {/* Capability counts matter only for someone who takes (or will
@@ -3653,6 +4020,43 @@ export function TeamTab({ showToast }) {
                     >
                       {uploadingId === t.id ? "Uploading…" : "Photo"}
                     </button>{" "}
+                    {t.hire_action === "hire" && (
+                      <button
+                        onClick={(event) => {
+                          event.currentTarget.focus({ preventScroll: true });
+                          setHireError("");
+                          setHireTech(t);
+                        }}
+                        style={{
+                          padding: "4px 10px",
+                          background: D.teal,
+                          border: `1px solid ${D.teal}`,
+                          borderRadius: 6,
+                          color: D.white,
+                          fontSize: 11,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Hired
+                      </button>
+                    )}{" "}
+                    {t.hire_action === "resend" && (
+                      <button
+                        onClick={() => handleResendLink(t)}
+                        disabled={resendingId !== null}
+                        style={{
+                          padding: "4px 10px",
+                          background: "transparent",
+                          border: `1px solid ${D.border}`,
+                          borderRadius: 6,
+                          color: D.teal,
+                          fontSize: 11,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {resendingId === t.id ? "Sending…" : "Resend link"}
+                      </button>
+                    )}{" "}
                     <button
                       onClick={(event) => {
                         if (t.active) {
@@ -3693,6 +4097,9 @@ export function TeamTab({ showToast }) {
           </tbody>{" "}
         </table></div>{" "}
       </div>
+      {isAdmin && serviceLinesEnabled && (
+        <ServiceLinesCard techs={techs} showToast={showToast} />
+      )}
       {earningsTech && (
         <EarningsModal
           tech={earningsTech}
@@ -3708,6 +4115,17 @@ export function TeamTab({ showToast }) {
           showToast={showToast}
         />
       )}
+      {hireTech && (
+        <HireStaffDialog
+          tech={hireTech}
+          error={hireError}
+          submitting={hiring}
+          onCancel={() => {
+            if (!hiring) setHireTech(null);
+          }}
+          onConfirm={(fields) => handleHire(hireTech, fields)}
+        />
+      )}
       {deactivateTech && (
         <DeactivateStaffDialog
           tech={deactivateTech}
@@ -3720,6 +4138,142 @@ export function TeamTab({ showToast }) {
         />
       )}
     </div>
+  );
+}
+
+// GATE_HIRED_PACKET: one click turns a prospective placeholder into an active
+// staff account and emails the hire a set-password link. Email and first day
+// are required; the rest is prefilled from the row.
+function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
+  const dialogRef = useModalFocus(true, () => {
+    if (!submitting) onCancel();
+  });
+  const titleId = `hire-staff-title-${tech.id}`;
+  const [form, setForm] = useState(() => ({
+    name: tech.name || "",
+    email: tech.email || "",
+    phone: tech.phone || "",
+    hireDate: tech.hire_date ? String(tech.hire_date).split("T")[0] : "",
+    payRate: tech.pay_rate != null ? String(tech.pay_rate) : "",
+    jobTitle: tech.job_title || "",
+    employmentType: tech.employment_type || "",
+  }));
+  const [showRequired, setShowRequired] = useState(false);
+  const missing = !form.name.trim() || !form.email.trim() || !form.hireDate;
+  const set = (key) => (event) => {
+    const value = event.target.value;
+    setForm((f) => ({ ...f, [key]: value }));
+  };
+  const submit = () => {
+    if (missing) {
+      setShowRequired(true);
+      return;
+    }
+    onConfirm({
+      name: form.name.trim(),
+      email: form.email.trim(),
+      phone: form.phone.trim(),
+      hireDate: form.hireDate,
+      payRate: form.payRate.trim(),
+      jobTitle: form.jobTitle.trim(),
+      employmentType: form.employmentType,
+    });
+  };
+  const field = (id, label, input, required) => (
+    <div style={{ marginBottom: 12 }}>
+      <label htmlFor={`${titleId}-${id}`} style={{ display: "block", fontSize: 11, color: D.muted, marginBottom: 4 }}>
+        {label}
+        {required ? " *" : ""}
+      </label>
+      {input}
+    </div>
+  );
+
+  return createPortal(
+    <div
+      className="staff-foundation"
+      onClick={() => {
+        if (!submitting) onCancel();
+      }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 200,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))",
+        overflowY: "auto",
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+        style={{
+          background: D.card,
+          border: `1px solid ${D.border}`,
+          borderRadius: 6,
+          width: "100%",
+          maxWidth: 480,
+          maxHeight: "100%",
+          overflowY: "auto",
+          padding: 20,
+          boxSizing: "border-box",
+        }}
+      >
+        <div id={titleId} style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
+          Hire {tech.name}
+        </div>
+        <p style={{ fontSize: 14, lineHeight: 1.55, color: D.text, margin: "12px 0 16px" }}>
+          This makes them an active staff member and emails them a link to set their password. The link works for 7 days.
+        </p>
+        {field("name", "Name", <input id={`${titleId}-name`} value={form.name} onChange={set("name")} style={sInput} />, true)}
+        {field("email", "Email", <input id={`${titleId}-email`} type="email" value={form.email} onChange={set("email")} placeholder="name@example.com" style={sInput} />, true)}
+        {field("phone", "Mobile phone", <input id={`${titleId}-phone`} type="tel" value={form.phone} onChange={set("phone")} placeholder="+19415551234" style={sInput} />)}
+        {field("hireDate", "First day", <input id={`${titleId}-hireDate`} type="date" value={form.hireDate} onChange={set("hireDate")} style={sInput} />, true)}
+        {field("payRate", "Pay rate", <input id={`${titleId}-payRate`} type="number" min="0" step="0.01" value={form.payRate} onChange={set("payRate")} placeholder="Per hour" style={sInput} />)}
+        {field("jobTitle", "Job title", <input id={`${titleId}-jobTitle`} value={form.jobTitle} onChange={set("jobTitle")} style={sInput} />)}
+        {field(
+          "employmentType",
+          "Employment type",
+          <select id={`${titleId}-employmentType`} value={form.employmentType} onChange={set("employmentType")} style={sInput}>
+            <option value="">Not set</option>
+            <option value="w2">W-2 employee</option>
+            <option value="1099">1099 contractor</option>
+          </select>,
+        )}
+        {showRequired && missing && (
+          <div role="alert" style={{ color: D.red, fontSize: 14, lineHeight: 1.55, marginBottom: 8 }}>
+            Name, email and first day are required.
+          </div>
+        )}
+        {error && (
+          <div role="alert" style={{ color: D.red, fontSize: 14, lineHeight: 1.55, marginBottom: 8 }}>
+            {error}
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+          <button type="button" onClick={onCancel} disabled={submitting} style={sBtn("transparent", D.text)}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting}
+            aria-busy={submitting || undefined}
+            style={{ ...sBtn(D.teal, D.white), cursor: submitting ? "wait" : "pointer", opacity: submitting ? 0.6 : 1 }}
+          >
+            {submitting ? "Hiring…" : "Hire and send link"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -5271,7 +5825,7 @@ function DocumentsTab({ showToast }) {
 // ===========================================================================
 // ApprovalsTab — weekly timesheet approval workflow
 // ===========================================================================
-function ApprovalsTab({ showToast }) {
+export function ApprovalsTab({ showToast }) {
   const lastMonday = useMemo(() => {
     return addDays(getMonday(new Date()), -7);
   }, []);
@@ -5545,8 +6099,23 @@ function ApprovalsTab({ showToast }) {
       {techs.map((t) => {
         const approved = t.status === "approved";
         const otHrs = parseFloat(t.overtime_minutes || 0) / 60;
-        const totalHrs = parseFloat(t.total_shift_minutes || 0) / 60;
+        // Paid hours when an unpaid lunch is on the week (regular + overtime
+        // from the server); otherwise the shift hours, as before.
+        const lunchHrs = parseFloat(t.unpaid_meal_minutes || 0) / 60;
+        const totalHrs =
+          lunchHrs > 0
+            ? (parseFloat(t.regular_minutes || 0) +
+                parseFloat(t.overtime_minutes || 0)) /
+              60
+            : parseFloat(t.total_shift_minutes || 0) / 60;
         const isExpanded = expanded === t.technician_id;
+        // The Lunch column appears only when a day in this week has one.
+        const showLunchCol =
+          isExpanded &&
+          !!detail &&
+          (detail.dailies || []).some(
+            (d) => d.no_lunch || unpaidMinutesOf(d) > 0,
+          );
         return (
           <div key={t.technician_id} style={sCard}>
             {" "}
@@ -5615,7 +6184,13 @@ function ApprovalsTab({ showToast }) {
                     ))}
                 </div>{" "}
               </div>{" "}
-              <Stat label="Hours" value={`${totalHrs.toFixed(1)}h`} />{" "}
+              <Stat
+                label={lunchHrs > 0 ? "Paid hours" : "Hours"}
+                value={`${totalHrs.toFixed(1)}h`}
+              />{" "}
+              {lunchHrs > 0 && (
+                <Stat label="Unpaid lunch" value={`${lunchHrs.toFixed(1)}h`} />
+              )}{" "}
               <Stat
                 label="OT"
                 value={`${otHrs.toFixed(1)}h`}
@@ -5691,6 +6266,9 @@ function ApprovalsTab({ showToast }) {
                             {" "}
                             <th style={{ padding: 8 }}>Date</th>{" "}
                             <th style={{ padding: 8 }}>Shift</th>{" "}
+                            {showLunchCol && (
+                              <th style={{ padding: 8 }}>Lunch</th>
+                            )}{" "}
                             <th style={{ padding: 8 }}>Jobs</th>{" "}
                             <th style={{ padding: 8 }}>OT</th>{" "}
                             <th style={{ padding: 8 }}>Revenue</th>{" "}
@@ -5710,6 +6288,25 @@ function ApprovalsTab({ showToast }) {
                               <td style={{ padding: 8 }}>
                                 {fmtHrs(d.total_shift_minutes)}
                               </td>{" "}
+                              {showLunchCol && (
+                                <td style={{ padding: 8 }}>
+                                  {unpaidMinutesOf(d) > 0
+                                    ? `-${fmtHrs(unpaidMinutesOf(d))}`
+                                    : d.no_lunch
+                                      ? ""
+                                      : "--"}
+                                  {d.no_lunch && (
+                                    <span
+                                      style={{
+                                        ...sBadge("#F1F5F9", D.text),
+                                        marginLeft: unpaidMinutesOf(d) > 0 ? 6 : 0,
+                                      }}
+                                    >
+                                      No lunch
+                                    </span>
+                                  )}
+                                </td>
+                              )}{" "}
                               <td style={{ padding: 8 }}>{d.job_count || 0}</td>{" "}
                               <td
                                 style={{

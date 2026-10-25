@@ -87,6 +87,24 @@ describe('findAvailableSlots — the night arrival search', () => {
     expect(createSchedulingTravel).toHaveBeenCalledWith({ maxRequests: 0 });
   });
 
+  test('the night request hands the route the van departure it was given', async () => {
+    await findAvailableSlots({ ...NIGHT, departureMinutes: 450 });
+    expect(routeAsks().length).toBeGreaterThan(0);
+    for (const ask of routeAsks()) expect(ask.vanDepartureMin).toBe(450);
+  });
+
+  test('the night request with no departure leaves vanDepartureMin off the route ask', async () => {
+    await findAvailableSlots(NIGHT);
+    for (const ask of routeAsks()) expect(ask.vanDepartureMin).toBeUndefined();
+  });
+
+  test('a booking caller never gets vanDepartureMin, even when it passes departureMinutes', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    await findAvailableSlots({ ...BASE, departureMinutes: 450 });
+    expect(routeAsks().length).toBeGreaterThan(0);
+    for (const ask of routeAsks()) expect(ask.vanDepartureMin).toBeUndefined();
+  });
+
   test('a booking request with the old gate off keeps today\'s search: the arrival engine is never asked', async () => {
     // lat/lng is checked by today's search only; its answer proves that path ran.
     expect(await findAvailableSlots({ ...BASE, lat: null })).toEqual({ error: 'lat/lng required', slots: [] });

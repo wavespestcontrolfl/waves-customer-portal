@@ -216,9 +216,7 @@ function planTermsApply(estimate, proposal) {
 // not billing). Fails closed: an unreadable answer drops the line.
 function termsMatchAgreement(proposal) {
   try {
-    const { agreementTermsConflict, AGREEMENT_TERMS } = require('./commercial-proposal-agreement');
-    const terms = { ...(proposal?.commercialTerms || {}), paymentTerms: AGREEMENT_TERMS.paymentTerms };
-    return agreementTermsConflict({ ...proposal, commercialTerms: terms }) === null;
+    return require('./commercial-proposal-agreement').fixedTermsConflict(proposal?.commercialTerms || {}) === null;
   } catch {
     return false;
   }

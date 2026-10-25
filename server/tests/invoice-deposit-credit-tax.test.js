@@ -63,6 +63,13 @@ jest.mock('../services/payer-statements', () => ({
 
 const db = require('../models/db');
 
+// InvoiceService.create's billed-elsewhere guard (scheduled-invoice-mint):
+// no Billing Recovery disposition is recorded for these visits.
+const mockNoBilledElsewhere = () => {
+  const q = { join: () => q, where: () => q, whereNotIn: () => q, first: async () => null };
+  return q;
+};
+
 // Match knex's transaction identity; the root client is not its own trx.
 async function mockTransaction(callback) {
   const trx = (...args) => db(...args);
@@ -326,6 +333,7 @@ describe('createFromService — estimate-deposit roll-forward', () => {
         };
         return q;
       }
+      if (table === 'visit_billing_dispositions as d') return mockNoBilledElsewhere();
       throw new Error(`Unexpected table query: ${table}`);
     });
     db.transaction = jest.fn(mockTransaction);
@@ -517,6 +525,7 @@ describe('createFromService — frozen-money backfill mints bypass scheduled rep
         };
         return q;
       }
+      if (table === 'visit_billing_dispositions as d') return mockNoBilledElsewhere();
       throw new Error(`Unexpected table query: ${table}`);
     });
     db.transaction = jest.fn(mockTransaction);
@@ -730,6 +739,7 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
         };
         return q;
       }
+      if (table === 'visit_billing_dispositions as d') return mockNoBilledElsewhere();
       throw new Error(`Unexpected table query: ${table}`);
     };
     db.mockImplementation(handler);

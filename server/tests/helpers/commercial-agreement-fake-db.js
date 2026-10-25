@@ -2,12 +2,15 @@
 // Shared by commercial-proposal-agreement.test.js and the sign-route tests. No customer data.
 const TEMPLATE_KEY = 'service_agreement.commercial_pest';
 
+// Version 1's fixed payment paragraph (migration 20260623000005), so an issue on this body behaves like production's.
+const { V1_PAYMENT } = require('../../models/migrations/20261025120000_commercial_agreement_payment_terms');
 const BODY = [
   'Commercial Pest Service Agreement',
   'Business / account: {{customer.name}}',
   'Service location(s): {{customer.address}}',
   'Service plan: {{service.name}}',
   'Start date: {{agreement.start_date}}',
+  V1_PAYMENT,
 ].join('\n');
 const TEMPLATE = { id: 'tpl-1', template_key: TEMPLATE_KEY, status: 'active', active_version_id: 'ver-1', requires_signature: true, expire_after_days: 14, name: 'Commercial Pest Service Agreement' };
 const VERSION = { id: 'ver-1', template_id: 'tpl-1', version_number: 1, title: 'Commercial Pest Service Agreement', body: BODY, signer_disclosure: 'I agree to sign electronically.' };

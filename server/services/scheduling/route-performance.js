@@ -210,6 +210,10 @@ function plannedPassthrough(plan) {
     plannedDriveMinutes: finiteOrNull(plan.modeledDriveMinutes),
     plannedWaitingMinutes: finiteOrNull(plan.modeledWaitingMinutes),
     plannedReturnMinuteBeforeBreaks: finiteOrNull(plan.modeledReturnMinuteBeforeBreaks),
+    // The departure that snapshot simulated (day-quality assumptions; the
+    // Settings time with GATE_AUTO_DISPATCH_DAY_RULES on), so stops/hour
+    // divides by the same day. null for a snapshot that never recorded one.
+    plannedDepartureMinutes: finiteOrNull(plan.assumptions?.departureMinutes),
     // Codex P2 (round 10): the saved snapshot's own modeled lateness count —
     // day-scorecard.js's plannedPastRow used to hard-code this unknown even
     // though the persisted snapshot carries it. modeledLateVisits is already

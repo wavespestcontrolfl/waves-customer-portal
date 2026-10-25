@@ -881,6 +881,90 @@ describe('GATE_PEST_QUIET_VISIT', () => {
   });
 });
 
+// GATE_SPECIALTY_REPORT_VOICE (owner 2026-10-24, "yes build voice"): the
+// termite, cockroach, rodent and mosquito writers get the one-voice prompt and
+// the quiet pest writer's trimmed inputs. Off, every line stays.
+describe('GATE_SPECIALTY_REPORT_VOICE', () => {
+  const body = (note) => ({
+    serviceNotes: note, customerInteraction: 'Customer home — spoke with them', pestActivityRating: 1, fresh: true,
+  });
+  beforeEach(() => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockProfile = { serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping' };
+    mockServiceType = 'Rodent Trapping';
+  });
+  afterEach(() => { delete process.env.GATE_SPECIALTY_REPORT_VOICE; });
+
+  test('off: the stacked writer and every input line', async () => {
+    await handler(mkReq(body('Checked the traps in the garage.')), mkRes());
+    const { system, text } = mockProvider.mock.calls[0][0];
+    expect(system).toContain(OWNER_RULES);
+    expect(system).not.toContain('# specialty_report_voice_v1');
+    expect(text).toContain('Observations: None noted');
+    expect(text).toContain('Customer interaction: Customer home — spoke with them');
+  });
+
+  test('on: the one-voice prompt, and an empty field or the sheet setting sends no line', async () => {
+    process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
+    const res = mkRes();
+    await handler(mkReq(body('Checked the traps in the garage.')), res);
+    expect(res.statusCode).toBe(200);
+    const { system, text } = mockProvider.mock.calls[0][0];
+    expect(system).toContain('# specialty_report_voice_v1');
+    expect(system).not.toContain(OWNER_RULES);
+    expect(text).not.toMatch(/None noted|Customer interaction:|Customer concern|\[REPORTED BY CUSTOMER\]/);
+    expect(text).toContain('Checked the traps in the garage.');
+  });
+
+  test('on: recorded observations and a concern still reach the writer', async () => {
+    process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
+    await handler(mkReq({
+      ...body('Set traps in the attic.'), observations: ['Droppings along the attic hatch'], customerConcern: 'Scratching in the attic at night',
+    }), mkRes());
+    const { text } = mockProvider.mock.calls[0][0];
+    expect(text).toContain('Observations: Droppings along the attic hatch');
+    expect(text).toContain('[REPORTED BY CUSTOMER]\nCustomer concern (as reported, not a verified finding): Scratching in the attic at night');
+    expect(text).not.toContain('Customer interaction:');
+  });
+
+  test('on: a pest visit keeps its own writer and inputs', async () => {
+    process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
+    mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
+    mockServiceType = 'Quarterly Pest Control Service';
+    await handler(mkReq(body('Quarterly. Treated the thresholds.')), mkRes());
+    const { system, text } = mockProvider.mock.calls[0][0];
+    expect(system).not.toContain('# specialty_report_voice_v1');
+    expect(text).toContain('Customer interaction: Customer home — spoke with them');
+  });
+
+  test('on: a flea visit keeps the stacked writer', async () => {
+    process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
+    mockProfile = { serviceKey: 'flea_tick', findingsType: 'flea' };
+    mockServiceType = 'Flea & Tick Treatment';
+    await handler(mkReq(body('Treated the yard for fleas.')), mkRes());
+    const { system, text } = mockProvider.mock.calls[0][0];
+    expect(system).toContain(OWNER_RULES);
+    expect(text).toContain('Observations: None noted');
+  });
+});
+
+// Owner 2026-10-25, "dont capitalize German": the draft the route returns
+// writes "german cockroaches" mid-sentence, whatever the model wrote.
+test('the returned report writes german with a small g mid-sentence', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockProvider.mockImplementation(async () => ({
+    ok: true,
+    text: "WHAT WE FOUND\nGerman cockroaches were under the kitchen sink, and we saw more German roaches by the fridge.\nWHAT WE DID AND WHY\nWe put bait under the sink for the German cockroaches.\nWHAT TO EXPECT\nToday's visit was part of your regular pest control plan.\nWHAT'S NEXT\nIf you still see German cockroaches in the kitchen, text or call us.",
+  }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'German roaches under the sink and by the fridge. Bait under the sink.', fresh: true }), res);
+  expect(res.statusCode).toBe(200);
+  const { report } = res.json.mock.calls[0][0];
+  expect(report).toContain('German cockroaches were under the kitchen sink, and we saw more german roaches by the fridge.');
+  expect(report).toContain('We put bait under the sink for the german cockroaches.');
+  expect(report).toContain('If you still see german cockroaches in the kitchen, text or call us.');
+});
+
 // GATE_PEST_LABEL_FACTS reads which pests the technician named; the route
 // hands the context its own redacted note and observations to read them from.
 test('the grounding context gets the redacted note and observations as visitTexts', async () => {

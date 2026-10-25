@@ -337,6 +337,10 @@ function buildCustomerDocumentContext(customer = {}, values = {}) {
     agreement: {
       ...extraAgreement,
       start_date: extraAgreement.start_date || extra.agreementStartDate || extra.startDate || '',
+      // The Commercial Pest Service Agreement's payment paragraph (template version 2): an agreement staff issue by hand
+      // or in bulk prints Net 30, exactly what version 1 fixed. The proposal issuer passes its own paragraph (Auto Pay or
+      // Net 30), and an explicit empty value stays empty so the render reports it unresolved.
+      payment_terms: extraAgreement.payment_terms ?? require('../../shared/commercial-agreement-terms.cjs').AGREEMENT_PAYMENT_TEXT.net30,
     },
     inspection: {
       ...extraInspection,

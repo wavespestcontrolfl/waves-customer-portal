@@ -427,6 +427,23 @@ describe('closeout-status: invoice + invoice delivery', () => {
     expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, dispositionLookupFailed: true })).facts.invoice.state).toBe('unknown');
   });
 
+  test('billed_elsewhere settles the visit only while its covering invoice is live', () => {
+    const frozenMint = { ...closedOutInputs().record, structured_notes: { backfillMintRequired: true, backfillMintAmountCents: 12000, completionSmsStatus: 'sent' } };
+    const disposition = { id: 'disp-2', disposition: 'billed_elsewhere', reason: 'two-home invoice', invoice_id: 'inv-cover', created_at: '2026-08-30T20:00:00Z' };
+    const covering = { id: 'inv-cover', invoice_number: 'WPC-2026-0600', status: 'viewed', total: '234.00' };
+    const live = deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, record: frozenMint, disposition, dispositionInvoice: { ...covering, live: true } })).facts;
+    expect(live.invoice).toMatchObject({
+      state: 'done', reason: 'disposition_billed_elsewhere', ruleSource: 'billing_disposition',
+      invoiceId: 'inv-cover', invoiceNumber: 'WPC-2026-0600', status: 'viewed', total: 234, dispositionReason: 'two-home invoice',
+    });
+    // The covering invoice's own flow sends it; this visit has nothing to deliver.
+    expect(live.invoiceDelivery).toMatchObject({ state: 'not_required', reason: 'disposition_billed_elsewhere', invoiceId: 'inv-cover' });
+    // A voided covering invoice no longer settles anything: the frozen mint shows again.
+    const dead = deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, record: frozenMint, disposition, dispositionInvoice: { ...covering, status: 'void', live: false } })).facts;
+    expect(dead.invoice).toMatchObject({ state: 'pending', reason: 'frozen_required_mint_not_minted' });
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, disposition, dispositionInvoice: null })).facts.invoice.state).not.toBe('done');
+  });
+
   test('paid ≠ receipted: unstamped paid invoice follows the receipt job (queued → pending, failed → failed, completed → done, none → pending)', () => {
     const paid = { id: 'inv-1', status: 'paid', total: 120, sent_at: null, sms_sent_at: null, receipt_sent_at: null, payer_id: null };
     const run = (o) => deriveCloseoutFacts(closedOutInputs({ liveInvoice: paid, ...o })).facts.invoiceDelivery;
@@ -1120,6 +1137,20 @@ describe('closeout-status: loader against a fake knex', () => {
     expect(result.requirements.unevaluated).toEqual([]);
     expect(result.visit).toMatchObject({ status: 'completed', serviceType: 'Quarterly Pest Control', isCallback: false });
     expect(result.record).toMatchObject({ id: REC, backfill: false, posture: 'auto_send' });
+  });
+
+  test('a billed_elsewhere disposition reads its covering invoice; a voided one does not settle the visit', async () => {
+    const tables = healthyTables();
+    const covering = { id: 'inv-cover', invoice_number: 'WPC-2026-0600', status: 'sent', total: 234, customer_id: 'cust-1' };
+    tables.invoices = [covering];
+    tables.visit_billing_dispositions = [{ id: 'disp-2', scheduled_service_id: SVC, disposition: 'billed_elsewhere', reason: null, invoice_id: 'inv-cover', created_at: '2026-08-30T20:00:00Z' }];
+    const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
+    expect(result.unavailable).toEqual([]);
+    expect(result.facts.invoice).toMatchObject({ state: 'done', reason: 'disposition_billed_elsewhere', invoiceNumber: 'WPC-2026-0600' });
+
+    covering.status = 'void';
+    const voided = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
+    expect(voided.facts.invoice.state).not.toBe('done');
   });
 
   test('a failing table lands in `unavailable` and its fact reads unknown — the loader never throws and never says "missing"', async () => {

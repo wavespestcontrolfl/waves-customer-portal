@@ -8,6 +8,7 @@ const { selectReportCopyPrompt, writerRulesInScope } = require('../services/serv
 const {
   OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned, bookedReasonBlock,
   groundedTimeframePhrases, observedAndReportedLines,
+  lowercaseGermanRoach,
 } = require('../services/service-report/report-writer-rules');
 const { scrubCustomerText } = require('../services/completion-comms-context');
 const { HUMAN_PROSE_RULES } = require('../services/llm/human-prose-rules');
@@ -820,7 +821,7 @@ describe('product facts for the pest writer', () => {
 
     test('a pest named today that the label names adds "its label lists", with one header line', () => {
       const text = withNamed([ALPINE_KITCHEN], named('Found a German cockroach under the kitchen sink'));
-      expect(text).toContain('- insect-control application, spot treatment, Kitchen: mainly used for ants and roaches; not tagged today (its reason is not recorded here); its label lists German cockroaches.');
+      expect(text).toContain('- insect-control application, spot treatment, Kitchen: mainly used for ants and roaches; not tagged today (its reason is not recorded here); its label lists german cockroaches.');
       expect(text).toContain('"Its label lists" names a pest from today\'s note');
       expect(text).toContain('Say it once in WHAT WE DID AND WHY, as a treatment "labeled for" that pest');
       expect(text).toContain('never that it kills the pest');
@@ -884,6 +885,28 @@ describe('product facts for the pest writer', () => {
 
 // GATE_PEST_QUIET_VISIT's input trim (the route passes `quiet` only under the
 // one-voice pest prompt). Off, the lines are the legacy ones, byte for byte.
+// Owner 2026-10-25, "dont capitalize German": "german cockroaches" takes a
+// small g in report text, except as the first word of a sentence or a line.
+describe('lowercaseGermanRoach', () => {
+  test.each([
+    ['We saw moderate German cockroach activity today.', 'We saw moderate german cockroach activity today.'],
+    ['If you still see German cockroaches on Tuesday, November 3, text or call us.', 'If you still see german cockroaches on Tuesday, November 3, text or call us.'],
+    ['Treated for German roaches. German cockroach activity was low.', 'Treated for german roaches. German cockroach activity was low.'],
+    ['WHAT WE FOUND\nGerman roaches were under the sink, and more German roaches by the fridge.', 'WHAT WE FOUND\nGerman roaches were under the sink, and more german roaches by the fridge.'],
+    ['German cockroaches were under the sink.', 'German cockroaches were under the sink.'],
+    ['\u201cGerman cockroaches\u201d is the species.', '\u201cGerman cockroaches\u201d is the species.'],
+    ['a German-cockroach program', 'a german-cockroach program'],
+    ['German Shepherd, Germany and American cockroaches stay as they are.', 'German Shepherd, Germany and American cockroaches stay as they are.'],
+  ])('%j', (input, expected) => {
+    expect(lowercaseGermanRoach(input)).toBe(expected);
+  });
+
+  test('leaves a missing report alone', () => {
+    expect(lowercaseGermanRoach(null)).toBeNull();
+    expect(lowercaseGermanRoach(undefined)).toBeUndefined();
+  });
+});
+
 describe('observedAndReportedLines', () => {
   const STATION = '\nTechnician station checks, observed (from the station form): 2 of 4 stations showed feeding.';
 

@@ -4428,7 +4428,7 @@ async function createSelfBooking(payload = {}) {
       // miss here is a "pick another slot" outcome, so it rides the SLOT_TAKEN
       // recovery below (just-created profile rolled back, generic message).
       try {
-        await assertAssignableTechnician(technician_id || null, { conn: trx, date: String(slotDateStr).slice(0, 10) });
+        await assertAssignableTechnician(technician_id || null, { conn: trx, date: String(slotDateStr).slice(0, 10), workDays: true });
       } catch (eligErr) {
         if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
         const err = new Error('That time slot is no longer available. Please pick another.');
@@ -4672,6 +4672,18 @@ async function createSelfBooking(payload = {}) {
       void require('../services/tech-visit-notifications').notifyTechVisitChange({
         visitId: row.id, kind: 'assigned', technicianId: row.technician_id, actorId: 'customer_self_serve',
         snapshot: { date: row.scheduled_date, windowStart: row.window_start, windowEnd: row.window_end },
+      });
+    }
+
+    // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow): log the technician the
+    // map would pick beside the one saved. Post-commit, never awaited, never throws;
+    // gate off = returns at once. A double-submit replay has no serviceRow: no row.
+    if (txResult?.serviceRow) {
+      const row = txResult.serviceRow;
+      void require('../services/scheduling/line-technician').recordLinePickShadow({
+        source: 'book', scheduledServiceId: row.id, customerId: row.customer_id, date: row.scheduled_date,
+        windowStart: row.window_start, windowEnd: row.window_end, serviceId: row.service_id, serviceKey: serviceKey || null,
+        serviceType: row.service_type, durationMinutes: row.estimated_duration_minutes, actualTechnicianId: row.technician_id,
       });
     }
 

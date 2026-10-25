@@ -515,7 +515,21 @@ async function attachmentUploadInFlight(database, invoiceId) {
   return Boolean(row);
 }
 
+// A visit booked by address only (customer_id NULL) has no customer to complete or bill:
+// service_records.customer_id and invoices.customer_id are NOT NULL, so every writer refuses
+// it up front with this ONE typed 409 instead of failing later on the constraint as a 500.
+const VISIT_NO_CUSTOMER_CODE = 'visit_has_no_customer';
+const VISIT_NO_CUSTOMER_MESSAGE = 'This visit has no customer yet. Link a customer before completing it.';
+function visitHasNoCustomerError() {
+  return Object.assign(new Error(VISIT_NO_CUSTOMER_MESSAGE), {
+    status: 409, statusCode: 409, isOperational: true, code: VISIT_NO_CUSTOMER_CODE,
+  });
+}
+
 module.exports = {
+  VISIT_NO_CUSTOMER_CODE,
+  VISIT_NO_CUSTOMER_MESSAGE,
+  visitHasNoCustomerError,
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
   INVOICE_UPDATE_ALLOWED_FIELDS,

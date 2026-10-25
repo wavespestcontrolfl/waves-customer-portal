@@ -204,3 +204,6 @@ async function revalidateThreadCompletion(trx, commitment, message, verdict) {
 }
 
 module.exports = { BASIS, THREAD_PROMPT_VERSION, THREAD_POLICY, THREAD_LIMIT, loadThreadMessages, latestHumanTextAt, threadFingerprint, groundThreadVerdict, verifyThreadCompletion, revalidateThreadCompletion };
+// The human-message rules on their own, for call-promise-later-text-check.js: it reads every later message with
+// exactly the rules latestHumanTextAt counts (no page, no text cut), so nothing the hold counted is hidden from it.
+module.exports.humanTextQueries = humanTextQueries;

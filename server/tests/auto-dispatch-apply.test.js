@@ -988,6 +988,11 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(guard(sat)({ trx: fakeTrx({ siblings: [skipper] }), members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
     await expect(guard(friday)({ trx: fakeTrx({ siblings: [skipper] }), members })).resolves.toBeUndefined();
     await expect(guard(sat)({ trx: fakeTrx({ siblings: [{ ...skipper, skip_weekends: false }] }), members })).resolves.toBeUndefined();
+    // "Skip weekends" covers Sunday too (GATE_AUTO_DISPATCH_DAY_RULES opens Sundays to the search).
+    const sunday = shiftDateStr(sat, 1);
+    await expect(guard(sunday)({ trx: fakeTrx({ siblings: [skipper] }), members }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('is a Sunday') });
+    await expect(guard(sunday)({ trx: fakeTrx({ siblings: [{ ...skipper, skip_weekends: false }] }), members })).resolves.toBeUndefined();
   });
 
   test('per-row eligibility (local audit): a one-time / booster, parent-template, locked, geo-less, archived-customer or lapsed-plan sibling refuses the grouped automatic move', async () => {

@@ -51,6 +51,7 @@ import { labelNamesRetiredSale, RETIRED_SALE_SERVICE_KEYS } from '../../constant
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
 import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
+import { formatETTime } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -549,10 +550,13 @@ export function pickAutoScheduleEstimate({
 // /admin/customers/quick-add): a 409 DUPLICATE_PROFILE / PHONE_MATCH_CONFIRM
 // becomes a conflict object the UI renders as an explicit choice, and the
 // resubmit carries the confirm flag bound to the account the admin saw.
+// adminFetch puts the server's reply ({ error, code, match }) on err.body;
+// reading err.code / err.details (never set) left the choice unreachable.
 export function quickAddConflictFromError(err) {
   if (!err || err.status !== 409) return null;
-  if (err.code !== 'DUPLICATE_PROFILE' && err.code !== 'PHONE_MATCH_CONFIRM') return null;
-  return { code: err.code, match: err.details?.match || null, message: err.message || '' };
+  const code = err.body?.code;
+  if (code !== 'DUPLICATE_PROFILE' && code !== 'PHONE_MATCH_CONFIRM') return null;
+  return { code, match: err.body?.match || null, message: err.message || '' };
 }
 
 export function quickAddConfirmFlags(conflict, { separateAccount = false } = {}) {
@@ -560,6 +564,20 @@ export function quickAddConfirmFlags(conflict, { separateAccount = false } = {})
   return conflict?.code === 'DUPLICATE_PROFILE'
     ? { confirmDuplicate: true, confirmMatchedAccountId: conflict?.match?.accountId }
     : { confirmAttach: true, confirmMatchedAccountId: conflict?.match?.accountId };
+}
+
+// GATE_NEW_APPT_PHONE_MATCH one Save: how long the form must hold still on
+// the new customer before the booking continues, and how long to wait for a
+// form that is still loading before handing Save back to staff.
+const QUICK_ADD_SAVE_SETTLE_MS = 400;
+const QUICK_ADD_SAVE_WAIT_MS = 15000;
+
+// GATE_NEW_APPT_PHONE_MATCH: the ten digits a typed phone compares on (a
+// leading US 1 dropped), or '' until the number is complete.
+export function quickAddPhoneDigits(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  const ten = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  return ten.length === 10 ? ten : '';
 }
 
 // Multi-property booking helpers (pure — unit-tested).
@@ -984,6 +1002,53 @@ function amountOrNull(value, preserveZero) {
 // technician assignment, and the pricing/estimate-link/property/notes
 // fields every group POST carries — folded from four builders that split
 // this one request-body shape across four call sites.
+// GATE_NEW_CALLER_BOOKING: why Book cannot save a new caller's visit yet
+// ('' = it can). One service, no discount (discounts need a customer), and a
+// price the server can set without a customer: a lot-priced mosquito line
+// needs a typed price (the lot ladder reads the customer's property).
+export function newCallerBookBlockReason({ serviceCount = 0, hasDiscount = false, lotPricedWithoutPrice = false } = {}) {
+  if (serviceCount > 1) return 'Book saves one service for a new caller. Add the other services after the customer is linked.';
+  if (serviceCount === 1 && hasDiscount) return 'Discounts wait until the customer exists. Remove the discount to book now.';
+  if (serviceCount === 1 && lotPricedWithoutPrice) return 'This service is priced by lot size. Type the price to book now.';
+  return '';
+}
+
+// The Book request (POST /api/admin/schedule/new-caller): the picked address
+// and its coordinates, the one service line, the time and the picked call.
+export function newCallerRequestBody({
+  serviceId, linePrice = null, durationMinutes, scheduledDate, windowStart, techMode, techId,
+  quickAdd = {}, quickAddTarget = null, callLogId, customerNotes, internalNotes,
+}) {
+  return {
+    scheduledDate: String(scheduledDate || '').split('T')[0],
+    windowStart,
+    serviceId: serviceId || null,
+    linePrice,
+    durationMinutes: durationMinutes || undefined,
+    technicianId: techMode === 'choose' && techId ? techId : null,
+    address: {
+      line1: quickAdd.address || '',
+      city: quickAdd.city || '',
+      state: quickAdd.state || '',
+      zip: quickAdd.zip || '',
+      lat: quickAddTarget?.lat ?? null,
+      lng: quickAddTarget?.lng ?? null,
+    },
+    callLogId: callLogId || null,
+    notes: customerNotes || undefined,
+    internalNotes: internalNotes || undefined,
+    createInvoice: true,
+  };
+}
+
+// One live call as the Book picker lists it: masked number, who answered,
+// when it started (ET) and whether it is still live.
+export function newCallerCallLabel(call) {
+  const started = call?.startedAt ? formatETTime(call.startedAt) : '';
+  const who = call?.direction === 'outbound' ? 'callback' : (call?.answeredBy ? `answered by ${call.answeredBy}` : 'answered');
+  return [call?.caller || 'Caller', who, started ? `started ${started}` : '', call?.live ? 'live' : 'ended'].filter(Boolean).join(' · ');
+}
+
 export function appointmentGroupRequestBody({
   separateProgram, key, separateProgramReason,
   customerId, scheduledDate, primaryId, primaryName,
@@ -1524,7 +1589,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', addressFirstTimes = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', addressFirstTimes = false, newCustomerPhoneMatch = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1629,12 +1694,33 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // coordinates), never from half-typed text, and any hand edit to the
   // address lines drops it until the next pick.
   const [quickAddTarget, setQuickAddTarget] = useState(null);
+  // GATE_NEW_CALLER_BOOKING: the live calls Book can stamp (null = not loaded
+  // yet), the one picked, and the Book request's own state.
+  const [newCallerCalls, setNewCallerCalls] = useState(null);
+  const [newCallerCallId, setNewCallerCallId] = useState('');
+  const [newCallerSubmitting, setNewCallerSubmitting] = useState(false);
+  const [newCallerError, setNewCallerError] = useState('');
+  // A failed call lookup is not "no live call": Book waits for a lookup that worked.
+  const [newCallerCallsFailed, setNewCallerCallsFailed] = useState(false);
+  const [newCallerCallsAttempt, setNewCallerCallsAttempt] = useState(0);
   // 409 phone-match conflict from quick-add ({ code, match }) — the admin
   // picks attach / duplicate / separate account and we resubmit with the flag.
   const [quickAddConflict, setQuickAddConflict] = useState(null);
   // In-flight guard: a double-click on a confirm action must not pass the
   // same confirmation twice and insert two profiles.
   const [quickAddSubmitting, setQuickAddSubmitting] = useState(false);
+  // GATE_NEW_APPT_PHONE_MATCH (owner 2026-10-24): the New customer block's
+  // phone is looked up once it has ten digits, and each customer already on
+  // that number is offered with one tap. Never an automatic pick: a household
+  // often shares one phone across two customers or two homes.
+  const [quickAddPhoneMatches, setQuickAddPhoneMatches] = useState({ digits: '', customers: [] });
+  const phoneMatchSeqRef = useRef(0);
+  // Same gate: one Save books a new caller. Save creates the customer first
+  // and parks here ({ customerId, totalAtSave }) until the form has settled on
+  // that customer; then the same Save continues into the booking, once.
+  const [pendingQuickAddSave, setPendingQuickAddSave] = useState(null);
+  const [quickAddSaveNotice, setQuickAddSaveNotice] = useState('');
+  const dateSectionRef = useRef(null);
   // Service-address picker for a multi-property customer. `bookingProperties`
   // is the customer's active customer_properties list; the picker renders
   // only when the address lane is enabled server-side
@@ -2994,9 +3080,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Quick add customer. `submitQuickAdd` takes explicit confirm flags;
   // `handleQuickAdd` stays the zero-arg onClick handler so a click event
   // never leaks into the request body.
+  // Resolves to the created customer once it is selected, else null.
   const submitQuickAdd = async (extraFlags = {}) => {
-    if (quickAddSubmitting) return;
-    if (!quickAdd.firstName || !quickAdd.lastName || !quickAdd.phone) return;
+    if (quickAddSubmitting) return null;
+    if (!quickAdd.firstName || !quickAdd.lastName || !quickAdd.phone) return null;
     setQuickAddSubmitting(true);
     try {
       const r = await adminFetch('/admin/customers/quick-add', {
@@ -3005,23 +3092,66 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       });
       if (r.customer) {
         setQuickAddConflict(null);
-        selectCustomer(r.customer);
+        const selected = selectCustomer(r.customer);
         setPropertyRefresh((n) => n + 1);
         setShowQuickAdd(false);
         setQuickAdd({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
         // The blank address must not keep the created customer's picked
         // address as the search subject if New customer is reopened later.
         setQuickAddTarget(null);
+        return selected ? r.customer : null;
       }
+      return null;
     } catch (e) {
       const conflict = quickAddConflictFromError(e);
-      if (conflict) { setQuickAddConflict(conflict); return; }
+      if (conflict) { setQuickAddConflict(conflict); return null; }
       alert('Failed to add customer: ' + e.message);
+      return null;
     } finally {
       setQuickAddSubmitting(false);
     }
   };
   const handleQuickAdd = () => submitQuickAdd();
+
+  // GATE_NEW_APPT_PHONE_MATCH: look the typed phone up once it is complete.
+  // Only an exact ten-digit match is offered (the search also matches names,
+  // notes and partial numbers); a late answer for an older number is dropped.
+  // limit=500 is the list route's page cap: a ten-digit search returns a
+  // handful of rows, and no profile on the number may be cut off before the
+  // exact-match filter.
+  const typedPhoneDigits = newCustomerPhoneMatch && showQuickAdd ? quickAddPhoneDigits(quickAdd.phone) : '';
+  useEffect(() => {
+    const seq = ++phoneMatchSeqRef.current;
+    if (!typedPhoneDigits) {
+      setQuickAddPhoneMatches((m) => (m.digits ? { digits: '', customers: [] } : m));
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      adminFetch(`/admin/customers?search=${typedPhoneDigits}&limit=500`)
+        .then((r) => {
+          if (seq !== phoneMatchSeqRef.current) return;
+          const customers = (r.customers || []).filter((c) => quickAddPhoneDigits(c.phone) === typedPhoneDigits);
+          setQuickAddPhoneMatches({ digits: typedPhoneDigits, customers });
+        })
+        .catch(() => {
+          if (seq === phoneMatchSeqRef.current) setQuickAddPhoneMatches({ digits: typedPhoneDigits, customers: [] });
+        });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [typedPhoneDigits]);
+  const phoneMatchesShown = typedPhoneDigits && quickAddPhoneMatches.digits === typedPhoneDigits
+    ? quickAddPhoneMatches.customers
+    : [];
+  // "Use this customer": the caller is on file, so book them as an existing
+  // customer. The New customer block closes and its draft (and its address
+  // search) goes with it.
+  const pickPhoneMatch = (c) => {
+    if (!selectCustomer(c)) return;
+    setShowQuickAdd(false);
+    setQuickAddConflict(null);
+    setQuickAdd({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
+    setQuickAddTarget(null);
+  };
 
   // Compute end time. Sum line-item durations across all services on the
   // appointment; if none are picked yet, honor the duration the operator
@@ -5030,6 +5160,158 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     alreadySubmitting: saving,
     addressAskPending,
   }) && !discountSaveBlockedReason && !previewConfirming && !previewGroupError && !tierCatalogBlocksSave;
+  // GATE_NEW_APPT_PHONE_MATCH: one Save books a new caller. With no customer
+  // selected and the New customer block open, Save first adds the customer
+  // (the same quick-add the Add customer button sends), then books through
+  // handleSubmit once the form has settled on that customer: its property
+  // list, address checks and price preview run exactly as after Add
+  // customer. A known phone or address stops at the same Attach / Separate
+  // account choice; after that choice staff press Save again.
+  // The server price preview runs only for a selected customer, so before one
+  // exists it can never confirm: adding the customer does not wait on it, and
+  // the booking after it does (canSubmit holds it as for any customer).
+  // GATE_NEW_CALLER_BOOKING (owner 2026-10-25): an address picked from the
+  // suggestions, with no name or phone typed, books a new caller's visit with
+  // no customer yet; the call-recording agent links the customer after the
+  // call and sends the confirmation. Typing a name or phone switches back to
+  // the customer flows below. Book stamps the live call the office answered.
+  const quickAddTyped = [quickAdd.firstName, quickAdd.lastName, quickAdd.phone].some((v) => String(v || '').trim() !== '');
+  const hasCoordinate = (v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+  const newCallerBookMode = newCallerBooking && !selectedCustomer && showQuickAdd && !quickAddTyped
+    && hasCoordinate(quickAddTarget?.lat) && hasCoordinate(quickAddTarget?.lng);
+  const newCallerLine = services.length === 1 ? services[0] : null;
+  const newCallerBlockReason = newCallerBookMode ? newCallerBookBlockReason({
+    serviceCount: services.length,
+    hasDiscount: !!(newCallerLine?.lineDiscount || appointmentDiscount),
+    lotPricedWithoutPrice: !!newCallerLine && isOneTimeMosquitoLine(newCallerLine) && !lineHasEnteredPrice(newCallerLine),
+  }) : '';
+  const newCallerNeedsCallPick = Array.isArray(newCallerCalls) && newCallerCalls.length > 1 && !newCallerCallId;
+  // Also waits while Save-with-new-customer is still adding the customer or booking it:
+  // clearing the name and phone mid-request re-enters Book mode, and must not book twice.
+  const canBookNewCaller = newCallerBookMode && timeChosen && !!newCallerLine && !newCallerBlockReason
+    && Array.isArray(newCallerCalls) && !newCallerNeedsCallPick && !saving && !newCallerSubmitting
+    && !quickAddSubmitting && !pendingQuickAddSave;
+  useEffect(() => {
+    if (!newCallerBookMode) return undefined;
+    let cancelled = false;
+    setNewCallerCalls(null);
+    setNewCallerCallsFailed(false);
+    adminFetch('/admin/schedule/new-caller/calls')
+      .then((data) => {
+        if (cancelled) return;
+        const calls = Array.isArray(data?.calls) ? data.calls : [];
+        setNewCallerCalls(calls);
+        // Exactly one live call: it is the one. Several: the office picks.
+        setNewCallerCallId((prev) => (calls.some((call) => call.id === prev) ? prev : (calls.length === 1 ? calls[0].id : '')));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setNewCallerCallsFailed(true);
+        setNewCallerCallId('');
+      });
+    return () => { cancelled = true; };
+  }, [newCallerBookMode, newCallerCallsAttempt]);
+  const bookNewCaller = async () => {
+    if (!canBookNewCaller) return;
+    setNewCallerError('');
+    setNewCallerSubmitting(true);
+    try {
+      const result = await adminFetch('/admin/schedule/new-caller', {
+        method: 'POST',
+        body: JSON.stringify(newCallerRequestBody({
+          serviceId: newCallerLine.id,
+          linePrice: lineHasEnteredPrice(newCallerLine) ? lineBaseAmount(newCallerLine) : null,
+          durationMinutes: newCallerLine.duration || newCallerLine.default_duration_minutes,
+          scheduledDate: apptDate,
+          windowStart,
+          techMode,
+          techId,
+          quickAdd,
+          quickAddTarget,
+          callLogId: newCallerCallId,
+          customerNotes,
+          internalNotes,
+        })),
+      });
+      const scheduledDate = String(apptDate || '').split('T')[0];
+      if (Array.isArray(result?.warnings) && result.warnings.length) showScheduleSaveNotice(`Visit booked.\n\n${result.warnings.join('\n\n')}`);
+      onCreated?.({ id: result?.id, scheduledDate });
+      onChange?.({ id: result?.id, scheduledDate });
+    } catch (err) {
+      if (modalMountedRef.current) setNewCallerError(err?.message || 'The visit was not booked. Try again.');
+    } finally {
+      if (modalMountedRef.current) setNewCallerSubmitting(false);
+    }
+  };
+  const quickAddSaveMode = newCustomerPhoneMatch && !selectedCustomer && showQuickAdd;
+  const canSaveNewCustomer = quickAddSaveMode && timeChosen
+    && !!(quickAdd.firstName && quickAdd.lastName && quickAdd.phone)
+    && services.length > 0 && !saving && !quickAddSubmitting && !quickAddConflict && !pendingQuickAddSave
+    && !discountSaveBlockedReason && !tierCatalogBlocksSave;
+  // Locked while a one-Save booking waits for the form to settle, so a tap
+  // then cannot book twice.
+  // A pending Book locks every save path, whatever mode the form moves to meanwhile.
+  const saveEnabled = !newCallerSubmitting && (newCallerBookMode ? canBookNewCaller : (!pendingQuickAddSave && (quickAddSaveMode ? canSaveNewCustomer : canSubmit)));
+  const savingLabel = newCallerSubmitting || (!newCallerBookMode && (saving || pendingQuickAddSave || (quickAddSaveMode && quickAddSubmitting)));
+  const saveNewCustomerThenBook = async () => {
+    if (!canSaveNewCustomer) return;
+    setQuickAddSaveNotice('');
+    const totalAtSave = Math.round(displayedTotal * 100);
+    const created = await submitQuickAdd();
+    if (created) setPendingQuickAddSave({ customerId: String(created.id), totalAtSave });
+  };
+  const handleSave = (arg) => {
+    if (newCallerSubmitting) return undefined;
+    if (newCallerBookMode) return bookNewCaller();
+    return quickAddSaveMode ? saveNewCustomerThenBook() : handleSubmit(arg);
+  };
+  // The wait below fires later than the render that started it: it reads the
+  // form as it is when it fires (a technician or note changed during the wait
+  // is booked as shown), never the values from when the wait began.
+  const latestSaveRef = useRef(null);
+  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine };
+  useEffect(() => {
+    if (!pendingQuickAddSave) return undefined;
+    if (selectedCustomerIdRef.current !== pendingQuickAddSave.customerId) {
+      setPendingQuickAddSave(null);
+      return undefined;
+    }
+    if (!canSubmit) {
+      // Still loading (properties, address check, price preview), or a
+      // blocker that needs staff. Stop waiting after a while; the customer
+      // stays selected and Save works as usual.
+      const timer = setTimeout(() => {
+        setPendingQuickAddSave(null);
+        setQuickAddSaveNotice('Customer added. Press Schedule appointment to book the visit.');
+      }, QUICK_ADD_SAVE_WAIT_MS);
+      return () => clearTimeout(timer);
+    }
+    // Book only once the form has held still: effects that answer the new
+    // customer (a tier discount, a price preview) land a render or more after
+    // the selection, and each change here restarts the wait.
+    const timer = setTimeout(() => {
+      const latest = latestSaveRef.current;
+      // A change in the last render made the form not ready: the effect runs
+      // again for it, so leave the booking waiting.
+      if (!latest.canSubmit) return;
+      setPendingQuickAddSave(null);
+      // The price staff saw must be the price booked: a customer-based price
+      // (a lot-size mosquito quote, a tier discount) waits for a second Save.
+      if (latest.hasAutoMosquitoLine) {
+        setQuickAddSaveNotice('Customer added. Check the mosquito price for this property, then press Schedule appointment.');
+        return;
+      }
+      if (Math.round(latest.displayedTotal * 100) !== pendingQuickAddSave.totalAtSave) {
+        setQuickAddSaveNotice(`Customer added. The total for this customer is now $${latest.displayedTotal.toFixed(2)}. Check it, then press Schedule appointment.`);
+        return;
+      }
+      latest.handleSubmit();
+    }, QUICK_ADD_SAVE_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [pendingQuickAddSave, canSubmit, displayedTotal, hasAutoMosquitoLine, services, selectedCustomer?.id]);
+  useEffect(() => {
+    if (!selectedCustomer) setQuickAddSaveNotice('');
+  }, [selectedCustomer?.id]);
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
@@ -5132,18 +5414,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               >×</button>
               <button
                 type="button"
-                onClick={handleSubmit}
-                disabled={!canSubmit}
+                onClick={handleSave}
+                disabled={!saveEnabled}
                 style={{
                   position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
                   height: 44, padding: '0 20px', borderRadius: 999, border: 'none',
-                  background: canSubmit ? '#18181B' : '#E4E4E7',
-                  color: canSubmit ? '#fff' : '#A1A1AA',
+                  background: saveEnabled ? '#18181B' : '#E4E4E7',
+                  color: saveEnabled ? '#fff' : '#A1A1AA',
                   fontSize: 14, fontWeight: 500,
-                  cursor: canSubmit ? 'pointer' : 'default',
+                  cursor: saveEnabled ? 'pointer' : 'default',
                 }}
               >
-                {saving ? 'Saving…' : 'Save'}
+                {savingLabel ? 'Saving…' : 'Save'}
               </button>
             </div>
           </div>
@@ -5234,6 +5516,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <div><label style={labelStyle}>Last Name</label><input value={quickAdd.lastName} onChange={e => setQuickAdd(q => ({ ...q, lastName: e.target.value }))} style={inputStyle} /></div>
                   </div>
                   <div style={{ marginBottom: 8 }}><label style={labelStyle}>Phone</label><input value={quickAdd.phone} onChange={e => setQuickAddField('phone', e.target.value)} style={inputStyle} /></div>
+                  {phoneMatchesShown.length > 0 && (
+                    <div role="region" aria-label="Phone already on file" style={{ marginBottom: 8, padding: 10, background: '#FAFAFA', border: '1px solid #E4E4E7', borderRadius: 8, fontSize: 14, color: '#18181B', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ fontWeight: 500 }}>This phone is on file</div>
+                      {phoneMatchesShown.map((c) => (
+                        <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div>
+                              {c.firstName} {c.lastName}
+                              {c.profileLabel && c.profileLabel !== 'Primary' && <span style={{ color: D.muted }}> · {c.profileLabel}</span>}
+                            </div>
+                            {c.address && <div style={{ color: D.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.address}</div>}
+                          </div>
+                          <button type="button" onClick={() => pickPhoneMatch(c)} style={{ padding: '8px 14px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, flex: '0 0 auto' }}>
+                            Use this customer
+                          </button>
+                        </div>
+                      ))}
+                      <div style={{ color: D.muted }}>A new home for them? Keep going. Save offers to add it to their account.</div>
+                    </div>
+                  )}
                   <div style={{ marginBottom: 8 }}><label style={labelStyle}>Email</label><input type="email" value={quickAdd.email} onChange={e => setQuickAdd(q => ({ ...q, email: e.target.value }))} style={inputStyle} /></div>
                   <div style={{ marginBottom: 8 }}>
                     <label style={labelStyle}>Address</label>
@@ -5257,6 +5559,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           lat: parts.lat ?? null,
                           lng: parts.lng ?? null,
                         });
+                        // GATE_NEW_APPT_PHONE_MATCH: bring the best times into view
+                        // (below the fold on a phone). A picked suggestion only: a
+                        // blur geocode means staff already moved to another field.
+                        if (newCustomerPhoneMatch && addressFirstTimes && parts.source === 'suggestion') {
+                          const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+                          dateSectionRef.current?.scrollIntoView?.({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+                        }
                       }}
                       style={inputStyle}
                       placeholder=""
@@ -5288,7 +5597,43 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       </button>
                     </div>
                   )}
-                  <button onClick={handleQuickAdd} disabled={quickAddSubmitting} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%', opacity: quickAddSubmitting ? 0.6 : 1 }}>{quickAddSubmitting ? 'Adding…' : 'Add customer'}</button>
+                  {newCallerBookMode && (
+                    <div role="group" aria-label="New caller booking" style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 8, padding: 10, background: '#FAFAFA', border: '1px solid #E4E4E7', borderRadius: 8, fontSize: 14, color: '#18181B' }}>
+                      <div>Book saves this visit with the address only. Nothing goes to the caller now: the call-recording agent adds the customer after the call and sends the confirmation.</div>
+                      {newCallerLine?.cadence && newCallerLine.cadence !== 'one_time' && (
+                        <div>This service repeats. Book saves the first visit only; the plan comes from the estimate once the customer is linked.</div>
+                      )}
+                      {newCallerCallsFailed ? (
+                        <div role="alert" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, color: D.red }}>
+                          <span>The calls did not load. Book waits until they do.</span>
+                          <button type="button" onClick={() => setNewCallerCallsAttempt((n) => n + 1)} style={{ minHeight: 44, padding: '8px 14px', background: 'none', color: '#18181B', border: '1px solid #E4E4E7', borderRadius: 6, fontSize: 14, cursor: 'pointer' }}>
+                            Try again
+                          </button>
+                        </div>
+                      ) : newCallerCalls === null ? (
+                        <div style={{ color: D.muted }}>Finding the call…</div>
+                      ) : newCallerCalls.length === 0 ? (
+                        <div style={{ color: D.muted }}>No live call found. The visit books without a call, and the office gets a reminder to link the customer.</div>
+                      ) : (
+                        <fieldset style={{ border: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <legend style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>{newCallerCalls.length > 1 ? 'Pick the call this visit is for' : 'This call'}</legend>
+                          {newCallerCalls.map((call) => (
+                            <label key={call.id} style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44, cursor: 'pointer' }}>
+                              <input type="radio" name="new-caller-call" value={call.id} checked={newCallerCallId === call.id} onChange={() => setNewCallerCallId(call.id)} style={{ width: 18, height: 18 }} />
+                              <span>{newCallerCallLabel(call)}</span>
+                            </label>
+                          ))}
+                        </fieldset>
+                      )}
+                      {newCallerBlockReason && <div role="status">{newCallerBlockReason}</div>}
+                      {newCallerError && <div role="alert" style={{ color: D.red }}>{newCallerError}</div>}
+                    </div>
+                  )}
+                  {newCallerBookMode ? null : newCustomerPhoneMatch ? (
+                    <div style={{ fontSize: 14, color: D.muted }}>{quickAddSubmitting ? 'Adding the customer…' : 'Schedule appointment adds this customer and books the visit.'}</div>
+                  ) : (
+                    <button onClick={handleQuickAdd} disabled={quickAddSubmitting} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%', opacity: quickAddSubmitting ? 0.6 : 1 }}>{quickAddSubmitting ? 'Adding…' : 'Add customer'}</button>
+                  )}
                 </div>
               )}
             </div>
@@ -5317,6 +5662,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 }}
               >✕</button>
             </div>
+          )}
+          {selectedCustomer && quickAddSaveNotice && (
+            <div role="status" style={{ fontSize: 14, color: '#18181B', marginTop: 10 }}>{quickAddSaveNotice}</div>
           )}
           {selectedCustomer && partialCommitLocked && (
             <div role="status" style={{ fontSize: 14, color: D.muted, marginTop: 10 }}>
@@ -5423,7 +5771,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
         {/* Section 3: Date — above Services (owner 2026-10-24): the best
             times answer "when can we come" as soon as there is an address. */}
-        <div style={sectionStyle}>
+        <div ref={dateSectionRef} style={sectionStyle}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
             <div style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Date</div>
             {selectedCustomer && selectedService && (
@@ -5614,7 +5962,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             style={{ marginBottom: 10 }}
           />
 
-          {hasRecurringServices && firstCustomRecurringIndex < 0 && (
+          {!newCallerBookMode && hasRecurringServices && firstCustomRecurringIndex < 0 && (
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 10, marginTop: 4 }}>
               {weekendRuleControl()}
             </div>
@@ -5921,17 +6269,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
                 <div style={{ gridColumn: isMobile ? '1 / -1' : undefined }}>
                   {isMobile && serviceFieldLabel('Repeats')}
-                  <select
-                    aria-label={`Repeats for ${svc.name || 'service'}`}
-                    value={svc.cadence || 'one_time'}
-                    onChange={(e) => updateServiceCadence(idx, e.target.value)}
-                    disabled={partialCommitLocked}
-                    style={inputStyle}
-                  >
-                    {CADENCE_OPTIONS.map((c) => (
-                      <option key={c.value} value={c.value}>{c.label}</option>
-                    ))}
-                  </select>
+                  {newCallerBookMode ? (
+                    <div style={{ ...inputStyle, color: D.muted }}>First visit only</div>
+                  ) : (
+                    <select
+                      aria-label={`Repeats for ${svc.name || 'service'}`}
+                      value={svc.cadence || 'one_time'}
+                      onChange={(e) => updateServiceCadence(idx, e.target.value)}
+                      disabled={partialCommitLocked}
+                      style={inputStyle}
+                    >
+                      {CADENCE_OPTIONS.map((c) => (
+                        <option key={c.value} value={c.value}>{c.label}</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
 
                 <button
@@ -5966,7 +6318,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
 
-                {svc.cadence === 'custom' && (
+                {!newCallerBookMode && svc.cadence === 'custom' && (
                   <div
                     style={{
                       gridColumn: '1 / -1',
@@ -5990,7 +6342,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
 
-                {svc.cadence === 'monthly_nth_weekday' && (
+                {!newCallerBookMode && svc.cadence === 'monthly_nth_weekday' && (
                   <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : '140px 180px', gap: 8 }}>
                     <div>
                       {serviceFieldLabel('Nth')}
@@ -6015,7 +6367,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
 
-                {svc.cadence && svc.cadence !== 'one_time' && (() => {
+                {!newCallerBookMode && svc.cadence && svc.cadence !== 'one_time' && (() => {
                   const selected = Array.isArray(svc.boosterMonths) ? svc.boosterMonths : [];
                   const summary = selected.length
                     ? MONTH_CHIPS.filter((m) => selected.includes(m.value)).map((m) => m.label).join(', ')
@@ -6389,7 +6741,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           {/* Visit count — applies to every recurring cadence group on
               this appointment. Empty = ongoing (auto-extends). A finite
               number caps the series at that many visits. */}
-          {services.some((s) => s.cadence && s.cadence !== 'one_time') && (
+          {!newCallerBookMode && services.some((s) => s.cadence && s.cadence !== 'one_time') && (
             <div style={{ borderTop: `1px solid ${D.border}`, marginTop: 12, paddingTop: 12 }}>
               <label style={labelStyle}>Visits (leave blank for ongoing)</label>
               <input
@@ -6520,8 +6872,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           );
         })()}
 
-        {/* Prepaid collection toggle */}
-        {hasRecurringServices && (() => {
+        {/* Prepaid collection toggle (Book records no payment, so none in Book mode) */}
+        {!newCallerBookMode && hasRecurringServices && (() => {
           const parsedCount = Number.parseInt(recurringCount, 10);
           const finiteCount = Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : 0;
           if (!finiteCount) return null;
@@ -6648,6 +7000,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             <label style={{ ...labelStyle, color: D.amber }}>Internal Notes (Admin only)</label>
             <textarea value={internalNotes} onChange={e => setInternalNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />
           </div>
+          {/* Book sends nothing to the caller: the confirmation goes out once the customer is linked. */}
+          {!newCallerBookMode && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 14 }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 44 }}>
               <input type="checkbox" checked={sendSms} onChange={e => setSendSms(e.target.checked)} style={{ width: 18, height: 18, accentColor: D.green }} />
@@ -6666,14 +7020,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </div>
             )}
           </div>
+          )}
           {!isMobile && (
-            <button disabled={!canSubmit} onClick={handleSubmit} style={{
+            <button disabled={!saveEnabled} onClick={handleSave} style={{
               width: '100%', padding: '14px 20px', background: D.text, color: D.white,
               border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 500, cursor: 'pointer',
-              minHeight: 52, opacity: canSubmit ? 1 : 0.5,
+              minHeight: 52, opacity: saveEnabled ? 1 : 0.5,
               transition: 'opacity 0.15s',
             }}>
-              {saving ? 'Scheduling…' : 'Schedule appointment'}
+              {newCallerSubmitting ? 'Booking…' : newCallerBookMode ? 'Book' : (savingLabel ? 'Scheduling…' : 'Schedule appointment')}
             </button>
           )}
         </div>
@@ -6682,22 +7037,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <div style={mobileActionBarStyle}>
             <button
               type="button"
-              disabled={!canSubmit}
-              onClick={handleSubmit}
+              disabled={!saveEnabled}
+              onClick={handleSave}
               style={{
                 width: '100%',
                 minHeight: 52,
                 border: 'none',
                 borderRadius: 8,
-                background: canSubmit ? D.text : '#E4E4E7',
-                color: canSubmit ? D.white : '#A1A1AA',
+                background: saveEnabled ? D.text : '#E4E4E7',
+                color: saveEnabled ? D.white : '#A1A1AA',
                 fontSize: 15,
                 fontWeight: 500,
-                cursor: canSubmit ? 'pointer' : 'default',
+                cursor: saveEnabled ? 'pointer' : 'default',
                 fontFamily: ROBOTO_STACK,
               }}
             >
-              {saving ? 'Scheduling...' : 'Schedule appointment'}
+              {newCallerSubmitting ? 'Booking…' : newCallerBookMode ? 'Book' : (savingLabel ? 'Scheduling...' : 'Schedule appointment')}
             </button>
           </div>
         )}

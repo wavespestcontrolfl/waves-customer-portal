@@ -77,6 +77,48 @@ test('first-occurrence anchors and due-date bounds are retained', () => {
   expect(analyzeGapCandidate(due, [], options).reason).toBe('outside_recurring_due_range');
 });
 
+describe('the van departure the day rules model (modeledDepartureMinutes)', () => {
+  const { departureMinutes: _omitted, ...noDeparture } = options;
+  const firstWindow = (extra) => analyzeGapCandidate(candidate, [], { ...noDeparture, ...extra }).routeFits.map(fit => fit.windowStart)[0];
+
+  test('a modeled 07:00 departure moves the van but the first window offered is still 08:00', () => {
+    expect(firstWindow({ modeledDepartureMinutes: 420 })).toBe('08:00');
+    expect(firstWindow({ modeledDepartureMinutes: 450 })).toBe('08:00');
+    expect(firstWindow({})).toBe('08:00');
+  });
+
+  test('a modeled departure after 08:00 also holds the first window back', () => {
+    expect(firstWindow({ modeledDepartureMinutes: 540 })).toBe('09:00');
+  });
+
+  test('a departure the caller gave keeps opening windows from that minute: 07:00 is offered', () => {
+    expect(firstWindow({ departureMinutes: 420, modeledDepartureMinutes: 450 })).toBe('07:00');
+    expect(firstWindow({ departureMinutes: 420 })).toBe('07:00');
+  });
+
+  test('with GATE_SCHEDULING_CAPACITY on, the route itself leaves at the modeled departure (pre-push P1)', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      const far = { ...candidate, service: { ...service, lat: HQ.lat + 0.12 } };
+      const arrivalAt8 = (extra) => analyzeGapCandidate(far, [], { ...noDeparture, ...extra })
+        .routeFits.find(fit => fit.windowStart === '08:00').estimatedArrival;
+      const fromEight = arrivalAt8({});
+      const fromSevenThirty = arrivalAt8({ modeledDepartureMinutes: 450 });
+      expect(fromEight > '08:00').toBe(true); // the drive in shows from an 08:00 departure
+      expect(fromSevenThirty < fromEight).toBe(true);
+      expect(fromSevenThirty >= '08:00').toBe(true); // never before the window opens
+      expect(arrivalAt8({ modeledDepartureMinutes: 480 })).toBe(fromEight); // day rules off: unchanged
+    } finally {
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+    }
+  });
+
+  test('the modeled departure is not a configured workday: results stay provisional', () => {
+    const result = analyzeGapCandidate(candidate, [], { ...noDeparture, modeledDepartureMinutes: 420 });
+    expect(result).toMatchObject({ workdayVerified: false, feasibleInsertionWindows: null });
+  });
+});
+
 describe('GATE_SCHEDULING_CAPACITY: the candidate keeps the legacy rule; surrounding stops plan owner minutes', () => {
   afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 

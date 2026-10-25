@@ -1646,6 +1646,10 @@ export default function DispatchPageV2({
           defaultInternalNotes={newApptDefaults?.internalNotes || ""}
           // GATE_NEW_APPT_ADDRESS_TIMES: a new caller's picked address alone answers the time box.
           addressFirstTimes={safeData.addressFirstTimes === true}
+          // GATE_NEW_APPT_PHONE_MATCH: phone match as it is typed, and one Save adds and books a new caller.
+          newCustomerPhoneMatch={safeData.newCustomerPhoneMatch === true}
+          // GATE_NEW_CALLER_BOOKING: Book saves a new caller's visit by address, no customer yet.
+          newCallerBooking={safeData.newCallerBooking === true}
           requireTimeChoice={newApptDefaults?.requireTimeChoice === true}
           onClose={() => {
             setShowNewAppt(false);
@@ -2656,6 +2660,16 @@ export default function DispatchPageV2({
               },
             });
             setShowNewAppt(true);
+          }}
+          // GATE_NEW_CALLER_BOOKING: Link customer on a visit booked by address.
+          newCallerBooking={safeData.newCallerBooking === true}
+          onCustomerLinked={() => {
+            closeFastSheetsBehindDetails();
+            // The visit now has a customer, a property and armed reminders:
+            // close the stale sheet and refetch, like the billing switch below.
+            setDetailService(null);
+            fetchSchedule(date, { silent: true });
+            setScheduleRefreshKey((k) => k + 1);
           }}
           onBillingChanged={() => {
             closeFastSheetsBehindDetails();

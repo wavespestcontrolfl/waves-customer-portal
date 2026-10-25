@@ -611,6 +611,15 @@ function isSaturday(dateStr) {
   return weekdayOf(dateStr) === 6;
 }
 
+// skip_weekends means Saturday AND Sunday (the seeder's own rule,
+// recurring-appointment-seeder.js). Sundays reach this filter only when the
+// run searches them (GATE_AUTO_DISPATCH_DAY_RULES); off, it is the Saturday
+// check above.
+function isWeekendDay(dateStr) {
+  const dow = weekdayOf(dateStr);
+  return dow === 0 || dow === 6;
+}
+
 // HARD: the customer set an explicit preferred day in the portal and this slot
 // is not on it. preferred_day_indexes is empty when the customer has no day
 // preference (→ no filter; route is free to pick any day).
@@ -793,12 +802,15 @@ function candidateFromSlot(slot, {
   if (hhmmToMin(slot.end_time) > DAY_CLOSE) { drops.after_hours++; return null; }
   if (inBlackout(slot.date, prefs.blackout)) { drops.blackout++; return null; }       // HARD: blackout
   if (siblingDates.has(slot.date)) { drops.sibling++; return null; }                  // HARD: same-series occurrence that day
-  if (service.skip_weekends === true && isSaturday(slot.date)) { drops.weekend++; return null; } // HARD: skip_weekends series
+  if (service.skip_weekends === true && isWeekendDay(slot.date)) { drops.weekend++; return null; } // HARD: skip_weekends series
   // HARD: explicit portal preferences override route efficiency. Route may
   // only optimize among slots on the customer's preferred day + time window.
   if (violatesPreferredDay(slot.date, prefs)) { drops.preferred_day++; return null; }
   if (violatesPreferredTime(slot.start_time, prefs)) { drops.preferred_time++; return null; }
   const techId = slot.technician && slot.technician.id;
+  // HARD (GATE_AUTO_DISPATCH_KEEP_TECH, ctx.keepTech): a visit that has a
+  // technician stays with that technician. An unassigned visit is not filtered.
+  if (ctx.keepTech === true && service.technician_id && String(techId) !== String(service.technician_id)) { drops.other_tech++; return null; }
   const cap = ctx.capabilityFor(techId, category);
   if (cap === 'deactivated') { drops.deactivated++; return null; }                    // HARD: tech turned off for this category
   return {
@@ -1008,6 +1020,12 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // Google about an ordinary move before it is made.
     arrivalSearch: ctx.arrivalSearch === true,
     ...(ctx.arrivalSearch === true ? { providerTravel: false } : {}),
+    // GATE_AUTO_DISPATCH_DAY_RULES (config.dayRules, carried on ctx by
+    // index.js): Sundays are searched too (move-rules.js takes one only when
+    // no other day qualifies), and the arrival search's van leaves at the
+    // Settings departure time (ctx.departureMinutes, departure-time.js).
+    ...(ctx.dayRules === true ? { includeWeekends: true } : {}),
+    ...(ctx.arrivalSearch === true && Number.isFinite(ctx.departureMinutes) ? { departureMinutes: ctx.departureMinutes } : {}),
     // HARD time preference must enter slot GENERATION, not just post-filtering:
     // find-time emits only each gap's earliest-feasible start, so an empty day
     // with an afternoon preference would yield a single 08:00 candidate that the
@@ -1033,7 +1051,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // better available" rather than an opaque NO_VALID_SLOT.
   // slot_taken only increments with GATE_AUTO_DISPATCH_SHARED_MODEL on — the
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
-  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0 };
+  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0, ...(ctx.keepTech === true ? { other_tech: 0 } : {}) };
   // The current placement is read first: a visit in overlap also gets every
   // free same-day hour (conflictSameDaySlots), through the same filters.
   const current = await computeCurrentPlacement(service, prefs, ctx);
@@ -1063,7 +1081,7 @@ module.exports = {
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
+    hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

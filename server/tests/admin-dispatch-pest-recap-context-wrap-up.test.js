@@ -24,7 +24,7 @@ jest.mock('../services/job-costing', () => ({
   resolveServiceRecord: jest.requireActual('../services/job-costing').resolveServiceRecord,
 }));
 jest.mock('../services/time-tracking', () => ({ adminEditEntry: jest.fn(async () => ({})) }));
-jest.mock('../services/pest-recap', () => ({ ...jest.requireActual('../services/pest-recap'), buildRecapContext: jest.fn() }));
+jest.mock('../services/pest-recap', () => ({ ...jest.requireActual('../services/pest-recap'), buildRecapContext: jest.fn(), submitRecap: jest.fn() }));
 
 const router = require('../routes/admin-dispatch');
 const PestRecap = require('../services/pest-recap');
@@ -202,5 +202,24 @@ describe('GET pest-recap/context carries the pest stock advisory (GATE_PEST_STOC
     PestRecap.buildRecapContext.mockResolvedValue(mosquito);
     const res = await invoke('get', CONTEXT_PATH, { params });
     expect(res.body).toEqual(mosquito);
+  });
+});
+
+describe('POST pest-recap on a visit with no customer yet', () => {
+  beforeEach(() => { mockDbCurrent = dbWithOwner('tech-1'); PestRecap.submitRecap.mockReset(); });
+  afterEach(() => { mockDbCurrent = null; });
+
+  test('answers 409 with the office message and its code', async () => {
+    PestRecap.submitRecap.mockResolvedValue({ ok: false, reason: 'visit_has_no_customer' });
+    const res = await invoke('post', '/:serviceId/pest-recap', { params, body: { technicianNotes: 'Done.' } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toEqual({ error: 'This visit has no customer yet. Link a customer before completing it.', code: 'visit_has_no_customer' });
+  });
+
+  test('another refusal still answers its own status with the bare reason', async () => {
+    PestRecap.submitRecap.mockResolvedValue({ ok: false, reason: 'not_pest_control' });
+    const res = await invoke('post', '/:serviceId/pest-recap', { params, body: { technicianNotes: 'Done.' } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toEqual({ error: 'not_pest_control' });
   });
 });

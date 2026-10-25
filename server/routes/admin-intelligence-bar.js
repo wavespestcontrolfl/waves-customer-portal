@@ -1575,6 +1575,23 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._ib_notes_before = current.crm_notes ?? null;
       notesReadVersion = current.version;
     }
+    if (toolUse.name === 'update_customer' && params.customer_id && params.updates
+      && Object.prototype.hasOwnProperty.call(params.updates, 'phone')) {
+      // The phone is the portal sign-in key (owner 2026-10-24), so the card
+      // names the number it replaces. Read now and bound into the contract;
+      // the commit compares it by value on the locked row, so a number saved
+      // after this read is never replaced unseen. Fail closed: an unreadable
+      // current number is no card.
+      let current;
+      try {
+        current = await db('customers').where('id', params.customer_id).first('phone');
+      } catch {
+        return { failed: true, modelResult: { error: 'Could not read this customer\'s current phone number — nothing was proposed. Try again in a moment.' } };
+      }
+      if (!current) return { failed: true, modelResult: { error: 'Customer no longer exists' } };
+      preview = { ...preview, phone_replaced: { before: current.phone ?? null } };
+      params._ib_phone_before = current.phone ?? null;
+    }
     if (toolUse.name === 'update_customer') {
       // monthly_rate is the customer's WHOLE monthly bill (owner 2026-10-06):
       // a rate edit names the one service whose price changes, the card lists

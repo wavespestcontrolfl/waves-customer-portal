@@ -278,9 +278,29 @@ test('getSavedDayPlans returns today\'s pre-service plan per technician, planned
   const plans = await getSavedDayPlans({ date: day, now }, conn);
   expect([...plans.keys()]).toEqual([techId]);
   expect(plans.get(techId)).toEqual({ plannedVisits: 1, plannedPhysicalStops: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 20,
-    plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'calibrated',
+    plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, plannedDepartureMinutes: null, driveModel: 'calibrated',
     plannedLateVisits: null, plannedStopIds: [goodId] });
   expect(selectPlanningSnapshots([before], { from: day, to: day, now })).toEqual([]);
+});
+
+// The departure the saved snapshot simulated (day-quality assumptions) passes
+// through so the scorecard divides stops/hour by the same day.
+test('measureRoutePerformance carries the snapshot\'s modeled departure as plannedDepartureMinutes, null when it never recorded one', () => {
+  const withDeparture = { ...snapshot, assumptions: { departureMinutes: 450, departureProvided: false } };
+  expect(measureRoutePerformance(withDeparture, [])).toMatchObject({ plannedDepartureMinutes: 450 });
+  expect(measureRoutePerformance(snapshot, [])).toMatchObject({ plannedDepartureMinutes: null });
+  expect(measureRoutePerformance({ ...snapshot, assumptions: { departureMinutes: 'soon' } }, [])).toMatchObject({ plannedDepartureMinutes: null });
+});
+
+test('getSavedDayPlans passes the snapshot\'s modeled departure through for today\'s row', async () => {
+  const goodId = '11111111-1111-4111-8111-111111111111';
+  const plan = { ...snapshot, as_of: snapshot.as_of, serviceMinutes: 60, modeledDriveMinutes: 20, modeledWaitingMinutes: 5,
+    modeledReturnMinuteBeforeBreaks: 600, drive_model: 'calibrated', assumptions: { departureMinutes: 450 },
+    plannedStops: [{ ...snapshot.plannedStops[0], id: goodId }] };
+  const run = { id: 'before', created_at: snapshot.as_of, result: { route_quality: [plan] } };
+  const { conn } = recordingConn({ route_optimization_planner_runs: [run] });
+  const plans = await getSavedDayPlans({ date: day, now: new Date('2026-09-08T16:00:00Z') }, conn);
+  expect(plans.get(techId)).toMatchObject({ plannedDepartureMinutes: 450, plannedReturnMinuteBeforeBreaks: 600 });
 });
 
 // Codex P2 (round 10): the snapshot's own modeled lateness count and stop

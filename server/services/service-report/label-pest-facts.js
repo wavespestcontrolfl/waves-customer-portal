@@ -113,8 +113,10 @@ function labelFactPests(labelPests, named, except = []) {
   return out;
 }
 
-// "German cockroaches" keeps its capital; "Ghost ants" reads "ghost ants".
-const PROPER_FIRST_WORDS = new Set(['german', 'american', 'australian', 'florida', 'argentine', 'pharaoh']);
+// "American cockroaches" keeps its capital; "Ghost ants" reads "ghost ants", and
+// "German cockroaches" reads "german cockroaches" (owner 2026-10-25, "dont
+// capitalize German").
+const PROPER_FIRST_WORDS = new Set(['american', 'australian', 'florida', 'argentine', 'pharaoh']);
 function displayTerm(term) {
   const text = String(term || '');
   const first = normalized(text).split(' ')[0];

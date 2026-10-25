@@ -51,6 +51,10 @@ jest.mock('../utils/customer-comms-lock', () => ({
   lockCustomerComms: jest.fn().mockResolvedValue(undefined),
   withCustomerCommsLock: jest.fn(async (db, customerId, fn) => db.transaction(async (trx) => fn(trx))),
 }));
+jest.mock('../services/scheduling/line-technician', () => {
+  const actual = jest.requireActual('../services/scheduling/line-technician');
+  return { ...actual, recordLinePickShadow: jest.fn(actual.recordLinePickShadow) };
+});
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),
 }));
@@ -61,6 +65,8 @@ jest.mock('../services/call-booking-catalog', () => ({
   shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
 }));
 const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
+const { recordLinePickShadow } = require('../services/scheduling/line-technician');
+const logger = require('../services/logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const express = require('express');
 const adminScheduleRouter = require('../routes/admin-schedule');
@@ -101,8 +107,10 @@ function chain(row) {
 }
 
 // technicians: a single active + field-dispatchable row, whatever the where().
+// work_days (GATE_TECH_WORK_DAYS) is whatever the test sets; null = every day.
+let techWorkDays = null;
 function chainTechnician(techId) {
-  return chain({ id: techId, name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true });
+  return chain({ id: techId, name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true, work_days: techWorkDays });
 }
 
 // technician_absences: only a hit when where() named THIS tech + THIS date
@@ -137,6 +145,8 @@ let inserts;
 beforeEach(() => {
   jest.clearAllMocks();
   inserts = [];
+  techWorkDays = null;
+  delete process.env.GATE_TECH_WORK_DAYS;
   findConflictingVisits.mockResolvedValue([]);
   acquireOccupancyLock.mockImplementation(async () => {});
   lockCustomerComms.mockImplementation(async () => {});
@@ -207,5 +217,131 @@ describe('POST / — admin create — recurring child/booster technician-absence
     expect(status).toBe(201);
     expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-07', '2099-09-04', '2099-11-03']);
     expect(body.code).not.toBe('TECH_NOT_ASSIGNABLE');
+  });
+});
+
+// GATE_TECH_WORK_DAYS (owner 2026-10-25): the office may put a technician on a
+// day they do not work. The create saves every visit and says so in `warnings`.
+describe('POST / — admin create — technician work-days warning (office paths warn, never block)', () => {
+  afterEach(() => { delete process.env.GATE_TECH_WORK_DAYS; });
+  // Same plan as above: the parent and two children fall on Fridays, the booster on a Tuesday.
+  const recurringBody = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    technicianId: 'tech-no-absence',
+    isRecurring: true,
+    recurringPattern: 'monthly',
+    recurringCount: 3,
+    boosterMonths: [11],
+    estimatedPrice: 89,
+    createInvoice: true,
+  };
+
+  test('gate on, a Monday-to-Thursday tech: every visit is saved and one "does not work on Fridays" warning comes back', async () => {
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    techWorkDays = [1, 2, 3, 4];
+    const { status, body } = await post(recurringBody);
+    expect(status).toBe(201);
+    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-07', '2099-09-04', '2099-11-03']);
+    expect(inserts.every((d) => d.technician_id === 'tech-no-absence')).toBe(true);
+    expect(body.warnings).toContain('Test Tech does not work on Fridays.');
+    expect(body.warnings.filter((w) => /does not work/.test(w))).toHaveLength(1);
+  });
+
+  test('gate on, a tech who works Fridays: no work-days warning', async () => {
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    techWorkDays = [1, 2, 3, 4, 5];
+    const { status, body } = await post(recurringBody);
+    expect(status).toBe(201);
+    expect((body.warnings || []).some((w) => /does not work/.test(w))).toBe(false);
+  });
+
+  test('gate off: work_days is ignored, no warning', async () => {
+    techWorkDays = [1, 2, 3, 4];
+    const { status, body } = await post(recurringBody);
+    expect(status).toBe(201);
+    expect((body.warnings || []).some((w) => /does not work/.test(w))).toBe(false);
+  });
+});
+
+
+// GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25): an office create left on Auto /
+// unassigned logs the technician the service-line map would pick, after the commit.
+describe('POST / — admin create — service-line map shadow (office_auto)', () => {
+  const body = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    estimatedPrice: 89,
+  };
+  const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((r) => setImmediate(r)); };
+  afterEach(() => { delete process.env.GATE_SERVICE_LINE_MAP; });
+
+  test('Auto: one office_auto row is recorded after the response, with the saved visit and technician', async () => {
+    const { status } = await post({ ...body, assignmentMode: 'auto' });
+    expect(status).toBe(201);
+    await settle();
+    expect(recordLinePickShadow).toHaveBeenCalledTimes(1);
+    expect(recordLinePickShadow).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'office_auto', scheduledServiceId: 'new-1', customerId: 'cust-1', date: '2099-07-03',
+      windowStart: '10:00', actualTechnicianId: null,
+    }));
+  });
+
+  test('the recorder runs only after every transaction of the create has committed', async () => {
+    let open = 0;
+    const openAtCall = [];
+    const run = db.transaction.getMockImplementation();
+    db.transaction = jest.fn(async (cb) => { open += 1; try { return await run(cb); } finally { open -= 1; } });
+    recordLinePickShadow.mockImplementationOnce(() => { openAtCall.push(open); return Promise.resolve(null); });
+    const { status } = await post({ ...body, assignmentMode: 'auto' });
+    expect(status).toBe(201);
+    await settle();
+    expect(openAtCall).toEqual([0]);
+  });
+
+  test('a technician picked by hand: no row', async () => {
+    const { status } = await post({ ...body, technicianId: 'tech-no-absence', assignmentMode: 'manual' });
+    expect(status).toBe(201);
+    await settle();
+    expect(recordLinePickShadow).not.toHaveBeenCalled();
+  });
+
+  test('a recurring create records the parent visit only (children copy the technician)', async () => {
+    const { status, body: out } = await post({
+      ...body, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, boosterMonths: [11], assignmentMode: 'unassigned', createInvoice: true,
+    });
+    expect(out.error).toBeUndefined();
+    expect(status).toBe(201);
+    await settle();
+    expect(recordLinePickShadow).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate shadow with a broken log table: the create still succeeds and the failure is only logged', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    const original = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'service_line_pick_shadow'
+      ? { insert: () => Promise.reject(new Error('log table down')) }
+      : original(table)));
+    const { status, body: out } = await post({ ...body, assignmentMode: 'auto' });
+    expect(status).toBe(201);
+    expect(out.id).toBe('new-1');
+    await settle();
+    expect(recordLinePickShadow).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('shadow row not written'));
+  });
+
+  test('gate off (default): the real recorder runs no query', async () => {
+    const original = db.getMockImplementation();
+    const tables = [];
+    db.mockImplementation((table) => { tables.push(table); return original(table); });
+    await post({ ...body, assignmentMode: 'auto' });
+    await settle();
+    expect(tables.filter((t) => /^service_line_/.test(t))).toEqual([]);
   });
 });

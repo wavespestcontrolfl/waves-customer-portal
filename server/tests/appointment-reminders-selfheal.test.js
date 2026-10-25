@@ -59,6 +59,17 @@ describe('selfHealMissingReminderRows', () => {
     db.transaction = jest.fn(async (callback) => callback(makeTrxConn()));
   });
 
+  test('the sweep only reads visits that have a customer (a visit booked by address only gets no reminder row)', async () => {
+    const sweep = sweepChain([]);
+    db.mockImplementation(() => sweep);
+    const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx');
+
+    await expect(AppointmentReminders.selfHealMissingReminderRows()).resolves.toBe(0);
+
+    expect(sweep.whereNotNull).toHaveBeenCalledWith('ss.customer_id');
+    expect(register).not.toHaveBeenCalled();
+  });
+
   test('registers a row for a future visit missing one, via registerVisitReminderInTx with cron_selfheal source', async () => {
     // scheduled_date is a DATE column — node-pg hydrates it as a JS Date at
     // UTC midnight under prod's TZ=UTC. The sweep must take the UTC calendar

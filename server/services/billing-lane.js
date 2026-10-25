@@ -11,7 +11,7 @@
  * membership double-billing incident).
  */
 
-const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cost-visit-types');
 // invoiceAmountDue is pure (no DB, no Stripe/Twilio — see that module's own
 // header) so it's safe to require at the top alongside isAlwaysFreeServiceType,
 // unlike the CANCELLED_SERVICE_RESOLVED_STATUSES / estimate-first-application-invoice
@@ -217,6 +217,14 @@ function hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice) {
 // byte-identically without it): a provenance-backed $0 (see
 // hasAuthoritativeZeroPrice above) returns 0 here directly, never the fee/
 // rate fallback — a fully-discounted application must stay free.
+//
+// `serviceType` (optional): a consultation (Waves Assessment — an advisory
+// walkthrough, no treatment, no catalog price; no-cost-visit-types) is not a
+// plan visit, so it never takes a plan fallback price — neither the
+// per-application fee nor the monthly_rate dues: with no row price of its
+// own it bills nothing. A consultation row priced on purpose still bills
+// that price (the first branch). A backfill quiet closeout minted a draft at
+// the fee for one (WPC-2026-0578, voided 2026-10-25).
 function completionInvoiceAmount({
   estimatedPrice,
   isCallback,
@@ -225,10 +233,12 @@ function completionInvoiceAmount({
   monthlyRate,
   billingMode,
   primaryLinePrice = null,
+  serviceType = null,
 }) {
   if (estimatedPrice != null && Number(estimatedPrice) > 0) return Number(estimatedPrice);
   if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) return 0;
   if (isCallback) return 0;
+  if (isConsultationServiceType(serviceType)) return 0;
   if (perApplicationBilling) {
     return Number(perApplicationFee) > 0 ? Number(perApplicationFee) : 0;
   }
@@ -292,7 +302,8 @@ function predictCompletionBillingPayer({
 }) {
   const payerFreeReason = isCallback
     ? 'callback'
-    : (isAlwaysFreeServiceType(serviceType) ? 'always_free_service_type' : null);
+    : (isAlwaysFreeServiceType(serviceType) ? 'always_free_service_type'
+      : (isConsultationServiceType(serviceType) ? 'consultation' : null));
   const payerAmount = completionInvoiceAmount({
     estimatedPrice,
     isCallback,
@@ -301,6 +312,7 @@ function predictCompletionBillingPayer({
     monthlyRate,
     billingMode,
     primaryLinePrice,
+    serviceType,
   });
   const resolvedPayerAmount = payerAmount > 0
     ? payerAmount
@@ -455,8 +467,10 @@ function predictCompletionBillingPerApplication({
   }
   const amount = completionInvoiceAmount({
     estimatedPrice, isCallback, perApplicationBilling: true, perApplicationFee, monthlyRate, billingMode,
-    primaryLinePrice,
+    primaryLinePrice, serviceType,
   });
+  // An unpriced consultation bills nothing by design — not a money gap.
+  if (!(amount > 0) && isConsultationServiceType(serviceType)) return noCharge('consultation');
   return predictionFromResolvedAmount({
     amount, estimatedPrice, primaryLinePrice, prepaid, autoChargeEligible: autopayActive, noCharge,
   });
@@ -495,7 +509,7 @@ function predictCompletionBillingMembership({
   // actually mints for this customer).
   const amount = completionInvoiceAmount({
     estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate, billingMode,
-    primaryLinePrice,
+    primaryLinePrice, serviceType,
   });
   if (covered) {
     return { kind: 'covered_membership', amount: null, grossAmount: amount, conflictStampedPrice: hasVisitPrice };
@@ -507,6 +521,8 @@ function predictCompletionBillingMembership({
   if (!(amount > 0) && (isCallback || isAlwaysFreeServiceType(serviceType))) {
     return noCharge(isCallback ? 'callback' : 'always_free_service_type');
   }
+  // An unpriced consultation (Waves Assessment) bills nothing by design.
+  if (!(amount > 0) && isConsultationServiceType(serviceType)) return noCharge('consultation');
   return predictionFromResolvedAmount({
     amount,
     estimatedPrice,
@@ -1166,8 +1182,8 @@ async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}
 
 // Reasons a no_charge prediction is a MONEY GAP rather than a deliberately
 // free visit: nothing bills only because no number is on the account.
-// 'callback' / 'always_free_service_type' / 'annual_renewal_owned' are the
-// by-design half and never appear here.
+// 'callback' / 'always_free_service_type' / 'annual_renewal_owned' /
+// 'consultation' are the by-design half and never appear here.
 const UNBILLED_MONEY_GAP_REASONS = new Set(['no_amount_on_file', 'no_invoice_will_mint']);
 
 /**

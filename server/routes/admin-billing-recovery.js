@@ -32,7 +32,9 @@ const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { listAtRiskMrrAccounts } = require('../services/mrr-breakdown');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require('../services/no-cost-visit-types');
+const {
+  ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX, isConsultationServiceType,
+} = require('../services/no-cost-visit-types');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require('../services/billing-lane').stampedZeroFreeLive();
@@ -49,8 +51,11 @@ router.use(adminAuthenticate, requireAdmin);
 // mints too. invoices.scheduled_service_id is NOT unique, so a private
 // namespace would let a recovery Bill and a concurrent mint both create
 // duplicate drafts. Imported, never re-declared (codex #3344 r8).
-const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-const { billVisit, dueDateFromVisit, siblingCoverageStatus } = require('../services/billing-recovery-bill');
+const { acquireScheduledInvoiceMintLock, assertScheduledInvoiceNotPacketOwned } = require('../services/scheduled-invoice-mint');
+const {
+  billVisit, dueDateFromVisit, siblingCoverageStatus, INVOICE_BACKED_DISPOSITIONS, deadInvoiceStatuses, claimDispositionSlot,
+  loadBillingMode,
+} = require('../services/billing-recovery-bill');
 
 // Service-type patterns that are intentionally $0 and must never be flagged as a
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
@@ -92,6 +97,15 @@ function clampDays(raw) {
   return Math.min(365, Math.max(1, n));
 }
 
+// Effective price mirrors the leak query + the bill route: row price →
+// per-application fee (never monthly_rate; never for a consultation).
+function effectivePrice(r) {
+  const rowPrice = parseFloat(r.estimated_price || 0);
+  if (rowPrice > 0) return rowPrice;
+  return r.billing_mode === 'per_application' && !isConsultationServiceType(r.service_type)
+    ? parseFloat(r.per_application_fee || 0) : 0;
+}
+
 // Shared base query for uninvoiced completed visits, with the full no-cost
 // allowlist applied. Returns visits with an effective price: the row's
 // estimated_price, or — when the billing_mode column exists (perAppAware) —
@@ -124,9 +138,18 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
     .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
     .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
     .leftJoin({ d: 'visit_billing_dispositions' }, 'd.scheduled_service_id', 'ss.id')
+    .leftJoin({ di: 'invoices' }, 'di.id', 'd.invoice_id')
     .whereRaw("ss.completed_at >= now() - (? * interval '1 day')", [days])
     .whereRaw(`${effectivePriceSql} > 0`)
-    .whereNull('d.id')                                   // not already dispositioned
+    // Not already dispositioned — except a 'billed' / 'billed_elsewhere' row
+    // whose invoice is gone (void / refunded / cancelled): that settles
+    // nothing, so the visit comes back (billing-recovery-bill.js).
+    .where(function notSettledByDisposition() {
+      this.whereNull('d.id').orWhere(function staleInvoiceDisposition() {
+        this.whereIn('d.disposition', INVOICE_BACKED_DISPOSITIONS)
+          .where(function deadInvoice() { this.whereNull('di.id').orWhereIn('di.status', deadInvoiceStatuses()); });
+      });
+    })
     // Completed record only (excludes office-handoff 'incomplete'), PLUS the
     // status-only leak: a scheduled_services row flipped to 'completed' with
     // NO service_records row at all (historical PUT /status completions —
@@ -140,7 +163,11 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
     .whereRaw('COALESCE(sr.is_callback, false) = false')
     .whereRaw(`COALESCE(ss.prepaid_amount, 0) < ${effectivePriceSql}`) // not FULLY prepaid (partial surfaces in needs-review)
     .whereRaw(`${effectivePayerSql} IS NULL`) // self-pay only (v1); payer-billed = payer AP flow
-    .whereRaw("COALESCE(ss.service_type, '') !~* ?", [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX]);
+    .whereRaw("COALESCE(ss.service_type, '') !~* ?", [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX])
+    // A consultation (Waves Assessment) never takes the per-application fee
+    // (no-cost-visit-types), so one surfaces only on its OWN row price —
+    // the same result as dropping the fee arm from the effective price.
+    .whereRaw("NOT (COALESCE(ss.service_type, '') ~* ? AND COALESCE(ss.estimated_price, 0) <= 0)", [CONSULTATION_SERVICE_TYPE_SQL_REGEX]);
   // Conservative v1 scope (owner priority: never risk double-billing an autopay
   // customer). The completion predicate only treats autopay as covering NO-price
   // visits, so an autopay customer's one-off explicitly-priced visit is
@@ -205,6 +232,16 @@ router.get('/leaks', async (req, res) => {
         'c.monthly_rate',
         'c.waveguard_tier',
         ...(perAppAware ? ['c.billing_mode', 'c.per_application_fee'] : []),
+        // A voided invoice puts its visit back in this queue (HAS_INVOICE_SQL
+        // skips void), and the void often had a replacement elsewhere (another
+        // row, a combined or prepay invoice). Name it so the operator checks.
+        db.raw(`(SELECT i.invoice_number FROM invoices i
+          WHERE (i.service_record_id = sr.id OR i.scheduled_service_id = ss.id) AND i.status = 'void'
+          ORDER BY i.updated_at DESC NULLS LAST, i.created_at DESC LIMIT 1) AS voided_invoice_number`),
+        // Set only on a visit back from a stale disposition (filter above).
+        'd.disposition as stale_disposition',
+        'di.invoice_number as stale_disposition_invoice_number',
+        'di.status as stale_disposition_invoice_status',
       )
       .orderBy('ss.completed_at', 'desc');
 
@@ -230,13 +267,6 @@ router.get('/leaks', async (req, res) => {
     );
     const activeRows = prepayActiveRows.filter((_, i) => siblingStatuses[i] !== 'covered');
 
-    // Effective price mirrors the query + the bill route: row price →
-    // per-application fee (never monthly_rate).
-    const effectivePrice = (r) => {
-      const rowPrice = parseFloat(r.estimated_price || 0);
-      if (rowPrice > 0) return rowPrice;
-      return r.billing_mode === 'per_application' ? parseFloat(r.per_application_fee || 0) : 0;
-    };
     const shape = (r) => ({
       scheduled_service_id: r.scheduled_service_id,
       service_record_id: r.service_record_id,
@@ -255,6 +285,11 @@ router.get('/leaks', async (req, res) => {
       leak_kind: r.service_record_id ? 'uninvoiced' : 'completed_no_service_record',
       // Dispatch-day deep link target for status-only rows (date-only string).
       scheduled_date: dueDateFromVisit({ service_date: r.scheduled_date }) || null,
+      voided_invoice_number: r.voided_invoice_number || null,
+      // A visit an operator marked billed elsewhere whose covering invoice
+      // has since died (void / refunded / cancelled).
+      billed_elsewhere_invoice_number: r.stale_disposition === 'billed_elsewhere' ? (r.stale_disposition_invoice_number || null) : null,
+      billed_elsewhere_invoice_status: r.stale_disposition === 'billed_elsewhere' ? (r.stale_disposition_invoice_status || null) : null,
     });
 
     // Recurring (monthly_rate>0), partially-prepaid, ambiguous-type
@@ -401,10 +436,8 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
         .first();
       if (invoiced) { const e = new Error('Visit is already invoiced — cannot mark it free.'); e.status = 409; throw e; }
 
-      const existing = await trx('visit_billing_dispositions')
-        .where('scheduled_service_id', scheduledServiceId)
-        .first();
-      if (existing) { const e = new Error('Visit has already been handled.'); e.status = 409; throw e; }
+      const handled = await claimDispositionSlot(trx, scheduledServiceId);
+      if (handled) { const e = new Error(handled); e.status = 409; throw e; }
 
       await trx('visit_billing_dispositions').insert({
         scheduled_service_id: scheduledServiceId,
@@ -439,6 +472,108 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
     }
     logger.error(`[billing-recovery] dismiss failed for ${scheduledServiceId}: ${err.message}`);
     res.status(500).json({ error: 'Failed to record disposition' });
+  }
+});
+
+/**
+ * POST /api/admin/billing-recovery/:scheduledServiceId/billed-elsewhere
+ * Body: { invoiceNumber, note? }
+ * Record that another invoice already bills this visit (a plan prepay, a
+ * combined multi-home invoice, a duplicate visit row's invoice). Creates NO
+ * invoice and leaves revenue as recorded (job costing zeroes revenue only for
+ * 'intentionally_free'). The visit leaves the queue while the covering invoice
+ * is live and returns if that invoice is later voided, refunded or cancelled.
+ */
+const BILLED_ELSEWHERE_REFUSED_STATUSES = ['draft'];
+router.post('/:scheduledServiceId/billed-elsewhere', requireAdmin, async (req, res) => {
+  const { scheduledServiceId } = req.params;
+  const invoiceNumber = String(req.body?.invoiceNumber || '').trim().slice(0, 60);
+  const reason = String(req.body?.note || '').trim().slice(0, 300) || null;
+  if (!invoiceNumber) return res.status(400).json({ error: 'invoiceNumber required' });
+  const refuse = (status, message) => Object.assign(new Error(message), { status });
+  try {
+    const covering = await db.transaction(async (trx) => {
+      // Same per-visit lock as Bill and Mark free; every check runs inside it.
+      await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+      const visit = await trx({ ss: 'scheduled_services' })
+        .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
+        .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
+        .where('ss.id', scheduledServiceId)
+        .first('ss.id', 'ss.completed_at', 'ss.customer_id', 'ss.estimated_price', 'ss.service_type',
+          'c.account_id', 'sr.id as service_record_id', 'sr.status as service_record_status');
+      if (!visit) throw refuse(404, 'Visit not found');
+      if (!visit.completed_at) throw refuse(422, 'Visit is not completed — nothing to record.');
+      // Only a finished closeout: a status-only visit still runs the
+      // completion flow, and an unfinished attempt resumes its mint — either
+      // could bill the visit again (InvoiceService.create refuses that too).
+      if (visit.service_record_status !== 'completed') {
+        throw refuse(422, 'Finish this visit\'s closeout first — it has no completed service record.');
+      }
+      const openAttempt = await trx('service_completion_attempts')
+        .where({ service_id: scheduledServiceId })
+        .whereIn('status', ['side_effects_pending', 'side_effects_running'])
+        .first('id');
+      if (openAttempt) throw refuse(409, 'This visit\'s closeout is still finishing. Resume it first.');
+      // A saved visit closeout (combined visit) bills every member on one
+      // invoice and owns this visit's billing, finished or not (409).
+      await assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId);
+      const own = await trx('invoices')
+        .where(function ownInvoice() {
+          this.where('scheduled_service_id', scheduledServiceId);
+          if (visit.service_record_id) this.orWhere('service_record_id', visit.service_record_id);
+        })
+        .whereNot('status', 'void')
+        .first('id');
+      if (own) throw refuse(409, 'This visit has its own invoice already.');
+      const found = await trx({ i: 'invoices' })
+        .join({ c: 'customers' }, 'c.id', 'i.customer_id')
+        .whereRaw('LOWER(i.invoice_number) = LOWER(?)', [invoiceNumber])
+        .first('i.id', 'i.invoice_number', 'i.status', 'i.total', 'i.scheduled_service_id', 'i.service_record_id',
+          'i.customer_id', 'c.account_id');
+      if (!found) throw refuse(404, `Invoice ${invoiceNumber} was not found.`);
+      // The same customer, or another profile of the same account (one
+      // household billed across its properties).
+      const sameOwner = String(found.customer_id) === String(visit.customer_id)
+        || (found.account_id && visit.account_id && String(found.account_id) === String(visit.account_id));
+      if (!sameOwner) throw refuse(409, `Invoice ${found.invoice_number} belongs to a different customer.`);
+      if ([...deadInvoiceStatuses(), ...BILLED_ELSEWHERE_REFUSED_STATUSES].includes(String(found.status))) {
+        throw refuse(409, `Invoice ${found.invoice_number} is ${found.status} — it cannot cover this visit.`);
+      }
+      // The covering invoice must plausibly pay for this visit. One smaller
+      // than the visit, or one that already bills another visit (a duplicate
+      // row's twin), more likely names the wrong row: a duplicate row or a
+      // visit never performed is Mark free, so its revenue is not counted
+      // twice. A note that explains the case still records it.
+      if (!reason) {
+        const billing = await loadBillingMode(visit.customer_id, trx);
+        const price = effectivePrice({ ...visit, billing_mode: billing.mode, per_application_fee: billing.perApplicationFee });
+        const total = Number(found.total) || 0;
+        const concern = total + 0.005 < price
+          ? `Invoice ${found.invoice_number} totals $${total.toFixed(2)}, less than this visit's $${price.toFixed(2)}.`
+          : ((found.scheduled_service_id || found.service_record_id) ? `Invoice ${found.invoice_number} already bills another visit.` : null);
+        if (concern) {
+          throw refuse(409, `${concern} If this row is a duplicate or was never performed, use Mark free. Otherwise add a note that explains it.`);
+        }
+      }
+      const handled = await claimDispositionSlot(trx, scheduledServiceId);
+      if (handled) throw refuse(409, handled);
+      await trx('visit_billing_dispositions').insert({
+        scheduled_service_id: scheduledServiceId,
+        service_record_id: visit.service_record_id || null,
+        disposition: 'billed_elsewhere',
+        invoice_id: found.id,
+        reason, // operator note stored in the DB column (not logged)
+        actor_user_id: req.technicianId,
+      });
+      return found;
+    });
+    logger.info(`[billing-recovery] visit ${scheduledServiceId} marked billed elsewhere on invoice ${covering.id} by tech ${req.technicianId}`);
+    res.json({ ok: true, invoice: { id: covering.id, invoice_number: covering.invoice_number, status: covering.status } });
+  } catch (err) {
+    if (err && err.status) return res.status(err.status).json({ error: err.message });
+    if (err && err.code === '23505') return res.status(409).json({ error: 'Visit has already been handled.' });
+    logger.error(`[billing-recovery] billed-elsewhere failed for ${scheduledServiceId}: ${err.message}`);
+    res.status(500).json({ error: 'Failed to record the covering invoice' });
   }
 });
 

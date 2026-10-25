@@ -335,12 +335,14 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/tech/staff-documents/onboarding` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/people` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/acknowledge` | tech-staff-documents |
+| GET | `/api/tech/staff-documents/versions/:id/prefill` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/records` | tech-staff-documents |
 | POST | `/api/tech/timetracking/clock-in` | tech-timetracking |
 | POST | `/api/tech/timetracking/clock-out` | tech-timetracking |
 | POST | `/api/tech/timetracking/end-break` | tech-timetracking |
 | POST | `/api/tech/timetracking/end-job` | tech-timetracking |
 | GET | `/api/tech/timetracking/history` | tech-timetracking |
+| POST | `/api/tech/timetracking/no-lunch` | tech-timetracking |
 | GET | `/api/tech/timetracking/pending-signoff` | tech-timetracking |
 | POST | `/api/tech/timetracking/sign-week` | tech-timetracking |
 | POST | `/api/tech/timetracking/start-break` | tech-timetracking |

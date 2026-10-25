@@ -26,6 +26,8 @@
  * Out of scope, always left parked for a human (never thrown away):
  *   - a grouped visit (alert carries >1 visit_member_ids, or the stop now
  *     carries a visit_id) — `grouped_visit_manual`
+ *   - a visit with no customer linked yet (booked by address only)
+ *     — `no_customer`
  *   - a call booking still awaiting office review (status 'pending', or a
  *     call-review source not yet customer_confirmed) — `office_review_pending`
  *   - anything but a plain 'confirmed' visit, or a live tracker state
@@ -286,6 +288,11 @@ const NO_FIT = 'TECH_OUT_AUTO_MOVE_NO_FIT';
  */
 function makeMoveGuard(stop, date) {
   return async ({ trx, technicianId, service }) => {
+    // Work days (GATE_TECH_WORK_DAYS): ranking checked them on a plain read, but the
+    // mover runs as 'admin' (no work-days guard of its own). A work-days edit between
+    // ranking and this commit must not land the stop on a tech who now has the day off.
+    // Failing here is a failed candidate: attemptMoves tries the next one.
+    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: true });
     await assertCapabilitiesActive(trx, technicianId, [service], (rowId, why) => Object.assign(
       new Error(`Cannot auto-move stop ${rowId}: ${why}`),
       { statusCode: 409, status: 409, code: 'TECH_OUT_AUTO_MOVE_CAPABILITY_GUARD', isOperational: true },
@@ -407,6 +414,9 @@ function stopMoveRefusal(stop, absentTechId, date) {
   // A grouped visit the alert didn't know about (grouped after park) is a
   // human decision, same as the up-front alert-payload check.
   if (stop.visit_id) return { reason: 'grouped_visit_manual', skipped: false };
+  // A visit booked by address only has no customer yet: the office decides who takes it. The mover
+  // moves stops silently, so it never touches a stop nobody has been told about by name.
+  if (!stop.customer_id) return { reason: 'no_customer', skipped: false };
   // A call booking still awaiting office review is never touched: the
   // mover's post-commit legacy activation would confirm it (reminders, lead
   // conversion, review card) as a side effect of a technician change.
@@ -497,7 +507,7 @@ async function eligibleRankedCandidates(stop, absentTechId, date) {
   const eligible = [];
   for (const tech of crew) {
     try {
-      await assertAssignableTechnician(tech.id, { conn: db, date });
+      await assertAssignableTechnician(tech.id, { conn: db, date, workDays: true });
       eligible.push(tech);
     } catch (err) {
       if (err.code !== NOT_ASSIGNABLE) throw err;
@@ -513,7 +523,7 @@ function refusalReason(lastErr) {
   // Grouped into a visit between our read and the move: the same
   // manual-decision rule as the up-front visit_id check.
   if (lastErr.code === 'VISIT_MEMBERSHIP_CHANGED') return 'grouped_visit_manual';
-  if (lastErr.code === NO_FIT) return 'no_eligible_candidate';
+  if (lastErr.code === NO_FIT || lastErr.code === NOT_ASSIGNABLE) return 'no_eligible_candidate';
   if (lastErr.code === COMPLETION_IN_FLIGHT) return 'completion_in_progress';
   return `move_failed: ${lastErr.message}`;
 }

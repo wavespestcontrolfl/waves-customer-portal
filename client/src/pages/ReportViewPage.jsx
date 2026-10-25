@@ -1244,7 +1244,7 @@ function formatEnumLabel(value) {
   const special = {
     ghost_ant: 'ghost ants',
     american_roach: 'American roaches',
-    german_roach: 'German roaches',
+    german_roach: 'german roaches',
     fire_ant: 'fire ants',
     spider: 'spiders',
     perimeter_spray: 'Perimeter spray',

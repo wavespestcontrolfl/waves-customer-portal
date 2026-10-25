@@ -47,13 +47,17 @@
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_CALL_PROMISE_AI_CLOSE=true (owner 2026-10-24: an open Waves call promise closes on its own when the same AI check the text-follow-up lane uses finds, across every line (texts both ways, calls, emails, visits booked, moved or completed, estimates, payments), a later record that kept it, quoted exactly; a customer text confirming it was done also closes it. Read at call time via callPromiseAiCloseLive(), strict 'true', dark by default; off = exactly today's behavior. Needs GATE_CALL_COMMITMENTS and PROMISE_EVIDENCE_CLOSE. Staff can Reopen from the Owed tab. Sends nothing to a customer.)
+ *   GATE_CALL_PROMISE_LATER_TEXT_CHECK=true (owner 2026-10-25 "build it": a record proof the call-promise AI check accepted is no longer held for good by any later human text. The AI reads the texts that came after the proof and answers one question: does any of them say this promise was not kept, was undone, went wrong or is still needed? Only a clear no lets the proof close the promise; yes, unclear, a failed read, any later message with no words (a photo) or too long to read whole, more later texts than it reads, and card-number fragments it cannot attribute keep it held as before. Needs GATE_CALL_PROMISE_AI_CLOSE. Read at call time via callPromiseLaterTextCheckLive(), strict 'true', dark by default; off = exactly today's behavior. Staff can Reopen from the Owed tab. Sends nothing to a customer.)
  *   GATE_SETUP_FEE_SETTLED_ANYWHERE=true (owner 2026-10-24 setup-fee alert audit: the "setup fee never invoiced, bill BOTH" admin alert, the completion hold it starts and the alert reconcile also treat the setup fee as settled when the customer's own invoices show it paid, waived or prepaid even though no invoice cites the accepted estimate: a paid line named setup fee or WaveGuard Membership for at least the frozen fee, a live $0 or waived setup-fee line, or a covered non-termite annual-prepay term or paid annual-prepay invoice. Settled = no alert, no hold, the normal visit invoice is made, and a standing alert is closed instead of reopened when the visit is billed. Read at call time via setupFeeSettledAnywhereLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_CALL_ADDRESS_FAMILY_CARD=true (owner 2026-10-24 "yes build": a caller on a number no account carries who states a service address a live customer already has no longer gets a new customer record. The call files ONE suggest-only office card, "<caller> called about <customer>'s home. Add as a contact?", with two actions: Attach as contact (the caller's name, number and role go into the first free service-contact slot of that customer and the call is relinked to it) and New customer (the card is closed and the call is reprocessed, which creates the record the old way). While the gate is on, any family-account card basis also keeps the pass from creating a customer for the call. Read at call time via callAddressFamilyCardLive(), strict 'true', dark by default; off = byte-identical to before. Sends no message and starts no opt-in.)
  *   GATE_NEIGHBORHOOD_NAMING=true (the neighborhood sweep names every live home's community: it looks up homes never checked, names Sarasota homes from the plat number on the county's plat layer, and for a home the county cannot name uses the community the customer said on a call, linked as unconfirmed and kept out of the shared directory (no code filed from it, no entries read for its visits, no shared visitor pass) until the county or the office confirms it; read at call time via neighborhoodNamingLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_ACCESS is live; off = the sweep is byte-identical to before. No message, no bell.)
  *   GATE_NEIGHBORHOOD_ADDRESS_LOOKUP=true (when a home's stored pin sits on another lot, the neighborhood naming asks the county roll for the home's own address and links it only when the lots at that house number, full street and ZIP all name one community; also reads a '#201' unit tail as a unit; read at call time via neighborhoodAddressLookupLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_NAMING is live; off = the pin-only match as before. No message, no bell.)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
+ *   GATE_HIRED_PACKET=true (owner ruling 2026-10-25, D7: the "Hired" button on the Staff page. On a prospective placeholder row an admin enters the hire's name, email, first day and pay, and one click makes the row an active staff account and emails the hire a set-password link (works 7 days) with a pointer to the Onboarding card. A "Resend link" action appears while the hire has not set a password yet. It never changes a customer; it sends ONE staff email per click. Strict opt-in: exactly 'true' in every environment, read at call time via hiredPacketLive(). Ships DARK; off = no button, both endpoints answer 404 before any database work and the Staff list is unchanged. The manual steps (rename, email, Active, Forgot password) still work.)
+ *   GATE_STAFF_DOC_PREFILL=true (owner ruling 2026-10-25: a NEW staff form record opens with fields filled from the staff record, for the Vehicle Use & Commuting Agreement: assigned vehicle, home address and start date from the technicians row. The signer checks each value and saves; a typed value always wins. Never a checkbox, never a typed signature. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffDocPrefillLive(). Ships DARK; off = GET /versions/:id/prefill answers 404 { enabled: false } before any query and the form opens empty. Reads only; sends nothing to anyone.)
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer.)
+ *   GATE_TRUCK_CLOCK_IN=shadow (owner 2026-10-25, "this works": the rule is that a technician's shift starts by itself from the truck's GPS; THIS RELEASE ONLY RECORDS what that rule would do. The first of two triggers each Eastern work day wins: the truck's first GPS arrival at one of that technician's visits, or the start of the truck's first trip of the day (no earlier trip-start of a different trip for that truck in bouncie_webhook_log that Eastern day) within 200 m of the office. It notes whether the technician has no active shift and has a completed Vehicle Use & Commuting Agreement. Training days stay by hand (a trainee rides in the trainer's truck). Read at call time via truckClockInMode(): exactly 'shadow' (trimmed, any case) = decide and record one truck_clock_in_shadow row a day, never write time_entries; anything else, including 'true', = off, no code path runs. 'true' is not a value yet: live clock-in is a separate later change. Clock-out, the 9 PM reminder and the 11 PM close are unchanged. Sends nothing to a customer or staff member.)
  *   GATE_SATELLITE_PALM_COUNT_TYPED=true (owner 2026-10-24 "ok go", follow-up B to #6562: a never-sent estimate whose Tree & Shrub line priced a palm count read from the satellite image (palmCountFromLookup) is sent only after an admin types the palm count from the aerial photo in Review and send. Acknowledging the AI review is no longer enough; a typed count other than the priced one refuses the send with PALM_COUNT_MISMATCH, so the quote is rebuilt with the real count. Read at call time via satellitePalmCountTypedLive(), strict 'true', dark by default; off = the one-click acknowledgment as before. Never sends, never changes a price.)
  *   GATE_TRUCK_KIT=true (truck check, docs/tool-inventory-tracker-scope.md PR 1: a technician whose truck is an equipment row (category vehicle, assigned to them) gets a Truck check in the field workspace listing every equipment row kept on that truck (assigned_vehicle_id, set on Equipment → Assets) and a Today card once the last check is 7 or more days old; a check writes one equipment_checks row, a missing or damaged item opens a maintenance alert (tool_missing / tool_damaged, resolved on Equipment → Maintenance with Found / Lost or Repaired / Retired) and the check rings one office bell per truck that closes itself when every tool alert on the truck is resolved; with kit keys on rows and checklist items (PR 2) the Schedule readiness strip and the technician's Today page say which required tool a truck lacks. Read at call time via truckKitLive(), strict 'true', dark by default; off = GET and POST /api/tech/truck-check answer 404 { enabled: false }, the readiness poll reads nothing from the kit, nothing renders, nothing is written. Never contacts a customer, never changes an item's status by itself.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
@@ -62,6 +66,7 @@
  *   GATE_BID_CHECKLIST=true (Bid Desk PR B, needs GATE_BID_DESK: each bid also carries its solicitation type, scored or pass/fail, a questions-due date, a mandatory job walk, a link to its estimate and proposal, its documents (the attachments of its emails), a per-bid checklist built from templates, and a submission record; adds a 14-day reminder before a confirmed due date, one reminder 2 days before the questions date and one 2 days before the job walk. Admin bell only: nothing goes to a buyer, contractor or agency. Read at call time via bidChecklistLive(), strict 'true', dark by default; off = the new fields are hidden and refused, no new reminder fires, and the Bid Desk works as before.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
+ *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
  *   GATE_CONTACT_LOGIN=true (an on-location contact signs into the customer app with their OWN phone number through the same SMS code login, landing on the account they are a contact for as a CONTACT session: view-only schedule, visit history, technician tracking, service-report documents (never for a contact the report rule withholds from) and their own notification choices (GET/PUT /api/notifications/contact-preferences); every other portal route answers 403 ACCOUNT_HOLDER_ONLY — billing, payments, cards, referrals, credits, requests, chat, property, account deletion, the holder's preferences, push subscriptions. The account holder's own number always wins; a contact number is tried only when no holder row matches, and the contact's session dies at its next refresh once the holder removes them. Per-contact notification choices (service_contact_notification_prefs) only NARROW what the account sends: a purpose the holder turned off stays off. Owner rulings 2026-10-20: view only, no confirm or reschedule; the contact's in-app text-consent checkbox counts as the YES for a pending opt-in ask only, never over a STOP. Read at call time via contactLoginLive(), strict 'true', dark by default; off = a contact number never logs in, an existing contact token is refused (401) and the senders ignore the per-contact table, byte-identical to before. Sends nothing to a customer.)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
@@ -86,6 +91,9 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
+ *   GATE_TECH_WORK_DAYS=true (owner 2026-10-25, work days per technician: a technician row may carry technicians.work_days, the weekdays that person works (the Team tab "Work days" row; empty = every day). On, slot offers, automatic booking and automatic moves skip that technician on a day they do not work, and an automatic booking that lands on such a day stays unassigned for the owner; office saves (schedule create and edit, board assign and drag) still go through and add a plain warning line. Strict opt-in: exactly 'true', read at call time via techWorkDaysLive(). Ships DARK; off = work_days is ignored everywhere and the Team tab shows no editor. Sends nothing to a customer.)
+ *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
+ *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; anything else, including 'true', = off, no resolver call and no query. 'true' is not a value yet: live mode is a separate later change. Never changes a booking, sends nothing to a customer or staff member.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
@@ -3194,6 +3202,11 @@ const gates = {
   // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
   commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
 
+  // Basic payroll settings (owner 2026-10-25): W-4 elections and pay method for W-2
+  // technicians. OFF in every environment; read at call time via payrollLive().
+  // Kill switch: unset GATE_PAYROLL.
+  payroll: process.env.GATE_PAYROLL === 'true',
+
   // Bid unit, private costing and validity controls; default off everywhere.
   // Readers always honor saved quantities and dates after the controls are off.
   commercialBidBuilder: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
@@ -3843,6 +3856,24 @@ const gates = {
   // customer's property_type exactly as before.
   slabHomeNoTax: gateEnvValue('GATE_SLAB_HOME_NO_TAX'),
 
+  // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
+  // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
+  // taxes pest control only for an infestation of a nonresidential building, so
+  // tree and shrub and palm care is not taxed either. Mosquito work keeps its tax.
+  // TaxCalculator.calculateTax reads it at call time via lawnSprayNoTaxLive();
+  // dark by default. Off = these services are taxed by the customer's
+  // property_type exactly as before.
+  lawnSprayNoTax: gateEnvValue('GATE_LAWN_SPRAY_NO_TAX'),
+
+  // Tax worksheets (2026-10-25): Tax > Reports > Sales tax (the Florida DR-15
+  // lines for a month, quarter, half year or year from the books) and 1099s
+  // (who was paid for contract labor or legal and professional work, and who
+  // needs a 1099-NEC). Read-only; Mark filed uses the filing calendar's own
+  // route. Nested under GATE_BANK_IMPORT; read at call time via
+  // taxWorksheetsLive(); dark by default. Off = the routes 404 and the tabs
+  // stay hidden.
+  taxWorksheets: gateEnvValue('GATE_TAX_WORKSHEETS'),
+
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic
@@ -3892,6 +3923,32 @@ const gates = {
   // the time box waits for a customer, as before.
   newApptAddressTimes: gateEnvValue('GATE_NEW_APPT_ADDRESS_TIMES'),
 
+  // New Appointment phone match and one Save (owner 2026-10-24): in the New
+  // customer block, a typed phone is looked up once it has ten digits and
+  // each customer already on that number is offered with one tap ("Use this
+  // customer"), never picked automatically (a household often shares one
+  // phone). Save then adds a new caller and books the visit in one press (the
+  // Add customer button goes away); a known phone or address still stops at
+  // the Attach / Separate account choice, and a total that changes once the
+  // customer exists waits for a second Save. A picked address suggestion
+  // scrolls the best times into view. OFF in every environment; the admin
+  // schedule day view carries it to Dispatch as newCustomerPhoneMatch. Kill
+  // switch: unset — the Add customer button and the two-step flow return.
+  newApptPhoneMatch: gateEnvValue('GATE_NEW_APPT_PHONE_MATCH'),
+
+  // New-caller booking by address (owner 2026-10-25): with no customer
+  // selected, the New customer block open, an address picked from the
+  // suggestions and no name or phone typed, New Appointment's Book saves ONE
+  // visit with that address and no customer (customer_id NULL, source_action
+  // 'admin_new_caller', booking/new-caller-visit.js), stamped with the live
+  // call the office answered (source_call_log_id; the office picks when more
+  // than one is live). Nothing goes to the caller at Book: no text, no email,
+  // no reminder. The call-recording agent links the customer after the call
+  // and sends the confirmation (a later PR, same gate). OFF in every
+  // environment; the admin schedule day view carries it to Dispatch as
+  // newCallerBooking. Kill switch: unset — Book needs a customer, as before.
+  newCallerBooking: gateEnvValue('GATE_NEW_CALLER_BOOKING'),
+
   // Booking rain rank (owner 2026-10-06): the New Appointment best-times rows
   // rank by rain fit before drive. Outdoor bookings (pest, lawn, T&S,
   // mosquito, termite treatment) sort hours with a 60%+ NWS chance in the
@@ -3914,6 +3971,17 @@ const gates = {
   // every environment; read through gateEnvValue() at call time. Kill switch:
   // unset — every route starts and ends at the office, as before.
   techStartPoints: gateEnvValue('GATE_TECH_START_POINTS'),
+
+  // Technician "can move visits" switch (owner 2026-10-25, the way ServiceTitan
+  // gates technician rescheduling): on, a non-admin technician whose Team tab
+  // switch (technicians.can_move_visits) is off cannot move a visit: Quick Move
+  // in the tech app and Quick Move / Reschedule from the dispatch routes answer
+  // "Ask the office to move this visit." Every technician on file when the
+  // column landed keeps moves on; a technician added later starts off. Admins
+  // are never refused. OFF in every environment; read through gateEnvValue()
+  // at call time (scheduling/tech-move-permission.js). Kill switch: unset —
+  // every technician can move their own visits, as before.
+  techMoveSwitch: gateEnvValue('GATE_TECH_MOVE_SWITCH'),
 
   // Customer rain rank (owner 2026-10-08): the same rain-fit rule on the
   // customer booking surfaces. buildBookingAvailability (routes/booking.js:
@@ -3992,6 +4060,29 @@ const gates = {
   // off; auto-dispatch/config.js reads autoDispatchArrivalSearchMode() at
   // call time (config.arrivalSearch). Kill switch: unset.
   autoDispatchArrivalSearch: ['shadow', 'true'].includes(String(process.env.GATE_AUTO_DISPATCH_ARRIVAL_SEARCH || '').trim().toLowerCase()),
+
+  // Auto-dispatch day rules (owner 2026-10-24: "dont skip sundays", "think
+  // sundays should be a last resort", "yes build the 7:30 depature, and make
+  // this ediatble in the admin portal"). On, the 04:10 run also searches
+  // Sundays: a Sunday slot is taken only when no Monday-Saturday slot
+  // qualifies, at most AUTO_DISPATCH_MAX_SUNDAY_MOVES_PER_RUN (2) a run, and
+  // never for a plan that skips weekends. The van leaves at the Settings →
+  // Scheduling departure time (default 07:30; scheduling/departure-time.js)
+  // in the night tool's arrival search, the 04:20 route pass and the day
+  // reports; no visit starts before its window opens. The staff time strip
+  // stops calling Sunday closed. Booking pages do not change. OFF in every
+  // environment; read at call time through autoDispatchDayRulesLive(). Kill
+  // switch: unset.
+  autoDispatchDayRules: gateEnvValue('GATE_AUTO_DISPATCH_DAY_RULES'),
+
+  // Auto-dispatch keeps each visit on its own technician (owner 2026-10-25,
+  // second technician starts early 2027). On, the 04:10 run offers a visit
+  // that has a technician only that technician's slots, and the write
+  // refuses a technician change. Unassigned visits are unchanged. Ships
+  // DARK: exactly 'true'. Registered for logGateStatus only; the run reads
+  // autoDispatchKeepTechLive() at call time (config.keepTech). Kill switch:
+  // unset - the run may move a visit to another technician, as before.
+  autoDispatchKeepTech: process.env.GATE_AUTO_DISPATCH_KEEP_TECH === 'true',
 
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
@@ -4310,8 +4401,20 @@ const gates = {
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
   // Staff source/version UI and APIs. Default off; every request rechecks.
   controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
+  // Staff page "Hired" button + Resend link (owner 2026-10-25, D7). Default off;
+  // reads at call time via hiredPacketLive(). Emails one staff member a
+  // set-password link per click. Kill switch: unset.
+  hiredPacket: gateEnvValue('GATE_HIRED_PACKET'),
+  // Staff form prefill from the staff record (owner 2026-10-25). Default off; reads at
+  // call time via staffDocPrefillLive(). Reads only; sends nothing.
+  staffDocPrefill: gateEnvValue('GATE_STAFF_DOC_PREFILL'),
   // Field Team Program rev 2b: evidence and simulation only; never payroll.
   fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
+  // Auto lunch (owner 2026-10-25): paid hours drop the unpaid meal. A completed
+  // break of 30+ minutes, or 30 minutes on a day over 6 hours unless the tech
+  // taps "No lunch today". This entry is for logGateStatus; the services read
+  // autoLunchLive() at CALL time. Ships DARK: exactly 'true' only. Sends nothing.
+  autoLunch: process.env.GATE_AUTO_LUNCH === 'true',
   // Consultation-link lane ("Book with Adam", scope doc
   // lead-inspection-link-scope.md): the /inspection/:token public page, the
   // buildLeadConsultationLink composer/admin builder, and the recurring-lead
@@ -4561,6 +4664,15 @@ const gates = {
   // multiTechConfirmLive() below. Kill switch: unset GATE_MULTI_TECH_CONFIRM —
   // every confirm-side probe goes back to tech-blind, byte for byte.
   multiTechConfirm: gateEnvValue('GATE_MULTI_TECH_CONFIRM'),
+
+  // Work days per technician (owner 2026-10-25). Ships DARK: exactly 'true'.
+  // Registered for logGateStatus only; consumers read techWorkDaysLive() at
+  // CALL time. Kill switch: unset - work_days is ignored everywhere.
+  techWorkDays: process.env.GATE_TECH_WORK_DAYS === 'true',
+
+  // Service-line map (owner 2026-10-25), SHADOW ONLY. Registered for logGateStatus only;
+  // consumers read serviceLineMapMode() at CALL time. Kill switch: unset.
+  serviceLineMapShadow: String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow',
 
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
@@ -5380,6 +5492,13 @@ function callPromiseAiCloseLive() {
   return process.env.GATE_CALL_PROMISE_AI_CLOSE === 'true';
 }
 
+// GATE_CALL_PROMISE_LATER_TEXT_CHECK read at CALL time — strict `=== 'true'`; unset = kill.
+// call-promise-later-text-check.js: whether a later human text still holds a record proof the AI close
+// accepted. Honoured only while the AI close itself is live.
+function callPromiseLaterTextCheckLive() {
+  return callPromiseAiCloseLive() && process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK === 'true';
+}
+
 // GATE_CALL_ADDRESS_FAMILY_CARD read at CALL time — strict `=== 'true'`; unset = kill.
 // call-family-name-link.js matchStatedAddressAccounts (the stated_address_on_account basis),
 // the processor's no-mint hold on a filed family card, and the card's two actions
@@ -5399,6 +5518,15 @@ function neighborhoodTechActionsLive() {
 // The reads also need the staff documents gate itself.
 function staffOnboardingDocsLive() {
   return process.env.GATE_STAFF_ONBOARDING_DOCS === 'true';
+}
+
+// Truck clock-in (services/truck-clock-in.js), read at CALL time: 'shadow' or 'off'.
+// 'shadow' (exactly, trimmed, any case) decides and records one truck_clock_in_shadow row per
+// technician per Eastern work day and never writes time_entries. Anything else, 'true'
+// included, is off: no code path runs. Live clock-in is a separate later change. Unset is
+// the kill, no redeploy.
+function truckClockInMode() {
+  return String(process.env.GATE_TRUCK_CLOCK_IN || '').trim().toLowerCase() === 'shadow' ? 'shadow' : 'off';
 }
 
 // Caller demotion + booking-confirmation replay after an on-site contact's YES
@@ -5587,6 +5715,20 @@ function ibStaffAutopayOffLive() {
   return process.env.GATE_IB_STAFF_AUTOPAY_OFF === 'true';
 }
 
+// The Staff page "Hired" button (routes/admin-timetracking.js POST
+// /technicians/:id/hire and /hire/resend), read at CALL time. Strict
+// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
+// Each click emails ONE staff member a set-password link, never a customer.
+function hiredPacketLive() {
+  return process.env.GATE_HIRED_PACKET === 'true';
+}
+
+// Staff form prefill (routes/tech-staff-documents.js GET /versions/:id/prefill), read at
+// CALL time. Strict `=== 'true'`, dark in every environment. Reads only.
+function staffDocPrefillLive() {
+  return process.env.GATE_STAFF_DOC_PREFILL === 'true';
+}
+
 // Intelligence Bar accept_estimate (services/intelligence-bar/estimate-accept-tools.js),
 // read at CALL time. Strict `=== 'true'`, dark in every environment.
 function ibAcceptEstimateLive() {
@@ -5725,6 +5867,16 @@ function commercialProposalSignLive() {
   return process.env.GATE_COMMERCIAL_PROPOSAL_SIGN === 'true';
 }
 
+// GATE_COMMERCIAL_AUTOPAY read at CALL time, strict `=== 'true'`, dark by default in every environment (owner 2026-10-24,
+// "autopay default"). The one reader for Auto Pay as a commercial proposal payment term: the builder's Auto Pay choice and
+// prefill (GET/PUT /api/admin/estimates/:id/proposal), the signing chokepoint (services/commercial-proposal-agreement.js
+// agreementTermsConflict) and the Auto Pay setup step after an Auto Pay agreement is signed (routes/contracts-public.js).
+// Off: Auto Pay cannot be saved or signed and every surface is as before. A proposal already saved with Auto Pay keeps
+// it, prints it, and cannot be signed online. Kill: unset.
+function commercialAutopayLive() {
+  return process.env.GATE_COMMERCIAL_AUTOPAY === 'true';
+}
+
 // GATE_TAX_SHARED_BILLS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
 function taxSharedBillsLive() {
   return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_SHARED_BILLS');
@@ -5738,6 +5890,16 @@ function taxReturnEngineLive() {
 // GATE_SLAB_HOME_NO_TAX read at CALL time (so a flip needs no redeploy).
 function slabHomeNoTaxLive() {
   return gateEnvValue('GATE_SLAB_HOME_NO_TAX');
+}
+
+// GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
+function lawnSprayNoTaxLive() {
+  return gateEnvValue('GATE_LAWN_SPRAY_NO_TAX');
+}
+
+// GATE_TAX_WORKSHEETS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
+function taxWorksheetsLive() {
+  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_WORKSHEETS');
 }
 
 // GATE_PUBLIC_LLM_SHARED_CAP read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -6089,6 +6251,23 @@ function autoDispatchArrivalSearchMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
+// GATE_AUTO_DISPATCH_DAY_RULES read at CALL time via gateEnvValue: unset is
+// the kill, no redeploy. The one canonical reader for the night tool
+// (auto-dispatch/config.js), the departure time (scheduling/departure-time.js)
+// and the staff strip's Sunday label (find-time-hints.js). The
+// `autoDispatchDayRules` gates-map entry above is for logGateStatus only.
+function autoDispatchDayRulesLive() {
+  return gateEnvValue('GATE_AUTO_DISPATCH_DAY_RULES');
+}
+
+// GATE_AUTO_DISPATCH_KEEP_TECH read at CALL time - strict `=== 'true'`. The
+// one reader for the night run (auto-dispatch/config.js resolves it once per
+// run as `config.keepTech`; candidate-slots.js and apply.js read that). The
+// `autoDispatchKeepTech` gates-map entry above is for logGateStatus only.
+function autoDispatchKeepTechLive() {
+  return process.env.GATE_AUTO_DISPATCH_KEEP_TECH === 'true';
+}
+
 // GATE_ESTIMATE_CONSULTATION_OFFER read at CALL time — strict `=== 'true'`,
 // same convention as leadInspectionLinkLive(). The `estimateConsultationOffer`
 // gates-map entry above is for logGateStatus only; this is the one canonical
@@ -6177,6 +6356,23 @@ function bookArrivalGraceLive() {
 // gates-map entry above is for logGateStatus only.
 function multiTechConfirmLive() {
   return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
+}
+
+// GATE_TECH_WORK_DAYS read at CALL time - strict `=== 'true'`. The one reader for
+// technicians.work_days (services/technician-eligibility.js): on, a technician
+// is skipped by slot offers and automatic placement on a day they do not work;
+// off, work_days is ignored everywhere (byte-identical to before).
+function techWorkDaysLive() {
+  return process.env.GATE_TECH_WORK_DAYS === 'true';
+}
+
+// GATE_SERVICE_LINE_MAP read at CALL time: 'shadow' or 'off'. 'shadow' (exactly, trimmed, any
+// case) lets the six booking choice points record what the service-line map
+// (services/scheduling/line-technician.js) would pick next to what was actually chosen, in
+// service_line_pick_shadow. Anything else, 'true' included, is off: no resolver call, no
+// query. Live mode is a separate later change. Unset is the kill, no redeploy.
+function serviceLineMapMode() {
+  return String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow' ? 'shadow' : 'off';
 }
 
 // Fresh annual contracts require the term-aware cancellation path. Read both
@@ -6811,6 +7007,12 @@ function pinParkedCheckLive() {
   return process.env.GATE_PIN_PARKED_CHECK === 'true';
 }
 
+// Auto lunch (services/time-tracking.js), read at CALL time. Strict
+// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
+function autoLunchLive() {
+  return process.env.GATE_AUTO_LUNCH === 'true';
+}
+
 // GATE_TRUCK_KIT read at CALL time — strict `=== 'true'`, dark by default
 // (docs/tool-inventory-tracker-scope.md PR 1). The canonical reader for
 // services/truck-kit.js and routes/tech-truck-check.js. Off: both tech routes
@@ -7339,6 +7541,14 @@ function aioGapSweepMonthlyLive() {
   return process.env.GATE_AIO_GAP_SWEEP_MONTHLY === 'true';
 }
 
+// GATE_PAYROLL read at CALL time — strict 'true' only, so an unset variable is
+// off. Gates the basic payroll settings (services/payroll-w4.js, routes/
+// admin-payroll.js): W-4 elections typed from the paper form and each W-2
+// technician's pay method. Stores no SSN and no bank account number.
+function payrollLive() {
+  return process.env.GATE_PAYROLL === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -7452,7 +7662,13 @@ module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
+// GATE_TECH_WORK_DAYS reader, on its own line so gate PRs never conflict.
+module.exports.techWorkDaysLive = techWorkDaysLive;
+// GATE_SERVICE_LINE_MAP reader, on its own line so gate PRs never conflict.
+module.exports.serviceLineMapMode = serviceLineMapMode;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
+module.exports.autoDispatchDayRulesLive = autoDispatchDayRulesLive;
+module.exports.autoDispatchKeepTechLive = autoDispatchKeepTechLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.payAfterFirstVisitLive = payAfterFirstVisitLive;
@@ -7547,6 +7763,10 @@ module.exports.contactReportTextLive = contactReportTextLive;
 module.exports.contactLoginLive = contactLoginLive;
 // GATE_IB_STAFF_AUTOPAY_OFF reader, on its own line.
 module.exports.ibStaffAutopayOffLive = ibStaffAutopayOffLive;
+// GATE_HIRED_PACKET reader, on its own line.
+module.exports.hiredPacketLive = hiredPacketLive;
+// GATE_STAFF_DOC_PREFILL reader, on its own line.
+module.exports.staffDocPrefillLive = staffDocPrefillLive;
 // GATE_IB_ACCEPT_ESTIMATE reader, on its own line.
 module.exports.ibAcceptEstimateLive = ibAcceptEstimateLive;
 // GATE_IB_RECORD_PAYMENT reader, on its own line.
@@ -7691,14 +7911,20 @@ module.exports.ibOpenaiBackupLive = ibOpenaiBackupLive;
 module.exports.ibBillingModeEditLive = ibBillingModeEditLive;
 // GATE_AIO_GAP_SWEEP_MONTHLY reader, on its own line so gate PRs never conflict.
 module.exports.aioGapSweepMonthlyLive = aioGapSweepMonthlyLive;
+// GATE_PAYROLL reader, on its own line so gate PRs never conflict.
+module.exports.payrollLive = payrollLive;
 // GATE_IB_TIER_UPGRADE_EMAIL reader, on its own line so gate PRs never conflict.
 module.exports.ibTierUpgradeEmailLive = ibTierUpgradeEmailLive;
 // GATE_STAFF_ONBOARDING_DOCS reader, on its own line so gate PRs never conflict.
 module.exports.staffOnboardingDocsLive = staffOnboardingDocsLive;
+// GATE_TRUCK_CLOCK_IN reader, on its own line so gate PRs never conflict.
+module.exports.truckClockInMode = truckClockInMode;
 // GATE_CALL_LAST_NAME_LOOKUP reader, on its own line so gate PRs never conflict.
 module.exports.callLastNameLookupLive = callLastNameLookupLive;
 // GATE_PIN_PARKED_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.pinParkedCheckLive = pinParkedCheckLive;
+// GATE_AUTO_LUNCH reader, on its own line so gate PRs never conflict.
+module.exports.autoLunchLive = autoLunchLive;
 module.exports.truckKitLive = truckKitLive;
 // GATE_LAWN_REPORT_CLARITY reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportClarityLive = lawnReportClarityLive;
@@ -7797,6 +8023,17 @@ function pestLabelFactsLive() {
 }
 // GATE_PEST_LABEL_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.pestLabelFactsLive = pestLabelFactsLive;
+
+// GATE_SPECIALTY_REPORT_VOICE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-24,
+// "yes build voice"). On (with GATE_REPORT_WRITER_RULES), the termite, cockroach, rodent and mosquito report writers
+// get one prompt in the pest report's voice (service-report/specialty-report-voice.js) in place of their stacked
+// blocks, and the route leaves out the same empty input lines as the quiet pest writer. Output screens are unchanged.
+// Off = their prompts and inputs are byte-identical to before.
+function specialtyReportVoiceLive() {
+  return process.env.GATE_SPECIALTY_REPORT_VOICE === 'true';
+}
+// GATE_SPECIALTY_REPORT_VOICE reader, on its own line so gate PRs never conflict.
+module.exports.specialtyReportVoiceLive = specialtyReportVoiceLive;
 
 // GATE_LAWN_TS_STOCK_ADVISORY read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-20,
 // "make lawn and tree & shrub work the same as pest"). On, a lawn or tree & shrub visit's completion may take a
@@ -7975,12 +8212,17 @@ module.exports.mosquitoMistingLive = mosquitoMistingLive;
 module.exports.bidKitLive = bidKitLive;
 // GATE_COMMERCIAL_PROPOSAL_SIGN reader, on its own line so gate PRs never conflict.
 module.exports.commercialProposalSignLive = commercialProposalSignLive;
+module.exports.commercialAutopayLive = commercialAutopayLive;
 // GATE_TAX_SHARED_BILLS reader, on its own line so gate PRs never conflict.
 module.exports.taxSharedBillsLive = taxSharedBillsLive;
 // GATE_TAX_RETURN_ENGINE reader, on its own line so gate PRs never conflict.
 module.exports.taxReturnEngineLive = taxReturnEngineLive;
 // GATE_SLAB_HOME_NO_TAX reader, on its own line so gate PRs never conflict.
 module.exports.slabHomeNoTaxLive = slabHomeNoTaxLive;
+// GATE_LAWN_SPRAY_NO_TAX reader, on its own line so gate PRs never conflict.
+module.exports.lawnSprayNoTaxLive = lawnSprayNoTaxLive;
+// GATE_TAX_WORKSHEETS reader, on its own line so gate PRs never conflict.
+module.exports.taxWorksheetsLive = taxWorksheetsLive;
 // GATE_PUBLIC_LLM_SHARED_CAP reader, on its own line so gate PRs never conflict.
 module.exports.publicLlmSharedCapLive = publicLlmSharedCapLive;
 // GATE_SMS_FOLLOWUP_WITNESS_FIX reader, on its own line so gate PRs never conflict.
@@ -7989,6 +8231,8 @@ module.exports.smsFollowupWitnessFixLive = smsFollowupWitnessFixLive;
 module.exports.setupFeeSettledAnywhereLive = setupFeeSettledAnywhereLive;
 // GATE_CALL_PROMISE_AI_CLOSE reader, on its own line so gate PRs never conflict.
 module.exports.callPromiseAiCloseLive = callPromiseAiCloseLive;
+// GATE_CALL_PROMISE_LATER_TEXT_CHECK reader, on its own line so gate PRs never conflict.
+module.exports.callPromiseLaterTextCheckLive = callPromiseLaterTextCheckLive;
 // GATE_SATELLITE_PALM_COUNT_TYPED reader, on its own line so gate PRs never conflict.
 module.exports.satellitePalmCountTypedLive = satellitePalmCountTypedLive;
 // GATE_CALL_ADDRESS_FAMILY_CARD reader, on its own line so gate PRs never conflict.

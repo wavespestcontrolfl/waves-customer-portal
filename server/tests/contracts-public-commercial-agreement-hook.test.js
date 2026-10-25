@@ -57,13 +57,16 @@ jest.mock('../services/termite-annual-activation', () => ({
   activateTermiteAnnualPlanForSignedContract: jest.fn().mockResolvedValue({ activated: true }),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
-jest.mock('../services/commercial-proposal-agreement', () => ({ handleAgreementSigned: jest.fn().mockResolvedValue({ alerted: true }) }));
+jest.mock('../services/commercial-proposal-agreement', () => ({
+  handleAgreementSigned: jest.fn().mockResolvedValue({ alerted: true }),
+  autopayNextStep: jest.fn().mockResolvedValue(null),
+}));
 
 const express = require('express');
 const db = require('../models/db');
 const contractsPublic = require('../routes/contracts-public');
 const { sendSignedContractCopy } = require('../services/contract-signed-email');
-const { handleAgreementSigned } = require('../services/commercial-proposal-agreement');
+const { handleAgreementSigned, autopayNextStep } = require('../services/commercial-proposal-agreement');
 const NotificationService = require('../services/notification-service');
 
 async function withServer(fn) {
@@ -120,6 +123,7 @@ beforeEach(() => {
   sendSignedContractCopy.mockClear();
   NotificationService.notifyAdmin.mockClear();
   handleAgreementSigned.mockClear();
+  autopayNextStep.mockClear();
 });
 
 const signBody = { signedName: 'Sam Customer', initials: 'SC', agreeElectronic: true, agreeDocumentTerms: true };
@@ -145,6 +149,21 @@ describe('commercial proposal agreement sign hook', () => {
     expect(handleAgreementSigned).toHaveBeenCalledWith({ contractId: CONTRACT_ID });
     expect(sendSignedContractCopy).toHaveBeenCalledWith(CONTRACT_ID);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // No Auto Pay next step: the response is exactly the signed contract, no new key.
+    expect(autopayNextStep).toHaveBeenCalledWith({ contractId: CONTRACT_ID });
+    expect(body).not.toHaveProperty('autopaySetup');
+  });
+
+  test('an Auto Pay agreement answers with its next step, read BEFORE the office alert is raised (GATE_COMMERCIAL_AUTOPAY)', async () => {
+    const order = [];
+    autopayNextStep.mockImplementationOnce(async () => { order.push('next-step'); return { state: 'setup', url: 'https://portal.example/secure/tok' }; });
+    handleAgreementSigned.mockImplementationOnce(async () => { order.push('alert'); return { alerted: true }; });
+    wireCustomerContracts(preSignRow());
+    const { status, body } = await sign();
+    expect(status).toBe(200);
+    expect(body.signed).toBe(true);
+    expect(body.autopaySetup).toEqual({ state: 'setup', url: 'https://portal.example/secure/tok' });
+    expect(order).toEqual(['next-step', 'alert']);
   });
 
   test('any other document template is untouched by the hook', async () => {
@@ -152,6 +171,7 @@ describe('commercial proposal agreement sign hook', () => {
     const { status } = await sign();
     expect(status).toBe(200);
     expect(handleAgreementSigned).not.toHaveBeenCalled();
+    expect(autopayNextStep).not.toHaveBeenCalled();
     expect(sendSignedContractCopy).toHaveBeenCalledWith(CONTRACT_ID);
   });
 

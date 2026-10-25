@@ -82,6 +82,33 @@ const summaryAnswer = {
   },
 };
 
+it('passes a last-resort day through, and a closed day stays closed', async () => {
+  const hours = [{ start_time: '10:00', end_time: '11:00', detour_minutes: 12, technician: { id: 'tech', name: 'A' } }];
+  const fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      ...summaryAnswer,
+      summary: {
+        days: [
+          { date: '2035-01-07', status: 'open', last_resort: true, hours },
+          { date: '2035-01-08', status: 'open', closed: true, hours },
+          { date: '2035-01-09', status: 'open', last_resort: false, hours },
+        ],
+      },
+    }),
+  });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00', pickedEnd: '15:00',
+  }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  const [sunday, closed, plain] = result.current.availability.days;
+  expect(sunday).toMatchObject({ date: '2035-01-07', last_resort: true });
+  expect(sunday.closed).toBeUndefined();
+  expect(closed.closed).toBe(true);
+  expect(plain.last_resort).toBeUndefined();
+});
+
 it('one search around the picked date answers availability', async () => {
   const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => summaryAnswer });
   vi.stubGlobal('fetch', fetch);

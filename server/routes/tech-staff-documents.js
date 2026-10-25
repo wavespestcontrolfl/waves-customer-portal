@@ -6,7 +6,7 @@ const { parseETDateTime, etParts, etDateString } = require('../utils/datetime-et
 const { validate, reject } = require('../services/staff-document-source');
 const documents = require('../services/staff-documents');
 const onboarding = require('../services/staff-onboarding');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, staffDocPrefillLive } = require('../config/feature-gates');
 const router = express.Router();
 router.use(adminAuthenticate, requireTechOrAdmin);
 router.use((req, res, next) => { res.set('Cache-Control', 'private, no-store'); next(); });
@@ -73,7 +73,8 @@ router.post('/drafts', requireAdmin, handle(async (req, res) => {
 router.get('/:id', handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   if (req.query.version) validate(uuid.required(), req.query.version);
-  res.json(await documents.detail(req.params.id, actor(req), req.query.version, req.query.at ? instant(req.query.at) : null));
+  // `prefill` tells the form whether to ask for a prefill (GATE_STAFF_DOC_PREFILL).
+  res.json({ ...await documents.detail(req.params.id, actor(req), req.query.version, req.query.at ? instant(req.query.at) : null), prefill: staffDocPrefillLive() });
 }));
 router.post('/:id/onboarding-required', requireAdmin, handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
@@ -99,6 +100,13 @@ router.post('/versions/:id/records', handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   validate(Joi.object({ id: uuid, base_updated_at: Joi.string().isoDate(), content_hash: Joi.string().length(64).required(), owner_id: uuid.required(), due_at: Joi.string().required(), answers: Joi.object().required(), completed_steps: Joi.array().items(Joi.string()).max(80).required(), complete: Joi.boolean().required() }), req.body);
   res.json({ record: await documents.saveRecord(req.params.id, { ...req.body, due_at: instant(req.body.due_at) }, actor(req)) });
+}));
+// Form prefill from the staff record (GATE_STAFF_DOC_PREFILL). Dark = 404 before any query. Reads only.
+router.get('/versions/:id/prefill', handle(async (req, res) => {
+  if (!staffDocPrefillLive()) return res.status(404).json({ enabled: false });
+  validate(uuid.required(), req.params.id);
+  validate(uuid.required(), req.query.owner_id);
+  res.json(await documents.prefillAnswers(req.params.id, req.query.owner_id, actor(req)));
 }));
 router.get('/:id/pdf', handle(async (req, res) => {
   validate(uuid.required(), req.params.id);

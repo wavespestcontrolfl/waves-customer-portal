@@ -36,6 +36,7 @@ import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
 import { describeCardRequestState, describeCardRequestResult, canSendCardRequest } from './cardLinkStatus';
 import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 import { directionsHref } from '../../lib/directionsHref';
+import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -142,6 +143,10 @@ export default function MobileAppointmentDetailSheet({
   // /rain-out, POST /card-request, PUT /update-details and POST
   // /admin/schedule answer with 403 for a non-admin.
   adminActions = true,
+  // GATE_NEW_CALLER_BOOKING (the day view's newCallerBooking): a visit booked by
+  // address offers Link customer; onCustomerLinked refetches the day.
+  newCallerBooking = false,
+  onCustomerLinked,
 }) {
   const [note, setNote] = useState(service?.notes || '');
   const [showOutcome, setShowOutcome] = useState(false);
@@ -679,6 +684,10 @@ export default function MobileAppointmentDetailSheet({
           </button>
         )}
 
+        {!service.customerId && service.awaitingCustomerLink && newCallerBooking && adminActions && (
+          <NewCallerLinkPanel serviceId={service.id} onLinked={onCustomerLinked} />
+        )}
+
         {/* Customer */}
         {service.customerId && (
           <section className="mt-8">
@@ -1152,5 +1161,138 @@ export default function MobileAppointmentDetailSheet({
       )}
     </div>,
     document.body,
+  );
+}
+
+// GATE_NEW_CALLER_BOOKING: a visit booked by address waits for its customer.
+// Link customer finds the caller in Customers and links the visit
+// (PUT /admin/schedule/new-caller/:id/link); the confirmation text goes out
+// unless the office unticks it.
+function NewCallerLinkPanel({ serviceId, onLinked }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState(null);
+  const [searchFailed, setSearchFailed] = useState(false);
+  const [picked, setPicked] = useState(null);
+  const [sendConfirmation, setSendConfirmation] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const term = query.trim();
+    if (!open || term.length < 2) {
+      setResults(null);
+      setSearchFailed(false);
+      return undefined;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      adminFetch(`/admin/customers?search=${encodeURIComponent(term)}&limit=10`)
+        .then((data) => {
+          if (cancelled) return;
+          setResults(Array.isArray(data?.customers) ? data.customers : []);
+          setSearchFailed(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setResults(null);
+          setSearchFailed(true);
+        });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [open, query]);
+
+  const nameOf = (customer) => [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'This customer';
+  const link = async () => {
+    if (!picked || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await adminFetch(`/admin/schedule/new-caller/${serviceId}/link`, {
+        method: 'PUT',
+        body: JSON.stringify({ customerId: picked.id, sendConfirmation }),
+      });
+      if (result?.warning) showScheduleSaveNotice(result.warning);
+      onLinked?.(result);
+    } catch (err) {
+      setError(err?.message || 'The visit was not linked. Try again.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="mt-8" aria-label="Link customer">
+      <div className="text-zinc-900 font-medium" style={{ fontSize: 20, marginBottom: 10 }}>
+        Customer
+      </div>
+      <div className="text-ink-secondary" style={{ fontSize: 14 }}>
+        New caller: no customer is linked yet. The call-recording agent links one after the call, or you can link it here.
+      </div>
+      {!open ? (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="mt-3 w-full border border-hairline border-zinc-300 rounded-sm bg-white text-zinc-900 font-medium hover:bg-zinc-50"
+          style={{ fontSize: 14, minHeight: 44 }}
+        >
+          Link customer
+        </button>
+      ) : (
+        <div className="mt-3 flex flex-col" style={{ gap: 8 }}>
+          <label className="flex flex-col text-zinc-900" style={{ fontSize: 14, gap: 4 }}>
+            Search customers
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => { setQuery(e.target.value); setPicked(null); }}
+              placeholder="Name or phone"
+              className="w-full border border-hairline border-zinc-300 rounded-sm px-3"
+              style={{ fontSize: 14, minHeight: 44 }}
+            />
+          </label>
+          {searchFailed && (
+            <div className="text-alert-fg" style={{ fontSize: 14 }}>The search did not load. Type again to retry.</div>
+          )}
+          {Array.isArray(results) && results.length === 0 && (
+            <div className="text-ink-secondary" style={{ fontSize: 14 }}>No customer matches.</div>
+          )}
+          {Array.isArray(results) && results.length > 0 && (
+            <ul className="flex flex-col" style={{ gap: 4, listStyle: 'none', margin: 0, padding: 0 }}>
+              {results.map((customer) => (
+                <li key={customer.id}>
+                  <button
+                    type="button"
+                    aria-pressed={picked?.id === customer.id}
+                    onClick={() => setPicked(customer)}
+                    className={`w-full text-left border border-hairline rounded-sm px-3 ${picked?.id === customer.id ? 'border-zinc-900 bg-zinc-50' : 'border-zinc-200 bg-white'}`}
+                    style={{ fontSize: 14, minHeight: 44 }}
+                  >
+                    {nameOf(customer)}{customer.phone ? ` · ${customer.phone}` : ''}{customer.address ? ` · ${customer.address}` : ''}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {picked && (
+            <>
+              <label className="flex items-center text-zinc-900" style={{ fontSize: 14, gap: 8, minHeight: 44 }}>
+                <input type="checkbox" checked={sendConfirmation} onChange={(e) => setSendConfirmation(e.target.checked)} style={{ width: 18, height: 18 }} />
+                Send the confirmation text
+              </label>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={link}
+                className="w-full rounded-sm bg-zinc-900 text-white font-medium disabled:opacity-50"
+                style={{ fontSize: 14, minHeight: 44 }}
+              >
+                {busy ? 'Linking…' : `Link to ${nameOf(picked)}`}
+              </button>
+            </>
+          )}
+          {error && <div role="alert" className="text-alert-fg" style={{ fontSize: 14 }}>{error}</div>}
+        </div>
+      )}
+    </section>
   );
 }

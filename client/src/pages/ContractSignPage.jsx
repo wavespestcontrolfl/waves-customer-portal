@@ -94,6 +94,32 @@ function BackToEstimateButton({ contract }) {
   );
 }
 
+// A Commercial Pest Service Agreement on Auto Pay (GATE_COMMERCIAL_AUTOPAY): the sign response carries the next step,
+// saving a card or bank account on the Auto Pay setup page (a link minted for this customer; nothing is charged), or
+// says Auto Pay is already set up. The copy is the setup page's own.
+function AutopayNextStep({ autopaySetup }) {
+  if (autopaySetup?.state === 'setup' && autopaySetup.url) {
+    return (
+      <div data-testid="autopay-next-step" style={{ marginTop: SP.md }}>
+        <p style={{ margin: 0, color: DOC.muted, fontSize: FS.body, lineHeight: LH.body }}>
+          Save a card or bank account and each completed service is paid automatically. Nothing is charged today.
+        </p>
+        <BrandButton type="button" fullWidth style={{ marginTop: SP.sm }} onClick={() => window.location.assign(autopaySetup.url)}>
+          Save your card or bank account
+        </BrandButton>
+      </div>
+    );
+  }
+  if (autopaySetup?.state === 'on') {
+    return (
+      <p data-testid="autopay-next-step" style={{ margin: `${SP.md}px 0 0`, color: DOC.muted, fontSize: FS.body, lineHeight: LH.body }}>
+        Auto Pay is set up. Nothing was charged today — after each completed service, that service’s amount is charged to your saved payment method automatically. You can change or remove it anytime in the Waves app.
+      </p>
+    );
+  }
+  return null;
+}
+
 export default function ContractSignPage() {
   const { token } = useParams();
   // Always reflects the active token so an in-flight sign POST can tell if the
@@ -107,6 +133,7 @@ export default function ContractSignPage() {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [signed, setSigned] = useState(false);
+  const [autopaySetup, setAutopaySetup] = useState(null);
   const [form, setForm] = useState({
     initials: '',
     signedName: '',
@@ -148,6 +175,7 @@ export default function ContractSignPage() {
     setError('');
     setSubmitting(false);
     setSigned(false);
+    setAutopaySetup(null);
     setForm({
       initials: '',
       signedName: '',
@@ -222,6 +250,7 @@ export default function ContractSignPage() {
       if (submittedToken !== tokenRef.current) return;
       if (!res.ok) throw new Error(body.error || 'Could not sign contract');
       setContract(body.contract);
+      setAutopaySetup(body.autopaySetup || null);
       setSigned(true);
     } catch (err) {
       if (submittedToken !== tokenRef.current) return;
@@ -335,6 +364,7 @@ export default function ContractSignPage() {
                 <p style={{ margin: '8px 0 0', color: DOC.muted, fontSize: FS.body, lineHeight: LH.body }}>
                   Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature{isAutopay ? ' and authorization' : ''}.
                 </p>
+                <AutopayNextStep autopaySetup={autopaySetup} />
                 <BackToEstimateButton contract={contract} />
               </div>
             ) : !needsSignature ? (

@@ -20,7 +20,7 @@ const logger = require('./logger');
 // refusal reuses it rather than hand-rolling a second list: 'completed' is
 // deliberately absent (normal completion billing) and so is 'rescheduled'
 // (a pending reschedule REQUEST parks the same row — not yet terminal).
-const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
+const { VISIT_NEVER_RAN_STATUSES, visitHasNoCustomerError } = require('./invoice-helpers');
 
 // Shared pre-completion mint: advisory-lock + replay-check + create, WITH the
 // estimate-deposit roll-forward. Completion REUSES a pre-minted invoice instead
@@ -121,6 +121,28 @@ async function assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId, pac
     throw err;
   }
   if (packetId && owner?.id !== packetId) throw new Error('Visit invoice ownership mismatch');
+}
+
+// Call under the existing mint lock (InvoiceService.create runs it for every
+// visit-linked invoice). Billing Recovery recorded that another live invoice
+// already bills this visit ('billed_elsewhere' — a plan prepay, a combined
+// multi-home invoice): one more invoice for it bills the customer twice. A
+// covering invoice that is void / refunded / cancelled settles nothing, so
+// the visit bills normally again.
+async function assertScheduledInvoiceNotBilledElsewhere(trx, scheduledServiceId) {
+  const covering = await trx('visit_billing_dispositions as d')
+    .join('invoices as i', 'i.id', 'd.invoice_id')
+    .where('d.scheduled_service_id', scheduledServiceId)
+    .where('d.disposition', 'billed_elsewhere')
+    .whereNotIn('i.status', ['void', ...TERMINAL_INVOICE_STATUSES])
+    .first('i.invoice_number');
+  if (!covering) return;
+  const err = new Error(`This visit is billed on invoice ${covering.invoice_number}. Add charges to that invoice, or void it first.`);
+  err.status = 409;
+  err.statusCode = 409;
+  err.isOperational = true;
+  err.code = 'VISIT_BILLED_ELSEWHERE';
+  throw err;
 }
 
 // The ONE lock chain every scheduled-price invoice writer takes, in the ONE
@@ -315,6 +337,9 @@ async function mintScheduledServiceInvoiceWithDeposit({
           e.status = 404;
           throw e;
         }
+        // A visit booked by address only has no customer to bill (invoices.customer_id is NOT NULL).
+        // Refused here, AFTER the caller's in-lock ownership recheck, so an unowned tech still gets 404.
+        if (!lockedSvc.customer_id) throw visitHasNoCustomerError();
         if (String(lockedSvc.customer_id) !== String(svc.customer_id)
           || String(lockedSvc.source_estimate_id || '') !== String(sourceEstimateId || '')
           // Codex round-6 P1: a sibling-coverage verdict (both the
@@ -456,6 +481,7 @@ module.exports = {
   acquireScheduledInvoiceMintLock,
   tryAcquireScheduledInvoiceMintLock,
   assertScheduledInvoiceNotPacketOwned,
+  assertScheduledInvoiceNotBilledElsewhere,
   acquireScheduledMintLockChain,
   findAdoptableScheduledInvoice,
   adoptScheduledInvoiceUnderMintLock,

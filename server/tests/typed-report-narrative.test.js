@@ -706,7 +706,9 @@ test('clean model copy is accepted; a withheld pesticide echo falls back', async
   // the follow-up, so the ratified next-step sentence is appended verbatim,
   // and mandatory care sentences embedded in the ratified BODY (the
   // "keep treated areas undisturbed" obligation) append too (codex r2+r3)
-  expect(accepted).toContain(clean);
+  // "german cockroaches" takes a small g mid-sentence (owner 2026-10-25)
+  expect(accepted).toContain(clean.replace('with German cockroaches', 'with german cockroaches'));
+  expect(accepted).not.toContain('German cockroaches');
   // with the follow-up on the schedule its timed sentence left the ratified
   // copy (owner ruling 2026-09-28), so it is never appended either
   expect(accepted).not.toContain('10–14 days');

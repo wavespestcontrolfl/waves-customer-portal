@@ -13,6 +13,12 @@ const {
   assertAssignableTechnician,
   employmentPatch,
   absentTechDays,
+  offDayTechDays,
+  normalizeWorkDays,
+  dayOfWeekOfDate,
+  isOffDay,
+  offDayWarning,
+  offDayWarningsFor,
 } = require('../services/technician-eligibility');
 
 function connReturning(row, { transaction = false } = {}) {
@@ -224,6 +230,199 @@ describe('technician eligibility', () => {
       const { conn: conn2, chain: chain2 } = connAbsenceRows([]);
       await absentTechDays(conn2, { dateFrom: '2026-10-01', dateTo: '2026-10-07', technicianIds: [] });
       expect(chain2.whereIn).not.toHaveBeenCalled();
+    });
+  });
+
+  // GATE_TECH_WORK_DAYS (owner 2026-10-25): technicians.work_days, 0 = Sunday.
+  describe('work days (GATE_TECH_WORK_DAYS)', () => {
+    const MON_THU = [1, 2, 3, 4];
+    afterEach(() => { delete process.env.GATE_TECH_WORK_DAYS; });
+    const gateOn = () => { process.env.GATE_TECH_WORK_DAYS = 'true'; };
+
+    test('normalizeWorkDays: sorted and de-duplicated; all seven, empty or unreadable = every day (null)', () => {
+      expect(normalizeWorkDays([4, 1, 3, 2, 2])).toEqual([1, 2, 3, 4]);
+      expect(normalizeWorkDays('{1,2,3,4}')).toEqual([1, 2, 3, 4]);
+      expect(normalizeWorkDays(['1', '2'])).toEqual([1, 2]);
+      expect(normalizeWorkDays([0, 1, 2, 3, 4, 5, 6])).toBeNull();
+      expect(normalizeWorkDays([])).toBeNull();
+      expect(normalizeWorkDays(null)).toBeNull();
+      expect(normalizeWorkDays(undefined)).toBeNull();
+      expect(normalizeWorkDays([7])).toBeNull();
+      expect(normalizeWorkDays([1.5])).toBeNull();
+      expect(normalizeWorkDays('nope')).toBeNull();
+    });
+
+    test('dayOfWeekOfDate reads the calendar date itself: Sunday = 0, impossible dates = null', () => {
+      expect(dayOfWeekOfDate('2026-10-25')).toBe(0); // Sunday
+      expect(dayOfWeekOfDate('2026-10-26')).toBe(1);
+      expect(dayOfWeekOfDate('2026-10-30')).toBe(5);
+      expect(dayOfWeekOfDate('2026-10-31T00:00:00.000Z')).toBe(6);
+      expect(dayOfWeekOfDate(new Date('2026-10-30T00:00:00.000Z'))).toBe(5); // a pg DATE read back as a Date
+      expect(dayOfWeekOfDate('2026-02-31')).toBeNull();
+      expect(dayOfWeekOfDate('soon')).toBeNull();
+      expect(dayOfWeekOfDate(null)).toBeNull();
+    });
+
+    test('gate off: nothing is ever an off day, whatever work_days says', () => {
+      expect(isOffDay({ work_days: MON_THU }, '2026-10-30')).toBe(false);
+      expect(offDayWarning({ name: 'Tech One', work_days: MON_THU }, '2026-10-30')).toBeNull();
+    });
+
+    test('gate must be exactly "true"', () => {
+      process.env.GATE_TECH_WORK_DAYS = '1';
+      expect(isOffDay({ work_days: MON_THU }, '2026-10-30')).toBe(false);
+      process.env.GATE_TECH_WORK_DAYS = 'TRUE';
+      expect(isOffDay({ work_days: MON_THU }, '2026-10-30')).toBe(false);
+    });
+
+    test('gate on: NULL / missing work_days = works every day', () => {
+      gateOn();
+      expect(isOffDay({ work_days: null }, '2026-10-30')).toBe(false);
+      expect(isOffDay({}, '2026-10-30')).toBe(false);
+      expect(isOffDay(null, '2026-10-30')).toBe(false);
+    });
+
+    test('gate on: a Monday-to-Thursday week is off Friday, Saturday and Sunday', () => {
+      gateOn();
+      const tech = { work_days: MON_THU };
+      const week = ['2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01'];
+      expect(week.map((d) => isOffDay(tech, d))).toEqual([false, false, false, false, true, true, true]);
+    });
+
+    test('gate on: weekdays hold across both DST changes (calendar dates, not clock hours)', () => {
+      gateOn();
+      const tech = { work_days: MON_THU };
+      // Fall back Sun 2026-11-01 and spring forward Sun 2027-03-14 (America/New_York).
+      expect(isOffDay(tech, '2026-11-01')).toBe(true);
+      expect(isOffDay(tech, '2026-11-02')).toBe(false); // Monday after fall back
+      expect(isOffDay(tech, '2027-03-12')).toBe(true); // Friday
+      expect(isOffDay(tech, '2027-03-14')).toBe(true); // Sunday, the 23-hour day
+      expect(isOffDay(tech, '2027-03-15')).toBe(false); // Monday after spring forward
+      expect(isOffDay(tech, '2027-03-18')).toBe(false); // Thursday
+    });
+
+    test('offDayWarning names the weekday in plain words', () => {
+      gateOn();
+      expect(offDayWarning({ name: 'Tech One', work_days: MON_THU }, '2026-10-30')).toBe('Tech One does not work on Fridays.');
+      expect(offDayWarning({ name: 'Tech One', work_days: MON_THU }, '2026-10-28')).toBeNull();
+      expect(offDayWarning({ work_days: MON_THU }, '2026-11-01')).toBe('This technician does not work on Sundays.');
+    });
+
+    function connWithWorkDays(rows) {
+      const chain = {
+        whereNotNull: jest.fn(() => chain), whereIn: jest.fn(() => chain),
+        select: jest.fn(async () => rows),
+      };
+      const conn = jest.fn(() => chain);
+      return { conn, chain };
+    }
+
+    test('offDayTechDays lists every off date in range across a DST change; empty with the gate off', async () => {
+      const { conn, chain } = connWithWorkDays([{ id: 't1', work_days: MON_THU }, { id: 't2', work_days: null }]);
+      expect(await offDayTechDays(conn, { dateFrom: '2026-10-26', dateTo: '2026-11-08' })).toEqual(new Set());
+      expect(conn).not.toHaveBeenCalled();
+      gateOn();
+      const days = await offDayTechDays(conn, { dateFrom: '2026-10-26', dateTo: '2026-11-08', technicianIds: ['t1', 't2'] });
+      expect(days).toEqual(new Set([
+        't1:2026-10-30', 't1:2026-10-31', 't1:2026-11-01', 't1:2026-11-06', 't1:2026-11-07', 't1:2026-11-08',
+      ]));
+      expect(chain.whereNotNull).toHaveBeenCalledWith('work_days');
+      expect(chain.whereIn).toHaveBeenCalledWith('id', ['t1', 't2']);
+    });
+
+    function connAbsencesAndWorkDays(absenceRows, techRows) {
+      const absences = {
+        whereBetween: jest.fn(() => absences), whereNull: jest.fn(() => absences), whereIn: jest.fn(() => absences),
+        select: jest.fn(async () => absenceRows),
+      };
+      const techs = {
+        whereNotNull: jest.fn(() => techs), whereIn: jest.fn(() => techs), select: jest.fn(async () => techRows),
+      };
+      const conn = jest.fn((table) => (table === 'technicians' ? techs : absences));
+      return { conn, techs };
+    }
+
+    test('absentTechDays: gate off reads no technicians row (byte-identical); gate on adds off days beside absences', async () => {
+      const args = { dateFrom: '2026-10-26', dateTo: '2026-11-01', technicianIds: ['t1'] };
+      const off = connAbsencesAndWorkDays([{ technician_id: 't1', absence_date: '2026-10-27' }], [{ id: 't1', work_days: MON_THU }]);
+      expect(await absentTechDays(off.conn, args)).toEqual(new Set(['t1:2026-10-27']));
+      expect(off.techs.select).not.toHaveBeenCalled();
+      gateOn();
+      const on = connAbsencesAndWorkDays([{ technician_id: 't1', absence_date: '2026-10-27' }], [{ id: 't1', work_days: MON_THU }]);
+      expect(await absentTechDays(on.conn, args)).toEqual(new Set(['t1:2026-10-27', 't1:2026-10-30', 't1:2026-10-31', 't1:2026-11-01']));
+    });
+
+    test('absentTechDays: includeOffDays false (the open-visit nudge) returns absences only, even with the gate on', async () => {
+      gateOn();
+      const { conn, techs } = connAbsencesAndWorkDays([], [{ id: 't1', work_days: MON_THU }]);
+      const days = await absentTechDays(conn, { dateFrom: '2026-10-26', dateTo: '2026-11-01', technicianIds: ['t1'], includeOffDays: false });
+      expect(days).toEqual(new Set());
+      expect(techs.select).not.toHaveBeenCalled();
+    });
+
+    describe('assertAssignableTechnician workDays option', () => {
+      const ROW = { id: 't1', name: 'Tech One', employment_status: 'active', field_dispatchable: true, work_days: MON_THU };
+      const connFor = (row) => connWithAbsence(row, undefined).conn;
+
+      test('without the option an off day is accepted (office paths), and work_days is not even read', async () => {
+        gateOn();
+        const { conn, techChain } = connWithAbsence(ROW, undefined);
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-30' })).resolves.toBe(ROW);
+        expect(techChain.first).toHaveBeenCalledWith('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active');
+      });
+
+      test('with the option and the gate on, an off day throws 422 TECH_NOT_ASSIGNABLE with offDay set', async () => {
+        gateOn();
+        await expect(assertAssignableTechnician('t1', { conn: connFor(ROW), date: '2026-10-30', workDays: true })).rejects.toMatchObject({
+          status: 422,
+          statusCode: 422,
+          isOperational: true,
+          code: NOT_ASSIGNABLE,
+          offDay: true,
+          technicianId: 't1',
+          message: expect.stringMatching(/Tech One does not work on Fridays \(2026-10-30\) and cannot be assigned work/),
+        });
+      });
+
+      test('with the option, a work day passes and reads work_days', async () => {
+        gateOn();
+        const { conn, techChain } = connWithAbsence(ROW, undefined);
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-29', workDays: true })).resolves.toBe(ROW);
+        expect(techChain.first).toHaveBeenCalledWith('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active', 'work_days');
+      });
+
+      test('with the option but the gate off, an off day passes with the original column list', async () => {
+        const { conn, techChain } = connWithAbsence(ROW, undefined);
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-30', workDays: true })).resolves.toBe(ROW);
+        expect(techChain.first).toHaveBeenCalledWith('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active');
+      });
+
+      test('with the option but no date nothing is checked', async () => {
+        gateOn();
+        await expect(assertAssignableTechnician('t1', { conn: connFor(ROW), workDays: true })).resolves.toBe(ROW);
+      });
+
+      test('an absence still wins the reason when the day is also an off day', async () => {
+        gateOn();
+        const { conn } = connWithAbsence(ROW, { id: 'abs-1' });
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-30', workDays: true })).rejects.toMatchObject({
+          message: expect.stringMatching(/is marked out on 2026-10-30/),
+        });
+      });
+    });
+
+    test('offDayWarningsFor: one read, one line per distinct off weekday, [] with the gate off or a failed read', async () => {
+      const chain = { where: jest.fn(() => chain), first: jest.fn(async () => ({ id: 't1', name: 'Tech One', work_days: MON_THU })) };
+      const conn = jest.fn(() => chain);
+      expect(await offDayWarningsFor('t1', ['2026-10-30'], { conn })).toEqual([]);
+      expect(conn).not.toHaveBeenCalled();
+      gateOn();
+      expect(await offDayWarningsFor('t1', ['2026-11-06', '2026-10-30', '2026-10-29', '2026-10-31'], { conn }))
+        .toEqual(['Tech One does not work on Fridays.', 'Tech One does not work on Saturdays.']);
+      expect(chain.first).toHaveBeenCalledTimes(1);
+      chain.first.mockRejectedValueOnce(new Error('column work_days does not exist'));
+      expect(await offDayWarningsFor('t1', ['2026-10-30'], { conn })).toEqual([]);
+      expect(await offDayWarningsFor(null, ['2026-10-30'], { conn })).toEqual([]);
     });
   });
 });

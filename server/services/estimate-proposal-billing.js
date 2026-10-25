@@ -156,7 +156,7 @@ function documentCarriesRateReviewTerms(estimate, acceptance = null) {
 // so the renderers and the served-disclosure evidence read ONE definition.
 function commercialTermLines(commercialTerms) {
   if (!commercialTerms || typeof commercialTerms !== 'object') return [];
-  const paymentLabel = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+  const paymentLabel = { autopay: 'Auto Pay', due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
   return [
     ['Payment', paymentLabel[commercialTerms.paymentTerms] || null],
     ['Initial term', commercialTerms.initialTermMonths != null

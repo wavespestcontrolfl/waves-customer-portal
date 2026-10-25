@@ -1000,8 +1000,18 @@ async function winCommercialProposal(trx, updatedEstimate) {
     proposal: normalizeProposal(updatedEstimate),
   });
   // A NON-invoice-mode win with authored structured payment terms has no path
-  // that consumes them (codex #3297 r4).
-  if (!updatedEstimate.bill_by_invoice && normalizeProposal(updatedEstimate).commercialTerms?.paymentTerms) {
+  // that consumes them (codex #3297 r4). Auto Pay is the exception and the
+  // mirror (GATE_COMMERCIAL_AUTOPAY): the customer's Auto Pay enrollment
+  // collects it after each service, so it needs no invoice mode, and an
+  // invoice-mode win would bill a first invoice the agreement never mentions.
+  const winPaymentTerms = normalizeProposal(updatedEstimate).commercialTerms?.paymentTerms;
+  if (winPaymentTerms === 'autopay' && updatedEstimate.bill_by_invoice) {
+    throw httpError(
+      'This proposal is on Auto Pay, which cannot be combined with Bill by invoice. Turn off Bill by invoice, or set Net-30 payment terms, then mark won again.',
+      409,
+    );
+  }
+  if (!updatedEstimate.bill_by_invoice && winPaymentTerms && winPaymentTerms !== 'autopay') {
     throw httpError(
       'This proposal promises structured payment terms, which only invoice-mode billing enforces. Turn on Bill by invoice, or move the payment language to Additional terms, then mark won again.',
       409,

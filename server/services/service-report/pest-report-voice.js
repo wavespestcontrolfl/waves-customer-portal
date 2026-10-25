@@ -53,13 +53,13 @@ const PEST_VOICE_EXAMPLES = Object.freeze([
     ],
     report: [
       'WHAT WE FOUND',
-      'You told us you found a German cockroach in the kitchen, and we saw a moderate amount of activity today.',
+      'You told us you found a german cockroach in the kitchen, and we saw a moderate amount of activity today.',
       'WHAT WE DID AND WHY',
       'We spot-treated the kitchen and bathrooms for the roaches and added a growth regulator, which stops young roaches from growing up and breeding.',
       'WHAT TO EXPECT',
       'You may see a few more roaches for a few days while the treatment works, then fewer over the next couple of weeks.',
       'WHAT\'S NEXT',
-      'If you\'re still seeing German cockroaches in the kitchen over the next couple of weeks, text us.',
+      'If you\'re still seeing german cockroaches in the kitchen over the next couple of weeks, text us.',
     ].join('\n'),
   }),
   Object.freeze({
@@ -127,6 +127,7 @@ THE VOICE
 - Say what a treatment does in one plain clause when HOW IT WORKS or an EXPECTATIONS line supplies it and it helps the customer understand what they will see ("a treatment insects walk right through, so they carry it back with them"). Say what it was for today only from its own "tagged today for" in PRODUCT FACTS or from the note. "Mainly used for" is what the treatment is generally used for, never why we used it today, and a treatment "not tagged today" gets no reason unless the note gives one. Never copy a HOW IT WORKS line, never explain chemistry ("detect", "active ingredient", "pheromone", "uptake"), never add a pest, a lasting period or an effect those lines do not state, and never put a reason in WHAT TO EXPECT.
 - Office work is not service work. Leave out texts, links, calls, emails, notifications and messages passed to someone, even when PROMISES lists them.
 - The activity level goes in words: "very little activity", "a moderate amount of activity".
+- Write "german cockroaches" and "german roaches" with a small g, except as the first word of a sentence.
 
 WHAT GOES WHERE
 WHAT WE FOUND: first what the customer told us, said as theirs ("You told us…", "You mentioned…"), from BOOKED REASON, the customer concern, WHAT THE CUSTOMER TOLD US, any "Customer communication" lines and the note's sentences about what they said. Then what we saw today: the note's sightings, Observations, any "Findings observed" lines and the activity level in words. A pest a treatment was "tagged today for" in PRODUCT FACTS, or a recorded treatment objective, is what the work aimed at, not a sighting: it goes here only when the note, Observations or a "Findings observed" line says we saw it. A zero activity rating is an absence: say it only for a place we checked, named in the same clause (rule 4), and when the inputs name no place we checked, leave it out. Add an earlier visit only when it was the same pest or the same spot, with its date, as past, and never say things got better or worse unless the inputs show both visits. ${quietVisit ? QUIET_VISIT_FOUND_RULE : ''}With no sighting, no activity level and nothing the customer told us, write one sentence about where we worked or the service type, and invent no inspection or check.
@@ -143,7 +144,7 @@ OWNER RULES (the report is refused if it breaks one)
 4. An absence only for a named place, in the same clause: "we didn't see any under the kitchen sink today". Never "no issues", "no problems", "all clear", "nothing to worry about", or an absence for the whole home, or for "inside" or "outside" alone. When the note says "no issues", write what it means: the customer's words as theirs, or the rooms we checked; when it names no room, say where we worked and leave the rest unsaid.
 5. No product, brand or active-ingredient name, and never the word "chemical". Treatments go by their job: an insect-control treatment, bait, an insect growth regulator. Never guess a product, or what it does, from an action, an area or a product type.
 6. No amounts or measurements: no units, rates, mix strength, percentages, feet or square feet.
-7. Never "safe" in any form ("pet-safe", "safely", "unsafe"), "non-toxic", "harmless", "toxic", "poison", "poisonous", "dangerous" or "deadly". No re-entry, drying, rainfast or waiting time, no safety steps and no aftercare: never tell the customer to leave, clean, water or avoid anything. Weather in the note ("dry and calm") never becomes a drying or rain claim.
+7. Never "safe" in any form ("pet-safe", "safely", "unsafe"), "non-toxic", "harmless", "toxic", "poison", "poisonous", "dangerous" or "deadly". No re-entry, drying, rainfast or waiting time, no safety steps and no aftercare: never tell the customer to leave, clean, water or avoid a treated area or a bait. A cleaning or sanitation step the note or Recommendations give ("wipe the counters dry before bed") is the customer's own task: say it in WHAT'S NEXT. Weather in the note ("dry and calm") never becomes a drying or rain claim.
 8. Nothing about the EPA.
 9. No prices, "free", "included", "covered", warranty, guarantee or bond, and never "per visit".
 10. The company is "Waves Pest Control" or "we", never "Waves Pest Control & Lawn Care", "Waves Lawn Care" or "Waves Lawn & Pest".

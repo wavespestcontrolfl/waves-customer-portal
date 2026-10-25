@@ -344,7 +344,9 @@ async function deliverNudge(techId, etDate, now) {
   try {
     live = groupByTechnician(await findOpenVisitsToday(now, techId))
       .find((g) => g.tech.id === String(techId));
-    absent = await absentTechDays(db, { dateFrom: etDate, dateTo: etDate, technicianIds: [techId] });
+    // includeOffDays: false - an open visit a technician really holds on a day
+    // they do not work (an office placement) still gets its nudge.
+    absent = await absentTechDays(db, { dateFrom: etDate, dateTo: etDate, technicianIds: [techId], includeOffDays: false });
   } catch (err) {
     // One tech's failed re-read must not end the run for the rest, nor keep
     // a claim for a nudge that never went out.

@@ -1028,3 +1028,50 @@ describe('appointment reminder cron delivery windows', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });
+
+describe('a visit with no customer yet (booked by address only)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+    db.raw = jest.fn().mockResolvedValue();
+    db.transaction = jest.fn(async (callback) => callback(db));
+  });
+
+  test.each([null, undefined, ''])('registerAppointment with customerId %p writes no reminder row and sends no confirmation', async (customerId) => {
+    db.mockImplementation((table) => { throw new Error(`Unexpected table query: ${table}`); });
+
+    const result = await AppointmentReminders.registerAppointment(
+      'svc-by-address', customerId, '2099-08-01T09:00', 'Pest Control', 'admin_manual', { sendConfirmation: true },
+    );
+
+    expect(result).toBeNull();
+    expect(db).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('sendConfirmation is a quiet no-op: it never reads the reminder row or texts anyone', async () => {
+    const visit = chain({ first: jest.fn().mockResolvedValue({ customer_id: null }) });
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return visit;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await expect(AppointmentReminders.sendConfirmation('svc-by-address')).resolves.toBe(false);
+
+    expect(visit.where).toHaveBeenCalledWith({ id: 'svc-by-address' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('sendConfirmation for a visit that has a customer still looks up its reminder row', async () => {
+    const visit = chain({ first: jest.fn().mockResolvedValue({ customer_id: 'customer-1' }) });
+    const reminder = chain({ first: jest.fn().mockResolvedValue({ id: 'rem-1', confirmation_sent: true }) });
+    db.mockImplementation((table) => (table === 'scheduled_services' ? visit : reminder));
+
+    await expect(AppointmentReminders.sendConfirmation('svc-1')).resolves.toBe(false);
+
+    expect(reminder.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-1' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+

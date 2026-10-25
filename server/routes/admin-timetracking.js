@@ -3,6 +3,10 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
+const featureGates = require('../config/feature-gates');
+const { autoLunchLive, techWorkDaysLive } = featureGates;
+// Looked up at call time: a missing reader (a partial feature-gates mock) reads as off.
+const serviceLineShadow = () => typeof featureGates.serviceLineMapMode === 'function' && featureGates.serviceLineMapMode() === 'shadow';
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
@@ -27,6 +31,10 @@ const {
 } = require('../utils/staff-identity');
 const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 const analyticsMath = require('../services/time-tracking-analytics');
+const { validDateOnly } = require('../utils/date-only');
+const { recordAuditEvent } = require('../services/audit-log');
+const { mintResetToken } = require('../services/staff-reset-token');
+const { HIRE_LINK_TTL_MS, sendStaffWelcomeEmail } = require('../services/staff-welcome-email');
 
 const STAFF_ENTRY_WORK_DATE_SQL = staffWorkDateSql('time_entries.clock_in');
 
@@ -86,6 +94,13 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'bouncie_imei', 'bouncie_vin', 'vehicle_name',
   // Start-of-day point (home address is staff PII: admin-only, never logged).
   'start_address', 'start_lat', 'start_lng',
+  // Team tab "Can move visits" switch (GATE_TECH_MOVE_SWITCH).
+  'can_move_visits',
+  // Hired button state (GATE_HIRED_PACKET); present only while the gate is on.
+  // Derived flags only: the token, its hash and the password hash never ship.
+  'hire_action', 'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at',
+  // Team tab "Work days" (GATE_TECH_WORK_DAYS); dropped from the response while the gate is off.
+  'work_days',
 ];
 
 function pickTechResponseFields(tech, fields) {
@@ -107,7 +122,29 @@ function sanitizeTechForAdmin(tech) {
   for (const f of ['start_lat', 'start_lng']) {
     if (out && out[f] != null) out[f] = Number(out[f]);
   }
+  if (out && !techWorkDaysLive()) delete out.work_days;
   return out;
+}
+
+const WORK_DAYS_ERROR = 'workDays must be null (every day) or a list of weekday numbers 0 (Sunday) to 6 (Saturday), each once';
+
+// `workDays` on POST/PUT /technicians (GATE_TECH_WORK_DAYS). undefined, or the
+// gate off = leave alone (the column is inert and the editor hidden). null or
+// all seven days = works every day (stored NULL). Otherwise a sorted list of
+// distinct ints 0..6; an empty list is a 400 (the column CHECK refuses it too).
+function normalizeWorkDaysInput(value) {
+  if (value === undefined || !techWorkDaysLive()) return { patch: {} };
+  if (value === null) return { patch: { work_days: null } };
+  if (!Array.isArray(value)) return { error: WORK_DAYS_ERROR };
+  if (!value.length) return { error: 'Pick at least one work day' };
+  const days = new Set();
+  for (const raw of value) {
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0 || raw > 6 || days.has(raw)) {
+      return { error: WORK_DAYS_ERROR };
+    }
+    days.add(raw);
+  }
+  return { patch: { work_days: days.size === 7 ? null : [...days].sort((a, b) => a - b) } };
 }
 
 const START_ADDRESS_MAX = 300;
@@ -266,6 +303,8 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
       allTechs,
       today,
       weekStart: weekStartStr,
+      // The timesheet shows its "No lunch" control only while this is on.
+      autoLunch: autoLunchLive(),
     });
   } catch (err) {
     next(err);
@@ -365,6 +404,44 @@ router.get('/daily', requireAdmin, async (req, res, next) => {
     const summaries = await timeTracking.getDailySummaries({ technicianId, startDate, endDate, status });
     res.json(summaries);
   } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PUT /daily/:technicianId/:workDate/no-lunch { noLunch, edit_reason }
+// Admin correction of a day's "No lunch today" flag (GATE_AUTO_LUNCH). Refused
+// (409) when that day or its week is approved. Who changed it and why is
+// appended to the day's notes, like an entry edit's edited_by / edit_reason.
+// ---------------------------------------------------------------------------
+router.put('/daily/:technicianId/:workDate/no-lunch', requireAdmin, async (req, res, next) => {
+  try {
+    const { technicianId, workDate } = req.params;
+    const { noLunch, edit_reason: editReason } = req.body || {};
+    if (!editReason || !String(editReason).trim()) {
+      return res.status(400).json({ error: 'edit_reason is required' });
+    }
+    if (typeof noLunch !== 'boolean') {
+      return res.status(400).json({ error: 'noLunch must be true or false.' });
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId)) {
+      return res.status(400).json({ error: 'technicianId must be a valid id.' });
+    }
+    const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(workDate);
+    const probe = ymd ? new Date(Date.UTC(+ymd[1], +ymd[2] - 1, +ymd[3])) : null;
+    if (!probe || probe.getUTCFullYear() !== +ymd[1] || probe.getUTCMonth() + 1 !== +ymd[2] || probe.getUTCDate() !== +ymd[3]) {
+      return res.status(400).json({ error: 'workDate must be a valid YYYY-MM-DD calendar date.' });
+    }
+    const tech = await db('technicians').where({ id: technicianId }).first('id');
+    if (!tech) return res.status(404).json({ error: 'Technician not found.' });
+
+    const summary = await timeTracking.setDayNoLunch(technicianId, workDate, noLunch, {
+      editedBy: req.technicianId,
+      editReason: String(editReason).trim(),
+    });
+    res.json({ technicianId, workDate, noLunch: Boolean(summary?.no_lunch), summary });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
   }
 });
@@ -641,6 +718,27 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 // TECHNICIAN MANAGEMENT — CRUD
 // ═══════════════════════════════════════════════════════════════════
 
+// GATE_HIRED_PACKET row state, derived from columns that never leave the
+// server. "Password unset" = an active account whose hire has not set a
+// password yet (the reset and change handlers stamp password_changed_at and
+// write password_hash); "link pending" = a set-password token is still valid.
+function hireLinkState(tech, now = new Date()) {
+  const status = tech.employment_status || (tech.active ? 'active' : 'inactive');
+  const passwordUnset = status === 'active' && tech.active === true
+    && !tech.password_hash && !tech.password_changed_at;
+  const expires = tech.password_reset_expires_at ? new Date(tech.password_reset_expires_at) : null;
+  const pending = passwordUnset && Boolean(tech.password_reset_token_hash)
+    && expires !== null && expires > now;
+  return {
+    // The one action the Team tab offers on this row: hire a prospective
+    // placeholder, or resend the link to a hire who has no password yet.
+    hire_action: status === 'prospective' ? 'hire' : (passwordUnset ? 'resend' : null),
+    hire_password_unset: passwordUnset,
+    hire_link_pending: pending,
+    hire_link_expires_at: pending ? expires.toISOString() : null,
+  };
+}
+
 // GET /technicians — list all technicians (including inactive).
 // Tech-role tokens get the rows with payroll/PII columns stripped;
 // admin tokens get the full rows. Keeping the route accessible to
@@ -662,15 +760,25 @@ async function listTechnicians(req, res, next) {
     // needs review / off / not set) — the editor itself lives at
     // GET /technicians/:id/capabilities.
     const summaries = await summarizeCapabilities(db, techs.map((t) => t.id));
+    // GATE_HIRED_PACKET: admins also get each row's hire action and link
+    // state (hire_action turns the Hired / Resend link buttons on). Gate off
+    // (or a technician caller) = the response is exactly what it was.
+    const hiredPacket = callerIsAdmin && featureGates.hiredPacketLive();
+    const now = new Date();
     const enriched = await Promise.all(techs.map(async (t) => {
       const row = {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
         capability_summary: summaries.get(t.id),
+        ...(hiredPacket ? hireLinkState(t, now) : {}),
       };
       return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
     }));
-    res.json({ technicians: enriched });
+    res.json({
+      technicians: enriched,
+      ...(techWorkDaysLive() ? { workDaysEnabled: true } : {}),
+      ...(serviceLineShadow() ? { serviceLinesEnabled: true } : {}),
+    });
   } catch (err) { next(err); }
 }
 
@@ -828,7 +936,7 @@ function uniqueViolationBody(err) {
 async function createTechnician(req, res, next) {
   try {
     const body = req.body || {};
-    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable } = body;
+    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable, canMoveVisits } = body;
     if (typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Name is required' });
     }
@@ -842,6 +950,9 @@ async function createTechnician(req, res, next) {
     if (fieldDispatchable !== undefined && typeof fieldDispatchable !== 'boolean') {
       return res.status(400).json({ error: 'fieldDispatchable must be a boolean' });
     }
+    if (canMoveVisits !== undefined && typeof canMoveVisits !== 'boolean') {
+      return res.status(400).json({ error: 'canMoveVisits must be a boolean' });
+    }
     const normalizedEmail = normalizeTechnicianEmail(email);
     if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
     // Owner-only access model (owner ruling 2026-09-28) — a brand-new row
@@ -853,6 +964,8 @@ async function createTechnician(req, res, next) {
     }
     const techLine = normalizeTechLine(body.twilioNumber);
     if (techLine.error) return res.status(400).json({ error: techLine.error });
+    const workDays = normalizeWorkDaysInput(body.workDays);
+    if (workDays.error) return res.status(400).json({ error: workDays.error });
 
     const insertRow = {
       name: name.trim(),
@@ -862,6 +975,9 @@ async function createTechnician(req, res, next) {
       // Field eligibility is granted deliberately on the Team tab, never by
       // the row existing (Field Team Program: assignment ≠ employment).
       field_dispatchable: fieldDispatchable === true,
+      // A technician added now starts unable to move visits (the column default)
+      // unless the owner ticks the switch in the add form.
+      can_move_visits: canMoveVisits === true,
     };
     // Honor the create-form's auto-flip checkbox. Without this, an
     // operator unchecking "Auto-flip enabled" during creation would
@@ -871,6 +987,7 @@ async function createTechnician(req, res, next) {
     // it to the column DEFAULT.
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
     Object.assign(insertRow, techLine.patch);
+    Object.assign(insertRow, workDays.patch);
     applyPayrollProfileFields(insertRow, body);
 
     const outcome = await db.transaction(async (trx) => {
@@ -908,7 +1025,7 @@ router.post('/technicians', requireAdmin, createTechnician);
 async function updateTechnician(req, res, next) {
   try {
     const body = req.body || {};
-    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable } = body;
+    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable, canMoveVisits } = body;
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
       return res.status(400).json({ error: 'Name cannot be empty' });
     }
@@ -920,6 +1037,9 @@ async function updateTechnician(req, res, next) {
     }
     if (fieldDispatchable !== undefined && typeof fieldDispatchable !== 'boolean') {
       return res.status(400).json({ error: 'fieldDispatchable must be a boolean' });
+    }
+    if (canMoveVisits !== undefined && typeof canMoveVisits !== 'boolean') {
+      return res.status(400).json({ error: 'canMoveVisits must be a boolean' });
     }
     // Legacy `active` boolean input maps onto employment status; an explicit
     // employmentStatus wins when both are sent.
@@ -935,6 +1055,8 @@ async function updateTechnician(req, res, next) {
     if (techLine.error) return res.status(400).json({ error: techLine.error });
     const startPoint = normalizeStartPoint(body.startPoint);
     if (startPoint.error) return res.status(400).json({ error: startPoint.error });
+    const workDays = normalizeWorkDaysInput(body.workDays);
+    if (workDays.error) return res.status(400).json({ error: workDays.error });
 
     const outcome = await db.transaction(async (trx) => {
       // Every Staff identity writer takes the table lock before a row lock.
@@ -981,8 +1103,10 @@ async function updateTechnician(req, res, next) {
       if (email !== undefined) updates.email = normalizedEmail.value;
       if (requestedStatus !== undefined) Object.assign(updates, employmentPatch(requestedStatus));
       if (fieldDispatchable !== undefined) updates.field_dispatchable = fieldDispatchable;
+      if (canMoveVisits !== undefined) updates.can_move_visits = canMoveVisits;
       Object.assign(updates, techLine.patch);
       Object.assign(updates, startPoint.patch);
+      Object.assign(updates, workDays.patch);
 
       // Any transition that leaves `active` (→ inactive OR → prospective)
       // revokes sessions; entering active from prospective also rotates so a
@@ -1077,6 +1201,254 @@ async function updateTechnician(req, res, next) {
 
 router.put('/technicians/:id', requireAdmin, updateTechnician);
 
+// =============================================================================
+// HIRED BUTTON (GATE_HIRED_PACKET, owner ruling 2026-10-25 D7)
+// POST /technicians/:id/hire        prospective row -> active account + welcome email
+// POST /technicians/:id/hire/resend fresh set-password link for a hire who has none yet
+// Both are admin-only and answer 404 { enabled: false } before any database
+// work while the gate is off. One staff email per click; never a customer.
+// =============================================================================
+const HIRE_RESEND_COOLDOWN_MS = 60 * 1000;
+const HIRE_EMPLOYMENT_TYPES = ['w2', '1099'];
+const HIRE_RENAME_LOCKED = {
+  error: 'This staff record already has service, time, or payout history and cannot be renamed. Add the new hire as a separate record.',
+  code: 'IDENTITY_LOCKED',
+};
+
+function hiredPacketOff(res) {
+  return res.status(404).json({ enabled: false });
+}
+
+// Validate and normalize the hire body with the PUT handler's rules for the
+// same fields (canonical email, '' clears a payroll field, name trimmed).
+// Returns { error } or { name, email, hireDate, patch } where patch carries
+// only the optional fields the caller sent.
+// Optional payroll fields: absent, null or '' keeps or clears the column (the
+// PUT rule, applied by applyPayrollProfileFields); any other value must pass
+// its check, so a bad value is a 400 instead of a database error.
+const HIRE_OPTIONAL_FIELD_CHECKS = [
+  ['payRate', (v) => typeof v !== 'boolean' && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 999999.99,
+    'Pay rate must be a number between 0 and 999999.99'],
+  ['jobTitle', (v) => typeof v === 'string' && v.length <= 100, 'Job title must be 100 characters or fewer'],
+  ['employmentType', (v) => HIRE_EMPLOYMENT_TYPES.includes(v), "Employment type must be 'w2' or '1099'"],
+];
+
+function parseHireBody(body) {
+  if (typeof body.name !== 'string' || !body.name.trim()) return { error: 'Name is required' };
+  const normalizedEmail = normalizeTechnicianEmail(body.email);
+  if (normalizedEmail.error) return { error: normalizedEmail.error };
+  if (!normalizedEmail.value) return { error: 'Email is required' };
+  if (!validDateOnly(body.hireDate)) return { error: 'First day must be a valid YYYY-MM-DD date' };
+  if (body.phone != null && typeof body.phone !== 'string') return { error: 'Phone must be a string' };
+  const invalid = HIRE_OPTIONAL_FIELD_CHECKS
+    .find(([key, valid]) => body[key] != null && body[key] !== '' && !valid(body[key]));
+  if (invalid) return { error: invalid[2] };
+
+  const patch = body.phone === undefined ? {} : { phone: body.phone || null };
+  applyPayrollProfileFields(patch, {
+    payRate: body.payRate,
+    jobTitle: body.jobTitle,
+    employmentType: body.employmentType,
+  });
+  return { name: body.name.trim(), email: normalizedEmail.value, hireDate: body.hireDate, patch };
+}
+
+// The updated row in the shape GET /technicians returns for an admin.
+async function hiredTechnicianResponse(tech) {
+  const { resolveTechPhotoUrl } = require('../services/tech-photo');
+  const summaries = await summarizeCapabilities(db, [tech.id]);
+  return sanitizeTechForAdmin({
+    ...tech,
+    avatar_url: await resolveTechPhotoUrl(tech.photo_s3_key, tech.avatar_url),
+    capability_summary: summaries.get(tech.id),
+    ...hireLinkState(tech),
+  });
+}
+
+// Send the welcome email for a token already stored on the row. Same failure
+// split as admin-auth issuePasswordReset: a definite not-queued failure (our
+// own pre-send error, or a provider 4xx) clears the token, but only while its
+// hash is still the stored one, so a newer link is never erased; a 5xx or
+// network failure is ambiguous (the message may have been accepted), so the
+// token stays valid. Returns true | false | 'uncertain'; never throws.
+async function sendHireLink({ tech, token, tokenHash, firstDay }) {
+  try {
+    await sendStaffWelcomeEmail({
+      technicianId: tech.id,
+      email: tech.email,
+      token,
+      firstName: String(tech.name || '').trim().split(/\s+/)[0],
+      firstDay,
+    });
+    return true;
+  } catch (error) {
+    const status = Number(error?.status);
+    const definitelyNotQueued = error?.definitelyNotQueued === true
+      || (Number.isInteger(status) && status >= 400 && status < 500);
+    if (definitelyNotQueued) {
+      try {
+        await db('technicians')
+          .where({ id: tech.id, password_reset_token_hash: tokenHash })
+          .update({
+            password_reset_token_hash: null,
+            password_reset_expires_at: null,
+            password_reset_requested_at: null,
+            updated_at: db.fn.now(),
+          });
+      } catch (clearError) {
+        logger.error(`[team] Could not clear unsent welcome link for technician id=${tech.id} (${clearError.code || 'db_error'})`);
+      }
+      logger.warn(`[team] Welcome email not sent for technician id=${tech.id} (status=${error?.status || 'n/a'})`);
+      return false;
+    }
+    logger.warn(`[team] Keeping welcome link after ambiguous delivery failure for technician id=${tech.id} (status=${error?.status || 'n/a'})`);
+    return 'uncertain';
+  }
+}
+
+async function hireTechnician(req, res, next) {
+  try {
+    if (!featureGates.hiredPacketLive()) return hiredPacketOff(res);
+    const parsed = parseHireBody(req.body || {});
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    const { token, tokenHash } = mintResetToken();
+    const now = new Date();
+    const outcome = await db.transaction(async (trx) => {
+      // Same global order as every staff identity writer: table lock, then row.
+      await lockTechnicianMutations(trx);
+      const target = await trx('technicians')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!target) return { notFound: true };
+      if (target.employment_status !== 'prospective') return { notProspective: true };
+
+      const storedEmail = canonicalStaffEmail(target.email);
+      if (parsed.email !== storedEmail) {
+        const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: storedEmail, toEmail: parsed.email });
+        if (fullAccessEmailGuard) return { fullAccessEmailGuard };
+      }
+      if (await findTechnicianByCanonicalEmail(trx, parsed.email, target.id)) return { conflict: true };
+      // A placeholder with history is a person, not a slot (same rule as PUT).
+      if (parsed.name !== target.name && await technicianHasHistory(trx, target.id)) {
+        return { renameLocked: true };
+      }
+
+      await trx('technicians').where({ id: target.id }).update({
+        name: parsed.name,
+        email: parsed.email,
+        hire_date: parsed.hireDate,
+        ...parsed.patch,
+        ...employmentPatch('active'),
+        // Being active never makes someone dispatchable: the Team tab grants
+        // field eligibility deliberately.
+        field_dispatchable: false,
+        // The hire sets the first password from the emailed link. Any older
+        // credential on a reused placeholder is dropped so it cannot sign in.
+        must_change_password: true,
+        password_hash: null,
+        password_changed_at: null,
+        // Entering active rotates sessions, as PUT does.
+        auth_token_version: Number(target.auth_token_version || 0) + 1,
+        password_reset_token_hash: tokenHash,
+        password_reset_expires_at: new Date(now.getTime() + HIRE_LINK_TTL_MS),
+        password_reset_requested_at: now,
+        updated_at: now,
+      });
+      await PushService.deactivateStaffUser(target.id, trx);
+      // Ids only: no email, phone or pay in the audit row.
+      await recordAuditEvent({
+        actor_type: 'technician',
+        actor_id: req.technicianId || null,
+        action: 'staff.hired',
+        resource_type: 'technician',
+        resource_id: target.id,
+        metadata: { technician_id: target.id },
+        critical: true,
+        trx,
+      });
+      return { tech: await trx('technicians').where({ id: target.id }).first() };
+    });
+
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.notProspective) return res.status(409).json({ error: 'Only a prospective row can be hired.' });
+    if (outcome.fullAccessEmailGuard) return res.status(403).json(outcome.fullAccessEmailGuard);
+    if (outcome.conflict) return res.status(409).json(EMAIL_IN_USE);
+    if (outcome.renameLocked) return res.status(409).json(HIRE_RENAME_LOCKED);
+
+    const { tech } = outcome;
+    disconnectRevokedStaffSessions(tech.id, 'account_status_changed');
+    logger.info(`[team] Hired technician id=${tech.id}`);
+    // The hire is committed; an email problem never rolls it back.
+    const emailed = await sendHireLink({ tech, token, tokenHash, firstDay: parsed.hireDate });
+    const fresh = emailed === false
+      ? await db('technicians').where({ id: tech.id }).first()
+      : tech;
+    return res.json({ hired: true, emailed, technician: await hiredTechnicianResponse(fresh || tech) });
+  } catch (err) {
+    const dup = uniqueViolationBody(err);
+    if (dup) return res.status(409).json(dup);
+    return next(err);
+  }
+}
+
+async function resendHireLink(req, res, next) {
+  try {
+    if (!featureGates.hiredPacketLive()) return hiredPacketOff(res);
+    const { token, tokenHash } = mintResetToken();
+    const now = new Date();
+    const outcome = await db.transaction(async (trx) => {
+      await lockTechnicianMutations(trx);
+      const target = await trx('technicians')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!target) return { notFound: true };
+      const state = hireLinkState(target, now);
+      if (target.employment_status !== 'active' || target.active !== true || !canonicalStaffEmail(target.email)) {
+        return { notEligible: true };
+      }
+      if (!state.hire_password_unset) return { passwordSet: true };
+      const requestedAt = target.password_reset_requested_at ? new Date(target.password_reset_requested_at) : null;
+      if (requestedAt && now.getTime() - requestedAt.getTime() < HIRE_RESEND_COOLDOWN_MS) {
+        return { cooldown: true };
+      }
+      await trx('technicians').where({ id: target.id }).update({
+        password_reset_token_hash: tokenHash,
+        password_reset_expires_at: new Date(now.getTime() + HIRE_LINK_TTL_MS),
+        password_reset_requested_at: now,
+        updated_at: now,
+      });
+      return { tech: await trx('technicians').where({ id: target.id }).first() };
+    });
+
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.notEligible) {
+      return res.status(409).json({ error: 'Only an active staff member with an email can be sent a link.' });
+    }
+    if (outcome.passwordSet) {
+      return res.status(409).json({ error: 'This person already set a password.' });
+    }
+    if (outcome.cooldown) {
+      return res.status(409).json({ error: 'A link was just sent. Try again in a minute.' });
+    }
+
+    const { tech } = outcome;
+    logger.info(`[team] Reissued hire link for technician id=${tech.id}`);
+    const emailed = await sendHireLink({ tech, token, tokenHash, firstDay: tech.hire_date });
+    const fresh = emailed === false
+      ? await db('technicians').where({ id: tech.id }).first()
+      : tech;
+    return res.json({ resent: true, emailed, technician: await hiredTechnicianResponse(fresh || tech) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+router.post('/technicians/:id/hire', requireAdmin, hireTechnician);
+router.post('/technicians/:id/hire/resend', requireAdmin, resendHireLink);
+
 // GET /technicians/:id/capabilities — the five dispatch categories for one
 // tech, missing rows reported as 'unset'. Admin only: this is the editor's
 // read, and capability decisions are a management call.
@@ -1141,6 +1513,148 @@ async function putTechnicianCapabilities(req, res, next) {
 
 router.get('/technicians/:id/capabilities', requireAdmin, getTechnicianCapabilities);
 router.put('/technicians/:id/capabilities', requireAdmin, putTechnicianCapabilities);
+
+// ── Service-line map (GATE_SERVICE_LINE_MAP=shadow, owner 2026-10-25) ─────────
+// One home and one gap technician per service line. SHADOW ONLY: nothing reads this
+// to place a visit; the six booking choice points only log what it would pick
+// (services/scheduling/line-technician.js). Admin only; 404 while the gate is off.
+const SERVICE_LINE_KEYS = ['general', 'mosquito', 'lawn', 'rodent', 'termite'];
+const SERVICE_LINE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHADOW_SUMMARY_DEFAULT_DAYS = 14;
+const SHADOW_SUMMARY_MAX_DAYS = 90;
+
+function serviceLinesOff(res) {
+  if (serviceLineShadow()) return false;
+  res.status(404).json({ error: 'Not found' });
+  return true;
+}
+
+async function readServiceLines(conn) {
+  const rows = await conn('service_line_techs').select('service_category', 'home_technician_id', 'gap_technician_id', 'updated_at');
+  const byLine = new Map(rows.map((r) => [r.service_category, r]));
+  return SERVICE_LINE_KEYS.map((key) => {
+    const row = byLine.get(key);
+    return {
+      service_category: key,
+      home_technician_id: row ? row.home_technician_id : null,
+      gap_technician_id: row ? row.gap_technician_id : null,
+      updated_at: row ? row.updated_at : null,
+    };
+  });
+}
+
+// PUT body: { lines: [{ service_category, home_technician_id, gap_technician_id }] }.
+// Any subset of the five lines; a technician id is a uuid or null (cleared).
+function normalizeServiceLineEntries(input) {
+  if (!Array.isArray(input) || !input.length) return { error: 'lines must be a non-empty array' };
+  const seen = new Set();
+  const entries = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') return { error: 'Each line must be an object' };
+    const key = raw.service_category;
+    if (!SERVICE_LINE_KEYS.includes(key)) return { error: `service_category must be one of ${SERVICE_LINE_KEYS.join(', ')}` };
+    if (seen.has(key)) return { error: `service_category '${key}' appears more than once` };
+    seen.add(key);
+    const entry = { service_category: key };
+    for (const field of ['home_technician_id', 'gap_technician_id']) {
+      const value = raw[field] === '' ? null : raw[field];
+      if (value === undefined) return { error: `${field} is required (a technician id, or null for none)` };
+      if (value !== null && (typeof value !== 'string' || !SERVICE_LINE_UUID.test(value))) {
+        return { error: `${field} must be a technician id or null` };
+      }
+      entry[field] = value === null ? null : value.toLowerCase();
+    }
+    entries.push(entry);
+  }
+  return { entries };
+}
+
+router.get('/service-lines', requireAdmin, async (req, res, next) => {
+  try {
+    if (serviceLinesOff(res)) return undefined;
+    return res.json({ mode: 'shadow', lines: await readServiceLines(db) });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.put('/service-lines', requireAdmin, async (req, res, next) => {
+  try {
+    if (serviceLinesOff(res)) return undefined;
+    const normalized = normalizeServiceLineEntries((req.body || {}).lines);
+    if (normalized.error) return res.status(400).json({ error: normalized.error });
+    const { entries } = normalized;
+    const outcome = await db.transaction(async (trx) => {
+      const ids = [...new Set(entries.flatMap((e) => [e.home_technician_id, e.gap_technician_id]).filter(Boolean))];
+      const techs = ids.length
+        ? await trx('technicians').whereIn('id', ids).forShare().select('id', 'employment_status')
+        : [];
+      const found = new Map(techs.map((t) => [t.id, t]));
+      const stored = new Map((await trx('service_line_techs').select('service_category', 'home_technician_id', 'gap_technician_id'))
+        .map((r) => [r.service_category, r]));
+      for (const entry of entries) {
+        for (const field of ['home_technician_id', 'gap_technician_id']) {
+          const id = entry[field];
+          if (!id) continue;
+          const tech = found.get(id);
+          if (!tech) return { error: 'Technician not found' };
+          // A technician who has since left may stay where already saved, never be newly picked.
+          const unchanged = stored.get(entry.service_category)?.[field] === id;
+          if (tech.employment_status === 'inactive' && !unchanged) return { error: 'That technician is no longer active' };
+        }
+      }
+      for (const entry of entries) {
+        await trx('service_line_techs')
+          .insert({ ...entry, updated_by: req.technicianId || null, updated_at: trx.fn.now() })
+          .onConflict('service_category')
+          .merge(['home_technician_id', 'gap_technician_id', 'updated_by', 'updated_at']);
+      }
+      return { lines: await readServiceLines(trx) };
+    });
+    if (outcome.error) return res.status(400).json({ error: outcome.error });
+    // Event ids only: no names, no phone numbers.
+    logger.info(`[team] Updated service-line map by staff id=${req.technicianId} (${entries.map((e) => `${e.service_category}: home=${e.home_technician_id || 'none'} gap=${e.gap_technician_id || 'none'}`).join('; ')})`);
+    return res.json({ success: true, mode: 'shadow', lines: outcome.lines });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /service-lines/shadow-summary?days=14 — the read-out of service_line_pick_shadow:
+// rows by source, by (line, would_reason), and how many had the technician actually
+// chosen differ from the one the map would pick. Read only.
+router.get('/service-lines/shadow-summary', requireAdmin, async (req, res, next) => {
+  try {
+    if (serviceLinesOff(res)) return undefined;
+    const asked = Number.parseInt(req.query.days, 10);
+    const days = Number.isInteger(asked) && asked > 0 ? Math.min(asked, SHADOW_SUMMARY_MAX_DAYS) : SHADOW_SUMMARY_DEFAULT_DAYS;
+    const since = new Date(Date.now() - days * 86400000);
+    const recent = () => db('service_line_pick_shadow').where('created_at', '>=', since);
+    const [bySource, byLineReason, totals] = await Promise.all([
+      recent().select('source').count('* as count').groupBy('source').orderBy('source'),
+      recent().select('service_line', 'would_reason').count('* as count').groupBy('service_line', 'would_reason')
+        .orderBy([{ column: 'service_line' }, { column: 'would_reason' }]),
+      recent().first(
+        db.raw('COUNT(*)::int AS total'),
+        db.raw('COUNT(*) FILTER (WHERE actual_technician_id IS DISTINCT FROM would_technician_id)::int AS differs'),
+        db.raw('COUNT(*) FILTER (WHERE would_free IS TRUE)::int AS would_free_yes'),
+        db.raw('COUNT(*) FILTER (WHERE would_free IS FALSE)::int AS would_free_no'),
+      ),
+    ]);
+    const asNumber = (rows) => rows.map((r) => ({ ...r, count: Number(r.count) }));
+    return res.json({
+      days,
+      since: since.toISOString(),
+      total: Number(totals?.total) || 0,
+      differs: Number(totals?.differs) || 0,
+      wouldFree: { yes: Number(totals?.would_free_yes) || 0, no: Number(totals?.would_free_no) || 0 },
+      bySource: asNumber(bySource),
+      byLineReason: asNumber(byLineReason),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
 
 // GET /technicians/:id/earnings — hours × pay_rate breakdown for a
 // window. OT pays at 1.5×. Falls back to $35/hr if pay_rate is unset
@@ -1207,11 +1721,19 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       .where({ technician_id: tech.id })
       .where('work_date', '>=', from)
       .where('work_date', '<=', to)
-      .select('work_date', 'total_shift_minutes', 'overtime_minutes', 'job_count');
+      .select('work_date', 'total_shift_minutes', 'unpaid_meal_minutes', 'overtime_minutes', 'job_count');
 
+    // Pay is on PAID minutes: shift less the day's unpaid meal (0 while
+    // GATE_AUTO_LUNCH is off, so the gate-off numbers are unchanged).
+    // overtime_minutes is already a share of the paid minutes.
     const totalMin = rows.reduce((s, r) => s + parseFloat(r.total_shift_minutes || 0), 0);
+    const unpaidMin = rows.reduce((s, r) => s + parseFloat(r.unpaid_meal_minutes || 0), 0);
     const otMin = rows.reduce((s, r) => s + parseFloat(r.overtime_minutes || 0), 0);
-    const regMin = Math.max(0, totalMin - otMin);
+    const regMin = rows.reduce((s, r) => {
+      const shift = parseFloat(r.total_shift_minutes || 0);
+      const unpaid = Math.min(shift, parseFloat(r.unpaid_meal_minutes || 0));
+      return s + Math.max(0, shift - unpaid - parseFloat(r.overtime_minutes || 0));
+    }, 0);
 
     const rate = parseFloat(tech.pay_rate) > 0 ? parseFloat(tech.pay_rate) : 35;
     // Round line items to cents and reconcile gross from those rounded
@@ -1238,6 +1760,7 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       regularMinutes: regMin,
       overtimeMinutes: otMin,
       totalMinutes: totalMin,
+      unpaidMealMinutes: unpaidMin,
       regularPay,
       overtimePay,
       grossPay,
@@ -1562,7 +2085,9 @@ module.exports._handlers = {
   createTechnician,
   deactivateTechnician,
   getTechnicianCapabilities,
+  hireTechnician,
   listTechnicians,
   putTechnicianCapabilities,
+  resendHireLink,
   updateTechnician,
 };

@@ -45,6 +45,9 @@ const {
   invoiceDepositCreditCents,
   invoiceSmsDigest,
 } = require("./invoice-helpers");
+// Its own statement on purpose: the import above is hashed into the reviewed Intelligence Bar
+// read fingerprints (admin-read-reviewed.json), and this write-path refusal changes no read.
+const { visitHasNoCustomerError } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
 // cover page DWELL time, not link age (the customer-photo blank-render class).
@@ -6364,6 +6367,8 @@ const InvoiceService = {
       trustedMembershipDues = false,
     } = createArgs;
     if (!trustedMembershipDues) lineItems = stripMembershipDuesMarkers(lineItems);
+    // A visit with no customer yet cannot be billed (invoices.customer_id is NOT NULL).
+    if (scheduledServiceId && !customerId) throw visitHasNoCustomerError();
 
     if (
       expectedDiscountStacking !== undefined &&
@@ -6450,8 +6455,12 @@ const InvoiceService = {
       // Harness databases may omit transaction(); production knex does not.
     }
     if (linkedScheduledServiceId) {
-      const { assertScheduledInvoiceNotPacketOwned } = require('./scheduled-invoice-mint');
+      const { assertScheduledInvoiceNotPacketOwned, assertScheduledInvoiceNotBilledElsewhere } = require('./scheduled-invoice-mint');
       await assertScheduledInvoiceNotPacketOwned(database, linkedScheduledServiceId, packetWrite?.packetId);
+      // Every visit-linked writer (completion, Charge Now, pre-completion and
+      // manual mints): a visit an operator marked billed elsewhere never gets
+      // a second bill while its covering invoice is live.
+      await assertScheduledInvoiceNotBilledElsewhere(database, linkedScheduledServiceId);
     } else if (packetWrite) {
       throw new Error('Visit invoice requires a billed member');
     }

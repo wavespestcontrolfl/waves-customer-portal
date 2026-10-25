@@ -25,6 +25,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const gpsArrivalDetector = require('../services/gps-arrival-detector');
+const truckClockIn = require('../services/truck-clock-in');
 const { pingTechLocation } = require('../services/tech-status');
 const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('../services/customer-tracking-eta');
 const {
@@ -203,13 +204,30 @@ async function processTrackingEvent({ logId, eventType, payload }) {
         logger.error(`[webhooks-bouncie] pingTechLocation failed: ${err.message}`);
       }
 
+      let arrival = null;
       try {
-        await gpsArrivalDetector.maybeMarkArrivedFromGps({
+        arrival = await gpsArrivalDetector.maybeMarkArrivedFromGps({
           techStatus,
           point,
         });
       } catch (err) {
         logger.error(`[webhooks-bouncie] gps arrival detector failed: ${err.message}`);
+      }
+
+      // Truck clock-in (GATE_TRUCK_CLOCK_IN; off = returns at once). After the
+      // detector so it can read whether this very point marked an arrival. Own
+      // try/catch: a failure here never changes the detector's work or the 200.
+      try {
+        await truckClockIn.maybeClockInFromTruck({
+          tech,
+          eventType: normalizedEventType,
+          point,
+          arrival,
+          logId,
+          payload,
+        });
+      } catch (err) {
+        logger.error(`[webhooks-bouncie] truck clock-in failed: ${err.message}`);
       }
     }
 
