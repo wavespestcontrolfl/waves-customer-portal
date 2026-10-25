@@ -255,6 +255,47 @@ describe('CreateAppointmentModal new-caller Book', () => {
     expect(screen.getByText('Send confirmation SMS')).toBeTruthy();
   });
 
+  it('Book stays blocked while Save-with-new-customer is still adding the customer', async () => {
+    const fetcher = installFetch();
+    const base = fetcher.getMockImplementation();
+    let releaseAdd;
+    fetcher.mockImplementation((input, options = {}) => (String(input).endsWith('/admin/customers/quick-add') && options.method === 'POST'
+      ? new Promise((resolve) => { releaseAdd = () => resolve(json({ customer: { id: 'cust-new' } })); })
+      : base(input, options)));
+    mount({ newCallerBooking: true, newCustomerPhoneMatch: true });
+    fireEvent.click(screen.getByText('pick suggestion'));
+    await screen.findByText('This call');
+    await addService();
+    const [first, last, phone] = Array.from(screen.getByLabelText('quick-add address').closest('div').parentElement.querySelectorAll('input'));
+    fireEvent.change(first, { target: { value: 'Pat' } });
+    fireEvent.change(last, { target: { value: 'Example' } });
+    fireEvent.change(phone, { target: { value: '941-555-0199' } });
+    const schedule = await screen.findByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(schedule.disabled).toBe(false));
+    fireEvent.click(schedule);
+    await waitFor(() => expect(posts(fetcher, '/admin/customers/quick-add')).toHaveLength(1));
+    // Staff clears the caller's fields mid-request: Book mode returns, but Book waits for the add.
+    for (const input of [first, last, phone]) fireEvent.change(input, { target: { value: '' } });
+    const book = await screen.findByRole('button', { name: 'Book' });
+    await screen.findByText('This call');
+    expect(book.disabled).toBe(true);
+    fireEvent.click(book);
+    releaseAdd();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Book' })).toBeNull());
+    expect(posts(fetcher, '/admin/schedule/new-caller')).toEqual([]);
+  });
+
+  it('a Collect prepayment choice made before the address was picked does not carry into Book mode', async () => {
+    installFetch();
+    mount({ newCallerBooking: true });
+    await addService('Quarterly', /Quarterly Pest Control/i);
+    fireEvent.change(screen.getByText('Visits (leave blank for ongoing)').parentElement.querySelector('input'), { target: { value: '4' } });
+    expect(await screen.findByText('Collect prepayment')).toBeTruthy();
+    fireEvent.click(screen.getByText('pick suggestion'));
+    await screen.findByText('This call');
+    expect(screen.queryByText('Collect prepayment')).toBeNull();
+  });
+
   it('two services stop Book with a reason', async () => {
     installFetch();
     mount({ newCallerBooking: true });

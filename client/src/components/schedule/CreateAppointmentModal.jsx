@@ -5186,8 +5186,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     lotPricedWithoutPrice: !!newCallerLine && isOneTimeMosquitoLine(newCallerLine) && !lineHasEnteredPrice(newCallerLine),
   }) : '';
   const newCallerNeedsCallPick = Array.isArray(newCallerCalls) && newCallerCalls.length > 1 && !newCallerCallId;
+  // Also waits while Save-with-new-customer is still adding the customer or booking it:
+  // clearing the name and phone mid-request re-enters Book mode, and must not book twice.
   const canBookNewCaller = newCallerBookMode && timeChosen && !!newCallerLine && !newCallerBlockReason
-    && Array.isArray(newCallerCalls) && !newCallerNeedsCallPick && !saving && !newCallerSubmitting;
+    && Array.isArray(newCallerCalls) && !newCallerNeedsCallPick && !saving && !newCallerSubmitting
+    && !quickAddSubmitting && !pendingQuickAddSave;
   useEffect(() => {
     if (!newCallerBookMode) return undefined;
     let cancelled = false;
@@ -6869,8 +6872,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           );
         })()}
 
-        {/* Prepaid collection toggle */}
-        {hasRecurringServices && (() => {
+        {/* Prepaid collection toggle (Book records no payment, so none in Book mode) */}
+        {!newCallerBookMode && hasRecurringServices && (() => {
           const parsedCount = Number.parseInt(recurringCount, 10);
           const finiteCount = Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : 0;
           if (!finiteCount) return null;
