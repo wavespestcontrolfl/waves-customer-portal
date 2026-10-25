@@ -367,10 +367,17 @@ async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, pro
     const recorded = await recordCallProperty({
       customerId, ...address, latitude: visit.lat, longitude: visit.lng, source: propertySource, conn: trx,
     });
+    // Every row, removed ones too: recordCallProperty never re-adds a removed
+    // address, and a removed property is never booked.
     const key = addressKey(address);
-    const properties = await trx('customer_properties').where({ customer_id: customerId, active: true })
-      .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+    const properties = await trx('customer_properties').where({ customer_id: customerId })
+      .select('id', 'active', 'address_line1', 'address_line2', 'city', 'zip');
     const property = properties.find((p) => key && addressKey(p) === key);
+    if (!property || !property.active) {
+      throw httpError(409, property
+        ? 'This address was removed from the customer\'s account, so the visit cannot use it. Check the customer, or book the visit again.'
+        : 'The visit address could not be added to this customer. Try again.');
+    }
     const note = 'Linked to its customer after the call.';
     const [row] = await trx('scheduled_services')
       .where({ id: visit.id })
@@ -378,7 +385,7 @@ async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, pro
       .whereNotIn('status', ['cancelled', 'rescheduled'])
       .update({
         customer_id: customerId,
-        property_id: property ? property.id : visit.property_id,
+        property_id: property.id,
         internal_notes: visit.internal_notes ? `${visit.internal_notes}\n${note}` : note,
         updated_at: new Date(),
       })

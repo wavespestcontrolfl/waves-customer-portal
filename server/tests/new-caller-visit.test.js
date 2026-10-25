@@ -358,6 +358,29 @@ maybeDescribe('new-caller booking on Postgres', () => {
     await expect(service.linkNewCallerVisit({ visitId: visit.id, customerId: require('crypto').randomUUID() })).rejects.toMatchObject({ status: 400 });
   });
 
+  test('Link refuses a booked address the customer\'s account removed, and writes nothing', async () => {
+    const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+    const customerId = require('crypto').randomUUID();
+    await db('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Removed', phone: '+15555550143',
+      address_line1: '1 Synthetic Ln', city: 'Bradenton', zip: '34201', active: true,
+    });
+    made.customerIds.push(customerId);
+    // The booked address was one of this customer's properties, since removed.
+    await db('customer_properties').insert({
+      customer_id: customerId, address_line1: '100 Example Way', city: 'Bradenton', state: 'FL', zip: '34200',
+      address_key: require('../services/customer-property-address-keys').addressKey({ address_line1: '100 Example Way', city: 'Bradenton', zip: '34200' }),
+      source: 'manual', active: false, is_primary: false,
+    });
+    const booked = await service.bookNewCallerVisit({ input: validInput({ serviceId: svc.id, scheduledDate: '2031-03-08', windowStart: '13:00' }) });
+    made.visitIds.push(booked.visit.id);
+
+    await expect(service.linkNewCallerVisit({ visitId: booked.visit.id, customerId }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/removed from the customer's account/) });
+    const row = await db('scheduled_services').where({ id: booked.visit.id }).first('customer_id', 'property_id');
+    expect(row).toEqual({ customer_id: null, property_id: null });
+  });
+
   test('lists answered and recent calls, never a voice-agent call, an old answer or a long-ended call', async () => {
     const live = await insertCall();
     const endedJustNow = await insertCall({ status: 'completed', createdMinutesAgo: 6, durationSeconds: 120 });
