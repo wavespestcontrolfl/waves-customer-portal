@@ -3924,6 +3924,19 @@ const gates = {
   // switch: unset — the Add customer button and the two-step flow return.
   newApptPhoneMatch: gateEnvValue('GATE_NEW_APPT_PHONE_MATCH'),
 
+  // New-caller booking by address (owner 2026-10-25): with no customer
+  // selected, the New customer block open, an address picked from the
+  // suggestions and no name or phone typed, New Appointment's Book saves ONE
+  // visit with that address and no customer (customer_id NULL, source_action
+  // 'admin_new_caller', booking/new-caller-visit.js), stamped with the live
+  // call the office answered (source_call_log_id; the office picks when more
+  // than one is live). Nothing goes to the caller at Book: no text, no email,
+  // no reminder. The call-recording agent links the customer after the call
+  // and sends the confirmation (a later PR, same gate). OFF in every
+  // environment; the admin schedule day view carries it to Dispatch as
+  // newCallerBooking. Kill switch: unset — Book needs a customer, as before.
+  newCallerBooking: gateEnvValue('GATE_NEW_CALLER_BOOKING'),
+
   // Booking rain rank (owner 2026-10-06): the New Appointment best-times rows
   // rank by rain fit before drive. Outdoor bookings (pest, lawn, T&S,
   // mosquito, termite treatment) sort hours with a 60%+ NWS chance in the

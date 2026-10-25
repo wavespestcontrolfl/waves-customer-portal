@@ -7080,6 +7080,23 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   return query.first();
 }
 
+// GATE_NEW_CALLER_BOOKING: a visit the office booked by address for THIS call
+// before the customer existed (booking/new-caller-visit.js: customer_id NULL,
+// source_action 'admin_new_caller', stamped with the call). Every lookup here
+// is customer-scoped and misses it, so without this the pipeline would insert
+// a second visit for the same call. Not gated: such a row exists only if the
+// gate was on when it was booked, and it must stay single after a kill.
+async function findNewCallerVisitForCall({ call, trx = db }) {
+  if (!call?.id) return null;
+  return trx('scheduled_services')
+    .where({ source_call_log_id: call.id, source_action: require('./booking/new-caller-visit').NEW_CALLER_SOURCE_ACTION })
+    .whereNull('customer_id')
+    .whereNull('parent_service_id')
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .orderBy('created_at', 'asc')
+    .first('id', 'status', 'service_type');
+}
+
 // Card-on-file spec §3 Phase 5.5: the guard above only sees THIS call's own
 // rows. A visit booked by a HUMAN through another channel while the call was
 // still being processed (the office books it in the portal mid-call; the
@@ -20751,6 +20768,20 @@ const CallRecordingProcessor = {
                 // linked lookup) instead of inserting; several plausible
                 // rows → hold for human review; a property mismatch falls
                 // through (a different property's visit is not a duplicate).
+                // The office already booked this call by address, before the
+                // customer existed: never a second visit. Hold for the office;
+                // the link step (a later PR, same gate) attaches the customer.
+                const newCallerVisit = await findNewCallerVisitForCall({ call, trx });
+                if (newCallerVisit) {
+                  return {
+                    __held: {
+                      reason: 'ambiguous_existing_appointment',
+                      existingId: newCallerVisit.id,
+                      existingStatus: newCallerVisit.status,
+                      existingService: newCallerVisit.service_type,
+                    },
+                  };
+                }
                 const attachable = await findAttachableCallAppointment({
                   customerId, scheduledDate, serviceType, trx,
                 });
@@ -25719,6 +25750,7 @@ CallRecordingProcessor._test = {
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,
   findAttachableCallAppointment,
+  findNewCallerVisitForCall,
   attachCandidateMatchesProperty,
   attachCandidateSlotAgrees,
   classifyCallerAccount,

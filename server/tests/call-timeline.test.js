@@ -1,4 +1,4 @@
-const { callStartedAt, recordingReadyAt, callDurationSeconds } = require('../utils/call-timeline');
+const { callStartedAt, callEndedAt, recordingReadyAt, callDurationSeconds } = require('../utils/call-timeline');
 
 describe('callStartedAt — created_at means different things on different rows', () => {
   test('a normal /voice-inserted row: created_at IS the start', () => {
@@ -58,6 +58,26 @@ describe('callStartedAt — created_at means different things on different rows'
   test('null on an unusable created_at', () => {
     expect(callStartedAt({})).toBeNull();
     expect(callStartedAt({ created_at: 'not-a-date' })).toBeNull();
+  });
+});
+
+describe('callEndedAt — the /call-status stamp, else start + length, never updated_at', () => {
+  test('the metadata.ended_at stamp wins over start + length (one leg\'s length misses the ring time)', () => {
+    const row = { created_at: '2026-09-26T18:00:00Z', duration_seconds: 120, updated_at: '2026-09-26T19:00:00Z', metadata: { ended_at: '2026-09-26T18:04:30.000Z' } };
+    expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:04:30.000Z');
+  });
+  test('without a stamp, a row inserted when the call began ends at its start + its length; updated_at never moves it', () => {
+    const row = { created_at: '2026-09-26T18:00:00Z', duration_seconds: 300, updated_at: '2026-09-26T19:00:00Z' };
+    expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:05:00.000Z');
+  });
+  test('a post-call row without a stamp has no known end; with one, the stamp', () => {
+    const row = { created_at: '2026-09-26T18:10:00Z', duration_seconds: 600, metadata: { source: 'twilio_recording_status_recovered' } };
+    expect(callEndedAt(row)).toBeNull();
+    expect(callEndedAt({ ...row, metadata: { ...row.metadata, ended_at: '2026-09-26T18:09:00Z' } }).toISOString()).toBe('2026-09-26T18:09:00.000Z');
+  });
+  test('a stamp in another shape is not trusted', () => {
+    const row = { created_at: '2026-09-26T18:00:00Z', duration_seconds: 60, metadata: JSON.stringify({ ended_at: 'Sat, 26 Sep 2026 18:30:00 GMT' }) };
+    expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:01:00.000Z');
   });
 });
 

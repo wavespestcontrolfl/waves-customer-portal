@@ -6925,7 +6925,11 @@ router.get('/', async (req, res, next) => {
         linkedProjectLookupFailed: projectCompletionContext.linkedProjectLookupFailed === true,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
-        customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
+        // GATE_NEW_CALLER_BOOKING: a visit booked by address before its
+        // customer exists reads "New caller" until the call-recording agent
+        // (or staff) links the customer.
+        customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim()
+          || (!s.customer_id && s.source_action === 'admin_new_caller' ? 'New caller' : null),
         customerId: s.customer_id,
         // propertyId, address, city, state, lat, lng, customerPhone and
         // checkInTime: shared with the week feed (visitPremiseFields).
@@ -7124,6 +7128,8 @@ router.get('/', async (req, res, next) => {
       addressFirstTimes: isEnabled('newApptAddressTimes'),
       // GATE_NEW_APPT_PHONE_MATCH: New Appointment matches a new caller's phone as it is typed, and one Save adds and books them.
       newCustomerPhoneMatch: isEnabled('newApptPhoneMatch'),
+      // GATE_NEW_CALLER_BOOKING: New Appointment's Book saves a new caller's visit by address, no customer yet.
+      newCallerBooking: isEnabled('newCallerBooking'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -29132,6 +29138,10 @@ module.exports.recurringWithoutBillableAmount = recurringWithoutBillableAmount;
 // create_appointment proposal and executor, so an IB booking carries exactly
 // the price a Schedule-screen booking would (owner 2026-09-27).
 module.exports.buildAppointmentPricing = buildAppointmentPricing;
+// The zone the create route stamps for an address — also used by the
+// new-caller booking route (admin-schedule-new-caller.js), which books by
+// address before a customer exists.
+module.exports.getZone = getZone;
 // The percent-discount exclusion predicate (termite bond, rodent bait,
 // bed bug, Bora-Care, pre-slab, ...) — consumed lazily by the IB
 // create_appointment member-discount auto-apply (tools.js) so its automatic
