@@ -153,6 +153,22 @@ describe('New customer phone match (gate on)', () => {
     expect(JSON.parse(posts(fetcher, '/admin/schedule')[0][1].body).customerId).toBe('cust-new');
   });
 
+  it('a note typed while one Save waits for the form to settle is booked as shown', async () => {
+    const fetcher = installFetch();
+    mount({ newCustomerPhoneMatch: true });
+    await fillCaller();
+    await addService();
+    const save = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(posts(fetcher, '/admin/customers/quick-add')).toHaveLength(1));
+    // The customer exists and the booking is waiting: staff add a note now.
+    const notes = screen.getByText('Internal Notes (Admin only)').parentElement.querySelector('textarea');
+    fireEvent.change(notes, { target: { value: 'Dog in the back yard' } });
+    await waitFor(() => expect(posts(fetcher, '/admin/schedule')).toHaveLength(1));
+    expect(JSON.parse(posts(fetcher, '/admin/schedule')[0][1].body).internalNotes).toBe('Dog in the back yard');
+  });
+
   it('a known phone stops at the Attach / Separate account choice and books nothing', async () => {
     const fetcher = installFetch({
       quickAdd: () => json({ error: 'This phone belongs to an existing customer', code: 'PHONE_MATCH_CONFIRM', match: { accountId: 'acct-1', name: 'Robin Sample', address: '200 Sample St' } }, { ok: false, status: 409 }),

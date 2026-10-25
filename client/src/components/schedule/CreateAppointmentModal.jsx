@@ -5124,6 +5124,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (created) setPendingQuickAddSave({ customerId: String(created.id), totalAtSave });
   };
   const handleSave = (arg) => (quickAddSaveMode ? saveNewCustomerThenBook() : handleSubmit(arg));
+  // The wait below fires later than the render that started it: it reads the
+  // form as it is when it fires (a technician or note changed during the wait
+  // is booked as shown), never the values from when the wait began.
+  const latestSaveRef = useRef(null);
+  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine };
   useEffect(() => {
     if (!pendingQuickAddSave) return undefined;
     if (selectedCustomerIdRef.current !== pendingQuickAddSave.customerId) {
@@ -5144,18 +5149,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // customer (a tier discount, a price preview) land a render or more after
     // the selection, and each change here restarts the wait.
     const timer = setTimeout(() => {
+      const latest = latestSaveRef.current;
+      // A change in the last render made the form not ready: the effect runs
+      // again for it, so leave the booking waiting.
+      if (!latest.canSubmit) return;
       setPendingQuickAddSave(null);
       // The price staff saw must be the price booked: a customer-based price
       // (a lot-size mosquito quote, a tier discount) waits for a second Save.
-      if (hasAutoMosquitoLine) {
+      if (latest.hasAutoMosquitoLine) {
         setQuickAddSaveNotice('Customer added. Check the mosquito price for this property, then press Schedule appointment.');
         return;
       }
-      if (Math.round(displayedTotal * 100) !== pendingQuickAddSave.totalAtSave) {
-        setQuickAddSaveNotice(`Customer added. The total for this customer is now $${displayedTotal.toFixed(2)}. Check it, then press Schedule appointment.`);
+      if (Math.round(latest.displayedTotal * 100) !== pendingQuickAddSave.totalAtSave) {
+        setQuickAddSaveNotice(`Customer added. The total for this customer is now $${latest.displayedTotal.toFixed(2)}. Check it, then press Schedule appointment.`);
         return;
       }
-      handleSubmit();
+      latest.handleSubmit();
     }, QUICK_ADD_SAVE_SETTLE_MS);
     return () => clearTimeout(timer);
   }, [pendingQuickAddSave, canSubmit, displayedTotal, hasAutoMosquitoLine, services, selectedCustomer?.id]);
