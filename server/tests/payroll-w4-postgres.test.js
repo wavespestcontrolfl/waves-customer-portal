@@ -2,7 +2,9 @@
 // no-edit trigger, which election currentW4For picks, the W-2-only rule, the
 // pay-method consent rule, and the admin routes (gate off writes nothing).
 // All names are synthetic. DATABASE_URL-gated like the other *-postgres suites.
-const postgres = process.env.DATABASE_URL ? describe : describe.skip;
+// CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
 let mockConnection;
 jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), {
   get(_target, key) {
