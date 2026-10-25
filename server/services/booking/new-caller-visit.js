@@ -352,10 +352,14 @@ async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, pro
       const call = await trx('call_log').where({ id: visit.source_call_log_id }).first('id', 'twilio_call_sid');
       if (call) await lockCallForBooking(trx, call);
     }
-    // Rung 6 before any row lock (occupancy.js ordering contract).
+    // Rung 6 before any row lock (occupancy.js ordering contract), then the
+    // customer row itself (customers before the child rows written below), so
+    // a merge cannot archive it between this check and the link.
     await lockCustomerComms(trx, customerId);
-    if (!(await trx('customers').where({ id: customerId }).first('id'))) {
-      throw httpError(400, 'That customer was not found. Pick the customer again.');
+    const customer = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'deleted_at');
+    if (!customer) throw httpError(400, 'That customer was not found. Pick the customer again.');
+    if (customer.deleted_at) {
+      throw httpError(409, 'That customer was merged into another account. Search again and pick the current one.');
     }
     const address = {
       address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,

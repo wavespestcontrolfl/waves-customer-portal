@@ -381,6 +381,23 @@ maybeDescribe('new-caller booking on Postgres', () => {
     expect(row).toEqual({ customer_id: null, property_id: null });
   });
 
+  test('Link refuses a customer merged into another account, and adds no property', async () => {
+    const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+    const customerId = require('crypto').randomUUID();
+    await db('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Merged', phone: '+15555550144',
+      address_line1: '1 Synthetic Ln', city: 'Bradenton', zip: '34201', active: true, deleted_at: new Date(),
+    });
+    made.customerIds.push(customerId);
+    const booked = await service.bookNewCallerVisit({ input: validInput({ serviceId: svc.id, scheduledDate: '2031-03-09', windowStart: '13:00' }) });
+    made.visitIds.push(booked.visit.id);
+
+    await expect(service.linkNewCallerVisit({ visitId: booked.visit.id, customerId }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/merged into another account/) });
+    expect((await db('scheduled_services').where({ id: booked.visit.id }).first('customer_id')).customer_id).toBeNull();
+    expect(await db('customer_properties').where({ customer_id: customerId }).first('id')).toBeUndefined();
+  });
+
   test('lists answered and recent calls, never a voice-agent call, an old answer or a long-ended call', async () => {
     const live = await insertCall();
     const endedJustNow = await insertCall({ status: 'completed', createdMinutesAgo: 6, durationSeconds: 120 });
