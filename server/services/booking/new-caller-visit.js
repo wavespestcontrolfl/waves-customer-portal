@@ -28,7 +28,7 @@ const { assertAssignableTechnician } = require('../technician-eligibility');
 const mistingRefill = require('../misting-refill');
 const logger = require('../logger');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
-const { dateOnlyString } = require('../../utils/datetime-et');
+const { dateOnlyString, parseETDateTime } = require('../../utils/datetime-et');
 const { ensurePrimaryProperty, recordCallProperty } = require('../customer-properties');
 const { addressKey } = require('../customer-property-address-keys');
 const { closeAdminAlertKeys } = require('../admin-alert-episodes');
@@ -52,6 +52,24 @@ const CALL_COLUMNS = ['id', 'twilio_call_sid', 'direction', 'from_phone', 'to_ph
 // The bell for a visit booked by address that still waits for its customer
 // (D4): one row per visit, closed by the link.
 const newCallerVisitAlertKey = (visitId) => `new-caller-visit:${visitId}`;
+
+// The words and the link the visit's bells use: "Tue Nov 3" and "1:00 PM" (a
+// person would say them), and the visit opened on Dispatch.
+function slotWords(date, time) {
+  const at = parseETDateTime(`${date}T${time || '12:00'}`);
+  if (!date || Number.isNaN(at.getTime())) return { day: '', time: '' };
+  const tz = { timeZone: 'America/New_York' };
+  return {
+    day: at.toLocaleDateString('en-US', { ...tz, weekday: 'short', month: 'short', day: 'numeric' }).replace(',', ''),
+    // Newer ICU puts a narrow no-break space before PM.
+    time: time ? at.toLocaleTimeString('en-US', { ...tz, hour: 'numeric', minute: '2-digit' }).replace(/\s/g, ' ') : '',
+  };
+}
+const bookedSlot = (visit) => ({
+  date: dateOnlyString(visit.scheduled_date),
+  time: visit.window_start ? String(visit.window_start).slice(0, 5) : '',
+});
+const newCallerVisitLink = (visit) => `/admin/dispatch?tab=schedule&date=${bookedSlot(visit).date}&appointment=${encodeURIComponent(visit.id)}`;
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM = /^\d{2}:\d{2}$/;
@@ -457,4 +475,7 @@ module.exports = {
   linkNewCallerVisit,
   armLinkedVisitComms,
   newCallerVisitAlertKey,
+  slotWords,
+  bookedSlot,
+  newCallerVisitLink,
 };

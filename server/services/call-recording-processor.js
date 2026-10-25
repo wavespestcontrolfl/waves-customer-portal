@@ -16512,6 +16512,8 @@ const CallRecordingProcessor = {
     await require('./booking/new-caller-link-from-call').linkOfficeVisitFromCall({
       call,
       procToken,
+      extracted,
+      createdCustomerId: createdCustomerFromCall ? customerId : null,
       text: {
         passBlocked: v2SmsBlocked,
         extraction: v2ApprovedExtraction || v2CanonicalExtraction || null,

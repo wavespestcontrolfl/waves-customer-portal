@@ -1,10 +1,11 @@
 // GATE_NEW_CALLER_BOOKING, the call-recording agent's link step
 // (services/booking/new-caller-link-from-call.js). After the processor's fenced
 // customer checkpoint, a visit the office booked by address for the call gets
-// the call's customer, its reminders and its confirmation (D1, D3, D6); a visit
-// the pass leaves unlinked rings its bell (D4a). The bell runs through the real
-// composer, so a copy-rule break fails here. Unit cases run everywhere; the
-// link on Postgres runs in CI (DATABASE_URL). Fixtures fictitious.
+// the call's customer, its reminders and its confirmation (D1, D3, D6); the
+// office gets a bell for a visit left unlinked (D4a) or for something to check
+// (D2 address, D7 time, a held text, failed reminders). The bells run through
+// the real composer, so a copy-rule break fails here. Unit cases run
+// everywhere; the link on Postgres runs in CI (DATABASE_URL). Fixtures fictitious.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 let mockNewCallerGate = true;
@@ -38,7 +39,7 @@ const officeVisit = (overrides = {}) => ({
 });
 const linkedVisit = () => officeVisit({ customer_id: CUSTOMER_ID });
 const TEXT_OK = { passBlocked: false, extraction: { consent: { sms_consent_given: true } }, impliedConsent: false, callerPhone: '+15555550142' };
-const PAT = { phone: '+15555550142' };
+const PAT = { phone: '+15555550142', first_name: 'Pat', last_name: 'Example', address_line1: '100 Example Street', address_line2: null, zip: '34200' };
 
 // Answers each read by table: rows.visit (the office-visit lookup), rows.call (the claimed call row),
 // rows.customer (every customers read), rows.recheck (the visit re-read after a refused link).
@@ -119,9 +120,12 @@ describe('the agent links the office visit after the call checkpoint', () => {
     const conn = fakeConn({ visit: officeVisit(), call: { customer_id: CUSTOMER_ID }, customer: PAT });
     newCallerVisit.linkNewCallerVisit.mockResolvedValueOnce({ visit: linkedVisit(), addedProperty: true });
 
-    const out = await linkOfficeVisitFromCall({ call: CALL, procToken: 'tok-1', conn, text: TEXT_OK });
+    const out = await linkOfficeVisitFromCall({
+      call: CALL, procToken: 'tok-1', conn, text: TEXT_OK, createdCustomerId: CUSTOMER_ID,
+      extracted: { appointment_confirmed: true, preferred_date_time: '2031-03-07T13:00' },
+    });
 
-    expect(out).toEqual({ outcome: 'linked', visitId: VISIT_ID, remindersArmed: true, confirmationSent: true, heldText: null });
+    expect(out).toEqual({ outcome: 'linked', visitId: VISIT_ID, remindersArmed: true, confirmationSent: true, heldText: null, checks: [] });
     expect(newCallerVisit.linkNewCallerVisit).toHaveBeenCalledWith({
       visitId: VISIT_ID, customerId: CUSTOMER_ID, propertySource: 'call_pipeline', claimFence: { callLogId: CALL.id, procToken: 'tok-1' }, conn,
     });
@@ -156,16 +160,38 @@ describe('the agent links the office visit after the call checkpoint', () => {
     expect(notify).toHaveBeenCalledTimes(2);
   });
 
-  test('a text the pass blocks is held: the reminders are set up, the confirmation is not sent', async () => {
-    const conn = fakeConn({ visit: officeVisit(), call: { customer_id: CUSTOMER_ID }, customer: PAT });
+  test('after the link, one check bell names each thing to check: a different address, a different time, a held text', async () => {
+    const conn = fakeConn({ visit: officeVisit(), call: { customer_id: CUSTOMER_ID }, customer: { ...PAT, address_line1: '102 Example St' } });
     newCallerVisit.linkNewCallerVisit.mockResolvedValueOnce({ visit: linkedVisit(), addedProperty: true });
     newCallerVisit.armLinkedVisitComms.mockResolvedValueOnce({ remindersArmed: true, confirmationSent: false });
 
-    const out = await linkOfficeVisitFromCall({ call: CALL, procToken: 'tok-1', conn, text: { ...TEXT_OK, passBlocked: true } });
+    const out = await linkOfficeVisitFromCall({
+      call: CALL, procToken: 'tok-1', conn, createdCustomerId: CUSTOMER_ID,
+      text: { ...TEXT_OK, passBlocked: true },
+      extracted: { appointment_confirmed: true, preferred_date_time: '2031-03-07T14:00' },
+    });
 
+    expect(out).toMatchObject({ heldText: 'consent', checks: ['address', 'time', 'text_consent'] });
     expect(newCallerVisit.armLinkedVisitComms).toHaveBeenCalledWith({ visit: linkedVisit(), sendConfirmation: false });
-    expect(out).toEqual({ outcome: 'linked', visitId: VISIT_ID, remindersArmed: true, confirmationSent: false, heldText: 'consent' });
-    expect(notify).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith('schedule', "Schedule — check Pat Example's visit on Fri Mar 7",
+      'Check 3 things on this visit: a different address, a different time and no confirmation text.', expect.objectContaining({
+        dedupeKey: `new-caller-visit-check:${VISIT_ID}`,
+        link: LINK,
+        detail: expect.stringContaining('the call says Fri Mar 7 at 2:00 PM; the visit stays at Fri Mar 7 at 1:00 PM, as booked'),
+        metadata: expect.objectContaining({ doneWhen: 'visit_checked', subject: { type: 'visit', id: VISIT_ID }, checks: ['address', 'time', 'text_consent'] }),
+      }));
+  });
+
+  test('failed reminders are the one check; an older customer\'s own home is never a different address (D6)', async () => {
+    const conn = fakeConn({ visit: officeVisit(), call: { customer_id: CUSTOMER_ID }, customer: { ...PAT, address_line1: '9 Other Rd' } });
+    newCallerVisit.linkNewCallerVisit.mockResolvedValueOnce({ visit: linkedVisit(), addedProperty: true });
+    newCallerVisit.armLinkedVisitComms.mockResolvedValueOnce({ remindersArmed: false, confirmationSent: false });
+
+    const out = await linkOfficeVisitFromCall({ call: CALL, procToken: 'tok-1', conn, text: TEXT_OK, createdCustomerId: null });
+
+    expect(out.checks).toEqual(['reminders']);
+    expect(notify).toHaveBeenCalledWith('schedule', expect.any(String), _private.CHECKS.reminders.why, expect.objectContaining({ dedupeKey: `new-caller-visit-check:${VISIT_ID}` }));
   });
 
   test('a failed phone read after the link still sets up the reminders and holds only the text', async () => {
@@ -176,7 +202,7 @@ describe('the agent links the office visit after the call checkpoint', () => {
     const out = await linkOfficeVisitFromCall({ call: CALL, procToken: 'tok-1', conn, text: { passBlocked: false, extraction: null, impliedConsent: true, callerPhone: PAT.phone } });
 
     expect(newCallerVisit.armLinkedVisitComms).toHaveBeenCalledWith({ visit: linkedVisit(), sendConfirmation: false });
-    expect(out).toMatchObject({ outcome: 'linked', remindersArmed: true, heldText: 'unknown' });
+    expect(out).toMatchObject({ outcome: 'linked', remindersArmed: true, heldText: 'unknown', checks: ['text_unknown'] });
   });
 
   test('a failure anywhere never escapes the call pass; the visit bell rings while the visit waits', async () => {
@@ -203,11 +229,39 @@ describe('the confirmation text follows the pass\'s own consent rules', () => {
   });
 });
 
-describe('the bell passes the notification rule', () => {
-  test('each why', () => {
+describe('what counts as a different address or time', () => {
+  const { addressDiffers, spokenSlot } = _private;
+  test('spelling, suffix, directional and ZIP+4 forms, and a unit or ZIP only one side gives, are not a difference', () => {
+    const booked = { address_line1: '100 North Example Street', address_line2: '', zip: '34200' };
+    expect(addressDiffers({ address_line1: '100 n example st.', zip: '34200-1234' }, booked)).toBe(false);
+    expect(addressDiffers({ address_line1: '100 N Example St Apt 4', zip: '' }, booked)).toBe(false);
+    expect(addressDiffers({ address_line1: '' }, booked)).toBe(false);
+  });
+
+  test('a different house, street, ZIP or unit is', () => {
+    const booked = { address_line1: '100 Example St', address_line2: 'Apt 4', zip: '34200' };
+    expect(addressDiffers({ address_line1: '102 Example St', zip: '34200' }, booked)).toBe(true);
+    expect(addressDiffers({ address_line1: '100 Example Ave', zip: '34200' }, booked)).toBe(true);
+    expect(addressDiffers({ address_line1: '100 Example St', zip: '34201' }, booked)).toBe(true);
+    expect(addressDiffers({ address_line1: '100 Example St Unit 5', zip: '34200' }, booked)).toBe(true);
+  });
+
+  test('only a confirmed time in the extractor\'s own format is compared', () => {
+    expect(spokenSlot({ appointment_confirmed: true, preferred_date_time: '2031-03-07T14:00' })).toEqual({ date: '2031-03-07', time: '14:00' });
+    expect(spokenSlot({ appointment_confirmed: true, preferred_date_time: '2031-03-07T14:00:00' })).toEqual({ date: '2031-03-07', time: '14:00' });
+    expect(spokenSlot({ appointment_confirmed: false, preferred_date_time: '2031-03-07T14:00' })).toBeNull();
+    expect(spokenSlot({ appointment_confirmed: true, preferred_date_time: 'Friday at 2 PM' })).toBeNull();
+    expect(spokenSlot({ appointment_confirmed: true, preferred_date_time: '2031-03-07' })).toBeNull();
+    expect(spokenSlot(null)).toBeNull();
+  });
+});
+
+describe('every bell passes the notification rule', () => {
+  test('each why, alone', () => {
     const { composeAdminAlert } = require('../services/admin-alert-compose');
-    const spec = { area: 'Schedule', action: "link the new caller's visit", severity: 'needs-you', link: LINK, subject: { type: 'visit', id: VISIT_ID }, doneWhen: 'visit_linked', who: 'person' };
-    for (const why of Object.values(_private.UNLINKED_WHY)) expect(() => composeAdminAlert({ ...spec, why })).not.toThrow();
+    const spec = { area: 'Schedule', action: 'check the visit', severity: 'needs-you', link: LINK, subject: { type: 'visit', id: VISIT_ID }, doneWhen: 'visit_checked', who: 'person' };
+    const whys = [...Object.values(_private.UNLINKED_WHY), ...Object.values(_private.CHECKS).map((check) => check.why)];
+    for (const why of whys) expect(() => composeAdminAlert({ ...spec, why })).not.toThrow();
   });
 });
 
@@ -224,6 +278,7 @@ describe('the processor runs the link step right after its customer checkpoint',
     expect(args).toContain('passBlocked: v2SmsBlocked,');
     expect(args).toContain("impliedConsent: isEnabled('callInboundImpliedConsent') && outboundImpliedConsentEligible(call, outboundReturnMessagesEligible),");
     expect(args).toContain('callerPhone: contactPhone,');
+    expect(args).toContain('createdCustomerId: createdCustomerFromCall ? customerId : null,');
   });
 });
 
@@ -281,16 +336,20 @@ maybeDescribe('the agent link on Postgres', () => {
     const customerId = await insertCustomer('Linked', '+15555550145');
     const { callId, visitId } = await bookedCall({ scheduledDate: '2031-04-07', customerId, token: 'tok-pass-1' });
 
-    const out = await linkOfficeVisitFromCall({ call: { id: callId }, procToken: 'tok-pass-1', text: { ...TEXT_OK, callerPhone: '+15555550145' } });
+    const out = await linkOfficeVisitFromCall({
+      call: { id: callId }, procToken: 'tok-pass-1', text: { ...TEXT_OK, callerPhone: '+15555550145' }, createdCustomerId: customerId,
+    });
 
-    expect(out).toEqual({ outcome: 'linked', visitId, remindersArmed: true, confirmationSent: true, heldText: null });
+    expect(out).toMatchObject({ outcome: 'linked', visitId, remindersArmed: true, confirmationSent: true });
     const visit = await db('scheduled_services').where({ id: visitId }).first('customer_id', 'property_id');
     expect(visit.customer_id).toBe(customerId);
     const property = await db('customer_properties').where({ id: visit.property_id }).first('address_line1', 'source', 'is_primary');
     expect(property).toEqual({ address_line1: '100 Example Way', source: 'call_pipeline', is_primary: false });
     const logged = await db('activity_log').where({ action: 'new_caller_visit_linked' }).whereRaw("metadata->>'scheduled_service_id' = ?", [visitId]).first('metadata');
     expect((typeof logged.metadata === 'string' ? JSON.parse(logged.metadata) : logged.metadata).linked_by).toBe('call_recording');
-    expect(newCallerVisit.armLinkedVisitComms).toHaveBeenCalledWith({ visit: expect.objectContaining({ id: visitId, customer_id: customerId }), sendConfirmation: true });
+    // D2: the customer this call created gave another address on the call; the visit keeps the booked one.
+    expect(out.checks).toEqual(['address']);
+    expect(notify).toHaveBeenCalledWith('schedule', expect.any(String), _private.CHECKS.address.why, expect.objectContaining({ dedupeKey: `new-caller-visit-check:${visitId}` }));
   });
 
   test('a pass whose claim moved links nothing: a rotated token, or a call relinked to another customer inside the link', async () => {
