@@ -4,14 +4,19 @@
 // Save (POST /api/admin/schedule). Mounted before the main schedule router so
 // /new-caller is never read as a visit id.
 //
-//   GET  /api/admin/schedule/new-caller/calls  live calls the office answered
-//   POST /api/admin/schedule/new-caller        book the visit (no customer)
+//   GET  /api/admin/schedule/new-caller/calls          live calls the office answered
+//   POST /api/admin/schedule/new-caller                book the visit (no customer)
+//   PUT  /api/admin/schedule/new-caller/:visitId/link  link it to its customer, then
+//        arm reminders and (unless sendConfirmation is false) send the confirmation
 
 const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
-const { listPickableCalls, bookNewCallerVisit } = require('../services/booking/new-caller-visit');
+const {
+  listPickableCalls, bookNewCallerVisit, linkNewCallerVisit, armLinkedVisitComms,
+} = require('../services/booking/new-caller-visit');
+const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireAdmin);
 // Dark: with the gate unset the routes answer as if they did not exist.
@@ -41,6 +46,29 @@ router.post('/', async (req, res, next) => {
       adminUserId: req.technicianId || null,
     });
     res.status(201).json({ ok: true, id: visit.id, scheduledDate: String(req.body.scheduledDate), warnings });
+  } catch (err) {
+    if (err?.isOperational && (err.status || err.statusCode)) return sendOperational(res, err);
+    next(err);
+  }
+});
+
+router.put('/:visitId/link', async (req, res, next) => {
+  try {
+    const { visit, addedProperty } = await linkNewCallerVisit({
+      visitId: req.params.visitId,
+      customerId: req.body?.customerId,
+      adminUserId: req.technicianId || null,
+    });
+    // The link is committed: a reminder or text failure is reported, never undone.
+    let confirmationSent = false;
+    let warning = null;
+    try {
+      confirmationSent = await armLinkedVisitComms({ visit, sendConfirmation: req.body?.sendConfirmation !== false });
+    } catch (err) {
+      logger.error(`[new-caller] reminders/confirmation after link failed for visit ${visit.id}: ${err.message}`);
+      warning = 'The visit is linked, but its reminders or confirmation did not go out. Check the visit.';
+    }
+    res.json({ ok: true, id: visit.id, customerId: visit.customer_id, addedProperty, confirmationSent, warning });
   } catch (err) {
     if (err?.isOperational && (err.status || err.statusCode)) return sendOperational(res, err);
     next(err);

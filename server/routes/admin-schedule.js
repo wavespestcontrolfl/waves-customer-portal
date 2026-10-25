@@ -6930,6 +6930,8 @@ router.get('/', async (req, res, next) => {
         // (or staff) links the customer.
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim()
           || (!s.customer_id && s.source_action === 'admin_new_caller' ? 'New caller' : null),
+        // The visit sheet offers Link customer for it (PUT /api/admin/schedule/new-caller/:id/link).
+        awaitingCustomerLink: !s.customer_id && s.source_action === 'admin_new_caller',
         customerId: s.customer_id,
         // propertyId, address, city, state, lat, lng, customerPhone and
         // checkInTime: shared with the week feed (visitPremiseFields).

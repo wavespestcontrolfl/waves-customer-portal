@@ -31,6 +31,7 @@ const {
   toPickableCall,
   stillPickable,
   bookNewCallerVisit,
+  linkNewCallerVisit,
 } = require('../services/booking/new-caller-visit');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 
@@ -172,12 +173,33 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     const processor = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     expect(processor).toContain(`${lock} callSid]`);
     expect(own).toContain(`${lock} call.twilio_call_sid]`);
-    // The call row's id first (an outbound bridge may have no Call SID yet), then the processor's key, then the ownership read.
-    const byId = own.indexOf("['new-caller-visit-call', call.id]");
-    expect(byId).toBeGreaterThan(-1);
-    expect(byId).toBeLessThan(own.indexOf(lock));
-    expect(own.indexOf(lock)).toBeLessThan(own.indexOf("linked.where('source_call_log_id', call.id)"));
-    expect(own.indexOf(lock)).toBeLessThan(own.indexOf('await probeSlotOverlap('));
+    // lockCallForBooking: the call row's id first (an outbound bridge may have no Call SID yet), then the processor's key.
+    const helper = own.slice(own.indexOf('async function lockCallForBooking('), own.indexOf('// Books the visit.'));
+    expect(helper.indexOf("['new-caller-visit-call', call.id]")).toBeGreaterThan(-1);
+    expect(helper.indexOf("['new-caller-visit-call', call.id]")).toBeLessThan(helper.indexOf(lock));
+    // Book: the locks, then the ownership read, then rung 1.
+    const book = own.slice(own.indexOf('async function bookNewCallerVisit('), own.indexOf('async function linkNewCallerVisit('));
+    expect(book.indexOf('await lockCallForBooking(trx, call);')).toBeGreaterThan(-1);
+    expect(book.indexOf('await lockCallForBooking(trx, call);')).toBeLessThan(book.indexOf("linked.where('source_call_log_id', call.id)"));
+    expect(book.indexOf("linked.where('source_call_log_id', call.id)")).toBeLessThan(book.indexOf('await probeSlotOverlap('));
+    // Link: the same call locks, then rung 6, before any row lock.
+    const link = own.slice(own.indexOf('async function linkNewCallerVisit('), own.indexOf('async function armLinkedVisitComms('));
+    expect(link.indexOf('await lockCallForBooking(trx, call);')).toBeGreaterThan(-1);
+    expect(link.indexOf('await lockCallForBooking(trx, call);')).toBeLessThan(link.indexOf('await lockCustomerComms(trx, customerId);'));
+    expect(link.indexOf('await lockCustomerComms(trx, customerId);')).toBeLessThan(link.indexOf('recordCallProperty('));
+  });
+
+  test('Link refuses with a 404 while the gate is off, and a 400 for a bad id, before any read', async () => {
+    const conn = () => { throw new Error('no query expected'); };
+    const VISIT = '0f8b9d1e-2c3a-4b5d-8e6f-7a8b9c0d1e2f';
+    mockNewCallerGate = false;
+    try {
+      await expect(linkNewCallerVisit({ visitId: VISIT, customerId: VISIT, conn })).rejects.toMatchObject({ status: 404 });
+    } finally {
+      mockNewCallerGate = true;
+    }
+    await expect(linkNewCallerVisit({ visitId: 'visit-1', customerId: VISIT, conn })).rejects.toMatchObject({ status: 400, message: 'Open the visit again.' });
+    await expect(linkNewCallerVisit({ visitId: VISIT, customerId: 'cust-1', conn })).rejects.toMatchObject({ status: 400, message: 'Pick the customer again.' });
   });
 
   test('a misting refill is refused as the visit itself, before any write (the create route\'s own rule)', async () => {
@@ -217,9 +239,10 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
       const { port } = server.address();
       const calls = await fetch(`http://127.0.0.1:${port}/new-caller/calls`);
       const book = await fetch(`http://127.0.0.1:${port}/new-caller`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      expect([calls.status, book.status]).toEqual([404, 404]);
-      expect(mockAdminAuth.adminAuthenticate).toHaveBeenCalledTimes(2);
-      expect(mockAdminAuth.requireAdmin).toHaveBeenCalledTimes(2);
+      const link = await fetch(`http://127.0.0.1:${port}/new-caller/0f8b9d1e-2c3a-4b5d-8e6f-7a8b9c0d1e2f/link`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      expect([calls.status, book.status, link.status]).toEqual([404, 404, 404]);
+      expect(mockAdminAuth.adminAuthenticate).toHaveBeenCalledTimes(3);
+      expect(mockAdminAuth.requireAdmin).toHaveBeenCalledTimes(3);
     } finally {
       mockNewCallerGate = true;
       await new Promise((resolve) => server.close(resolve));
@@ -233,7 +256,7 @@ const maybeDescribe = SKIP ? describe.skip : describe;
 maybeDescribe('new-caller booking on Postgres', () => {
   let db;
   let service;
-  const made = { callIds: [], visitIds: [] };
+  const made = { callIds: [], visitIds: [], customerIds: [] };
   const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000);
 
   // updated_at defaults to a minute ago on every row: later writes (recording
@@ -266,11 +289,39 @@ maybeDescribe('new-caller booking on Postgres', () => {
   });
   afterAll(async () => {
     if (made.visitIds.length) {
-      await db('activity_log').where('action', 'new_caller_visit_booked').whereRaw("metadata->>'scheduled_service_id' = ANY(?)", [made.visitIds]).del();
+      await db('activity_log').whereIn('action', ['new_caller_visit_booked', 'new_caller_visit_linked']).whereRaw("metadata->>'scheduled_service_id' = ANY(?)", [made.visitIds]).del();
       await db('scheduled_services').whereIn('id', made.visitIds).del();
+    }
+    if (made.customerIds.length) {
+      await db('customer_properties').whereIn('customer_id', made.customerIds).del();
+      await db('customers').whereIn('id', made.customerIds).del();
     }
     if (made.callIds.length) await db('call_log').whereIn('id', made.callIds).del();
     await db.destroy();
+  });
+
+  test('Link gives the visit its customer, adds the booked address as a property and points the visit at it; a second Link is refused', async () => {
+    const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+    const customerId = require('crypto').randomUUID();
+    await db('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Caller', phone: '+15555550142',
+      address_line1: '1 Synthetic Ln', city: 'Bradenton', zip: '34201', active: true,
+    });
+    made.customerIds.push(customerId);
+    const booked = await service.bookNewCallerVisit({ input: validInput({ serviceId: svc.id, scheduledDate: '2031-03-07', windowStart: '13:00' }) });
+    made.visitIds.push(booked.visit.id);
+
+    const { visit, addedProperty } = await service.linkNewCallerVisit({ visitId: booked.visit.id, customerId });
+    expect(visit.customer_id).toBe(customerId);
+    expect(addedProperty).toBe(true);
+    const property = await db('customer_properties').where({ id: visit.property_id }).first();
+    expect(property).toMatchObject({ customer_id: customerId, address_line1: '100 Example Way', zip: '34200' });
+    expect(visit.internal_notes).toContain('Linked to its customer after the call.');
+    const logged = await db('activity_log').where({ action: 'new_caller_visit_linked' }).whereRaw("metadata->>'scheduled_service_id' = ?", [visit.id]).first();
+    expect(logged).toBeTruthy();
+
+    await expect(service.linkNewCallerVisit({ visitId: visit.id, customerId })).rejects.toMatchObject({ status: 409 });
+    await expect(service.linkNewCallerVisit({ visitId: visit.id, customerId: require('crypto').randomUUID() })).rejects.toMatchObject({ status: 400 });
   });
 
   test('lists answered and recent calls, never a voice-agent call, an old answer or a long-ended call', async () => {
