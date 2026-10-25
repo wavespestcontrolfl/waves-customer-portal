@@ -46,12 +46,43 @@ const ALLOWANCE_TAX_CAP = 1200;
 const PENALTY_RATE = 0.10;
 const PENALTY_MIN = 50;
 
-// A Saturday or Sunday due date moves to Monday. A state or federal holiday
-// moves it too; DOR's calendar is the authority for those.
-function nextWeekday(iso) {
+// A return or form due on a weekend or a state or federal holiday is due the
+// next business day (DR-15N; IRS for the 1099-NEC). Holidays: the federal list
+// (5 U.S.C. 6103; a Saturday holiday is observed Friday, a Sunday one Monday)
+// plus Florida's day after Thanksgiving.
+const FIXED_HOLIDAYS = [[1, 1], [6, 19], [7, 4], [11, 11], [12, 25]];
+// [month, weekday (0 = Sunday), nth (-1 = last)]: MLK, Washington, Memorial,
+// Labor, Columbus, Thanksgiving
+const FLOATING_HOLIDAYS = [[1, 1, 3], [2, 1, 3], [5, 1, -1], [9, 1, 1], [10, 1, 2], [11, 4, 4]];
+
+function nthWeekday(y, m, weekday, n) {
+  if (n < 0) {
+    const last = lastDay(y, m);
+    return last - ((new Date(Date.UTC(y, m - 1, last)).getUTCDay() - weekday + 7) % 7);
+  }
+  return 1 + ((weekday - new Date(Date.UTC(y, m - 1, 1)).getUTCDay() + 7) % 7) + (n - 1) * 7;
+}
+
+function observed(iso) {
   const d = new Date(`${iso}T12:00:00Z`);
-  const shift = { 6: 2, 0: 1 }[d.getUTCDay()] || 0;
-  d.setUTCDate(d.getUTCDate() + shift);
+  d.setUTCDate(d.getUTCDate() + ({ 6: -1, 0: 1 }[d.getUTCDay()] || 0));
+  return d.toISOString().slice(0, 10);
+}
+
+function holidays(y) {
+  const thanksgiving = nthWeekday(y, 11, 4, 4);
+  return new Set([
+    // next year's New Year's Day can be observed on Dec 31 of this year
+    ...[...FIXED_HOLIDAYS.map(([m, d]) => isoDate(y, m, d)), isoDate(y + 1, 1, 1)].map(observed),
+    ...FLOATING_HOLIDAYS.map(([m, wd, n]) => isoDate(y, m, nthWeekday(y, m, wd, n))),
+    isoDate(y, 11, thanksgiving + 1),
+  ]);
+}
+
+function nextBusinessDay(iso) {
+  const d = new Date(`${iso}T12:00:00Z`);
+  const closed = () => [0, 6].includes(d.getUTCDay()) || holidays(d.getUTCFullYear()).has(d.toISOString().slice(0, 10));
+  while (closed()) d.setUTCDate(d.getUTCDate() + 1);
   return d.toISOString().slice(0, 10);
 }
 
@@ -74,14 +105,15 @@ function periodFor(kind, year, index) {
 // A DR-15 is due on the 20th of the month after the period.
 function dr15DueDate(periodEnd) {
   const [y, m] = periodEnd.split('-').map(Number);
-  return nextWeekday(m === 12 ? isoDate(y + 1, 1, 20) : isoDate(y, m + 1, 20));
+  return nextBusinessDay(m === 12 ? isoDate(y + 1, 1, 20) : isoDate(y, m + 1, 20));
 }
 
-// The DR-15 lines from the period's figures. `filedOn` is the filing date of a
-// return already marked filed; otherwise lateness is judged from `today`.
-function dr15Lines({ grossSales, taxable, tax, surtax, dueDate, today, filedOn = null }) {
-  const late = (filedOn || today) > dueDate;
+// The DR-15 lines from the period's figures. A return is on time only when it
+// is filed AND its tax is paid by the due date: `filedOn` and `paidOn` come
+// from the filing calendar row, and a missing one is judged from `today`.
+function dr15Lines({ grossSales, taxable, tax, surtax, dueDate, today, filedOn = null, paidOn = null }) {
   const taxDue = Math.max(0, round2(tax));
+  const late = (filedOn || today) > dueDate || (taxDue > 0 && (paidOn || today) > dueDate);
   const allowance = late ? 0 : round2(ALLOWANCE_RATE * Math.min(taxDue, ALLOWANCE_TAX_CAP));
   const penalty = late ? round2(Math.max(PENALTY_MIN, PENALTY_RATE * taxDue)) : 0;
   return {
@@ -130,9 +162,10 @@ async function salesTaxSheet({ kind = 'month', year, index } = {}) {
   ]);
   const filing = filingOut(filingRow);
   const filedOn = filing && ['filed', 'paid'].includes(filing.status) ? (filing.filed_date || filing.paid_date) : null;
+  const paidOn = filing?.paid_date || null;
   const dueDate = dr15DueDate(period.end);
   const grossSales = Number(pnl.revenue?.total) || 0;
-  const sheet = dr15Lines({ grossSales, taxable: legs.taxable, tax: legs.tax, surtax: legs.surtax, dueDate, today, filedOn });
+  const sheet = dr15Lines({ grossSales, taxable: legs.taxable, tax: legs.tax, surtax: legs.surtax, dueDate, today, filedOn, paidOn });
   const warnings = [
     period.end >= today && { code: 'in_progress', text: `This period runs to ${period.end}; the figures will change.` },
     pnl.coverage?.complete === false && { code: 'pnl_coverage', text: `Sales may be incomplete: ${pnl.coverage.note}` },
@@ -143,9 +176,9 @@ async function salesTaxSheet({ kind = 'month', year, index } = {}) {
 
 // 1099-NEC threshold: $600 for payments through 2025, $2,000 for payments made
 // after 2025 (P.L. 119-21; indexed for inflation after 2026). Due Jan 31 of
-// the next year, or the next weekday.
+// the next year, or the next business day.
 const necThreshold = (year) => (year >= 2026 ? 2000 : 600);
-const necDueDate = (year) => nextWeekday(isoDate(year + 1, 1, 31));
+const necDueDate = (year) => nextBusinessDay(isoDate(year + 1, 1, 31));
 
 const SCHEDULE_C_1099_LINES = ['11', '17'];
 const LEFT_OUT_CHANNELS = new Set(['card', 'debit_card', 'platform']);
@@ -173,26 +206,24 @@ function paymentChannel(paymentMethod, text) {
 }
 
 // The payee inside a bank text: "Zelle money sent to Pat Example" gives
-// "Pat Example". A text that names no person keeps a plain description.
+// "Pat Example". A check or a Wise transfer does not name the person paid:
+// such a payment is never added to anyone else's and is marked unresolved.
 const PAYEE_PATTERNS = [
   /\bzelle\b(?:\s+money)?(?:\s+sent)?(?:\s+payment)?\s+to\s+(.+)/i,
   /\bvenmo\b(?:\s+payment)?(?:\s+to)?\s+(.+)/i,
   /cash\s*app\*?\s*(?:to\s+)?(.+)/i,
   /\bpaypal\s*\*\s*(.+)/i,
 ];
-const NO_PAYEE = [
-  [/\bwise\b|transferwise/i, 'Wise transfer (payee not in the bank text)'],
-  [/^\s*che(?:ck|que)\b|^\s*chk\b/i, 'Check (payee not in the bank text)'],
-];
+const NO_PAYEE = [/\bwise\b|transferwise/i, /^\s*che(?:ck|que)\b|^\s*chk\b/i];
 const REFERENCE_TAIL = /\s+(?:conf(?:irmation)?|ref(?:erence)?|id|trn|txn)\b.*$/i;
+const tidy = (text) => text.replace(REFERENCE_TAIL, '').replace(/\b\d{5,}\b/g, '').replace(/[\s,.-]+$/, '').replace(/\s+/g, ' ').trim();
 
-function payeeName(text) {
+function payeeOf(text) {
   const raw = String(text || '').replace(/\s+/g, ' ').trim();
   const pattern = PAYEE_PATTERNS.map((re) => re.exec(raw)).find(Boolean);
-  const plain = NO_PAYEE.find(([re]) => re.test(raw));
-  const name = pattern ? pattern[1] : (plain ? plain[1] : raw.replace(/^(?:debit\s+card\s+purchase|online\s+transfer\s+to|payment\s+to)\s*-?\s*/i, ''));
-  const cleaned = name.replace(REFERENCE_TAIL, '').replace(/\b\d{5,}\b/g, '').replace(/[\s,.-]+$/, '').replace(/\s+/g, ' ').trim();
-  return cleaned || 'Unknown payee';
+  if (!pattern && NO_PAYEE.some((re) => re.test(raw))) return { name: `${tidy(raw)} (payee not in the bank text)`, identified: false };
+  const name = tidy(pattern ? pattern[1] : raw.replace(/^(?:debit\s+card\s+purchase|online\s+transfer\s+to|payment\s+to)\s*-?\s*/i, ''));
+  return name ? { name, identified: true } : { name: 'Unknown payee', identified: false };
 }
 const payeeKey = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
@@ -211,9 +242,9 @@ function build1099List(year, rows) {
       leftOut.count += 1; leftOut.total = round2(leftOut.total + amount);
       continue;
     }
-    const name = payeeName(r.vendor_name || r.description || r.bank_text);
-    const key = payeeKey(name);
-    const p = payees.get(key) || { key, name, total: 0, count: 0, channels: [], lines: [], payments: [] };
+    const { name, identified } = payeeOf(r.vendor_name || r.description || r.bank_text);
+    const key = identified ? payeeKey(name) : `unresolved:${r.expense_id}`;
+    const p = payees.get(key) || { key, name, unresolved: !identified, total: 0, count: 0, channels: [], lines: [], payments: [] };
     p.total = round2(p.total + amount);
     p.count += 1;
     if (!p.channels.includes(channel)) p.channels.push(channel);
@@ -259,7 +290,7 @@ async function form1099List(year) {
     inbox_pending: { count: Number(inbox?.count) || 0, total: round2(inbox?.total) },
     notes: [
       'Venmo, Cash App and PayPal: a payment sent as a business (goods and services) payment is reported by the app on a 1099-K and needs no 1099-NEC.',
-      'Names come from the bank text. W-9 requests and name corrections come with the filing step.',
+      'Names come from the bank text. A check or a Wise transfer does not name the person paid, so it stays on its own line until you know who it was. W-9 requests and name corrections come with the filing step.',
       'Rent paid to a person goes on a 1099-MISC and is not in this list.',
       ...(y >= 2027 ? ['The $2,000 threshold is indexed for inflation from 2027; check the IRS figure for this year.'] : []),
     ],
@@ -274,7 +305,7 @@ module.exports = {
   dr15DueDate,
   dr15Lines,
   paymentChannel,
-  payeeName,
+  payeeOf,
   build1099List,
   necThreshold,
   necDueDate,

@@ -77,6 +77,9 @@ describe('periods and due dates', () => {
     ['2026-08-31', '2026-09-21'], // the 20th is a Sunday
     ['2026-05-31', '2026-06-22'], // the 20th is a Saturday
     ['2026-12-31', '2027-01-20'], // into the next year
+    ['2024-12-31', '2025-01-21'], // Jan 20, 2025 is Martin Luther King Jr. Day
+    ['2023-01-31', '2023-02-21'], // Feb 20, 2023 is Washington's Birthday
+    ['2022-05-31', '2022-06-21'], // Juneteenth (a Sunday) observed Monday June 20
   ])('DR-15 for a period ending %s is due %s', (end, due) => {
     expect(ws.dr15DueDate(end)).toBe(due);
   });
@@ -117,10 +120,19 @@ describe('DR-15 lines', () => {
     expect(r.lines.amount_due).toBe(2070);
   });
 
-  test('a return filed on time stays on time after the due date passes', () => {
-    const r = ws.dr15Lines({ ...base, today: '2026-12-15', filedOn: '2026-11-18' });
+  test('a return filed and paid on time stays on time after the due date passes', () => {
+    const r = ws.dr15Lines({ ...base, today: '2026-12-15', filedOn: '2026-11-18', paidOn: '2026-11-18' });
     expect(r.late).toBe(false);
     expect(r.lines.penalty).toBe(0);
+  });
+
+  test('filed on time but paid late, or still unpaid after the due date, is late', () => {
+    expect(ws.dr15Lines({ ...base, today: '2026-12-15', filedOn: '2026-11-18', paidOn: '2026-11-25' }).late).toBe(true);
+    expect(ws.dr15Lines({ ...base, today: '2026-12-15', filedOn: '2026-11-18' }).lines).toMatchObject({ collection_allowance: 0, penalty: 50 });
+  });
+
+  test('a zero-tax return filed on time needs no payment', () => {
+    expect(ws.dr15Lines({ ...base, tax: 0, taxable: 0, today: '2026-12-15', filedOn: '2026-11-18' }).late).toBe(false);
   });
 
   test('exempt sales never go below zero', () => {
@@ -148,15 +160,15 @@ describe('payment channel and payee', () => {
   });
 
   test.each([
-    ['Zelle money sent to Pat Example Conf# AB12CD', 'Pat Example'],
-    ['Zelle money sent to Lee Sample-Smith', 'Lee Sample-Smith'],
-    ['PAYPAL *LEESAMPLE', 'LEESAMPLE'],
-    ['Withdrawal from WISE US INC WISE', 'Wise transfer (payee not in the bank text)'],
-    ['Check 1042', 'Check (payee not in the bank text)'],
-    ['Pat Example', 'Pat Example'],
-    ['', 'Unknown payee'],
-  ])('"%s" -> %s', (text, expected) => {
-    expect(ws.payeeName(text)).toBe(expected);
+    ['Zelle money sent to Pat Example Conf# AB12CD', 'Pat Example', true],
+    ['Zelle money sent to Lee Sample-Smith', 'Lee Sample-Smith', true],
+    ['PAYPAL *LEESAMPLE', 'LEESAMPLE', true],
+    ['Pat Example', 'Pat Example', true],
+    ['Withdrawal from WISE US INC WISE', 'Withdrawal from WISE US INC WISE (payee not in the bank text)', false],
+    ['Check 1042', 'Check 1042 (payee not in the bank text)', false],
+    ['', 'Unknown payee', false],
+  ])('"%s" -> %s', (text, name, identified) => {
+    expect(ws.payeeOf(text)).toEqual({ name, identified });
   });
 });
 
@@ -183,6 +195,19 @@ describe('1099 list', () => {
     expect(r.payees[1].lines).toEqual(['17']);
     expect(r.payees[2].unclear_method).toBe(true);
     expect(r.left_out).toEqual({ count: 2, total: 125, by_channel: { card: { count: 1, total: 50 }, platform: { count: 1, total: 75 } } });
+  });
+
+  test('payments that name no person are never added together', () => {
+    const r = ws.build1099List(2026, [
+      row({ expense_id: 'k1', amount: 1100, payment_method: 'check', vendor_name: 'Check 1042', bank_text: 'Check 1042' }),
+      row({ expense_id: 'k2', amount: 1100, payment_method: 'check', vendor_name: 'Check 1043', bank_text: 'Check 1043' }),
+      row({ expense_id: 'k3', amount: 1100, payment_method: 'check', vendor_name: 'Check 1043', bank_text: 'Check 1043' }),
+    ]);
+    expect(r.payees.map((p) => [p.key, p.total, p.unresolved, p.needs_1099])).toEqual([
+      ['unresolved:k1', 1100, true, false],
+      ['unresolved:k2', 1100, true, false],
+      ['unresolved:k3', 1100, true, false],
+    ]);
   });
 
   test('2025 payments use the $600 threshold', () => {

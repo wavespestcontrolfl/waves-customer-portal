@@ -88,6 +88,7 @@ function PayeeRows({ payee, threshold, open, onToggle }) {
         <TD>
           <div className="flex flex-col gap-1 items-start">
             {payee.needs_1099 ? <Badge tone="strong">Needs a 1099-NEC</Badge> : <span className="text-sm text-ink-secondary">Under {money(threshold)}</span>}
+            {payee.unresolved && <span className="text-sm text-ink-secondary">Payee not in the bank text: check who you paid</span>}
             {payee.unclear_method && <span className="text-sm text-ink-secondary">Check how you paid</span>}
             <Button variant="ghost" size="sm" aria-expanded={open} onClick={onToggle}>
               {open ? "Hide payments" : "Show payments"}

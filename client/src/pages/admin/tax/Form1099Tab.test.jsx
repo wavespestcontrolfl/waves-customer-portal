@@ -112,6 +112,16 @@ it('expanding a payee lists its payments and hiding closes them', async () => {
   expect(await screen.findByTestId('payments-lee-sample')).toHaveTextContent('Legal and professional');
 });
 
+it('a payment that names no person shows its own line marked unresolved', async () => {
+  list.payees.push({
+    key: 'unresolved:e9', name: 'Check 1043 (payee not in the bank text)', unresolved: true, total: 1100, count: 1, channels: ['check'], lines: ['11'], needs_1099: false, unclear_method: false,
+    payments: [{ expense_id: 'e9', date: `${LAST_YEAR}-08-01`, amount: 1100, channel: 'check', line: '11', category: 'contract_labor', text: 'Check 1043' }],
+  });
+  render(<Form1099Tab />);
+  expect(await screen.findByText('Check 1043 (payee not in the bank text)')).toBeInTheDocument();
+  expect(screen.getAllByText('Payee not in the bank text: check who you paid')).toHaveLength(1);
+});
+
 it('changing the year reads the new year', async () => {
   render(<Form1099Tab />);
   await screen.findByText('Pat Example');
