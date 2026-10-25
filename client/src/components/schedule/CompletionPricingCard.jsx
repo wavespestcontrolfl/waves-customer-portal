@@ -169,7 +169,7 @@ function JobCharge({ service, data, apply }) {
   // it must show the review state and read as $0, matching the sidebar /
   // detail sheet / checkout sheet (Codex round-6 P2).
   const siblingNeedsReview = billing.kind === "sibling_needs_review";
-  const noCharge = billing.kind === "no_charge" && ["callback", "always_free_service_type", "annual_renewal_owned"]
+  const noCharge = billing.kind === "no_charge" && ["callback", "always_free_service_type", "annual_renewal_owned", "consultation"]
     .includes(service.billingLane?.prediction?.reason);
   const flagged = siblingNeedsReview || siblingCollectible;
   const amount = covered || noCharge || siblingNeedsReview || siblingCollectible

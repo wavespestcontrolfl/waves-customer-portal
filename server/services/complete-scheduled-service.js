@@ -5119,6 +5119,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // — contradicting the schedule prediction and Charge Now, which both
       // already pass primaryLinePrice.
       primaryLinePrice: svc.primary_line_price,
+      // A consultation (Waves Assessment) never takes the per-application fee.
+      serviceType: svc.service_type,
     });
     // The inspection-credit amount is resolved from the LOCKED row inside
     // the completion transaction (below), never from this pre-lock read: a
@@ -10103,8 +10105,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A billable per-application visit with no amount on file (multi-service
     // accept: fee + row prices intentionally NULL) completes UNINVOICED — flag
     // it loudly so the visit gets billed manually instead of leaking.
+    // (An unpriced consultation — Waves Assessment — bills nothing by design.)
     if (!packetEffects && (perApplicationBilling && !reviewedVisitPrice && !(invoiceAmount > 0)
-      && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type))) {
+      && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)
+      && !require('./no-cost-visit-types').isConsultationServiceType(svc.service_type))) {
       logger.warn(`[dispatch] per-application visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (no visit price, no per_application_fee — multi-service plan?) — invoice manually`);
     }
     // Same loud-flag convention for the explicit per-visit/one-time lanes:

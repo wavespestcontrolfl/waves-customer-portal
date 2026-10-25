@@ -4191,6 +4191,18 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
   });
 
+  // A Waves Assessment is a free consultation. Unpriced, it bills nothing and
+  // never takes the plan's per-application fee or blocks its priced sibling.
+  test('an unpriced consultation member bills nothing and never blocks its priced sibling', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ billing_mode: 'per_application', per_application_fee: 240 });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ estimated_price: null, service_type: 'Waves Assessment' });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'invoice_ready', total: 120 });
+    const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
+    expect(invoices).toHaveLength(1);
+    expect(Number(invoices[0].total)).toBe(120);
+  });
+
   test('an unpriced source-estimate member still refuses without an exact acceptance invoice', async () => {
     await linkFixtureEstimate();
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ estimated_price: null });

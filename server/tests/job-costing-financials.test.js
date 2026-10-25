@@ -30,6 +30,19 @@ describe('deriveRevenue — mirrors the completion handler invoiceAmount', () =>
     expect(rev).toBe(99);
   });
 
+  test('an unpriced consultation (Waves Assessment) books $0, never monthly_rate; a priced one books its price', () => {
+    expect(deriveRevenue({
+      serviceRecord: {},
+      scheduledService: { estimated_price: null, is_callback: false, service_type: 'Waves Assessment' },
+      customer: { monthly_rate: 47 },
+    })).toBe(0);
+    expect(deriveRevenue({
+      serviceRecord: {},
+      scheduledService: { estimated_price: 75, is_callback: false, service_type: 'Waves Assessment' },
+      customer: { monthly_rate: 47 },
+    })).toBe(75);
+  });
+
   test('a callback with no explicit price is free ($0), never monthly_rate', () => {
     const rev = deriveRevenue({
       serviceRecord: {},

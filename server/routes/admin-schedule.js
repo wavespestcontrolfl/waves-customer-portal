@@ -109,7 +109,7 @@ const {
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
-const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const { isAlwaysFreeServiceType, isConsultationServiceType } = require('../services/no-cost-visit-types');
 const SeriesPriceGuards = require('../services/series-price-guards');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -18169,7 +18169,10 @@ async function resolveScheduledServiceCharge({
   // explicit non-monthly per_visit/one_time lanes never fall back to
   // anything besides an explicit price either (completionInvoiceAmount
   // returns 0 for them regardless), so they have no fee to lose this way.
-  if (billingMode === 'per_application' && !isCallback && !isAlwaysFreeServiceType(serviceType) && !hasOwnPrice) {
+  // An unpriced consultation (Waves Assessment) bills nothing at completion
+  // either — no fee to lose — so it is not refused.
+  if (billingMode === 'per_application' && !isCallback && !isAlwaysFreeServiceType(serviceType)
+    && !isConsultationServiceType(serviceType) && !hasOwnPrice) {
     return {
       refused: true,
       reason: 'per_application_fee_at_completion',
@@ -18182,6 +18185,8 @@ async function resolveScheduledServiceCharge({
     monthlyRate,
     billingMode,
     primaryLinePrice,
+    // Same inputs completion reads: a consultation never takes the rate.
+    serviceType,
   });
 }
 
