@@ -463,6 +463,9 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Regrese en 30 minutos.', '¿Qué hago después del tratamiento?'],
     ['Vuelva a entrar en 2 horas.', '¿Qué hago después del tratamiento?'],
     ['Come back inside after 2 hours; you can ask us more in this chat.', 'What should I do after the treatment?'],
+    // "Instantly" / "in an instant" stay time words; only the product name is exempt.
+    ['The kids can play outside instantly.', ''],
+    ['You can re-enter in an instant.', 'What should I do after the treatment?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -503,6 +506,10 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Regrese mañana a este chat si tiene preguntas.', '¿Qué hago después del tratamiento?'],
     ['Come back at 10 AM to our office.', 'What should I do after the treatment?'],
     ['Regrese a las 10 a nuestra oficina.', '¿Qué hago después del tratamiento?'],
+    // The instant quote is the product name the prompt steers to (10-25 chat test).
+    ['Pricing comes only from the instant-quote step, which prices from your actual property data. You can get a WaveGuard quarterly pest control quote for your Lakewood Ranch home there.', 'How much is quarterly pest control for a 2,000 sq ft house in Lakewood Ranch?'],
+    ['Yes, we offer subterranean termite bait and monitoring protection in Parrish! You can get an instant quote based on your property details.', 'Do you treat for termites? We live in Parrish.'],
+    ['We offer recurring Mosquito & No-See-Um Control with yard treatments to help reduce biting pests so you can enjoy your backyard. You can get an instant quote based on your property details.', 'The mosquitoes in our backyard are terrible, we cannot sit outside. What do you offer?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
