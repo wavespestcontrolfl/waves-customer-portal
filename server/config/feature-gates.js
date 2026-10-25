@@ -67,6 +67,7 @@
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
+ *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
  *   GATE_CONTACT_LOGIN=true (an on-location contact signs into the customer app with their OWN phone number through the same SMS code login, landing on the account they are a contact for as a CONTACT session: view-only schedule, visit history, technician tracking, service-report documents (never for a contact the report rule withholds from) and their own notification choices (GET/PUT /api/notifications/contact-preferences); every other portal route answers 403 ACCOUNT_HOLDER_ONLY — billing, payments, cards, referrals, credits, requests, chat, property, account deletion, the holder's preferences, push subscriptions. The account holder's own number always wins; a contact number is tried only when no holder row matches, and the contact's session dies at its next refresh once the holder removes them. Per-contact notification choices (service_contact_notification_prefs) only NARROW what the account sends: a purpose the holder turned off stays off. Owner rulings 2026-10-20: view only, no confirm or reschedule; the contact's in-app text-consent checkbox counts as the YES for a pending opt-in ask only, never over a STOP. Read at call time via contactLoginLive(), strict 'true', dark by default; off = a contact number never logs in, an existing contact token is refused (401) and the senders ignore the per-contact table, byte-identical to before. Sends nothing to a customer.)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
@@ -4415,6 +4416,11 @@ const gates = {
   // taps "No lunch today". This entry is for logGateStatus; the services read
   // autoLunchLive() at CALL time. Ships DARK: exactly 'true' only. Sends nothing.
   autoLunch: process.env.GATE_AUTO_LUNCH === 'true',
+  // Shift close review (census H8 + M7, owner 2026-10-25): a forced clock-out ends at the
+  // last real activity and is flagged for an admin; the clock-out texts follow the 7 PM
+  // nudge routing. This entry is for logGateStatus; the services read shiftCloseReviewLive()
+  // at CALL time. Ships DARK: exactly 'true' only. Texts only the owner's own phone.
+  shiftCloseReview: process.env.GATE_SHIFT_CLOSE_REVIEW === 'true',
   // Consultation-link lane ("Book with Adam", scope doc
   // lead-inspection-link-scope.md): the /inspection/:token public page, the
   // buildLeadConsultationLink composer/admin builder, and the recurring-lead
@@ -7013,6 +7019,13 @@ function autoLunchLive() {
   return process.env.GATE_AUTO_LUNCH === 'true';
 }
 
+// Shift close review (services/time-tracking.js, time-tracking-crons.js,
+// payroll-runs.js), read at CALL time. Strict `=== 'true'`, dark in every
+// environment; unsetting it is the kill switch.
+function shiftCloseReviewLive() {
+  return process.env.GATE_SHIFT_CLOSE_REVIEW === 'true';
+}
+
 // GATE_TRUCK_KIT read at CALL time — strict `=== 'true'`, dark by default
 // (docs/tool-inventory-tracker-scope.md PR 1). The canonical reader for
 // services/truck-kit.js and routes/tech-truck-check.js. Off: both tech routes
@@ -8245,3 +8258,5 @@ module.exports.planRateLedgerReconcileLive = planRateLedgerReconcileLive;
 module.exports.leadDraftPropertyLookupLive = leadDraftPropertyLookupLive;
 // GATE_ESTIMATE_CONSUMER_NOTICE reader, on its own line so gate PRs never conflict.
 module.exports.estimateConsumerNoticeLive = estimateConsumerNoticeLive;
+// GATE_SHIFT_CLOSE_REVIEW reader, on its own line so gate PRs never conflict.
+module.exports.shiftCloseReviewLive = shiftCloseReviewLive;

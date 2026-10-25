@@ -15,7 +15,7 @@ const {
 } = require('../constants/staff-time');
 const { PAYROLL_SCALE, payrollUnits } = require('../utils/payroll-units');
 const { unpaidMealUnits } = require('../utils/unpaid-meal');
-const { autoLunchLive } = require('../config/feature-gates');
+const { autoLunchLive, shiftCloseReviewLive } = require('../config/feature-gates');
 
 const UNDO_STOP_WINDOW_MINUTES = 30;
 const AUTO_LUNCH_OFF_MESSAGE = 'Auto lunch is not turned on, so there is no lunch to change.';
@@ -130,10 +130,44 @@ function appendEntryNote(existing, note) {
   return `${existing ? `${existing}; ` : ''}${note}`;
 }
 
+// The last moment this technician really did something inside an open shift
+// that the system is about to close for them (GATE_SHIFT_CLOSE_REVIEW, census
+// H8): the later of (a) their latest completed visit and (b) the end of their
+// latest finished job / drive / break / admin entry that started in the shift.
+// Both are capped at `forcedAt`. Returns null when neither exists after the
+// shift's clock_in, and the caller keeps the forced time. An entry still
+// running is not activity: its end is exactly what is unknown.
+async function lastRealActivityAt(trx, shift, forcedAt) {
+  const visit = await trx('scheduled_services')
+    .where({ technician_id: shift.technician_id, status: 'completed' })
+    .where('completed_at', '>', shift.clock_in)
+    .where('completed_at', '<=', forcedAt)
+    .max('completed_at as at')
+    .first();
+  const entry = await trx('time_entries')
+    .where({ technician_id: shift.technician_id })
+    .whereIn('entry_type', ['job', 'drive', 'break', 'admin_time'])
+    .whereIn('status', ['completed', 'edited'])
+    .where('clock_in', '>=', shift.clock_in)
+    .where('clock_out', '>', shift.clock_in)
+    .where('clock_out', '<=', forcedAt)
+    .max('clock_out as at')
+    .first();
+  const times = [visit?.at, entry?.at].filter(Boolean).map((value) => new Date(value));
+  if (!times.length) return null;
+  return new Date(Math.max(...times.map((value) => value.getTime())));
+}
+
 /**
  * Close a shift and every active child while holding the shift row lock.
  * startJob/startBreak take the same lock before creating an
  * active child, so no child can commit after this transaction closes them.
+ *
+ * options.autoCloseReason ('cron_11pm' | 'over_14_hours') marks a close the
+ * system makes for a technician who did not clock out. With
+ * GATE_SHIFT_CLOSE_REVIEW on, that close ends at the last real activity
+ * (lastRealActivityAt) instead of now, and the shift is flagged for admin
+ * review (auto_closed_at, auto_close_reason). Off, the option does nothing.
  */
 async function closeActiveShiftAtomically(technicianId, options = {}) {
   return db.transaction(async (trx) => {
@@ -147,10 +181,30 @@ async function closeActiveShiftAtomically(technicianId, options = {}) {
     // transaction may have held it; using a pre-lock timestamp could produce
     // a negative duration for the child that just committed.
     const now = options.now || new Date();
+    const markAutoClose = Boolean(options.autoCloseReason) && shiftCloseReviewLive();
+    const activityAt = markAutoClose ? await lastRealActivityAt(trx, activeShift, now) : null;
+    const closeAt = activityAt || now;
+    const trimmed = Boolean(activityAt) && activityAt.getTime() < new Date(now).getTime();
+
+    if (trimmed) {
+      // A timer that began after the last real activity has no real end to
+      // pay: it would run past the shift it sits in. Void it, as the office
+      // would on review.
+      await trx('time_entries')
+        .where({ technician_id: technicianId, status: 'active' })
+        .whereIn('entry_type', ['job', 'break', 'drive', 'admin_time'])
+        .where('clock_in', '>=', closeAt)
+        .update({
+          status: 'voided',
+          edit_reason: 'Automatic clock-out: started after the last recorded activity',
+          updated_at: now,
+        });
+    }
+
     const childUpdates = {
       status: 'completed',
-      clock_out: now,
-      duration_minutes: completedDurationSql(trx, now),
+      clock_out: closeAt,
+      duration_minutes: completedDurationSql(trx, closeAt),
       updated_at: now,
     };
     if (options.childNoteSuffix) {
@@ -162,14 +216,21 @@ async function closeActiveShiftAtomically(technicianId, options = {}) {
       .whereIn('entry_type', ['job', 'break', 'drive', 'admin_time'])
       .update(childUpdates);
 
-    const duration = roundCompletedDuration(activeShift.clock_in, now);
+    const duration = roundCompletedDuration(activeShift.clock_in, closeAt);
     const shiftUpdates = {
       status: 'completed',
-      clock_out: now,
+      clock_out: closeAt,
       duration_minutes: duration,
-      notes: appendEntryNote(activeShift.notes, options.shiftNote),
+      notes: appendEntryNote(
+        activeShift.notes,
+        trimmed && options.shiftNote ? `${options.shiftNote}, ended at last recorded activity` : options.shiftNote,
+      ),
       updated_at: now,
     };
+    if (markAutoClose) {
+      shiftUpdates.auto_closed_at = now;
+      shiftUpdates.auto_close_reason = options.autoCloseReason;
+    }
     if (options.includeLocation) {
       shiftUpdates.clock_out_lat = options.lat || null;
       shiftUpdates.clock_out_lng = options.lng || null;
@@ -184,6 +245,10 @@ async function closeActiveShiftAtomically(technicianId, options = {}) {
       entry,
       activeShift,
       duration,
+      closedAt: closeAt,
+      forcedAt: now,
+      autoClosed: markAutoClose,
+      trimmed,
       workDate: staffWorkDate(activeShift.clock_in),
     };
   });
@@ -515,6 +580,13 @@ async function getStatus(technicianId) {
   };
 }
 
+// An admin who sets the clock-out of an automatically closed shift has
+// reviewed it (GATE_SHIFT_CLOSE_REVIEW): the flag clears with the edit.
+function autoCloseReviewedBy(entry, updates, editedBy) {
+  if (!updates.clock_out || !entry.auto_closed_at || entry.auto_close_reviewed_at) return {};
+  return { auto_close_reviewed_at: new Date(), auto_close_reviewed_by: editedBy || null };
+}
+
 /**
  * Admin edit an entry — preserves originals.
  */
@@ -601,6 +673,7 @@ async function adminEditEntry(entryId, {
     }
     if (entry_type) updates.entry_type = entry_type;
     if (notes !== undefined) updates.notes = notes;
+    Object.assign(updates, autoCloseReviewedBy(entry, updates, edited_by));
 
     // A completed/edited payroll interval must be positive and internally
     // consistent. Recompute the duration from the final timestamps so edits
@@ -640,6 +713,28 @@ async function adminEditEntry(entryId, {
 
   logger.info(`[time-tracking] Entry ${entryId} edited by ${edited_by}`, { edit_reason });
   return updated;
+}
+
+/**
+ * Confirm an automatically closed shift as it stands (GATE_SHIFT_CLOSE_REVIEW).
+ * Changes no time: it only records that an admin looked, which lets the
+ * technician's pay run line through. Works on a locked week too, because the
+ * week's minutes do not change.
+ */
+async function confirmAutoClose(entryId, { reviewed_by } = {}) {
+  const [saved] = await db('time_entries')
+    .where({ id: entryId, entry_type: 'shift' })
+    .whereNotNull('auto_closed_at')
+    .whereNull('auto_close_reviewed_at')
+    .whereNot({ status: 'voided' })
+    .update({
+      auto_close_reviewed_at: new Date(),
+      auto_close_reviewed_by: reviewed_by || null,
+    })
+    .returning('*');
+  if (!saved) throw staffTimeHttpError(409, 'That clock-out is not waiting for review.');
+  logger.info(`[time-tracking] Automatic clock-out ${entryId} confirmed by ${reviewed_by}`);
+  return saved;
 }
 
 /**
@@ -1296,6 +1391,7 @@ async function autoClockOutCheck() {
       shiftId: shift.id,
       childNoteSuffix: ' [auto-closed]',
       shiftNote: 'AUTO CLOCK-OUT: exceeded 14-hour limit',
+      autoCloseReason: 'over_14_hours',
     });
     if (!closed) continue;
 
@@ -1322,6 +1418,7 @@ module.exports = {
   closeActiveShiftAtomically,
   getStatus,
   adminEditEntry,
+  confirmAutoClose,
   voidEntry,
   computeDailySummary,
   computeDailySummaryInTransaction,

@@ -42,6 +42,7 @@ const {
   staffWeekStartForWorkDate,
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
+const { shiftCloseReviewLive } = require('../config/feature-gates');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_REASON = 500;
@@ -138,6 +139,7 @@ function centsText(cents) {
   const abs = Math.abs(n);
   return `${sign}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
 }
+const AUTO_CLOSE_BLOCK_REASON = 'An automatic clock-out needs a real time';
 const hoursText = (minutes) => (Math.round((Number(minutes) || 0) / 60 * 100) / 100).toFixed(2);
 
 // ---- One paycheck, no database
@@ -340,9 +342,26 @@ async function evaluate(conn, run, { lock = false } = {}) {
 
   const withHours = approved.filter((row) => Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0) > 0);
   const ytd = await ytdBefore(conn, withHours.map((row) => row.technician_id), run.pay_date, start);
+  // GATE_SHIFT_CLOSE_REVIEW: a week holding a shift the system closed (the
+  // 11 PM job or the 14-hour check) that no admin has edited or confirmed
+  // cannot be paid yet. Minutes are not changed; the line is only held.
+  const unreviewed = shiftCloseReviewLive() && withHours.length
+    ? new Set((await conn('time_entries')
+      .whereIn('technician_id', withHours.map((row) => row.technician_id))
+      .where({ entry_type: 'shift' })
+      .whereNotNull('auto_closed_at')
+      .whereNull('auto_close_reviewed_at')
+      .whereNot({ status: 'voided' })
+      .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
+      .distinct('technician_id')).map((row) => row.technician_id))
+    : new Set();
   const checks = [];
   const blocked = [];
   for (const tech of withHours) {
+    if (unreviewed.has(tech.technician_id)) {
+      blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: AUTO_CLOSE_BLOCK_REASON });
+      continue;
+    }
     const w4 = await currentW4For(tech.technician_id, run.pay_date, conn);
     const built = buildCheck({
       tech, payDate: run.pay_date, weekStart: start, w4, ytdGrossCents: ytd.get(tech.technician_id) || 0,
