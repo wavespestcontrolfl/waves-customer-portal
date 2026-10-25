@@ -131,6 +131,8 @@ describe('New customer phone match (gate on)', () => {
     // Offered, not picked: nothing is selected until the tap.
     expect(screen.queryByLabelText('Clear selected customer')).toBeNull();
 
+    // Every profile on the number can be offered: the lookup asks for the route's full page.
+    expect(new URL(phoneSearches(fetcher)[0], 'http://test').searchParams.get('limit')).toBe('500');
     fireEvent.click(screen.getByRole('button', { name: 'Use this customer' }));
     expect(await screen.findByLabelText('Clear selected customer')).toBeTruthy();
     expect(screen.queryByLabelText('quick-add address')).toBeNull();

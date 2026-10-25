@@ -3059,6 +3059,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // GATE_NEW_APPT_PHONE_MATCH: look the typed phone up once it is complete.
   // Only an exact ten-digit match is offered (the search also matches names,
   // notes and partial numbers); a late answer for an older number is dropped.
+  // limit=500 is the list route's page cap: a ten-digit search returns a
+  // handful of rows, and no profile on the number may be cut off before the
+  // exact-match filter.
   const typedPhoneDigits = newCustomerPhoneMatch && showQuickAdd ? quickAddPhoneDigits(quickAdd.phone) : '';
   useEffect(() => {
     const seq = ++phoneMatchSeqRef.current;
@@ -3067,7 +3070,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       return undefined;
     }
     const timer = setTimeout(() => {
-      adminFetch(`/admin/customers?search=${typedPhoneDigits}&limit=8`)
+      adminFetch(`/admin/customers?search=${typedPhoneDigits}&limit=500`)
         .then((r) => {
           if (seq !== phoneMatchSeqRef.current) return;
           const customers = (r.customers || []).filter((c) => quickAddPhoneDigits(c.phone) === typedPhoneDigits);
