@@ -808,6 +808,9 @@ function candidateFromSlot(slot, {
   if (violatesPreferredDay(slot.date, prefs)) { drops.preferred_day++; return null; }
   if (violatesPreferredTime(slot.start_time, prefs)) { drops.preferred_time++; return null; }
   const techId = slot.technician && slot.technician.id;
+  // HARD (GATE_AUTO_DISPATCH_KEEP_TECH, ctx.keepTech): a visit that has a
+  // technician stays with that technician. An unassigned visit is not filtered.
+  if (ctx.keepTech === true && service.technician_id && String(techId) !== String(service.technician_id)) { drops.other_tech++; return null; }
   const cap = ctx.capabilityFor(techId, category);
   if (cap === 'deactivated') { drops.deactivated++; return null; }                    // HARD: tech turned off for this category
   return {
@@ -1048,7 +1051,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // better available" rather than an opaque NO_VALID_SLOT.
   // slot_taken only increments with GATE_AUTO_DISPATCH_SHARED_MODEL on — the
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
-  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0 };
+  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0, ...(ctx.keepTech === true ? { other_tech: 0 } : {}) };
   // The current placement is read first: a visit in overlap also gets every
   // free same-day hour (conflictSameDaySlots), through the same filters.
   const current = await computeCurrentPlacement(service, prefs, ctx);

@@ -1993,6 +1993,38 @@ describe('arrival search (GATE_AUTO_DISPATCH_ARRIVAL_SEARCH)', () => {
   });
 });
 
+// GATE_AUTO_DISPATCH_KEEP_TECH (owner 2026-10-25; config.keepTech).
+describe('keep technician (GATE_AUTO_DISPATCH_KEEP_TECH)', () => {
+  const searches = () => candidateSlots.findValidCandidateSlots.mock.calls.map((c) => c[2]);
+  const applyMode = async (fn) => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try { await fn(); } finally {
+      if (prev === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY; else process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  };
+
+  test('on: the run hands the search keepTech on its ctx, once per run; off: false', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'dry_run', keepTech: true });
+    expect(searches().map((ctx) => ctx.keepTech)).toEqual([true]);
+    candidateSlots.findValidCandidateSlots.mockClear();
+    await runAutoDispatch({ mode: 'dry_run', keepTech: false });
+    expect(searches().map((ctx) => ctx.keepTech)).toEqual([false]);
+  });
+
+  test('the write refused a technician change: nothing moves, no_change TECH_CHANGE_BLOCKED, not a failed run', async () => {
+    await applyMode(async () => {
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('keep tech'), { code: 'TECH_CHANGE_BLOCKED', statusCode: 409 }));
+      const res = await runAutoDispatch({ mode: 'apply', keepTech: true });
+      expect(res).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('TECH_CHANGE_BLOCKED');
+      expect(lastDecision('failed')).toBeUndefined();
+      expect(apply.applyAutoDispatchMove.mock.calls[0][3].keepTech).toBe(true);
+    });
+  });
+});
+
 describe('day rules (GATE_AUTO_DISPATCH_DAY_RULES, owner 2026-10-24)', () => {
   const departureTime = require('../services/scheduling/departure-time');
   const searches = () => candidateSlots.findValidCandidateSlots.mock.calls.map((c) => c[2]);

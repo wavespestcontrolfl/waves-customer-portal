@@ -132,6 +132,16 @@ function dayRulesEnabled() {
   }
 }
 
+// GATE_AUTO_DISPATCH_KEEP_TECH, same call-time, fail-closed convention.
+function keepTechEnabled() {
+  const { autoDispatchKeepTechLive } = require('../../config/feature-gates');
+  try {
+    return autoDispatchKeepTechLive() === true;
+  } catch {
+    return false;
+  }
+}
+
 // The 2026-10-09 move rules (move-rules.js), resolved apart from
 // getAutoDispatchConfig to keep that function inside its complexity budget.
 function moveRuleConfig(overrides) {
@@ -190,6 +200,11 @@ function moveRuleConfig(overrides) {
     dayRules: overrides.dayRules ?? dayRulesEnabled(),
     maxSundayMovesPerRun: overrides.maxSundayMovesPerRun
       ?? intEnv('AUTO_DISPATCH_MAX_SUNDAY_MOVES_PER_RUN', 2, { min: 0, max: 1000 }),
+    // KEEP TECH (GATE_AUTO_DISPATCH_KEEP_TECH, owner 2026-10-25): a visit that
+    // has a technician stays with that technician. The candidate search drops
+    // other technicians' slots (`other_tech`) and apply.js refuses a change
+    // (TECH_CHANGE_BLOCKED). Unassigned visits are unchanged.
+    keepTech: overrides.keepTech ?? keepTechEnabled(),
   };
 }
 
