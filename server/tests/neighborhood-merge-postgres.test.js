@@ -187,6 +187,24 @@ postgres('neighborhood merge routes', () => {
     expect(await entryRow(stale)).toMatchObject({ neighborhood_id: target, status: 'retired' });
   });
 
+  test('merge: the copy with the gate pin is the one kept, even when the other was confirmed later', async () => {
+    const source = await neighborhood('Pin Source');
+    const target = await neighborhood('Pin Target');
+    const fresh = await entry(source, { code: '5656', last_confirmed_at: new Date() });
+    const pinnedOld = await entry(target, { code: '5656', last_confirmed_at: new Date('2026-01-01T00:00:00Z'), gate_lat: 27.4, gate_lng: -82.4 });
+    expect((await merge(source, target)).body).toMatchObject({ duplicatesRetired: 1 });
+    expect((await entryRow(pinnedOld)).status).toBe('active');
+    expect((await entryRow(fresh)).status).toBe('retired');
+
+    const source2 = await neighborhood('Pin Source Two');
+    const target2 = await neighborhood('Pin Target Two');
+    const pinnedMoved = await entry(source2, { code: '5757', last_confirmed_at: new Date('2026-01-01T00:00:00Z'), gate_lat: 27.5, gate_lng: -82.5 });
+    const freshTarget = await entry(target2, { code: '5757', last_confirmed_at: new Date() });
+    await merge(source2, target2);
+    expect(await entryRow(pinnedMoved)).toMatchObject({ neighborhood_id: target2, status: 'active' });
+    expect((await entryRow(freshTarget)).status).toBe('retired');
+  });
+
   test('dry run: the same counts, and nothing is written', async () => {
     const source = await neighborhood('Dry Source');
     const target = await neighborhood('Dry Target');
@@ -244,6 +262,7 @@ postgres('neighborhood merge routes', () => {
     const h = await home(source);
     const picked = await home(source);
     await filing(h.customerId, source);
+    await filing(picked.customerId, source);
     const moved = await entry(source, { code: '6060' });
     const edited = await entry(source, { code: '7070', gate_label: 'Side gate' });
     const dupSource = await entry(source, { code: '8080', last_confirmed_at: new Date('2026-01-01T00:00:00Z') });
@@ -260,6 +279,8 @@ postgres('neighborhood merge routes', () => {
     const u = await call('POST', `/merges/${r.body.mergeId}/undo`);
     expect(u).toEqual({ status: 200, body: { homes: 1, homesKept: 1, entries: 2, entriesKept: 1 } });
     expect(await homeHood(picked.propertyId)).toBe(target);
+    // Its filing stays with it, so the sweep sees the home and its filing together.
+    expect((await trx('neighborhood_access_filings').where({ customer_id: picked.customerId }).first('neighborhood_id')).neighborhood_id).toBe(target);
     expect(await entryRow(moved)).toEqual({ neighborhood_id: source, gate_label: 'Main gate', status: 'active' });
     expect(await entryRow(dupSource)).toEqual({ neighborhood_id: source, gate_label: 'Main gate', status: 'active' });
     expect(await entryRow(edited)).toMatchObject({ neighborhood_id: target, gate_label: `Side gate (${hoodName('Undo Source')})` });

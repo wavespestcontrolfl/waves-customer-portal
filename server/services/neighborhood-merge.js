@@ -58,14 +58,19 @@ function withOrigin(label, sourceName) {
   return full.length <= MAX_LABEL ? full : `${full.slice(0, MAX_LABEL - 2)}…)`;
 }
 
-// The live code both entries hold, kept once: the more recently confirmed
-// copy stays (the target's on a tie). Returns the ids to retire.
+// The live code both entries hold, kept once: the copy carrying the gate pin
+// stays (retiring it would take the gate off visit directions; two pins never
+// get this far), else the more recently confirmed copy (the target's on a tie).
+// Returns the entries to retire.
 function duplicateLosers(sourceLive, targetLive) {
   const targetByCode = new Map(targetLive.filter((e) => e.code).map((e) => [e.code.toLowerCase(), e]));
   const losers = [];
   for (const s of sourceLive) {
     const t = s.code && targetByCode.get(s.code.toLowerCase());
-    if (t) losers.push(basis(s) > basis(t) ? t : s);
+    if (!t) continue;
+    const sPinned = s.gate_lat != null;
+    if (sPinned !== (t.gate_lat != null)) losers.push(sPinned ? t : s);
+    else losers.push(basis(s) > basis(t) ? t : s);
   }
   return losers;
 }
@@ -144,19 +149,20 @@ async function mergeNeighborhood(trx, { sourceId, targetId, actorId = null }) {
   const homes = (await trx.raw(`UPDATE customer_properties SET neighborhood_id = ?, updated_at = now()
     WHERE neighborhood_id = ?
     RETURNING id, active, neighborhood_source, neighborhood_checked_at::text AS checked_at`, [targetId, sourceId])).rows;
-  const filings = await trx('neighborhood_access_filings').where({ neighborhood_id: sourceId })
-    .update({ neighborhood_id: targetId }).returning('customer_id');
+  const filings = (await trx.raw(`UPDATE neighborhood_access_filings SET neighborhood_id = ? WHERE neighborhood_id = ?
+    RETURNING customer_id, value_hash, filed_at::text AS filed_at`, [targetId, sourceId])).rows;
   await trx('neighborhoods').where({ id: sourceId })
     .update({ active: false, merged_into_id: targetId, updated_at: trx.fn.now() });
 
   // Journal: properties [{ id, source, checked_at }], entries [{ id, gate_label,
-  // updated_at }], retired [{ id, status, updated_at }], filings [customer_id].
+  // updated_at }], retired [{ id, status, updated_at }], filings [{ customer_id,
+  // value_hash, filed_at }] (the ledger's sha256 of a code, never the code).
   // Ids, labels, statuses and stamps only; never a code.
   const journal = {
     properties: homes.map((h) => ({ id: h.id, source: h.neighborhood_source, checked_at: h.checked_at })),
     entries: moved.entries,
     retired: moved.retired,
-    filings: filings.map((f) => (typeof f === 'object' ? f.customer_id : f)),
+    filings,
   };
   const [row] = await trx('neighborhood_merges').insert({
     source_id: sourceId, target_id: targetId, journal: JSON.stringify(journal), merged_by: actorId,
@@ -240,11 +246,18 @@ async function undoMerge(trx, { mergeId, actorId = null }) {
       WHERE p.id = j.id AND p.neighborhood_id = ?
         AND p.neighborhood_source IS NOT DISTINCT FROM j.source
         AND p.neighborhood_checked_at IS NOT DISTINCT FROM j.checked_at
-      RETURNING p.id, p.active`, [source.id, JSON.stringify(homes), target.id])).rows
+      RETURNING p.id, p.active, p.customer_id`, [source.id, JSON.stringify(homes), target.id])).rows
     : [];
-  if ((journal.filings || []).length) {
-    await trx('neighborhood_access_filings').whereIn('customer_id', journal.filings).where({ neighborhood_id: target.id })
-      .update({ neighborhood_id: source.id });
+  // A ledger row goes back only with its home, and only while it is the row
+  // the merge moved (same value, same filing time): otherwise the sweep would
+  // see a home and its filing in two places and file the code again.
+  const backOwners = [...new Set(homesBack.map((h) => h.customer_id))];
+  if ((journal.filings || []).length && backOwners.length) {
+    await trx.raw(`UPDATE neighborhood_access_filings f SET neighborhood_id = ?
+      FROM jsonb_to_recordset(?::jsonb) AS j(customer_id uuid, value_hash text, filed_at timestamptz)
+      WHERE f.customer_id = j.customer_id AND f.neighborhood_id = ?
+        AND f.value_hash = j.value_hash AND f.filed_at = j.filed_at
+        AND f.customer_id = ANY(?::uuid[])`, [source.id, JSON.stringify(journal.filings), target.id, backOwners]);
   }
   await trx('neighborhoods').where({ id: source.id }).update({ active: true, merged_into_id: null, updated_at: trx.fn.now() });
   await trx('neighborhood_merges').where({ id: mergeId }).update({ undone_at: trx.fn.now(), undone_by: actorId });
