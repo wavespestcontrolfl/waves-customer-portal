@@ -33,6 +33,13 @@ jest.mock('../services/rain-out', () => ({
   previewMovedSms: jest.fn(async () => ({ ok: true })),
   checkTarget: jest.fn(async () => ({ ok: true })),
 }));
+const mockApplyProposal = jest.fn(async () => ({ ok: true }));
+const mockPreviewProposal = jest.fn(async () => ({}));
+jest.mock('../services/call-reschedule-proposals', () => ({
+  applyProposal: (...a) => mockApplyProposal(...a),
+  previewProposal: (...a) => mockPreviewProposal(...a),
+  dismissProposal: jest.fn(async () => ({ ok: true })),
+}));
 jest.mock('../models/db', () => {
   const state = { scheduledServices: [], technicians: [], queries: [] };
   const dbFn = (table) => {
@@ -71,6 +78,7 @@ const db = require('../models/db');
 const { techMoveRefusal } = require('../services/scheduling/tech-move-permission');
 const dispatchRouter = require('../routes/admin-dispatch');
 const techTrackRouter = require('../routes/tech-track');
+const callRecordingsRouter = require('../routes/admin-call-recordings');
 // admin-dispatch calls SmartRebooker.findRescheduleOptions on the module object.
 const mockFindRescheduleOptions = jest.spyOn(require('../services/rebooker'), 'findRescheduleOptions').mockImplementation(async () => []);
 
@@ -80,6 +88,7 @@ beforeAll(() => new Promise((resolve) => {
   app.use(express.json());
   app.use('/api/admin/dispatch', dispatchRouter);
   app.use('/api/tech/services', techTrackRouter);
+  app.use('/api/admin/call-recordings', callRecordingsRouter);
   app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
   server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; resolve(); });
 }));
@@ -88,6 +97,8 @@ afterAll(() => new Promise((r) => server.close(r)));
 const etToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const tomorrow = (() => { const d = new Date(`${etToday}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
 const prevGate = process.env.GATE_TECH_MOVE_SWITCH;
+const PROPOSAL_ID = '00000000-0000-4000-8000-000000000001';
+const VISIT_UUID = '00000000-0000-4000-8000-000000000002';
 
 beforeEach(() => {
   process.env.GATE_TECH_MOVE_SWITCH = 'true';
@@ -105,6 +116,8 @@ beforeEach(() => {
   mockCommit.mockClear();
   mockGetOptions.mockClear();
   mockFindRescheduleOptions.mockClear();
+  mockApplyProposal.mockClear();
+  mockPreviewProposal.mockClear();
 });
 afterAll(() => {
   if (prevGate === undefined) delete process.env.GATE_TECH_MOVE_SWITCH;
@@ -152,6 +165,9 @@ describe('every move route refuses a technician whose switch is off', () => {
     ['POST', '/api/admin/dispatch/svc-1/rain-out', moveBody],
     ['GET', '/api/admin/dispatch/svc-1/reschedule-options', null],
     ['POST', '/api/admin/dispatch/svc-1/reschedule', { newWindow: { date: tomorrow, start: '09:00', end: '10:00' } }],
+    // A call's reschedule proposal card (Codex #6704 r1): applying it moves the visit.
+    ['POST', `/api/admin/call-recordings/proposals/${PROPOSAL_ID}/preview`, { visit_id: VISIT_UUID }],
+    ['POST', `/api/admin/call-recordings/proposals/${PROPOSAL_ID}/apply`, { visit_id: VISIT_UUID, preview_hash: 'a'.repeat(64) }],
   ];
   test.each(routes)('%s %s', async (method, path, body) => {
     const r = await call(method, path, body);
@@ -160,6 +176,8 @@ describe('every move route refuses a technician whose switch is off', () => {
     expect(mockCommit).not.toHaveBeenCalled();
     expect(mockGetOptions).not.toHaveBeenCalled();
     expect(mockFindRescheduleOptions).not.toHaveBeenCalled();
+    expect(mockPreviewProposal).not.toHaveBeenCalled();
+    expect(mockApplyProposal).not.toHaveBeenCalled();
   });
 });
 
@@ -169,6 +187,13 @@ describe('the same technician moves as before when allowed', () => {
     const r = await call('POST', '/api/tech/services/svc-1/rain-out', moveBody);
     expect(r.status).toBe(200);
     expect(mockCommit).toHaveBeenCalledTimes(1);
+  });
+
+  test('switch on: applying a call\'s reschedule proposal reaches the apply', async () => {
+    db.__state.technicians.find((t) => t.id === 'tech-1').can_move_visits = true;
+    const r = await call('POST', `/api/admin/call-recordings/proposals/${PROPOSAL_ID}/apply`, { visit_id: VISIT_UUID, preview_hash: 'a'.repeat(64) });
+    expect(r.status).toBe(200);
+    expect(mockApplyProposal).toHaveBeenCalledTimes(1);
   });
 
   test('gate off: switch off does not matter (today\'s behavior)', async () => {

@@ -7,10 +7,11 @@
  * trusts their routing. Off = the technician asks the office to move the visit.
  *
  * Checked by every route a technician can reach that moves a visit or lists the
- * moves it would make: Quick Move in the tech app (tech-track.js) and Quick Move
- * and Reschedule from the dispatch routes (admin-dispatch.js). The commit routes
- * are the enforcers; the option routes refuse too, so the sheets show the reason
- * instead of choices the commit would refuse.
+ * moves it would make: Quick Move in the tech app (tech-track.js), Quick Move
+ * and Reschedule from the dispatch routes (admin-dispatch.js), and a call's
+ * reschedule proposal card (admin-call-recordings.js preview + apply). The commit
+ * routes are the enforcers; the option and preview routes refuse too, so the
+ * sheets show the reason instead of choices the commit would refuse.
  *
  * Admins are never refused. Read at call time. Gate off: always allowed, and no
  * query runs (today's behavior). Gate on: a technician with no row, or a row that
