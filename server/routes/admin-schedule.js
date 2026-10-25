@@ -17,6 +17,7 @@ const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
 const { pestReportVoiceLive, pestQuietVisitLive } = require('../config/feature-gates');
+const { specialtyReportVoiceLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
@@ -26262,7 +26263,9 @@ router.post('/generate-report', async (req, res) => {
     // GATE_REPORT_WRITER_RULES, read once per request. It applies only to
     // writers in its scope (never lawn or tree/shrub/palm — owner
     // 2026-09-30, another lane owns them); see report-writer-rules.js.
-    const { selectReportCopyPrompt, writerRulesInScope, pestVoiceServes } = require('../services/service-report/lawn-report-copy-prompt');
+    const {
+      selectReportCopyPrompt, writerRulesInScope, pestVoiceServes, specialtyVoiceServes,
+    } = require('../services/service-report/lawn-report-copy-prompt');
     const writerRulesGate = reportWriterRulesLive();
 
     // A technician writes a report only for a visit of their own: the id-less
@@ -27165,12 +27168,20 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     }
 
     const promptContext = writerRulesOn
-      ? { ...reportPromptContext, writerRules: true, pestVoice: pestReportVoiceLive(), pestQuietVisit: pestQuietVisitLive() }
+      ? {
+        ...reportPromptContext,
+        writerRules: true,
+        pestVoice: pestReportVoiceLive(),
+        pestQuietVisit: pestQuietVisitLive(),
+        specialtyVoice: specialtyReportVoiceLive(),
+      }
       : reportPromptContext;
     const selectedSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, promptContext);
-    // GATE_PEST_QUIET_VISIT trims empty inputs under the one-voice pest prompt only.
+    // GATE_PEST_QUIET_VISIT trims empty inputs under the one-voice pest prompt,
+    // and GATE_SPECIALTY_REPORT_VOICE the same lines under its one-voice prompt.
     const inputLines = observedAndReportedLines({
-      quiet: promptContext.pestQuietVisit === true && pestVoiceServes(groundingServiceType, promptContext),
+      quiet: (promptContext.pestQuietVisit === true && pestVoiceServes(groundingServiceType, promptContext))
+        || specialtyVoiceServes(promptContext),
       observations: promptObs,
       stationObserved: stationLines.observed,
       interaction: customerInteraction,
