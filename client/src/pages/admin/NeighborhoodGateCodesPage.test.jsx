@@ -451,3 +451,92 @@ it("a bell link on a page already open switches to Found in messages with a fres
   expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
   await waitFor(() => expect(foundReads()).toBe(3));
 });
+
+// Neighborhood merge (GATE_NEIGHBORHOOD_MERGE, owner 2026-10-25).
+const MERGE_LIST = {
+  total: 1,
+  mergeEnabled: true,
+  neighborhoods: [{ ...ALL.neighborhoods[0], mergedIn: [] }],
+};
+const PICKS = {
+  total: 3,
+  neighborhoods: [
+    { id: "n1", name: "Synthetic Oaks", county: "Manatee", propertyCount: 3, entries: [] },
+    { id: "n4", name: "Synthetic Oaks Estates", county: "Manatee", propertyCount: 5, entries: [] },
+    { id: "n5", name: "Synthetic Oaks South", county: "Sarasota", propertyCount: 2, entries: [] },
+  ],
+};
+
+it("shows no merge controls while the merge switch is off", async () => {
+  rawAdminFetch.mockImplementation(() => response(ALL));
+  renderPage();
+  await screen.findByText("Synthetic Oaks");
+  expect(screen.queryByRole("button", { name: "Merge into…" })).toBeNull();
+  expect(screen.queryByText("Also named:")).toBeNull();
+});
+
+it("Merge into… offers only other neighborhoods of the same county, shows what moves from a dry run, then merges", async () => {
+  rawAdminFetch.mockImplementation((path, options) => {
+    if (options?.method === "POST" && path.endsWith("/merge")) {
+      const { dryRun } = JSON.parse(options.body);
+      return response({ mergeId: dryRun ? null : "m9", homes: 3, entries: 1, duplicatesRetired: 1, relabeled: 0, dryRun: !!dryRun });
+    }
+    if (path.includes("picker=1")) return response(PICKS);
+    return response(MERGE_LIST);
+  });
+  renderPage();
+  await screen.findByText("Synthetic Oaks");
+  fireEvent.click(screen.getByRole("button", { name: "Merge into…" }));
+  fireEvent.change(screen.getByLabelText("Merge into"), { target: { value: "oaks" } });
+  const choice = await screen.findByRole("button", { name: "Synthetic Oaks Estates · 5 properties" });
+  expect(screen.queryByRole("button", { name: /Synthetic Oaks South/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Synthetic Oaks · 3 properties" })).toBeNull();
+  const search = rawAdminFetch.mock.calls.find(([p]) => p.includes("picker=1"));
+  expect(search[0]).toBe("/admin/neighborhood-access?q=oaks&limit=8&picker=1");
+
+  fireEvent.click(choice);
+  expect(await screen.findByText(
+    'Moves 3 homes and 1 gate entry into Synthetic Oaks Estates. 1 code on file in both is kept once. "Synthetic Oaks" becomes another name for it. Undo merge puts it back.',
+  )).toBeInTheDocument();
+  const dry = rawAdminFetch.mock.calls.find(([p, o]) => p.endsWith("/merge") && JSON.parse(o.body).dryRun);
+  expect(dry[0]).toBe("/admin/neighborhood-access/n1/merge");
+  expect(JSON.parse(dry[1].body)).toEqual({ into: "n4", dryRun: true });
+
+  fireEvent.click(screen.getByRole("button", { name: "Merge" }));
+  expect(await screen.findByText("Merged Synthetic Oaks into Synthetic Oaks Estates")).toBeInTheDocument();
+  const real = rawAdminFetch.mock.calls.filter(([p]) => p.endsWith("/merge")).at(-1);
+  expect(JSON.parse(real[1].body)).toEqual({ into: "n4" });
+});
+
+it("a refused merge shows the server's message in the panel", async () => {
+  rawAdminFetch.mockImplementation((path, options) => {
+    if (options?.method === "POST" && path.endsWith("/merge")) {
+      return JSON.parse(options.body).dryRun
+        ? response({ homes: 1, entries: 0, duplicatesRetired: 0, relabeled: 0, dryRun: true })
+        : response({ error: "Both neighborhoods have a gate location. Clear one, then merge.", code: "pins" }, { ok: false, status: 409 });
+    }
+    if (path.includes("picker=1")) return response(PICKS);
+    return response(MERGE_LIST);
+  });
+  renderPage();
+  await screen.findByText("Synthetic Oaks");
+  fireEvent.click(screen.getByRole("button", { name: "Merge into…" }));
+  fireEvent.change(screen.getByLabelText("Merge into"), { target: { value: "oaks" } });
+  fireEvent.click(await screen.findByRole("button", { name: "Synthetic Oaks Estates · 5 properties" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Merge" }));
+  expect(await screen.findByText("Both neighborhoods have a gate location. Clear one, then merge.")).toBeInTheDocument();
+});
+
+it("Undo merge asks first, posts the undo and says what stayed", async () => {
+  const merged = { ...MERGE_LIST, neighborhoods: [{ ...MERGE_LIST.neighborhoods[0], mergedIn: [{ mergeId: "m1", name: "Synthetic Oaks Lwr", mergedAt: "2026-10-25T16:00:00.000Z" }] }] };
+  rawAdminFetch.mockImplementation((path, options) => (
+    options?.method === "POST" ? response({ homes: 1, homesKept: 0, entries: 0, entriesKept: 1 }) : response(merged)
+  ));
+  renderPage();
+  expect(await screen.findByText("Synthetic Oaks Lwr")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Undo merge" }));
+  expect(window.confirm).toHaveBeenCalledWith("Undo the merge of Synthetic Oaks Lwr? Its homes and gate entries go back to it.");
+  expect(await screen.findByText("Undid the merge of Synthetic Oaks Lwr. 1 item changed since stays here.")).toBeInTheDocument();
+  const post = rawAdminFetch.mock.calls.find(([, o]) => o?.method === "POST");
+  expect(post[0]).toBe("/admin/neighborhood-access/merges/m1/undo");
+});

@@ -25,6 +25,12 @@
  *                                     visit's neighborhood ({ code, gateLabel? })
  * POST   /visits/:visitId/entries/:entryId/wrong — from a visit: report a
  *                                     neighborhood code wrong ({ code }: the code shown)
+ * POST   /:neighborhoodId/merge     — merge this neighborhood into another of the
+ *                                     same county ({ into, dryRun? }); dryRun answers
+ *                                     the same counts and writes nothing
+ * POST   /merges/:mergeId/undo      — undo a merge (what nobody changed since)
+ *                                     Both merge routes are GATE_NEIGHBORHOOD_MERGE
+ *                                     (owner ruling 2026-10-25); off = 404.
  *
  * A neighborhood's gate code is shared by every stop in it and is staff-only:
  * every route but the two /visits ones requires full admin, and every
@@ -42,12 +48,13 @@ const express = require('express');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { neighborhoodAccessLive, neighborhoodTechActionsLive } = require('../config/feature-gates');
+const { neighborhoodAccessLive, neighborhoodTechActionsLive, neighborhoodMergeLive } = require('../config/feature-gates');
 const {
   isKeypadCode, lockCommunity, matchKey, visitNeighborhoodIds, parseGateLocation,
 } = require('../services/neighborhood-access');
 const { isTechnicianRequest, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { mergeNeighborhood, undoMerge, mergesInto } = require('../services/neighborhood-merge');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -273,7 +280,7 @@ const BUSY = { status: 503, body: { error: 'That stop is busy right now. Try aga
 const LOCK_NOT_AVAILABLE = '55P03';
 const DEADLOCK_DETECTED = '40P01';
 
-async function gateWrite(work) {
+async function gateWrite(work, busy = BUSY) {
   for (let attempt = 1; attempt <= GATE_WRITE_TRIES; attempt += 1) {
     try {
       return await db.transaction(async (trx) => {
@@ -285,7 +292,7 @@ async function gateWrite(work) {
       if (attempt < GATE_WRITE_TRIES) await new Promise((resolve) => { setTimeout(resolve, 50 * attempt); });
     }
   }
-  return BUSY;
+  return busy;
 }
 
 const NO_NEIGHBORHOOD = {
@@ -470,8 +477,11 @@ router.get('/', async (req, res) => {
     if (needsConfirmOnly) where += ' AND (f.needs_confirm OR f.conflict OR f.stale)';
     if (q) {
       const like = likePattern(q);
-      where += " AND (n.name ILIKE ? ESCAPE '\\' OR CAST(n.subdivision_names AS text) ILIKE ? ESCAPE '\\')";
-      bindings.push(like, like);
+      // A merged-away entry's names still find the entry it went into.
+      where += ` AND (n.name ILIKE ? ESCAPE '\\' OR CAST(n.subdivision_names AS text) ILIKE ? ESCAPE '\\'
+        OR EXISTS (SELECT 1 FROM neighborhoods m WHERE m.merged_into_id = n.id
+          AND (m.name ILIKE ? ESCAPE '\\' OR CAST(m.subdivision_names AS text) ILIKE ? ESCAPE '\\')))`;
+      bindings.push(like, like, like, like);
     }
     const matched = `WITH matched AS (
       SELECT n.id, n.name, n.county, COALESCE(p.cnt, 0)::int AS property_count
@@ -508,6 +518,8 @@ router.get('/', async (req, res) => {
     const staffNames = new Map(staffIds.length
       ? (await db('technicians').whereIn('id', staffIds).select('id', 'name')).map((t) => [t.id, t.name])
       : []);
+    const mergeEnabled = neighborhoodMergeLive();
+    const merged = mergeEnabled ? await mergesInto(db, ids) : new Map();
 
     const neighborhoods = page.map((n) => {
       const rows = byNeighborhood.get(n.id);
@@ -522,12 +534,13 @@ router.get('/', async (req, res) => {
         county: n.county || null,
         propertyCount: n.property_count,
         hasConflict: conflicted,
+        ...(mergeEnabled ? { mergedIn: merged.get(n.id) || [] } : {}),
         entries: rows
           .filter((r) => includeRetired || r.status !== 'retired')
           .map((r) => serializeEntry(r, { cutoff, conflicted, staffNames })),
       };
     });
-    res.json({ neighborhoods, total, limit, offset });
+    res.json({ neighborhoods, total, limit, offset, mergeEnabled });
   } catch (err) {
     logFailure('list', err);
     res.status(500).json({ error: 'Could not load gate codes' });
@@ -776,6 +789,87 @@ router.patch('/entries/:id', async (req, res) => {
     if (err && err.code === '23505') return res.status(409).json({ error: uniqueViolationMessage(err) });
     logFailure('update entry', err);
     return res.status(500).json({ error: 'Could not update the entry' });
+  }
+});
+
+// ---- merge (GATE_NEIGHBORHOOD_MERGE, owner ruling 2026-10-25) ---------------
+// The office joins split entries of one community. Both routes yield to every
+// other writer (gateWrite), so a merge never makes a property or visit write fail.
+const MERGE_BUSY = { status: 503, body: { error: 'Those neighborhoods are busy right now. Try again in a moment.', code: 'busy' } };
+const MERGE_REFUSALS = {
+  not_found: [404, 'Neighborhood not found'],
+  same: [400, 'Pick a different neighborhood to merge into'],
+  county: [400, 'Both neighborhoods must be in the same county'],
+  not_live: [409, 'One of these neighborhoods was merged or switched off. Reload the page.'],
+  pins: [409, 'Both neighborhoods have a gate location. Clear one, then merge.'],
+};
+const UNDO_REFUSALS = {
+  not_found: [404, 'Merge not found'],
+  undone: [409, 'This merge was already undone'],
+  changed: [409, 'These neighborhoods changed since the merge. Reload the page.'],
+};
+
+class DryRunDone extends Error {
+  constructor(result) {
+    super('dry run');
+    this.result = result;
+  }
+}
+
+function mergeLive(req, res, next) {
+  if (!neighborhoodMergeLive()) return res.status(404).json({ enabled: false });
+  return next();
+}
+
+router.post('/:neighborhoodId/merge', mergeLive, async (req, res) => {
+  const sourceId = req.params.neighborhoodId;
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (!UUID_RE.test(sourceId)) return res.status(404).json({ error: 'Neighborhood not found' });
+  if (typeof body.into !== 'string' || !UUID_RE.test(body.into)) return res.status(400).json({ error: 'into must be a neighborhood id' });
+  const dryRun = body.dryRun === true;
+  let result;
+  try {
+    result = await gateWrite(async (trx) => {
+      const merged = await mergeNeighborhood(trx, { sourceId, targetId: body.into, actorId: req.technicianId || null });
+      // A dry run answers the real counts, then rolls the transaction back.
+      if (dryRun && !merged.error) throw new DryRunDone(merged);
+      return merged;
+    }, MERGE_BUSY);
+  } catch (err) {
+    if (err instanceof DryRunDone) result = { ...err.result, mergeId: null };
+    else {
+      if (err && err.code === '23505') return res.status(409).json({ error: 'These neighborhoods changed while merging. Reload the page.' });
+      logFailure('merge', err);
+      return res.status(500).json({ error: 'Could not merge the neighborhoods' });
+    }
+  }
+  if (result.status) return res.status(result.status).json(result.body);
+  if (result.error) {
+    const [status, error] = MERGE_REFUSALS[result.error];
+    return res.status(status).json({ error, code: result.error });
+  }
+  return res.status(dryRun ? 200 : 201).json({ ...result, dryRun });
+});
+
+router.post('/merges/:mergeId/undo', mergeLive, async (req, res) => {
+  const { mergeId } = req.params;
+  if (!UUID_RE.test(mergeId)) return res.status(404).json({ error: 'Merge not found' });
+  try {
+    const result = await gateWrite((trx) => undoMerge(trx, { mergeId, actorId: req.technicianId || null }), MERGE_BUSY);
+    if (result.status) return res.status(result.status).json(result.body);
+    if (result.error === 'later') {
+      const name = result.laterName || 'another neighborhood';
+      return res.status(409).json({ error: `Undo the later merge into ${name} first`, code: 'later' });
+    }
+    if (result.error) {
+      const [status, error] = UNDO_REFUSALS[result.error];
+      return res.status(status).json({ error, code: result.error });
+    }
+    return res.status(200).json(result);
+  } catch (err) {
+    if (err && err.code === '23505') return res.status(409).json({ error: 'A code changed since the merge. Fix it on the page, then undo.' });
+    logFailure('undo merge', err);
+    return res.status(500).json({ error: 'Could not undo the merge' });
   }
 });
 
