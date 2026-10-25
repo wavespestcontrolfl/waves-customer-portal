@@ -166,6 +166,15 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     expect(own).toBeLessThan(main);
   });
 
+  test('Book takes the recording processor\'s call lock, with the same key, before the date lock', () => {
+    const lock = "pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule',";
+    const own = fs.readFileSync(path.join(__dirname, '../services/booking/new-caller-visit.js'), 'utf8');
+    const processor = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(processor).toContain(`${lock} callSid]`);
+    expect(own).toContain(`${lock} call.twilio_call_sid]`);
+    expect(own.indexOf(lock)).toBeLessThan(own.indexOf('await probeSlotOverlap('));
+  });
+
   test('the service refuses with a 404 while the gate is off, before any read', async () => {
     mockNewCallerGate = false;
     try {
@@ -220,6 +229,7 @@ maybeDescribe('new-caller booking on Postgres', () => {
       to_phone: direction === 'inbound' ? '+15555550999' : '+15555550177',
       status,
       answered_by: answeredBy,
+      twilio_call_sid: `CA${require('crypto').randomBytes(16).toString('hex')}`,
       duration_seconds: durationSeconds,
       created_at: minutesAgo(createdMinutesAgo),
       updated_at: minutesAgo(1),
@@ -277,6 +287,17 @@ maybeDescribe('new-caller booking on Postgres', () => {
     made.visitIds.push(second.visit.id);
     expect(second.visit.source_call_log_id).toBeNull();
     expect(second.warnings).toHaveLength(1);
+  });
+
+  test('a call that already has a visit is refused with a 409: a repeated Book (the processor stamps its own booking the same way)', async () => {
+    const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+    const callId = await insertCall();
+    const input = validInput({ serviceId: svc.id, callLogId: callId, scheduledDate: '2031-03-06', windowStart: '11:00' });
+    const first = await service.bookNewCallerVisit({ input });
+    made.visitIds.push(first.visit.id);
+    await expect(service.bookNewCallerVisit({ input })).rejects.toMatchObject({ status: 409, message: 'This call already has a visit. Find it on Dispatch.' });
+    const rows = await db('scheduled_services').where({ source_call_log_id: callId }).count({ n: '*' }).first();
+    expect(Number(rows.n)).toBe(1);
   });
 
   test('a call that is no longer pickable is refused with a 409 and writes nothing', async () => {

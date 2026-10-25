@@ -38,8 +38,8 @@ const MAX_PICKABLE_CALLS = 10;
 // Calls answered in the window, newest first, before the ended-call check
 // drops the long-ended ones (staff answer far fewer calls than this in 30 minutes).
 const MAX_ANSWERED_CANDIDATES = 50;
-// callEndedAt reads created_at, metadata and both lengths.
-const CALL_COLUMNS = ['id', 'direction', 'from_phone', 'to_phone', 'status', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds'];
+// callEndedAt reads created_at, metadata and both lengths; the save locks on the Call SID.
+const CALL_COLUMNS = ['id', 'twilio_call_sid', 'direction', 'from_phone', 'to_phone', 'status', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds'];
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM = /^\d{2}:\d{2}$/;
@@ -230,17 +230,33 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
     : (serviceRecord.base_price != null && Number.isFinite(Number(serviceRecord.base_price)) ? Number(serviceRecord.base_price) : null);
 
   return conn.transaction(async (trx) => {
-    // Rung 1 first (occupancy.js ordering contract), then the row locks.
-    const clash = await probeSlotOverlap({
-      trx, date: v.scheduledDate, windowStart: window.window_start, windowEnd: window.window_end,
-    });
-    if (v.technicianId) await assertAssignableTechnician(v.technicianId, { conn: trx, date: v.scheduledDate });
     let callLogId = null;
     if (v.callLogId) {
       const call = await findPickableCallForSave(trx, v.callLogId, now);
       if (!call) throw httpError(409, 'That call is no longer live. Pick the call again.');
+      // The call lock before rung 1, the order the recording processor's
+      // booking transaction takes it in (call-recording-processor.js): Book
+      // and the processor's booking for one call run one after the other, so
+      // the second sees the first's visit. A repeated Book is refused the same way.
+      if (call.twilio_call_sid) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', call.twilio_call_sid]);
+      }
+      const owned = await trx('scheduled_services')
+        .whereNull('parent_service_id')
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .where((linked) => {
+          linked.where('source_call_log_id', call.id);
+          if (call.twilio_call_sid) linked.orWhere('notes', 'like', `%Call SID: ${call.twilio_call_sid}%`);
+        })
+        .first('id');
+      if (owned) throw httpError(409, 'This call already has a visit. Find it on Dispatch.');
       callLogId = call.id;
     }
+    // Rung 1 (occupancy.js ordering contract), then the row locks.
+    const clash = await probeSlotOverlap({
+      trx, date: v.scheduledDate, windowStart: window.window_start, windowEnd: window.window_end,
+    });
+    if (v.technicianId) await assertAssignableTechnician(v.technicianId, { conn: trx, date: v.scheduledDate });
 
     const cols = await trx('scheduled_services').columnInfo();
     const insertData = {
