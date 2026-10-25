@@ -100,7 +100,9 @@ function todayUs() {
 // Issue the notice for this estimate's customer, or return the open one with a fresh signing link (only a hash
 // of the link is stored, so every call rotates it). An open notice is reused only when it reads exactly as the
 // one issued now (same form version, name, representative and date); otherwise it is cancelled and replaced.
-async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db }) {
+// `blockedFor(trx, lockedEstimate)` is the route's eligibility re-run on the estimate row locked here (the same
+// check the commercial agreement issuer runs): true = the estimate is no longer open for online signing.
+async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db, blockedFor = async () => false }) {
   if (!estimate.customer_id) return refusal(409, 'no_account', CALL_US);
   const { renderDocumentTemplate, buildCustomerDocumentContext, lockActiveVersionForIssue, jsonb } = require('./document-template-library');
   const { documentContractExpiresAt, hashContractToken, mintContractToken, publicContractUrl } = require('./contracts');
@@ -119,25 +121,31 @@ async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db }) {
   });
 
   const outcome = await conn.transaction(async (trx) => {
-    // Customer first, like every customer contact write: comms fence, customers, then template and contracts.
+    // Customer first, like every customer contact write: comms fence, customers, estimates (then leads and call_log in
+    // blockedFor), template, contracts.
     await lockCustomerComms(trx, estimate.customer_id);
     const customer = await trx('customers').where({ id: estimate.customer_id }).whereNull('deleted_at').forUpdate().first();
     if (!customer || customer.active === false) return refusal(409, 'customer_unavailable', CALL_US);
+    // The estimate under lock decides, not the route's earlier read: a decline, archive, reassignment, call-linkage
+    // correction or revision that removed the termite line, landing in between, wins and nothing is issued.
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+    if (!locked || String(locked.customer_id) !== String(customer.id)) return refusal(404, 'not_available', 'Estimate not found');
+    if (await blockedFor(trx, locked) || !estimateNeedsConsumerNotice(locked)) return refusal(404, 'not_available', 'Estimate not found');
     if (await findConsumerNotice(trx, customer.id, { onOrBefore: etDateString() })) {
       return refusal(409, 'already_signed', 'Your consumer notice is already signed. Please reload the page.');
     }
-    const representative = await representativeName(trx, estimate);
+    const representative = await representativeName(trx, locked);
     if (!representative) return refusal(409, 'no_representative', CALL_US);
     await lockActiveVersionForIssue(trx, { template, activeVersion: version });
 
     const context = buildCustomerDocumentContext(customer, {
       service: { name: SERVICE_NAME },
       issuer: { name: representative, date: todayUs() },
-      estimate: { id: estimate.id, source: SNAPSHOT_SOURCE },
+      estimate: { id: locked.id, source: SNAPSHOT_SOURCE },
     });
     const rendered = renderDocumentTemplate({ template, version, context });
     if (rendered.unresolvedVariables.length) {
-      logger.warn(`[estimate-consumer-notice] unresolved variables for estimate ${estimate.id}: ${rendered.unresolvedVariables.join(', ')}`);
+      logger.warn(`[estimate-consumer-notice] unresolved variables for estimate ${locked.id}: ${rendered.unresolvedVariables.join(', ')}`);
       return refusal(409, 'template_unavailable', CALL_US);
     }
     const now = new Date();
@@ -152,7 +160,7 @@ async function ensureEstimateConsumerNotice({ estimate, req = {}, conn = db }) {
     // The gate is read again after the last lock and before any write: a request that waited on the locks while
     // the kill switch was thrown must create nothing.
     if (!require('../config/feature-gates').estimateConsumerNoticeLive()) return refusal(404, 'not_available', 'Estimate not found');
-    const meta = { source: SNAPSHOT_SOURCE, estimateId: estimate.id };
+    const meta = { source: SNAPSHOT_SOURCE, estimateId: locked.id };
     if (existing?.contract_text_snapshot === rendered.body) {
       await trx('customer_contracts').where({ id: existing.id }).update({
         status: 'sent', share_token_hash: hashContractToken(token), share_token_expires_at: expiresAt, shared_at: now, updated_at: now,

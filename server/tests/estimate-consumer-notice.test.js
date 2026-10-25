@@ -74,8 +74,9 @@ describe('estimateNeedsConsumerNotice', () => {
 });
 
 // A tiny in-memory stand-in for the tables the service touches.
-function makeDb({ contracts = [], technicians = [], customer = CUSTOMER, template = TEMPLATE, version = VERSION } = {}) {
-  const state = { contracts: contracts.map((c) => ({ ...c })), events: [], writes: [], techQueries: [] };
+// `estimateRow` is the estimate the issuer reads under lock (default: the termite estimate the tests pass in).
+function makeDb({ contracts = [], technicians = [], customer = CUSTOMER, template = TEMPLATE, version = VERSION, estimateRow = undefined } = {}) {
+  const state = { contracts: contracts.map((c) => ({ ...c })), events: [], writes: [], techQueries: [], locks: [] };
   const make = (table) => {
     const q = { where: {}, statusIn: null, source: undefined };
     const api = {
@@ -84,7 +85,7 @@ function makeDb({ contracts = [], technicians = [], customer = CUSTOMER, templat
       whereIn(col, vals) { if (col === 'status') q.statusIn = vals; return api; },
       whereRaw(_sql, binds) { q.source = binds[0]; return api; },
       orderByRaw() { return api; },
-      forUpdate() { return api; },
+      forUpdate() { state.locks.push(table); return api; },
       limit() { return api; },
       async select() {
         if (table === 'technicians') { state.techQueries.push(q.where); return technicians.filter((t) => t.role === q.where.role && t.active && t.employment_status === 'active'); }
@@ -94,6 +95,7 @@ function makeDb({ contracts = [], technicians = [], customer = CUSTOMER, templat
         if (table === 'document_templates') return q.where.template_key ? template : { active_version_id: template.active_version_id, status: template.status, template_key: template.template_key };
         if (table === 'document_template_versions') return version;
         if (table === 'customers') return customer;
+        if (table === 'estimates') return estimateRow === undefined ? estimate([{ service: 'termite_bait', name: 'Termite Bait Stations' }]) : estimateRow;
         if (table === 'technicians') {
           state.techQueries.push(q.where);
           return technicians.find((t) => t.id === q.where.id && t.active === q.where.active && t.employment_status === q.where.employment_status) || null;
@@ -235,6 +237,39 @@ describe('ensureEstimateConsumerNotice', () => {
     expect(state.events.map((e) => e.event_type)).toEqual(['created_from_document_template', 'share_link_created']);
     expect(state.writes.filter((w) => w.table === 'estimates')).toEqual([]);
     expect(lockCustomerComms).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+  });
+
+  test('locks in the order every customer contact write takes: customer, estimate, then the contracts', async () => {
+    const { database, state } = makeDb({ technicians: [TECH] });
+    await ensureEstimateConsumerNotice({ estimate: termite, req, conn: database });
+    expect(state.locks.slice(0, 2)).toEqual(['customers', 'estimates']);
+    expect(state.locks.indexOf('customer_contracts')).toBeGreaterThan(state.locks.indexOf('estimates'));
+  });
+
+  test('the estimate locked here decides: reassigned to another customer, it issues nothing', async () => {
+    const { database, state } = makeDb({ technicians: [TECH], estimateRow: { ...termite, customer_id: 'cust-2' } });
+    await expect(ensureEstimateConsumerNotice({ estimate: termite, req, conn: database })).resolves.toMatchObject({ ok: false, status: 404 });
+    expect(state.writes).toEqual([]);
+  });
+
+  test('the route\'s eligibility re-run on the locked row (declined, archived, call-side block) stops the issue', async () => {
+    const { database, state } = makeDb({ technicians: [TECH] });
+    const blockedFor = jest.fn().mockResolvedValue(true);
+    await expect(ensureEstimateConsumerNotice({ estimate: termite, req, conn: database, blockedFor })).resolves.toMatchObject({ ok: false, status: 404 });
+    expect(blockedFor).toHaveBeenCalledWith(database, expect.objectContaining({ id: 'est-1' }));
+    expect(state.writes).toEqual([]);
+  });
+
+  test('a revision that removed the termite line before the lock issues nothing', async () => {
+    const { database, state } = makeDb({ technicians: [TECH], estimateRow: estimate([PEST]) });
+    await expect(ensureEstimateConsumerNotice({ estimate: termite, req, conn: database })).resolves.toMatchObject({ ok: false, status: 404 });
+    expect(state.writes).toEqual([]);
+  });
+
+  test('a missing locked estimate issues nothing', async () => {
+    const { database, state } = makeDb({ technicians: [TECH], estimateRow: null });
+    await expect(ensureEstimateConsumerNotice({ estimate: termite, req, conn: database })).resolves.toMatchObject({ ok: false, status: 404 });
+    expect(state.writes).toEqual([]);
   });
 
   test('the link is stored as a hash only, and the same open notice comes back with a fresh link', async () => {

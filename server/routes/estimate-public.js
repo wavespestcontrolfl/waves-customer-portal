@@ -19255,7 +19255,7 @@ router.post('/:token/consumer-notice', consumerNoticeLimiter, async (req, res, n
     if (!isEstimateCustomerViewable(estimate) || !isEstimateAcceptActive(estimate)) return notFound();
     const consumerNotice = require('../services/estimate-consumer-notice');
     if (!consumerNotice.estimateNeedsConsumerNotice(estimate)) return notFound();
-    const result = await consumerNotice.ensureEstimateConsumerNotice({ estimate, req });
+    const result = await consumerNotice.ensureEstimateConsumerNotice({ estimate, req, blockedFor: commercialAgreementBlockedFor });
     if (!result.ok) {
       return res.status(result.status).json(result.status === 404 ? { error: 'Estimate not found' } : { error: result.error, code: result.code });
     }
