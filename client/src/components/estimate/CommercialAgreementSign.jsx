@@ -57,7 +57,7 @@ export default function CommercialAgreementSign({ token, commercialAgreement }) 
 
   if (state === 'signed') {
     return (
-      <div data-testid="commercial-agreement-signed" style={estimateCard()}>
+      <div data-glass="card" data-testid="commercial-agreement-signed" style={estimateCard()}>
         <div style={heading}>Service agreement signed</div>
         <div style={body}>Thank you for signing. Our team will follow up to schedule your first visit.</div>
       </div>
@@ -66,7 +66,7 @@ export default function CommercialAgreementSign({ token, commercialAgreement }) 
 
   if (!canSign) {
     return (
-      <div data-testid="commercial-agreement-call" style={estimateCard()}>
+      <div data-glass="card" data-testid="commercial-agreement-call" style={estimateCard()}>
         <div style={heading}>Ready to go ahead?</div>
         <div style={body}>
           {reason === 'terms_conflict'
@@ -78,7 +78,7 @@ export default function CommercialAgreementSign({ token, commercialAgreement }) 
   }
 
   return (
-    <div data-testid="commercial-agreement-sign" style={estimateCard()}>
+    <div data-glass="card" data-testid="commercial-agreement-sign" style={estimateCard()}>
       <div style={heading}>Ready to go ahead?</div>
       <div style={body}>
         {state === 'awaiting'

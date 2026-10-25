@@ -74,6 +74,20 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
     expect(html).toContain('your formal proposal is ready');
   });
 
+  test('authored proposal next step is the PDF follow-up sentence, never "no online checkout"', () => {
+    const followUp = 'Adam, your Waves account manager, will follow up to answer questions and finalize this proposal — or call (941) 297-5749 any time.';
+    for (const pdfEmailed of [true, false]) {
+      const html = renderPage('proposal-next-step-token', BASE_ESTIMATE, {
+        proposal: AUTHORED_PROPOSAL,
+        proposalDelivery: { pdfEmailed },
+      });
+      // Top banner and the closing "Your commercial proposal is ready" section.
+      expect(html.split(followUp).length - 1).toBe(2);
+      expect(html).not.toMatch(/no online checkout/i);
+      expect(html).not.toContain('attached as a PDF');
+    }
+  });
+
   test('measured and multi-unit lines print their quantity × rate basis with the unit label (GH codex P0 on #4305)', () => {
     const measured = {
       ...AUTHORED_PROPOSAL,
