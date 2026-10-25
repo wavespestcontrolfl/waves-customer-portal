@@ -224,5 +224,9 @@ describe('the lead webhook reads the cache before its lock and schedules the ste
     expect(call).toContain('address: fullAddress,');
     expect(call).toContain('rebuild: (measurements) => buildAutomatedLeadDraftEstimate({ intake, customer, body, readiness: draftReadiness, measurements }),');
     expect(src.slice(lockEnd, schedule)).toContain("automatedDraftEstimate?.automation?.sizeSource === 'default'");
+    // The triage rebuild of the same draft carries the in-flight lookup's sizes.
+    const triage = src.indexOf('const triageDraftEstimate = await buildAutomatedLeadDraftEstimate({');
+    expect(triage).toBeGreaterThan(caught);
+    expect(src.slice(triage, src.indexOf('});', triage))).toContain('measurements: await pendingLeadMeasurements(createdEstimateId),');
   });
 });

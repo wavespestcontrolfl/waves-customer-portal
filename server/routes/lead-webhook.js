@@ -43,7 +43,7 @@ const {
   buildAutomatedLeadDraftEstimate,
   evaluateLeadEstimateAutomationReadiness,
 } = require('../services/lead-estimate-automation');
-const { cachedLeadMeasurements, scheduleLeadDraftPropertyLookup } = require('../services/lead-draft-measurements');
+const { cachedLeadMeasurements, pendingLeadMeasurements, scheduleLeadDraftPropertyLookup } = require('../services/lead-draft-measurements');
 
 const LEAD_PREFILL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -1263,6 +1263,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                 customer,
                 body,
                 readiness: triageReadiness,
+                // The county sizes the draft's background lookup proves, when
+                // one is still in flight: this write would otherwise land
+                // first, on the defaults, and the lookup's re-price then
+                // stands down for a row it no longer recognizes.
+                measurements: await pendingLeadMeasurements(createdEstimateId),
               });
               const estimateUpdateQuery = db('estimates')
                 .where({

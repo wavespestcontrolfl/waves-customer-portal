@@ -17,7 +17,10 @@
 //      exactly as it was created: never written since (updated_at =
 //      created_at) and the same whole-row witness (estimateEditVersion)
 //      before and after the lookup. A staff member with the draft open is
-//      protected by the send and save checks on that same witness.
+//      protected by the send and save checks on that same witness. The AI
+//      triage rebuild of the same draft (lead-webhook.js) waits for this
+//      lookup's sizes (pendingLeadMeasurements) and prices with them, so a
+//      triage write that lands first never discards them.
 //
 // Only a county-assessed home AND lot for a single-family home at an address
 // with no unit line, inside residential ranges, and only when the lookup did
@@ -43,6 +46,13 @@ const FROM_COUNTY_REVIEW = 'property_measurements_from_county';
 const HOME_SQFT_RANGE = [400, 10000];
 const LOT_SQFT_RANGE = [1000, 435600];
 const REPRICE_STATUSES = new Set(['generated', 'manual_review_required']);
+// The triage rebuild's longest wait for an in-flight lookup (a lookup runs
+// about 10 s, 71 s at p90); past it the rebuild reads the cache as before.
+const PENDING_WAIT_MS = 3 * 60 * 1000;
+
+// In-flight background lookups by estimate id: a promise of the county
+// sizes the lookup proved, or null when it proved none.
+const pendingMeasurements = new Map();
 
 const inRange = (value, [low, high]) => Number.isFinite(value) && value >= low && value <= high;
 
@@ -108,7 +118,7 @@ function untouchedDefaultedDraft(row) {
  * not_rebuilt | lookup_failed. A database error rejects (the scheduler
  * logs it); the draft then stays as it was.
  */
-async function runLeadDraftPropertyLookup({ estimateId, address, rebuild, conn = db }) {
+async function runLeadDraftPropertyLookup({ estimateId, address, rebuild, conn = db, onMeasurements = () => {} }) {
   if (!leadDraftPropertyLookupLive() || !isEnabled('leadEstimateAutomation')) return { skipped: 'disabled' };
   if (!estimateId || typeof rebuild !== 'function' || !wholeHomeAddress(address)) return { skipped: 'not_eligible' };
   const { estimateEditVersion } = require('./admin-estimate-persistence');
@@ -125,6 +135,7 @@ async function runLeadDraftPropertyLookup({ estimateId, address, rebuild, conn =
     return { outcome: 'lookup_failed' };
   }
   const measurements = countyMeasurements(lookup);
+  onMeasurements(measurements);
   if (!measurements) return { outcome: 'no_trusted_size' };
 
   // Priced before the row lock: the builder reads only the lead's in-memory
@@ -154,18 +165,48 @@ async function runLeadDraftPropertyLookup({ estimateId, address, rebuild, conn =
 }
 
 // Fire-and-forget from the lead webhook: the website's answer never waits on
-// the lookup, and a failure only leaves the draft flagged, as before.
+// the lookup, and a failure only leaves the draft flagged, as before. The
+// pending entry is set before this returns, so the triage rebuild the
+// webhook starts after it always finds it. Returns a promise that settles
+// (never rejects) when the step is done; the webhook does not wait on it.
 function scheduleLeadDraftPropertyLookup(args) {
-  if (!leadDraftPropertyLookupLive()) return;
-  setImmediate(() => {
-    runLeadDraftPropertyLookup(args)
-      .then((result) => logger.info(`[lead-draft-measurements] estimate ${args.estimateId}: ${result.outcome || result.skipped}`))
-      .catch((err) => logger.warn(`[lead-draft-measurements] estimate ${args.estimateId} failed (${err.code || err.name || 'error'})`));
+  if (!leadDraftPropertyLookupLive()) return Promise.resolve();
+  let settle;
+  const pending = new Promise((resolve) => { settle = resolve; });
+  pendingMeasurements.set(args.estimateId, pending);
+  return new Promise((done) => {
+    setImmediate(() => {
+      runLeadDraftPropertyLookup({ ...args, onMeasurements: settle })
+        .then((result) => logger.info(`[lead-draft-measurements] estimate ${args.estimateId}: ${result.outcome || result.skipped}`))
+        .catch((err) => logger.warn(`[lead-draft-measurements] estimate ${args.estimateId} failed (${err.code || err.name || 'error'})`))
+        .finally(() => {
+          settle(null);
+          if (pendingMeasurements.get(args.estimateId) === pending) pendingMeasurements.delete(args.estimateId);
+          done();
+        });
+    });
   });
+}
+
+// For a rebuild of the same draft (the webhook's AI triage): the sizes an
+// in-flight lookup proves (null = none), waited for up to PENDING_WAIT_MS.
+// undefined when no lookup is in flight or the wait ran out: the builder
+// then reads the cache itself, as for any other build.
+async function pendingLeadMeasurements(estimateId, { waitMs = PENDING_WAIT_MS } = {}) {
+  const pending = estimateId ? pendingMeasurements.get(estimateId) : null;
+  if (!pending) return undefined;
+  let timer;
+  const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(undefined), waitMs); });
+  try {
+    return await Promise.race([pending, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 module.exports = {
   cachedLeadMeasurements,
+  pendingLeadMeasurements,
   runLeadDraftPropertyLookup,
   scheduleLeadDraftPropertyLookup,
   MEASUREMENTS_SOURCE,

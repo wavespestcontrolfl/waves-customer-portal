@@ -19,6 +19,7 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
   let performPropertyLookup;
   let runLeadDraftPropertyLookup;
   let scheduleLeadDraftPropertyLookup;
+  let pendingLeadMeasurements;
   let buildAutomatedLeadDraftEstimate;
   let evaluateLeadEstimateAutomationReadiness;
   let estimateEditVersion;
@@ -32,7 +33,7 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
     db = require('../models/db');
     ({ performPropertyLookup } = require('../routes/property-lookup-v2'));
-    ({ runLeadDraftPropertyLookup, scheduleLeadDraftPropertyLookup } = require('../services/lead-draft-measurements'));
+    ({ runLeadDraftPropertyLookup, scheduleLeadDraftPropertyLookup, pendingLeadMeasurements } = require('../services/lead-draft-measurements'));
     ({ buildAutomatedLeadDraftEstimate, evaluateLeadEstimateAutomationReadiness } = require('../services/lead-estimate-automation'));
     ({ estimateEditVersion } = require('../services/admin-estimate-persistence'));
   });
@@ -173,8 +174,8 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
     delete process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP;
     const rebuild = rebuildFor(inputs);
     expect(await runLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild })).toEqual({ skipped: 'disabled' });
-    scheduleLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild });
-    await new Promise((resolve) => setImmediate(resolve));
+    await scheduleLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild });
+    expect(await pendingLeadMeasurements(row.id)).toBeUndefined();
     expect(performPropertyLookup).not.toHaveBeenCalled();
     expect(rebuild).not.toHaveBeenCalled();
   });
@@ -182,12 +183,91 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
   test('the webhook\'s scheduled call re-prices in the background', async () => {
     const { row, inputs } = await webhookDraft();
     performPropertyLookup.mockResolvedValue(countyLookup());
-    scheduleLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild: rebuildFor(inputs) });
-    let sizeSource = 'default';
-    for (let i = 0; i < 40 && sizeSource === 'default'; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      sizeSource = automationOf(await reread(row.id)).draftEstimateAutomation.sizeSource;
-    }
-    expect(sizeSource).toBe('county_assessed');
+    const job = scheduleLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild: rebuildFor(inputs) });
+    expect(performPropertyLookup).not.toHaveBeenCalled(); // the caller's turn ends before the lookup starts
+    await job;
+    expect(automationOf(await reread(row.id)).draftEstimateAutomation.sizeSource).toBe('county_assessed');
+  });
+  // The webhook's AI triage rebuilds an unkeyed lead's draft under its own
+  // service label, usually seconds after the lead, while the lookup still
+  // runs. Its write lands first and the lookup's re-price then stands down
+  // for a row it no longer recognizes, so the triage rebuild must carry the
+  // lookup's sizes itself (pre-push codex P1).
+  async function triageRewrite(row, inputs, measurements) {
+    const intake = { ...inputs.intake, serviceInterest: 'Mosquito Control' };
+    const readiness = evaluateLeadEstimateAutomationReadiness({ intake, phone: '+19415550142', serviceInterest: 'Mosquito Control' });
+    const draft = await buildAutomatedLeadDraftEstimate({ ...inputs, intake, readiness, measurements });
+    // The webhook's own triage update (routes/lead-webhook.js).
+    await db('estimates')
+      .where({ id: row.id, source: 'lead_webhook', status: 'draft', service_interest: row.service_interest })
+      .whereNull('archived_at')
+      .update({
+        service_interest: 'Mosquito Control',
+        monthly_total: draft.monthly || null,
+        annual_total: draft.annual || null,
+        onetime_total: draft.oneTimeTotal || null,
+        pricing_authority: draft.automation.status === 'generated' ? 'SERVER' : null,
+        estimate_data: JSON.stringify(draft.estimateData),
+        updated_at: new Date(),
+      });
+  }
+
+  test('a triage rebuild that lands first waits for the lookup and carries its county size', async () => {
+    const { row, inputs } = await webhookDraft();
+    let releaseLookup;
+    performPropertyLookup.mockImplementation(() => new Promise((resolve) => { releaseLookup = () => resolve(countyLookup()); }));
+    let triageWrote;
+    const triageDone = new Promise((resolve) => { triageWrote = resolve; });
+    // The lookup's own re-price is held until triage has written, so triage
+    // lands first.
+    const rebuild = jest.fn(async (measurements) => {
+      await triageDone;
+      return buildAutomatedLeadDraftEstimate({ ...inputs, measurements });
+    });
+    const job = scheduleLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild });
+
+    const triage = (async () => {
+      const measurements = await pendingLeadMeasurements(row.id);
+      await triageRewrite(row, inputs, measurements);
+      triageWrote();
+    })();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(automationOf(await reread(row.id)).draftEstimateAutomation.sizeSource).toBe('default'); // triage is waiting
+    releaseLookup();
+    await triage;
+    await job;
+
+    const after = await reread(row.id);
+    expect(after.service_interest).toBe('Mosquito Control');
+    expect(automationOf(after).draftEstimateAutomation).toMatchObject({
+      sizeSource: 'county_assessed',
+      engineInput: expect.objectContaining({ homeSqFt: 1850, lotSqFt: 9200 }),
+    });
+    expect(rebuild).toHaveBeenCalledTimes(1);
+  });
+
+  test('the triage wait is bounded, and no lookup in flight means no wait', async () => {
+    const { row, inputs } = await webhookDraft();
+    let releaseLookup;
+    performPropertyLookup.mockImplementation(() => new Promise((resolve) => { releaseLookup = () => resolve(countyLookup()); }));
+    expect(await pendingLeadMeasurements(row.id)).toBeUndefined();
+    const job = scheduleLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild: rebuildFor(inputs) });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const started = Date.now();
+    expect(await pendingLeadMeasurements(row.id, { waitMs: 30 })).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(1000);
+    releaseLookup();
+    await job;
+    expect(await pendingLeadMeasurements(row.id)).toBeUndefined();
+    expect(automationOf(await reread(row.id)).draftEstimateAutomation.sizeSource).toBe('county_assessed');
+  });
+
+  test('a lookup that proves no size hands the triage rebuild null, so it prices on the defaults without a second read', async () => {
+    const { row, inputs } = await webhookDraft();
+    performPropertyLookup.mockResolvedValue({ propertyRecord: { ...countyLookup().propertyRecord, propertyType: 'Condo' }, enriched: {} });
+    const job = scheduleLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild: rebuildFor(inputs) });
+    expect(await pendingLeadMeasurements(row.id)).toBeNull();
+    await job;
+    expect(performPropertyLookup).toHaveBeenCalledTimes(1);
   });
 });
