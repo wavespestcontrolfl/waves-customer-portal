@@ -104,10 +104,14 @@ function roundDiv(numerator, denominator) {
   return (numerator % denominator) * 2n >= denominator ? quotient + 1n : quotient;
 }
 
+// payrollUnits reads anything it cannot parse as zero, which would turn a
+// mistyped figure into a smaller paycheck or a lost tax. Here an omitted value
+// is zero, but a supplied one must be a plain non-negative decimal.
 function nonNegativeCents(value, label) {
-  const cents = payrollUnits(value);
-  if (cents < 0n) throw new Error(`${label} cannot be negative`);
-  return cents;
+  if (value == null || value === '') return 0n;
+  const text = typeof value === 'number' && Number.isFinite(value) ? String(value) : String(value).trim();
+  if (!/^\d+(?:\.\d+)?$/.test(text)) throw new Error(`${label} must be a non-negative number`);
+  return payrollUnits(text);
 }
 
 function schedulesForYear(year) {
@@ -198,8 +202,8 @@ function computePaycheck({
   const periods = PAY_PERIODS_PER_YEAR[payFrequency];
   if (!periods) throw new Error(`Unknown pay frequency: ${payFrequency}`);
   validateW4(w4);
-  const rateCents = payrollUnits(hourlyRate);
-  if (rateCents <= 0n) throw new Error('No pay rate set');
+  const rateCents = nonNegativeCents(hourlyRate, 'Hourly rate');
+  if (rateCents === 0n) throw new Error('No pay rate set');
   if (!Number.isInteger(reemploymentRateBp) || reemploymentRateBp < 0) {
     throw new Error('reemploymentRateBp must be a whole number of basis points');
   }

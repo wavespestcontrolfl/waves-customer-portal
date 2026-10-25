@@ -165,7 +165,11 @@ describe('computePaycheck: refuses to guess', () => {
     ['no W-4', { w4: null }, /No Form W-4 on file/],
     ['a 2019 W-4', { w4: { ...W4_SINGLE, formYear: 2019 } }, /2020 or later/],
     ['an unknown filing status', { w4: { ...W4_SINGLE, filingStatus: 'widowed' } }, /Unknown W-4 filing status/],
-    ['negative minutes', { regularMinutes: '-5' }, /cannot be negative/],
+    ['negative minutes', { regularMinutes: '-5' }, /Regular minutes must be a non-negative number/],
+    ['mistyped minutes', { regularMinutes: 'oops' }, /Regular minutes must be a non-negative number/],
+    ['a mistyped rate', { hourlyRate: 'abc' }, /Hourly rate must be a non-negative number/],
+    ['year-to-date wages that are not a number', { ytdGrossWages: Number.NaN }, /Year-to-date wages must be/],
+    ['an infinite Step 4(c) amount', { w4: { ...W4_SINGLE, step4cExtraWithholding: Infinity } }, /W-4 Step 4\(c\) must be/],
     ['an unknown pay frequency', { payFrequency: 'daily' }, /Unknown pay frequency/],
   ])('%s', (_label, overrides, message) => {
     expect(() => paycheck(overrides)).toThrow(message);
