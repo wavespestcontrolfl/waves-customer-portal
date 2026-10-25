@@ -72,7 +72,9 @@ const path = require('path');
 const root = path.join(__dirname, '..', '..', 'server');
 const { serviceLineFor } = require(path.join(root, 'services', 'scheduling', 'line-technician'));
 const { normalizeWorkDays, dayOfWeekOfDate } = require(path.join(root, 'services', 'technician-eligibility'));
-const { etDateString, etWeekStart, addETDays, parseETDateTime } = require(path.join(root, 'utils', 'datetime-et'));
+const {
+  etDateString, etWeekStart, addETDays, parseETDateTime, validCalendarDate,
+} = require(path.join(root, 'utils', 'datetime-et'));
 const { overlayRecurringTemplateOverrides } = require(path.join(root, 'services', 'recurring-template-overrides'));
 const { isEnabled } = require(path.join(root, 'config', 'feature-gates'));
 const { whereVisitRowLive } = require(path.join(root, 'services', 'customer-lifecycle-guard'));
@@ -94,14 +96,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const dayOf = (value) => (value == null ? null : String(value).slice(0, 10));
 
-function isRealCalendarDate(v) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
-  if (!m) return false;
-  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  const dt = new Date(Date.UTC(y, mo - 1, d));
-  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
-}
-
 /** First solo day when --start is not given: the next Monday after today, ET. */
 function defaultStart(now = new Date()) {
   return etDateString(addETDays(parseETDateTime(`${etWeekStart(now)}T12:00:00`), 7));
@@ -117,7 +111,7 @@ const technicianFlag = (name) => (v) => (UUID.test(v)
 const VALUE_FLAGS = {
   '--from': technicianFlag('from'),
   '--to': technicianFlag('to'),
-  '--start': (v) => (isRealCalendarDate(v) ? { start: v } : `--start needs a real YYYY-MM-DD calendar date, got ${JSON.stringify(v)}`),
+  '--start': (v) => (validCalendarDate(v) ? { start: v } : `--start needs a real YYYY-MM-DD calendar date, got ${JSON.stringify(v)}`),
   '--lines': (v) => {
     const lines = [...new Set(v.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean))];
     const ok = lines.length && lines.every((l) => MOVABLE_LINES.includes(l));
@@ -226,7 +220,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
     stays_off_day: { visits: 0, by_weekday: {} },
     skipped: {},
     notices_to_suppress: 0,
-    ids: { series: [], visits: [] },
+    ids: { retemplate: [], series: [], visits: [] },
   };
   const bucket = (reason) => plan.skipped[reason] || (plan.skipped[reason] = { series: 0, visits: 0, _ids: new Set() });
   // One visit stays: its series counts once per reason.
@@ -268,6 +262,7 @@ function buildPlan({ from, to = null, start, today, lines = MOVABLE_LINES, paren
       continue;
     }
     plan.series.retemplate += 1;
+    plan.ids.retemplate.push(p.id);
 
     let moved = 0;
     for (const v of members) {
@@ -439,8 +434,10 @@ function printPlan(plan, { list }) {
   out.push(`Per-visit technician notices the execute step must suppress: ${plan.notices_to_suppress}`);
   if (list) {
     out.push('');
-    out.push(`Series ids (${plan.ids.series.length}):`);
-    for (const id of plan.ids.series) out.push(`  ${id}`);
+    out.push(`Series whose technician template changes (${plan.ids.retemplate.length}):`);
+    for (const id of plan.ids.retemplate) out.push(`  ${id}`);
+    out.push(`  of which with visits that change now (${plan.ids.series.length}):`);
+    for (const id of plan.ids.series) out.push(`    ${id}`);
     out.push(`Visit ids (${plan.ids.visits.length}):`);
     for (const id of plan.ids.visits) out.push(`  ${id}`);
   }
@@ -494,7 +491,7 @@ async function main() {
 
 module.exports = {
   MOVABLE_LINES, OPEN_STATUSES, TERMITE_BAIT_KEYS,
-  parseArgs, defaultStart, isRealCalendarDate, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries,
+  parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries,
   buildPlan, planHandover, printPlan, readOnlyConn,
 };
 

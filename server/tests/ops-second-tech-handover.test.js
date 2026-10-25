@@ -42,6 +42,16 @@ const plan = (parents, visits, o = {}) => buildPlan({
 });
 
 describe('second-tech-handover planner', () => {
+  test('a series whose template changes but has no visit to move now is still listed (template-only)', () => {
+    const fridayOnly = parent();
+    const noChildren = parent();
+    const moving = parent();
+    const p = plan([fridayOnly, noChildren, moving], [visit(fridayOnly, FRI), visit(moving, MON)]);
+    expect(p.series.retemplate).toBe(3);
+    expect(new Set(p.ids.retemplate)).toEqual(new Set([fridayOnly.id, noChildren.id, moving.id]));
+    expect(p.ids.series).toEqual([moving.id]);
+  });
+
   test('a pest series on the owner moves its Mon-Thu visits; the Friday visit stays (stays_off_day)', () => {
     const s = parent();
     const vs = [MON, TUE, WED, THU, FRI].map((d) => visit(s, d));
