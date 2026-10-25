@@ -66,6 +66,25 @@ function callStartedAt(row) {
   return new Date(created.getTime() - callDurationSeconds(row) * 1000);
 }
 
+// The ISO shape /call-status stamps into metadata.ended_at (Twilio's event time).
+const ENDED_AT_STAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$/;
+
+/**
+ * When the call ENDED: the metadata.ended_at stamp /call-status writes from
+ * Twilio's own event time on the first terminal callback. Without it, a row
+ * inserted when the call began gets its start plus its length, which is early
+ * by the ring time; a row inserted after the call says nothing about when the
+ * call ended, so it is null. The same rule as sms-pending-conversations.js's SQL.
+ */
+function callEndedAt(row) {
+  const stamp = parseMetadata(row?.metadata).ended_at;
+  const stamped = typeof stamp === 'string' && ENDED_AT_STAMP.test(stamp) ? new Date(stamp) : null;
+  if (stamped && !Number.isNaN(stamped.getTime())) return stamped;
+  if (createdAfterTheCall(row)) return null;
+  const started = callStartedAt(row);
+  return started ? new Date(started.getTime() + callDurationSeconds(row) * 1000) : null;
+}
+
 /**
  * When the recording could FIRST have been processable — where the
  * pipeline's clock starts. Call end, or later if the recording only landed
@@ -88,6 +107,7 @@ module.exports = {
   POST_CALL_ROW_SOURCES,
   TERMINAL_CALL_STATUSES,
   callStartedAt,
+  callEndedAt,
   recordingReadyAt,
   callDurationSeconds,
 };

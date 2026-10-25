@@ -29,6 +29,7 @@ const express = require('express');
 const {
   validateNewCallerInput,
   toPickableCall,
+  stillPickable,
   bookNewCallerVisit,
 } = require('../services/booking/new-caller-visit');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -92,6 +93,24 @@ describe('the call picker shows one call', () => {
     expect(toPickableCall({
       id: 'c3', direction: 'outbound', from_phone: '+19415550999', to_phone: '+19415550177', status: 'initiated', created_at: '2027-01-15T15:00:00.000Z',
     })).toMatchObject({ direction: 'outbound', caller: '•••-0177', answeredBy: null, live: true });
+  });
+});
+
+describe('an ended call leaves the picker 10 minutes after it ends (call-timeline callEndedAt), whatever touched the row since', () => {
+  const now = new Date('2027-01-15T15:30:00.000Z');
+  const at = (hhmm) => `2027-01-15T${hhmm}:00.000Z`;
+  test.each([
+    ['a live call, however old its last write', { status: 'in-progress', created_at: at('15:01'), updated_at: at('15:02') }, true],
+    ['stamped as ended 20 minutes ago, row touched 1 minute ago by recording processing', { status: 'completed', created_at: at('15:05'), duration_seconds: 120, updated_at: at('15:29'), metadata: { ended_at: at('15:10') } }, false],
+    ['stamped as ended 3 minutes ago, though start + one leg\'s length is 25 minutes ago', { status: 'completed', created_at: at('15:00'), duration_seconds: 300, metadata: { ended_at: at('15:27') } }, true],
+    ['no stamp: ended 20 minutes ago by start + length, row touched 1 minute ago', { status: 'completed', created_at: at('15:05'), duration_seconds: 300, updated_at: at('15:29') }, false],
+    ['no stamp: ended 2 minutes ago after a 16-minute call', { status: 'completed', created_at: at('15:12'), duration_seconds: 960 }, true],
+    ['no stamp: the recording length counts when the call length is not known yet', { status: 'completed', created_at: at('15:06'), duration_seconds: 0, recording_duration_seconds: 900 }, true],
+    ['a row inserted after the call, with no stamp, has no known end', { status: 'completed', created_at: at('15:28'), duration_seconds: 600, metadata: { source: 'status_callback', inserted_on_status: 'completed' } }, false],
+    ['a callback nobody answered, 5 minutes ago', { status: 'no-answer', created_at: at('15:25'), duration_seconds: 0 }, true],
+    ['a callback nobody answered, 15 minutes ago', { status: 'no-answer', created_at: at('15:15'), duration_seconds: 0 }, false],
+  ])('%s', (_label, row, pickable) => {
+    expect(stillPickable(row, { now, endedMinutes: 10 })).toBe(pickable);
   });
 });
 
@@ -187,18 +206,24 @@ maybeDescribe('new-caller booking on Postgres', () => {
   const made = { callIds: [], visitIds: [] };
   const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000);
 
-  async function insertCall({ direction = 'inbound', status = 'in-progress', acceptedMinutesAgo = 5, createdMinutesAgo = 6, updatedMinutesAgo = 1, answeredBy = null, accepted = true } = {}) {
+  // updated_at defaults to a minute ago on every row: later writes (recording
+  // processing, metadata) bump it, and it must never decide whether a call lists.
+  async function insertCall({ direction = 'inbound', status = 'in-progress', acceptedMinutesAgo = 5, createdMinutesAgo = 6, durationSeconds = 0, endedMinutesAgo = null, answeredBy = null, accepted = true } = {}) {
+    const metadata = {
+      ...(accepted && direction === 'inbound' ? { forward_acceptance: { accepted: true, csr_name: 'Office', answered_by_number: '+15555550123', accepted_at: minutesAgo(acceptedMinutesAgo).toISOString() } } : {}),
+      // The stamp /call-status writes from Twilio's event time.
+      ...(endedMinutesAgo == null ? {} : { ended_at: minutesAgo(endedMinutesAgo).toISOString() }),
+    };
     const [row] = await db('call_log').insert({
       direction,
       from_phone: direction === 'inbound' ? '+15555550100' : '+15555550999',
       to_phone: direction === 'inbound' ? '+15555550999' : '+15555550177',
       status,
       answered_by: answeredBy,
+      duration_seconds: durationSeconds,
       created_at: minutesAgo(createdMinutesAgo),
-      updated_at: minutesAgo(updatedMinutesAgo),
-      metadata: accepted && direction === 'inbound'
-        ? JSON.stringify({ forward_acceptance: { accepted: true, csr_name: 'Office', answered_by_number: '+15555550123', accepted_at: minutesAgo(acceptedMinutesAgo).toISOString() } })
-        : null,
+      updated_at: minutesAgo(1),
+      metadata: Object.keys(metadata).length ? JSON.stringify(metadata) : null,
     }).returning(['id']);
     made.callIds.push(row.id);
     return row.id;
@@ -219,13 +244,16 @@ maybeDescribe('new-caller booking on Postgres', () => {
 
   test('lists answered and recent calls, never a voice-agent call, an old answer or a long-ended call', async () => {
     const live = await insertCall();
-    const endedJustNow = await insertCall({ status: 'completed', updatedMinutesAgo: 4 });
+    const endedJustNow = await insertCall({ status: 'completed', createdMinutesAgo: 6, durationSeconds: 120 });
     const bridge = await insertCall({ direction: 'outbound', status: 'initiated', createdMinutesAgo: 3 });
     const agentHeld = await insertCall({ accepted: false, answeredBy: 'ai_agent' });
     const oldAnswer = await insertCall({ acceptedMinutesAgo: 45, createdMinutesAgo: 46 });
-    const endedLongAgo = await insertCall({ status: 'completed', updatedMinutesAgo: 25 });
+    // Ended 20 minutes ago; its row was touched a minute ago (insertCall's updated_at).
+    const endedLongAgo = await insertCall({ status: 'completed', acceptedMinutesAgo: 24, createdMinutesAgo: 25, durationSeconds: 300 });
+    // Only the stored stamp says this one ended 3 minutes ago (one leg's length says 24).
+    const stampedRecent = await insertCall({ status: 'completed', acceptedMinutesAgo: 24, createdMinutesAgo: 25, durationSeconds: 60, endedMinutesAgo: 3 });
     const ids = (await service.listPickableCalls()).map((call) => call.id);
-    expect(ids).toEqual(expect.arrayContaining([live, endedJustNow, bridge]));
+    expect(ids).toEqual(expect.arrayContaining([live, endedJustNow, bridge, stampedRecent]));
     for (const id of [agentHeld, oldAnswer, endedLongAgo]) expect(ids).not.toContain(id);
   });
 
@@ -253,7 +281,7 @@ maybeDescribe('new-caller booking on Postgres', () => {
 
   test('a call that is no longer pickable is refused with a 409 and writes nothing', async () => {
     const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
-    const stale = await insertCall({ status: 'completed', acceptedMinutesAgo: 120, createdMinutesAgo: 121, updatedMinutesAgo: 115 });
+    const stale = await insertCall({ status: 'completed', acceptedMinutesAgo: 120, createdMinutesAgo: 121, durationSeconds: 300 });
     const before = await db('scheduled_services').where({ source_call_log_id: stale }).count({ n: '*' }).first();
     await expect(service.bookNewCallerVisit({ input: validInput({ serviceId: svc.id, callLogId: stale, scheduledDate: '2031-03-05' }) }))
       .rejects.toMatchObject({ status: 409 });

@@ -13,10 +13,13 @@
 // metadata.forward_acceptance) or an outbound bridge, started within the last
 // PICKABLE_ANSWERED_MINUTES and still live or ended within the last
 // PICKABLE_ENDED_MINUTES. Calls the voice agent still holds never carry
-// forward_acceptance, so they never list.
+// forward_acceptance, so they never list. A call's end comes from
+// utils/call-timeline.js callEndedAt, never updated_at: recording processing
+// and metadata writes bump that long after hangup.
 
 const db = require('../../models/db');
 const { isEnabled } = require('../../config/feature-gates');
+const { TERMINAL_CALL_STATUSES, callEndedAt } = require('../../utils/call-timeline');
 // booking-insert-contract.test.js recognizes the contract helper by this path.
 const { completeScheduledServiceInsert } = require('../booking/create-scheduled-service');
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
@@ -28,8 +31,15 @@ const PICKABLE_ENDED_MINUTES = 10;
 // The save re-checks the picked call with this much extra room: the office
 // may finish the form a few minutes after the picker loaded.
 const SAVE_GRACE_MINUTES = 30;
-const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'no-answer', 'canceled'];
+// A call answered inside the window began at most this long before its
+// answer: a coarse created_at bound so the picker never scans all of call_log.
+const RING_BEFORE_ANSWER_MINUTES = 120;
 const MAX_PICKABLE_CALLS = 10;
+// Calls answered in the window, newest first, before the ended-call check
+// drops the long-ended ones (staff answer far fewer calls than this in 30 minutes).
+const MAX_ANSWERED_CANDIDATES = 50;
+// callEndedAt reads created_at, metadata and both lengths.
+const CALL_COLUMNS = ['id', 'direction', 'from_phone', 'to_phone', 'status', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds'];
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM = /^\d{2}:\d{2}$/;
@@ -145,14 +155,23 @@ function toPickableCall(row) {
     caller: maskedPhone(inbound ? row.from_phone : row.to_phone),
     answeredBy: inbound ? (acceptance.csr_name || maskedPhone(acceptance.answered_by_number) || null) : null,
     startedAt: row.created_at ? new Date(row.created_at).toISOString() : null,
-    live: !TERMINAL_CALL_STATUSES.includes(String(row.status || '')),
+    live: !TERMINAL_CALL_STATUSES.has(String(row.status || '')),
   };
 }
 
-function pickableCallsQuery(conn, { now, answeredMinutes, endedMinutes }) {
+// A live call stays pickable; an ended one only while its end (callEndedAt:
+// the /call-status stamp, else start + length) is inside the last
+// `endedMinutes`. An ended call with no known end is not pickable.
+function stillPickable(row, { now, endedMinutes }) {
+  if (!TERMINAL_CALL_STATUSES.has(String(row?.status || ''))) return true;
+  const ended = callEndedAt(row);
+  return Boolean(ended) && ended.getTime() >= now.getTime() - endedMinutes * 60 * 1000;
+}
+
+function answeredCallsQuery(conn, { now, answeredMinutes }) {
   const answeredSince = new Date(now.getTime() - answeredMinutes * 60 * 1000);
-  const endedSince = new Date(now.getTime() - endedMinutes * 60 * 1000);
   return conn('call_log')
+    .where('created_at', '>=', new Date(answeredSince.getTime() - RING_BEFORE_ANSWER_MINUTES * 60 * 1000))
     .where((scope) => {
       scope.where((inbound) => {
         inbound.where('direction', 'inbound')
@@ -166,30 +185,26 @@ function pickableCallsQuery(conn, { now, answeredMinutes, endedMinutes }) {
           .where('created_at', '>=', answeredSince)
           .where((agent) => agent.whereNull('answered_by').orWhereNot('answered_by', 'ai_agent'));
       });
-    })
-    .where((state) => {
-      state.whereNotIn('status', TERMINAL_CALL_STATUSES).orWhere('updated_at', '>=', endedSince);
     });
 }
 
 async function listPickableCalls({ conn = db, now = new Date() } = {}) {
-  const rows = await pickableCallsQuery(conn, {
-    now, answeredMinutes: PICKABLE_ANSWERED_MINUTES, endedMinutes: PICKABLE_ENDED_MINUTES,
-  })
+  const rows = await answeredCallsQuery(conn, { now, answeredMinutes: PICKABLE_ANSWERED_MINUTES })
     .orderBy('created_at', 'desc')
-    .limit(MAX_PICKABLE_CALLS)
-    .select('id', 'direction', 'from_phone', 'to_phone', 'status', 'created_at', 'updated_at', 'metadata');
-  return rows.map(toPickableCall).filter(Boolean);
+    .limit(MAX_ANSWERED_CANDIDATES)
+    .select(CALL_COLUMNS);
+  return rows
+    .filter((row) => stillPickable(row, { now, endedMinutes: PICKABLE_ENDED_MINUTES }))
+    .slice(0, MAX_PICKABLE_CALLS)
+    .map(toPickableCall)
+    .filter(Boolean);
 }
 
 async function findPickableCallForSave(conn, callLogId, now) {
-  return pickableCallsQuery(conn, {
-    now,
-    answeredMinutes: PICKABLE_ANSWERED_MINUTES + SAVE_GRACE_MINUTES,
-    endedMinutes: PICKABLE_ENDED_MINUTES + SAVE_GRACE_MINUTES,
-  })
+  const row = await answeredCallsQuery(conn, { now, answeredMinutes: PICKABLE_ANSWERED_MINUTES + SAVE_GRACE_MINUTES })
     .where('id', callLogId)
-    .first('id');
+    .first(CALL_COLUMNS);
+  return row && stillPickable(row, { now, endedMinutes: PICKABLE_ENDED_MINUTES + SAVE_GRACE_MINUTES }) ? row : null;
 }
 
 // Books the visit. `zone` comes from the route (admin-schedule.js getZone,
@@ -284,6 +299,7 @@ module.exports = {
   PICKABLE_ENDED_MINUTES,
   validateNewCallerInput,
   toPickableCall,
+  stillPickable,
   listPickableCalls,
   bookNewCallerVisit,
 };
