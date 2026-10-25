@@ -42,11 +42,18 @@ const phoneKey = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10)
 // sweep matches a caller against a service-contact change with it; the
 // masked …1234 alone is ambiguous). Null without a secret or a keyable
 // number — consumers fail closed.
-function phoneFingerprint(phone) {
+function phoneFingerprint(phone, secret = require('../config').jwt?.secret) {
   const digits = phoneKey(phone);
-  const secret = require('../config').jwt?.secret;
   if (digits.length !== 10 || !secret) return null;
   return require('crypto').createHmac('sha256', secret).update(`service-contact-phone:${digits}`).digest('hex');
+}
+// Every fingerprint a stored row could carry: current JWT_SECRET first, then
+// each JWT_SECRET_PREVIOUS entry. Writers keep using phoneFingerprint().
+function phoneFingerprintCandidates(phone) {
+  const { jwtVerifySecrets } = require('../utils/jwt-secrets');
+  return jwtVerifySecrets(require('../config').jwt?.secret)
+    .map((secret) => phoneFingerprint(phone, secret))
+    .filter(Boolean);
 }
 const maskPhone = (v) => {
   const key = phoneKey(v);
@@ -288,4 +295,5 @@ module.exports = {
   recordServiceContactChanges,
   diffServiceContacts,
   phoneFingerprint,
+  phoneFingerprintCandidates,
 };

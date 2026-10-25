@@ -8,6 +8,7 @@ const { lockCustomerPaymentMethods } = require('../utils/payment-method-lock');
 const { assertNoCollectionHold, recordHoldOverride, excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
+const { jwtVerifySecrets, retiredMintedBefore } = require('../utils/jwt-secrets');
 const { etDateString } = require('../utils/datetime-et');
 const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
 
@@ -5276,8 +5277,14 @@ const StripeService = {
     try {
       const [payloadPart, sigPart] = quoteToken.split('.');
       if (!payloadPart || !sigPart) throw new Error('malformed');
-      const expectedSig = crypto.createHmac('sha256', hmacSecret).update(Buffer.from(payloadPart, 'base64url').toString()).digest('base64url');
-      if (sigPart !== expectedSig) throw new Error('signature mismatch');
+      const signedText = Buffer.from(payloadPart, 'base64url').toString();
+      // Current JWT_SECRET first, then each JWT_SECRET_PREVIOUS entry.
+      const signatureOk = jwtVerifySecrets(hmacSecret).some((secret, i) => {
+        // Accepted only by a retired secret: quoted before the rotation cutoff.
+        if (i > 0 && !retiredMintedBefore(JSON.parse(signedText)?.quotedAt)) return false;
+        return sigPart === crypto.createHmac('sha256', secret).update(signedText).digest('base64url');
+      });
+      if (!signatureOk) throw new Error('signature mismatch');
       quote = JSON.parse(Buffer.from(payloadPart, 'base64url').toString());
     } catch {
       throw new Error('Invalid or tampered quote token');
@@ -5806,8 +5813,14 @@ const StripeService = {
     try {
       const [payloadPart, sigPart] = quoteToken.split('.');
       if (!payloadPart || !sigPart) throw new Error('malformed');
-      const expectedSig = crypto.createHmac('sha256', hmacSecret).update(Buffer.from(payloadPart, 'base64url').toString()).digest('base64url');
-      if (sigPart !== expectedSig) throw new Error('signature mismatch');
+      const signedText = Buffer.from(payloadPart, 'base64url').toString();
+      // Current JWT_SECRET first, then each JWT_SECRET_PREVIOUS entry.
+      const signatureOk = jwtVerifySecrets(hmacSecret).some((secret, i) => {
+        // Accepted only by a retired secret: quoted before the rotation cutoff.
+        if (i > 0 && !retiredMintedBefore(JSON.parse(signedText)?.quotedAt)) return false;
+        return sigPart === crypto.createHmac('sha256', secret).update(signedText).digest('base64url');
+      });
+      if (!signatureOk) throw new Error('signature mismatch');
       quote = JSON.parse(Buffer.from(payloadPart, 'base64url').toString());
     } catch { throw new Error('Invalid or tampered quote token'); }
 

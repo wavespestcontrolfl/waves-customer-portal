@@ -58,8 +58,8 @@
  * Errors emit Socket.io connect_error so the client can distinguish
  * "your token expired, refresh it" from "the server is down."
  */
-const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { verifyCustomerJwt } = require('../utils/jwt-secrets');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const {
@@ -158,7 +158,7 @@ async function socketAuth(socket, next) {
 
   let decoded;
   try {
-    decoded = jwt.verify(jwtToken, config.jwt.secret);
+    decoded = verifyCustomerJwt(jwtToken, config.jwt.secret);
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       return next(rejectionError('Token expired', 'TOKEN_EXPIRED'));

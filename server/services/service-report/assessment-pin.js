@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { verifySecretsFor, retiredExpOk } = require('../../utils/jwt-secrets');
 
 // Signed assessment pins (#3168).
 //
@@ -24,6 +25,14 @@ const PIN_TTL_SECONDS = 15 * 60;
 // keeps the two uses independent. REPORT_PIN_SECRET, when set, is dedicated
 // already but is derived the same way so both paths behave identically.
 const PIN_KEY_INFO = 'waves:report-assessment-pin:v1';
+
+// Verify-side keys: the signing key first, then (only while JWT_SECRET is the
+// effective secret) one per JWT_SECRET_PREVIOUS entry.
+function pinVerifyKeys() {
+  const bases = verifySecretsFor(process.env.REPORT_PIN_SECRET);
+  if (!bases.length || !String(bases[0]).trim()) return [];
+  return bases.map((base) => crypto.createHmac('sha256', String(base)).update(PIN_KEY_INFO).digest());
+}
 
 function pinKey() {
   const base = process.env.REPORT_PIN_SECRET || process.env.JWT_SECRET;
@@ -69,21 +78,27 @@ function signAssessmentPin(token, assessmentId, { nowSeconds = Math.floor(Date.n
 // timing-distinguishable or differently-worded rejection would leak whether a
 // given assessment exists.
 function verifyAssessmentPin(token, assessmentId, signature, expiresAt, { nowSeconds = Math.floor(Date.now() / 1000), plan = '' } = {}) {
-  const key = pinKey();
-  if (!key || typeof signature !== 'string') return false;
+  const keys = pinVerifyKeys();
+  if (!keys.length || typeof signature !== 'string') return false;
 
   const exp = Number(expiresAt);
   if (!Number.isFinite(exp) || exp <= nowSeconds) return false;
 
   const history = assessmentPinHistory(signature);
   const signed = history ? signature.split('.')[2] : signature;
-  const expected = computeSignature(key, token, assessmentId, String(expiresAt), plan, history || '');
-  if (signed.length !== expected.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signed, 'hex'));
-  } catch {
-    return false;
+  for (let i = 0; i < keys.length; i += 1) {
+    // Accepted only by a retired secret: minted before the rotation cutoff.
+    if (i > 0 && !retiredExpOk(exp, PIN_TTL_SECONDS)) return false;
+    const key = keys[i];
+    const expected = computeSignature(key, token, assessmentId, String(expiresAt), plan, history || '');
+    if (signed.length !== expected.length) return false;
+    try {
+      if (crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signed, 'hex'))) return true;
+    } catch {
+      return false;
+    }
   }
+  return false;
 }
 
 module.exports = { signAssessmentPin, verifyAssessmentPin, assessmentPinHistory, PIN_TTL_SECONDS };

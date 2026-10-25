@@ -819,6 +819,11 @@ function propertyFactSecret() {
   return process.env.JWT_SECRET || PROPERTY_FACT_FALLBACK_SECRET;
 }
 
+// Verify keys: current JWT_SECRET first, then each JWT_SECRET_PREVIOUS entry.
+function propertyFactVerifySecrets() {
+  return require('../../utils/jwt-secrets').jwtVerifySecretsOr(PROPERTY_FACT_FALLBACK_SECRET);
+}
+
 function signPropertyFactCredential(address, property, enriched) {
   const payload = Buffer.from(JSON.stringify({
     version: 1,
@@ -834,10 +839,12 @@ function verifyPropertyFactCredential(token, quoteAddress) {
   try {
     const [payload, suppliedSignature] = String(token || '').split('.');
     if (!payload || !suppliedSignature) return null;
-    const expectedSignature = crypto.createHmac('sha256', propertyFactSecret()).update(payload).digest('base64url');
     const supplied = Buffer.from(suppliedSignature);
-    const expected = Buffer.from(expectedSignature);
-    if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return null;
+    const signatureOk = propertyFactVerifySecrets().some((secret) => {
+      const expected = Buffer.from(crypto.createHmac('sha256', secret).update(payload).digest('base64url'));
+      return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+    });
+    if (!signatureOk) return null;
     const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (decoded.version !== 1 || Number(decoded.expiresAt) < Date.now()) return null;
     if (quoteAddress && decoded.address

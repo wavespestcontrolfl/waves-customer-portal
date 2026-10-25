@@ -121,6 +121,7 @@ const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items'
 const { freezePestCheck } = require('./tree-shrub-pest-check');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments, dropSprayGallonsWithoutLiquidApplication } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
+const { jwtVerifySecretsOr } = require('../utils/jwt-secrets');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
@@ -9946,7 +9947,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         ? packetContext.verifiedTreeShrubPhotosHash
         : treeShrubPhotosHash(submitted.map((p) => p.data));
       const reviewSigned = reviewPhotosHash && review && review.signature
-        && review.signature === treeShrubReviewSignature(review.scores, review.scoredCount, svc.id, reviewPhotosHash, review.observations);
+        && jwtVerifySecretsOr('tree-shrub-review-key').some((key) => review.signature
+          === treeShrubReviewSignature(review.scores, review.scoredCount, svc.id, reviewPhotosHash, review.observations, key));
       let scoringPromise = null;
       if (review && review.scores && typeof review.scores === 'object' && allUploaded && previewCoveredAll && reviewSigned) {
         const reviewPhotos = scorable.map(({ p, row }) => ({ s3_key: row.s3_key || null, url: row.url || null, caption: p.caption || null, zone: p.zone || p.zoneId || null }));
