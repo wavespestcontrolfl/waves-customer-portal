@@ -24,6 +24,7 @@ const { TERMINAL_CALL_STATUSES, callEndedAt } = require('../../utils/call-timeli
 const { completeScheduledServiceInsert } = require('../booking/create-scheduled-service');
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const { assertAssignableTechnician } = require('../technician-eligibility');
+const mistingRefill = require('../misting-refill');
 
 const NEW_CALLER_SOURCE_ACTION = 'admin_new_caller';
 const PICKABLE_ANSWERED_MINUTES = 30;
@@ -216,6 +217,11 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
 
   const serviceRecord = await conn('services').where({ id: v.serviceId }).first();
   if (!serviceRecord) throw httpError(400, 'Pick a service from the list.');
+  // A misting refill is an add-on of a misting plan visit, never the visit
+  // itself: the same refusal buildAppointmentPricing throws (GATE_MOSQUITO_MISTING).
+  if (mistingRefill.refillLive() && mistingRefill.isRefillKey(serviceRecord.service_key)) {
+    throw mistingRefill.refusalError(await mistingRefill.resolveRefillAttachment({ parentServiceKey: serviceRecord.service_key }, conn));
+  }
   // A lot-size price needs the customer's property data; the office types
   // the price or adds the customer first (buildAppointmentPricing).
   if (serviceRecord.service_key === 'mosquito_one_time' && v.linePrice == null) {
@@ -234,10 +240,13 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
     if (v.callLogId) {
       const call = await findPickableCallForSave(trx, v.callLogId, now);
       if (!call) throw httpError(409, 'That call is no longer live. Pick the call again.');
-      // The call lock before rung 1, the order the recording processor's
-      // booking transaction takes it in (call-recording-processor.js): Book
-      // and the processor's booking for one call run one after the other, so
-      // the second sees the first's visit. A repeated Book is refused the same way.
+      // The call locks before rung 1. The call row's id first: two Books for
+      // one call run one after the other even while an outbound bridge has
+      // no Call SID yet. Then the recording processor's own lock, in the order
+      // its booking transaction takes it (call-recording-processor.js), so
+      // Book and the processor's booking for one call also run one after the
+      // other. Whoever runs second sees the first one's visit.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['new-caller-visit-call', call.id]);
       if (call.twilio_call_sid) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', call.twilio_call_sid]);
       }

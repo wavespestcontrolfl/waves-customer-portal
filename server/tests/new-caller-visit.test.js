@@ -166,13 +166,34 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     expect(own).toBeLessThan(main);
   });
 
-  test('Book takes the recording processor\'s call lock, with the same key, before the date lock', () => {
+  test('Book locks the call row, then takes the recording processor\'s call lock with the same key, before the date lock', () => {
     const lock = "pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule',";
     const own = fs.readFileSync(path.join(__dirname, '../services/booking/new-caller-visit.js'), 'utf8');
     const processor = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     expect(processor).toContain(`${lock} callSid]`);
     expect(own).toContain(`${lock} call.twilio_call_sid]`);
+    // The call row's id first (an outbound bridge may have no Call SID yet), then the processor's key, then the ownership read.
+    const byId = own.indexOf("['new-caller-visit-call', call.id]");
+    expect(byId).toBeGreaterThan(-1);
+    expect(byId).toBeLessThan(own.indexOf(lock));
+    expect(own.indexOf(lock)).toBeLessThan(own.indexOf("linked.where('source_call_log_id', call.id)"));
     expect(own.indexOf(lock)).toBeLessThan(own.indexOf('await probeSlotOverlap('));
+  });
+
+  test('a misting refill is refused as the visit itself, before any write (the create route\'s own rule)', async () => {
+    const { MISTING_REFILL_CATALOG_KEY } = require('../utils/mosquito-misting-system');
+    const saved = process.env.GATE_MOSQUITO_MISTING;
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    try {
+      const transaction = jest.fn();
+      const refill = { id: 'svc-r', service_key: MISTING_REFILL_CATALOG_KEY, name: 'Mosquito Misting System Refill', base_price: 129 };
+      const conn = Object.assign((table) => ({ where: () => ({ first: async () => (table === 'services' ? refill : null) }) }), { transaction });
+      await expect(bookNewCallerVisit({ input: validInput({ serviceId: 'svc-r' }), conn }))
+        .rejects.toMatchObject({ status: 400, code: 'MISTING_REFILL_ADDON_ONLY' });
+      expect(transaction).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env.GATE_MOSQUITO_MISTING; else process.env.GATE_MOSQUITO_MISTING = saved;
+    }
   });
 
   test('the service refuses with a 404 while the gate is off, before any read', async () => {
