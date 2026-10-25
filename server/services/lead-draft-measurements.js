@@ -46,6 +46,12 @@ const FROM_COUNTY_REVIEW = 'property_measurements_from_county';
 const HOME_SQFT_RANGE = [400, 10000];
 const LOT_SQFT_RANGE = [1000, 435600];
 const REPRICE_STATUSES = new Set(['generated', 'manual_review_required']);
+// The lookup record's own type label for a detached home (the county
+// mapper's 'Single Family'). Checked on the raw label, not on the pricing
+// normalizer's key: that maps any label with "family" in it, a county
+// 'Multifamily' triplex or apartment building included, to single_family
+// (codex P2 on #6666).
+const SINGLE_FAMILY_LABEL = /^single[\s_-]*family$/i;
 // The triage rebuild's longest wait for an in-flight lookup (a lookup runs
 // about 10 s, 71 s at p90); past it the rebuild reads the cache as before.
 const PENDING_WAIT_MS = 3 * 60 * 1000;
@@ -72,8 +78,9 @@ function countyMeasurements(lookup) {
   // The geocoder snapped to a different premise: the county figures describe
   // another parcel (estimator-engine parcelSignalsDescribeGatheredAddress).
   if (hasWrongPremiseFlag(lookup.enriched) || propertyRecord._addressAudit?.snappedRecord) return null;
+  if (!SINGLE_FAMILY_LABEL.test(String(propertyRecord.propertyType || '').trim())) return null;
   const facts = resolvePropertyFacts({ extraction: null, propertyRecord, customer: null, isCommercial: false });
-  if (facts.propertyType !== 'single_family' || facts.newConstruction) return null;
+  if (facts.newConstruction) return null;
   if (facts.home?.source !== SQFT_SOURCES.COUNTY_ASSESSED || facts.lot?.source !== SQFT_SOURCES.COUNTY_ASSESSED) return null;
   const homeSqFt = Math.round(Number(facts.home.value));
   const lotSqFt = Math.round(Number(facts.lot.value));

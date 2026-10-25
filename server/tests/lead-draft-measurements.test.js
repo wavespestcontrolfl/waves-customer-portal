@@ -61,7 +61,13 @@ describe('county sizes a lead draft may use', () => {
     ['the house number snapped to another parcel', lookupOf(countyRecord({ _addressAudit: { snappedRecord: { typed: '4521' } } }))],
     ['the living area came from AI or a listing', lookupOf(countyRecord({ _fieldEvidence: { squareFootage: { sourceType: 'ai' } } }))],
     ['a condo', lookupOf(countyRecord({ propertyType: 'Condo' }))],
-    ['a townhome', lookupOf(countyRecord({ propertyType: 'Townhouse' }))],
+    ['a townhome', lookupOf(countyRecord({ propertyType: 'Townhome' }))],
+    ['an interior townhome', lookupOf(countyRecord({ propertyType: 'Interior Townhome' }))],
+    // The pricing normalizer reads any label with "family" as single_family;
+    // the county mapper's 'Multifamily' is a triplex or an apartment building.
+    ['a multifamily building', lookupOf(countyRecord({ propertyType: 'Multifamily' }))],
+    ['a duplex', lookupOf(countyRecord({ propertyType: 'Duplex' }))],
+    ['a mobile home', lookupOf(countyRecord({ propertyType: 'Mobile Home' }))],
     ['no property type', lookupOf(countyRecord({ propertyType: null }))],
     ['an unassessed vacant parcel', lookupOf(countyRecord({ squareFootage: null, yearBuilt: null, _parcel: { county: 'Sarasota', parcelId: '0000000001', lotSqft: 9200, landUseDescription: 'VACANT RESIDENTIAL' } }))],
     ['a home over 10,000 sq ft', lookupOf(countyRecord({ squareFootage: 12000 }))],
