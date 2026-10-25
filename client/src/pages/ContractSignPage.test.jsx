@@ -203,3 +203,51 @@ describe('ContractSignPage "Back to your estimate" (Florida consumer notice)', (
     expect(queryByText(BACK)).toBeNull();
   });
 });
+
+describe('ContractSignPage Auto Pay next step (commercial agreement, GATE_COMMERCIAL_AUTOPAY)', () => {
+  const AGREEMENT = {
+    ...CONTRACT_A,
+    contractType: 'document_template',
+    documentTemplateKey: 'service_agreement.commercial_pest',
+    title: 'Commercial Pest Service Agreement',
+  };
+
+  async function signWith(signResponseExtra) {
+    vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/sign')
+      ? jsonResponse({ contract: { ...AGREEMENT, status: 'signed', signedAt: '2026-10-25T14:00:00.000Z', signedName: 'Pat Owner' }, signed: true, ...signResponseExtra })
+      : jsonResponse({ contract: AGREEMENT }))));
+    const view = render(
+      <MemoryRouter initialEntries={[`/contract/${CONTRACT_A.token}`]}>
+        <Routes><Route path="/contract/:token" element={<ContractSignPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(input(view.container, 'signedName')).toBeInTheDocument());
+    expect(view.queryByTestId('autopay-next-step')).toBeNull();
+    fireEvent.change(input(view.container, 'initials'), { target: { value: 'PO' } });
+    fireEvent.change(input(view.container, 'signedName'), { target: { value: 'Pat Owner' } });
+    view.container.querySelectorAll('input[type="checkbox"]').forEach((cb) => { if (!cb.checked) fireEvent.click(cb); });
+    fireEvent.submit(view.container.querySelector('form'));
+    await waitFor(() => expect(view.getByText('Document signed')).toBeInTheDocument());
+    return view;
+  }
+
+  it('offers "Save your card or bank account", which opens the Auto Pay setup link the server minted', async () => {
+    const assign = vi.fn();
+    vi.stubGlobal('location', { ...window.location, assign });
+    const { getByRole, getByTestId } = await signWith({ autopaySetup: { state: 'setup', url: 'https://portal.example/secure/tok' } });
+    expect(getByTestId('autopay-next-step')).toHaveTextContent('Save a card or bank account and each completed service is paid automatically. Nothing is charged today.');
+    fireEvent.click(getByRole('button', { name: 'Save your card or bank account' }));
+    expect(assign).toHaveBeenCalledWith('https://portal.example/secure/tok');
+  });
+
+  it('says Auto Pay is set up when the account is already on Auto Pay', async () => {
+    const { getByTestId, queryByRole } = await signWith({ autopaySetup: { state: 'on' } });
+    expect(getByTestId('autopay-next-step')).toHaveTextContent(/^Auto Pay is set up\. Nothing was charged today/);
+    expect(queryByRole('button', { name: 'Save your card or bank account' })).toBeNull();
+  });
+
+  it('shows nothing new when the sign response carries no next step (Net 30, or any other contract)', async () => {
+    const { queryByTestId } = await signWith({});
+    expect(queryByTestId('autopay-next-step')).toBeNull();
+  });
+});

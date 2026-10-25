@@ -8,9 +8,11 @@
 // Bid validity is printed in proposal details and enforced by expires_at;
 // it is not a second free-text commercial-term promise.
 // Canonical payment-terms tokens → customer-facing labels. The tokens are
-// the payer system's vocabulary (server payer.js PAYMENT_TERMS), normalized
-// by the server; anything unrecognized renders nothing rather than raw data.
+// the payer system's vocabulary (server payer.js PAYMENT_TERMS) plus the
+// proposal-only Auto Pay term (GATE_COMMERCIAL_AUTOPAY), normalized by the
+// server; anything unrecognized renders nothing rather than raw data.
 export const PAYMENT_TERM_LABELS = {
+  autopay: 'Auto Pay',
   due_on_receipt: 'Due on receipt',
   net15: 'Net-15',
   net30: 'Net-30',

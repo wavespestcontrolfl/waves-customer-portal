@@ -4463,6 +4463,8 @@ router.get('/:id/proposal', async (req, res, next) => {
       totals: computeProposalTotals(proposal),
       suggestedTaxRate,
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
+      // GATE_COMMERCIAL_AUTOPAY: the builder offers Auto Pay as the payment term (and prefills it).
+      commercialAutopayEnabled: require('../config/feature-gates').commercialAutopayLive(),
       // GATE_COMMERCIAL_PROPOSAL_SIGN: where the customer's online agreement stands (none / awaiting /
       // signed) for the builder's read-only line. The key is absent with the gate off.
       ...(commercialAgreement ? { commercialAgreement } : {}),
@@ -4722,18 +4724,32 @@ router.put('/:id/proposal', async (req, res, next) => {
       const canonicalPaymentTerms = rawPaymentTerms != null && String(rawPaymentTerms).trim() !== ''
         ? require('../services/estimate-proposal').normalizePaymentTerms(rawPaymentTerms)
         : null;
+      const autopayLive = require('../config/feature-gates').commercialAutopayLive();
       if (rawPaymentTerms != null && String(rawPaymentTerms).trim() !== '' && canonicalPaymentTerms === null) {
-        return res.status(400).json({ error: 'Payment terms must be one of: Due on receipt, Net-15, Net-30.' });
+        return res.status(400).json({ error: `Payment terms must be one of: ${autopayLive ? 'Auto Pay, ' : ''}Due on receipt, Net-15, Net-30.` });
       }
-      // Structured payment terms exist because billing CONSUMES them (the
-      // acceptance invoice's due date). Only invoice-mode proposals have
-      // that path — on any other proposal the field would render a promise
-      // no invoice ever reads. Payment language for manually-billed
-      // agreements belongs in Additional terms (codex #3297 r4).
-      if (canonicalPaymentTerms && !estimate.bill_by_invoice) {
+      const { AUTOPAY_PAYMENT_TERMS } = require('../../shared/commercial-agreement-terms.cjs');
+      if (canonicalPaymentTerms === AUTOPAY_PAYMENT_TERMS) {
+        // Auto Pay (GATE_COMMERCIAL_AUTOPAY, owner 2026-10-24): the agreement's charge after each service, enforced by
+        // the customer's Auto Pay enrollment, not by an invoice. So it needs no Bill by invoice, and never sits on an
+        // invoice-mode proposal (that bills its first invoice on its terms). With the gate off, a proposal already
+        // saved on Auto Pay keeps it; a new Auto Pay term is refused.
+        if (!autopayLive && savedProposal.commercialTerms?.paymentTerms !== AUTOPAY_PAYMENT_TERMS) {
+          return res.status(400).json({ error: 'Payment terms must be one of: Due on receipt, Net-15, Net-30.' });
+        }
+        if (estimate.bill_by_invoice) {
+          return res.status(400).json({ error: 'Auto Pay cannot be combined with Bill by invoice. Pick Net-30 for an invoiced proposal, or turn off Bill by invoice.' });
+        }
+      } else if (canonicalPaymentTerms && !estimate.bill_by_invoice) {
+        // Structured payment terms exist because billing CONSUMES them (the
+        // acceptance invoice's due date). Only invoice-mode proposals have
+        // that path — on any other proposal the field would render a promise
+        // no invoice ever reads. Payment language for manually-billed
+        // agreements belongs in Additional terms (codex #3297 r4).
         return res.status(400).json({ error: 'Structured payment terms require Bill by invoice. Put payment language in Additional terms, or turn on invoice billing for this proposal.' });
       }
-      savingPaymentTerm = Boolean(canonicalPaymentTerms);
+      // The invoice-mode state the term was checked against, re-asserted at write time below.
+      savingPaymentTerm = canonicalPaymentTerms ? { billByInvoice: canonicalPaymentTerms !== AUTOPAY_PAYMENT_TERMS } : false;
       // A linked ACTIVE payer's terms are the standing billing relationship
       // (they drive statement accrual and the acceptance invoice via
       // resolveAcceptanceTermDays). Authoring a CONTRADICTING term here
@@ -5043,8 +5059,8 @@ router.put('/:id/proposal', async (req, res, next) => {
     // Payment terms are predicated on bill_by_invoice AT WRITE TIME too — a
     // concurrent PATCH turning invoice mode off between the pre-read guard
     // and this UPDATE must not persist a term no billing path enforces
-    // (codex #3297 r4c).
-    if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
+    // (codex #3297 r4c). Auto Pay is the mirror: invoice mode must still be off.
+    if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: savingPaymentTerm.billByInvoice });
     // Monotonic by design, including when a hold SHRINKS. A link already
     // delivered promising reachability through a date keeps it; what changes
     // is the offer, which lives in each row's own expires_at and closes on
@@ -6043,6 +6059,12 @@ router.patch('/:id', async (req, res, next) => {
         && parseEstimateData(estimate.estimate_data)?.proposal?.commercialTerms?.paymentTerms) {
         return res.status(400).json({ error: 'This proposal has structured payment terms, which require invoice billing. Clear the payment terms in the proposal editor first.' });
       }
+      // The mirror (GATE_COMMERCIAL_AUTOPAY): Auto Pay never sits on an invoice-mode proposal, so turning invoice mode
+      // ON while the proposal says Auto Pay is refused (the write below re-asserts it).
+      if (nextBillByInvoice && !estimate.bill_by_invoice
+        && parseEstimateData(estimate.estimate_data)?.proposal?.commercialTerms?.paymentTerms === 'autopay') {
+        return res.status(400).json({ error: 'This proposal is on Auto Pay, which cannot be combined with Bill by invoice. Set Payment terms to Not set in the proposal editor first.' });
+      }
       updates.bill_by_invoice = nextBillByInvoice;
     }
     if (req.body.status !== undefined) {
@@ -6109,6 +6131,13 @@ router.patch('/:id', async (req, res, next) => {
     if (updates.bill_by_invoice === false) {
       updateQuery = updateQuery.whereRaw(
         "COALESCE(estimate_data->'proposal'->'commercialTerms'->>'paymentTerms', '') = ''",
+      );
+    }
+    // Turning invoice mode ON is predicated on the stored proposal still not being on Auto Pay (the mirror of the
+    // proposal PUT, whose Auto Pay write predicates on bill_by_invoice=false).
+    if (updates.bill_by_invoice === true && !estimate.bill_by_invoice) {
+      updateQuery = updateQuery.whereRaw(
+        "COALESCE(estimate_data->'proposal'->'commercialTerms'->>'paymentTerms', '') <> 'autopay'",
       );
     }
     const updatedCount = changesDeliveryOptions ? await db.transaction(async (trx) => {

@@ -5725,6 +5725,16 @@ function commercialProposalSignLive() {
   return process.env.GATE_COMMERCIAL_PROPOSAL_SIGN === 'true';
 }
 
+// GATE_COMMERCIAL_AUTOPAY read at CALL time, strict `=== 'true'`, dark by default in every environment (owner 2026-10-24,
+// "autopay default"). The one reader for Auto Pay as a commercial proposal payment term: the builder's Auto Pay choice and
+// prefill (GET/PUT /api/admin/estimates/:id/proposal), the signing chokepoint (services/commercial-proposal-agreement.js
+// agreementTermsConflict) and the Auto Pay setup step after an Auto Pay agreement is signed (routes/contracts-public.js).
+// Off: Auto Pay cannot be saved or signed and every surface is as before. A proposal already saved with Auto Pay keeps
+// it, prints it, and cannot be signed online. Kill: unset.
+function commercialAutopayLive() {
+  return process.env.GATE_COMMERCIAL_AUTOPAY === 'true';
+}
+
 // GATE_TAX_SHARED_BILLS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
 function taxSharedBillsLive() {
   return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_SHARED_BILLS');
@@ -7975,6 +7985,7 @@ module.exports.mosquitoMistingLive = mosquitoMistingLive;
 module.exports.bidKitLive = bidKitLive;
 // GATE_COMMERCIAL_PROPOSAL_SIGN reader, on its own line so gate PRs never conflict.
 module.exports.commercialProposalSignLive = commercialProposalSignLive;
+module.exports.commercialAutopayLive = commercialAutopayLive;
 // GATE_TAX_SHARED_BILLS reader, on its own line so gate PRs never conflict.
 module.exports.taxSharedBillsLive = taxSharedBillsLive;
 // GATE_TAX_RETURN_ENGINE reader, on its own line so gate PRs never conflict.

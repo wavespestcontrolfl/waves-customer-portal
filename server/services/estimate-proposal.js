@@ -209,6 +209,10 @@ function normalizeGeneratedResponsibilities(raw) {
 // mechanism). Common human spellings canonicalize; anything not in the
 // canonical list is null (and the PUT route 400s it).
 const { PAYMENT_TERMS: PROPOSAL_PAYMENT_TERMS } = require('./payer');
+// Auto Pay is a proposal term only (owner 2026-10-24, GATE_COMMERCIAL_AUTOPAY): the charge after each service the
+// Commercial Pest Service Agreement authorizes. It is never an invoice term: no payer bills on it and no due date is
+// derived from it, so the payer vocabulary above stays the only invoice-term language.
+const { AUTOPAY_PAYMENT_TERMS } = require('../../shared/commercial-agreement-terms.cjs');
 
 // Carry the misting SYSTEM identity (GATE_MOSQUITO_MISTING) from the previously persisted proposal onto an incoming one, by line id
 // (programs: by label, else by index when the counts match). The editor can change text and prices, but it can never launder the
@@ -265,6 +269,7 @@ function normalizePaymentTerms(value) {
   const t = String(value ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
   if (!t) return null;
   const candidate = t === 'dueonreceipt' ? 'due_on_receipt' : t;
+  if (candidate === AUTOPAY_PAYMENT_TERMS) return AUTOPAY_PAYMENT_TERMS;
   return PROPOSAL_PAYMENT_TERMS.includes(candidate) ? candidate : null;
 }
 
