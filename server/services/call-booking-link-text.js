@@ -1074,6 +1074,17 @@ async function bookedSinceCall(conn, customerId, since, leadPhone) {
   return !!row;
 }
 
+// A visit the office stamped with THIS call (source_call_log_id), whatever its customer_id.
+// bookedSinceCall above cannot see a visit booked by address only: it has no customer to join
+// by id or phone until the recording agent links one, so a link text could reach a caller whose
+// visit is already set. No time bound: a stamp on this call is "booked on the call" at any time.
+async function visitStampedWithCall(conn, callId) {
+  if (!callId) return false;
+  const row = await conn('scheduled_services').where({ source_call_log_id: callId })
+    .whereNotIn('status', ['cancelled']).first('id');
+  return !!row;
+}
+
 // codex P1 on #5292 (thread PRRT_kwDOR3YQi86m6KVg, line 729): the dedicated
 // consent.sms_declined check above (STAGING_CHECKS) judges only THIS call's
 // own extraction. A caller who explicitly declined texts on an EARLIER
@@ -1310,6 +1321,7 @@ const DISPATCH_CHECKS = [
     const callStart = callStartedAt(call) || new Date(call.created_at);
     return (await bookedSinceCall(conn, lead.customer_id, callStart, lead.phone)) ? 'booked_since_call' : null;
   },
+  async ({ conn, call }) => ((await visitStampedWithCall(conn, call.id)) ? 'visit_stamped_with_call' : null),
   // codex P1 on #5292: a decline spoken on ANY earlier call for this same
   // phone (owner ruling 2026-09-29: never cleared). See smsDeclinedOnEarlierCall's
   // own doc comment.
@@ -1556,6 +1568,7 @@ const NEVER_SEND_RECHECK_STEPS = [
     const callStart = callStartedAt(ctx.call) || new Date(ctx.call.created_at);
     return (await bookedSinceCall(ctx.dbi, ctx.lead.customer_id, callStart, ctx.lead.phone)) ? { code: 'booked_since_call' } : null;
   },
+  async (ctx) => ((await visitStampedWithCall(ctx.dbi, ctx.call.id)) ? { code: 'visit_stamped_with_call' } : null),
   // codex P1 on #5292: the send-time twin of the DISPATCH_CHECKS entry
   // above, on ctx.dbi under the held lock, so a refusal spoken on a call
   // that lands between dispatch and this actual provider request is still

@@ -25,6 +25,7 @@ const db = require('../models/db');
 const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('./service-closeout-requirements');
 const logger = require('./logger');
+const { VISIT_NO_CUSTOMER_CODE } = require('./invoice-helpers');
 const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const { transitionJobStatus } = require('./job-status');
 const trackTransitions = require('./track-transitions');
@@ -632,6 +633,8 @@ async function submitRecap({
 }) {
   const { ok, reason, svc, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
+  // A visit booked by address only has no customer to record the recap against.
+  if (!svc.customer_id) return { ok: false, reason: VISIT_NO_CUSTOMER_CODE };
   if (!eligible) return { ok: false, reason: 'not_pest_control' };
 
   // Stale-recap guard: a live job force-rescheduled to a future day

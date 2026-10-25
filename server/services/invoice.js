@@ -44,6 +44,7 @@ const {
   staleClaimReviewHoldError,
   invoiceDepositCreditCents,
   invoiceSmsDigest,
+  visitHasNoCustomerError,
 } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
@@ -6364,6 +6365,8 @@ const InvoiceService = {
       trustedMembershipDues = false,
     } = createArgs;
     if (!trustedMembershipDues) lineItems = stripMembershipDuesMarkers(lineItems);
+    // A visit with no customer yet cannot be billed (invoices.customer_id is NOT NULL).
+    if (scheduledServiceId && !customerId) throw visitHasNoCustomerError();
 
     if (
       expectedDiscountStacking !== undefined &&

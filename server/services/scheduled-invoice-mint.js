@@ -20,7 +20,7 @@ const logger = require('./logger');
 // refusal reuses it rather than hand-rolling a second list: 'completed' is
 // deliberately absent (normal completion billing) and so is 'rescheduled'
 // (a pending reschedule REQUEST parks the same row — not yet terminal).
-const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
+const { VISIT_NEVER_RAN_STATUSES, visitHasNoCustomerError } = require('./invoice-helpers');
 
 // Shared pre-completion mint: advisory-lock + replay-check + create, WITH the
 // estimate-deposit roll-forward. Completion REUSES a pre-minted invoice instead
@@ -288,6 +288,9 @@ async function mintScheduledServiceInvoiceWithDeposit({
   // to the month's dedupe (and refused if the month is already covered).
   membershipDues = null,
 }) {
+  // A visit booked by address only has no customer to bill (invoices.customer_id is NOT NULL):
+  // refused before the lock chain, whatever the caller's own checks said.
+  if (!svc.customer_id) throw visitHasNoCustomerError();
   const InvoiceService = require('../services/invoice');
   const {
     acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit,

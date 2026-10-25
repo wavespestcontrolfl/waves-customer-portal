@@ -26,6 +26,8 @@
  * Out of scope, always left parked for a human (never thrown away):
  *   - a grouped visit (alert carries >1 visit_member_ids, or the stop now
  *     carries a visit_id) — `grouped_visit_manual`
+ *   - a visit with no customer linked yet (booked by address only)
+ *     — `no_customer`
  *   - a call booking still awaiting office review (status 'pending', or a
  *     call-review source not yet customer_confirmed) — `office_review_pending`
  *   - anything but a plain 'confirmed' visit, or a live tracker state
@@ -407,6 +409,9 @@ function stopMoveRefusal(stop, absentTechId, date) {
   // A grouped visit the alert didn't know about (grouped after park) is a
   // human decision, same as the up-front alert-payload check.
   if (stop.visit_id) return { reason: 'grouped_visit_manual', skipped: false };
+  // A visit booked by address only has no customer yet: the office decides who takes it. The mover
+  // moves stops silently, so it never touches a stop nobody has been told about by name.
+  if (!stop.customer_id) return { reason: 'no_customer', skipped: false };
   // A call booking still awaiting office review is never touched: the
   // mover's post-commit legacy activation would confirm it (reminders, lead
   // conversion, review card) as a side effect of a technician change.
