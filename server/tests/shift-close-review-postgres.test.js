@@ -277,6 +277,13 @@ describeDb('shift close review on PostgreSQL (GATE_SHIFT_CLOSE_REVIEW)', () => {
       expect(await listed()).toMatchObject({ auto_close_pending: 1 });
       await timeTracking.adminEditEntry(shift.id, { notes: 'checked by office', edit_reason: 'note', edited_by: adminId });
       expect((await entry(shift.id)).auto_close_reviewed_at).toBeNull();
+      // The entry editor sends clock_in and clock_out on every save: the same times plus a note is still not a review.
+      const stored = await entry(shift.id);
+      await timeTracking.adminEditEntry(shift.id, {
+        clock_in: stored.clock_in.toISOString(), clock_out: stored.clock_out.toISOString(),
+        notes: 'checked again', edit_reason: 'note', edited_by: adminId,
+      });
+      expect((await entry(shift.id)).auto_close_reviewed_at).toBeNull();
       await timeTracking.confirmAutoClose(shift.id, { reviewed_by: adminId });
       expect(await listed()).not.toHaveProperty('auto_close_pending');
     });

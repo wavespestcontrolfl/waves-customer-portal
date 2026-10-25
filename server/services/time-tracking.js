@@ -580,10 +580,13 @@ async function getStatus(technicianId) {
   };
 }
 
-// An admin who sets the clock-out of an automatically closed shift has
-// reviewed it (GATE_SHIFT_CLOSE_REVIEW): the flag clears with the edit.
+// An admin who CHANGES the clock-out of an automatically closed shift has
+// reviewed it (GATE_SHIFT_CLOSE_REVIEW): the flag clears with the edit. The
+// entry editor sends clock_out on every save, so an unchanged value (a
+// notes-only edit) is not a review; Confirm accepts an unchanged time.
 function autoCloseReviewedBy(entry, updates, editedBy) {
   if (!updates.clock_out || !entry.auto_closed_at || entry.auto_close_reviewed_at) return {};
+  if (entry.clock_out && new Date(updates.clock_out).getTime() === new Date(entry.clock_out).getTime()) return {};
   return { auto_close_reviewed_at: new Date(), auto_close_reviewed_by: editedBy || null };
 }
 
