@@ -7122,6 +7122,8 @@ router.get('/', async (req, res, next) => {
       visitCloseout: legacyCloseoutEnabled,
       // GATE_NEW_APPT_ADDRESS_TIMES: New Appointment's time box answers on a new caller's address alone.
       addressFirstTimes: isEnabled('newApptAddressTimes'),
+      // GATE_NEW_APPT_PHONE_MATCH: New Appointment matches a new caller's phone as it is typed, and one Save adds and books them.
+      newCustomerPhoneMatch: isEnabled('newApptPhoneMatch'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,

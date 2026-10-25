@@ -29,9 +29,11 @@ export function sameAutocompleteAddress(previous, parts) {
  *   value       — controlled input string
  *   onChange    — (value) => void  (fires on typing)
  *   onSelect    — (parts) => void  (fires when user picks a suggestion)
- *                 parts: { formatted, line1, line1Short, line2, city, state, zip, lat, lng }
+ *                 parts: { formatted, line1, line1Short, line2, city, state, zip, lat, lng, source }
  *                 line2 = Google subpremise (unit/apt) when the user typed one;
- *                 line1 stays street-only so geocode/parcel matching is clean
+ *                 line1 stays street-only so geocode/parcel matching is clean;
+ *                 source = 'suggestion' (a picked suggestion) or 'typed' (the
+ *                 typed text geocoded on blur)
  *   placeholder
  *   autoFocus
  *   style       — inline style overrides for the input
@@ -138,6 +140,7 @@ export default function AddressAutocomplete({
           zip: get('postal_code'),
           lat: p.geometry?.location?.lat?.() ?? null,
           lng: p.geometry?.location?.lng?.() ?? null,
+          source: 'suggestion',
         };
         if (parts.state && parts.state !== 'FL') return;
         lastSelectedRef.current = [parts.formatted, parts.line1].filter(Boolean);
@@ -232,6 +235,7 @@ export default function AddressAutocomplete({
             zip: get('postal_code'),
             lat: p.geometry?.location?.lat?.() ?? null,
             lng: p.geometry?.location?.lng?.() ?? null,
+            source: 'typed',
           };
           if (parts.state && parts.state !== 'FL') return;
           lastSelectedRef.current = [parts.formatted, parts.line1, typed].filter(Boolean);

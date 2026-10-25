@@ -1646,6 +1646,8 @@ export default function DispatchPageV2({
           defaultInternalNotes={newApptDefaults?.internalNotes || ""}
           // GATE_NEW_APPT_ADDRESS_TIMES: a new caller's picked address alone answers the time box.
           addressFirstTimes={safeData.addressFirstTimes === true}
+          // GATE_NEW_APPT_PHONE_MATCH: phone match as it is typed, and one Save adds and books a new caller.
+          newCustomerPhoneMatch={safeData.newCustomerPhoneMatch === true}
           requireTimeChoice={newApptDefaults?.requireTimeChoice === true}
           onClose={() => {
             setShowNewAppt(false);

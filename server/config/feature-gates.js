@@ -3901,6 +3901,19 @@ const gates = {
   // the time box waits for a customer, as before.
   newApptAddressTimes: gateEnvValue('GATE_NEW_APPT_ADDRESS_TIMES'),
 
+  // New Appointment phone match and one Save (owner 2026-10-24): in the New
+  // customer block, a typed phone is looked up once it has ten digits and
+  // each customer already on that number is offered with one tap ("Use this
+  // customer"), never picked automatically (a household often shares one
+  // phone). Save then adds a new caller and books the visit in one press (the
+  // Add customer button goes away); a known phone or address still stops at
+  // the Attach / Separate account choice, and a total that changes once the
+  // customer exists waits for a second Save. A picked address suggestion
+  // scrolls the best times into view. OFF in every environment; the admin
+  // schedule day view carries it to Dispatch as newCustomerPhoneMatch. Kill
+  // switch: unset — the Add customer button and the two-step flow return.
+  newApptPhoneMatch: gateEnvValue('GATE_NEW_APPT_PHONE_MATCH'),
+
   // Booking rain rank (owner 2026-10-06): the New Appointment best-times rows
   // rank by rain fit before drive. Outdoor bookings (pest, lawn, T&S,
   // mosquito, termite treatment) sort hours with a 60%+ NWS chance in the
