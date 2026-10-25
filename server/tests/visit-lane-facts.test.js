@@ -176,7 +176,7 @@ describe('readLaneFacts', () => {
       unclearGroups: [],
     });
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
-    expect(policy.name).toBe('fastStructured');
+    expect(policy.name).toBe('fastStructuredInteractive');
     expect(payload).toMatchObject({ laneId: 'visit_lane_facts', promptVersion: 'visit-lane-facts-v1' });
     expect(payload.jsonSchema.properties.areas.items.properties.area.enum).toEqual(SPECIALTY_SERVICE_CLOSEOUTS.bed_bug_treatment.areas);
     expect(options).toEqual({ reserveFallbackBudget: true });

@@ -547,7 +547,7 @@ describe('readTypedFacts', () => {
     const facts = await readTypedFacts({ note: ROACH_NOTE, findingsType: 'cockroach' });
     expect(facts).toMatchObject({ status: 'read', type: 'cockroach', values: { species: 'German' }, unclearFields: [] });
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
-    expect(policy.name).toBe('fastStructured');
+    expect(policy.name).toBe('fastStructuredInteractive');
     expect(payload).toMatchObject({ laneId: 'visit_typed_facts', promptVersion: 'visit-typed-facts-v3' });
     expect(payload.jsonSchema.properties.fields.required).toEqual(voiceFieldsFor('cockroach').map((field) => field.key));
     expect(options).toEqual({ reserveFallbackBudget: true });

@@ -885,7 +885,7 @@ async function readVoiceFacts(note) {
   if (text.length > MAX_NOTE_CHARS) return empty('too_long');
   let result;
   try {
-    result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructuredInteractive, {
       laneId: 'visit_voice_facts',
       system: VOICE_FACTS_SYSTEM_PROMPT,
       text: `TECHNICIAN NOTE:\n${text}`,

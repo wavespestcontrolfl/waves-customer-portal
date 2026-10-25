@@ -204,6 +204,13 @@ const DEFAULTS = Object.freeze({
   CONTENT: 'claude-opus-5-5',
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
+  // Structured reads a technician waits on: the Fast Complete fact readers
+  // (voice, lane and typed voice fill). Each call has 10 s split across two
+  // legs, so the first model gets about 5 s. This stays on Luna when
+  // MODEL_OPENAI_FAST moves: on 2026-10-25 GPT-6.1 Sol (MODEL_OPENAI_FAST
+  // since that day) ran past its 5 s share on 2 of 2 production voice fills,
+  // where Luna had answered 22 of 22 at about 2.3 s.
+  OPENAI_FAST_INTERACTIVE: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
   OPENAI_FRONTIER: 'gpt-6-astra',
   OPENAI_ESTIMATE_VISION: 'gpt-6-sol',
@@ -360,6 +367,8 @@ const OPENAI_BALANCED      = process.env.MODEL_OPENAI_BALANCED
   || process.env.MODEL_OPENAI_BEST
   || DEFAULTS.OPENAI_BALANCED;
 const OPENAI_FAST          = process.env.MODEL_OPENAI_FAST          || DEFAULTS.OPENAI_FAST;
+// Never derived from OPENAI_FAST: see DEFAULTS.OPENAI_FAST_INTERACTIVE.
+const OPENAI_FAST_INTERACTIVE = process.env.MODEL_OPENAI_FAST_INTERACTIVE || DEFAULTS.OPENAI_FAST_INTERACTIVE;
 // Backwards-compatible export for older callers/env configuration. New routes
 // should select BALANCED or FAST explicitly instead of treating one model as
 // universally "best".
@@ -643,6 +652,13 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }),
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FAST }),
   }),
+  // fastStructured for a read a technician waits on (the Fast Complete fact
+  // readers), on its own OpenAI model: see DEFAULTS.OPENAI_FAST_INTERACTIVE.
+  fastStructuredInteractive: Object.freeze({
+    name: 'fastStructuredInteractive',
+    primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST_INTERACTIVE }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FAST }),
+  }),
   balancedAnswer: Object.freeze({
     name: 'balancedAnswer',
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
@@ -840,6 +856,7 @@ module.exports = {
   OPENAI_BEST,
   OPENAI_BALANCED,
   OPENAI_FAST,
+  OPENAI_FAST_INTERACTIVE,
   OPENAI_REPORT_WRITER,
   OPENAI_FRONTIER,
   OPENAI_ESTIMATE_VISION,

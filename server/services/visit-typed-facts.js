@@ -439,7 +439,7 @@ async function readTypedFacts({ note, findingsType, current = {}, serviceKey = n
   }
   let result;
   try {
-    result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructuredInteractive, {
       laneId: 'visit_typed_facts',
       system: typedSystemPrompt(findingsType, fields, { score }),
       text: `TECHNICIAN NOTE:\n${text}`,

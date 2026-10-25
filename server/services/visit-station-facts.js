@@ -206,7 +206,7 @@ async function readStationExceptions({ note, stations, program = null } = {}) {
   let result;
   try {
     // The typed voice fill's own lane: this read is part of the same step.
-    result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructuredInteractive, {
       laneId: 'visit_typed_facts',
       system: stationFactsPrompt(program || 'termite', roster),
       text: `TECHNICIAN NOTE:\n${text}`,
