@@ -530,6 +530,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       before: preview.notes_replaced.before, after,
     });
   }
+  // A phone change names the number it replaces (the portal sign-in key,
+  // owner 2026-10-24): one line from the proposal's own read, in place of
+  // the bare new number the field lines below would show.
+  if (toolName === 'update_customer' && preview?.phone_replaced && displayParams?.updates
+    && Object.prototype.hasOwnProperty.call(displayParams.updates, 'phone')) {
+    const { phone: after, ...otherUpdates } = displayParams.updates;
+    const before = String(preview.phone_replaced.before ?? '').trim() || '(none)';
+    push('customer', `phone: ${before} → ${after}`, { before, after });
+    displayParams = { ...displayParams, updates: otherUpdates };
+  }
   if (toolName === 'reschedule_appointment' && preview?.pinned_appointment) {
     const a = preview.pinned_appointment;
     const from = `${a.scheduled_date || '?'}${a.time_window ? ` ${a.time_window}` : ''}`;
@@ -1310,6 +1320,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     ...(preview?.pinned_recipient ? { pinned_recipient: preview.pinned_recipient } : {}),
     ...(preview?.pinned_customer ? { pinned_customer: preview.pinned_customer } : {}),
     ...(preview?.notes_replaced ? { pinned_notes_replaced: preview.notes_replaced } : {}),
+    ...(preview?.phone_replaced ? { pinned_phone_replaced: preview.phone_replaced } : {}),
     ...(preview?.pinned_appointment ? { pinned_appointment: preview.pinned_appointment } : {}),
     // The exact structured effect set (fee amount, invoice ids/credit_applied,
     // inspection-credit offer ids/amounts) — not just its formatted text

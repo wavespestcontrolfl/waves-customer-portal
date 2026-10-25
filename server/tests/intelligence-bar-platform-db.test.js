@@ -891,6 +891,43 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe('Shown on the card\nGate code 0000 added later');
   }, 30000);
 
+  test('a phone card names the number it replaces, and a number saved after it refuses the commit', async () => {
+    const shown = (await db('customers').where('id', customerA).first('phone')).phone;
+    const proposePhone = () => mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
+      .mockResolvedValueOnce(tools('update_customer', { customer_id: customerA, updates: { phone: '+19415550172' } }, 'phone'))
+      .mockResolvedValueOnce(answer('The new number is awaiting confirmation.'));
+    try {
+      proposePhone();
+      const card = (await api('/query', request(`Change the phone for ${nameA} to 941-555-0172`))).body.pendingActions[0];
+      const labels = card.contract.effects.map(effect => effect.label);
+      expect(labels).toContain(`phone: ${shown} → +19415550172`);
+      expect(labels).not.toContain('phone: +19415550172');
+      const stored = await db('ib_pending_actions').where('id', card.id).first('params');
+      expect((typeof stored.params === 'string' ? JSON.parse(stored.params) : stored.params)._ib_phone_before).toBe(shown);
+      // Saved after the card by a writer that leaves updated_at alone: the number the card names is gone.
+      await db('customers').where('id', customerA).update({ phone: '+19415550199' });
+      const refused = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+      expect(refused.body.success).not.toBe(true);
+      expect((await db('customers').where('id', customerA).first('phone')).phone).toBe('+19415550199');
+      // The commit also compares the number under the row lock (Confirm's own re-check runs
+      // before the lock): the executor handed the card's stale number refuses and writes nothing.
+      const stale = await require('../services/intelligence-bar/tools').executeTool('update_customer',
+        { customer_id: customerA, updates: { phone: '+19415550172' }, _ib_phone_before: shown }, {});
+      expect(stale).toMatchObject({ preview_changed: true });
+      expect((await db('customers').where('id', customerA).first('phone')).phone).toBe('+19415550199');
+
+      // A fresh card names the number stored now, and commits.
+      proposePhone();
+      const fresh = (await api('/query', request(`Change the phone for ${nameA} to 941-555-0172`))).body.pendingActions[0];
+      expect(fresh.contract.effects.map(effect => effect.label)).toContain('phone: +19415550199 → +19415550172');
+      const confirmed = await api('/confirm-action', { pending_action_id: fresh.id, contract_hash: fresh.contract_hash });
+      expect(confirmed.body).toMatchObject({ success: true, outcome: 'completed' });
+      expect((await db('customers').where('id', customerA).first('phone')).phone).toBe('+19415550172');
+    } finally {
+      await db('customers').where('id', customerA).update({ phone: shown });
+    }
+  }, 30000);
+
   test('revoked mutation permission records a blocked receipt after claiming the approval', async () => {
     const before = await db('customers').where('id', customerA).first('crm_notes');
     proposeNote(customerA, 'Must not survive permission revocation');
