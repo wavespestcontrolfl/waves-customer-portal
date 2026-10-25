@@ -215,9 +215,12 @@ function canonical(value) {
 }
 
 // sha256 over the normalized proposal (lines, programs, corrective work, scope, terms, tax rate), its totals, the
-// merge values the contract renders, the customer and the template version.
+// merge values the contract renders, the customer and the template version. agreement.payment_terms is left out: it is
+// derived from the proposal's payment term (hashed with the proposal), and leaving it out keeps the fingerprint of an
+// agreement issued before the payment paragraph existed, so its signing link stays valid.
 function quoteFingerprint({ proposal, totals, values, customerId, templateVersionId }) {
-  const { estimate: _estimate, ...rendered } = values;
+  const { estimate: _estimate, agreement: { payment_terms: _paymentTerms, ...agreement } = {}, ...others } = values;
+  const rendered = { ...others, agreement };
   return crypto.createHash('sha256')
     .update(JSON.stringify(canonical({ proposal, totals, rendered, customerId: String(customerId), templateVersionId: String(templateVersionId) })))
     .digest('hex');
@@ -370,6 +373,11 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
     // waited on those locks while the kill switch was thrown must not create, re-open or re-link an agreement
     // (live gate re-read at the commit boundary).
     if (!require('../config/feature-gates').commercialProposalSignLive()) return refusal(404, 'not_signable', 'Estimate not found');
+    // The payment term is judged again here for the same reason: GATE_COMMERCIAL_AUTOPAY (and Bill by invoice on the
+    // locked row) may have changed while this request waited.
+    if (paymentTermsConflict(lockedFound.proposal.commercialTerms?.paymentTerms, { billByInvoice: locked.bill_by_invoice === true })) {
+      return refusal(404, 'not_signable', 'Estimate not found');
+    }
     if (existing?.status === 'signed') return refusal(409, 'already_signed', 'This agreement has already been signed.');
     if (existing) {
       const snap = parseJson(existing.document_variables_snapshot);
@@ -600,4 +608,5 @@ module.exports = {
   ensureAgreement,
   handleAgreementSigned,
   autopayNextStep,
+  quoteFingerprint,
 };

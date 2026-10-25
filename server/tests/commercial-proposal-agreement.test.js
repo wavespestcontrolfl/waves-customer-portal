@@ -20,7 +20,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   TEMPLATE_KEY, SNAPSHOT_SOURCE, START_DATE_TEXT, ensureAgreement, agreementStateForEstimate, agreementCtaFor, agreementAdminStatus,
   signEligibility, agreementTermsConflict, AGREEMENT_TERMS, lockEstimateForSign, refuseStaleSignature, handleAgreementSigned,
-  AGREEMENT_PAYMENT_TEXT, autopayNextStep, STALE_PROPOSAL_MESSAGE,
+  AGREEMENT_PAYMENT_TEXT, autopayNextStep, STALE_PROPOSAL_MESSAGE, quoteFingerprint, buildAgreementValues, signableProposal,
 } = require('../services/commercial-proposal-agreement');
 const { requestAutopaySetupLink } = require('../services/autopay-setup-link');
 const AutopayEligibility = require('../services/autopay-eligibility');
@@ -436,6 +436,46 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
     expect(await ensureAgreement({ estimate: autopay(), req, database })).toMatchObject({ ok: true, status: 201, created: true });
     expect(state.contracts[0]).toMatchObject({ status: 'cancelled', share_token_hash: null });
     expect(state.contracts[1].contract_text_snapshot).toContain(AGREEMENT_PAYMENT_TEXT.autopay);
+  });
+
+  test('the Auto Pay gate thrown while the issue waited on the CONTRACT row lock (the last lock): 404, nothing written', async () => {
+    const estimate = autopay();
+    const { database, state } = slotDb(estimate);
+    state.onContractLock = async () => { delete process.env.GATE_COMMERCIAL_AUTOPAY; };
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: false, status: 404, code: 'not_signable' });
+    expect(state.contracts).toHaveLength(0);
+    expect(state.writes).toEqual([]);
+  });
+
+  test('the same flip does not re-open an open Auto Pay agreement (its link is not rotated)', async () => {
+    const estimate = autopay();
+    const { database, state } = slotDb(estimate);
+    await ensureAgreement({ estimate, req, database });
+    const hashBefore = state.contracts[0].share_token_hash;
+    const writesBefore = state.writes.length;
+    state.onContractLock = async () => { delete process.env.GATE_COMMERCIAL_AUTOPAY; };
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: false, status: 404 });
+    expect(state.contracts[0].share_token_hash).toBe(hashBefore);
+    expect(state.writes).toHaveLength(writesBefore);
+  });
+
+  test('the fingerprint ignores the payment paragraph text, so an agreement issued before it existed keeps a valid link', async () => {
+    const estimate = estimateRow();
+    const { proposal, totals } = signableProposal(estimate);
+    const values = buildAgreementValues(estimate, proposal, totals);
+    expect(values.agreement.payment_terms).toBe(AGREEMENT_PAYMENT_TEXT.net30);
+    const { payment_terms: _dropped, ...preChangeAgreement } = values.agreement;
+    const args = { proposal, totals, customerId: 'cust-1', templateVersionId: 'ver-1' };
+    expect(quoteFingerprint({ ...args, values })).toBe(quoteFingerprint({ ...args, values: { ...values, agreement: preChangeAgreement } }));
+    // At the sign boundary: a Net 30 contract whose snapshot predates the paragraph signs.
+    const made = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database: made.database });
+    const contract = made.state.contracts[0];
+    const snapshot = JSON.parse(contract.document_variables_snapshot);
+    delete snapshot.agreement.payment_terms;
+    contract.document_variables_snapshot = JSON.stringify(snapshot);
+    const estimateLock = await lockEstimateForSign(made.database, contract);
+    expect(await refuseStaleSignature({ trx: made.database, contract, estimateLock, req })).toBeNull();
   });
 
   test('the gate turned off after an Auto Pay agreement was issued refuses the signature and cancels it', async () => {
