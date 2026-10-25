@@ -261,6 +261,43 @@ postgres('payroll tax calendar sync', () => {
     expect(await trx('tax_filing_calendar').where('source_key', 'like', `${KEY}%`)).toHaveLength(2);
   });
 
+  it('asks for a review when every check behind a filed return is voided, and keeps asking', async () => {
+    const Q1 = 'payroll:941:2027-Q1';
+    const W2 = 'payroll:w2:2027';
+    const only = await finalCheck(W1, '2027-01-15');
+    await sync();
+    await trx('tax_filing_calendar').whereIn('source_key', [Q1, W2]).update({ status: 'filed', filed_date: '2027-04-20' });
+    const filedBefore = await trx('tax_filing_calendar').whereIn('source_key', [Q1, W2]).orderBy('source_key');
+    await trx('payroll_checks').where({ id: only.checkId }).update({ status: 'voided' });
+    await trx('payroll_runs').where({ id: only.runId }).update({ status: 'voided' }); // no replacement
+    await sync();
+    const reviews = await trx('tax_filing_calendar').where('source_key', 'like', 'payroll:%:review:%').orderBy('source_key');
+    expect(reviews.map((r) => [r.source_key.split(':review:')[0], r.status, r.amount_due])).toEqual([
+      [Q1, 'upcoming', null], [W2, 'upcoming', null],
+    ]);
+    const filedAfter = await trx('tax_filing_calendar').whereIn('source_key', [Q1, W2]).orderBy('source_key');
+    expect(filedAfter).toEqual(filedBefore);
+    expect(await sync()).toEqual({ inserted: 0, updated: 0, deleted: 0 });
+  });
+
+  it('a balance payment does not end a review', async () => {
+    const KEY = 'payroll:rt6:2027-Q1';
+    const first = await finalCheck(W1, '2027-01-15'); // RT-6 2.70
+    await sync();
+    await trx('tax_filing_calendar').where({ source_key: KEY }).update({ status: 'paid', amount_paid: '2.70', paid_date: '2027-04-20' });
+    await trx('payroll_checks').where({ id: first.checkId }).update({ status: 'voided' });
+    await trx('payroll_runs').where({ id: first.runId }).update({ status: 'voided' });
+    await finalCheck(W1, '2027-01-15', { fl_reemployment_cents: 5000 }); // RT-6 50.00
+    await sync();
+    const balance = await rowFor(`${KEY}:balance:1`);
+    expect(balance.amount_due).toBe('47.30');
+    await trx('tax_filing_calendar').where({ id: balance.id }).update({ status: 'paid', amount_paid: '47.30', paid_date: '2027-04-21' });
+    await sync();
+    const reviews = await trx('tax_filing_calendar').where('source_key', 'like', `${KEY}:review:%`);
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0].status).toBe('upcoming');
+  });
+
   it('writes one FUTA alert row when the year passes $500, and no FUTA deposit rows', async () => {
     await finalCheck(W1, '2027-01-15', { futa_cents: 30000 });
     await finalCheck(W2, '2027-01-22', { futa_cents: 30000 });

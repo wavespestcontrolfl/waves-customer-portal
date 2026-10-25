@@ -316,4 +316,72 @@ describe('source digest and review rows', () => {
     expect(keys.some((k) => k.includes(':review:'))).toBe(true);
     expect(keys).toContain('payroll:rt6:2027-Q1:balance:1');
   });
+
+  test('a payment on a balance row does not acknowledge a review', () => {
+    const now = payrollObligations({ checks: [check('2027-01-08', { fl_reemployment_cents: 5000 })], hires: [], today: '2027-03-01' });
+    const current = now.find((r) => r.source_key === 'payroll:rt6:2027-Q1').source_digest;
+    const rows = withBalances(now, [
+      marked('payroll:rt6:2027-Q1', 'old-digest', { amount_paid: '1.00', amount_due: '1.00' }),
+      marked('payroll:rt6:2027-Q1:balance:1', current, { amount_paid: '49.00', amount_due: '49.00' }),
+    ]);
+    expect(reviewsOf(rows).map((r) => r.source_key)).toEqual([`payroll:rt6:2027-Q1:review:${current.slice(0, 12)}`]);
+  });
+});
+
+describe('periods with every check voided', () => {
+  const EMPTY = obsEmpty();
+  function obsEmpty() {
+    // The digest of the empty set, as the sync computes it for a period with no checks.
+    const rows = payrollObligations({ checks: [], hires: [], today: '2027-02-01', remembered: ['payroll:941:2027-Q1'] });
+    return rows.find((r) => r.source_key === 'payroll:941:2027-Q1').source_digest;
+  }
+  const marked = (key, source_digest, patch = {}) => ({ source_key: key, source_digest, amount_paid: null, amount_due: null, ...patch });
+  const reviewsOf = (rows) => rows.filter((r) => r.source_key.includes(':review:'));
+
+  test('no checks and nothing marked: no rows', () => {
+    expect(payrollObligations({ checks: [], hires: [], today: '2027-02-01', remembered: [] })).toEqual([]);
+  });
+
+  test('a marked 941 whose quarter lost every check gets a review row with the empty-set digest', () => {
+    const now = payrollObligations({ checks: [], hires: [], today: '2027-02-01', remembered: ['payroll:941:2027-Q1'] });
+    expect(EMPTY).toMatch(/^[0-9a-f]{32}$/);
+    const rows = withBalances(now, [marked('payroll:941:2027-Q1', 'old-digest')]);
+    expect(reviewsOf(rows).map((r) => r.source_key)).toEqual([`payroll:941:2027-Q1:review:${EMPTY.slice(0, 12)}`]);
+    // The span still runs to the quarter holding today and starts at the remembered quarter.
+    expect(now.map((r) => r.source_key).filter((k) => k.startsWith('payroll:rt6:'))).toEqual(['payroll:rt6:2027-Q1']);
+  });
+
+  test('a remembered quarter before the first check starts the span there', () => {
+    const now = payrollObligations({
+      checks: [check('2027-05-07')], hires: [], today: '2027-05-10', remembered: ['payroll:rt6:2027-Q1:review:abc'],
+    });
+    expect(now.map((r) => r.source_key).filter((k) => k.startsWith('payroll:941:'))).toEqual(['payroll:941:2027-Q1', 'payroll:941:2027-Q2']);
+  });
+
+  test('a marked W-2 whose year lost every check gets a review row; the 940 holds zero', () => {
+    const now = payrollObligations({ checks: [], hires: [], today: '2027-02-01', remembered: ['payroll:w2:2026'] });
+    const keys = now.map((r) => r.source_key);
+    expect(keys).toEqual(expect.arrayContaining(['payroll:w2:2026', 'payroll:940:2026']));
+    expect(now.find((r) => r.source_key === 'payroll:940:2026').amount_due).toBe('0.00');
+    expect(keys.some((k) => k.includes('futa_over_500'))).toBe(false);
+    const rows = withBalances(now, [marked('payroll:w2:2026', 'old-digest')]);
+    expect(reviewsOf(rows).map((r) => r.source_key)).toEqual([`payroll:w2:2026:review:${EMPTY.slice(0, 12)}`]);
+  });
+
+  test('a paid deposit whose month lost every check wants no row', () => {
+    const key = 'payroll:941_deposit:2027-01';
+    const now = payrollObligations({ checks: [], hires: [], today: '2027-01-20', remembered: [key] });
+    const dep = now.find((r) => r.source_key === key);
+    expect(dep.amount_due).toBe('0.00');
+    expect(withBalances(now, [marked(key, 'old-digest', { amount_paid: '253.00', amount_due: '253.00' })])
+      .filter((r) => r.source_key.startsWith(key))).toEqual([]);
+  });
+
+  test('balance, review and new-hire keys name their period correctly', () => {
+    const now = payrollObligations({
+      checks: [], hires: [], today: '2027-01-20',
+      remembered: ['payroll:941_deposit:2027-01:balance:1', 'payroll:new_hire:t1', 'payroll:futa_over_500:2027'],
+    });
+    expect(now.map((r) => r.source_key)).toEqual(['payroll:941_deposit:2027-01']);
+  });
 });

@@ -35,8 +35,12 @@
  * checks. If a Form 941, RT-6, 940 or W-2/W-3 row was marked done and its
  * checks have since changed (a void and replacement), a review row (key
  * '<row>:review:<digest prefix>') asks the owner to check the figures; marking
- * it done stores the current digest and ends the ask. A marked row with no
- * digest (not written by this sync) never gets a review row.
+ * it done stores the current digest and ends the ask. Only the filing's own
+ * rows (base and review) acknowledge a change, never a balance row. A period
+ * with a marked row stays covered even when every check in it is voided (zero
+ * totals, the digest of the empty set), so a filed return still gets its
+ * review row. A marked row with no digest (not written by this sync) never
+ * gets a review row.
  */
 const crypto = require('crypto');
 const db = require('../models/db');
@@ -181,13 +185,32 @@ function digestOf(checks) {
 }
 const taxCents = (check) => TAX_COLUMNS.reduce((sum, col) => sum + num(check[col]), 0);
 
-// Totals by month, quarter and year, keyed from the pay date.
-function totalsOf(checks) {
+const zeroTotals = (extra) => ({ tax: 0, futa: 0, reemployment: 0, checks: [], ...extra });
+
+// The periods (month 'YYYY-MM', quarter 'YYYY-Qn', year 'YYYY') of payroll rows
+// the owner already marked done, read from their source keys. New hire and FUTA
+// alert keys name no period; ':balance:' and ':review:' suffixes are dropped.
+function rememberedPeriods(sourceKeys) {
+  const out = { months: new Set(), quarters: new Set(), years: new Set() };
+  for (const key of sourceKeys) {
+    const duty = String(key).split(BALANCE_SEPARATOR)[0].split(REVIEW_SEPARATOR)[0];
+    const [, kind, period] = duty.split(':');
+    if (kind === '941_deposit' && /^\d{4}-\d{2}$/.test(period || '')) out.months.add(period);
+    else if ((kind === '941' || kind === 'rt6') && /^\d{4}-Q[1-4]$/.test(period || '')) out.quarters.add(period);
+    else if ((kind === '940' || kind === 'w2') && /^\d{4}$/.test(period || '')) out.years.add(period);
+  }
+  return out;
+}
+
+// Totals by month, quarter and year, keyed from the pay date. A remembered
+// period with no finalized check left gets zero totals, so its duties keep
+// being checked against the rows already marked done.
+function totalsOf(checks, remembered) {
   const months = new Map();
   const quarters = new Map();
   const years = new Map();
   const bump = (map, key, check, extra) => {
-    const t = map.get(key) || { tax: 0, futa: 0, reemployment: 0, checks: [] };
+    const t = map.get(key) || zeroTotals();
     t.checks.push(check);
     t.tax += taxCents(check);
     t.futa += num(check.futa_cents);
@@ -202,6 +225,15 @@ function totalsOf(checks) {
     bump(months, `${year}-${pad(month)}`, check, { year, month });
     bump(quarters, quarterKey(year, quarterOf(month)), check, { year, q: quarterOf(month) });
     bump(years, String(year), check, { year });
+  }
+  for (const key of remembered.months) {
+    if (!months.has(key)) months.set(key, zeroTotals({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)) }));
+  }
+  for (const key of remembered.quarters) {
+    if (!quarters.has(key)) quarters.set(key, zeroTotals({ year: Number(key.slice(0, 4)), q: Number(key.slice(6, 7)) }));
+  }
+  for (const key of remembered.years) {
+    if (!years.has(key)) years.set(key, zeroTotals({ year: Number(key) }));
   }
   return { months, quarters, years };
 }
@@ -245,8 +277,8 @@ function quarterRows(year, q, t) {
   }];
 }
 
-// First quarter with a check through the quarter containing today (or the last
-// check, if that is later).
+// First quarter with a check or a marked row through the quarter containing
+// today (or the last one of those, if that is later).
 function quarterSpan(quarters, today) {
   const sorted = [...quarters.values()].sort((a, b) => (a.year - b.year) || (a.q - b.q));
   const last = sorted[sorted.length - 1];
@@ -323,10 +355,12 @@ function hireRow(hire) {
 /**
  * checks: finalized payroll_checks rows (pay_date 'YYYY-MM-DD' + cents columns).
  * hires: W-2 technicians ({ id, name, hire_date, employment_type, employment_status }).
- * today: 'YYYY-MM-DD' in ET. Returns the obligations sorted by due date.
+ * today: 'YYYY-MM-DD' in ET. remembered: source keys of rows already marked
+ * done; their periods are covered even when no finalized check is left in them.
+ * Returns the obligations sorted by due date.
  */
-function payrollObligations({ checks = [], hires = [], today }) {
-  const { months, quarters, years } = totalsOf(checks);
+function payrollObligations({ checks = [], hires = [], today, remembered = [] }) {
+  const { months, quarters, years } = totalsOf(checks, rememberedPeriods(remembered));
   const rows = [...months.values()].map(depositRow);
   if (quarters.size) {
     for (const [year, q] of quarterSpan(quarters, today)) {
@@ -371,9 +405,12 @@ function withBalances(obligations, markedRows) {
   for (const ob of obligations) {
     const done = marked.get(ob.source_key);
     if (!done) { wanted.push(ob); continue; }
+    // Only the filing's own rows acknowledge a change: a payment on a balance
+    // row says nothing about the return.
+    const filings = done.filter((row) => !String(row.source_key).includes(BALANCE_SEPARATOR));
     if (REVIEW_TYPES.has(ob.filing_type) && ob.source_digest
-      && !done.some((row) => row.source_digest === ob.source_digest)
-      && done.some((row) => row.source_digest)) {
+      && !filings.some((row) => row.source_digest === ob.source_digest)
+      && filings.some((row) => row.source_digest)) {
       wanted.push({
         ...ob,
         source_key: `${ob.source_key}${REVIEW_SEPARATOR}${ob.source_digest.slice(0, 12)}`,
@@ -422,9 +459,10 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
       .where('source_key', 'like', `${SOURCE_PREFIX}%`)
       .select('id', 'source_key', 'status', 'title', 'period_label', 'amount_due', 'amount_paid', 'notes', 'source_digest',
         trx.raw("to_char(due_date, 'YYYY-MM-DD') AS due_date"));
+    const markedRows = existing.filter((row) => row.status !== 'upcoming');
     const obligations = withBalances(
-      payrollObligations({ checks, hires, today }),
-      existing.filter((row) => row.status !== 'upcoming'),
+      payrollObligations({ checks, hires, today, remembered: markedRows.map((row) => row.source_key) }),
+      markedRows,
     );
     const byKey = new Map(existing.map((row) => [row.source_key, row]));
     const result = { inserted: 0, updated: 0, deleted: 0 };
