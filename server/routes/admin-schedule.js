@@ -10338,6 +10338,16 @@ async function scheduleCreateHandler(req, res, next) {
             snapshot: { date: scheduledDate, windowStart: windowStart || null, windowEnd: windowEnd || null },
           });
         }
+        // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow): the office left the
+        // technician to Auto / unassigned. Log the one the map would pick beside the one
+        // saved (parent visit only; series children copy it). Never throws; gate off = no-op.
+        if (assignmentMode === 'auto' || !technicianId) {
+          void require('../services/scheduling/line-technician').recordLinePickShadow({
+            source: 'office_auto', scheduledServiceId: svc.id, customerId, date: scheduledDate, windowStart, windowEnd,
+            serviceId: serviceId || null, serviceKey: serviceRecord?.service_key, serviceType: svc.service_type || serviceType,
+            durationMinutes: duration, actualTechnicianId: svc.technician_id || resolvedTechId,
+          });
+        }
         // Fire the deferred confirmation SMS for any appointment that wants one
         // (the reminder rows were already inserted durably above). This is the
         // slow, Twilio-bound step: landline lookup + send.

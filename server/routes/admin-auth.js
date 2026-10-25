@@ -24,6 +24,7 @@ const {
 } = require('../utils/staff-password-policy');
 const { validDateOnly } = require('../utils/date-only');
 const { canonicalStaffEmail } = require('../utils/staff-identity');
+const { hashResetToken, mintResetToken } = require('../services/staff-reset-token');
 const { employmentPatch } = require('../services/technician-eligibility');
 const { seedNewHireCapabilities } = require('../services/technician-capabilities');
 const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
@@ -32,7 +33,6 @@ const { noStore } = require('../middleware/no-store');
 const { loginMfaPreParserGuard } = require('../middleware/staff-mfa-guard');
 const { adminMfaLive } = staffMfa;
 
-const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 const RESET_REQUEST_COOLDOWN_MS = 2 * 60 * 1000;
 const FAILED_LOGIN_FLOOR_MS = process.env.NODE_ENV === 'test' ? 0 : 750;
@@ -131,10 +131,6 @@ function mintStaffTokens(tech, { mfa = false, mfaRecoveryUntil = null } = {}) {
 
 function normalizeStaffEmail(value) {
   return canonicalStaffEmail(value);
-}
-
-function hashResetToken(token) {
-  return crypto.createHash('sha256').update(token).digest('hex');
 }
 
 async function rejectInvalidCredentials(res, startedAt) {
@@ -470,8 +466,7 @@ function disconnectRevokedStaffSessions(technicianId, reason) {
 async function issuePasswordReset(email) {
   const normalizedEmail = normalizeStaffEmail(email);
   if (!normalizedEmail) return { issued: false };
-  const token = crypto.randomBytes(RESET_TOKEN_BYTES).toString('base64url');
-  const tokenHash = hashResetToken(token);
+  const { token, tokenHash } = mintResetToken();
   const now = new Date();
   const cooldownCutoff = new Date(now.getTime() - RESET_REQUEST_COOLDOWN_MS);
   const expiresAt = new Date(now.getTime() + (RESET_LINK_TTL_MINUTES * 60 * 1000));

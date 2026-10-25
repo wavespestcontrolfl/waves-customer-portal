@@ -9,6 +9,7 @@ import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import PayGrowth from "../../components/payGrowth/PayGrowth";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import PayrollSettings from "../../components/payroll/PayrollSettings";
+import ServiceLinesCard from "./ServiceLinesCard";
 import usePayrollAvailable from "../../hooks/usePayrollAvailable";
 import {
   BarChart3,
@@ -85,8 +86,19 @@ function adminFetch(path, opts = {}) {
         ? opts.body
         : JSON.stringify(opts.body)
       : undefined,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // The message stays "HTTP <status>"; the status and the server's JSON
+      // body ride along for callers that show the server's own reason.
+      const error = new Error(`HTTP ${r.status}`);
+      error.status = r.status;
+      try {
+        error.data = typeof r.json === "function" ? await r.json() : null;
+      } catch {
+        error.data = null;
+      }
+      throw error;
+    }
     return r.json();
   });
 }
@@ -2843,6 +2855,9 @@ export function TeamTab({ showToast }) {
   // GATE_TECH_WORK_DAYS: the server marks the roster response when the gate is
   // on; off, the Work days row and summary never render and nothing is sent.
   const [workDaysEnabled, setWorkDaysEnabled] = useState(false);
+  // GATE_SERVICE_LINE_MAP=shadow: the server marks the roster response; off, the
+  // Service lines card never renders and nothing is fetched.
+  const [serviceLinesEnabled, setServiceLinesEnabled] = useState(false);
   const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
@@ -2851,6 +2866,14 @@ export function TeamTab({ showToast }) {
   const [deactivateError, setDeactivateError] = useState("");
   const [deactivating, setDeactivating] = useState(false);
   const deactivateInFlightRef = useRef(false);
+  // GATE_HIRED_PACKET: the server sets t.hire_action ("hire" | "resend") on a
+  // row only for an admin while the gate is on; no hire_action = no Hired /
+  // Resend link UI.
+  const [hireTech, setHireTech] = useState(null);
+  const [hireError, setHireError] = useState("");
+  const [hiring, setHiring] = useState(false);
+  const hireInFlightRef = useRef(false);
+  const [resendingId, setResendingId] = useState(null);
   // The capabilities routes are admin-only; the roster itself is readable by
   // technicians, so the action is hidden for them rather than 403ing.
   const isAdmin = useMemo(() => readStaffRole() === "admin", []);
@@ -2907,6 +2930,7 @@ export function TeamTab({ showToast }) {
       const res = await adminFetch("/admin/timetracking/technicians");
       setTechs(res.technicians || []);
       setWorkDaysEnabled(res.workDaysEnabled === true);
+      setServiceLinesEnabled(res.serviceLinesEnabled === true);
     } catch {
       /* ignore */
     }
@@ -2999,6 +3023,62 @@ export function TeamTab({ showToast }) {
     } finally {
       deactivateInFlightRef.current = false;
       setDeactivating(false);
+    }
+  };
+
+  // Toast for the welcome email result of Hired / Resend link.
+  const welcomeToast = (emailed, email) => {
+    if (emailed === true) return `Welcome email sent to ${email}.`;
+    if (emailed === "uncertain") {
+      return "Hired. The email may not have gone out. Use Resend link if it does not arrive.";
+    }
+    return "Hired, but the email failed. Use Resend link.";
+  };
+
+  const handleHire = async (tech, fields) => {
+    if (hireInFlightRef.current) return;
+    hireInFlightRef.current = true;
+    setHiring(true);
+    setHireError("");
+    try {
+      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire`, {
+        method: "POST",
+        body: JSON.stringify(fields),
+      });
+      showToast(welcomeToast(res && res.emailed, fields.email.trim()));
+      setHireTech(null);
+      load();
+    } catch (e) {
+      setHireError(
+        (e && e.data && e.data.error) || "Could not hire: " + String((e && e.message) || "Unknown error"),
+      );
+    } finally {
+      hireInFlightRef.current = false;
+      setHiring(false);
+    }
+  };
+
+  const handleResendLink = async (tech) => {
+    if (resendingId !== null) return;
+    setResendingId(tech.id);
+    try {
+      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire/resend`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      const emailed = res && res.emailed;
+      showToast(
+        emailed === true
+          ? `Welcome email sent to ${tech.email}.`
+          : emailed === "uncertain"
+            ? "The email may not have gone out. Use Resend link again if it does not arrive."
+            : "The email failed. Use Resend link to try again.",
+      );
+      load();
+    } catch (e) {
+      showToast("Failed: " + ((e && e.data && e.data.error) || (e && e.message) || "Unknown error"));
+    } finally {
+      setResendingId(null);
     }
   };
 
@@ -3852,6 +3932,11 @@ export function TeamTab({ showToast }) {
                       Field dispatchable
                     </div>
                   )}
+                  {t.hire_action === "resend" && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                      {t.hire_link_pending ? "Waiting for first password" : "Link expired or not sent"}
+                    </div>
+                  )}
                   {/* Capability counts matter only for someone who takes (or will
                       take) field work — an office-only admin never reaches
                       auto-dispatch, so the line would be noise there. */}
@@ -3935,6 +4020,43 @@ export function TeamTab({ showToast }) {
                     >
                       {uploadingId === t.id ? "Uploading…" : "Photo"}
                     </button>{" "}
+                    {t.hire_action === "hire" && (
+                      <button
+                        onClick={(event) => {
+                          event.currentTarget.focus({ preventScroll: true });
+                          setHireError("");
+                          setHireTech(t);
+                        }}
+                        style={{
+                          padding: "4px 10px",
+                          background: D.teal,
+                          border: `1px solid ${D.teal}`,
+                          borderRadius: 6,
+                          color: D.white,
+                          fontSize: 11,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Hired
+                      </button>
+                    )}{" "}
+                    {t.hire_action === "resend" && (
+                      <button
+                        onClick={() => handleResendLink(t)}
+                        disabled={resendingId !== null}
+                        style={{
+                          padding: "4px 10px",
+                          background: "transparent",
+                          border: `1px solid ${D.border}`,
+                          borderRadius: 6,
+                          color: D.teal,
+                          fontSize: 11,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {resendingId === t.id ? "Sending…" : "Resend link"}
+                      </button>
+                    )}{" "}
                     <button
                       onClick={(event) => {
                         if (t.active) {
@@ -3975,6 +4097,9 @@ export function TeamTab({ showToast }) {
           </tbody>{" "}
         </table></div>{" "}
       </div>
+      {isAdmin && serviceLinesEnabled && (
+        <ServiceLinesCard techs={techs} showToast={showToast} />
+      )}
       {earningsTech && (
         <EarningsModal
           tech={earningsTech}
@@ -3990,6 +4115,17 @@ export function TeamTab({ showToast }) {
           showToast={showToast}
         />
       )}
+      {hireTech && (
+        <HireStaffDialog
+          tech={hireTech}
+          error={hireError}
+          submitting={hiring}
+          onCancel={() => {
+            if (!hiring) setHireTech(null);
+          }}
+          onConfirm={(fields) => handleHire(hireTech, fields)}
+        />
+      )}
       {deactivateTech && (
         <DeactivateStaffDialog
           tech={deactivateTech}
@@ -4002,6 +4138,142 @@ export function TeamTab({ showToast }) {
         />
       )}
     </div>
+  );
+}
+
+// GATE_HIRED_PACKET: one click turns a prospective placeholder into an active
+// staff account and emails the hire a set-password link. Email and first day
+// are required; the rest is prefilled from the row.
+function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
+  const dialogRef = useModalFocus(true, () => {
+    if (!submitting) onCancel();
+  });
+  const titleId = `hire-staff-title-${tech.id}`;
+  const [form, setForm] = useState(() => ({
+    name: tech.name || "",
+    email: tech.email || "",
+    phone: tech.phone || "",
+    hireDate: tech.hire_date ? String(tech.hire_date).split("T")[0] : "",
+    payRate: tech.pay_rate != null ? String(tech.pay_rate) : "",
+    jobTitle: tech.job_title || "",
+    employmentType: tech.employment_type || "",
+  }));
+  const [showRequired, setShowRequired] = useState(false);
+  const missing = !form.name.trim() || !form.email.trim() || !form.hireDate;
+  const set = (key) => (event) => {
+    const value = event.target.value;
+    setForm((f) => ({ ...f, [key]: value }));
+  };
+  const submit = () => {
+    if (missing) {
+      setShowRequired(true);
+      return;
+    }
+    onConfirm({
+      name: form.name.trim(),
+      email: form.email.trim(),
+      phone: form.phone.trim(),
+      hireDate: form.hireDate,
+      payRate: form.payRate.trim(),
+      jobTitle: form.jobTitle.trim(),
+      employmentType: form.employmentType,
+    });
+  };
+  const field = (id, label, input, required) => (
+    <div style={{ marginBottom: 12 }}>
+      <label htmlFor={`${titleId}-${id}`} style={{ display: "block", fontSize: 11, color: D.muted, marginBottom: 4 }}>
+        {label}
+        {required ? " *" : ""}
+      </label>
+      {input}
+    </div>
+  );
+
+  return createPortal(
+    <div
+      className="staff-foundation"
+      onClick={() => {
+        if (!submitting) onCancel();
+      }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 200,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))",
+        overflowY: "auto",
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+        style={{
+          background: D.card,
+          border: `1px solid ${D.border}`,
+          borderRadius: 6,
+          width: "100%",
+          maxWidth: 480,
+          maxHeight: "100%",
+          overflowY: "auto",
+          padding: 20,
+          boxSizing: "border-box",
+        }}
+      >
+        <div id={titleId} style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
+          Hire {tech.name}
+        </div>
+        <p style={{ fontSize: 14, lineHeight: 1.55, color: D.text, margin: "12px 0 16px" }}>
+          This makes them an active staff member and emails them a link to set their password. The link works for 7 days.
+        </p>
+        {field("name", "Name", <input id={`${titleId}-name`} value={form.name} onChange={set("name")} style={sInput} />, true)}
+        {field("email", "Email", <input id={`${titleId}-email`} type="email" value={form.email} onChange={set("email")} placeholder="name@example.com" style={sInput} />, true)}
+        {field("phone", "Mobile phone", <input id={`${titleId}-phone`} type="tel" value={form.phone} onChange={set("phone")} placeholder="+19415551234" style={sInput} />)}
+        {field("hireDate", "First day", <input id={`${titleId}-hireDate`} type="date" value={form.hireDate} onChange={set("hireDate")} style={sInput} />, true)}
+        {field("payRate", "Pay rate", <input id={`${titleId}-payRate`} type="number" min="0" step="0.01" value={form.payRate} onChange={set("payRate")} placeholder="Per hour" style={sInput} />)}
+        {field("jobTitle", "Job title", <input id={`${titleId}-jobTitle`} value={form.jobTitle} onChange={set("jobTitle")} style={sInput} />)}
+        {field(
+          "employmentType",
+          "Employment type",
+          <select id={`${titleId}-employmentType`} value={form.employmentType} onChange={set("employmentType")} style={sInput}>
+            <option value="">Not set</option>
+            <option value="w2">W-2 employee</option>
+            <option value="1099">1099 contractor</option>
+          </select>,
+        )}
+        {showRequired && missing && (
+          <div role="alert" style={{ color: D.red, fontSize: 14, lineHeight: 1.55, marginBottom: 8 }}>
+            Name, email and first day are required.
+          </div>
+        )}
+        {error && (
+          <div role="alert" style={{ color: D.red, fontSize: 14, lineHeight: 1.55, marginBottom: 8 }}>
+            {error}
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+          <button type="button" onClick={onCancel} disabled={submitting} style={sBtn("transparent", D.text)}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting}
+            aria-busy={submitting || undefined}
+            style={{ ...sBtn(D.teal, D.white), cursor: submitting ? "wait" : "pointer", opacity: submitting ? 0.6 : 1 }}
+          >
+            {submitting ? "Hiring…" : "Hire and send link"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
