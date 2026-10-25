@@ -228,6 +228,8 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
   const [pendingTechId, setPendingTechId] = useState(undefined);
   const [savingAssign, setSavingAssign] = useState(false);
   const [assignError, setAssignError] = useState(null);
+  // Plain notes the server sent with a SAVED assignment (e.g. a tech who does not work that day).
+  const [assignWarnings, setAssignWarnings] = useState([]);
 
   // Two refs, two purposes:
   //
@@ -298,6 +300,7 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
     setError(null);
     setPendingTechId(undefined);
     setAssignError(null);
+    setAssignWarnings([]);
     if (jobId) fetchJob(jobId);
   }, [jobId, fetchJob]);
 
@@ -410,6 +413,7 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
     const targetJobId = job.id;
     setSavingAssign(true);
     setAssignError(null);
+    setAssignWarnings([]);
     try {
       const res = await fetch(
         `${API_BASE}/admin/dispatch/jobs/${targetJobId}/assign`,
@@ -423,10 +427,14 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
+      // The save went through; the body may carry warnings to show.
+      const saved = await res.json().catch(() => null);
+      const warnings = Array.isArray(saved?.warnings) ? saved.warnings.filter((w) => typeof w === 'string' && w) : [];
       // Refetch into the drawer if still on the same job — same
       // pattern as handleStatus. The dispatch:job_update broadcast
       // will refresh other dispatchers' boards.
       if (currentIdRef.current === targetJobId) {
+        setAssignWarnings(warnings);
         setPendingTechId(undefined);
         await fetchJob(targetJobId);
       }
@@ -590,6 +598,9 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
               {assignError && (
                 <div className="text-12 text-alert-fg mt-1">{assignError}</div>
               )}
+              {assignWarnings.map((line) => (
+                <div key={line} role="status" className="text-12 text-ink-secondary mt-1">{line}</div>
+              ))}
             </div>
             <Field label="Customer Phone">
               {job.customer_phone ? (

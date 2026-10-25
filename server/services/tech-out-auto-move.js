@@ -288,6 +288,11 @@ const NO_FIT = 'TECH_OUT_AUTO_MOVE_NO_FIT';
  */
 function makeMoveGuard(stop, date) {
   return async ({ trx, technicianId, service }) => {
+    // Work days (GATE_TECH_WORK_DAYS): ranking checked them on a plain read, but the
+    // mover runs as 'admin' (no work-days guard of its own). A work-days edit between
+    // ranking and this commit must not land the stop on a tech who now has the day off.
+    // Failing here is a failed candidate: attemptMoves tries the next one.
+    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: true });
     await assertCapabilitiesActive(trx, technicianId, [service], (rowId, why) => Object.assign(
       new Error(`Cannot auto-move stop ${rowId}: ${why}`),
       { statusCode: 409, status: 409, code: 'TECH_OUT_AUTO_MOVE_CAPABILITY_GUARD', isOperational: true },
@@ -518,7 +523,7 @@ function refusalReason(lastErr) {
   // Grouped into a visit between our read and the move: the same
   // manual-decision rule as the up-front visit_id check.
   if (lastErr.code === 'VISIT_MEMBERSHIP_CHANGED') return 'grouped_visit_manual';
-  if (lastErr.code === NO_FIT) return 'no_eligible_candidate';
+  if (lastErr.code === NO_FIT || lastErr.code === NOT_ASSIGNABLE) return 'no_eligible_candidate';
   if (lastErr.code === COMPLETION_IN_FLIGHT) return 'completion_in_progress';
   return `move_failed: ${lastErr.message}`;
 }
