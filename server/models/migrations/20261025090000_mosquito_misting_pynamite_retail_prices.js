@@ -10,12 +10,13 @@
  *  1. pricing_config `mosquito_misting_pricing` (seeded by the frozen 20261023000010). Replaced with NEXT only while it still
  *     deep-equals that migration's SEED, i.e. no admin has edited it. An edited or missing row is left alone with a warning.
  *     The replacement writes a pricing_config_audit row and a pricing_changelog row, like the seed did.
- *  2. services `mosquito_misting_install` (frozen 20261023100000). Only while base_price is 4595 and price_range_min is 3795
- *     (the seeded Smart and Essential lists): base 4195, range min 2795, and the description and internal notes drop the
- *     "pump or tankless unit" and the old list prices. Otherwise left alone with a warning.
+ *  2. services `mosquito_misting_install` (frozen 20261023100000). Each field moves on its own, only while it still holds the
+ *     seeded value: base_price 4595 -> 4195, price_range_min 3795 -> 2795, and the description and internal notes (which drop the
+ *     "pump or tankless unit" and the old list prices) only while they equal the seeded text. A field an operator edited is left
+ *     alone with a warning and the others still move.
  *
- * down() reverses each part only while the row still holds exactly what up() wrote, and removes only the audit and changelog
- * rows this migration wrote. A part an admin changed since is left alone.
+ * down() reverses each part (and each services field) only while it still holds exactly what up() wrote, and removes only the audit
+ * and changelog rows this migration wrote. A part an admin changed since is left alone.
  *
  * NEXT is an inlined literal (a pushed migration is frozen): server/tests/mosquito-misting-pynamite-retail-migration.test.js
  * asserts it equals mosquitoMistingPricingDefaults() in constants.js, so a later constant change fails the test instead of
@@ -143,19 +144,28 @@ async function upPricingConfig(knex) {
   }
 }
 
+// Each field is guarded on its own: a price moves only while it still holds the seeded list, and a text field only while it still
+// holds the seeded text, so an operator who edited the copy (or the prices) keeps that work and the other fields still move.
 async function upService(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
-  const row = await knex('services').where({ service_key: SERVICE_KEY }).first('base_price', 'price_range_min');
+  const row = await knex('services').where({ service_key: SERVICE_KEY })
+    .first('base_price', 'price_range_min', 'description', 'internal_notes');
   if (!row) {
     console.warn(`${LOG} services ${SERVICE_KEY} is missing - leaving it alone`);
     return;
   }
-  if (sameNumber(row.base_price, NEW_SERVICE.base_price) && sameNumber(row.price_range_min, NEW_SERVICE.price_range_min)) return; // re-run
-  if (!sameNumber(row.base_price, OLD_SERVICE.base_price) || !sameNumber(row.price_range_min, OLD_SERVICE.price_range_min)) {
-    console.warn(`${LOG} services ${SERVICE_KEY} prices were changed since the 20261023 catalog seed - leaving them alone`);
-    return;
-  }
-  await knex('services').where({ service_key: SERVICE_KEY }).update(NEW_SERVICE);
+  const patch = {};
+  const left = [];
+  const field = (name, isSeeded, isDone, next) => {
+    if (isSeeded) patch[name] = next;
+    else if (!isDone) left.push(name);
+  };
+  field('base_price', sameNumber(row.base_price, OLD_SERVICE.base_price), sameNumber(row.base_price, NEW_SERVICE.base_price), NEW_SERVICE.base_price);
+  field('price_range_min', sameNumber(row.price_range_min, OLD_SERVICE.price_range_min), sameNumber(row.price_range_min, NEW_SERVICE.price_range_min), NEW_SERVICE.price_range_min);
+  field('description', row.description === OLD_SERVICE.description, row.description === NEW_SERVICE.description, NEW_SERVICE.description);
+  field('internal_notes', row.internal_notes === OLD_SERVICE.internal_notes, row.internal_notes === NEW_SERVICE.internal_notes, NEW_SERVICE.internal_notes);
+  if (left.length) console.warn(`${LOG} services ${SERVICE_KEY}: ${left.join(', ')} changed since the 20261023 catalog seed - leaving ${left.length === 1 ? 'it' : 'them'} alone`);
+  if (Object.keys(patch).length) await knex('services').where({ service_key: SERVICE_KEY }).update(patch);
 }
 
 exports.up = async function up(knex) {
@@ -179,17 +189,14 @@ exports.down = async function down(knex) {
   if (await knex.schema.hasTable('services')) {
     const row = await knex('services').where({ service_key: SERVICE_KEY })
       .first('base_price', 'price_range_min', 'description', 'internal_notes');
-    if (row
-      && sameNumber(row.base_price, NEW_SERVICE.base_price)
-      && sameNumber(row.price_range_min, NEW_SERVICE.price_range_min)
-      && row.description === NEW_SERVICE.description
-      && row.internal_notes === NEW_SERVICE.internal_notes) {
-      await knex('services').where({ service_key: SERVICE_KEY }).update({
-        base_price: OLD_SERVICE.base_price,
-        price_range_min: OLD_SERVICE.price_range_min,
-        description: OLD_SERVICE.description,
-        internal_notes: OLD_SERVICE.internal_notes,
-      });
+    if (row) {
+      // Each field goes back only while it still holds exactly what up() wrote.
+      const patch = {};
+      if (sameNumber(row.base_price, NEW_SERVICE.base_price)) patch.base_price = OLD_SERVICE.base_price;
+      if (sameNumber(row.price_range_min, NEW_SERVICE.price_range_min)) patch.price_range_min = OLD_SERVICE.price_range_min;
+      if (row.description === NEW_SERVICE.description) patch.description = OLD_SERVICE.description;
+      if (row.internal_notes === NEW_SERVICE.internal_notes) patch.internal_notes = OLD_SERVICE.internal_notes;
+      if (Object.keys(patch).length) await knex('services').where({ service_key: SERVICE_KEY }).update(patch);
     }
   }
 };

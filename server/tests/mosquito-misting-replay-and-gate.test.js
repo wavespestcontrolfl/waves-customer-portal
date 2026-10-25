@@ -520,10 +520,27 @@ describe('the proposal editor cannot launder the misting identity away', () => {
     expect(normalizeCorrectiveWork([{ label: 'Gutter guard', amount: 50 }])[0].service).toBeNull();
   });
 
+  test('a corrective-work row stored under an old MistAway tier label still resolves to the install identity', () => {
+    const { normalizeCorrectiveWork } = require('../services/estimate-proposal');
+    for (const label of ['Smart system (tankless + app) Installation', 'Essential system (drum) Installation']) {
+      expect(normalizeCorrectiveWork([{ id: 'cw-legacy', label, amount: 4595 }])[0].service).toBe('mosquito_misting_installation');
+    }
+    expect(normalizeCorrectiveWork([{ id: 'cw-new', label: 'Standard system (55-gallon) Installation', amount: 4195 }])[0].service).toBe('mosquito_misting_installation');
+  });
+
   test('text fallback: the install labels the mapper emits are recognized without any service field', () => {
     for (const label of ['Compact system (10-gallon) Installation', 'Standard system (55-gallon) Installation']) {
       expect(mistingProposalIdentity({ description: label })).toBe('mosquito_misting_installation');
     }
+    // stored quotes and proposal lines named under the MistAway-era tier labels keep their identity (code-owned legacy list)
+    for (const label of ['Essential system (drum) Installation', 'Smart system (tankless + app) Installation', 'Essential system (drum)', 'smart system (tankless + app)']) {
+      expect(mistingProposalIdentity({ description: label })).toBe('mosquito_misting_installation');
+      expect(mistingProposalIdentity({ label })).toBe('mosquito_misting_installation');
+      expect(mistingProposalIdentity({ name: label })).toBe('mosquito_misting_installation');
+    }
+    // the bare live tier labels are not claimed (only "<label> Installation" is), and unrelated text is still null
+    expect(mistingProposalIdentity({ description: 'Compact system (10-gallon)' })).toBeNull();
+    expect(mistingProposalIdentity({ description: 'Quarterly pest control' })).toBeNull();
     const mapped = mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { mosquitoMisting: OPTS } }));
     const item = mapped.oneTime.items.find((i) => i.service === 'mosquito_misting_installation');
     expect(mistingProposalIdentity({ description: item.name })).toBe('mosquito_misting_installation');

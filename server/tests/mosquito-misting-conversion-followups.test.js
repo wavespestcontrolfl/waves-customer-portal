@@ -190,6 +190,19 @@ describe('audit 4: engine-origin install, one prepay total helper, install bell 
     expect(proposal).toMatchObject({ amount: 5200, description: 'Smart system Installation', lines: [{ amount: 5200, description: 'Smart system Installation' }] });
   });
 
+  test.each([
+    'Essential system (drum) Installation',
+    'Smart system (tankless + app) Installation',
+    'Compact system (10-gallon) Installation',
+    'Standard system (55-gallon) Installation',
+  ])('frozenMistingInstall: a label-only itemized proposal line named "%s" (no service key) is the install', (description) => {
+    const install = converter.frozenMistingInstall({
+      proposal: { enabled: true, buildings: [{ lineItems: [{ description, unitPrice: 4000, quantity: 1, amount: 4000 }] }] },
+      result: { recurring: { services: [] }, oneTime: { items: [] } },
+    });
+    expect(install).toMatchObject({ amount: 4000, description });
+  });
+
   test('frozenMistingInstall: an unpriced / oversize raw line, a quote-required item and an unpriced proposal install bill nothing', () => {
     expect(converter.frozenMistingInstall(engineOnly({ nozzles: 120 }))).toBeNull();
     const rawLine = engineOnly().engineResult.lineItems.find((l) => l.service === 'mosquito_misting');

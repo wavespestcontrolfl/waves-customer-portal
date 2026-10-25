@@ -133,13 +133,38 @@ describe('up: services install row', () => {
   });
 
   test.each([
-    ['an edited base price', { base_price: '4800.00' }],
-    ['an edited range minimum', { price_range_min: '3500.00' }],
-  ])('leaves %s alone with a warning', async (_name, patch) => {
+    ['an edited base price', { base_price: '4800.00' }, { base_price: '4800.00', price_range_min: 2795 }],
+    ['an edited range minimum', { price_range_min: '3500.00' }, { base_price: 4195, price_range_min: '3500.00' }],
+  ])('%s is left alone with a warning; the other fields still move', async (_name, patch, expected) => {
     const knex = fakeKnex({ services: [installRow(patch)] });
     await migration.up(knex);
-    expect(knex.db().services[0]).toMatchObject(installRow(patch));
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('leaving them alone'));
+    expect(knex.db().services[0]).toMatchObject({ ...expected, description: migration.NEW_SERVICE.description, internal_notes: migration.NEW_SERVICE.internal_notes });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('changed since the 20261023 catalog seed'));
+  });
+
+  test('an edited description with the seeded prices keeps the operator text; prices and notes still move', async () => {
+    const knex = fakeKnex({ services: [installRow({ description: 'Our own install copy' })] });
+    await migration.up(knex);
+    expect(knex.db().services[0]).toMatchObject({
+      base_price: 4195, price_range_min: 2795, description: 'Our own install copy', internal_notes: migration.NEW_SERVICE.internal_notes,
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('description'));
+  });
+
+  test('edited internal notes with the seeded prices keep the operator notes; prices and description still move', async () => {
+    const knex = fakeKnex({ services: [installRow({ internal_notes: 'Ask Dana before quoting' })] });
+    await migration.up(knex);
+    expect(knex.db().services[0]).toMatchObject({
+      base_price: 4195, price_range_min: 2795, description: migration.NEW_SERVICE.description, internal_notes: 'Ask Dana before quoting',
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('internal_notes'));
+  });
+
+  test('every field edited: nothing moves', async () => {
+    const edited = installRow({ base_price: '4800.00', price_range_min: '3500.00', description: 'A', internal_notes: 'B' });
+    const knex = fakeKnex({ services: [edited] });
+    await migration.up(knex);
+    expect(knex.db().services[0]).toMatchObject(edited);
   });
 
   test('a missing row is skipped with a warning', async () => {
@@ -184,7 +209,7 @@ describe('down', () => {
     expect(db.pricing_changelog).toEqual([{ ...seedMigration.CHANGELOG }]);
   });
 
-  test('leaves a pricing_config row an admin edited after up() (and the services row an admin edited)', async () => {
+  test('leaves a pricing_config row an admin edited after up() (and an edited services price)', async () => {
     const knex = fakeKnex({ pricing_config: [configRow(SEED)], services: [installRow()] });
     await migration.up(knex);
     const edited = { ...NEXT, serviceCallNoPlan: 175 };
@@ -194,17 +219,43 @@ describe('down', () => {
     const db = knex.db();
     expect(JSON.parse(db.pricing_config[0].data)).toEqual(edited);
     expect(Number(db.services[0].base_price)).toBe(4300);
-    expect(db.services[0].description).toBe(migration.NEW_SERVICE.description);
+    expect(db.services[0].description).toBe(OLD_INSTALL.description);
     expect(db.pricing_config_audit).toHaveLength(0);
   });
 
-  test('leaves a services row whose copy was edited even when the prices still match', async () => {
+  test.each([
+    ['description', 'Admin copy', 'internal_notes'],
+    ['internal_notes', 'Admin notes', 'description'],
+  ])('an edited %s after up() stays; the other fields still go back', async (field, text, other) => {
     const knex = fakeKnex({ services: [installRow()] });
     await migration.up(knex);
-    knex.db().services[0].description = 'Admin copy';
+    knex.db().services[0][field] = text;
     await migration.down(knex);
-    expect(Number(knex.db().services[0].base_price)).toBe(4195);
-    expect(knex.db().services[0].description).toBe('Admin copy');
+    const row = knex.db().services[0];
+    expect(row[field]).toBe(text);
+    expect(row[other]).toBe(OLD_INSTALL[other]);
+    expect(Number(row.base_price)).toBe(OLD_INSTALL.base_price);
+    expect(Number(row.price_range_min)).toBe(OLD_INSTALL.price_range_min);
+  });
+
+  test('an edited price after up() stays; the unedited fields still go back', async () => {
+    const knex = fakeKnex({ services: [installRow()] });
+    await migration.up(knex);
+    knex.db().services[0].base_price = '4300.00';
+    await migration.down(knex);
+    const row = knex.db().services[0];
+    expect(Number(row.base_price)).toBe(4300);
+    expect(Number(row.price_range_min)).toBe(OLD_INSTALL.price_range_min);
+    expect(row.description).toBe(OLD_INSTALL.description);
+    expect(row.internal_notes).toBe(OLD_INSTALL.internal_notes);
+  });
+
+  test('operator text that up() left alone is never overwritten by down()', async () => {
+    const knex = fakeKnex({ services: [installRow({ description: 'Our own install copy' })] });
+    await migration.up(knex);
+    await migration.down(knex);
+    expect(knex.db().services[0].description).toBe('Our own install copy');
+    expect(Number(knex.db().services[0].base_price)).toBe(OLD_INSTALL.base_price);
   });
 
   test('a row that up() skipped (edited) is not rewritten by down()', async () => {
