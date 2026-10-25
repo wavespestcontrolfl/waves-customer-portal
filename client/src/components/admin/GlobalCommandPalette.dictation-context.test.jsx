@@ -111,3 +111,42 @@ describe('Intelligence Bar dictation flag', () => {
     expect(body.dictation_used).toBe(true);
   });
 });
+
+// GATE_IB_TARGET_RULES_V2: text pasted or dropped into the message (a customer's email or text)
+// is not all the operator's own words, so the bar says so (pasted_text) and the server shows a
+// card for every write. The flag goes with the message it was pasted into, not the next one.
+describe('Intelligence Bar pasted-text flag', () => {
+  const queryBodies = () => fetch.mock.calls
+    .filter(([url, opts]) => String(url).includes('/intelligence-bar/query') && opts?.method === 'POST')
+    .map(([, opts]) => JSON.parse(opts.body));
+  async function send(box, value, how) {
+    const text = { getData: (type) => (type === 'text/plain' ? value : '') };
+    if (how === 'paste') fireEvent.paste(box, { clipboardData: text });
+    if (how === 'drop') fireEvent.drop(box, { dataTransfer: text });
+    fireEvent.change(box, { target: { value } });
+    const sent = queryBodies().length;
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await waitFor(() => expect(queryBodies()).toHaveLength(sent + 1));
+    await waitFor(() => expect(box).toHaveValue(''));
+    return queryBodies().at(-1);
+  }
+  async function composer(mobile = false) {
+    useIsMobile.mockReturnValue(mobile);
+    await openBar(null);
+    return screen.findByPlaceholderText(/Ask anything|Tell me|Ask/);
+  }
+
+  it.each([
+    { how: 'paste', mobile: false }, { how: 'drop', mobile: false }, { how: 'paste', mobile: true },
+  ])('text by $how (mobile=$mobile) sends pasted_text: true; the next typed message does not', async ({ how, mobile }) => {
+    const box = await composer(mobile);
+    expect((await send(box, 'Hi, this is Pat Example. Please change my name on the account', how)).pasted_text).toBe(true);
+    expect(await send(box, 'thanks', null)).not.toHaveProperty('pasted_text');
+  });
+
+  it('a typed message sends no flag, and a paste with no text (an image) sets none', async () => {
+    const box = await composer();
+    fireEvent.paste(box, { clipboardData: { getData: () => '' } });
+    expect(await send(box, 'update Pat Example notes', null)).not.toHaveProperty('pasted_text');
+  });
+});

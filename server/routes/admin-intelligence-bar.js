@@ -3633,7 +3633,9 @@ async function runQuery(req, res, next) {
         thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
         thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
         // kept with the saved task so a customer pick or a resume still asks about the dictated amount
-        ...(dictationMoneyNormalizeLive() && req.body.dictation_used === true ? { dictation_used: true } : {}) };
+        ...(dictationMoneyNormalizeLive() && req.body.dictation_used === true ? { dictation_used: true } : {}),
+        // …and still cards every write after pasted text (owner-direct.js, PASTED TEXT)
+        ...(req.body.pasted_text === true ? { pasted_text: true } : {}) };
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
         ...taskRequestsFor(req, taskRequest),
@@ -3798,6 +3800,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       fullAccess: actionScope.fullAccess, conversationHistory, prompt,
     });
     OwnerDirect.noteSameNameContext(requestTaint, taskContext);
+    // Text pasted or dropped into the message: every write shows its card (owner-direct.js, PASTED TEXT).
+    if (req.body.pasted_text === true) OwnerDirect.notePastedText(requestTaint);
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the
       // ones a completed discovery round loaded but never reached (the
