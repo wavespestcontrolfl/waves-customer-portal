@@ -1165,7 +1165,7 @@ router.post('/sms', async (req, res) => {
     // GATE_LEAD_CALL_TEXT_FOLLOWUP: a lead answering our "what time
     // tomorrow" question is answering that, not the intake machine ("10 AM
     // works" reads as an address there); the follow-up below takes it.
-    const pendingTimeAnswer = !!(customer && Body) && !isAiNumber
+    const pendingTimeAnswer = !!(customer && Body) && !isAiNumber && !TWILIO_NUMBERS.isTechLine(To)
       && await require('../services/lead-call-text-followup').hasOpenTimeAsk({ customer, fromPhone: From });
     if (customer && Body && customer.lead_intake_status &&
         customer.lead_intake_status !== 'estimate_drafted' && !rescheduleAsk && !pendingTimeAnswer) {
@@ -1199,8 +1199,10 @@ router.post('/sms', async (req, res) => {
     // 8 AM-8 PM ET. Keyed on our sent text, not lead_intake_status, so a lead
     // whose intake state never seeded still counts. Post-ack, never awaited;
     // the service holds every other rule.
-    // Not on the AI line: its own auto-reply already answers there.
-    if (Body && customer?.id && !smsReaction && !rescheduleAsk && !isAiNumber) {
+    // Never the AI line (its own auto-reply answers there) or a technician's
+    // line (no automated replies on those conversations).
+    const leadFollowupLine = !isAiNumber && !TWILIO_NUMBERS.isTechLine(To);
+    if (Body && customer?.id && !smsReaction && !rescheduleAsk && leadFollowupLine) {
       const ringInput = { customer, body: Body, fromPhone: From, smsLogId: smsLogEntry?.id || null };
       res.once('finish', () => {
         void require('../services/lead-call-reply-ring').ringForCallReply(ringInput)

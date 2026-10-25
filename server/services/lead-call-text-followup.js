@@ -38,6 +38,9 @@ const SLOT_MINUTES = 15;
 // Same set as lead-call-reply-ring.js: a row in one of these is a customer.
 const REAL_CUSTOMER_STAGES = ['active_customer', 'won', 'at_risk'];
 
+// Code only in logs: a knex message carries the bindings (the phone digits).
+const errCode = (err) => String(err?.code || err?.name || 'error');
+
 function phoneDigits(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
 }
@@ -162,7 +165,7 @@ async function sendFollowup({ customer, phone, body, kind, requestId, requireSta
   } catch (err) {
     result = err?.providerOutcome && typeof err.providerOutcome === 'object' ? err.providerOutcome : null;
     if (!result) {
-      logger.warn(`[lead-call-text-followup] send threw for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
+      logger.warn(`[lead-call-text-followup] send threw for customer ${customer.id} (${errCode(err)})`);
       return 'uncertain';
     }
   }
@@ -197,7 +200,7 @@ async function raiseLeadBell({ customer, leadId, requestId, why }, delaysMs = BE
       });
       if (bellSettled(result)) return true;
     } catch (err) {
-      logger.warn(`[lead-call-text-followup] bell try failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
+      logger.warn(`[lead-call-text-followup] bell try failed for customer ${customer.id} (${errCode(err)})`);
     }
   }
   logger.error(`[lead-call-text-followup] bell not delivered for customer ${customer.id} after ${delaysMs.length} tries (request ${requestId})`);
@@ -362,7 +365,7 @@ async function hasOpenTimeAsk({ customer, fromPhone, now = new Date() }) {
       .first('id');
     return !!open;
   } catch (err) {
-    logger.warn(`[lead-call-text-followup] open-ask check failed for customer ${customer?.id} (${String(err?.code || err?.name || 'error')})`);
+    logger.warn(`[lead-call-text-followup] open-ask check failed for customer ${customer?.id} (${errCode(err)})`);
     return false;
   }
 }
@@ -374,7 +377,7 @@ async function hasOpenTimeAsk({ customer, fromPhone, now = new Date() }) {
 async function handleLeadReply({ customer, body, fromPhone, smsLogId = null, now = new Date() }) {
   try {
     if (!isEnabled('leadCallTextFollowup')) return { action: 'none', reason: 'gate_off' };
-    if (!customer?.id || typeof body !== 'string' || !body.trim()) return { action: 'none', reason: 'no_input' };
+    if (!customer?.id || !String(body || '').trim()) return { action: 'none', reason: 'no_input' };
     if (!/^\+1\d{10}$/.test(String(fromPhone || ''))) return { action: 'none', reason: 'bad_phone' };
     const digits = phoneDigits(fromPhone);
     await closeStaleRows(digits, now);
@@ -403,8 +406,7 @@ async function handleLeadReply({ customer, body, fromPhone, smsLogId = null, now
     }
     return answerTimeAsk({ customer, request: open, body, smsLogId, now });
   } catch (err) {
-    // Code only: a knex message carries the bindings (the phone digits).
-    logger.error(`[lead-call-text-followup] failed for customer ${customer?.id} (${String(err?.code || err?.name || 'error')})`);
+    logger.error(`[lead-call-text-followup] failed for customer ${customer?.id} (${errCode(err)})`);
     return { action: 'none', reason: 'error' };
   }
 }
