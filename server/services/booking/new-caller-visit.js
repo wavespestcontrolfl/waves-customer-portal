@@ -26,6 +26,12 @@ const { completeScheduledServiceInsert } = require('../booking/create-scheduled-
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const { assertAssignableTechnician } = require('../technician-eligibility');
 const mistingRefill = require('../misting-refill');
+const logger = require('../logger');
+const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+const { dateOnlyString } = require('../../utils/datetime-et');
+const { ensurePrimaryProperty, recordCallProperty } = require('../customer-properties');
+const { addressKey } = require('../customer-property-address-keys');
+const { closeAdminAlertKeys } = require('../admin-alert-episodes');
 
 const NEW_CALLER_SOURCE_ACTION = 'admin_new_caller';
 const PICKABLE_ANSWERED_MINUTES = 30;
@@ -42,6 +48,10 @@ const MAX_PICKABLE_CALLS = 10;
 const MAX_ANSWERED_CANDIDATES = 50;
 // callEndedAt reads created_at, metadata and both lengths; the save locks on the Call SID.
 const CALL_COLUMNS = ['id', 'twilio_call_sid', 'direction', 'from_phone', 'to_phone', 'status', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds'];
+
+// The bell for a visit booked by address that still waits for its customer
+// (D4): one row per visit, closed by the link.
+const newCallerVisitAlertKey = (visitId) => `new-caller-visit:${visitId}`;
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM = /^\d{2}:\d{2}$/;
@@ -210,6 +220,18 @@ async function findPickableCallForSave(conn, callLogId, now) {
   return row && stillPickable(row, { now, endedMinutes: PICKABLE_ENDED_MINUTES + SAVE_GRACE_MINUTES }) ? row : null;
 }
 
+// The call locks, before rung 1, in the order the recording processor's
+// booking transaction takes its own (call-recording-processor.js): the call
+// row's id first, so two writers for one call run one after the other even
+// while an outbound bridge has no Call SID yet, then the processor's Call SID
+// lock. Whoever runs second sees the first one's visit.
+async function lockCallForBooking(trx, call) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['new-caller-visit-call', call.id]);
+  if (call.twilio_call_sid) {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', call.twilio_call_sid]);
+  }
+}
+
 // Books the visit. `zone` comes from the route (admin-schedule.js getZone,
 // the same zone the office create route stamps). Returns the inserted row
 // and any advisory overlap warning; admin writes never block on a clash.
@@ -242,16 +264,8 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
     if (v.callLogId) {
       const call = await findPickableCallForSave(trx, v.callLogId, now);
       if (!call) throw httpError(409, 'That call is no longer live. Pick the call again.');
-      // The call locks before rung 1. The call row's id first: two Books for
-      // one call run one after the other even while an outbound bridge has
-      // no Call SID yet. Then the recording processor's own lock, in the order
-      // its booking transaction takes it (call-recording-processor.js), so
-      // Book and the processor's booking for one call also run one after the
-      // other. Whoever runs second sees the first one's visit.
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['new-caller-visit-call', call.id]);
-      if (call.twilio_call_sid) {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', call.twilio_call_sid]);
-      }
+      // A repeated Book, or the processor's own booking of this call, is refused below.
+      await lockCallForBooking(trx, call);
       const owned = await trx('scheduled_services')
         .whereNull('parent_service_id')
         .whereNotIn('status', ['cancelled', 'rescheduled'])
@@ -320,6 +334,99 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
   });
 }
 
+// Links a visit booked by address to its customer: the office's Link, and
+// the call-recording agent's link step. Serialized with Book and the
+// processor's booking on the visit's call. D6: an address that is not on the
+// customer's account yet becomes one of its properties, and the visit points
+// at it. The visit's bell closes. armLinkedVisitComms arms the reminders and
+// the confirmation after the commit. propertySource labels a property the
+// link adds: 'manual' for the office, 'call_pipeline' for the agent.
+async function linkNewCallerVisit({ visitId, customerId, adminUserId = null, propertySource = 'manual', conn = db } = {}) {
+  if (!isEnabled('newCallerBooking')) throw httpError(404, 'Not found');
+  matchOrThrow(visitId, UUID, 'Open the visit again.');
+  matchOrThrow(customerId, UUID, 'Pick the customer again.');
+  const linked = await conn.transaction(async (trx) => {
+    const visit = await trx('scheduled_services').where({ id: visitId }).first();
+    if (!visit || visit.source_action !== NEW_CALLER_SOURCE_ACTION) throw httpError(404, 'This visit was not booked by address for a new caller.');
+    if (visit.source_call_log_id) {
+      const call = await trx('call_log').where({ id: visit.source_call_log_id }).first('id', 'twilio_call_sid');
+      if (call) await lockCallForBooking(trx, call);
+    }
+    // Rung 6 before any row lock (occupancy.js ordering contract), then the
+    // customer row itself (customers before the child rows written below), so
+    // a merge cannot archive it between this check and the link.
+    await lockCustomerComms(trx, customerId);
+    const customer = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'deleted_at');
+    if (!customer) throw httpError(400, 'That customer was not found. Pick the customer again.');
+    if (customer.deleted_at) {
+      throw httpError(409, 'That customer was merged into another account. Search again and pick the current one.');
+    }
+    const address = {
+      address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
+      city: visit.service_address_city, state: visit.service_address_state, zip: visit.service_address_zip,
+    };
+    // The customer's own home first (an older customer may have no property row
+    // yet), so a different booked address is added beside it, never as its primary.
+    await ensurePrimaryProperty(customerId, { conn: trx });
+    const recorded = await recordCallProperty({
+      customerId, ...address, latitude: visit.lat, longitude: visit.lng, source: propertySource, conn: trx,
+    });
+    // Every row, removed ones too: recordCallProperty never re-adds a removed
+    // address, and a removed property is never booked.
+    const key = addressKey(address);
+    const properties = await trx('customer_properties').where({ customer_id: customerId })
+      .select('id', 'active', 'address_line1', 'address_line2', 'city', 'zip');
+    const property = properties.find((p) => key && addressKey(p) === key);
+    if (!property || !property.active) {
+      throw httpError(409, property
+        ? 'This address was removed from the customer\'s account, so the visit cannot use it. Check the customer, or book the visit again.'
+        : 'The visit address could not be added to this customer. Try again.');
+    }
+    const note = 'Linked to its customer after the call.';
+    const [row] = await trx('scheduled_services')
+      .where({ id: visit.id })
+      .whereNull('customer_id')
+      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      .update({
+        customer_id: customerId,
+        property_id: property.id,
+        internal_notes: visit.internal_notes ? `${visit.internal_notes}\n${note}` : note,
+        updated_at: new Date(),
+      })
+      .returning('*');
+    if (!row) throw httpError(409, 'This visit already has a customer, or it was cancelled.');
+    await trx('activity_log').insert({
+      admin_user_id: adminUserId,
+      customer_id: customerId,
+      action: 'new_caller_visit_linked',
+      description: `Visit ${row.id} booked by address is linked to its customer.`,
+      metadata: JSON.stringify({ scheduled_service_id: row.id, call_log_id: row.source_call_log_id || null, property_added: recorded.created === true }),
+    });
+    return { visit: row, addedProperty: recorded.created === true };
+  });
+  await closeAdminAlertKeys(conn, [newCallerVisitAlertKey(visitId)], 'linked', { resolution: 'Linked to its customer' })
+    .catch((err) => logger.warn(`[new-caller] bell close failed for visit ${visitId}: ${err.message}`));
+  return linked;
+}
+
+// After a link: the calls the office create route makes for a new visit
+// (registerAppointment, then the deferred sendConfirmation). Both catch their
+// own failures and answer null / false, so the outcome is read from their
+// answers: { remindersArmed, confirmationSent }.
+async function armLinkedVisitComms({ visit, sendConfirmation = true }) {
+  const AppointmentReminders = require('../appointment-reminders');
+  const windowStart = visit.window_start ? String(visit.window_start).slice(0, 5) : null;
+  const registered = await AppointmentReminders.registerAppointment(
+    visit.id, visit.customer_id,
+    `${dateOnlyString(visit.scheduled_date)}T${windowStart || '08:00'}`,
+    visit.service_type, 'admin_manual',
+    { sendConfirmation, deferConfirmation: true, closeReminderWindows: !windowStart, fromCommittedRow: true },
+  );
+  if (!registered) return { remindersArmed: false, confirmationSent: false };
+  if (!sendConfirmation) return { remindersArmed: true, confirmationSent: false };
+  return { remindersArmed: true, confirmationSent: (await AppointmentReminders.sendConfirmation(visit.id)) === true };
+}
+
 module.exports = {
   NEW_CALLER_SOURCE_ACTION,
   PICKABLE_ANSWERED_MINUTES,
@@ -329,4 +436,7 @@ module.exports = {
   stillPickable,
   listPickableCalls,
   bookNewCallerVisit,
+  linkNewCallerVisit,
+  armLinkedVisitComms,
+  newCallerVisitAlertKey,
 };

@@ -11,7 +11,7 @@ const mockAdminAuth = {
   adminAuthenticate: jest.fn((req, res, next) => next()),
   requireAdmin: jest.fn((req, res, next) => next()),
 };
-jest.mock('../middleware/admin-auth', () => mockAdminAuth);
+jest.mock('../middleware/admin-auth', () => ({ ...jest.requireActual('../middleware/admin-auth'), ...mockAdminAuth }));
 
 let mockNewCallerGate = true;
 jest.mock('../config/feature-gates', () => {
@@ -31,6 +31,8 @@ const {
   toPickableCall,
   stillPickable,
   bookNewCallerVisit,
+  linkNewCallerVisit,
+  armLinkedVisitComms,
 } = require('../services/booking/new-caller-visit');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 
@@ -159,6 +161,13 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
   test('rides the admin schedule day view to Dispatch, and the route mounts before the main schedule router', () => {
     const day = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     expect(day).toContain("newCallerBooking: isEnabled('newCallerBooking')");
+    // The day and the week feed both open the visit sheet, so both carry the New caller fields
+    // (the week query selects source_action for them).
+    expect(day.match(/\.\.\.newCallerRowFields\(s\)/g)).toHaveLength(2);
+    const weekStart = day.indexOf("router.get('/week'");
+    const week = day.slice(weekStart, day.indexOf('router.', weekStart + 20));
+    expect(week).toContain("'scheduled_services.source_action'");
+    expect(week).toContain('...newCallerRowFields(s)');
     const index = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
     const own = index.indexOf("app.use('/api/admin/schedule/new-caller'");
     const main = index.indexOf("app.use('/api/admin/schedule', require('./routes/admin-schedule'))");
@@ -172,12 +181,63 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     const processor = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     expect(processor).toContain(`${lock} callSid]`);
     expect(own).toContain(`${lock} call.twilio_call_sid]`);
-    // The call row's id first (an outbound bridge may have no Call SID yet), then the processor's key, then the ownership read.
-    const byId = own.indexOf("['new-caller-visit-call', call.id]");
-    expect(byId).toBeGreaterThan(-1);
-    expect(byId).toBeLessThan(own.indexOf(lock));
-    expect(own.indexOf(lock)).toBeLessThan(own.indexOf("linked.where('source_call_log_id', call.id)"));
-    expect(own.indexOf(lock)).toBeLessThan(own.indexOf('await probeSlotOverlap('));
+    // lockCallForBooking: the call row's id first (an outbound bridge may have no Call SID yet), then the processor's key.
+    const helper = own.slice(own.indexOf('async function lockCallForBooking('), own.indexOf('// Books the visit.'));
+    expect(helper.indexOf("['new-caller-visit-call', call.id]")).toBeGreaterThan(-1);
+    expect(helper.indexOf("['new-caller-visit-call', call.id]")).toBeLessThan(helper.indexOf(lock));
+    // Book: the locks, then the ownership read, then rung 1.
+    const book = own.slice(own.indexOf('async function bookNewCallerVisit('), own.indexOf('async function linkNewCallerVisit('));
+    expect(book.indexOf('await lockCallForBooking(trx, call);')).toBeGreaterThan(-1);
+    expect(book.indexOf('await lockCallForBooking(trx, call);')).toBeLessThan(book.indexOf("linked.where('source_call_log_id', call.id)"));
+    expect(book.indexOf("linked.where('source_call_log_id', call.id)")).toBeLessThan(book.indexOf('await probeSlotOverlap('));
+    // Link: the same call locks, then rung 6, before any row lock.
+    const link = own.slice(own.indexOf('async function linkNewCallerVisit('), own.indexOf('async function armLinkedVisitComms('));
+    expect(link.indexOf('await lockCallForBooking(trx, call);')).toBeGreaterThan(-1);
+    expect(link.indexOf('await lockCallForBooking(trx, call);')).toBeLessThan(link.indexOf('await lockCustomerComms(trx, customerId);'));
+    expect(link.indexOf('await lockCustomerComms(trx, customerId);')).toBeLessThan(link.indexOf('recordCallProperty('));
+  });
+
+  test('after a link, the outcome is read from the helpers\' own answers (they catch their failures)', async () => {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const register = jest.spyOn(AppointmentReminders, 'registerAppointment');
+    const confirm = jest.spyOn(AppointmentReminders, 'sendConfirmation');
+    const visit = { id: 'svc-1', customer_id: 'cust-1', scheduled_date: '2031-03-07', window_start: '13:00:00', service_type: 'Waves Assessment' };
+    try {
+      register.mockResolvedValueOnce(null);
+      await expect(armLinkedVisitComms({ visit })).resolves.toEqual({ remindersArmed: false, confirmationSent: false });
+      expect(confirm).not.toHaveBeenCalled();
+
+      register.mockResolvedValueOnce({ record: { id: 'r1' }, inserted: true });
+      confirm.mockResolvedValueOnce(false);
+      await expect(armLinkedVisitComms({ visit })).resolves.toEqual({ remindersArmed: true, confirmationSent: false });
+
+      register.mockResolvedValueOnce({ record: { id: 'r1' }, inserted: true });
+      confirm.mockResolvedValueOnce(true);
+      await expect(armLinkedVisitComms({ visit })).resolves.toEqual({ remindersArmed: true, confirmationSent: true });
+      expect(register).toHaveBeenLastCalledWith('svc-1', 'cust-1', '2031-03-07T13:00', 'Waves Assessment', 'admin_manual',
+        { sendConfirmation: true, deferConfirmation: true, closeReminderWindows: false, fromCommittedRow: true });
+
+      confirm.mockClear();
+      register.mockResolvedValueOnce({ record: { id: 'r1' }, inserted: true });
+      await expect(armLinkedVisitComms({ visit, sendConfirmation: false })).resolves.toEqual({ remindersArmed: true, confirmationSent: false });
+      expect(confirm).not.toHaveBeenCalled();
+    } finally {
+      register.mockRestore();
+      confirm.mockRestore();
+    }
+  });
+
+  test('Link refuses with a 404 while the gate is off, and a 400 for a bad id, before any read', async () => {
+    const conn = () => { throw new Error('no query expected'); };
+    const VISIT = '0f8b9d1e-2c3a-4b5d-8e6f-7a8b9c0d1e2f';
+    mockNewCallerGate = false;
+    try {
+      await expect(linkNewCallerVisit({ visitId: VISIT, customerId: VISIT, conn })).rejects.toMatchObject({ status: 404 });
+    } finally {
+      mockNewCallerGate = true;
+    }
+    await expect(linkNewCallerVisit({ visitId: 'visit-1', customerId: VISIT, conn })).rejects.toMatchObject({ status: 400, message: 'Open the visit again.' });
+    await expect(linkNewCallerVisit({ visitId: VISIT, customerId: 'cust-1', conn })).rejects.toMatchObject({ status: 400, message: 'Pick the customer again.' });
   });
 
   test('a misting refill is refused as the visit itself, before any write (the create route\'s own rule)', async () => {
@@ -194,6 +254,14 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     } finally {
       if (saved === undefined) delete process.env.GATE_MOSQUITO_MISTING; else process.env.GATE_MOSQUITO_MISTING = saved;
     }
+  });
+
+  test('a visit booked by address reads "New caller" and awaits its link; a named visit or a slot hold does not', () => {
+    const { newCallerRowFields } = require('../routes/admin-schedule');
+    expect(newCallerRowFields({ customer_id: null, source_action: 'admin_new_caller' })).toEqual({ customerName: 'New caller', awaitingCustomerLink: true });
+    expect(newCallerRowFields({ customer_id: 'cust-1', source_action: 'admin_new_caller', first_name: 'Pat', last_name: 'Example' }))
+      .toEqual({ customerName: 'Pat Example', awaitingCustomerLink: false });
+    expect(newCallerRowFields({ customer_id: null, source_action: 'estimate_slot_hold' })).toEqual({ customerName: null, awaitingCustomerLink: false });
   });
 
   test('the service refuses with a 404 while the gate is off, before any read', async () => {
@@ -217,9 +285,10 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
       const { port } = server.address();
       const calls = await fetch(`http://127.0.0.1:${port}/new-caller/calls`);
       const book = await fetch(`http://127.0.0.1:${port}/new-caller`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      expect([calls.status, book.status]).toEqual([404, 404]);
-      expect(mockAdminAuth.adminAuthenticate).toHaveBeenCalledTimes(2);
-      expect(mockAdminAuth.requireAdmin).toHaveBeenCalledTimes(2);
+      const link = await fetch(`http://127.0.0.1:${port}/new-caller/0f8b9d1e-2c3a-4b5d-8e6f-7a8b9c0d1e2f/link`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      expect([calls.status, book.status, link.status]).toEqual([404, 404, 404]);
+      expect(mockAdminAuth.adminAuthenticate).toHaveBeenCalledTimes(3);
+      expect(mockAdminAuth.requireAdmin).toHaveBeenCalledTimes(3);
     } finally {
       mockNewCallerGate = true;
       await new Promise((resolve) => server.close(resolve));
@@ -233,7 +302,7 @@ const maybeDescribe = SKIP ? describe.skip : describe;
 maybeDescribe('new-caller booking on Postgres', () => {
   let db;
   let service;
-  const made = { callIds: [], visitIds: [] };
+  const made = { callIds: [], visitIds: [], customerIds: [] };
   const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000);
 
   // updated_at defaults to a minute ago on every row: later writes (recording
@@ -266,11 +335,82 @@ maybeDescribe('new-caller booking on Postgres', () => {
   });
   afterAll(async () => {
     if (made.visitIds.length) {
-      await db('activity_log').where('action', 'new_caller_visit_booked').whereRaw("metadata->>'scheduled_service_id' = ANY(?)", [made.visitIds]).del();
+      await db('activity_log').whereIn('action', ['new_caller_visit_booked', 'new_caller_visit_linked']).whereRaw("metadata->>'scheduled_service_id' = ANY(?)", [made.visitIds]).del();
       await db('scheduled_services').whereIn('id', made.visitIds).del();
+    }
+    if (made.customerIds.length) {
+      await db('customer_properties').whereIn('customer_id', made.customerIds).del();
+      await db('customers').whereIn('id', made.customerIds).del();
     }
     if (made.callIds.length) await db('call_log').whereIn('id', made.callIds).del();
     await db.destroy();
+  });
+
+  test('Link gives the visit its customer, adds the booked address beside the customer\'s own home and points the visit at it; a second Link is refused', async () => {
+    const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+    const customerId = require('crypto').randomUUID();
+    await db('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Caller', phone: '+15555550142',
+      address_line1: '1 Synthetic Ln', city: 'Bradenton', zip: '34201', active: true,
+    });
+    made.customerIds.push(customerId);
+    const booked = await service.bookNewCallerVisit({ input: validInput({ serviceId: svc.id, scheduledDate: '2031-03-07', windowStart: '13:00' }) });
+    made.visitIds.push(booked.visit.id);
+
+    const { visit, addedProperty } = await service.linkNewCallerVisit({ visitId: booked.visit.id, customerId });
+    expect(visit.customer_id).toBe(customerId);
+    expect(addedProperty).toBe(true);
+    const property = await db('customer_properties').where({ id: visit.property_id }).first();
+    expect(property).toMatchObject({ customer_id: customerId, address_line1: '100 Example Way', zip: '34200', is_primary: false });
+    // The customer had no property row: their own home became the primary first, never the booked address.
+    const primary = await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first();
+    expect(primary).toMatchObject({ address_line1: '1 Synthetic Ln' });
+    expect(visit.internal_notes).toContain('Linked to its customer after the call.');
+    const logged = await db('activity_log').where({ action: 'new_caller_visit_linked' }).whereRaw("metadata->>'scheduled_service_id' = ?", [visit.id]).first();
+    expect(logged).toBeTruthy();
+
+    await expect(service.linkNewCallerVisit({ visitId: visit.id, customerId })).rejects.toMatchObject({ status: 409 });
+    await expect(service.linkNewCallerVisit({ visitId: visit.id, customerId: require('crypto').randomUUID() })).rejects.toMatchObject({ status: 400 });
+  });
+
+  test('Link refuses a booked address the customer\'s account removed, and writes nothing', async () => {
+    const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+    const customerId = require('crypto').randomUUID();
+    await db('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Removed', phone: '+15555550143',
+      address_line1: '1 Synthetic Ln', city: 'Bradenton', zip: '34201', active: true,
+    });
+    made.customerIds.push(customerId);
+    // The booked address was one of this customer's properties, since removed.
+    await db('customer_properties').insert({
+      customer_id: customerId, address_line1: '100 Example Way', city: 'Bradenton', state: 'FL', zip: '34200',
+      address_key: require('../services/customer-property-address-keys').addressKey({ address_line1: '100 Example Way', city: 'Bradenton', zip: '34200' }),
+      source: 'manual', active: false, is_primary: false,
+    });
+    const booked = await service.bookNewCallerVisit({ input: validInput({ serviceId: svc.id, scheduledDate: '2031-03-08', windowStart: '13:00' }) });
+    made.visitIds.push(booked.visit.id);
+
+    await expect(service.linkNewCallerVisit({ visitId: booked.visit.id, customerId }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/removed from the customer's account/) });
+    const row = await db('scheduled_services').where({ id: booked.visit.id }).first('customer_id', 'property_id');
+    expect(row).toEqual({ customer_id: null, property_id: null });
+  });
+
+  test('Link refuses a customer merged into another account, and adds no property', async () => {
+    const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+    const customerId = require('crypto').randomUUID();
+    await db('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Merged', phone: '+15555550144',
+      address_line1: '1 Synthetic Ln', city: 'Bradenton', zip: '34201', active: true, deleted_at: new Date(),
+    });
+    made.customerIds.push(customerId);
+    const booked = await service.bookNewCallerVisit({ input: validInput({ serviceId: svc.id, scheduledDate: '2031-03-09', windowStart: '13:00' }) });
+    made.visitIds.push(booked.visit.id);
+
+    await expect(service.linkNewCallerVisit({ visitId: booked.visit.id, customerId }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/merged into another account/) });
+    expect((await db('scheduled_services').where({ id: booked.visit.id }).first('customer_id')).customer_id).toBeNull();
+    expect(await db('customer_properties').where({ customer_id: customerId }).first('id')).toBeUndefined();
   });
 
   test('lists answered and recent calls, never a voice-agent call, an old answer or a long-ended call', async () => {

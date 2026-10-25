@@ -2661,6 +2661,16 @@ export default function DispatchPageV2({
             });
             setShowNewAppt(true);
           }}
+          // GATE_NEW_CALLER_BOOKING: Link customer on a visit booked by address.
+          newCallerBooking={safeData.newCallerBooking === true}
+          onCustomerLinked={() => {
+            closeFastSheetsBehindDetails();
+            // The visit now has a customer, a property and armed reminders:
+            // close the stale sheet and refetch, like the billing switch below.
+            setDetailService(null);
+            fetchSchedule(date, { silent: true });
+            setScheduleRefreshKey((k) => k + 1);
+          }}
           onBillingChanged={() => {
             closeFastSheetsBehindDetails();
             // The annual-prepay switch rewrote this visit's money state (lane,
