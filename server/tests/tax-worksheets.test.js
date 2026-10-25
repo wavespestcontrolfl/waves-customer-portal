@@ -124,10 +124,11 @@ describe('DR-15 lines', () => {
 
   test('refunded tax is line 6; refunds beyond the tax collected are an excess for the next return, never a negative amount due', () => {
     const r = ws.dr15Lines({ revenue: 5000, collected: legs(30, 428.57, 4.29), reversed: legs(100, 1428.57, 14.29), dueDate: '2026-12-21', today: '2026-12-01' });
-    expect(r.lines).toMatchObject({ gross_sales: 6428.57, taxable_amount: 428.57, tax_collected: 30, lawful_deductions: 100, tax_due: 0, collection_allowance: 0, amount_due: 0 });
+    // line 6 stops at the tax collected; the rest is the excess
+    expect(r.lines).toMatchObject({ gross_sales: 6428.57, taxable_amount: 428.57, tax_collected: 30, lawful_deductions: 30, tax_due: 0, collection_allowance: 0, amount_due: 0 });
     expect(r.excess_deduction).toBe(70);
     const part = ws.dr15Lines({ revenue: 5000, collected: legs(100, 1428.57, 14.29), reversed: legs(13.37, 191, 1.91), dueDate: '2026-12-21', today: '2026-12-01' });
-    expect(part.lines).toMatchObject({ tax_due: 86.63, collection_allowance: 2.17, amount_due: 84.46 });
+    expect(part.lines).toMatchObject({ lawful_deductions: 13.37, tax_due: 86.63, collection_allowance: 2.17, amount_due: 84.46 });
     expect(part.excess_deduction).toBe(0);
   });
 
@@ -261,7 +262,7 @@ describe('salesTaxSheet', () => {
     pnl.buildPnlReport.mockResolvedValue({ revenue: { total: 5000 }, coverage: { complete: true } });
     pnl.salesTaxLegsForWindow.mockResolvedValue({ tax: -70, taxable: -1000, surtax: -10, collected: { tax: 30, taxable: 428.57, surtax: 4.29 }, reversed: { tax: 100, taxable: 1428.57, surtax: 14.29 } });
     const r = await ws.salesTaxSheet({ kind: 'month', year: 2026, index: 9 });
-    expect(r.lines).toMatchObject({ tax_due: 0, lawful_deductions: 100, amount_due: 50 });
+    expect(r.lines).toMatchObject({ tax_due: 0, lawful_deductions: 30, amount_due: 50 });
     expect(r.warnings).toContainEqual({ code: 'excess_deduction', text: "Tax refunded ($100.00) is more than the tax collected. Carry the $70.00 excess to the next return's line 6." });
   });
 

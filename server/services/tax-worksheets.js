@@ -110,8 +110,8 @@ function dr15DueDate(periodEnd) {
 
 // The DR-15 lines from the period's figures. Tax collected (line A column 4)
 // and the tax refunded on earlier sales (line 6, lawful deductions) stay
-// apart; refunds beyond the tax collected are an excess the next return
-// deducts, never a negative amount due. Gross sales add the refunded taxable
+// apart; line 6 may not exceed the tax collected (DR-15N), so refunds beyond
+// it are an excess the next return deducts, never a negative amount due. Gross sales add the refunded taxable
 // base back to the P&L revenue, which nets refunds, so column 3 never tops
 // column 1. A return is on time only when it is filed AND its tax is paid by
 // the due date: `filedOn` and `paidOn` come from the filing calendar row, and
@@ -131,7 +131,7 @@ function dr15Lines({ revenue, collected, reversed, dueDate, today, filedOn = nul
       exempt_sales: round2(Math.max(0, grossSales - collected.taxable)),
       taxable_amount: round2(collected.taxable),
       tax_collected: round2(collected.tax),
-      lawful_deductions: round2(reversed.tax),
+      lawful_deductions: round2(Math.min(reversed.tax, Math.max(0, collected.tax))),
       tax_due: taxDue,
       surtax_collected: round2(collected.surtax),
       collection_allowance: allowance,
@@ -180,7 +180,7 @@ async function salesTaxSheet({ kind = 'month', year, index } = {}) {
   const warnings = [
     period.end >= today && { code: 'in_progress', text: `This period runs to ${period.end}; the figures will change.` },
     pnl.coverage?.complete === false && { code: 'pnl_coverage', text: `Sales may be incomplete: ${pnl.coverage.note}` },
-    sheet.excess_deduction > 0 && { code: 'excess_deduction', text: `Tax refunded (${money(sheet.lines.lawful_deductions)}) is more than the tax collected. Carry the ${money(sheet.excess_deduction)} excess to the next return's line 6.` },
+    sheet.excess_deduction > 0 && { code: 'excess_deduction', text: `Tax refunded (${money(legs.reversed.tax)}) is more than the tax collected. Carry the ${money(sheet.excess_deduction)} excess to the next return's line 6.` },
     taxable > grossSales && { code: 'taxable_over_gross', text: `The taxable amount (${money(taxable)}) is more than gross sales (${money(grossSales)}). Check the period's refunds and credits.` },
   ].filter(Boolean);
   return { period: { ...period, in_progress: period.end >= today }, due_date: dueDate, ...sheet, filing, warnings };
