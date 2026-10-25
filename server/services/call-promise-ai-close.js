@@ -47,12 +47,13 @@
 
 const crypto = require('crypto');
 const logger = require('./logger');
-const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive } = require('../config/feature-gates');
+const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive, callPromiseLaterTextCheckLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const commitments = require('./call-commitments');
 const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
 const { verifyThreadCompletion, loadThreadMessages, latestHumanTextAt, THREAD_LIMIT, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
+const laterTexts = require('./call-promise-later-text-check');
 
 const { associationFrom, evidenceBoundary, storedProof, refreshableVerdictSql, staleAiRowSql, speakerTurns, normalizeForMatch } = commitments;
 
@@ -60,6 +61,8 @@ const { associationFrom, evidenceBoundary, storedProof, refreshableVerdictSql, s
 // the stored cache key, so every cached verdict is judged again.
 const VERSION = 'call-promise-ai-close-v1';
 const AI_CHECK_KIND = 'ai_check';
+// A record proof held because a human text came after it (judgeCandidate).
+const HELD_BY_LATER_TEXT = 'contradicted_by_later_text';
 const AI_CHECK_BASIS = 'ai_check';
 const AGENT = 'ai-check';
 // Model calls per run. The nightly watchdog pass uses MAX_MODEL_CALLS; the Owed
@@ -162,10 +165,42 @@ function sayWavesWords(verdict, evidence) {
   return turns && said && turns.agent.some((turn) => turn.includes(said)) ? verdict : { verdict: 'uncertain', reason: 'not_waves_words' };
 }
 
+// GATE_CALL_PROMISE_LATER_TEXT_CHECK helpers. A held proof (HELD_BY_LATER_TEXT) stands without a new model call
+// only while the later-text check has already answered for this proof, this newest human message and these later
+// texts; otherwise its cached verdict is dropped so the record check runs again (a hold cached before the check
+// existed carries no proof to test, so it is judged again once).
+async function dropUnansweredHold(conn, current, message, cache, now) {
+  const held = current.sms_context.fulfillment_check;
+  if (held?.reason !== HELD_BY_LATER_TEXT) return;
+  const proof = held.record_id && held.matched_at ? { record_type: held.record_type, record_id: held.record_id, matched_at: held.matched_at } : null;
+  const answered = !!proof && !!cache?.later_text_check && await laterTexts.laterVerdictCurrent(conn, { commitment: current, message, proof,
+    readThrough: await latestHumanMessage(conn, message), now, cache: cache.later_text_check });
+  if (!answered) delete current.sms_context.fulfillment_check;
+}
+
+// The cache a judgment stores. The later-text key exists only while that check is live, so off writes exactly
+// what it did before.
+const cacheOf = (checked, cache, laterLive) => ({ fulfillment_check: checked, thread_check: cache?.thread_check ?? null,
+  ...(laterLive ? { later_text_check: cache?.later_text_check ?? null } : {}) });
+
+// A record proof held by a later human text, as cached: no quote, the same evidence hash, and (while the
+// later-text check is live) the record it rests on, so that check can tell whether it already answered.
+const heldVerdict = (checked, verdict, laterLive) => ({ verdict: 'uncertain', reason: HELD_BY_LATER_TEXT, evidence_hash: checked.evidence_hash, retry_after: null,
+  ...(laterLive ? { record_type: verdict.record_type, record_id: verdict.record_id, matched_at: iso(verdict.matched_at || new Date()) } : {}) });
+
+// The later-text check over a held record proof: true when it found nothing against it, so the record may close
+// the promise. Keeps its answer on the judgment's cache; a spent budget (null) holds for this run, as before.
+async function laterTextsAllowClose(conn, result, { verdict, cache, now, mayCall, checkLater }) {
+  const later = await checkLater(conn, { commitment: result.current, message: result.message, proof: verdict, readThrough: result.readThrough, now,
+    cache: cache?.later_text_check, mayCall });
+  if (later) result.cache.later_text_check = later;
+  return later?.verdict === 'not_contradicted';
+}
+
 // Judges one open promise; writes nothing. `budget.left` caps model calls (a
 // cached verdict costs none). Returns { outcome, ... }: skipped | deferred |
 // judged, with the verdict, the cache to store and the objects a close needs.
-async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfillment, verifyThread = verifyThreadCompletion }) {
+async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfillment, verifyThread = verifyThreadCompletion, checkLater = laterTexts.checkLaterTexts }) {
   const call = callOf(row);
   const after = await evidenceBoundary(conn, row, call, { endOf: callEnd });
   if (!after) return { outcome: 'skipped', reason: 'no_call_time' };
@@ -173,6 +208,10 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
   if (from.getTime() >= now.getTime()) return { outcome: 'skipped', reason: 'not_yet' };
   const cache = parsed(row.contact_check)?.ai_close?.version === VERSION ? parsed(row.contact_check).ai_close : null;
   const { current, message } = await subjectOf(conn, row, from, cache);
+  // GATE_CALL_PROMISE_LATER_TEXT_CHECK: a held proof is judged again unless the later-text check already
+  // answered for exactly these later texts (a hold cached before the check existed carries no proof to test).
+  const laterLive = callPromiseLaterTextCheckLive();
+  if (laterLive) await dropUnansweredHold(conn, current, message, cache, now);
   const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
   let model = 0;
   // One model call from the run's budget; false when it is spent.
@@ -190,15 +229,19 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
     // evidence is not judged again on every pass (storeCache never keeps a fulfilled one).
     if (verdict !== checked) checked = { ...verdict, evidence_hash: checked.evidence_hash, retry_after: null };
   }
-  const result = { outcome: 'judged', verdict, current, message, evidence, model,
-    cache: { fulfillment_check: checked, thread_check: cache?.thread_check ?? null } };
+  const result = { outcome: 'judged', verdict, current, message, evidence, model, cache: cacheOf(checked, cache, laterLive) };
   if (verdict.verdict === 'fulfilled') {
     // A human message after the cited record: the record alone does not close. Remember the held verdict (no
     // quote, same evidence hash) so it is not re-judged, and let the later conversation decide below.
     result.readThrough = await latestHumanMessage(conn, message);
     if (!laterThan(result.readThrough, verdict.matched_at)) return result;
-    result.cache.fulfillment_check = { verdict: 'uncertain', reason: 'contradicted_by_later_text', evidence_hash: checked.evidence_hash, retry_after: null };
-    result.verdict = { verdict: 'uncertain', reason: 'contradicted_by_later_text' };
+    // GATE_CALL_PROMISE_LATER_TEXT_CHECK: only a clear "no later text says this promise was not kept" lets the
+    // record close it.
+    if (laterLive && await laterTextsAllowClose(conn, result, { verdict, cache, now, mayCall: take, checkLater })) {
+      return { ...result, model, laterTextChecked: true };
+    }
+    result.cache.fulfillment_check = heldVerdict(checked, verdict, laterLive);
+    result.verdict = { verdict: 'uncertain', reason: HELD_BY_LATER_TEXT };
   } else result.readThrough = null;
   // The customer's own later "got it, thanks" (or a person's "done") closes what
   // no record shows: the thread check, which only a later text can start.
@@ -269,13 +312,15 @@ async function witnessState(conn, row, { ref, thread = false, now = new Date() }
 
 const refOf = (checkerType, id) => `${checkerType}:${id}`;
 
-function proofOf(row, verdict, witnessFp, readThrough) {
+function proofOf(row, verdict, witnessFp, readThrough, laterTextChecked = false) {
   const matchedAt = verdict.matched_at ? iso(verdict.matched_at) : iso(new Date());
   const recordType = LEDGER_RECORD_TYPE[verdict.record_type] || verdict.record_type;
   return storedProof({ strength: 'association', kind: AI_CHECK_KIND, basis: AI_CHECK_BASIS, closed_agent: AGENT,
     record_type: recordType, record_id: verdict.record_id, label: RECORD_LABEL[recordType] || 'record', matched_at: matchedAt,
     check: verdict.basis === THREAD_BASIS ? THREAD_BASIS : 'record', ...(verdict.witness ? { witness: verdict.witness } : {}),
-    promise_md5: promiseMd5(row), witness_fp: witnessFp, read_through: readThrough ? iso(readThrough) : null, evidence_hash: verdict.evidence_hash, extractor_version: VERSION }, row.call_customer_id);
+    promise_md5: promiseMd5(row), witness_fp: witnessFp, read_through: readThrough ? iso(readThrough) : null, evidence_hash: verdict.evidence_hash, extractor_version: VERSION,
+    // Closed over later human texts that the later-text check found say nothing against it.
+    ...(laterTextChecked ? { later_text_check: laterTexts.VERSION } : {}) }, row.call_customer_id);
 }
 
 // One transaction: the promise (never waiting: a busy row fails the close and
@@ -307,7 +352,7 @@ async function closeOnVerdict(conn, row, judged, { now }) {
     if (!state.fingerprint) return false;
     // A human message that arrived since the verdict was judged changes the answer: the next run judges again.
     if ((state.lastHuman?.getTime() ?? null) !== (judged.readThrough?.getTime() ?? null)) return false;
-    const proof = proofOf(row, verdict, state.fingerprint, judged.readThrough);
+    const proof = proofOf(row, verdict, state.fingerprint, judged.readThrough, judged.laterTextChecked === true);
     const written = await snapshot(trx('call_commitments'))
       .whereExists(function callStillHasThatCustomer() {
         this.select(trx.raw('1')).from('call_log').where({ id: row.call_log_id, customer_id: row.call_customer_id }).forShare();
@@ -369,10 +414,15 @@ async function storeCache(conn, row, cache, now) {
   // contact_check rides on the staff-readable commitment row: keep the cached verdicts free of quotes. A
   // fulfilled verdict is not cached at all (it closes the promise in the same run; a lost race asks again).
   const bare = (v) => (v && v.verdict !== 'fulfilled' ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'quote')) : null);
-  const next = { version: VERSION, fulfillment_check: bare(cache.fulfillment_check), thread_check: bare(cache.thread_check), checked_at: now.toISOString() };
+  const next = { version: VERSION, fulfillment_check: bare(cache.fulfillment_check), thread_check: bare(cache.thread_check),
+    // Only while GATE_CALL_PROMISE_LATER_TEXT_CHECK is live (judgeCandidate sets the key): off writes exactly what it did.
+    ...(cache.later_text_check !== undefined ? { later_text_check: bare(cache.later_text_check) } : {}), checked_at: now.toISOString() };
   const prior = parsed(row.contact_check)?.ai_close;
-  const same = (a, b) => (a?.evidence_hash ?? null) === (b?.evidence_hash ?? null) && (a?.retry_after ?? null) === (b?.retry_after ?? null);
-  if (prior?.version === VERSION && same(prior.fulfillment_check, next.fulfillment_check) && same(prior.thread_check, next.thread_check)) return;
+  // record_id: a held proof that gains the record it rests on is written once, so the later-text check can test it.
+  const same = (a, b) => (a?.evidence_hash ?? null) === (b?.evidence_hash ?? null) && (a?.retry_after ?? null) === (b?.retry_after ?? null)
+    && (a?.record_id ?? null) === (b?.record_id ?? null);
+  if (prior?.version === VERSION && same(prior.fulfillment_check, next.fulfillment_check) && same(prior.thread_check, next.thread_check)
+    && (next.later_text_check === undefined || same(prior.later_text_check, next.later_text_check))) return;
   await conn('call_commitments').where({ id: row.id }).update({
     contact_check: conn.raw("COALESCE(contact_check, '{}'::jsonb) || jsonb_build_object('ai_close', ?::jsonb)", [JSON.stringify(next)]),
   });
