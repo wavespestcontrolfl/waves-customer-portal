@@ -7,7 +7,7 @@ const InvoiceService = require('./invoice');
 const { acquireScheduledInvoiceMintLock, TERMINAL_INVOICE_STATUSES } = require('./scheduled-invoice-mint');
 const { lockStop, dateOnly } = require('./visit-groups');
 const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane');
-const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cost-visit-types');
 const { parkSetupFeeStampForOffice, isPlanApplicationRow } = require('./setup-fee-obligation');
 const { acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
 
@@ -90,6 +90,8 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
     // so primary_line_price is on the row — pass it or a fully-discounted $0
     // packet member falls back to the acceptance fee here too.
     primaryLinePrice: member.primary_line_price,
+    // A consultation (Waves Assessment) never takes the per-application fee.
+    serviceType: member.service_type,
   });
   const eligible = require('./complete-scheduled-service').shouldAutoInvoiceCompletion({
     invoiceAmount: amount, createInvoiceOnComplete: member.create_invoice_on_complete,
@@ -101,6 +103,9 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
     autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
   });
   if (isAlwaysFreeServiceType(member.service_type) || (member.is_callback && !eligible)) return { lineItems: [] };
+  // A consultation (Waves Assessment) with no row price of its own bills
+  // nothing and needs no office review (completionInvoiceAmount).
+  if (isConsultationServiceType(member.service_type) && !(price > 0)) return { lineItems: [] };
   // A combined plan's customer-level fallback is not a price for each member.
   // Explicit zero is allowed only when the canonical lane also says zero.
   if (!Number.isFinite(price)) {
