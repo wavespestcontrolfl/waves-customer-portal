@@ -182,13 +182,13 @@ const BELL_RETRY_DELAYS_MS = [0, 2000, 10000];
 
 // One Leads bell per request, tried 3 times; only a written, deduped or
 // deliberately held row counts (the ring's own rule, lead-call-reply-ring.js).
-async function raiseLeadBell({ customer, leadId, requestId, why }, delaysMs = BELL_RETRY_DELAYS_MS) {
+async function raiseLeadBell({ customer, leadId, requestId, why, actions = null, key = 'lead-call-text-followup' }, delaysMs = BELL_RETRY_DELAYS_MS) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const { fitAction } = require('./admin-alert-names');
   const { _test: { bellSettled } } = require('./lead-call-reply-ring');
   const spec = {
     area: 'Leads',
-    action: fitAction('Leads', fullName(customer), [(who) => `call ${who} back`, (who) => `call ${who}`]),
+    action: fitAction('Leads', fullName(customer), actions || [(who) => `call ${who} back`, (who) => `call ${who}`]),
     why,
     severity: 'needs-you',
     link: leadId ? `/admin/leads?lead=${leadId}` : `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
@@ -200,7 +200,7 @@ async function raiseLeadBell({ customer, leadId, requestId, why }, delaysMs = BE
     if (delay) await new Promise((resolve) => { setTimeout(resolve, delay); });
     try {
       const result = await raiseAdminAlert('lead', spec, {
-        bell: true, dedupeKey: `lead-call-text-followup:${requestId}`, metadata: { leadId, customerId: customer.id, leadCallbackRequestId: requestId },
+        bell: true, dedupeKey: `${key}:${requestId}`, metadata: { leadId, customerId: customer.id, leadCallbackRequestId: requestId },
       });
       if (bellSettled(result)) return true;
     } catch (err) {
@@ -426,4 +426,6 @@ module.exports = {
   TEXT_REPLY_BODY,
   NIGHT_CALL_BODY,
   _test: { targetDateFor, slotInstant, bookSlot, dateText },
+  // For lead-callback-scheduler.js (part 2b): the same send and bell rules.
+  _shared: { sendFollowup, raiseLeadBell, REAL_CUSTOMER_STAGES },
 };
