@@ -226,3 +226,20 @@ describe("Admin billing failure and draft boundaries", () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   });
 });
+
+describe("Billing recovery visit rows", () => {
+  it("names a voided invoice on the visit so the operator checks for its replacement", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (url.includes("/leaks?")) return response({ summary: {}, leaks: [
+        { scheduled_service_id: "visit-a", customer: "Avery Example", price: 117, billable: true, voided_invoice_number: "WPC-2026-0598" },
+        { scheduled_service_id: "visit-b", customer: "Jordan Example", price: 120, billable: true, voided_invoice_number: null },
+      ] });
+      if (url.endsWith("/aging")) return response({ aging: {}, top_balances: [] });
+      return response({ accounts: [], count: 0, atRisk: 0 });
+    }));
+    render(<BillingRecoveryPage />);
+    await screen.findByText("Avery Example");
+    expect(screen.getByText(/Invoice WPC-2026-0598 was voided/)).toBeInTheDocument();
+    expect(screen.getAllByText(/was voided/)).toHaveLength(1);
+  });
+});

@@ -272,6 +272,24 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
+  test('a per-application consultation (Waves Assessment) with no row price 422s — never the plan fee', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, service_type: 'Waves Assessment', estimated_price: null, monthly_rate: '31.67' } });
+      if (arg === 'customers') return makeQB({ first: { billing_mode: 'per_application', per_application_fee: '95.00' } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(true);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.error).toMatch(/no price/i);
+      expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+    });
+  });
+
   test('a LEGACY (no billing_mode) customer with no row price still 422s — the fee fallback is per-app only', async () => {
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: null } });
@@ -490,6 +508,75 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
+  // pg returns a DATE column as a JS Date at UTC midnight (the server runs
+  // in UTC). Reading that instant in ET gave the PREVIOUS day, so "Open
+  // completion" opened the dispatch day before the visit and could not find it.
+  test('GET /leaks keeps a DATE scheduled_date on its own calendar day for the deep link', async () => {
+    const rows = [
+      { scheduled_service_id: 'ss-9', service_record_id: null, service_type: 'Pest Control', estimated_price: '99.00', prepaid_amount: '0', completed_at: '2026-06-17T16:00:00Z', scheduled_date: new Date(Date.UTC(2026, 5, 17)), customer_id: 'cust-9', first_name: 'Nora', last_name: 'Quill', monthly_rate: '0', waveguard_tier: null },
+    ];
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
+      throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/leaks?days=90`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.leaks[0].scheduled_date).toBe('2026-06-17');
+    });
+  });
+
+  // A Waves Assessment is an advisory walkthrough, not an application: the
+  // plan's per-application fee must never price it (it read as a $95 leak).
+  test('GET /leaks drops unpriced consultations in SQL and never prices one with the fee', async () => {
+    const rows = [
+      { scheduled_service_id: 'ss-6', service_record_id: 'sr-6', service_type: 'Waves Assessment', estimated_price: '75.00', prepaid_amount: null, completed_at: '2026-06-12', customer_id: 'cust-6', first_name: 'Ada', last_name: 'Priced', monthly_rate: '31.67', waveguard_tier: 'Bronze', billing_mode: 'per_application', per_application_fee: '95.00' },
+      { scheduled_service_id: 'ss-7', service_record_id: 'sr-7', service_type: 'Waves Assessment', estimated_price: null, prepaid_amount: null, completed_at: '2026-06-11', customer_id: 'cust-7', first_name: 'Ben', last_name: 'Unpriced', monthly_rate: '31.67', waveguard_tier: 'Bronze', billing_mode: 'per_application', per_application_fee: '95.00' },
+    ];
+    let qb;
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(false) };
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) { qb = makeQB({ rows }); return qb; }
+      throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+    });
+    const { CONSULTATION_SERVICE_TYPE_SQL_REGEX } = require('../services/no-cost-visit-types');
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/leaks?days=90`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      // The SQL filter keeps a consultation only on its own row price.
+      expect(qb.whereRaw).toHaveBeenCalledWith(
+        "NOT (COALESCE(ss.service_type, '') ~* ? AND COALESCE(ss.estimated_price, 0) <= 0)",
+        [CONSULTATION_SERVICE_TYPE_SQL_REGEX],
+      );
+      const priced = body.needs_review.find((r) => r.scheduled_service_id === 'ss-6');
+      expect(priced.price).toBe(75);
+      // Had one slipped through, the JS mirror still never reaches the fee.
+      const unpriced = body.needs_review.find((r) => r.scheduled_service_id === 'ss-7');
+      expect(unpriced.price).toBe(0);
+    });
+    delete db.schema;
+  });
+
+  test('GET /leaks names a voided invoice on the visit so the operator checks for its replacement', async () => {
+    const rows = [
+      { scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service', estimated_price: '117.00', prepaid_amount: '0', completed_at: '2026-06-18', customer_id: 'cust-1', first_name: 'Tyler', last_name: 'Levin', monthly_rate: '0', waveguard_tier: null, voided_invoice_number: 'WPC-2026-0598' },
+      { scheduled_service_id: 'ss-2', service_record_id: 'sr-2', service_type: 'Quarterly Pest Control Service', estimated_price: '117.00', prepaid_amount: '0', completed_at: '2026-06-17', customer_id: 'cust-2', first_name: 'Jane', last_name: 'Doe', monthly_rate: '0', waveguard_tier: null, voided_invoice_number: null },
+    ];
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
+      throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/leaks?days=90`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.leaks.find((r) => r.scheduled_service_id === 'ss-1').voided_invoice_number).toBe('WPC-2026-0598');
+      expect(body.leaks.find((r) => r.scheduled_service_id === 'ss-2').voided_invoice_number).toBeNull();
+    });
+  });
+
   test('GET /aging proxies the dashboard outstanding-balances tool', async () => {
     executeDashboardTool.mockResolvedValue({ total_outstanding: 500, aging: { current: 100, days_30: 400, days_60: 0, days_90_plus: 0 } });
     await withServer(async (baseUrl) => {
@@ -588,6 +675,19 @@ describe('billVisit fails closed on unverifiable coverage (GH Codex P1)', () => 
     const assessed = await assessVisitBillable('ss-1');
     expect(customersRead).not.toHaveBeenCalled();
     expect(assessed).toEqual(expect.objectContaining({ ok: true, price: 129, dueDate: '2026-04-14' }));
+  });
+
+  // sr.service_date is a Postgres DATE: on the UTC server pg returns it as a
+  // JS Date at UTC midnight. Its due date is that same calendar day — read
+  // as an ET instant it was the day before the service.
+  test('a DATE service_date read back as a Date keeps its own calendar day as the due date', async () => {
+    const { assessVisitBillable } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss
+      ? makeQB({ first: { ...BILLABLE_VISIT, service_date: new Date(Date.UTC(2026, 3, 14)) } })
+      : makeQB({ first: null })));
+    customerOnAutopay.mockResolvedValue(false);
+    const assessed = await assessVisitBillable('ss-1');
+    expect(assessed).toEqual(expect.objectContaining({ ok: true, dueDate: '2026-04-14' }));
   });
 
   test('a caller-pinned service record narrows the visit read to that record', async () => {
