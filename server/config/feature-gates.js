@@ -91,6 +91,7 @@
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_TECH_WORK_DAYS=true (owner 2026-10-25, work days per technician: a technician row may carry technicians.work_days, the weekdays that person works (the Team tab "Work days" row; empty = every day). On, slot offers, automatic booking and automatic moves skip that technician on a day they do not work, and an automatic booking that lands on such a day stays unassigned for the owner; office saves (schedule create and edit, board assign and drag) still go through and add a plain warning line. Strict opt-in: exactly 'true', read at call time via techWorkDaysLive(). Ships DARK; off = work_days is ignored everywhere and the Team tab shows no editor. Sends nothing to a customer.)
+ *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; anything else, including 'true', = off, no resolver call and no query. 'true' is not a value yet: live mode is a separate later change. Never changes a booking, sends nothing to a customer or staff member.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
@@ -4073,6 +4074,15 @@ const gates = {
   // switch: unset.
   autoDispatchDayRules: gateEnvValue('GATE_AUTO_DISPATCH_DAY_RULES'),
 
+  // Auto-dispatch keeps each visit on its own technician (owner 2026-10-25,
+  // second technician starts early 2027). On, the 04:10 run offers a visit
+  // that has a technician only that technician's slots, and the write
+  // refuses a technician change. Unassigned visits are unchanged. Ships
+  // DARK: exactly 'true'. Registered for logGateStatus only; the run reads
+  // autoDispatchKeepTechLive() at call time (config.keepTech). Kill switch:
+  // unset - the run may move a visit to another technician, as before.
+  autoDispatchKeepTech: process.env.GATE_AUTO_DISPATCH_KEEP_TECH === 'true',
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
@@ -6240,6 +6250,14 @@ function autoDispatchDayRulesLive() {
   return gateEnvValue('GATE_AUTO_DISPATCH_DAY_RULES');
 }
 
+// GATE_AUTO_DISPATCH_KEEP_TECH read at CALL time - strict `=== 'true'`. The
+// one reader for the night run (auto-dispatch/config.js resolves it once per
+// run as `config.keepTech`; candidate-slots.js and apply.js read that). The
+// `autoDispatchKeepTech` gates-map entry above is for logGateStatus only.
+function autoDispatchKeepTechLive() {
+  return process.env.GATE_AUTO_DISPATCH_KEEP_TECH === 'true';
+}
+
 // GATE_ESTIMATE_CONSULTATION_OFFER read at CALL time — strict `=== 'true'`,
 // same convention as leadInspectionLinkLive(). The `estimateConsultationOffer`
 // gates-map entry above is for logGateStatus only; this is the one canonical
@@ -7640,6 +7658,7 @@ module.exports.techWorkDaysLive = techWorkDaysLive;
 module.exports.serviceLineMapMode = serviceLineMapMode;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
 module.exports.autoDispatchDayRulesLive = autoDispatchDayRulesLive;
+module.exports.autoDispatchKeepTechLive = autoDispatchKeepTechLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.payAfterFirstVisitLive = payAfterFirstVisitLive;

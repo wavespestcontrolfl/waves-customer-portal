@@ -25,6 +25,7 @@ const { violatesPreferredTime, _internals: { isSaturday, isWeekendDay } } = requ
 const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { assertScoredStartPoints } = require('./start-point-fence');
+const { techChangeBlocked } = require('./keep-tech');
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
 // backlog item 3): total placements tried per visit, including the first —
@@ -779,6 +780,9 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   if (Number.isFinite(config.remainingChanges)) options.maxUnitSize = Math.max(0, config.remainingChanges);
   const techChanged = !!best.technician_id
     && String(best.technician_id) !== String(service.technician_id || '');
+  // GATE_AUTO_DISPATCH_KEEP_TECH (config.keepTech): a visit that has a
+  // technician never changes it here; refused before any write (keep-tech.js).
+  if (techChanged && config.keepTech === true && service.technician_id) throw techChangeBlocked();
   if (techChanged) options.technicianId = best.technician_id;
   // Every grouped member re-passes the apply-time hard guards under the
   // unit mover's stop lock, or the grouped move is refused (codex r13 P1).

@@ -26,6 +26,7 @@ const {
   applyAutoDispatchMove, revalidatePlacement, unitMoveSize, previewGroupMove,
 } = require('./apply');
 const { startPointRefusal } = require('./start-point-fence');
+const { techChangeRefusal } = require('./keep-tech');
 const { toDateStr, shiftDateStr } = require('./dates');
 const { stampedAddressDiverges } = require('../stamped-address');
 const { ensureCustomerGeocoded } = require('../geocoder');
@@ -1136,6 +1137,9 @@ async function evaluateServiceForRun(service, run) {
     // search's van leaves at the run's departure time (withDayRules).
     dayRules: config.dayRules === true,
     departureMinutes: config.departureMinutes,
+    // GATE_AUTO_DISPATCH_KEEP_TECH: a visit with a technician is offered that
+    // technician's slots only (candidate-slots.js candidateFromSlot).
+    keepTech: config.keepTech === true,
     // ROUTE-TIERS: pre-intersected candidate window (null/absent when the
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
@@ -1422,10 +1426,11 @@ async function preferencesChanged(pm) {
 
 // A move that the write refused for an ordinary reason, not a failure: the one
 // approved slot was taken (a proofread move has no fallback slot), the visit
-// changed while the model read, or a technician's start address changed after
-// the move was scored. Nothing moved; the next run tries again.
+// changed while the model read, a technician's start address changed after
+// the move was scored, or the keep-technician rule would be broken. Nothing
+// moved; the next run tries again.
 function ordinaryRefusal(attempt, err) {
-  return moveCheck.approvedSlotTaken(attempt.checked, err) || startPointRefusal(err);
+  return moveCheck.approvedSlotTaken(attempt.checked, err) || startPointRefusal(err) || techChangeRefusal(err);
 }
 
 async function logOrdinaryRefusal(pm, attempt, run, reason) {
