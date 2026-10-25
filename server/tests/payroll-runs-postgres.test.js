@@ -34,6 +34,7 @@ const { parseETDateTime } = require('../utils/datetime-et');
 const timeTracking = require('../services/time-tracking');
 const approval = require('../services/timesheet-approval');
 const router = require('../routes/admin-payroll');
+const payrollRuns = require('../services/payroll-runs');
 
 jest.setTimeout(60000);
 
@@ -44,6 +45,8 @@ const W3 = '2026-09-28'; // pay Fri 2026-10-09
 
 postgres('payroll pay runs', () => {
   let database;
+  let holderDb;
+  let callerDb;
   let trx;
   let server;
   let baseUrl;
@@ -118,6 +121,9 @@ postgres('payroll pay runs', () => {
       throw new Error('Use an isolated local/CI database or labeled private QA database');
     }
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    // Two more real connections for the lock tests: one holds the lock, one calls the service.
+    holderDb = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    callerDb = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
     const app = express();
     app.use(express.json());
     app.use('/api/admin/payroll', router);
@@ -139,6 +145,8 @@ postgres('payroll pay runs', () => {
   afterAll(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
     if (database) await database.destroy();
+    if (holderDb) await holderDb.destroy();
+    if (callerDb) await callerDb.destroy();
   });
 
   describe('drafting a run', () => {
@@ -634,6 +642,63 @@ postgres('payroll pay runs', () => {
       await draft(W1);
       await unlock(id, W1);
       expect((await trx('time_weekly_summary').where({ technician_id: id, week_start: W1 }).first()).status).toBe('pending');
+    });
+  });
+
+  describe('payroll mutation lock (separate connections)', () => {
+    // The service runs on its own connection with a lock timeout, so a held lock shows up as a
+    // timeout (55P03) and a free one as the ordinary 404 for a run that does not exist.
+    const callerWith = (timeout) => ({
+      transaction: (work) => callerDb.transaction(async (t) => {
+        await t.raw(`SET LOCAL lock_timeout = '${timeout}'`);
+        return work(t);
+      }),
+    });
+    const takeLock = async () => {
+      const holder = await holderDb.transaction();
+      await holder.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [payrollRuns.PAYROLL_LOCK_NS, payrollRuns.PAYROLL_LOCK_KEY]);
+      return holder;
+    };
+    const calls = {
+      finalizeRun: (conn) => payrollRuns.finalizeRun(randomUUID(), { token: 'x' }, ADMIN_ID, conn),
+      voidRun: (conn) => payrollRuns.voidRun(randomUUID(), { reason: 'Redo' }, ADMIN_ID, conn),
+    };
+
+    it.each(Object.keys(calls))('%s waits while another connection holds the lock, then answers 404', async (name) => {
+      const holder = await takeLock();
+      try {
+        const timedOut = await calls[name](callerWith('300ms')).catch((err) => err);
+        expect(timedOut.code).toBe('55P03');
+        expect(timedOut.status).toBeUndefined();
+      } finally {
+        await holder.commit();
+      }
+      await expect(calls[name](callerWith('300ms'))).rejects.toMatchObject({ status: 404, message: 'Pay run not found.' });
+    });
+
+    it.each(Object.keys(calls))('%s goes on by itself once the holder commits', async (name) => {
+      const holder = await takeLock();
+      let pending;
+      try {
+        pending = calls[name](callerWith('10s')).catch((err) => err);
+        let settled = false;
+        pending.then(() => { settled = true; });
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
+        expect(settled).toBe(false);
+      } finally {
+        await holder.commit();
+      }
+      expect(await pending).toMatchObject({ status: 404, message: 'Pay run not found.' });
+    });
+
+    it('does not make draft or recompute wait', async () => {
+      const holder = await takeLock();
+      try {
+        await expect(payrollRuns.recomputeRun(randomUUID(), ADMIN_ID, callerWith('300ms')))
+          .rejects.toMatchObject({ status: 404 });
+      } finally {
+        await holder.commit();
+      }
     });
   });
 

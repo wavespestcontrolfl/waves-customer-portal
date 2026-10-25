@@ -472,6 +472,22 @@ async function recomputeRun(runId, actor, conn = db) {
   return runView(conn, runId);
 }
 
+// One lock for every payroll mutation that reads or changes year-to-date
+// figures: finalize and void. Each run locks only its own rows, so two runs for
+// different weeks could otherwise both read the same YTD, or a void could pass
+// while a later finalize counted the run it voids. Same idiom as
+// payment-method-lock.js: pg_advisory_xact_lock(hashtext(ns), hashtext(key)),
+// released when the transaction ends. Take it before the first read.
+// Draft and recompute do not take it: they write draft rows only, never feed
+// another run, and finalize re-evaluates under this lock and compares the
+// review token, so a draft built on stale YTD cannot be finalized.
+const PAYROLL_LOCK_NS = 'payroll.mutation';
+const PAYROLL_LOCK_KEY = 'pay-runs';
+const lockPayrollMutations = (trx) => trx.raw(
+  'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+  [PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY],
+);
+
 // A later finalized check for the same technician and year already counted this
 // one's pay in its year-to-date figures.
 async function laterFinalCheckExists(trx, run, technicianIds) {
@@ -498,6 +514,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
   const actorId = actorOf(actor);
   let changed = false;
   await conn.transaction(async (trx) => {
+    await lockPayrollMutations(trx);
     const run = await loadRun(trx, runId, { lock: true });
     if (run.status !== 'draft') throw new PayrollError(409, `This pay run is already ${run.status}.`);
     const evaluation = await evaluate(trx, run, { lock: true });
@@ -528,6 +545,7 @@ async function voidRun(runId, input, actor, conn = db) {
   const v = validate(voidSchema, input);
   const actorId = actorOf(actor);
   await conn.transaction(async (trx) => {
+    await lockPayrollMutations(trx);
     const run = await loadRun(trx, runId, { lock: true });
     if (run.status === 'voided') throw new PayrollError(409, 'This pay run is already voided.');
     const rows = await loadCheckRows(trx, runId, { lock: true });
@@ -668,4 +686,7 @@ module.exports = {
   setCheckNumber,
   getStub,
   exportCsv,
+  lockPayrollMutations,
+  PAYROLL_LOCK_NS,
+  PAYROLL_LOCK_KEY,
 };

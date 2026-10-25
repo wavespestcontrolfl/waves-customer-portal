@@ -6,7 +6,7 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 
 const {
   defaultPayDate, validateWeek, resolvePayDate, centsText, buildCheck, tokenOf, checksToCsv,
-  draftRun, finalizeRun, voidRun, setCheckNumber, getRun,
+  draftRun, finalizeRun, voidRun, setCheckNumber, getRun, PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY,
 } = require('../services/payroll-runs');
 
 const RUN_ID = '33333333-3333-4333-8333-333333333333';
@@ -184,5 +184,39 @@ describe('input checks stop before the connection is used', () => {
     await expect(getRun('nope', untouched)).rejects.toMatchObject({ status: 404 });
     await expect(finalizeRun('nope', { token: 'x' }, TECH_ID, untouched)).rejects.toMatchObject({ status: 404 });
     await expect(voidRun('nope', { reason: 'x' }, TECH_ID, untouched)).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('payroll mutation lock', () => {
+  // A fake connection that records the order of calls and stops at the first read.
+  const fakeConnection = () => {
+    const events = [];
+    const stop = new Error('stopped at first read');
+    const chain = () => new Proxy(() => {}, {
+      get: (_t, key) => (key === 'then' ? undefined : (...args) => {
+        if (key === 'first' || key === 'select' || key === 'del' || key === 'update') { events.push(`read:${key}`); return Promise.reject(stop); }
+        return chain();
+      }),
+    });
+    const trx = (table) => { events.push(`table:${table}`); return chain(); };
+    trx.raw = jest.fn(async (sql, bindings) => {
+      if (/pg_advisory_xact_lock/.test(sql)) { events.push('lock'); trx.lockArgs = [sql, bindings]; return { rows: [] }; }
+      return sql;
+    });
+    trx.fn = { now: () => 'now' };
+    return { events, stop, trx, conn: { transaction: (callback) => callback(trx) } };
+  };
+
+  it.each([
+    ['finalizeRun', (conn) => finalizeRun(RUN_ID, { token: 'x' }, TECH_ID, conn)],
+    ['voidRun', (conn) => voidRun(RUN_ID, { reason: 'Redo' }, TECH_ID, conn)],
+  ])('%s takes the payroll lock before any table is read', async (_name, call) => {
+    const { events, stop, trx, conn } = fakeConnection();
+    await expect(call(conn)).rejects.toBe(stop);
+    expect(events[0]).toBe('lock');
+    expect(events.slice(1).every((event) => /^(table|read):/.test(event))).toBe(true);
+    expect(events.filter((event) => event === 'lock')).toHaveLength(1);
+    expect(trx.lockArgs[0]).toBe('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))');
+    expect(trx.lockArgs[1]).toEqual([PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY]);
   });
 });
