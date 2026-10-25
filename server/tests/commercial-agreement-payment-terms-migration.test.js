@@ -3,6 +3,9 @@
  * payment paragraph becomes {{agreement.payment_terms}}. Runs the real version 1 seed into an in-memory store, then the
  * version 2 migration, so the test proves the replacement against the seeded text itself. Synthetic data only.
  */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
 const seed = require('../models/migrations/20260623000005_seed_commercial_service_agreement');
 const v2 = require('../models/migrations/20261025120000_commercial_agreement_payment_terms');
 const { AGREEMENT_PAYMENT_TEXT } = require('../../shared/commercial-agreement-terms.cjs');
@@ -10,7 +13,7 @@ const { renderDocumentText } = require('../services/document-template-library');
 
 // The document template tables in memory: the query shapes the two migrations use, nothing more.
 function memoryKnex() {
-  const store = { document_templates: [], document_template_versions: [], customer_contracts: [], locks: [] };
+  const store = { document_templates: [], document_template_versions: [], customer_contracts: [], audit_log: [], locks: [] };
   let nextId = 1;
   const matches = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
   const knex = (table) => {
@@ -45,6 +48,7 @@ function memoryKnex() {
     return api;
   };
   knex.fn = { now: () => 'now()' };
+  knex.schema = { hasTable: async (table) => table in store };
   return { knex, store };
 }
 
@@ -104,29 +108,27 @@ describe('commercial agreement payment paragraph migration (version 2)', () => {
     expect(made.template.active_version_id).toBe(made.v1.id);
   });
 
-  test('down restores version 1 while version 2 is active, and deletes version 2 only when no agreement was issued from it', async () => {
+  test('the publish writes one audit_log row naming both versions', async () => {
     const made = await seeded();
     await v2.up(made.knex);
-    const mine = activeVersion(made);
-    made.store.customer_contracts.push({ id: 'contract-1', document_template_version_id: mine.id });
-    await v2.down(made.knex);
-    expect(made.template.active_version_id).toBe(made.v1.id);
-    expect(made.store.document_template_versions).toHaveLength(2);
-
-    const fresh = await seeded();
-    await v2.up(fresh.knex);
-    await v2.down(fresh.knex);
-    expect(fresh.template.active_version_id).toBe(fresh.v1.id);
-    expect(fresh.store.document_template_versions).toHaveLength(1);
+    expect(made.store.audit_log).toHaveLength(1);
+    expect(made.store.audit_log[0]).toMatchObject({
+      actor_type: 'system',
+      action: 'migration:20261025120000:publish',
+      resource_type: 'document_template',
+      resource_id: made.template.id,
+      metadata: { templateKey: 'service_agreement.commercial_pest', fromVersionId: made.v1.id, toVersionId: activeVersion(made).id, versionNumber: 2, created: true },
+    });
+    // A skipped run (already on version 2) writes no second row.
+    await v2.up(made.knex);
+    expect(made.store.audit_log).toHaveLength(1);
   });
 
-  test('down leaves a version published after version 2 alone', async () => {
+  test('down is a documented no-op: nothing is re-pointed or deleted', async () => {
     const made = await seeded();
     await v2.up(made.knex);
-    const [later] = await made.knex('document_template_versions').insert({ template_id: made.template.id, version_number: 3, body: 'Admin version 3' }).returning();
-    made.template.active_version_id = later.id;
+    const before = JSON.stringify(made.store);
     await v2.down(made.knex);
-    expect(made.template.active_version_id).toBe(later.id);
-    expect(made.store.document_template_versions).toHaveLength(3);
+    expect(JSON.stringify(made.store)).toBe(before);
   });
 });
