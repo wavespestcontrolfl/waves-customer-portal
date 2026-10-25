@@ -464,6 +464,10 @@ postgres('llm cost (PostgreSQL)', () => {
     await app('llm_dispatch_log').insert(row({ created_at: at, ok: false, error_code: 'anthropic_529', input_tokens: null }));
     res = await llmCost.laneCosts(...window, { conn: app });
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(6);
+    // a session turn with a refused status may still have billed agent work: it stays unknown
+    await app('llm_dispatch_log').insert(row({ created_at: at, row_kind: 'session_turn', ok: false, error_code: 'anthropic_429', input_tokens: null }));
+    res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(7);
 
     // per-call rows (prompt at or above the tier floor): a refused one is not unknown
     const openai = { provider: 'openai', requested_model: 'gpt-6-sol', served_model: 'gpt-6-sol', created_at: at, lane_id: 'report' };

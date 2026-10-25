@@ -51,7 +51,10 @@ const ROW_KINDS = ['call', 'session_turn'];
 // nothing. Every other failure (a timeout, 408/504/524, a 500/502, a body read error, an unclassified
 // 'error') may have been processed and billed, so its usage stays unknown.
 const REFUSED_STATUSES = ['400', '401', '402', '403', '404', '413', '422', '429', '503', '529'];
-const USAGE_UNKNOWN_SQL = `input_tokens IS NULL AND NOT (ok IS FALSE AND COALESCE(error_code, '') ~ '^[a-z0-9]+_(${REFUSED_STATUSES.join('|')})$')`;
+// Single calls only: a Managed Agent session_turn can carry a refused status from its event stream
+// after the agent already did billable work (the message is posted before the stream opens), so a
+// session turn with no usage stays unknown whatever its error code (Codex P2 on #6669).
+const USAGE_UNKNOWN_SQL = `input_tokens IS NULL AND NOT (row_kind = 'call' AND ok IS FALSE AND COALESCE(error_code, '') ~ '^[a-z0-9]+_(${REFUSED_STATUSES.join('|')})$')`;
 
 // Spend-spike rule: yesterday's estimated spend on a lane is at least
 // MIN_USD AND at least MULTIPLIER × its average day over the 7 days before.
