@@ -6,6 +6,13 @@
 // Postgres (CI's DB-gated step, DATABASE_URL). Fixtures fictitious.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+// Admin auth passes through here; the route test checks the router runs it before the gate.
+const mockAdminAuth = {
+  adminAuthenticate: jest.fn((req, res, next) => next()),
+  requireAdmin: jest.fn((req, res, next) => next()),
+};
+jest.mock('../middleware/admin-auth', () => mockAdminAuth);
+
 let mockNewCallerGate = true;
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
@@ -150,25 +157,22 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     }
   });
 
-  test('the routes answer 404 while the gate is off', async () => {
-    jest.resetModules();
-    let router;
-    jest.isolateModules(() => {
-      jest.doMock('../middleware/admin-auth', () => ({ adminAuthenticate: (req, res, next) => next(), requireAdmin: (req, res, next) => next() }));
-      jest.doMock('../config/feature-gates', () => ({ ...jest.requireActual('../config/feature-gates'), isEnabled: () => false }));
-      router = require('../routes/admin-schedule-new-caller');
-    });
+  test('the routes run admin auth, then answer 404 while the gate is off', async () => {
     const app = express();
     app.use(express.json());
-    app.use('/new-caller', router);
+    app.use('/new-caller', require('../routes/admin-schedule-new-caller'));
     const server = http.createServer(app);
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    mockNewCallerGate = false;
     try {
       const { port } = server.address();
       const calls = await fetch(`http://127.0.0.1:${port}/new-caller/calls`);
       const book = await fetch(`http://127.0.0.1:${port}/new-caller`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       expect([calls.status, book.status]).toEqual([404, 404]);
+      expect(mockAdminAuth.adminAuthenticate).toHaveBeenCalledTimes(2);
+      expect(mockAdminAuth.requireAdmin).toHaveBeenCalledTimes(2);
     } finally {
+      mockNewCallerGate = true;
       await new Promise((resolve) => server.close(resolve));
     }
   });
