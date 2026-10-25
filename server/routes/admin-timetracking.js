@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
-const { autoLunchLive } = require('../config/feature-gates');
+const { autoLunchLive, techWorkDaysLive } = require('../config/feature-gates');
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
@@ -89,6 +89,8 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'start_address', 'start_lat', 'start_lng',
   // Team tab "Can move visits" switch (GATE_TECH_MOVE_SWITCH).
   'can_move_visits',
+  // Team tab "Work days" (GATE_TECH_WORK_DAYS); dropped from the response while the gate is off.
+  'work_days',
 ];
 
 function pickTechResponseFields(tech, fields) {
@@ -110,7 +112,29 @@ function sanitizeTechForAdmin(tech) {
   for (const f of ['start_lat', 'start_lng']) {
     if (out && out[f] != null) out[f] = Number(out[f]);
   }
+  if (out && !techWorkDaysLive()) delete out.work_days;
   return out;
+}
+
+const WORK_DAYS_ERROR = 'workDays must be null (every day) or a list of weekday numbers 0 (Sunday) to 6 (Saturday), each once';
+
+// `workDays` on POST/PUT /technicians (GATE_TECH_WORK_DAYS). undefined, or the
+// gate off = leave alone (the column is inert and the editor hidden). null or
+// all seven days = works every day (stored NULL). Otherwise a sorted list of
+// distinct ints 0..6; an empty list is a 400 (the column CHECK refuses it too).
+function normalizeWorkDaysInput(value) {
+  if (value === undefined || !techWorkDaysLive()) return { patch: {} };
+  if (value === null) return { patch: { work_days: null } };
+  if (!Array.isArray(value)) return { error: WORK_DAYS_ERROR };
+  if (!value.length) return { error: 'Pick at least one work day' };
+  const days = new Set();
+  for (const raw of value) {
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0 || raw > 6 || days.has(raw)) {
+      return { error: WORK_DAYS_ERROR };
+    }
+    days.add(raw);
+  }
+  return { patch: { work_days: days.size === 7 ? null : [...days].sort((a, b) => a - b) } };
 }
 
 const START_ADDRESS_MAX = 300;
@@ -713,7 +737,7 @@ async function listTechnicians(req, res, next) {
       };
       return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
     }));
-    res.json({ technicians: enriched });
+    res.json({ technicians: enriched, ...(techWorkDaysLive() ? { workDaysEnabled: true } : {}) });
   } catch (err) { next(err); }
 }
 
@@ -899,6 +923,8 @@ async function createTechnician(req, res, next) {
     }
     const techLine = normalizeTechLine(body.twilioNumber);
     if (techLine.error) return res.status(400).json({ error: techLine.error });
+    const workDays = normalizeWorkDaysInput(body.workDays);
+    if (workDays.error) return res.status(400).json({ error: workDays.error });
 
     const insertRow = {
       name: name.trim(),
@@ -920,6 +946,7 @@ async function createTechnician(req, res, next) {
     // it to the column DEFAULT.
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
     Object.assign(insertRow, techLine.patch);
+    Object.assign(insertRow, workDays.patch);
     applyPayrollProfileFields(insertRow, body);
 
     const outcome = await db.transaction(async (trx) => {
@@ -987,6 +1014,8 @@ async function updateTechnician(req, res, next) {
     if (techLine.error) return res.status(400).json({ error: techLine.error });
     const startPoint = normalizeStartPoint(body.startPoint);
     if (startPoint.error) return res.status(400).json({ error: startPoint.error });
+    const workDays = normalizeWorkDaysInput(body.workDays);
+    if (workDays.error) return res.status(400).json({ error: workDays.error });
 
     const outcome = await db.transaction(async (trx) => {
       // Every Staff identity writer takes the table lock before a row lock.
@@ -1036,6 +1065,7 @@ async function updateTechnician(req, res, next) {
       if (canMoveVisits !== undefined) updates.can_move_visits = canMoveVisits;
       Object.assign(updates, techLine.patch);
       Object.assign(updates, startPoint.patch);
+      Object.assign(updates, workDays.patch);
 
       // Any transition that leaves `active` (→ inactive OR → prospective)
       // revokes sessions; entering active from prospective also rotates so a

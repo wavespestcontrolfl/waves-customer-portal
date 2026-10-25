@@ -316,7 +316,7 @@ async function bookInSavepoint(sp, outerTrx, primary, cols) {
   if (technicianId) {
     try {
       const { assertAssignableTechnician } = require('./technician-eligibility');
-      await assertAssignableTechnician(technicianId, { conn: sp, date });
+      await assertAssignableTechnician(technicianId, { conn: sp, date, workDays: true });
     } catch (eligErr) {
       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
       logger.warn(`[package-followup] technician ${technicianId} not assignable on ${date}; booking visit 2 unassigned`);

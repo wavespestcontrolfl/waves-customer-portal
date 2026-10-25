@@ -115,8 +115,10 @@ function chain(row) {
 }
 
 // technicians: a single active + field-dispatchable row, whatever the where().
+// work_days (GATE_TECH_WORK_DAYS) is whatever the test sets; null = every day.
+let techWorkDays = null;
 function chainTechnician() {
-  return chain({ id: 'any-tech', name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true });
+  return chain({ id: 'any-tech', name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true, work_days: techWorkDays });
 }
 
 // technician_absences: a hit only when where() named THIS tech + THIS date
@@ -175,6 +177,8 @@ function setup({ svc, absenceTechId, absenceDate }) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  techWorkDays = null;
+  delete process.env.GATE_TECH_WORK_DAYS;
   findConflictingVisits.mockResolvedValue([]);
   acquireOccupancyLock.mockImplementation(async () => {});
   lockCustomerComms.mockImplementation(async () => {});
@@ -254,3 +258,42 @@ describe('PUT /:id/update-details — save-time technician eligibility on the FI
     expect(body.code).not.toBe('TECH_NOT_ASSIGNABLE');
   });
 });
+
+// GATE_TECH_WORK_DAYS (owner 2026-10-25): the office edit saves and warns.
+describe('PUT /:id/update-details — technician work days (office paths warn, never block)', () => {
+  afterEach(() => { delete process.env.GATE_TECH_WORK_DAYS; });
+  // NEW_DATE (2099-08-01) is a Saturday.
+  test('gate on, a Monday-to-Friday tech moved onto a Saturday: the edit is written and the reply warns', async () => {
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    techWorkDays = [1, 2, 3, 4, 5];
+    setup({ svc: baseSvc({ technician_id: TECH_A }), absenceTechId: null, absenceDate: null });
+
+    const { status, body } = await put('svc-1', { scheduledDate: NEW_DATE });
+
+    expect(status).toBe(200);
+    expect(updateCalls.length).toBeGreaterThan(0);
+    expect(body.warnings).toEqual(['Test Tech does not work on Saturdays.']);
+  });
+
+  test('gate on, the technician works Saturdays: no warning', async () => {
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    techWorkDays = [1, 2, 3, 4, 5, 6];
+    setup({ svc: baseSvc({ technician_id: TECH_A }), absenceTechId: null, absenceDate: null });
+
+    const { status, body } = await put('svc-1', { scheduledDate: NEW_DATE });
+
+    expect(status).toBe(200);
+    expect((body.warnings || []).some((w) => /does not work/.test(w))).toBe(false);
+  });
+
+  test('gate off: work_days is ignored', async () => {
+    techWorkDays = [1, 2, 3, 4, 5];
+    setup({ svc: baseSvc({ technician_id: TECH_A }), absenceTechId: null, absenceDate: null });
+
+    const { status, body } = await put('svc-1', { scheduledDate: NEW_DATE });
+
+    expect(status).toBe(200);
+    expect((body.warnings || []).some((w) => /does not work/.test(w))).toBe(false);
+  });
+});
+

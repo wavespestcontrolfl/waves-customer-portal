@@ -89,6 +89,7 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
+ *   GATE_TECH_WORK_DAYS=true (owner 2026-10-25, work days per technician: a technician row may carry technicians.work_days, the weekdays that person works (the Team tab "Work days" row; empty = every day). On, slot offers, automatic booking and automatic moves skip that technician on a day they do not work, and an automatic booking that lands on such a day stays unassigned for the owner; office saves (schedule create and edit, board assign and drag) still go through and add a plain warning line. Strict opt-in: exactly 'true', read at call time via techWorkDaysLive(). Ships DARK; off = work_days is ignored everywhere and the Team tab shows no editor. Sends nothing to a customer.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
@@ -4644,6 +4645,11 @@ const gates = {
   // every confirm-side probe goes back to tech-blind, byte for byte.
   multiTechConfirm: gateEnvValue('GATE_MULTI_TECH_CONFIRM'),
 
+  // Work days per technician (owner 2026-10-25). Ships DARK: exactly 'true'.
+  // Registered for logGateStatus only; consumers read techWorkDaysLive() at
+  // CALL time. Kill switch: unset - work_days is ignored everywhere.
+  techWorkDays: process.env.GATE_TECH_WORK_DAYS === 'true',
+
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
   // 'true'. The route reads this via isEnabled('blogReadDepth') at request
@@ -6306,6 +6312,14 @@ function multiTechConfirmLive() {
   return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
 }
 
+// GATE_TECH_WORK_DAYS read at CALL time - strict `=== 'true'`. The one reader for
+// technicians.work_days (services/technician-eligibility.js): on, a technician
+// is skipped by slot offers and automatic placement on a day they do not work;
+// off, work_days is ignored everywhere (byte-identical to before).
+function techWorkDaysLive() {
+  return process.env.GATE_TECH_WORK_DAYS === 'true';
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -7593,6 +7607,8 @@ module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
+// GATE_TECH_WORK_DAYS reader, on its own line so gate PRs never conflict.
+module.exports.techWorkDaysLive = techWorkDaysLive;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
 module.exports.autoDispatchDayRulesLive = autoDispatchDayRulesLive;
 // Exported on its own line (not in the shared list above) so concurrent gate

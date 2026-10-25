@@ -118,7 +118,7 @@ function service(overrides = {}) {
   };
 }
 
-function wireRescheduleMocks(svc, { absentTechRow = undefined } = {}) {
+function wireRescheduleMocks(svc, { absentTechRow = undefined, techWorkDays = null } = {}) {
   const serviceLookup = chain({ first: jest.fn().mockResolvedValue(svc) });
   const trxScheduled = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
   const historyInsert = chain();
@@ -138,7 +138,7 @@ function wireRescheduleMocks(svc, { absentTechRow = undefined } = {}) {
     // a test that wants the "marked out on the new date" 422 supplies the
     // uncleared technician_absences row the real query would find.
     if (table === 'technicians') {
-      return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: svc.technician_id || 'tech-1', name: 'Tech', employment_status: 'active', field_dispatchable: true }) });
+      return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: svc.technician_id || 'tech-1', name: 'Tech', employment_status: 'active', field_dispatchable: true, work_days: techWorkDays }) });
     }
     if (table === 'technician_absences') return chain({ whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(absentTechRow) });
     throw new Error(`Unexpected trx table ${table}`);
@@ -222,6 +222,54 @@ describe('reschedule — shared occupancy conflict gate', () => {
         'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true },
       )).rejects.toMatchObject({
         status: 409, statusCode: 409, code: 'SLOT_TAKEN', message: expect.stringContaining('no longer available'),
+      });
+    });
+
+    // GATE_TECH_WORK_DAYS (owner 2026-10-25): the kept technician does not work
+    // TARGET's weekday. A move that is not the office's is automatic and is
+    // refused the same way an absence is; an office (admin) move warns and goes.
+    describe('work days: the kept technician does not work the target weekday', () => {
+      const targetDow = new Date(`${TARGET}T12:00:00Z`).getUTCDay();
+      const worksAllButTarget = [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== targetDow);
+      const dayName = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays'][targetDow];
+      afterEach(() => { delete process.env.GATE_TECH_WORK_DAYS; });
+
+      test('gate on, a non-admin move (rain-out, customer, auto-dispatch) is refused SLOT_TAKEN and writes nothing', async () => {
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        const { trxScheduled } = wireRescheduleMocks(service({ technician_id: 'tech-1', scheduled_date: BASE }), { techWorkDays: worksAllButTarget });
+        await expect(SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', {},
+        )).rejects.toMatchObject({ status: 409, statusCode: 409, code: 'SLOT_TAKEN' });
+        expect(trxScheduled.update).not.toHaveBeenCalled();
+      });
+
+      test('gate on, an admin move commits and warns', async () => {
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        const { trxScheduled } = wireRescheduleMocks(service({ technician_id: 'tech-1', scheduled_date: BASE }), { techWorkDays: worksAllButTarget });
+        const result = await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true },
+        );
+        expect(result).toMatchObject({ success: true, warnings: [`Tech does not work on ${dayName}.`] });
+        expect(trxScheduled.update).toHaveBeenCalled();
+      });
+
+      test('gate on, a technician who works that day: a non-admin move commits with no warning', async () => {
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        wireRescheduleMocks(service({ technician_id: 'tech-1', scheduled_date: BASE }), { techWorkDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== (targetDow + 1) % 7) });
+        const result = await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', {},
+        );
+        expect(result.success).toBe(true);
+        expect(result.warnings).toBeUndefined();
+      });
+
+      test('gate off: work_days is ignored for a non-admin move too', async () => {
+        wireRescheduleMocks(service({ technician_id: 'tech-1', scheduled_date: BASE }), { techWorkDays: worksAllButTarget });
+        const result = await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', {},
+        );
+        expect(result.success).toBe(true);
+        expect(result.warnings).toBeUndefined();
       });
     });
 
@@ -710,6 +758,47 @@ describe('findRescheduleOptions — candidate days are probed on the visit\'s te
     await SmartRebooker.findRescheduleOptions('svc-1', 'weather_rain', { probeSpanMinutes: 60 });
     expect(findConflictingVisits).toHaveBeenCalled();
     for (const [call] of findConflictingVisits.mock.calls) expect(call.technicianId).toBe(expected);
+  });
+
+  // GATE_TECH_WORK_DAYS (owner 2026-10-25): the options keep the visit's own
+  // technician, so a call with a reason (rain-out, customer moves) is not offered
+  // a weekday that technician does not work; the admin picker (no reason) is.
+  describe('work days', () => {
+    afterEach(() => { delete process.env.GATE_TECH_WORK_DAYS; });
+    // Works Mon-Thu: every Fri, Sat and Sun in the next 10 days must go.
+    const wire = (workDays) => {
+      const svc = { ...service({ technician_id: 'tech-1' }), zip: '34202', city: 'Bradenton', count: '0' };
+      db.raw = rawFactory('db.raw');
+      db.mockImplementation((table) => {
+        if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', work_days: workDays }) });
+        return chain({ first: jest.fn().mockResolvedValue(svc), then: (resolve, reject) => Promise.resolve([]).then(resolve, reject) });
+      });
+    };
+    const dow = (iso) => new Date(`${iso}T12:00:00Z`).getUTCDay();
+    const probedDays = () => findConflictingVisits.mock.calls.map(([call]) => call.date);
+
+    test('gate on, with a reason: no probe and no option on a day the kept technician does not work', async () => {
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      wire([1, 2, 3, 4]);
+      const options = await SmartRebooker.findRescheduleOptions('svc-1', 'weather_rain', { probeSpanMinutes: 60 });
+      expect(probedDays().length).toBeGreaterThan(0);
+      expect(probedDays().every((d) => [1, 2, 3, 4].includes(dow(d)))).toBe(true);
+      expect(options.every((o) => [1, 2, 3, 4].includes(dow(o.date)))).toBe(true);
+    });
+
+    test('gate on, no reason (the admin picker): every day is still probed', async () => {
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      wire([1, 2, 3, 4]);
+      await SmartRebooker.findRescheduleOptions('svc-1');
+      expect(probedDays()).toHaveLength(10);
+    });
+
+    test('gate off: every day is probed and no technician row is read', async () => {
+      wire([1, 2, 3, 4]);
+      await SmartRebooker.findRescheduleOptions('svc-1', 'weather_rain', { probeSpanMinutes: 60 });
+      expect(probedDays()).toHaveLength(10);
+      expect(db.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
+    });
   });
 });
 

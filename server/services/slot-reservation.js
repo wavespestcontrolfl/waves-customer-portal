@@ -1241,7 +1241,7 @@ async function reserveSlot({
           // hold time — not just accepted and later caught by the identical
           // commit-time re-check (assertAssignableTechnician with `date`,
           // same as the graduate-hold paths below use).
-          activeTech = await assertAssignableTechnician(techId, { conn: trx, date });
+          activeTech = await assertAssignableTechnician(techId, { conn: trx, date, workDays: true });
         } catch (techErr) {
           if (techErr?.code !== NOT_ASSIGNABLE) {
             logger.warn(`[slot-reservation] technician lookup failed for slot ${slotId}: ${techErr.message}`);
@@ -1861,7 +1861,7 @@ async function commitReservation({
     // accept flow already handles (customer re-picks a time).
     if (row.technician_id) {
       try {
-        await assertAssignableTechnician(row.technician_id, { conn: client, date: dateOnly(row.scheduled_date) });
+        await assertAssignableTechnician(row.technician_id, { conn: client, date: dateOnly(row.scheduled_date), workDays: true });
       } catch (eligErr) {
         if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
         const err = new Error('slot technician is not available');
@@ -2632,7 +2632,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // Same error codes, so the route and client recovery are unchanged.
     if (row.technician_id) {
       try {
-        await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate });
+        await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true });
       } catch (eligErr) {
         if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
         const err = new Error('slot technician is not available');

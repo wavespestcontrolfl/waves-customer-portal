@@ -338,6 +338,18 @@ describe('autoAssignParkedAlert', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
+  test('GATE_TECH_WORK_DAYS: each candidate is checked with workDays, so a tech who does not work that day is skipped', async () => {
+    assertAssignableTechnician.mockRejectedValue(Object.assign(new Error('off day'), { code: NOT_ASSIGNABLE, offDay: true }));
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query({}), query({})];
+    db.mockImplementation(() => queue.shift() || query({}));
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(assertAssignableTechnician).toHaveBeenCalledWith(CANDIDATE.id, expect.objectContaining({ workDays: true }));
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'no_eligible_candidate' });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
   test('success: moves via the canonical mover, pins the expect CAS, resolves the alert, broadcasts', async () => {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
     const stopQuery = query(baseStop());

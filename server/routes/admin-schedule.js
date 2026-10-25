@@ -17,7 +17,7 @@ const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
 const { pestReportVoiceLive, pestQuietVisitLive } = require('../config/feature-gates');
-const { specialtyReportVoiceLive } = require('../config/feature-gates');
+const { specialtyReportVoiceLive, techWorkDaysLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
@@ -2312,17 +2312,26 @@ function recurringTemplateTechnicianId(parent) {
 // whole call because ONE occurrence lands on a marked-out day — that child
 // is simply seeded unassigned, same as any other not-assignable case.
 // Omitting `date` keeps every caller byte-identical to before this check.
+//
+// Work days (GATE_TECH_WORK_DAYS on): a `date` that falls on a weekday the
+// technician does not work (technicians.work_days) seeds the child unassigned
+// the same way, for the owner to place. Gate off: no extra column read.
 async function assignableRecurringTemplateTechnicianId(conn, parent, date) {
   const techId = recurringTemplateTechnicianId(parent);
   if (!techId) return null;
   let q = conn('technicians').where({ id: techId });
   if (conn.isTransaction) q = q.forShare();
-  const tech = await q.first('id', 'employment_status', 'field_dispatchable');
+  const workDaysLive = techWorkDaysLive();
+  const tech = await q.first('id', 'employment_status', 'field_dispatchable', ...(workDaysLive ? ['work_days'] : []));
   if (!isAssignable(tech)) {
     logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
     return null;
   }
   if (date) {
+    if (workDaysLive && require('../services/technician-eligibility').isOffDay(tech, date)) {
+      logger.warn(`[recurring] parent=${parent?.id} technician ${techId} does not work on ${date}; seeding child unassigned`);
+      return null;
+    }
     const absence = await conn('technician_absences')
       .where({ technician_id: techId, absence_date: date })
       .whereNull('cleared_at')
@@ -2460,6 +2469,7 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     }
   }
 
+  const assignmentWarnings = new Set();
   for (const targetId of targetIds) {
     const assignment = await assignDispatchJob({
       jobId: targetId,
@@ -2473,6 +2483,7 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     });
     if (assignment.technicianName) technicianName = assignment.technicianName;
     if (assignment.changed) changedJobIds.push(targetId);
+    for (const line of assignment.warnings || []) assignmentWarnings.add(line);
   }
 
   if (scope !== 'this_only' && parentId) {
@@ -2500,6 +2511,7 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     templateChanged,
     changed: changedJobIds.length > 0 || templateChanged,
     technicianName,
+    ...(assignmentWarnings.size ? { warnings: [...assignmentWarnings] } : {}),
   };
 }
 
@@ -9392,6 +9404,14 @@ async function scheduleCreateHandler(req, res, next) {
           await assertAssignableTechnician(resolvedTechId, { conn: trx, date: occDate });
         }
       }
+      // Work days (GATE_TECH_WORK_DAYS): the office may put a technician on a day
+      // they do not work; the save proceeds and the response says so, for the
+      // parent date and every child/booster date.
+      if (resolvedTechId && techWorkDaysLive()) {
+        const { offDayWarningsFor } = require('../services/technician-eligibility');
+        const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
+        bookingWarnings.push(...await offDayWarningsFor(resolvedTechId, offDayDates, { conn: trx }));
+      }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -14862,6 +14882,13 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         if (finalTechnicianId && (finalDateChanging || finalTechChanging)) {
           const finalDate = finalDateChanging ? dateOnly(updates.scheduled_date) : (eligibilityRow?.day || null);
           await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
+          // Work days (GATE_TECH_WORK_DAYS): an office save onto a day the
+          // technician does not work still goes through; the modal is told.
+          if (techWorkDaysLive()) {
+            const { offDayWarningFor } = require('../services/technician-eligibility');
+            const offDayLine = await offDayWarningFor(finalTechnicianId, finalDate, { conn: trx });
+            if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
+          }
         }
       }
       // Match customer editors and grouping: maintenance/comms,
@@ -17920,6 +17947,7 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
       assignmentScope,
       assignmentUpdatedCount: result.changedJobIds?.length || 0,
       job,
+      ...(result.warnings ? { warnings: result.warnings } : {}),
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });

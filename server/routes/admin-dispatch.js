@@ -6903,6 +6903,20 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       today_completed: parseInt(r.today_completed, 10) || 0,
       out_today: !!r.out_today,
     })));
+    // Work days (GATE_TECH_WORK_DAYS): a technician who does not work today
+    // shows "Off" on the board. Unlike out_today it is information only: the
+    // card stays a valid drop target (an office placement warns, never blocks).
+    // The key exists only with the gate on, so gate off is byte-identical.
+    if (require('../config/feature-gates').techWorkDaysLive() && techs.length) {
+      try {
+        const { isOffDay } = require('../services/technician-eligibility');
+        const workRows = await db('technicians').whereIn('id', techs.map((t) => t.id)).select('id', 'work_days');
+        const workDaysById = new Map(workRows.map((w) => [String(w.id), w]));
+        for (const t of techs) t.off_today = isOffDay(workDaysById.get(String(t.id)), today);
+      } catch (err) {
+        logger.warn(`[dispatch/board] work days lookup failed (no Off flag): ${err.message}`);
+      }
+    }
 
     const jobs = (jobRows.rows || []).map((r) => {
       // Address normalization at the API boundary. Clients render this
@@ -7379,6 +7393,21 @@ router.get('/technicians', requireAdmin, async (req, res, next) => {
       })
       .select('technicians.id', 'technicians.name', 'technicians.role')
       .orderBy('name', 'asc');
+    // Work days (GATE_TECH_WORK_DAYS, with ?date): a technician who does not
+    // work that weekday stays in the list (office placements warn, never block)
+    // and is flagged offDay so the picker can say so. Gate off: no key, no read.
+    if (date && require('../config/feature-gates').techWorkDaysLive() && techs.length) {
+      try {
+        const { isOffDay } = require('../services/technician-eligibility');
+        const workRows = await db('technicians').whereIn('id', techs.map((t) => t.id)).select('id', 'work_days');
+        const workDaysById = new Map(workRows.map((w) => [String(w.id), w]));
+        for (const t of techs) {
+          if (isOffDay(workDaysById.get(String(t.id)), date)) t.offDay = true;
+        }
+      } catch (err) {
+        logger.warn(`[dispatch/technicians] work days lookup failed (no Off flag): ${err.message}`);
+      }
+    }
     res.json({ technicians: techs });
   } catch (err) {
     logger.error(`[dispatch/technicians] list failed: ${err.message}`);
@@ -7416,7 +7445,7 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
       technicianId: req.body ? req.body.technicianId : undefined,
       actorId: req.technicianId,
     });
-    res.json({ job: result.job });
+    res.json({ job: result.job, ...(result.warnings ? { warnings: result.warnings } : {}) });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     logger.error(`[dispatch/jobs/assign] failed for ${req.params.id}: ${err.message}`);

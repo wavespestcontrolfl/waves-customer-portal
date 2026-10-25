@@ -502,7 +502,7 @@ async function eligibleRankedCandidates(stop, absentTechId, date) {
   const eligible = [];
   for (const tech of crew) {
     try {
-      await assertAssignableTechnician(tech.id, { conn: db, date });
+      await assertAssignableTechnician(tech.id, { conn: db, date, workDays: true });
       eligible.push(tech);
     } catch (err) {
       if (err.code !== NOT_ASSIGNABLE) throw err;

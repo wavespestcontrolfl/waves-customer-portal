@@ -18,7 +18,7 @@
 // and metadata writes bump that long after hangup.
 
 const db = require('../../models/db');
-const { isEnabled } = require('../../config/feature-gates');
+const { isEnabled, techWorkDaysLive } = require('../../config/feature-gates');
 const { TERMINAL_CALL_STATUSES, callEndedAt } = require('../../utils/call-timeline');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 // booking-insert-contract.test.js recognizes the contract helper by this path.
@@ -315,6 +315,11 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
       trx, date: v.scheduledDate, windowStart: window.window_start, windowEnd: window.window_end,
     });
     if (v.technicianId) await assertAssignableTechnician(v.technicianId, { conn: trx, date: v.scheduledDate });
+    // Work days (GATE_TECH_WORK_DAYS): an office pick of a day the technician
+    // does not work saves with a warning line (never blocks).
+    const offDayWarnings = v.technicianId && techWorkDaysLive()
+      ? await require('../technician-eligibility').offDayWarningsFor(v.technicianId, [v.scheduledDate], { conn: trx })
+      : [];
 
     const cols = await trx('scheduled_services').columnInfo();
     const insertData = {
@@ -363,7 +368,7 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
       description: `Visit ${visit.id} booked by address for a new caller${callLogId ? ` (call ${callLogId})` : ' (no live call found)'}.`,
       metadata: JSON.stringify({ scheduled_service_id: visit.id, call_log_id: callLogId }),
     });
-    return { visit, warnings: clash.length ? [slotOverlapWarning(v.scheduledDate)] : [] };
+    return { visit, warnings: [...(clash.length ? [slotOverlapWarning(v.scheduledDate)] : []), ...offDayWarnings] };
   });
 }
 
