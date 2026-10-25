@@ -9709,6 +9709,20 @@ async function handleEstimateView(req, res, next) {
         logger.warn(`[estimate-view] phone-park routing check failed, forcing the React view: ${e.message}`);
       }
     }
+    // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE) lives ONLY in the React page (the notice card and the
+    // accept hold). The legacy server-HTML page has no notice step, so its accept would end in a refused 409
+    // consumer_notice_required with no way forward. An accept-active estimate with a termite line therefore always
+    // gets the React view, exactly like the acceptance-terms force above (holdback excluded, the /api/estimates
+    // mount redirects). Gate-tied, so the kill switch restores today's routing. A failed check fails toward React.
+    let consumerNoticeForcesReactView = false;
+    if (featureGates.estimateConsumerNoticeLive() && isEstimateAcceptActive(estimate)) {
+      try {
+        consumerNoticeForcesReactView = require('../services/estimate-consumer-notice').estimateNeedsConsumerNotice(estimate);
+      } catch (e) {
+        consumerNoticeForcesReactView = true;
+        logger.warn(`[estimate-view] consumer-notice routing check failed, forcing the React view: ${e.message}`);
+      }
+    }
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
@@ -9716,7 +9730,8 @@ async function handleEstimateView(req, res, next) {
       || estimatePdfRenderPass
       || acceptanceTermsForcesReactView
       || contactGapsForceReactView
-      || parkedForcesReactView;
+      || parkedForcesReactView
+      || consumerNoticeForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -9742,6 +9757,7 @@ async function handleEstimateView(req, res, next) {
       && !acceptanceTermsForcesReactView
       && !contactGapsForceReactView
       && !parkedForcesReactView
+      && !consumerNoticeForcesReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -9774,7 +9790,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView || consumerNoticeForcesReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
@@ -10416,6 +10432,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
     // an ALREADY-accepted estimate stay untouched (that acceptance happened).
     if (gatedAddOn) return res.status(409).json(gatedAddOn);
+    // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE, Rule 5E-14.105(1)): an estimate with a termite line is not
+    // accepted until the customer has the signed FDACS-13692 on file. It follows the one blocking-state decision above and
+    // the Bermuda gate, and stays ahead of everything that validates, writes or charges (contact fills, the accept
+    // transaction, cards, holds, bookings), so a refusal writes nothing. A read error fails the accept closed.
+    if (featureGates.estimateConsumerNoticeLive()) {
+      const consumerNotice = require('../services/estimate-consumer-notice');
+      if (await consumerNotice.consumerNoticeBlocksAccept(estimate)) {
+        return res.status(409).json({ error: consumerNotice.REQUIRED_MESSAGE, code: 'consumer_notice_required' });
+      }
+    }
     // Missing-contact capture (owner ruling 2026-09-27): the accept card
     // asks for whatever's actually missing — last name and/or email — right
     // above the Accept button. Only sanitize/validate here (a malformed
@@ -12261,7 +12287,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // against a linkage correction. One order everywhere:
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
-        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status');
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status', 'customer_id');
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -12315,6 +12341,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const err = new Error('Estimate is no longer active');
           err.status = 409;
           throw err;
+        }
+        // Florida consumer notice at the commit (GATE_ESTIMATE_CONSUMER_NOTICE): the live gate and the notice are judged
+        // again on the estimate row locked above, so an accept that waited on payment checks or locks while the gate was
+        // turned on (or while a termite line arrived) cannot commit without the signed FDACS-13692.
+        if (featureGates.estimateConsumerNoticeLive()) {
+          const consumerNotice = require('../services/estimate-consumer-notice');
+          const lockedForNotice = { ...estimate, estimate_data: freshLinkRow?.estimate_data, customer_id: freshLinkRow?.customer_id };
+          if (await consumerNotice.consumerNoticeBlocksAccept(lockedForNotice, trx)) {
+            const err = new Error(consumerNotice.REQUIRED_MESSAGE);
+            err.status = 409;
+            err.code = 'consumer_notice_required';
+            throw err;
+          }
         }
       }
       // Plan-restart accept revalidation (C4 codex GH r4 P1): the restart
@@ -19202,6 +19241,57 @@ router.post('/:token/commercial-agreement', commercialAgreementLimiter, async (r
   } catch (err) {
     // err.code only, never err.message (PG constraint errors can quote customer data).
     logger.warn(`[estimate-public] commercial-agreement failed (code=${err?.code || 'none'})`);
+    next(err);
+  }
+});
+
+// Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE, owner 2026-10-25, Rule 5E-14.105(1)): the same contract as
+// commercial-agreement above, so its privacy-header stamp is reused. Gate-aware limiter: a dark gate answers the generic 404
+// on every probe, never a 429.
+const consumerNoticeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.estimateConsumerNoticeLive(),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like commercialAgreementPreGuard: the
+// privacy headers and the dark gate's generic 404 land ahead of any limiter. POST only.
+const CONSUMER_NOTICE_PATH_RE = /^\/[^/]+\/consumer-notice\/?$/i;
+function consumerNoticePreGuard(req, res, next) {
+  if (req.method !== 'POST' || !CONSUMER_NOTICE_PATH_RE.test(req.path || '')) return next();
+  stampCommercialAgreementHeaders(res);
+  if (!featureGates.estimateConsumerNoticeLive()) return res.status(404).json({ error: 'Estimate not found' });
+  return next();
+}
+
+// POST /api/estimates/:token/consumer-notice — the estimate page's "Read and sign the notice" tap. Issues, or re-opens,
+// the FDACS-13692 consumer notice for the estimate's customer and returns its public signing URL. The estimate is never
+// changed. The generic 404 covers a dark gate, an unknown token, an estimate that is not open, a staff preview and an
+// estimate with no termite line; the distinct 409s (no account, no representative, already signed) come only after the
+// token has cleared every check.
+router.post('/:token/consumer-notice', consumerNoticeLimiter, async (req, res, next) => {
+  stampCommercialAgreementHeaders(res);
+  const notFound = () => res.status(404).json({ error: 'Estimate not found' });
+  try {
+    if (!featureGates.estimateConsumerNoticeLive() || req.query.adminPreview === '1') return notFound();
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return notFound();
+    if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) return notFound();
+    if (!isEstimateCustomerViewable(estimate) || !isEstimateAcceptActive(estimate)) return notFound();
+    const consumerNotice = require('../services/estimate-consumer-notice');
+    if (!consumerNotice.estimateNeedsConsumerNotice(estimate)) return notFound();
+    const result = await consumerNotice.ensureEstimateConsumerNotice({ estimate, req, blockedFor: commercialAgreementBlockedFor });
+    if (!result.ok) {
+      return res.status(result.status).json(result.status === 404 ? { error: 'Estimate not found' } : { error: result.error, code: result.code });
+    }
+    return res.status(result.status).json({ signingUrl: result.signingUrl });
+  } catch (err) {
+    // err.code only, never err.message (PG constraint errors can quote customer data).
+    logger.warn(`[estimate-public] consumer-notice failed (code=${err?.code || 'none'})`);
     next(err);
   }
 });
@@ -30710,6 +30800,14 @@ async function composeEstimateDataPayload(estimate, {
       && isEstimateAcceptActive(estimate)
       ? await require('../services/commercial-proposal-agreement').agreementCtaFor(estimate)
       : null;
+    // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): an open estimate with a termite line asks for the signed
+    // FDACS-13692 before it can be accepted. Nothing is read or added with the gate off; never a staff preview, a draft
+    // preview or the headless document render.
+    const consumerNoticeCta = featureGates.estimateConsumerNoticeLive()
+      && terminalState === null && !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass
+      && isEstimateAcceptActive(estimate)
+      ? await require('../services/estimate-consumer-notice').consumerNoticeCtaFor(estimate)
+      : null;
     // Public proposal view — the authored buildings/line items the customer's
     // emailed PDF already contains, projected for the on-page glass render.
     // Resolved with the SAME live billing lane as the PDF generator so the
@@ -31418,6 +31516,7 @@ async function composeEstimateDataPayload(estimate, {
         // about whether the PDF was actually emailed.
         commercialProposal: quoteRequirement.reason === 'commercial_proposal',
         ...(commercialAgreementCta ? { commercialAgreement: commercialAgreementCta } : {}),
+        ...(consumerNoticeCta ? { consumerNotice: consumerNoticeCta } : {}),
         // Auto-priced commercial (no quote-required proposal): React needs the
         // commercial identity too — its bundle card keeps the monthly contract
         // price, mirroring the SSR fork (codex #3128 r5).
@@ -31890,6 +31989,7 @@ module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.mapImagePreGuard = mapImagePreGuard;
 module.exports.contactPhonePreGuard = contactPhonePreGuard;
 module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
+module.exports.consumerNoticePreGuard = consumerNoticePreGuard;
 module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
