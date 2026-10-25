@@ -2502,24 +2502,28 @@ const BED_BUG = {
 
 // ============================================================
 // MOSQUITO MISTING SYSTEM (automatic install + monthly plan + per-fill refills)
-// DRAFT values from ~/mosquito-misting-scope-20260924.md section 4.3. Dealer
-// cost is unknown, so every price and cost here is a placeholder and the line
-// ships DARK behind GATE_MOSQUITO_MISTING. Not a WaveGuard tier service and
-// not percent-discountable (see WAVEGUARD.excludedFromPercentDiscount).
+// Modeled on the Pynamite system (owner pick 2026-10-24: no tankless unit, every unit has a Wi-Fi/Bluetooth app,
+// a 55-gallon Cube Pro and a compact 10-gallon unit) and built at RETAIL for now ("build at retail for now"). The
+// cost basis is Pynamite retail sale prices read 2026-10-24: Cube Pro 30-nozzle kit $2,495 plus about $65 for a
+// surge protector and filter; 10-gallon 10-nozzle kit $1,557 plus about $63; copper riser $30.30; Sector 1 gal
+// $139 (2 fills); Riptide/Troika 1/2 gal $203 (1 fill). Dealer pricing will replace these when it arrives, so every
+// price and cost here is a placeholder and the line ships DARK behind GATE_MOSQUITO_MISTING. Not a WaveGuard tier
+// service and not percent-discountable (see WAVEGUARD.excludedFromPercentDiscount).
 // ============================================================
 const MOSQUITO_MISTING = {
+  // Tier KEYS (essential, smart) are stored on estimates and stay; only the labels and numbers follow Pynamite.
   tiers: {
-    // hardwareCost is a PLACEHOLDER cost basis (the retail list; dealer cost unknown).
-    essential: { label: 'Essential system (drum)', price: 3795, includedNozzles: 35, hardwareCost: 1800 },
-    smart: { label: 'Smart system (tankless + app)', price: 4595, includedNozzles: 35, hardwareCost: 2600 },
+    // hardwareCost is a PLACEHOLDER cost basis (Pynamite retail kit + surge protector/filter; dealer cost pending).
+    essential: { label: 'Compact system (10-gallon)', price: 2795, includedNozzles: 10, hardwareCost: 1620 },
+    smart: { label: 'Standard system (55-gallon)', price: 4195, includedNozzles: 30, hardwareCost: 2560 },
   },
   defaultTier: 'smart',
   extraNozzlePrice: 75,
   extraNozzleCost: 22,
-  includedRisers: 10,
-  extraRiserPrice: 45,
-  extraRiserCost: 14,
-  install: { techs: 2, hours: 10 }, // labor cost = techs x hours x GLOBAL.LABOR_RATE
+  includedRisers: 0, // every riser is priced individually
+  extraRiserPrice: 75,
+  extraRiserCost: 30, // Pynamite copper riser $30.30 retail
+  install: { techs: 2, hours: 6 }, // labor cost = techs x hours x GLOBAL.LABOR_RATE
   minNozzles: 10,
   maxNozzles: 80, // above this the system is a manual quote
   maxRisers: 80, // above this the system is a manual quote
@@ -2531,11 +2535,12 @@ const MOSQUITO_MISTING = {
     partsReservePerMonth: 10,
   },
   // Refill per fill, billed per visit (not part of the plan annual).
-  // productCost basis: 1 gal concentrate $179.49 at SiteOne member price fills a 55 gal drum about 4 times.
+  // productCost basis (Pynamite retail 2026-10-24): standard = Sector 1 gal $139 = 2 fills, plus carrier and wear
+  // (70); premium = Riptide/Troika 1/2 gal $203 = 1 fill (203). Natural is unchanged until a source is priced.
   refills: {
-    standard: { label: 'Standard (permethrin, Sector or Mosquito Mist Ultra)', price: 129, productCost: 45 },
+    standard: { label: 'Standard (permethrin, Sector or Mosquito Mist Ultra)', price: 129, productCost: 70 },
     natural: { label: 'Natural (botanical)', price: 219, productCost: 95 },
-    premium: { label: 'Premium (pyrethrins)', price: 319, productCost: 140 },
+    premium: { label: 'Premium (pyrethrins)', price: 319, productCost: 203 },
   },
   defaultSolution: 'standard',
   defaultRefillsPerYear: 4,

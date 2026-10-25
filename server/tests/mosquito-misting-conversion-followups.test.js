@@ -18,7 +18,7 @@ const constants = require('../services/pricing-engine/constants');
 
 const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 const PROPERTY = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, propertyType: 'single_family' };
-const INSTALL = 3795 + 5 * 75 + 2 * 45;
+const INSTALL = 2795 + 30 * 75 + 12 * 75; // compact, 40 nozzles (10 included), 12 risers (none included)
 const saved = process.env.GATE_MOSQUITO_MISTING;
 beforeEach(() => { process.env.GATE_MOSQUITO_MISTING = 'true'; });
 afterEach(() => {
@@ -173,9 +173,9 @@ describe('audit 4: engine-origin install, one prepay total helper, install bell 
 
   test('frozenMistingInstall: mapped item, raw engine line (engineResult.lineItems), and an itemized proposal line all resolve; same shape', () => {
     const mapped = converter.frozenMistingInstall(estimateData());
-    expect(mapped).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    expect(mapped).toMatchObject({ amount: INSTALL, description: 'Compact system (10-gallon) Installation' });
     const raw = converter.frozenMistingInstall(engineOnly());
-    expect(raw).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    expect(raw).toMatchObject({ amount: INSTALL, description: 'Compact system (10-gallon) Installation' });
     expect(converter.frozenMistingInstall(JSON.stringify(engineOnly()))).toEqual(raw);
     const proposal = converter.frozenMistingInstall({
       proposal: {
@@ -212,7 +212,7 @@ describe('audit 4: engine-origin install, one prepay total helper, install bell 
     });
     expect(draft.lineItems.some(misting.isMistingInstallLine)).toBe(true);
     expect(draft.amount).toBe(Math.round((59 + INSTALL) * 100) / 100);
-    expect(converter.frozenPrepayOneTimeLines(data)).toEqual({ rodentSetup: 0, mistingInstall: INSTALL, mistingInstallDescription: 'Essential system (drum) Installation', total: INSTALL });
+    expect(converter.frozenPrepayOneTimeLines(data)).toEqual({ rodentSetup: 0, mistingInstall: INSTALL, mistingInstallDescription: 'Compact system (10-gallon) Installation', total: INSTALL });
   });
 
   test('frozenPrepayOneTimeLines: misting + pest prepay quote total equals the minted invoice total; no misting is unchanged', () => {
@@ -441,7 +441,7 @@ describe('audit 7: several sold installs bill once each; a refill is due once', 
 
   test('a single mapped install is unchanged (one line, same amount and label)', () => {
     const install = converter.frozenMistingInstall(estimateData());
-    expect(install).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    expect(install).toMatchObject({ amount: INSTALL, description: 'Compact system (10-gallon) Installation' });
     expect(install.lines).toHaveLength(1);
     expect(misting.mistingInstallInvoiceLines(install)).toEqual([misting.mistingInstallLine({ description: install.description, amount: INSTALL })]);
     expect(misting.mistingInstallInvoiceLines(null)).toEqual([]);
@@ -526,7 +526,7 @@ describe('audit 8: the install resolves for an inputs-only estimate and fails cl
     expect(converter.frozenMistingInstall(raw)).toBeNull(); // nothing is stored to read
     const accepted = withSupplementedRecurringServices(raw);
     const install = converter.frozenMistingInstall(accepted);
-    expect(install).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    expect(install).toMatchObject({ amount: INSTALL, description: 'Compact system (10-gallon) Installation' });
     // standard / prepay lines, the quote helper and the invoice-mode draft all see it
     expect(misting.mistingInstallInvoiceLines(install).every(misting.isMistingInstallLine)).toBe(true);
     expect(converter.frozenPrepayOneTimeLines(accepted).mistingInstall).toBe(INSTALL);

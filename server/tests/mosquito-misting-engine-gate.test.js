@@ -60,7 +60,7 @@ describe('gate off (default)', () => {
 describe('gate on', () => {
   beforeEach(() => { process.env.GATE_MOSQUITO_MISTING = 'true'; });
 
-  const install = 3795 + 5 * 75 + 2 * 45; // essential, 40 nozzles, 12 risers
+  const install = 2795 + 30 * 75 + 12 * 75; // essential (10 nozzles included), 40 nozzles, 12 risers (none included)
 
   test('the reader is true', () => {
     expect(mosquitoMistingLive()).toBe(true);
@@ -133,7 +133,7 @@ describe('gate on', () => {
     expect(plan.detail).toBe('40 nozzles · 12 applications/yr · $59 per application · Natural (botanical) refill $219 per refill application');
     const item = mapped.oneTime.items.find((i) => i.service === 'mosquito_misting_installation');
     expect(item).toMatchObject({
-      name: 'Essential system (drum) Installation',
+      name: 'Compact system (10-gallon) Installation',
       price: install,
     });
     expect(item.detail).toBe('40 nozzles · 12 risers · Natural (botanical) refill $219 per refill application');
@@ -155,9 +155,9 @@ describe('gate on', () => {
     const inst = rows.find((r) => r.key === 'mosquito_misting_install');
     const plan = rows.find((r) => r.key === 'mosquito_misting_plan');
     expect(inst.name).toBe('Mosquito Misting System Installation');
-    // essential 20 nozzles (below included, no credit) to smart 50 nozzles.
-    expect(inst.low).toBe(3795);
-    expect(inst.high).toBe(4595 + 15 * 75);
+    // compact (essential) at its 10 included nozzles up to the compact system at 50 nozzles; no risers in the sweep.
+    expect(inst.low).toBe(2795);
+    expect(inst.high).toBe(2795 + 40 * 75);
     expect(plan.name).toBe('Mosquito Misting Service Plan (monthly application)');
     expect(plan.unit).toBe('per application');
     expect(`${plan.notes} ${inst.notes}`).not.toMatch(/per month|per visit|\/mo/i);
