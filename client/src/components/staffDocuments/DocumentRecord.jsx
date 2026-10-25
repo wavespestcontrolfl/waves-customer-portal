@@ -10,16 +10,26 @@ function usePrefill({ detail, canWrite, record, owner, setAnswers }) {
   const [prefilled, setPrefilled] = useState({});
   const applied = useRef({});
   useEffect(() => {
+    // A saved record keeps its own answers: only forget what the prefill put in.
     if (!enabled) { applied.current = {}; setPrefilled({}); return undefined; }
+    // Owner or version changed on a new record: drop the last prefill's values (unless edited)
+    // BEFORE asking again, so a slow or failed request never leaves another person's details here.
+    const previous = applied.current;
+    applied.current = {}; setPrefilled({});
+    if (Object.keys(previous).length) {
+      setAnswers(current => {
+        const cleared = { ...current };
+        for (const [id, value] of Object.entries(previous)) if (cleared[id] === value) delete cleared[id];
+        return cleared;
+      });
+    }
     const controller = new AbortController();
-    request(`/versions/${versionId}/prefill?owner_id=${owner}`, undefined, controller.signal).then(result => {
+    request(`/versions/${versionId}/prefill?owner_id=${encodeURIComponent(owner)}`, undefined, controller.signal).then(result => {
       if (controller.signal.aborted) return;
-      const next = result.answers || {}; const previous = applied.current;
+      const next = result.answers || {};
       setAnswers(current => {
         const merged = { ...current };
-        for (const id of new Set([...Object.keys(previous), ...Object.keys(next)])) {
-          if (!current[id] || current[id] === previous[id]) { if (next[id]) merged[id] = next[id]; else delete merged[id]; }
-        }
+        for (const [id, value] of Object.entries(next)) if (!current[id]) merged[id] = value;
         return merged;
       });
       applied.current = next; setPrefilled(next);

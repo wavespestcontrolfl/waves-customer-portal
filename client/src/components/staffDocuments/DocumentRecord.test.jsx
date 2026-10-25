@@ -83,3 +83,39 @@ test('a failed prefill leaves the form empty and shows no error', async () => {
   expect(screen.getByLabelText('Assigned vehicle')).toHaveValue('');
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
+
+test('an owner change clears the earlier prefill at once, before the new request answers', async () => {
+  let resolveSecond;
+  request.mockResolvedValueOnce(FILLED).mockReturnValueOnce(new Promise(r => { resolveSecond = r; }));
+  view({ detail: { prefill: true } });
+  await screen.findByDisplayValue('Truck 7');
+  fireEvent.change(screen.getByLabelText('Record owner'), { target: { value: 'hire' } });
+  await waitFor(() => expect(screen.getByLabelText('Assigned vehicle')).toHaveValue(''));
+  expect(screen.getByLabelText('Home address')).toHaveValue('');
+  expect(screen.getByLabelText('Start date')).toHaveValue('');
+  expect(screen.queryByText(/Filled from the staff record/)).not.toBeInTheDocument();
+  resolveSecond({ answers: { vehicle: 'Truck 9' }, fields: ['vehicle'] });
+  expect(await screen.findByDisplayValue('Truck 9')).toBeInTheDocument();
+});
+
+test('a failed request for the new owner leaves none of the earlier owner\'s details', async () => {
+  request.mockResolvedValueOnce(FILLED).mockRejectedValueOnce(new Error('offline'));
+  view({ detail: { prefill: true } });
+  await screen.findByDisplayValue('Truck 7');
+  fireEvent.change(screen.getByLabelText('Record owner'), { target: { value: 'hire' } });
+  await waitFor(() => expect(screen.getByLabelText('Home address')).toHaveValue(''));
+  expect(screen.getByLabelText('Assigned vehicle')).toHaveValue('');
+  expect(screen.queryByText(/Filled from the staff record/)).not.toBeInTheDocument();
+});
+
+test('opening a saved record keeps its answers, even ones equal to the prefill', async () => {
+  const saved = { id: 'rec-1', owner_id: 'me', answers: { vehicle: 'Truck 7', 'home-address': 'Saved address' }, completed_steps: [],
+    created_at: '2026-10-25T12:00:00Z', updated_at: '2026-10-25T12:00:00Z', due_at: '2026-10-26T12:00:00Z', completed_at: null };
+  request.mockResolvedValue(FILLED);
+  view({ detail: { prefill: true, records: [saved] } });
+  await screen.findByDisplayValue('Truck 7');
+  fireEvent.change(screen.getByLabelText('Saved records'), { target: { value: 'rec-1' } });
+  await waitFor(() => expect(screen.getByLabelText('Home address')).toHaveValue('Saved address'));
+  expect(screen.getByLabelText('Assigned vehicle')).toHaveValue('Truck 7');
+  expect(screen.queryByText(/Filled from the staff record/)).not.toBeInTheDocument();
+});
