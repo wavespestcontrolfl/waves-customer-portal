@@ -412,9 +412,13 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
     const wanted = new Set(obligations.map((ob) => ob.source_key));
     const stale = existing.filter((row) => row.status === 'upcoming' && !wanted.has(row.source_key));
     if (stale.length) {
-      // Same guard: never delete a row marked done after the read.
+      // Same guard: never delete a row marked done after the read, and never one
+      // that holds something the owner entered (a payment, a date or a
+      // confirmation number), even if it was moved back to upcoming.
       result.deleted = await trx('tax_filing_calendar')
-        .whereIn('id', stale.map((row) => row.id)).where('status', 'upcoming').del();
+        .whereIn('id', stale.map((row) => row.id)).where('status', 'upcoming')
+        .whereNull('amount_paid').whereNull('paid_date').whereNull('filed_date').whereNull('confirmation_number')
+        .del();
     }
     return result;
   });
