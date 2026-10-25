@@ -1132,6 +1132,10 @@ async function evaluateServiceForRun(service, run) {
     // find-time's arrival-window engine (candidate-slots.js); pass 2 reuses
     // this ctx, so the re-check before a move searches the same way.
     arrivalSearch: config.arrivalSearch === 'true',
+    // GATE_AUTO_DISPATCH_DAY_RULES: Sundays are searched too, and the arrival
+    // search's van leaves at the run's departure time (withDayRules).
+    dayRules: config.dayRules === true,
+    departureMinutes: config.departureMinutes,
     // ROUTE-TIERS: pre-intersected candidate window (null/absent when the
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
@@ -1239,6 +1243,33 @@ async function recheckPlannedMove(pm, run) {
   return null;
 }
 
+// DAY RULES (GATE_AUTO_DISPATCH_DAY_RULES, owner 2026-10-24): the van's
+// departure, read once per run so the run's config snapshot records it
+// (scheduling/departure-time.js). Off: nothing is read and every search
+// keeps 08:00.
+async function withDayRules(config) {
+  if (config.dayRules !== true) return config;
+  const { dayDepartureMinutes } = require('../scheduling/departure-time');
+  return { ...config, departureMinutes: await dayDepartureMinutes(db, { enabled: true }) };
+}
+
+// DAY RULES: the run's Sunday budget, config.maxSundayMovesPerRun visits
+// moved onto a Sunday they are not already on (a same-day re-time on a
+// Sunday visit is not one). Spent, a Sunday move is held and no SLOT_TAKEN
+// fallback is a Sunday. With the day rules off find-time never offers a
+// Sunday, so nothing is ever held or filtered.
+function sundayBudget(config) {
+  let moved = 0;
+  const ontoSunday = (service, cand) => !!cand && moveRules.isSundayDate(cand.date) && String(cand.date) !== toDateStr(service.scheduled_date);
+  const spent = () => config.dayRules === true && moved >= config.maxSundayMovesPerRun;
+  const holds = (service, cand) => spent() && ontoSunday(service, cand);
+  return {
+    holds,
+    fallbacks: (service, candidates) => (candidates || []).filter((cand) => !holds(service, cand)),
+    note: (service, cand) => { if (ontoSunday(service, cand)) moved += 1; },
+  };
+}
+
 // Pass 2 for one planned move: the supersession check, the apply-time guard
 // recheck, a live re-evaluation and the per-run cap, then the apply and its
 // audit. Resolves to `fresh` — the live re-evaluation — for the failure
@@ -1286,6 +1317,14 @@ async function applyPlannedMove(pm, run, attempt) {
     return audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${grouped})`, ...fresh.audit });
   }
 
+  // DAY RULES: past the run's Sunday budget a Sunday move is held like a
+  // cap-held move, before the move check spends a model call on it.
+  if (run.sundays.holds(pm.service, fresh.best)) {
+    totals.recommended++;
+    noteUnmoved(run, pm.service, 'SUNDAY_CAP_REACHED');
+    return audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'SUNDAY_CAP_REACHED', reason_description: `Per-run Sunday move cap ${config.maxSundayMovesPerRun} reached (valid move held, +${fresh.improvement})`, ...fresh.audit });
+  }
+
   // GATE_AUTO_DISPATCH_PROOFREADER (proofreader/nightly.js): the last step
   // before the write, so a move no rule or cap lets through is never paid
   // for. Anything but "allow" leaves the visit where it is.
@@ -1327,8 +1366,11 @@ async function applyPlannedMove(pm, run, attempt) {
     // the run's cache. The move guard refuses when a Team-tab edit changed one.
     startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(pm.ctx, technicianId),
     ...moveCheck.writeOptions(checked, {
-      alternateCandidates: fresh.rankedCandidates,
-      rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
+      alternateCandidates: run.sundays.fallbacks(pm.service, fresh.rankedCandidates),
+      rescore: async () => {
+        const again = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
+        return again.kind === 'move' ? { ...again, rankedCandidates: run.sundays.fallbacks(pm.service, again.rankedCandidates) } : again;
+      },
     }),
   });
   totals.changed += result.movedCount || 1;
@@ -1338,6 +1380,7 @@ async function applyPlannedMove(pm, run, attempt) {
   // For the common (non-fallback) case this reproduces fresh.audit exactly
   // (same pure inputs).
   const appliedAudit = buildAppliedPlacementAudit(fresh, pm.service, pm.prefs, pm.ctx, lockBoundary, result);
+  run.sundays.note(pm.service, appliedAudit.newPlacement);
   return audit.logDecision(runId, {
     action: 'changed',
     service: pm.service,
@@ -1359,6 +1402,8 @@ async function applyPlannedMove(pm, run, attempt) {
 async function recordApplyFailure(pm, fresh, applyErr, run) {
   run.totals.failed++;
   run.totals.changed += applyErr.movedCount || 0;
+  // A partial grouped move onto a Sunday still put rows there.
+  if (applyErr.movedCount > 0) run.sundays.note(pm.service, applyErr.lastAttempted || (fresh && fresh.best));
   const failedMembers = Array.isArray(applyErr.failedMembers) ? applyErr.failedMembers : [];
   for (const id of failedMembers) { run.quarantinedIds.add(String(id)); run.strandedIds.add(String(id)); }
   logger.error(`[auto-dispatch] apply failed for ${pm.service.id}: ${applyErr.message}`);
@@ -1435,7 +1480,7 @@ async function runPassTwo(run) {
 }
 
 async function runAutoDispatch(opts = {}) {
-  const config = getAutoDispatchConfig(opts);
+  const config = await withDayRules(getAutoDispatchConfig(opts));
   const triggeredBy = opts.triggeredBy || 'cron';
   const nowDate = new Date();
   const today = etDateString(nowDate);
@@ -1477,6 +1522,8 @@ async function runAutoDispatch(opts = {}) {
     // Visits auto-dispatch cannot fix alone; raised once at run end (needs-person-notice.js).
     needsPerson: new Map(),
     moveCounts: new Map(),
+    // DAY RULES: visits this run may still move onto a Sunday (sundayBudget).
+    sundays: sundayBudget(config),
     guardReadDegraded: false, // a failed guard read must not report a green run
     // Visits skipped for a missing pin on a live plan this run, and whether
     // pass 1 looked at every visit (their notices close only then).

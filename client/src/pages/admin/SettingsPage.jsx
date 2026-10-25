@@ -5,6 +5,7 @@ import {
   Building2,
   CalendarOff,
   ChevronRight,
+  Clock,
   DollarSign,
   KeyRound,
   Link2,
@@ -94,6 +95,7 @@ const VALID_TABS = [
   "link-library",
   "service-reports",
   "blackout-days",
+  "day-start",
   "kpi-targets",
   "operating-costs",
   "system",
@@ -107,7 +109,7 @@ const SETTINGS_TAB_GROUPS = [
   { key: "general", label: "General", Icon: Building2, tabs: ["general", "link-library"] },
   { key: "integrations", label: "Integrations", Icon: Plug, tabs: ["integrations"] },
   { key: "service-reports", label: "Reports", Icon: MapPinned, tabs: ["service-reports"] },
-  { key: "scheduling", label: "Scheduling", Icon: CalendarOff, tabs: ["blackout-days"] },
+  { key: "scheduling", label: "Scheduling", Icon: CalendarOff, tabs: ["blackout-days", "day-start"] },
   { key: "financials", label: "Financials", Icon: Target, tabs: ["kpi-targets", "operating-costs"] },
   { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system", "usage"] },
 ];
@@ -119,6 +121,7 @@ const SETTINGS_LEAF_META = {
   integrations: { label: "Integrations", Icon: Plug },
   "service-reports": { label: "Reporting", Icon: MapPinned },
   "blackout-days": { label: "Blackouts", Icon: CalendarOff },
+  "day-start": { label: "Day start", Icon: Clock },
   "kpi-targets": { label: "Targets", Icon: Target },
   "operating-costs": { label: "Costs", Icon: DollarSign },
   gates: { label: "Features", Icon: ToggleLeft },
@@ -219,7 +222,7 @@ export default function SettingsPage() {
   // hooks than during the previous render" (codex P1).
   useEffect(() => {
     if (user && user.role !== "admin"
-      && ["service-reports", "blackout-days", "kpi-targets", "operating-costs", "integrations", "gates", "system", "link-library"].includes(tab)) {
+      && ["service-reports", "blackout-days", "day-start", "kpi-targets", "operating-costs", "integrations", "gates", "system", "link-library"].includes(tab)) {
       selectTab("general");
     }
     // selectTab is stable; errors-only lint config has no exhaustive-deps.
@@ -253,7 +256,7 @@ export default function SettingsPage() {
   // KPI targets, feature gates, and System are owner-only.
   // Operating Costs reads and writes /admin/revenue/settings (company
   // financials), owner-only under the 2026-10-02 technician allow-list.
-  const OWNER_ONLY_SETTINGS_LEAVES = ["kpi-targets", "operating-costs", "gates", "system", "service-reports", "blackout-days", "link-library"];
+  const OWNER_ONLY_SETTINGS_LEAVES = ["kpi-targets", "operating-costs", "gates", "system", "service-reports", "blackout-days", "day-start", "link-library"];
   const visibleGroups = SETTINGS_TAB_GROUPS.filter(
     (g) => isAdminRole || !["service-reports", "scheduling", "integrations"].includes(g.key),
   ).map((g) => (
@@ -382,6 +385,7 @@ export default function SettingsPage() {
       {tab === "gates" && isAdminRole && <FeatureGatesTab />}
       {tab === "service-reports" && <ServiceCoverageSettingsTab />}
       {tab === "blackout-days" && <BlackoutDaysTab />}
+      {tab === "day-start" && <DayStartTab />}
       {tab === "kpi-targets" && <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />}
       {tab === "operating-costs" && isAdminRole && <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />}
       {tab === "system" && isAdminRole && <SystemTab health={health} />}
@@ -1437,6 +1441,105 @@ function BlackoutDaysTab() {
           ))}
         </div>
       )}
+      </CardBody>
+    </Card>
+  );
+}
+
+// The 9 times Settings accepts: 6:00 AM to 8:00 AM in 15-minute steps. The
+// server (scheduling/departure-time.js) refuses anything else.
+const DEPARTURE_TIME_OPTIONS = Array.from({ length: 9 }, (_, i) => {
+  const minutes = 6 * 60 + i * 15;
+  const hour = Math.floor(minutes / 60);
+  const minute = String(minutes % 60).padStart(2, "0");
+  return { value: `${String(hour).padStart(2, "0")}:${minute}`, label: `${hour}:${minute} AM` };
+});
+
+function DayStartTab() {
+  const [loaded, setLoaded] = useState(null); // time the server holds
+  const [value, setValue] = useState("");
+  const [inUse, setInUse] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    adminFetch("/admin/schedule/departure-time")
+      .then((d) => {
+        if (d?.error) throw new Error(d.error);
+        setLoaded(d.departureTime);
+        setValue(d.departureTime);
+        setInUse(d.inUse === true);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const save = async () => {
+    if (saving || !value) return;
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      // adminFetch resolves parsed JSON even on HTTP errors: read the body
+      // before treating the save as done (see BlackoutDaysTab remove).
+      const d = await adminFetch("/admin/schedule/departure-time", {
+        method: "PUT",
+        body: JSON.stringify({ departureTime: value }),
+      });
+      if (d?.error) throw new Error(d.error);
+      setLoaded(d.departureTime || value);
+      setValue(d.departureTime || value);
+      setInUse(d.inUse === true);
+      setSaved(true);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Day start</CardTitle>
+        <p className="mt-1 text-ui-body text-ink-secondary">
+          The time the van leaves the start point. The first visit still starts
+          at 8:00 AM at the earliest; an earlier time lets a farther first stop
+          start at 8:00.
+        </p>
+      </CardHeader>
+      <CardBody>
+        {loading ? (
+          <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
+        ) : (
+          <>
+            <div className="grid items-end gap-3 md:grid-cols-[minmax(180px,0.6fr)_auto]">
+              <Field label="Van leaves at">
+                <Select
+                  value={value}
+                  onChange={(e) => { setValue(e.target.value); setSaved(false); }}
+                  disabled={saving || loaded === null}
+                >
+                  {DEPARTURE_TIME_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </Select>
+              </Field>
+              <Button onClick={save} loading={saving} disabled={saving || loaded === null || value === loaded}>
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+            {loaded !== null && (
+              <p className="mt-3 text-ui-body text-ink-secondary">
+                {inUse
+                  ? "In use by the nightly auto-dispatch, the 4:20 AM route check and the day reports."
+                  : "Not in use yet: it takes effect when the new night rules turn on."}
+              </p>
+            )}
+            {saved && <ActionFeedback className="mt-3">Saved.</ActionFeedback>}
+          </>
+        )}
+        {error && <ActionFeedback error className="mt-3">{error}</ActionFeedback>}
       </CardBody>
     </Card>
   );

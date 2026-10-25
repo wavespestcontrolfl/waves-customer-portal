@@ -611,6 +611,15 @@ function isSaturday(dateStr) {
   return weekdayOf(dateStr) === 6;
 }
 
+// skip_weekends means Saturday AND Sunday (the seeder's own rule,
+// recurring-appointment-seeder.js). Sundays reach this filter only when the
+// run searches them (GATE_AUTO_DISPATCH_DAY_RULES); off, it is the Saturday
+// check above.
+function isWeekendDay(dateStr) {
+  const dow = weekdayOf(dateStr);
+  return dow === 0 || dow === 6;
+}
+
 // HARD: the customer set an explicit preferred day in the portal and this slot
 // is not on it. preferred_day_indexes is empty when the customer has no day
 // preference (→ no filter; route is free to pick any day).
@@ -793,7 +802,7 @@ function candidateFromSlot(slot, {
   if (hhmmToMin(slot.end_time) > DAY_CLOSE) { drops.after_hours++; return null; }
   if (inBlackout(slot.date, prefs.blackout)) { drops.blackout++; return null; }       // HARD: blackout
   if (siblingDates.has(slot.date)) { drops.sibling++; return null; }                  // HARD: same-series occurrence that day
-  if (service.skip_weekends === true && isSaturday(slot.date)) { drops.weekend++; return null; } // HARD: skip_weekends series
+  if (service.skip_weekends === true && isWeekendDay(slot.date)) { drops.weekend++; return null; } // HARD: skip_weekends series
   // HARD: explicit portal preferences override route efficiency. Route may
   // only optimize among slots on the customer's preferred day + time window.
   if (violatesPreferredDay(slot.date, prefs)) { drops.preferred_day++; return null; }
@@ -1008,6 +1017,12 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // Google about an ordinary move before it is made.
     arrivalSearch: ctx.arrivalSearch === true,
     ...(ctx.arrivalSearch === true ? { providerTravel: false } : {}),
+    // GATE_AUTO_DISPATCH_DAY_RULES (config.dayRules, carried on ctx by
+    // index.js): Sundays are searched too (move-rules.js takes one only when
+    // no other day qualifies), and the arrival search's van leaves at the
+    // Settings departure time (ctx.departureMinutes, departure-time.js).
+    ...(ctx.dayRules === true ? { includeWeekends: true } : {}),
+    ...(ctx.arrivalSearch === true && Number.isFinite(ctx.departureMinutes) ? { departureMinutes: ctx.departureMinutes } : {}),
     // HARD time preference must enter slot GENERATION, not just post-filtering:
     // find-time emits only each gap's earliest-feasible start, so an empty day
     // with an afternoon preference would yield a single 08:00 candidate that the
@@ -1063,7 +1078,7 @@ module.exports = {
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
+    hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

@@ -21,7 +21,7 @@ const moveLimit = require('./move-limit');
 const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
-const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
+const { violatesPreferredTime, _internals: { isSaturday, isWeekendDay } } = require('./candidate-slots');
 const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { assertScoredStartPoints } = require('./start-point-fence');
@@ -513,9 +513,9 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     await checkMemberEligibility(rows, best, eligCtx, trx, refuse);
     // A grouped unit moves only if every member is under the move limit.
     await moveLimit.assertUnderLimit(trx, rows, config, refuse);
-    if (isSaturday(best.date)) {
+    if (isWeekendDay(best.date)) {
       const weekend = rows.find((r) => r.skip_weekends === true);
-      if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a Saturday`);
+      if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a ${isSaturday(best.date) ? 'Saturday' : 'Sunday'}`);
     }
     if (guardMode === 'tiers') {
       await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse);

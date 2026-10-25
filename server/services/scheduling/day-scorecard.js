@@ -45,7 +45,11 @@ const RECORDED_EVIDENCE = new Set(['operator_corrected', 'operator_reported', 'r
 // regardless of real completion, so filtering on it dropped every completed
 // grouped stop from the count.
 const NOT_COMPLETED_OUTCOMES = new Set(['missing_visit', 'day_or_technician_changed', 'not_completed']);
-const DEPARTURE_MINUTES = 8 * 60; // 08:00 — the same default measureDayQuality falls back to.
+// 08:00 — for a measurement that does not record the departure it modeled.
+// Every measurement does since GATE_AUTO_DISPATCH_DAY_RULES (assumptions.
+// departureMinutes: the Settings time when on), so stops/hour divides by the
+// day the measurement actually simulated.
+const DEPARTURE_MINUTES = 8 * 60;
 
 function routeScorecardEnabled() {
   return gateEnvValue('GATE_ROUTE_SCORECARD');
@@ -89,7 +93,7 @@ function plannedFutureRow(techQuality) {
     stops: techQuality.scheduledVisits, physicalStops,
     onSiteMinutes, driveMinutes, waitMinutes: simulated.modeledWaitingMinutes ?? null,
     driveShare: driveShare(driveMinutes, onSiteMinutes),
-    stopsPerHour: stopsPerHour(physicalStops, DEPARTURE_MINUTES, returnMinute),
+    stopsPerHour: stopsPerHour(physicalStops, techQuality.assumptions?.departureMinutes ?? DEPARTURE_MINUTES, returnMinute),
     returnMinute, lateVisits: simulated.modeledLateVisits ? simulated.modeledLateVisits.length : null,
   };
 }
@@ -115,7 +119,7 @@ function plannedPastRow(plan) {
     onSiteMinutes: plan.plannedServiceMinutes, driveMinutes: plan.plannedDriveMinutes,
     waitMinutes: plan.plannedWaitingMinutes,
     driveShare: driveShare(plan.plannedDriveMinutes, plan.plannedServiceMinutes),
-    stopsPerHour: stopsPerHour(physicalStops, DEPARTURE_MINUTES, plan.plannedReturnMinuteBeforeBreaks),
+    stopsPerHour: stopsPerHour(physicalStops, plan.plannedDepartureMinutes ?? DEPARTURE_MINUTES, plan.plannedReturnMinuteBeforeBreaks),
     returnMinute: plan.plannedReturnMinuteBeforeBreaks,
     // Codex P2 (round 10): the snapshot's own modeled lateness count
     // (route-performance's plannedPassthrough), not a hard-coded unknown —

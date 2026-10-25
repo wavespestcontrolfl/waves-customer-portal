@@ -122,6 +122,16 @@ function arrivalSearchMode() {
   }
 }
 
+// GATE_AUTO_DISPATCH_DAY_RULES, same call-time, fail-closed convention.
+function dayRulesEnabled() {
+  const { autoDispatchDayRulesLive } = require('../../config/feature-gates');
+  try {
+    return autoDispatchDayRulesLive() === true;
+  } catch {
+    return false;
+  }
+}
+
 // The 2026-10-09 move rules (move-rules.js), resolved apart from
 // getAutoDispatchConfig to keep that function inside its complexity budget.
 function moveRuleConfig(overrides) {
@@ -172,6 +182,14 @@ function moveRuleConfig(overrides) {
     // (candidate-slots.js); 'shadow' = the run also records what that search
     // would do for each visit and decides on today's search; 'off' = today.
     arrivalSearch: overrides.arrivalSearch ?? arrivalSearchMode(),
+    // DAY RULES (GATE_AUTO_DISPATCH_DAY_RULES, owner 2026-10-24): Sundays are
+    // searched, as the last resort (move-rules.js), and the van leaves at the
+    // Settings departure time (index.js reads it once per run). The cap is
+    // the most visits one run moves onto a Sunday; past it a Sunday move
+    // waits for the next run. 0 = no Sunday moves.
+    dayRules: overrides.dayRules ?? dayRulesEnabled(),
+    maxSundayMovesPerRun: overrides.maxSundayMovesPerRun
+      ?? intEnv('AUTO_DISPATCH_MAX_SUNDAY_MOVES_PER_RUN', 2, { min: 0, max: 1000 }),
   };
 }
 

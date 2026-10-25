@@ -434,7 +434,7 @@ function emptyDayStatus(reasons) {
  * and deduped by day + start (best-ranked technician wins). Hours are in
  * clock order; ranking by added drive is the consumer's call.
  */
-function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, offDates }) {
+function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, offDates, lastResortDates }) {
   const byDate = new Map();
   for (let date = from; date <= to; date = nextYmd(date)) byDate.set(date, []);
   for (const slot of slots) {
@@ -463,15 +463,17 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
     status: hours.length ? 'open' : (offDates?.has(date) ? 'off' : emptyDayStatus(rejectionsByDate?.[date])),
     // A day the business does not normally work. Staff may still book it,
     // so its hours stay listed; the strip labels it and never offers it as
-    // the "closest" alternative.
-    ...(closedDates?.has(date) ? { closed: true } : {}),
+    // the "closest" alternative. A last-resort day (a Sunday with
+    // GATE_AUTO_DISPATCH_DAY_RULES on) is a working day the strip offers
+    // only when no other day has room.
+    ...(closedDates?.has(date) ? { closed: true } : (lastResortDates?.has(date) ? { last_resort: true } : {})),
     hours: hours.sort((a, b) => a.start_time.localeCompare(b.start_time)),
   }));
 }
 
 // The best-times rows (owner 2026-10-06): four hours on the picked date and
 // four date + hour pairs in the next 7 days from today, the picked date,
-// closed days and days off left out of the second row. Best = least added
+// closed days, last-resort days and days off left out of the second row. Best = least added
 // to the day's driving, then the shortest drive in, then the sooner day,
 // then the earlier hour. An unpriced hour sorts last.
 const BEST_ROW_SIZE = 4;
@@ -496,7 +498,7 @@ function pickBestRows(days, { pickedDate, today, tierOf = null }) {
   const dayRow = days.filter((day) => day.date === pickedDate).flatMap(withDate).sort(order).slice(0, BEST_ROW_SIZE);
   const weekRow = days
     .filter((day) => day.date >= today && day.date <= weekEnd && day.date !== pickedDate
-      && !day.closed && day.status !== 'off')
+      && !day.closed && !day.last_resort && day.status !== 'off')
     .flatMap(withDate).sort(order).slice(0, BEST_ROW_SIZE);
   // A picked date more than two weeks out searches only the days around it,
   // so the week row has nothing to say rather than "nothing fits".
@@ -601,15 +603,20 @@ async function buildBestRows(days, {
  * What the calendar says about each summary day, beyond the route: closed
  * days (owner blackout dates, weekly days off, and Sundays — the day every
  * customer surface skips) and, for a search scoped to one technician, that
- * technician's absences. Advisory labels only: any lookup failure leaves the
- * set empty and the summary answers as before.
+ * technician's absences. With GATE_AUTO_DISPATCH_DAY_RULES on (owner
+ * 2026-10-24: "dont skip sundays", "think sundays should be a last resort")
+ * a Sunday is a last-resort working day instead of a closed one, unless a
+ * closure also covers it. Advisory labels only: any lookup failure leaves
+ * the set empty and the summary answers as before.
  */
 async function loadSummaryDayFacts(plan, technicianId) {
   const closedDates = new Set();
   const offDates = new Set();
-  if (!plan.summary) return { closedDates, offDates };
+  const lastResortDates = new Set();
+  if (!plan.summary) return { closedDates, offDates, lastResortDates };
+  const sundays = require('../../config/feature-gates').autoDispatchDayRulesLive() ? lastResortDates : closedDates;
   for (let date = plan.from; date <= plan.to; date = nextYmd(date)) {
-    if (new Date(`${date}T12:00:00Z`).getUTCDay() === 0) closedDates.add(date);
+    if (new Date(`${date}T12:00:00Z`).getUTCDay() === 0) sundays.add(date);
   }
   try {
     const { getBlackoutDates } = require('./blackout-dates');
@@ -628,7 +635,7 @@ async function loadSummaryDayFacts(plan, technicianId) {
       logger.warn(`[find-time] summary absence lookup failed (no off labels): ${err.message}`);
     }
   }
-  return { closedDates, offDates };
+  return { closedDates, offDates, lastResortDates };
 }
 
 // Budget for the strip's eleven days (the plain hint's range search covers
@@ -657,11 +664,11 @@ function withChipValues(days, rows, hourly) {
 // Returns { summary, picked }: the summary (undefined for any other plan)
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
-  rejectionsByDate, startedAt, closedDates, offDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
+  rejectionsByDate, startedAt, closedDates, offDates, lastResortDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
   serviceTypes = [], rainSpan = null,
 }) {
   if (!plan.summary) return { summary: undefined, picked };
-  const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates });
+  const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates, lastResortDates });
   // Only a strip that shows the best-times rows asks for them; any other skips the
   // rain and road-time work (Codex #6045 r2).
   const best = bestRows ? await buildBestRows(days, {

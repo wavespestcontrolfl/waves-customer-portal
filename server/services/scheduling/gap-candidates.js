@@ -49,6 +49,8 @@ function analyzeGapCandidate(candidate, rows, {
   date, technicianId, now, today, departureMinutes, targetReturnMinutes, breakMinutes, closed,
   // The tech's start point (GATE_TECH_START_POINTS); absent = the office.
   home,
+  // The van's departure when the caller gave none (day-quality.js); 08:00 by default.
+  modeledDepartureMinutes = 480,
 }) {
   const response = { candidateId: candidate.service?.id || null, routeFits: [], feasibleInsertionWindows: null,
     automaticMoveAuthorized: false, reviewRequirements: ['customer_commitments_and_access', 'locked_save_recheck'] };
@@ -86,7 +88,10 @@ function analyzeGapCandidate(candidate, rows, {
   }
   const configured = [departureMinutes, targetReturnMinutes, breakMinutes].every(Number.isFinite)
     && targetReturnMinutes > departureMinutes && breakMinutes >= 0;
-  const departure = departureMinutes ?? 480;
+  const departure = departureMinutes ?? modeledDepartureMinutes;
+  // A caller's own departure also opens the first window (as before). The
+  // Settings departure only moves the van: no window opens before 08:00.
+  const earliestStart = departureMinutes ?? Math.max(480, departure);
   // Respect any known return limit even when another workday input is
   // missing. Such results stay provisional; an omitted break is not zero.
   const returnBy = Number.isFinite(targetReturnMinutes)
@@ -101,7 +106,7 @@ function analyzeGapCandidate(candidate, rows, {
   const sameRoute = toDateStr(service.scheduled_date) === date && service.technician_id === technicianId;
   const target = { ...service, technician_id: technicianId, scheduled_date: date, route_order: sameRoute ? service.route_order : null };
   const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home };
-  const result = enumerateArrivalPlacements(context, { durationMinutes: duration, earliestStartMin: departure,
+  const result = enumerateArrivalPlacements(context, { durationMinutes: duration, earliestStartMin: earliestStart,
     latestServiceEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES),
     dayEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES), departureMin: departure, returnByMin: returnBy });
   const routeFits = result.placements.filter(item => !violatesPreferredTime(item.windowStart, preferences)).map(({ windowStart, windowEnd, fit }) => ({

@@ -187,6 +187,37 @@ describe('findValidCandidateSlots', () => {
     expect(candidates.map((c) => c.date)).toEqual(['2026-08-10']);
   });
 
+  // "skip weekends" is Saturday AND Sunday (the seeder's rule). Sundays only
+  // reach this filter with GATE_AUTO_DISPATCH_DAY_RULES on (ctx.dayRules).
+  test('drops Sunday slots for a skip_weekends series too', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        { date: '2026-08-09', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 }, // Sunday
+        { date: '2026-08-10', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 3, score: 2 }, // Monday
+      ],
+    });
+    const plan = await findValidCandidateSlots({ ...SERVICE, skip_weekends: true }, { service_category: 'general', blackout: null }, { ...ctx(), dayRules: true });
+    expect(plan.candidates.map((c) => c.date)).toEqual(['2026-08-10']);
+    expect(plan.drops.weekend).toBe(1);
+    // A plan that allows weekends keeps the Sunday.
+    const open = await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, { ...ctx(), dayRules: true });
+    expect(open.candidates.map((c) => c.date)).toEqual(['2026-08-09', '2026-08-10']);
+  });
+
+  test('day rules: the search asks for Sundays, and the arrival search for the run\'s departure; off, neither', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [] });
+    const prefsNone = { service_category: 'general', blackout: null };
+    await findValidCandidateSlots(SERVICE, prefsNone, ctx());
+    expect(findAvailableSlots.mock.calls[0][0]).not.toHaveProperty('includeWeekends');
+    expect(findAvailableSlots.mock.calls[0][0]).not.toHaveProperty('departureMinutes');
+    await findValidCandidateSlots(SERVICE, prefsNone, { ...ctx(), dayRules: true, departureMinutes: 450 });
+    expect(findAvailableSlots.mock.calls[1][0]).toMatchObject({ includeWeekends: true });
+    // The hour-block search has no departure to set (being retired).
+    expect(findAvailableSlots.mock.calls[1][0]).not.toHaveProperty('departureMinutes');
+    await findValidCandidateSlots(SERVICE, prefsNone, { ...ctx(), dayRules: true, departureMinutes: 450, arrivalSearch: true });
+    expect(findAvailableSlots.mock.calls[2][0]).toMatchObject({ includeWeekends: true, arrivalSearch: true, departureMinutes: 450 });
+  });
+
   test('records what the search saw: the window and each searched day\'s open starts before any filter, so a full week reads as full (owner audit 2026-10-22, finding 6)', async () => {
     findAvailableSlots.mockResolvedValue({
       slots: [

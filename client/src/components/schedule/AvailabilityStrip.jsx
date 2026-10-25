@@ -110,9 +110,11 @@ const byDrive = (a, b) => (a.detourMinutes ?? Infinity) - (b.detourMinutes ?? In
 function closestHours(days, pickedDate, count) {
   const picked = parseYmd(pickedDate);
   const distance = (day) => Math.abs(parseYmd(day.date) - picked);
-  return days
-    // A closed day (blackout, weekly day off, Sunday) is never the suggestion.
-    .filter((day) => day.date !== pickedDate && day.hours.length && !day.closed)
+  // A closed day (blackout, weekly day off) is never the suggestion. A
+  // last-resort day (Sunday) is offered only when no other day has room.
+  const withRoom = days.filter((day) => day.date !== pickedDate && day.hours.length && !day.closed);
+  const regular = withRoom.filter((day) => !day.last_resort);
+  return (regular.length ? regular : withRoom)
     .sort((a, b) => distance(a) - distance(b) || b.date.localeCompare(a.date))
     .flatMap((day) => [...day.hours].sort(byDrive))
     .slice(0, count);
@@ -431,7 +433,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
         <div>
           <div style={{ marginBottom: 6, color: '#52525B' }}>
             {viewed.hours.length
-              ? `${fmtDay(viewed.date)}${viewed.closed ? ' (closed day)' : ''}`
+              ? `${fmtDay(viewed.date)}${viewed.closed ? ' (closed day)' : ''}${viewed.last_resort ? ' (last resort)' : ''}`
               : `${fmtDay(viewed.date)}: ${viewed.closed ? 'closed day, ' : ''}${emptyDayLine(viewed)}`}
           </div>
           {viewed.hours.length > 0 && (

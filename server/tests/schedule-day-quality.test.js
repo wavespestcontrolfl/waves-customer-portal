@@ -367,3 +367,91 @@ test('an owner-planned stop with no stored estimate is not a default duration (C
     delete process.env.GATE_SCHEDULING_CAPACITY;
   }
 });
+
+// The van's departure (GATE_AUTO_DISPATCH_DAY_RULES, departure-time.js): the
+// day is modeled from it when the caller gave no departure of its own.
+describe('modeled van departure', () => {
+  test('modeledDepartureMinutes starts the simulated day there and says so, without calling it a configured workday', () => {
+    const early = measureDayQuality(Model, [stop(8, 0)], { modeledDepartureMinutes: 420 });
+    expect(early.assumptions).toMatchObject({ departureMinutes: 420, departureProvided: false });
+    // Nothing early to wait for: the 08:00 promise is reached at 07:00 + the 10-minute drive, then waits.
+    expect(early.modeledWaitingMinutes).toBe(50);
+    const legacy = measureDayQuality(Model, [stop(8, 0)]);
+    expect(legacy.assumptions).toMatchObject({ departureMinutes: 480, departureProvided: false });
+    expect(legacy.modeledWaitingMinutes).toBe(0);
+  });
+
+  test('an explicit departureMinutes still wins over the modeled one', () => {
+    const explicit = measureDayQuality(Model, [stop(8, 0)], { departureMinutes: 480, modeledDepartureMinutes: 420 });
+    expect(explicit.assumptions).toMatchObject({ departureMinutes: 480, departureProvided: true });
+    expect(explicit.modeledWaitingMinutes).toBe(0);
+  });
+
+  describe('getScheduleQualityMeasurements', () => {
+    const { dayStopsQuery } = require('../services/scheduling/day-stops');
+    const DATE = '2027-05-10';
+    const GATE = 'GATE_AUTO_DISPATCH_DAY_RULES';
+    let settingReads;
+    let savedValue;
+    const makeConn = (value) => jest.fn((table) => {
+      const c = {};
+      if (table === 'technicians') {
+        c.where = () => c;
+        c.select = async () => [{ id: 'tech1', name: 'Tech One' }, { id: 'tech2', name: 'Tech Two' }];
+        return c;
+      }
+      if (table === 'system_settings') {
+        settingReads += 1;
+        c.where = () => c;
+        c.first = async () => (value === undefined ? undefined : { value });
+        return c;
+      }
+      throw new Error(`schedule-day-quality test: unexpected table ${table}`);
+    });
+    const row = (id, tech) => ({
+      id, technician_id: tech, route_order: 1, customer_id: `cust-${id}`, scheduled_date: DATE,
+      window_start: '09:00', window_end: '10:00', time_window: null, status: 'confirmed',
+      reservation_expires_at: null, created_at: '2020-01-01T00:00:00Z', visit_id: null,
+      estimated_duration_minutes: 60, service_type: null, is_recurring: false, is_callback: false, lat: 27.4, lng: -82.4,
+    });
+    const run = (conn, input = {}) => getScheduleQualityMeasurements({ date: DATE, ...input }, conn, new Date(`${DATE}T12:00:00Z`));
+    const departures = (result) => result.days[0].byTech.map((t) => t.assumptions.departureMinutes);
+
+    beforeEach(() => {
+      settingReads = 0;
+      savedValue = process.env[GATE];
+      dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve([row('v1', 'tech1'), row('v2', 'tech2')]) }));
+    });
+    afterEach(() => {
+      if (savedValue === undefined) delete process.env[GATE]; else process.env[GATE] = savedValue;
+      dayStopsQuery.mockReset();
+    });
+
+    test('gate on: the saved time is read once and every tech-day is modeled from it', async () => {
+      process.env[GATE] = 'true';
+      const result = await run(makeConn('"07:00"'));
+      expect(settingReads).toBe(1);
+      expect(departures(result)).toEqual([420, 420]);
+      expect(result.days[0].byTech.map((t) => t.assumptions.departureProvided)).toEqual([false, false]);
+    });
+
+    test('gate on and nothing saved: 07:30', async () => {
+      process.env[GATE] = 'true';
+      expect(departures(await run(makeConn(undefined)))).toEqual([450, 450]);
+    });
+
+    test('gate off: 08:00 and the setting is never read', async () => {
+      delete process.env[GATE];
+      const result = await run(makeConn('"07:00"'));
+      expect(settingReads).toBe(0);
+      expect(departures(result)).toEqual([480, 480]);
+    });
+
+    test('a caller\'s own departure_time still wins over the saved time', async () => {
+      process.env[GATE] = 'true';
+      const result = await run(makeConn('"07:00"'), { departure_time: '08:30' });
+      expect(departures(result)).toEqual([510, 510]);
+      expect(result.days[0].byTech.map((t) => t.assumptions.departureProvided)).toEqual([true, true]);
+    });
+  });
+});

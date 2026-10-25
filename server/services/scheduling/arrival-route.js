@@ -160,6 +160,10 @@ async function loadArrivalRouteContext({
   // Staff callers only: start the day at the tech's start point
   // (GATE_TECH_START_POINTS). Public and commit-time callers keep the office.
   startPoints = false,
+  // The night tool's arrival search only (GATE_AUTO_DISPATCH_DAY_RULES,
+  // departure-time.js): the minute the van leaves its start point. Unset:
+  // the 08:00 shift open, as before.
+  vanDepartureMin,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -239,6 +243,7 @@ async function loadArrivalRouteContext({
   insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
     || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
   travel, preserveCapacity, blocks,
+  vanDepartureMin,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
   home: startPoints ? await loadTechStartPoint(conn, techId) : RouteOptimizer.HQ };
 }
@@ -369,7 +374,11 @@ function targetUnroutable(capacity, target, windowStart, windowEnd, grouped) {
  *  gap) cannot certify a route — the caller returns `unverified` for it,
  *  same as every reason below. */
 function resolvePlacementOrigin(context, capacity, departureMin, target, own) {
-  let startMin = capacity ? Math.max(SHIFT.startMinutes, departureMin ?? SHIFT.startMinutes)
+  // The night tool's van departure (context.vanDepartureMin): the van may
+  // leave before the shift opens, so a farther first stop still makes an
+  // 08:00 promise. No stop starts before its window opens either way.
+  const shiftStart = capacity && Number.isFinite(context.vanDepartureMin) ? context.vanDepartureMin : SHIFT.startMinutes;
+  let startMin = capacity ? Math.max(shiftStart, departureMin ?? shiftStart)
     : departureMin ?? Math.min(8 * 60, ...[target, ...own].map(row => effectiveWindowRange(row)?.startMin ?? Infinity));
   // The tech's start point (GATE_TECH_START_POINTS), else the office.
   let origin = context.home || RouteOptimizer.HQ;

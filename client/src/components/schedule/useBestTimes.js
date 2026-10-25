@@ -65,6 +65,7 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
       date: day.date,
       status: day.status || (day.hours?.length ? 'open' : 'full'),
       ...(day.closed === true ? { closed: true } : {}),
+      ...(day.last_resort === true ? { last_resort: true } : {}),
       hours: (day.hours || []).map((h) => summaryHour({ ...h, date: day.date }, scopedToTech)),
     })),
     // The best-times rows (owner 2026-10-06): 4 hours on the picked date, 4

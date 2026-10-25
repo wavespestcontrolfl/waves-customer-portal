@@ -130,6 +130,51 @@ describe('loadArrivalRouteContext({ planningMinutes })', () => {
   });
 });
 
+// The night tool's van departure (GATE_AUTO_DISPATCH_DAY_RULES): the van leaves
+// at vanDepartureMin, no stop starts before its window opens.
+describe('van departure on the capacity route', () => {
+  const RouteOptimizer = require('../services/route-optimizer');
+  // The first stop is ~26 drive-minutes from the office (the start point).
+  const firstStop = { id: 'a', technician_id: 't1', lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng - 0.15,
+    window_start: '08:00:00', window_end: '09:00:00', estimated_duration_minutes: 30, scheduled_date: '2035-03-08' };
+  const context = (over = {}) => ({ target: firstStop, rows: [], date: '2035-03-08', now: new Date('2035-01-01T00:00:00Z'),
+    grouped: false, preserveCapacity: true, insertTarget: true, blocks: [], home: RouteOptimizer.HQ, ...over });
+  const eight = (ctx) => evaluateArrivalPlacement(ctx, { windowStart: '08:00', windowEnd: '08:30', durationMinutes: 30 });
+
+  test('a van leaving at 7:30 reaches a first stop 26 minutes away at 8:00, not 8:26', () => {
+    const early = eight(context({ vanDepartureMin: 450 }));
+    const legacy = eight(context());
+    expect(early).toMatchObject({ feasible: true, estimatedArrival: '08:00' });
+    expect(legacy).toMatchObject({ feasible: true, estimatedArrival: '08:26' });
+  });
+
+  test('a context with no vanDepartureMin plans exactly as a shift that opens at 8:00', () => {
+    expect(eight(context({ vanDepartureMin: undefined }))).toEqual(eight(context()));
+    expect(eight(context({ vanDepartureMin: NaN }))).toEqual(eight(context()));
+  });
+
+  test('a departure after the shift opens still holds the van back to that time', () => {
+    // Leaving at 8:15 reaches the stop at 8:41; the 8:00 shift open does not apply.
+    expect(eight(context({ vanDepartureMin: 495 })).estimatedArrival).toBe('08:41');
+  });
+
+  test('without capacity routing the departure is ignored', () => {
+    const plain = (over) => eight(context({ preserveCapacity: false, ...over }));
+    expect(plain({ vanDepartureMin: 450 })).toEqual(plain());
+  });
+});
+
+describe('loadArrivalRouteContext({ vanDepartureMin })', () => {
+  const conn = () => fakeConn({ target: stop('a', { visit_id: null }), siblings: [] });
+  test('a finite minute rides on the context', async () => {
+    expect((await load(conn(), { preserveCapacity: true, vanDepartureMin: 450 })).vanDepartureMin).toBe(450);
+  });
+  test('unset or null leaves the context with no van departure (the shift open applies)', async () => {
+    expect((await load(conn(), { preserveCapacity: true })).vanDepartureMin).toBeUndefined();
+    expect((await load(conn(), { preserveCapacity: true, vanDepartureMin: null })).vanDepartureMin).toBeNull();
+  });
+});
+
 describe('loadArrivalRouteContext({ unit })', () => {
   test('gate on + unit: the visit is one ungrouped target and its members are off the day', async () => {
     process.env.GATE_COMBO_ROUTE_CHECK = 'true';

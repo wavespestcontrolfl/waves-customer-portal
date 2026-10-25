@@ -28694,6 +28694,55 @@ router.put('/blackout-dates/holidays', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The time the van leaves its start point (owner 2026-10-24: leave 7:30 so a
+// first visit 30 minutes away still starts at 8:00; "make this editable in the
+// admin portal"). Stored in system_settings; read by the night tool, the 04:20
+// route pass and the day reports only while GATE_AUTO_DISPATCH_DAY_RULES is on
+// (scheduling/departure-time.js). Booking does not read it, so no slot cache
+// flush or route-quality refresh follows a save.
+router.get('/departure-time', requireAdmin, async (req, res, next) => {
+  try {
+    const departure = require('../services/scheduling/departure-time');
+    const setting = await departure.readDepartureSetting(db);
+    res.json({
+      // The time the readers use while the gate is on.
+      departureTime: departure.formatDepartureTime(departure.effectiveDepartureMinutes(setting)),
+      saved: setting.saved,
+      inUse: require('../config/feature-gates').autoDispatchDayRulesLive(),
+      earliest: departure.formatDepartureTime(departure.EARLIEST_DEPARTURE_MINUTES),
+      latest: departure.formatDepartureTime(departure.LATEST_DEPARTURE_MINUTES),
+      stepMinutes: departure.DEPARTURE_STEP_MINUTES,
+    });
+  } catch (err) { next(err); }
+});
+
+router.put('/departure-time', requireAdmin, async (req, res, next) => {
+  try {
+    const departure = require('../services/scheduling/departure-time');
+    const raw = req.body?.departureTime;
+    const minutes = typeof raw === 'string' ? departure.parseDepartureTime(raw) : null;
+    if (minutes == null) {
+      return res.status(400).json({ error: 'departureTime must be a time from 06:00 to 08:00 in 15-minute steps' });
+    }
+    const departureTime = departure.formatDepartureTime(minutes);
+    await db('system_settings')
+      .insert({
+        key: departure.DEPARTURE_TIME_KEY,
+        value: JSON.stringify(departureTime),
+        category: 'scheduling',
+        description: 'The time the van leaves its start point (HH:MM). Read by the night tool, the 04:20 route pass and the day reports while GATE_AUTO_DISPATCH_DAY_RULES is on.',
+      })
+      .onConflict('key')
+      .merge({ value: JSON.stringify(departureTime), updated_at: db.fn.now() });
+    logger.info(`[schedule] departure time set to ${departureTime}`);
+    res.json({
+      success: true,
+      departureTime,
+      inUse: require('../config/feature-gates').autoDispatchDayRulesLive(),
+    });
+  } catch (err) { next(err); }
+});
+
 router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
   try {
     const date = typeof req.body?.date === 'string' ? req.body.date.trim() : '';
