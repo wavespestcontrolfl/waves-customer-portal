@@ -608,10 +608,14 @@ function durationWindow(sentence, index, length) {
 // window — units or not ("until four o'clock", "hasta las cuatro", "in 2").
 // NUM_WORD / NUM_WORD_ES are the spelled-number lists defined with the price
 // matchers near the top of this file (EN and ES number words).
-// The Spanish articles "un / una / unos / unas" are "a / some", not a number
-// ("una cotización", "una infestación", "una vez que"); a time with them is
-// caught on its unit or clock form ("una hora", "en un rato", "a la una").
-const ANY_TIME_FIGURE_RE = new RegExp(`\\d|\\b(?!once\\b)(?!(?:un|una|unos|unas)\\b)(?:${NUM_WORD}|${NUM_WORD_ES}|half|quarter|o'?clock|media|cuarto)\\b`, 'i');
+// "Una vez que" is "once" (the condition), not the number one. A Spanish
+// article or quantifier in front of a noun counts that noun, not time ("una
+// cotización", "unas pocas cucarachas", "un ratón"). Alone, or in front of a
+// time word, it is the time figure: "En una." (one hour), "En unas pocas.",
+// "un par", "una horita", "unos días". Other number words always count.
+const ES_QUANTIFIER = '(?:un|una|unos|unas|pocos|pocas|par|cuant[oa]s|vari[oa]s)';
+const ES_TIME_WORD = '(?:horas?|horitas?|minutos?|minutitos?|segundos?|segunditos?|d[ií]as?|diitas?|semanas?|semanitas?|ratos?|ratitos?|momentos?|momentitos?|mes|meses|vez|veces|noches?|tardes?|ma[ñn]anas?)';
+const ANY_TIME_FIGURE_RE = new RegExp(`\\d|\\b(?!once\\b)(?!una\\s+vez\\s+que\\b)(?!${ES_QUANTIFIER}\\s+(?!${ES_TIME_WORD}(?![a-zñáéíóú]))[a-zñáéíóúü])(?:${NUM_WORD}|${NUM_WORD_ES}|${ES_QUANTIFIER}|half|quarter|o'?clock|media|cuarto)\\b`, 'i');
 // A phone number or a property size is never a time window. The prompt has
 // the model give the office line for every job it cannot quote and echo the
 // visitor's home, so "(941) 297-5749" and "your 2,000 sq ft home" counted as
