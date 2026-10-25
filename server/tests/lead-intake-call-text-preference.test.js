@@ -1,12 +1,11 @@
 /**
- * GATE_LEAD_CALL_TEXT_PREFERENCE: a lead in SMS intake answering the
+ * Lead CALL / TEXT preference: a lead in SMS intake answering the
  * auto-reply with a bare CALL or TEXT gets one note on their newest lead, and
  * the reply is NOT consumed (it still reaches inbox + bell). Nothing else is
  * stored, nothing is sent to the customer, lead_intake_status never changes.
  * The customer row is locked and its status re-read before the note.
  */
 
-let mockGateOn;
 let mockLockedRow;
 let mockLockedForUpdate;
 let mockLeadRow;
@@ -14,10 +13,6 @@ let mockActivityInserts;
 let mockCustomerUpdates;
 let mockSmsSends;
 let mockInsertFails;
-
-jest.mock('../config/feature-gates', () => ({
-  isEnabled: (name) => name === 'leadCallTextPreference' && mockGateOn,
-}));
 
 jest.mock('../models/db', () => {
   const db = (table) => {
@@ -91,7 +86,6 @@ const CUSTOMER = (status = 'awaiting_service') => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockGateOn = true;
   mockLockedRow = { lead_intake_status: 'awaiting_service' };
   mockLockedForUpdate = false;
   mockLeadRow = { id: 'lead-1' };
@@ -102,7 +96,7 @@ beforeEach(() => {
   mockClassify.mockResolvedValue(null);
 });
 
-describe('recordCallTextReply, gate on', () => {
+describe('recordCallTextReply', () => {
   test.each([
     ['CALL', 'call', 'Lead replied CALL: wants a phone call'],
     ['Text me', 'text', 'Lead replied TEXT: prefers text'],
@@ -159,22 +153,9 @@ describe('recordCallTextReply, gate on', () => {
   });
 });
 
-describe('gate off', () => {
-  test.each(['call', 'text', 'Text me'])('%j records nothing and returns nothing', async (body) => {
-    mockGateOn = false;
-    expect(await recordCallTextReply(CUSTOMER(), body, {})).toBeUndefined();
-    expect(mockLockedForUpdate).toBe(false);
-    expect(mockActivityInserts).toEqual([]);
-    expect(mockSmsSends).toEqual([]);
-  });
-});
-
-test('handleIntakeReply never consumes a bare CALL / TEXT reply (gate on or off) and never reaches the classifier', async () => {
-  for (const on of [true, false]) {
-    mockGateOn = on;
-    for (const status of ['awaiting_service', 'awaiting_address']) {
-      expect(await handleIntakeReply(CUSTOMER(status), 'call', {})).toEqual({ handled: false });
-    }
+test('handleIntakeReply never consumes a bare CALL / TEXT reply and never reaches the classifier', async () => {
+  for (const status of ['awaiting_service', 'awaiting_address']) {
+    expect(await handleIntakeReply(CUSTOMER(status), 'call', {})).toEqual({ handled: false });
   }
   expect(mockActivityInserts).toEqual([]);
   expect(mockSmsSends).toEqual([]);

@@ -371,7 +371,7 @@ const TRIGGER_REGISTRY = {
       // One bell row per conversation: a known sender's later texts rewrite the
       // row while it is still open, so a count leads the title ("3 texts from
       // Name") and the body is always the latest text.
-      // A lead's bare CALL / TEXT reply (GATE_LEAD_CALL_TEXT_PREFERENCE) leads
+      // A lead's bare CALL / TEXT reply leads
       // with the choice so the owner calls the CALL leads first. Only the text
       // that carried it has it: the next text's payload replaces the row's, and
       // an older late text never changes the title (the row keeps its content).
