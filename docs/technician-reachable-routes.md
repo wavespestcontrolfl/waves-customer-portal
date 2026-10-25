@@ -335,6 +335,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/tech/staff-documents/onboarding` | tech-staff-documents |
 | GET | `/api/tech/staff-documents/people` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/acknowledge` | tech-staff-documents |
+| GET | `/api/tech/staff-documents/versions/:id/prefill` | tech-staff-documents |
 | POST | `/api/tech/staff-documents/versions/:id/records` | tech-staff-documents |
 | POST | `/api/tech/timetracking/clock-in` | tech-timetracking |
 | POST | `/api/tech/timetracking/clock-out` | tech-timetracking |

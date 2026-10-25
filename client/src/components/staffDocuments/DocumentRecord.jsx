@@ -1,6 +1,39 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { etDatetimeLocalValue } from '../../lib/timezone';
 import { box, row, inputStyle, primaryStyle, buttonStyle, Field, request, dateLabel } from './common';
+
+// Prefill a NEW record from the staff record (GATE_STAFF_DOC_PREFILL, flag on the detail). It fills only
+// fields that are still empty, or that still hold the value the last prefill put there (owner change).
+// A typed value always wins. A failed prefill is silent: the form just stays empty.
+function usePrefill({ detail, canWrite, record, owner, setAnswers }) {
+  const enabled = Boolean(detail.prefill && canWrite && !record); const versionId = detail.version.id;
+  const [prefilled, setPrefilled] = useState({});
+  const applied = useRef({});
+  useEffect(() => {
+    if (!enabled) { applied.current = {}; setPrefilled({}); return undefined; }
+    const controller = new AbortController();
+    request(`/versions/${versionId}/prefill?owner_id=${owner}`, undefined, controller.signal).then(result => {
+      if (controller.signal.aborted) return;
+      const next = result.answers || {}; const previous = applied.current;
+      setAnswers(current => {
+        const merged = { ...current };
+        for (const id of new Set([...Object.keys(previous), ...Object.keys(next)])) {
+          if (!current[id] || current[id] === previous[id]) { if (next[id]) merged[id] = next[id]; else delete merged[id]; }
+        }
+        return merged;
+      });
+      applied.current = next; setPrefilled(next);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [enabled, versionId, owner, setAnswers]);
+  return prefilled;
+}
+
+function PrefillNote({ hidden, fields, prefilled, answers }) {
+  if (hidden) return null;
+  const labels = fields.filter(field => prefilled[field.id] && answers[field.id] === prefilled[field.id]).map(field => field.label);
+  return labels.length ? <p>Filled from the staff record: {labels.join(', ')}. Check each before you save.</p> : null;
+}
 
 export default function DocumentRecord({ detail, people, selfId, manage, canWrite, onSaved }) {
   const { version, rendered, records } = detail;
@@ -35,6 +68,7 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
     } catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
+  const prefilled = usePrefill({ detail, canWrite, record, owner, setAnswers });
   const locked = !canWrite || !!record?.completed_at;
   const selectableRecords = [...new Map([...records, ...(record ? [record] : [])].map(item => [item.id, item])).values()];
   return <section style={{ ...box, marginTop: 24 }}>
@@ -54,6 +88,7 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
         if (field.type === 'checkbox') return <label key={field.id} style={{ ...row, marginBottom: 18 }}><input type="checkbox" checked={answers[field.id] === true} onChange={e => setAnswers({ ...answers, [field.id]: e.target.checked })} />{label}</label>;
         return <Field key={field.id} label={label}>{field.type === 'textarea' ? <textarea rows={4} style={inputStyle} value={answers[field.id] || ''} onChange={e => setAnswers({ ...answers, [field.id]: e.target.value })} /> : <input type={field.type === 'date' ? 'date' : 'text'} style={inputStyle} value={answers[field.id] || ''} onChange={e => setAnswers({ ...answers, [field.id]: e.target.value })} />}</Field>;
       })}
+      <PrefillNote hidden={locked || !!record} fields={rendered.metadata.fields} prefilled={prefilled} answers={answers} />
       {!locked && <div style={row}><button type="button" style={buttonStyle} onClick={() => save(false)}>Save open record</button><button type="button" disabled={owner !== selfId} style={primaryStyle} onClick={() => save(true)}>Complete record</button></div>}
       {!locked && owner !== selfId && <p>The assigned owner must complete this record.</p>}
     </fieldset>

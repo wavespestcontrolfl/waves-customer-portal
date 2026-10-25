@@ -2,6 +2,7 @@ const db = require('../models/db');
 const Joi = require('joi');
 const { recordAuditEvent } = require('./audit-log');
 const { sourceSchema, policySchema, validate, reject, hash, renderSource, checkRelease } = require('./staff-document-source');
+const { dateOnlyString, validDateOnly } = require('../utils/date-only');
 
 const ACKNOWLEDGMENT = 'I have read this policy version and acknowledge receipt. I intend my typed name to serve as my electronic signature for this acknowledgment.';
 const sourceOf = version => ({ title: version.title, body: version.body, metadata: version.staff_metadata });
@@ -206,8 +207,8 @@ async function detail(id, actor, versionId = null, at = null) {
     versions: versions.map(v => ({ id: v.id, number: v.version_number, effective_at: v.effective_at, hash: v.content_hash, issued: !!v.published_at })), acknowledgments, records };
 }
 
-async function recordableVersion(trx, id, actor, kind) {
-  await lockLibrary(trx);
+async function recordableVersion(trx, id, actor, kind, { lock = true } = {}) {
+  if (lock) await lockLibrary(trx);
   const now = new Date();
   const version = await trx('document_template_versions').where({ id }).whereNotNull('published_at').where('effective_at', '<=', now).first();
   if (!version) reject('Version not found', 404);
@@ -275,4 +276,40 @@ async function saveRecord(versionId, input, actor) {
   });
 }
 
-module.exports = { saveDraft, preview, publish, setOnboardingRequired, updatePolicy, list, detail, acknowledge, saveRecord, recordAnswers, ACKNOWLEDGMENT };
+// Form prefill (GATE_STAFF_DOC_PREFILL): template_key -> field id -> technicians column.
+// A form field gets a value only when it is listed here, exists on the version, is not a
+// checkbox and is not a typed signature. Dates are date-only (YYYY-MM-DD).
+const PREFILL_MAP = {
+  'staff.vehicle-use-commuting-agreement': { vehicle: 'vehicle_name', 'home-address': 'address', 'start-date': 'hire_date' },
+};
+const NEVER_PREFILL_IDS = new Set(['signed-name']);
+
+async function prefillAnswers(versionId, ownerId, actor) {
+  const version = await recordableVersion(db, versionId, actor, 'record', { lock: false });
+  const document = await loadDocument(db, version.template_id, actor);
+  if (document.staff_kind !== 'form') reject('Only forms can be prefilled.');
+  if (!isAdmin(actor) && ownerId !== actor.id) reject('Only an admin may prefill a record for another staff member.', 403);
+  const owner = await activeOwner(db, ownerId);
+  await loadDocument(db, version.template_id, owner);
+  const map = PREFILL_MAP[document.template_key] || {};
+  const wanted = prefillableFields(map, version.staff_metadata.fields);
+  const source = wanted.length ? await db('technicians').where({ id: ownerId }).first(...new Set(wanted.map(field => map[field.id]))) : null;
+  return prefillValues(map, wanted, source);
+}
+
+// Fields a map may fill: present on the version, never a checkbox, never a typed signature.
+function prefillableFields(map, fields) {
+  return fields.filter(field => map[field.id] && field.type !== 'checkbox' && !NEVER_PREFILL_IDS.has(field.id));
+}
+
+function prefillValues(map, fields, source) {
+  const answers = {};
+  for (const field of prefillableFields(map, fields)) {
+    const raw = source?.[map[field.id]];
+    const value = field.type === 'date' ? dateOnlyString(raw) : typeof raw === 'string' ? raw.trim() : null;
+    if (value && (field.type !== 'date' || validDateOnly(value))) answers[field.id] = value;
+  }
+  return { answers, fields: Object.keys(answers) };
+}
+
+module.exports = { saveDraft, preview, publish, setOnboardingRequired, updatePolicy, list, detail, acknowledge, saveRecord, prefillAnswers, prefillValues, recordAnswers, ACKNOWLEDGMENT };
