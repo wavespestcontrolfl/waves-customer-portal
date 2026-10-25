@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ActionFeedback, Badge, Button, Checkbox, Field, Input, Select } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
+import { buildKitIndex, pillForLine } from "./bidChecklistKit";
 import { etDatetimeLocalValue } from "../../lib/timezone";
 
 // Bid Desk checklist panel (GATE_BID_CHECKLIST, dark). The page shows it only when the server says the gate is on
@@ -199,7 +201,18 @@ function EditRow({ item, busy, onSave, onCancel }) {
   );
 }
 
-function ChecklistRow({ item, first, last, busy, onTick, onNotes, onArchive, onMove, onEdit }) {
+// The Bid kit status of a line that needs a kit paper (read only: it links to the kit item and never ticks the line).
+function KitPill({ templateKey, kit }) {
+  const pill = pillForLine(templateKey, kit);
+  if (!pill) return null;
+  return (
+    <Link to={pill.to} title={pill.title} aria-label={`${pill.text}. ${pill.title}`} data-testid="kit-pill" className="no-underline">
+      <Badge tone={pill.tone}>{pill.text}</Badge>
+    </Link>
+  );
+}
+
+function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive, onMove, onEdit }) {
   const [notes, setNotes] = useState(item.notes || "");
   const [editing, setEditing] = useState(false);
   useEffect(() => setNotes(item.notes || ""), [item.notes]);
@@ -210,6 +223,7 @@ function ChecklistRow({ item, first, last, busy, onTick, onNotes, onArchive, onM
       <div className="flex flex-wrap items-start gap-2">
         <Checkbox id={`check-${item.id}`} label={item.label} checked={!!item.checked_at} disabled={busy} onChange={(event) => onTick(item, event.target.checked)} />
         {!item.required && <Badge>Optional</Badge>}
+        <KitPill templateKey={item.template_key} kit={kit} />
         <span className="ml-auto flex gap-1">
           <Button size="sm" variant="ghost" disabled={busy || first} aria-label={`Move up: ${item.label}`} onClick={() => onMove(item, -1)}>Up</Button>
           <Button size="sm" variant="ghost" disabled={busy || last} aria-label={`Move down: ${item.label}`} onClick={() => onMove(item, 1)}>Down</Button>
@@ -243,7 +257,7 @@ function AddRow({ busy, onAdd }) {
   );
 }
 
-function Checklist({ bidId, bid, items, progress, missing, busy, run, invite }) {
+function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, kit }) {
   const act = (path, method, body, query = "") => adminFetch(`/admin/bid-desk/${bidId}/checklist${path}${query}`, { method, ...(body === undefined ? {} : { body }) });
   const start = (query) => run(() => act("/start", "POST", bid.solicitation_type ? { type: bid.solicitation_type } : {}, query));
   // "Add missing lines" is offered whenever the bid has template lines it does not carry (an unset type means the base
@@ -268,7 +282,7 @@ function Checklist({ bidId, bid, items, progress, missing, busy, run, invite }) 
           </div>
           <ul className="grid gap-2">
             {items.map((item, index) => (
-              <ChecklistRow key={item.id} item={item} first={index === 0} last={index === items.length - 1} busy={busy}
+              <ChecklistRow key={item.id} item={item} kit={kit} first={index === 0} last={index === items.length - 1} busy={busy}
                 onTick={(row, checked) => run(() => act(`/${row.id}`, "PATCH", { checked }))}
                 onNotes={(row, notes) => run(() => act(`/${row.id}`, "PATCH", { notes }))}
                 onArchive={(row) => run(() => act(`/${row.id}`, "DELETE"))}
@@ -327,6 +341,24 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
   const [refreshError, setRefreshError] = useState("");
   const first = useRef(true);
 
+  // The Bid kit list, read once per panel (GATE_BID_KIT). It loads beside the checklist and the pills appear when it
+  // arrives. Flag off, a refused or failed read, or an unusable reply: no pills and no message, the checklist is as before.
+  const kitLive = useFeatureFlag("bid_kit");
+  const [kit, setKit] = useState(null);
+  useEffect(() => {
+    if (!kitLive) { setKit(null); return undefined; }
+    let live = true;
+    (async () => {
+      try {
+        const res = await adminFetch("/admin/bid-kit");
+        if (!res.ok) return;
+        const index = buildKitIndex(await res.json());
+        if (live) setKit(index);
+      } catch { /* the checklist shows without kit pills */ }
+    })();
+    return () => { live = false; };
+  }, [kitLive]);
+
   // Reloads the lines, progress, estimate and documents. A failure (network error, a refusal, the gate turned off) is
   // shown in the checklist section until the next success; it never throws.
   const refresh = useCallback(async () => {
@@ -377,7 +409,7 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
       <Section title="Estimate and proposal"><EstimateLink bid={bid} estimate={state.estimate} busy={disabled} save={save} /></Section>
       <Section title="Documents"><Documents documents={state.documents} /></Section>
       <Section title="Checklist">
-        <Checklist bidId={bidId} bid={bid} items={state.checklist} progress={state.progress} missing={state.missing ?? 0} busy={disabled} run={run} invite={invite} />
+        <Checklist bidId={bidId} bid={bid} items={state.checklist} progress={state.progress} missing={state.missing ?? 0} busy={disabled} run={run} invite={invite} kit={kit} />
         {message.text && <ActionFeedback error={message.error} className="mt-2">{message.text}</ActionFeedback>}
         {refreshError && <ActionFeedback error className="mt-2">{refreshError}</ActionFeedback>}
       </Section>
