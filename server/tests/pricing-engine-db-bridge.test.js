@@ -609,7 +609,7 @@ describe('pricing engine DB bridge', () => {
     // A sane price backed by an ACTIVE, APPROVED vendor row flows into the
     // engine (containerCost AND containerOz come from the catalog together).
     await expect(syncConstantsFromDB(linkDb(
-      [{ name: 'Talstar P', best_price: 45.5, unit_size_oz: 128, best_vendor_pricing_id: 'vp-approved' }],
+      [{ name: 'Atticus Talak 7.9 F', best_price: 45.5, unit_size_oz: 128, best_vendor_pricing_id: 'vp-approved' }],
       [{ id: 'vp-approved' }],
     ))).resolves.toBe(true);
     expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).toBe(45.5);

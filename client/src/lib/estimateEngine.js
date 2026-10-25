@@ -1398,16 +1398,16 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     warning: 'Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.',
   },
   talstar_p: {
-    label: 'Talstar P - Bifenthrin',
-    shortLabel: 'Talstar P',
+    label: 'Talak 7.9 F - Bifenthrin',
+    shortLabel: 'Talak 7.9 F',
     activeIngredient: 'bifenthrin',
     chemistryType: 'repellent_pyrethroid',
-    positioning: 'branded_repellent',
-    containerCost: 38.99,
-    containerOz: 128,
+    positioning: 'standard_repellent',
+    containerCost: 41.57,
+    containerOz: 96,
     productOzPer10SqFt: 1.0,
     marginDivisor: 0.5294,
-    warning: 'Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.',
+    warning: 'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.',
   },
 };
 
@@ -1489,16 +1489,16 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     warning: 'Repellent bifenthrin barrier; not equivalent to non-repellent fipronil positioning.',
   },
   talstar_p: {
-    label: 'Talstar P / Pro - Bifenthrin',
-    shortLabel: 'Talstar P / Pro',
+    label: 'Talak 7.9 F - Bifenthrin',
+    shortLabel: 'Talak 7.9 F',
     activeIngredient: 'bifenthrin',
     chemistryType: 'repellent_pyrethroid',
-    positioning: 'branded_repellent',
-    containerCost: 65.00,
+    positioning: 'standard_repellent',
+    containerCost: 41.57,
     containerOz: 96,
     standardOzPerGal: 1.0,
     highOzPerGal: 2.0,
-    warning: 'Branded bifenthrin repellent barrier. Do not attach long repair-and-retreat warranty without admin approval.',
+    warning: 'Bifenthrin repellent barrier (Atticus Talak 7.9 F). Do not attach long repair-and-retreat warranty without admin approval.',
   },
 };
 
@@ -1523,6 +1523,8 @@ function normalizeTrenchingProductKey(value) {
     talstar_p: 'talstar_p',
     talstar_pro: 'talstar_p',
     talstar_professional: 'talstar_p',
+    talak: 'talstar_p',
+    atticus_talak: 'talstar_p',
   };
   return aliases[raw] || 'taurus_sc';
 }
@@ -1570,6 +1572,8 @@ function normalizePreSlabProductKey(value) {
     talstar: 'talstar_p',
     talstar_p: 'talstar_p',
     talstar_professional: 'talstar_p',
+    talak: 'talstar_p',
+    atticus_talak: 'talstar_p',
   };
   return aliases[raw] || 'termidor_sc';
 }

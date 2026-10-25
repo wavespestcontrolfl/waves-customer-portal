@@ -842,6 +842,8 @@ function normalizePreSlabTermiticideProduct(value, options = {}) {
     talstar: 'talstar_p',
     talstar_p: 'talstar_p',
     talstar_professional: 'talstar_p',
+    talak: 'talstar_p',
+    atticus_talak: 'talstar_p',
   };
   if (options.legacyPayload || options.allowIngredientAliases) {
     aliases.fipronil = 'termidor_sc';
@@ -6819,6 +6821,8 @@ function normalizeTrenchingTermiticideProduct(value, options = {}) {
     talstar_p: 'talstar_p',
     talstar_pro: 'talstar_p',
     talstar_professional: 'talstar_p',
+    talak: 'talstar_p',
+    atticus_talak: 'talstar_p',
   };
   const productKey = aliases[raw];
   if (productKey && cfg.products?.[productKey]) {

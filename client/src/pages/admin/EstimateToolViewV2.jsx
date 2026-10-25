@@ -83,7 +83,7 @@ const TRENCHING_PRODUCT_OPTIONS = [
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
   { value: "bifen_it", label: "Bifen I/T - Bifenthrin, standard repellent barrier" },
-  { value: "talstar_p", label: "Talstar P / Pro - Bifenthrin, branded repellent barrier" },
+  { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
 ];
 
 const TRENCHING_PRODUCT_META = {
@@ -100,8 +100,8 @@ const TRENCHING_PRODUCT_META = {
     config: "96 oz @ $55 | 1.0 oz / finished gal standard",
   },
   talstar_p: {
-    warning: "Branded bifenthrin repellent barrier. 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
-    config: "96 oz @ $65 | 1.0 oz / finished gal standard",
+    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "96 oz @ $41.57 | 1.0 oz / finished gal standard",
   },
 };
 
@@ -109,7 +109,7 @@ const PRE_SLAB_PRODUCT_OPTIONS = [
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
   { value: "bifen_it", label: "Bifen I/T - Bifenthrin, standard repellent barrier" },
-  { value: "talstar_p", label: "Talstar P - Bifenthrin, branded repellent barrier" },
+  { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
 ];
 
 const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
@@ -132,8 +132,8 @@ const PRE_SLAB_PRODUCT_META = {
     config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   talstar_p: {
-    warning: "Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.",
-    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
+    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.",
+    config: "96 oz @ $41.57 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
 };
 
