@@ -51,6 +51,7 @@ import { labelNamesRetiredSale, RETIRED_SALE_SERVICE_KEYS } from '../../constant
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
 import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
+import { formatETTime } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -1001,6 +1002,53 @@ function amountOrNull(value, preserveZero) {
 // technician assignment, and the pricing/estimate-link/property/notes
 // fields every group POST carries — folded from four builders that split
 // this one request-body shape across four call sites.
+// GATE_NEW_CALLER_BOOKING: why Book cannot save a new caller's visit yet
+// ('' = it can). One service, no discount (discounts need a customer), and a
+// price the server can set without a customer: a lot-priced mosquito line
+// needs a typed price (the lot ladder reads the customer's property).
+export function newCallerBookBlockReason({ serviceCount = 0, hasDiscount = false, lotPricedWithoutPrice = false } = {}) {
+  if (serviceCount > 1) return 'Book saves one service for a new caller. Add the other services after the customer is linked.';
+  if (serviceCount === 1 && hasDiscount) return 'Discounts wait until the customer exists. Remove the discount to book now.';
+  if (serviceCount === 1 && lotPricedWithoutPrice) return 'This service is priced by lot size. Type the price to book now.';
+  return '';
+}
+
+// The Book request (POST /api/admin/schedule/new-caller): the picked address
+// and its coordinates, the one service line, the time and the picked call.
+export function newCallerRequestBody({
+  serviceId, linePrice = null, durationMinutes, scheduledDate, windowStart, techMode, techId,
+  quickAdd = {}, quickAddTarget = null, callLogId, customerNotes, internalNotes,
+}) {
+  return {
+    scheduledDate: String(scheduledDate || '').split('T')[0],
+    windowStart,
+    serviceId: serviceId || null,
+    linePrice,
+    durationMinutes: durationMinutes || undefined,
+    technicianId: techMode === 'choose' && techId ? techId : null,
+    address: {
+      line1: quickAdd.address || '',
+      city: quickAdd.city || '',
+      state: quickAdd.state || '',
+      zip: quickAdd.zip || '',
+      lat: quickAddTarget?.lat ?? null,
+      lng: quickAddTarget?.lng ?? null,
+    },
+    callLogId: callLogId || null,
+    notes: customerNotes || undefined,
+    internalNotes: internalNotes || undefined,
+    createInvoice: true,
+  };
+}
+
+// One live call as the Book picker lists it: masked number, who answered,
+// when it started (ET) and whether it is still live.
+export function newCallerCallLabel(call) {
+  const started = call?.startedAt ? formatETTime(call.startedAt) : '';
+  const who = call?.direction === 'outbound' ? 'callback' : (call?.answeredBy ? `answered by ${call.answeredBy}` : 'answered');
+  return [call?.caller || 'Caller', who, started ? `started ${started}` : '', call?.live ? 'live' : 'ended'].filter(Boolean).join(' · ');
+}
+
 export function appointmentGroupRequestBody({
   separateProgram, key, separateProgramReason,
   customerId, scheduledDate, primaryId, primaryName,
@@ -1541,7 +1589,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', addressFirstTimes = false, newCustomerPhoneMatch = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', addressFirstTimes = false, newCustomerPhoneMatch = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1646,6 +1694,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // coordinates), never from half-typed text, and any hand edit to the
   // address lines drops it until the next pick.
   const [quickAddTarget, setQuickAddTarget] = useState(null);
+  // GATE_NEW_CALLER_BOOKING: the live calls Book can stamp (null = not loaded
+  // yet), the one picked, and the Book request's own state.
+  const [newCallerCalls, setNewCallerCalls] = useState(null);
+  const [newCallerCallId, setNewCallerCallId] = useState('');
+  const [newCallerSubmitting, setNewCallerSubmitting] = useState(false);
+  const [newCallerError, setNewCallerError] = useState('');
   // 409 phone-match conflict from quick-add ({ code, match }) — the admin
   // picks attach / duplicate / separate account and we resubmit with the flag.
   const [quickAddConflict, setQuickAddConflict] = useState(null);
@@ -5113,6 +5167,75 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // The server price preview runs only for a selected customer, so before one
   // exists it can never confirm: adding the customer does not wait on it, and
   // the booking after it does (canSubmit holds it as for any customer).
+  // GATE_NEW_CALLER_BOOKING (owner 2026-10-25): an address picked from the
+  // suggestions, with no name or phone typed, books a new caller's visit with
+  // no customer yet; the call-recording agent links the customer after the
+  // call and sends the confirmation. Typing a name or phone switches back to
+  // the customer flows below. Book stamps the live call the office answered.
+  const quickAddTyped = [quickAdd.firstName, quickAdd.lastName, quickAdd.phone].some((v) => String(v || '').trim() !== '');
+  const hasCoordinate = (v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+  const newCallerBookMode = newCallerBooking && !selectedCustomer && showQuickAdd && !quickAddTyped
+    && hasCoordinate(quickAddTarget?.lat) && hasCoordinate(quickAddTarget?.lng);
+  const newCallerLine = services.length === 1 ? services[0] : null;
+  const newCallerBlockReason = newCallerBookMode ? newCallerBookBlockReason({
+    serviceCount: services.length,
+    hasDiscount: !!(newCallerLine?.lineDiscount || appointmentDiscount),
+    lotPricedWithoutPrice: !!newCallerLine && isOneTimeMosquitoLine(newCallerLine) && !lineHasEnteredPrice(newCallerLine),
+  }) : '';
+  const newCallerNeedsCallPick = Array.isArray(newCallerCalls) && newCallerCalls.length > 1 && !newCallerCallId;
+  const canBookNewCaller = newCallerBookMode && timeChosen && !!newCallerLine && !newCallerBlockReason
+    && Array.isArray(newCallerCalls) && !newCallerNeedsCallPick && !saving && !newCallerSubmitting;
+  useEffect(() => {
+    if (!newCallerBookMode) return undefined;
+    let cancelled = false;
+    setNewCallerCalls(null);
+    adminFetch('/admin/schedule/new-caller/calls')
+      .then((data) => {
+        if (cancelled) return;
+        const calls = Array.isArray(data?.calls) ? data.calls : [];
+        setNewCallerCalls(calls);
+        // Exactly one live call: it is the one. Several: the office picks.
+        setNewCallerCallId((prev) => (calls.some((call) => call.id === prev) ? prev : (calls.length === 1 ? calls[0].id : '')));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setNewCallerCalls([]);
+        setNewCallerCallId('');
+      });
+    return () => { cancelled = true; };
+  }, [newCallerBookMode]);
+  const bookNewCaller = async () => {
+    if (!canBookNewCaller) return;
+    setNewCallerError('');
+    setNewCallerSubmitting(true);
+    try {
+      const result = await adminFetch('/admin/schedule/new-caller', {
+        method: 'POST',
+        body: JSON.stringify(newCallerRequestBody({
+          serviceId: newCallerLine.id,
+          linePrice: lineHasEnteredPrice(newCallerLine) ? lineBaseAmount(newCallerLine) : null,
+          durationMinutes: newCallerLine.duration || newCallerLine.default_duration_minutes,
+          scheduledDate: apptDate,
+          windowStart,
+          techMode,
+          techId,
+          quickAdd,
+          quickAddTarget,
+          callLogId: newCallerCallId,
+          customerNotes,
+          internalNotes,
+        })),
+      });
+      const scheduledDate = String(apptDate || '').split('T')[0];
+      if (Array.isArray(result?.warnings) && result.warnings.length) showScheduleSaveNotice(`Visit booked.\n\n${result.warnings.join('\n\n')}`);
+      onCreated?.({ id: result?.id, scheduledDate });
+      onChange?.({ id: result?.id, scheduledDate });
+    } catch (err) {
+      if (modalMountedRef.current) setNewCallerError(err?.message || 'The visit was not booked. Try again.');
+    } finally {
+      if (modalMountedRef.current) setNewCallerSubmitting(false);
+    }
+  };
   const quickAddSaveMode = newCustomerPhoneMatch && !selectedCustomer && showQuickAdd;
   const canSaveNewCustomer = quickAddSaveMode && timeChosen
     && !!(quickAdd.firstName && quickAdd.lastName && quickAdd.phone)
@@ -5120,8 +5243,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     && !discountSaveBlockedReason && !tierCatalogBlocksSave;
   // Locked while a one-Save booking waits for the form to settle, so a tap
   // then cannot book twice.
-  const saveEnabled = !pendingQuickAddSave && (quickAddSaveMode ? canSaveNewCustomer : canSubmit);
-  const savingLabel = saving || pendingQuickAddSave || (quickAddSaveMode && quickAddSubmitting);
+  const saveEnabled = newCallerBookMode ? canBookNewCaller : (!pendingQuickAddSave && (quickAddSaveMode ? canSaveNewCustomer : canSubmit));
+  const savingLabel = newCallerBookMode ? newCallerSubmitting : (saving || pendingQuickAddSave || (quickAddSaveMode && quickAddSubmitting));
   const saveNewCustomerThenBook = async () => {
     if (!canSaveNewCustomer) return;
     setQuickAddSaveNotice('');
@@ -5129,7 +5252,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const created = await submitQuickAdd();
     if (created) setPendingQuickAddSave({ customerId: String(created.id), totalAtSave });
   };
-  const handleSave = (arg) => (quickAddSaveMode ? saveNewCustomerThenBook() : handleSubmit(arg));
+  const handleSave = (arg) => {
+    if (newCallerBookMode) return bookNewCaller();
+    return quickAddSaveMode ? saveNewCustomerThenBook() : handleSubmit(arg);
+  };
   // The wait below fires later than the render that started it: it reads the
   // form as it is when it fires (a technician or note changed during the wait
   // is booked as shown), never the values from when the wait began.
@@ -5462,7 +5588,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       </button>
                     </div>
                   )}
-                  {newCustomerPhoneMatch ? (
+                  {newCallerBookMode && (
+                    <div role="group" aria-label="New caller booking" style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 8, padding: 10, background: '#FAFAFA', border: '1px solid #E4E4E7', borderRadius: 8, fontSize: 14, color: '#18181B' }}>
+                      <div>Book saves this visit with the address only. Nothing goes to the caller now: the call-recording agent adds the customer after the call and sends the confirmation.</div>
+                      {newCallerCalls === null ? (
+                        <div style={{ color: D.muted }}>Finding the call…</div>
+                      ) : newCallerCalls.length === 0 ? (
+                        <div style={{ color: D.muted }}>No live call found. The visit books without a call, and the office gets a reminder to link the customer.</div>
+                      ) : (
+                        <fieldset style={{ border: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <legend style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>{newCallerCalls.length > 1 ? 'Pick the call this visit is for' : 'This call'}</legend>
+                          {newCallerCalls.map((call) => (
+                            <label key={call.id} style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44, cursor: 'pointer' }}>
+                              <input type="radio" name="new-caller-call" value={call.id} checked={newCallerCallId === call.id} onChange={() => setNewCallerCallId(call.id)} style={{ width: 18, height: 18 }} />
+                              <span>{newCallerCallLabel(call)}</span>
+                            </label>
+                          ))}
+                        </fieldset>
+                      )}
+                      {newCallerBlockReason && <div role="status">{newCallerBlockReason}</div>}
+                      {newCallerError && <div role="alert" style={{ color: D.red }}>{newCallerError}</div>}
+                    </div>
+                  )}
+                  {newCallerBookMode ? null : newCustomerPhoneMatch ? (
                     <div style={{ fontSize: 14, color: D.muted }}>{quickAddSubmitting ? 'Adding the customer…' : 'Schedule appointment adds this customer and books the visit.'}</div>
                   ) : (
                     <button onClick={handleQuickAdd} disabled={quickAddSubmitting} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%', opacity: quickAddSubmitting ? 0.6 : 1 }}>{quickAddSubmitting ? 'Adding…' : 'Add customer'}</button>
@@ -6854,7 +7002,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               minHeight: 52, opacity: saveEnabled ? 1 : 0.5,
               transition: 'opacity 0.15s',
             }}>
-              {savingLabel ? 'Scheduling…' : 'Schedule appointment'}
+              {newCallerBookMode ? (newCallerSubmitting ? 'Booking…' : 'Book') : (savingLabel ? 'Scheduling…' : 'Schedule appointment')}
             </button>
           )}
         </div>
