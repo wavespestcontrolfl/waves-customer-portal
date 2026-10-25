@@ -466,6 +466,12 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     // "Instantly" / "in an instant" stay time words; only the product name is exempt.
     ['The kids can play outside instantly.', ''],
     ['You can re-enter in an instant.', 'What should I do after the treatment?'],
+    // A phone number is stripped, never the timing next to it; physical "get" / "use" stay access.
+    ['Keep pets away for 2 hours, then call (941) 297-5749.', 'There is a big wasp nest by my front door.'],
+    ['Call 941-297-5749. You can re-enter in 30 minutes.', 'When can I re-enter after treatment?'],
+    ['Your dog can get back on the lawn in 30 minutes.', ''],
+    ['Kids can get into the pool after 4 hours.', ''],
+    ['Pets can get near the treated area after 1 hour.', ''],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -510,6 +516,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Pricing comes only from the instant-quote step, which prices from your actual property data. You can get a WaveGuard quarterly pest control quote for your Lakewood Ranch home there.', 'How much is quarterly pest control for a 2,000 sq ft house in Lakewood Ranch?'],
     ['Yes, we offer subterranean termite bait and monitoring protection in Parrish! You can get an instant quote based on your property details.', 'Do you treat for termites? We live in Parrish.'],
     ['We offer recurring Mosquito & No-See-Um Control with yard treatments to help reduce biting pests so you can enjoy your backyard. You can get an instant quote based on your property details.', 'The mosquitoes in our backyard are terrible, we cannot sit outside. What do you offer?'],
+    // The office line the prompt requires is not a time figure; "get a quote" is not access.
+    ['Pricing comes only from the instant-quote step, which prices from your actual property data. You can get a WaveGuard quarterly pest control quote for your 2,000 sq ft Lakewood Ranch home there.', 'How much is quarterly pest control for a 2,000 sq ft house in Lakewood Ranch?'],
+    ['Yes, we offer subterranean termite bait protection and monitoring in Parrish. You can get an instant quote for termite protection; if you need a termite inspection or suspect an active infestation, call (941) 297-5749.', 'Do you treat for termites? We live in Parrish.'],
+    ['Keep people and pets away from the front door and avoid disturbing or spraying the nest, since wasps may swarm when threatened. Wasp nest treatment requires a custom quote; call (941) 297-5749 for help.', 'There is a big wasp nest by my front door.'],
+    ['You can use the instant quote right here, or call us at (941) 297-5749.', 'Do you do bed bugs?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
