@@ -51,6 +51,10 @@ jest.mock('../utils/customer-comms-lock', () => ({
   lockCustomerComms: jest.fn().mockResolvedValue(undefined),
   withCustomerCommsLock: jest.fn(async (db, customerId, fn) => db.transaction(async (trx) => fn(trx))),
 }));
+jest.mock('../services/scheduling/line-technician', () => {
+  const actual = jest.requireActual('../services/scheduling/line-technician');
+  return { ...actual, recordLinePickShadow: jest.fn(actual.recordLinePickShadow) };
+});
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),
 }));
@@ -61,6 +65,8 @@ jest.mock('../services/call-booking-catalog', () => ({
   shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
 }));
 const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
+const { recordLinePickShadow } = require('../services/scheduling/line-technician');
+const logger = require('../services/logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const express = require('express');
 const adminScheduleRouter = require('../routes/admin-schedule');
@@ -261,3 +267,81 @@ describe('POST / — admin create — technician work-days warning (office paths
   });
 });
 
+
+// GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25): an office create left on Auto /
+// unassigned logs the technician the service-line map would pick, after the commit.
+describe('POST / — admin create — service-line map shadow (office_auto)', () => {
+  const body = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    estimatedPrice: 89,
+  };
+  const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise((r) => setImmediate(r)); };
+  afterEach(() => { delete process.env.GATE_SERVICE_LINE_MAP; });
+
+  test('Auto: one office_auto row is recorded after the response, with the saved visit and technician', async () => {
+    const { status } = await post({ ...body, assignmentMode: 'auto' });
+    expect(status).toBe(201);
+    await settle();
+    expect(recordLinePickShadow).toHaveBeenCalledTimes(1);
+    expect(recordLinePickShadow).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'office_auto', scheduledServiceId: 'new-1', customerId: 'cust-1', date: '2099-07-03',
+      windowStart: '10:00', actualTechnicianId: null,
+    }));
+  });
+
+  test('the recorder runs only after every transaction of the create has committed', async () => {
+    let open = 0;
+    const openAtCall = [];
+    const run = db.transaction.getMockImplementation();
+    db.transaction = jest.fn(async (cb) => { open += 1; try { return await run(cb); } finally { open -= 1; } });
+    recordLinePickShadow.mockImplementationOnce(() => { openAtCall.push(open); return Promise.resolve(null); });
+    const { status } = await post({ ...body, assignmentMode: 'auto' });
+    expect(status).toBe(201);
+    await settle();
+    expect(openAtCall).toEqual([0]);
+  });
+
+  test('a technician picked by hand: no row', async () => {
+    const { status } = await post({ ...body, technicianId: 'tech-no-absence', assignmentMode: 'manual' });
+    expect(status).toBe(201);
+    await settle();
+    expect(recordLinePickShadow).not.toHaveBeenCalled();
+  });
+
+  test('a recurring create records the parent visit only (children copy the technician)', async () => {
+    const { status, body: out } = await post({
+      ...body, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, boosterMonths: [11], assignmentMode: 'unassigned', createInvoice: true,
+    });
+    expect(out.error).toBeUndefined();
+    expect(status).toBe(201);
+    await settle();
+    expect(recordLinePickShadow).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate shadow with a broken log table: the create still succeeds and the failure is only logged', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    const original = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'service_line_pick_shadow'
+      ? { insert: () => Promise.reject(new Error('log table down')) }
+      : original(table)));
+    const { status, body: out } = await post({ ...body, assignmentMode: 'auto' });
+    expect(status).toBe(201);
+    expect(out.id).toBe('new-1');
+    await settle();
+    expect(recordLinePickShadow).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('shadow row not written'));
+  });
+
+  test('gate off (default): the real recorder runs no query', async () => {
+    const original = db.getMockImplementation();
+    const tables = [];
+    db.mockImplementation((table) => { tables.push(table); return original(table); });
+    await post({ ...body, assignmentMode: 'auto' });
+    await settle();
+    expect(tables.filter((t) => /^service_line_/.test(t))).toEqual([]);
+  });
+});

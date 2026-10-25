@@ -945,6 +945,13 @@ async function requestBookingText(input = {}, ctx = {}) {
   }
 
   if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(commit.callLogId || callLogId);
+  // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow): the booking is committed;
+  // log the technician the map would pick beside the one saved. Never awaited, never throws.
+  void require('../scheduling/line-technician').recordLinePickShadow({
+    source: 'phone_live', scheduledServiceId: commit.scheduledServiceId, customerId, date: dateStr, windowStart,
+    windowEnd: insertData.window_end, serviceId: catalogRow.id, serviceType: catalogRow.name,
+    durationMinutes: bookingDurationMinutes, actualTechnicianId: insertData.technician_id,
+  });
   // THE OTHER HALF OF THE LEAD BACK-FILL, for the slow-commit race.
   //
   // capture_lead back-fills the card when the booking already finished

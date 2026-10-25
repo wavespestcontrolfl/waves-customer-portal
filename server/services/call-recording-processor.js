@@ -21671,6 +21671,16 @@ const CallRecordingProcessor = {
                   });
                 }
               }
+              // Service-line map shadow (GATE_SERVICE_LINE_MAP=shadow): the booking is committed;
+              // log the technician the map would pick beside the one saved. A fresh insert, or a
+              // reused row this run assigned a technician to. Never awaited, never throws.
+              if (!reusedExistingSchedule || reuseAssignedTechId) {
+                void require('./scheduling/line-technician').recordLinePickShadow({
+                  source: 'after_call', scheduledServiceId: svc.id, customerId: svc.customer_id, date: svc.scheduled_date,
+                  windowStart: svc.window_start, windowEnd: svc.window_end, serviceId: svc.service_id,
+                  serviceType: svc.service_type, durationMinutes: svc.estimated_duration_minutes, actualTechnicianId: svc.technician_id,
+                });
+              }
               if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {
                 // (A street-level address hold is never activated by a pipeline
                 // reuse — only the office confirm activates it.)
