@@ -221,8 +221,9 @@ async function startFollowup({ customer, fromPhone, smsLogId, kind, now }) {
     const phoneMatch = ["RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits]];
     // A TEXT answer replaces an open night ask: the lead chose text instead.
     // Closed even when no new text goes out, so their next reply reaches intake.
+    // A booked call is cancelled the same way: the lead switched to text.
     if (kind === 'text_reply') {
-      await trx('lead_callback_requests').where({ state: 'asked', kind: 'call_request' }).whereRaw(...phoneMatch)
+      await trx('lead_callback_requests').whereIn('state', ['asked', 'scheduled']).where({ kind: 'call_request' }).whereRaw(...phoneMatch)
         .update({ state: 'cancelled', updated_at: now });
     }
     if (await sentKindRecently({ digits, kind, now }, trx)) return { reason: 'sent_today' };
@@ -242,17 +243,18 @@ async function startFollowup({ customer, fromPhone, smsLogId, kind, now }) {
   if (!claim.requestId) return { action: 'none', reason: claim.reason };
   const { requestId } = claim;
 
-  if (kind === 'text_reply') {
-    // We just asked which service: the intake machine must read the answer as
+  const body = kind === 'text_reply' ? TEXT_REPLY_BODY : NIGHT_CALL_BODY;
+  const outcome = await sendFollowup({ customer, phone: fromPhone, body, kind, requestId });
+  await settleSend(requestId, outcome, { sentState: kind === 'text_reply' ? 'done' : 'asked', now });
+  if (kind === 'text_reply' && outcome !== 'not_sent') {
+    // We asked which service: the intake machine must read the answer as
     // one. A cleared state (a repeat form) or one waiting on the address goes
-    // back to awaiting_service; a drafted quote is left alone.
+    // back to awaiting_service; a drafted quote is left alone. A question
+    // that provably never left changes nothing.
     await db('customers').where({ id: customer.id })
       .where((q) => q.whereNull('lead_intake_status').orWhere('lead_intake_status', 'awaiting_address'))
       .update({ lead_intake_status: 'awaiting_service', updated_at: now });
   }
-  const body = kind === 'text_reply' ? TEXT_REPLY_BODY : NIGHT_CALL_BODY;
-  const outcome = await sendFollowup({ customer, phone: fromPhone, body, kind, requestId });
-  await settleSend(requestId, outcome, { sentState: kind === 'text_reply' ? 'done' : 'asked', now });
   if (outcome === 'not_sent') {
     await raiseLeadBell({
       customer, leadId, requestId,

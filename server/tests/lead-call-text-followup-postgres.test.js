@@ -107,6 +107,21 @@ jest.setTimeout(30000);
     expect(sentBodies()).toEqual([TEXT_REPLY_BODY, NIGHT_CALL_BODY]);
   });
 
+  test('TEXT after a booked call cancels the call and asks the service question', async () => {
+    const c = await lead('+19415550120');
+    await reply(c, 'call', NIGHT);
+    await reply(c, '10am', NIGHT);
+    await expect(reply(c, 'text', NIGHT)).resolves.toMatchObject({ action: 'text_reply_sent' });
+    expect((await database('lead_callback_requests').where({ customer_id: c.id, kind: 'call_request' }).first()).state).toBe('cancelled');
+  });
+
+  test('a service question that did not send leaves the intake state alone', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent' });
+    const c = await lead('+19415550121', { intake: 'awaiting_address' });
+    await reply(c, 'text', NIGHT);
+    expect((await database('customers').where({ id: c.id }).first()).lead_intake_status).toBe('awaiting_address');
+  });
+
   test('a night CALL asks for a time; "10am" books 10:00 tomorrow and confirms it', async () => {
     const c = await lead('+19415550101');
     await expect(reply(c, 'CALL', NIGHT)).resolves.toMatchObject({ action: 'time_asked' });
