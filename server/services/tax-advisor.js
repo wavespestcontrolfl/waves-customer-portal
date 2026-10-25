@@ -412,7 +412,7 @@ Please search for current FL and federal tax changes, then provide your analysis
     try {
       const upcoming = await db('tax_filing_calendar')
         .where('due_date', '>=', db.fn.now())
-        .where('status', '!=', 'filed')
+        .whereNotIn('status', ['filed', 'paid'])
         .orderBy('due_date')
         .limit(10);
 

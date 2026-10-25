@@ -1734,7 +1734,7 @@ function ExpensesTab() {
 // ═══════════════════════════════════════════════════════════════
 // FILING CALENDAR TAB
 // ═══════════════════════════════════════════════════════════════
-function FilingCalendarTab() {
+export function FilingCalendarTab() {
   const actionRef = useRef(false);
   const [pendingAction, setPendingAction] = useState("");
   const [actionError, setActionError] = useState("");
@@ -1774,6 +1774,13 @@ function FilingCalendarTab() {
             );
           }
           update.amountPaid = amt;
+        }
+        if (status === "filed" || status === "paid") {
+          // Optional: the confirmation number from EFTPS, the state or the
+          // agency. Cancel aborts the change; blank sends none.
+          const conf = window.prompt("Confirmation number (optional):", "");
+          if (conf === null) return;
+          if (conf.trim() !== "") update.confirmationNumber = conf.trim();
         }
         await adminFetch(`/admin/tax/filings/${id}`, {
           method: "PUT",
@@ -2002,6 +2009,16 @@ function FilingCalendarTab() {
                   }}
                 >
                   {fmtM(f.amountPaid)}
+                </span>
+              )}
+              {f.confirmationNumber && (
+                <span
+                  style={{
+                    fontSize: 14,
+                    color: "#71717A",
+                  }}
+                >
+                  Conf. {f.confirmationNumber}
                 </span>
               )}
             </Card>

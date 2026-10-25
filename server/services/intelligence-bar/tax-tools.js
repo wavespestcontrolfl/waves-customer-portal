@@ -191,7 +191,7 @@ async function getTaxDashboard(yearInput) {
       db.raw("COUNT(*) FILTER (WHERE current_book_value <= 0) as fully_depreciated"),
     ).first().catch(() => ({ count: 0, total_cost: 0, book_value: 0, depreciation: 0, fully_depreciated: 0 })),
 
-    db('tax_filing_calendar').where('due_date', '>=', today).whereNot('status', 'filed')
+    db('tax_filing_calendar').where('due_date', '>=', today).whereNotIn('status', ['filed', 'paid'])
       .orderBy('due_date').limit(5).catch(() => []),
 
     db('tax_advisor_alerts').where('status', 'new')
@@ -307,12 +307,13 @@ async function getFilingDeadlines(input) {
   const cutoff = etDateString(addETDays(new Date(), days_ahead));
 
   let query = db('tax_filing_calendar').where('due_date', '<=', cutoff).orderBy('due_date');
-  if (!include_filed) query = query.whereNot('status', 'filed');
+  if (!include_filed) query = query.whereNotIn('status', ['filed', 'paid']);
 
   const filings = await query;
 
   const toDateStr = (v) => (v instanceof Date ? etDateString(v) : String(v).slice(0, 10));
-  const overdue = filings.filter(f => toDateStr(f.due_date) < today && f.status !== 'filed');
+  const isDone = (f) => f.status === 'filed' || f.status === 'paid';
+  const overdue = filings.filter(f => toDateStr(f.due_date) < today && !isDone(f));
 
   return {
     filings: filings.map(f => ({
@@ -320,7 +321,7 @@ async function getFilingDeadlines(input) {
       due_date: f.due_date, status: f.status,
       amount_due: f.amount_due ? parseFloat(f.amount_due) : null,
       days_until: daysUntil(f.due_date),
-      overdue: toDateStr(f.due_date) < today && f.status !== 'filed',
+      overdue: toDateStr(f.due_date) < today && !isDone(f),
     })),
     overdue_count: overdue.length,
     next_due: filings[0] ? { title: filings[0].title, date: filings[0].due_date, days: daysUntil(filings[0].due_date) } : null,

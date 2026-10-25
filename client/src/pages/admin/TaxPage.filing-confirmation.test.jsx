@@ -1,0 +1,73 @@
+// @vitest-environment jsdom
+// Payroll layer 2: marking a filing filed or paid asks for an optional
+// confirmation number (Cancel aborts the change, blank sends none), and a
+// completed row shows it.
+import React from 'react';
+import '@testing-library/jest-dom/vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { FilingCalendarTab } from './TaxPage.jsx';
+
+const filings = [
+  { id: 'f-open', filingType: 'payroll_941', title: 'Form 941 — Q1 2099', periodLabel: 'Q1 2099', dueDate: '2099-04-30', status: 'upcoming', amountDue: 120.5, amountPaid: null, filedDate: null, paidDate: null, confirmationNumber: null, notes: null },
+  { id: 'f-done', filingType: 'payroll_941', title: 'Form 941 — Q4 2098', periodLabel: 'Q4 2098', dueDate: '2099-01-31', status: 'filed', amountDue: null, amountPaid: null, filedDate: '2099-01-20', paidDate: null, confirmationNumber: 'EFT-998877', notes: null },
+];
+let puts;
+
+beforeEach(() => {
+  puts = [];
+  localStorage.setItem('waves_admin_token', 'test-token');
+  vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+    if (options.method === 'PUT') {
+      puts.push({ url: String(url), body: JSON.parse(options.body) });
+      return { ok: true, json: async () => ({ success: true }) };
+    }
+    return { ok: true, json: async () => ({ filings }) };
+  }));
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+const markFiled = async () => {
+  render(<FilingCalendarTab />);
+  await waitFor(() => expect(screen.getByText('Form 941 — Q1 2099')).toBeInTheDocument());
+  fireEvent.change(screen.getByLabelText('Filing status'), { target: { value: 'filed' } });
+};
+
+it('shows the confirmation number on a completed row', async () => {
+  render(<FilingCalendarTab />);
+  await waitFor(() => expect(screen.getByText('Conf. EFT-998877')).toBeInTheDocument());
+});
+
+it('sends the trimmed confirmation number when marking filed', async () => {
+  vi.spyOn(window, 'prompt').mockReturnValue('  EFT-555  ');
+  await markFiled();
+  await waitFor(() => expect(puts).toHaveLength(1));
+  expect(puts[0].url).toContain('/admin/tax/filings/f-open');
+  expect(puts[0].body).toMatchObject({ status: 'filed', confirmationNumber: 'EFT-555' });
+});
+
+it('sends no confirmation number when the prompt is left blank', async () => {
+  vi.spyOn(window, 'prompt').mockReturnValue('   ');
+  await markFiled();
+  await waitFor(() => expect(puts).toHaveLength(1));
+  expect(puts[0].body.status).toBe('filed');
+  expect(puts[0].body).not.toHaveProperty('confirmationNumber');
+});
+
+it('cancelling the prompt aborts the status change', async () => {
+  vi.spyOn(window, 'prompt').mockReturnValue(null);
+  await markFiled();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(puts).toHaveLength(0);
+});
+
+it('asks for the amount first, then the confirmation number, when marking paid', async () => {
+  const prompt = vi.spyOn(window, 'prompt').mockReturnValueOnce('120.50').mockReturnValueOnce('PAY-1');
+  render(<FilingCalendarTab />);
+  await waitFor(() => expect(screen.getByText('Form 941 — Q1 2099')).toBeInTheDocument());
+  fireEvent.change(screen.getByLabelText('Filing status'), { target: { value: 'paid' } });
+  await waitFor(() => expect(puts).toHaveLength(1));
+  expect(prompt.mock.calls[0][0]).toMatch(/Amount paid/);
+  expect(prompt.mock.calls[1][0]).toMatch(/Confirmation number/);
+  expect(puts[0].body).toMatchObject({ status: 'paid', amountPaid: 120.5, confirmationNumber: 'PAY-1' });
+});
