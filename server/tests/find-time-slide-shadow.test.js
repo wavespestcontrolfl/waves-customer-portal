@@ -34,6 +34,17 @@ afterAll(() => {
     else process.env[k] = saved[k];
   }
 });
+// The shadow pass stops at a 50 ms wall-clock ceiling (find-time.js
+// SLIDE_SHADOW_MAX_MS, checked against Date.now in slide-offer.js). A loaded
+// CI runner can use that up before the pass finds its slide, and then nothing
+// is logged, so every test holds the clock still; the ceiling's own test moves it.
+let clock;
+let nowSpy;
+beforeEach(() => {
+  clock = Date.now();
+  nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+});
+afterEach(() => nowSpy.mockRestore());
 
 const selects = [];
 function chain(result, table) {
@@ -268,6 +279,21 @@ test('sampled: a second request inside the interval runs no shadow pass', async 
   wireDb();
   await findAvailableSlots(CALL);
   expect(shadowLines()).toHaveLength(1);
+});
+
+test('the 50 ms ceiling: a pass that runs out of time logs nothing and the offered slots are unchanged', async () => {
+  wireDb();
+  const off = await findAvailableSlots(CALL);
+  wireDb();
+  process.env.GATE_SLOT_SLIDE_OFFER = 'true';
+  _resetSlideShadowSample();
+  // Each clock read lands 60 ms after the last, so the pass is past its ceiling at its first check.
+  nowSpy.mockImplementation(() => (clock += 60));
+  const on = await findAvailableSlots(CALL);
+
+  expect(on.slots).toEqual(off.slots);
+  expect(svcSelects()).toHaveLength(2); // the pass ran (its movability read) and ran out of time
+  expect(shadowLines()).toHaveLength(0);
 });
 
 const runWith = async (rows) => {
