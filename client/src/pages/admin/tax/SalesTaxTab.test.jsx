@@ -69,11 +69,12 @@ it('shows the DR-15 lines with their values, the due date, the Late badge and th
   expect(row('Line A, column 2 — Exempt sales (residential work)')).toHaveTextContent('$9,000.00');
   expect(row('Line A, column 3 — Taxable amount (commercial work)')).toHaveTextContent('$3,000.00');
   expect(row('Line A, column 4 — Tax collected')).toHaveTextContent('$210.00');
-  expect(row('Line 6 — Lawful deductions (tax refunded)')).toHaveTextContent('$0.00');
+  expect(row('Line 6 — Less lawful deductions (tax refunded)')).toHaveTextContent('$0.00');
   expect(row('Line 7 — Total tax due')).toHaveTextContent('$210.00');
   expect(row('Line 15(d) — Surtax collected (part of column 4)')).toHaveTextContent('$30.00');
-  expect(row('Line 11 — Collection allowance')).toHaveTextContent('-$0.33');
-  expect(row('Line 11 — Collection allowance')).toHaveTextContent('The allowance is 2.5% of the first $1,200 of tax.');
+  expect(row('Line 11 — Less collection allowance')).toHaveTextContent('$0.33');
+  expect(row('Line 11 — Less collection allowance')).not.toHaveTextContent('-$');
+  expect(row('Line 11 — Less collection allowance')).toHaveTextContent('The allowance is 2.5% of the first $1,200 of tax.');
   expect(row('Line 12 — Penalty')).toHaveTextContent('$15.50');
   expect(row('Line 12 — Penalty')).toHaveTextContent('Late returns pay 10% of the tax due.');
   expect(row('Line 13 — Interest')).toHaveTextContent('DOR works it out when the return is late');
@@ -82,14 +83,15 @@ it('shows the DR-15 lines with their values, the due date, the Late badge and th
   expect(screen.getByText('Late')).toBeInTheDocument();
   expect(screen.queryByText('In progress')).toBeNull();
   expect(screen.getByText('Two invoices have no tax rate.')).toBeInTheDocument();
-  expect(screen.getByText('File on the Florida Department of Revenue site and copy these numbers across.')).toBeInTheDocument();
+  expect(screen.getByText(/File on the Florida Department of Revenue site and copy these numbers across\./)).toBeInTheDocument();
 });
 
-it('shows refunded tax on line 6 as a deduction', async () => {
+it('shows refunded tax on line 6 as a positive amount', async () => {
   sheet.lines = { ...sheet.lines, lawful_deductions: 13.37, tax_due: 196.63 };
   render(<SalesTaxTab />);
   await screen.findByText('Sep 2026');
-  expect(screen.getByText('Line 6 — Lawful deductions (tax refunded)').closest('tr')).toHaveTextContent('-$13.37');
+  expect(screen.getByText('Line 6 — Less lawful deductions (tax refunded)').closest('tr')).toHaveTextContent('$13.37');
+  expect(screen.getByText('Line 6 — Less lawful deductions (tax refunded)').closest('tr')).not.toHaveTextContent('-$');
   expect(screen.getByText('Line 7 — Total tax due').closest('tr')).toHaveTextContent('$196.63');
 });
 

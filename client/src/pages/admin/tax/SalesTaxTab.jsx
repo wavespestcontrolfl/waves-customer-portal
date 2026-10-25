@@ -253,21 +253,17 @@ export default function SalesTaxTab() {
                     <Row label="Line A, column 2 — Exempt sales (residential work)" value={money(sheet.lines.exempt_sales)} />
                     <Row label="Line A, column 3 — Taxable amount (commercial work)" value={money(sheet.lines.taxable_amount)} />
                     <Row label="Line A, column 4 — Tax collected" value={money(sheet.lines.tax_collected)} />
-                    <Row label="Line 6 — Lawful deductions (tax refunded)" value={money(Number(sheet.lines.lawful_deductions) > 0 ? -sheet.lines.lawful_deductions : 0)} />
+                    <Row label="Line 6 — Less lawful deductions (tax refunded)" value={money(sheet.lines.lawful_deductions)} />
                     <Row label="Line 7 — Total tax due" value={money(sheet.lines.tax_due)} />
                     <Row label="Line 15(d) — Surtax collected (part of column 4)" value={money(sheet.lines.surtax_collected)} />
-                    <Row
-                      label="Line 11 — Collection allowance"
-                      value={money(Number(sheet.lines.collection_allowance) > 0 ? -sheet.lines.collection_allowance : 0)}
-                      note={sheet.allowance_note}
-                    />
+                    <Row label="Line 11 — Less collection allowance" value={money(sheet.lines.collection_allowance)} note={sheet.allowance_note} />
                     <Row label="Line 12 — Penalty" value={money(sheet.lines.penalty)} note={sheet.penalty_note} />
                     <Row label="Line 13 — Interest" value="DOR works it out when the return is late" />
                     <Row label="Line 14 — Amount due with the return" value={money(sheet.lines.amount_due)} strong testId="amount-due" />
                   </TBody>
                 </Table>
               </div>
-              <div className="text-sm text-ink-secondary">File on the Florida Department of Revenue site and copy these numbers across.</div>
+              <div className="text-sm text-ink-secondary">File on the Florida Department of Revenue site and copy these numbers across. Enter the "less" lines as positive amounts, as shown.</div>
               <FilingBox key={sheet.filing?.id ?? "none"} sheet={sheet} busy={busy} onMarkFiled={markFiled} />
               {error && <ActionFeedback error>{error}</ActionFeedback>}
             </>
