@@ -4,8 +4,8 @@
 // a finished pass that left the visit unlinked, and once more on the visit's
 // last day. A call still in its first 90 minutes waits for its own pass. The
 // bells run through the real composer, so a copy-rule break fails here. Unit
-// cases run everywhere; the ring-then-link lifecycle on Postgres runs in CI
-// (DATABASE_URL). Fixtures fictitious.
+// cases run everywhere; the ring, dedupe, link-close and stale-ring lifecycle
+// on Postgres runs in CI (DATABASE_URL). Fixtures fictitious.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 let mockNewCallerGate = true;
@@ -71,7 +71,12 @@ function fakeConn(visits, calls, now = () => ({ customer_id: null, status: 'pend
     chain.modify = (fn) => { fn(chain); return chain; };
     chain.select = async () => {
       reads.push({ table, steps });
-      return table === 'scheduled_services' ? visits : calls;
+      if (table !== 'scheduled_services') return calls;
+      // Keyset pages: the rows after the bound id, up to the limit.
+      const bound = steps.find(([m]) => m === 'whereRaw');
+      const start = bound ? visits.findIndex((v) => v.id === bound[2][1]) + 1 : 0;
+      const [, limit] = steps.find(([m]) => m === 'limit');
+      return visits.slice(start, start + limit);
     };
     chain.first = async () => {
       reads.push({ table, steps });
@@ -151,6 +156,25 @@ describe('the sweep', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  test('every waiting visit is read, past the first page; ten bells a run, so a backlog rings over successive runs', async () => {
+    const many = Array.from({ length: 105 }, (_, i) => visit({ id: `v-${String(i).padStart(3, '0')}`, source_call_log_id: null }));
+    const rungKeys = new Set();
+    notify.mockImplementation(async (_category, _headline, _why, opts) => {
+      const deduped = rungKeys.has(opts.dedupeKey);
+      rungKeys.add(opts.dedupeKey);
+      return { id: 'n', deduped };
+    });
+    const conn = fakeConn(many, []);
+
+    await expect(runNewCallerVisitBells({ now: NOW, conn })).resolves.toEqual({ waiting: 105, due: 105, rung: 10 });
+    const pages = conn.reads.filter((r) => r.table === 'scheduled_services' && r.steps.some(([m]) => m === 'limit'));
+    expect(pages).toHaveLength(2);
+    expect(pages[1].steps).toContainEqual(['whereRaw', '(scheduled_date, id) > (?::date, ?::uuid)', ['2031-03-12', 'v-099']]);
+
+    await expect(runNewCallerVisitBells({ now: NOW, conn })).resolves.toEqual({ waiting: 105, due: 105, rung: 10 });
+    expect(rungKeys.size).toBe(20);
+  });
+
   test('a row that already shows the stage counts as no ring; a bell that fails never stops the sweep', async () => {
     notify.mockResolvedValueOnce({ id: 'n-1', deduped: true }).mockRejectedValueOnce(new Error('insert failed'));
     const conn = fakeConn([visit({ id: 'v1', source_call_log_id: null }), visit({ id: 'v2', source_call_log_id: null }), visit({ id: 'v3', source_call_log_id: null })], []);
@@ -199,7 +223,9 @@ maybeDescribe('the timed bell on Postgres', () => {
     await db.destroy();
   });
 
-  test('a finished pass that left the visit unlinked rings once; the next tick adds nothing; the office\'s link closes it', async () => {
+  // The ring path for this suite's own visit (the sweep's list reads every
+  // waiting visit in the database, other suites' fixtures included).
+  test('a waiting visit rings once; a second ring adds nothing; the link closes it; a stale last-day ring after the link writes nothing', async () => {
     const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000);
     const [row] = await db('call_log').insert({
       direction: 'inbound', from_phone: '+15555550100', to_phone: '+15555550999', status: 'in-progress',
@@ -212,15 +238,14 @@ maybeDescribe('the timed bell on Postgres', () => {
     const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
     const booked = await service.bookNewCallerVisit({ input: { scheduledDate: '2031-05-07', windowStart: '13:00', serviceId: svc.id, address: ADDRESS, callLogId: row.id } });
     made.visitIds.push(booked.visit.id);
-    // The pass finished with no customer and its own bell never landed.
-    await db('call_log').where({ id: row.id }).update({ processing_status: 'processed' });
     const key = `new-caller-visit:${booked.visit.id}`;
-    const rows = () => db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).select('id', 'done_at', 'metadata');
+    const rows = () => db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).select('id', 'done_at');
 
-    const first = await runNewCallerVisitBells();
-    expect(first.rung).toBeGreaterThanOrEqual(1);
-    expect(await rows()).toHaveLength(1);
-    await runNewCallerVisitBells();
+    const first = await _private.ringVisit(db, booked.visit, 'processed');
+    expect(first.waits).toBe(true);
+    expect(first.raised.deduped).toBe(false);
+    const second = await _private.ringVisit(db, booked.visit, 'processed');
+    expect(second.raised.deduped).toBe(true);
     expect(await rows()).toHaveLength(1);
 
     const customerId = require('crypto').randomUUID();
@@ -231,8 +256,7 @@ maybeDescribe('the timed bell on Postgres', () => {
     expect(closed.done_at).not.toBeNull();
 
     // A sweep that listed the visit before the link, ringing its last-day bell after it: no reopen.
-    const stale = { ...booked.visit, customer_id: null, scheduled_date: new Date(Date.now() + 2 * 3600 * 1000).toISOString().slice(0, 10) };
-    await expect(_private.ringVisit(db, stale, 'soon')).resolves.toEqual({ waits: false });
+    await expect(_private.ringVisit(db, booked.visit, 'soon')).resolves.toEqual({ waits: false });
     const after = await rows();
     expect(after).toHaveLength(1);
     expect(after[0].done_at).not.toBeNull();

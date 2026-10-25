@@ -19,7 +19,7 @@
 const db = require('../../models/db');
 const { isEnabled } = require('../../config/feature-gates');
 const logger = require('../logger');
-const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, dateOnlyString } = require('../../utils/datetime-et');
 const { callEndedAt } = require('../../utils/call-timeline');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { raiseAdminAlert } = require('../admin-alert-compose');
@@ -29,8 +29,9 @@ const {
 
 const NO_RECORDING_MS = 90 * 60 * 1000;
 const SOON_MS = 24 * 60 * 60 * 1000;
-// Far more than the office books by address; a backlog drains over ticks.
-const MAX_VISITS_PER_RUN = 100;
+// The sweep reads every waiting visit, a page at a time; the bell cap stops
+// the rings in one run, never the reading, so a backlog rings over ticks.
+const PAGE_SIZE = 100;
 const MAX_ALERTS_PER_RUN = 10;
 
 const WHY = {
@@ -106,36 +107,44 @@ async function ringVisit(conn, visit, stage) {
 async function runNewCallerVisitBells({ now = new Date(), conn = db } = {}) {
   if (!isEnabled('newCallerBooking')) return { skipped: 'disabled' };
   const completedStatuses = require('../call-recording-processor').COMPLETED_STATUSES;
-  const visits = await conn('scheduled_services')
-    .where({ source_action: NEW_CALLER_SOURCE_ACTION })
-    .whereNull('customer_id')
-    .whereNull('parent_service_id')
-    .whereNotIn('status', ['cancelled', 'rescheduled'])
-    // A visit whose day has passed keeps the bell it has; the sweep stops at yesterday.
-    .where('scheduled_date', '>=', etDateString(addETDays(now, -1)))
-    .orderBy('scheduled_date', 'asc')
-    .limit(MAX_VISITS_PER_RUN)
-    .select('id', 'scheduled_date', 'window_start', 'source_call_log_id');
-  const callIds = [...new Set(visits.map((v) => v.source_call_log_id).filter(Boolean))];
-  const calls = callIds.length
-    ? await conn('call_log').whereIn('id', callIds).modify((q) => whereNotSandboxCall(q))
-      .select('id', 'processing_status', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds')
-    : [];
-  const callById = new Map(calls.map((c) => [String(c.id), c]));
-  const result = { waiting: visits.length, due: 0, rung: 0 };
-  for (const visit of visits) {
-    const stage = stageOf(visit, visit.source_call_log_id ? callById.get(String(visit.source_call_log_id)) : null, now.getTime(), completedStatuses);
-    if (!stage) continue;
-    result.due += 1;
-    if (result.rung >= MAX_ALERTS_PER_RUN) continue;
-    try {
-      const { raised } = await ringVisit(conn, visit, stage);
-      if (raised && !raised.suppressed && (!raised.deduped || raised.rung)) result.rung += 1;
-    } catch (err) {
-      logger.warn(`[new-caller-bells] bell for visit ${visit.id} failed: ${err.code || err.name || 'error'}`);
+  // A visit whose day has passed keeps the bell it has; the sweep starts at yesterday.
+  const fromDate = etDateString(addETDays(now, -1));
+  const result = { waiting: 0, due: 0, rung: 0 };
+  let after = null;
+  for (;;) {
+    // Keyset pages in (date, id) order, after the last visit of the page before.
+    const visits = await conn('scheduled_services')
+      .where({ source_action: NEW_CALLER_SOURCE_ACTION })
+      .whereNull('customer_id')
+      .whereNull('parent_service_id')
+      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      .where('scheduled_date', '>=', fromDate)
+      .modify((q) => after && q.whereRaw('(scheduled_date, id) > (?::date, ?::uuid)', [dateOnlyString(after.scheduled_date), after.id]))
+      .orderBy([{ column: 'scheduled_date' }, { column: 'id' }])
+      .limit(PAGE_SIZE)
+      .select('id', 'scheduled_date', 'window_start', 'source_call_log_id');
+    result.waiting += visits.length;
+    const callIds = [...new Set(visits.map((v) => v.source_call_log_id).filter(Boolean))];
+    const calls = callIds.length
+      ? await conn('call_log').whereIn('id', callIds).modify((q) => whereNotSandboxCall(q))
+        .select('id', 'processing_status', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds')
+      : [];
+    const callById = new Map(calls.map((c) => [String(c.id), c]));
+    for (const visit of visits) {
+      const stage = stageOf(visit, callById.get(String(visit.source_call_log_id)) || null, now.getTime(), completedStatuses);
+      if (!stage) continue;
+      result.due += 1;
+      if (result.rung >= MAX_ALERTS_PER_RUN) continue;
+      try {
+        const { raised } = await ringVisit(conn, visit, stage);
+        if (raised && !raised.suppressed && (!raised.deduped || raised.rung)) result.rung += 1;
+      } catch (err) {
+        logger.warn(`[new-caller-bells] bell for visit ${visit.id} failed: ${err.code || err.name || 'error'}`);
+      }
     }
+    if (visits.length < PAGE_SIZE) return result;
+    after = visits[visits.length - 1];
   }
-  return result;
 }
 
 module.exports = { runNewCallerVisitBells, _private: { stageOf, ringVisit, WHY } };
