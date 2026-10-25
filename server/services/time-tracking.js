@@ -13,6 +13,8 @@ const {
   WEEKLY_OT_THRESHOLD_MINUTES,
 } = require('../constants/staff-time');
 const { PAYROLL_SCALE, payrollUnits } = require('../utils/payroll-units');
+const { unpaidMealUnits } = require('../utils/unpaid-meal');
+const { autoLunchLive } = require('../config/feature-gates');
 
 const UNDO_STOP_WINDOW_MINUTES = 30;
 
@@ -784,6 +786,65 @@ async function computeDailySummary(technicianId, date) {
   return summary;
 }
 
+/**
+ * Mark one ET work day "No lunch today" (or undo it). The flag lives on the
+ * day's summary row; computeDailySummaryInTransaction reads it and never
+ * overwrites it. The day and its week are recomputed under the same staff
+ * week lock the entry writers take. An approved day or week is refused.
+ *
+ * `editedBy` + `editReason` (admin route only) append who changed what and
+ * why to the day's notes, the day-level counterpart of an entry's
+ * edited_by / edit_reason.
+ */
+async function setDayNoLunch(technicianId, workDate, noLunch, { editedBy = null, editReason = null } = {}) {
+  const day = validateWorkDate(workDate);
+  const weekStart = staffWeekStartForWorkDate(day);
+  const flag = Boolean(noLunch);
+  const result = await db.transaction(async (trx) => {
+    await lockStaffWeek(trx, technicianId, weekStart);
+
+    const weekly = await trx('time_weekly_summary')
+      .where({ technician_id: technicianId, week_start: weekStart })
+      .forUpdate()
+      .first('id', 'status');
+    if (weekly?.status === 'approved') {
+      throw staffTimeHttpError(409, 'Unlock the approved week before changing lunch.');
+    }
+
+    const readDay = () => trx('time_entry_daily_summary')
+      .where({ technician_id: technicianId, work_date: day })
+      .forUpdate()
+      .first('id', 'status', 'notes', 'no_lunch');
+    let daily = await readDay();
+    if (!daily) {
+      // The tech can tap before the first clock-out writes the day's row.
+      await computeDailySummaryInTransaction(trx, technicianId, day);
+      daily = await readDay();
+    }
+    if (daily?.status === 'approved') {
+      throw staffTimeHttpError(409, 'Reopen the approved day before changing lunch.');
+    }
+
+    const updates = { no_lunch: flag, updated_at: new Date() };
+    if (editedBy) {
+      updates.notes = appendEntryNote(
+        daily.notes,
+        `No lunch ${flag ? 'set' : 'cleared'} by ${editedBy}${editReason ? `: ${editReason}` : ''}`,
+      );
+    }
+    await trx('time_entry_daily_summary').where({ id: daily.id }).update(updates);
+
+    const summary = await computeDailySummaryInTransaction(trx, technicianId, day);
+    await computeWeeklySummaryInTransaction(trx, technicianId, weekStart, { lock: false });
+    return summary;
+  });
+  logger.info(`[time-tracking] No-lunch ${flag ? 'set' : 'cleared'} for tech ${technicianId} on ${day}`, {
+    editedBy,
+    editReason,
+  });
+  return result;
+}
+
 async function computeDailySummaryInTransaction(trx, technicianId, workDate) {
   const entries = await trx('time_entries')
     .where({ technician_id: technicianId })
@@ -812,6 +873,24 @@ async function computeDailySummaryInTransaction(trx, technicianId, workDate) {
   const totalBreak = payrollNumber(totalBreakUnits);
   const totalAdmin = payrollNumber(totalAdminUnits);
   const jobCount = jobEntries.length;
+
+  // Unpaid meal (GATE_AUTO_LUNCH). Only completed breaks count; the day's
+  // no_lunch flag is set by the tech or an admin and is never rewritten here.
+  // Gate off: no flag read and a zero unpaid meal, byte-identical to before.
+  const autoLunchOn = autoLunchLive();
+  const existingDay = autoLunchOn && totalShiftUnits > 0n
+    ? await trx('time_entry_daily_summary')
+      .where({ technician_id: technicianId, work_date: workDate })
+      .first('no_lunch')
+    : null;
+  const unpaidMeal = payrollNumber(unpaidMealUnits({
+    totalShiftUnits,
+    breakDurationUnits: breakEntries
+      .filter(e => e.status !== 'active')
+      .map(e => payrollUnits(e.duration_minutes)),
+    noLunch: Boolean(existingDay?.no_lunch),
+    enabled: autoLunchOn,
+  }));
 
   const firstIn = shiftEntries.length > 0
     ? shiftEntries.reduce((min, e) => (e.clock_in < min ? e.clock_in : min), shiftEntries[0].clock_in)
@@ -853,6 +932,7 @@ async function computeDailySummaryInTransaction(trx, technicianId, workDate) {
     total_drive_minutes: totalDrive,
     total_break_minutes: totalBreak,
     total_admin_minutes: totalAdmin,
+    unpaid_meal_minutes: unpaidMeal,
     job_count: jobCount,
     first_clock_in: firstIn,
     last_clock_out: lastOut,
@@ -912,6 +992,7 @@ async function computeWeeklySummaryInTransaction(
   const totalJobUnits = sumDailyUnits('total_job_minutes');
   const totalDriveUnits = sumDailyUnits('total_drive_minutes');
   const totalRevenueUnits = sumDailyUnits('revenue_generated');
+  const unpaidMealUnitsTotal = sumDailyUnits('unpaid_meal_minutes');
   const totalShift = payrollNumber(totalShiftUnits);
   const totalJob = payrollNumber(totalJobUnits);
   const totalDrive = payrollNumber(totalDriveUnits);
@@ -919,12 +1000,21 @@ async function computeWeeklySummaryInTransaction(
   const jobCount = dailies.reduce((s, d) => s + Number(d.job_count || 0), 0);
   const daysWorked = dailies.filter(d => payrollUnits(d.total_shift_minutes) > 0n).length;
 
+  // Regular and overtime split PAID minutes: shift minutes less the unpaid
+  // meal of each day (0 while GATE_AUTO_LUNCH is off). A day never pays below 0.
+  const dayPaidUnits = (daily) => {
+    const shiftUnits = payrollUnits(daily.total_shift_minutes);
+    const unpaidUnits = payrollUnits(daily.unpaid_meal_minutes);
+    const paid = shiftUnits - unpaidUnits;
+    return paid > 0n ? paid : 0n;
+  };
+  const paidUnits = dailies.reduce((sum, daily) => sum + dayPaidUnits(daily), 0n);
   const overtimeThresholdUnits = BigInt(WEEKLY_OT_THRESHOLD_MINUTES) * PAYROLL_SCALE;
-  const regularUnits = totalShiftUnits < overtimeThresholdUnits
-    ? totalShiftUnits
+  const regularUnits = paidUnits < overtimeThresholdUnits
+    ? paidUnits
     : overtimeThresholdUnits;
-  const overtimeUnits = totalShiftUnits > overtimeThresholdUnits
-    ? totalShiftUnits - overtimeThresholdUnits
+  const overtimeUnits = paidUnits > overtimeThresholdUnits
+    ? paidUnits - overtimeThresholdUnits
     : 0n;
 
   const avgRpmh = totalShiftUnits > 0n
@@ -938,11 +1028,11 @@ async function computeWeeklySummaryInTransaction(
   let runningUnits = 0n;
   const sortedDailies = [...dailies].sort((a, b) => a.work_date < b.work_date ? -1 : 1);
   for (const d of sortedDailies) {
-    const dayShiftUnits = payrollUnits(d.total_shift_minutes);
-    runningUnits += dayShiftUnits;
+    const dayPaid = dayPaidUnits(d);
+    runningUnits += dayPaid;
     const dayOvertimeUnits = runningUnits > overtimeThresholdUnits
-      ? (dayShiftUnits < runningUnits - overtimeThresholdUnits
-        ? dayShiftUnits
+      ? (dayPaid < runningUnits - overtimeThresholdUnits
+        ? dayPaid
         : runningUnits - overtimeThresholdUnits)
       : 0n;
     const dayOT = payrollNumber(dayOvertimeUnits);
@@ -964,6 +1054,7 @@ async function computeWeeklySummaryInTransaction(
     total_drive_minutes: totalDrive,
     regular_minutes: payrollNumber(regularUnits),
     overtime_minutes: payrollNumber(overtimeUnits),
+    unpaid_meal_minutes: payrollNumber(unpaidMealUnitsTotal),
     days_worked: daysWorked,
     job_count: jobCount,
     total_revenue: totalRevenue,
@@ -981,6 +1072,7 @@ async function computeWeeklySummaryInTransaction(
     'total_drive_minutes',
     'regular_minutes',
     'overtime_minutes',
+    'unpaid_meal_minutes',
     'days_worked',
     'job_count',
     'total_revenue',
@@ -1120,6 +1212,7 @@ module.exports = {
   voidEntry,
   computeDailySummary,
   computeDailySummaryInTransaction,
+  setDayNoLunch,
   computeWeeklySummary,
   computeWeeklySummaryInTransaction,
   lockStaffWeek,

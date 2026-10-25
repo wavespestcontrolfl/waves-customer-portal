@@ -5,7 +5,7 @@ const timeTracking = require('../services/time-tracking');
 const timesheetApproval = require('../services/timesheet-approval');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
-const { STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
+const { STAFF_WORK_DATE_SQL, staffWorkDate } = require('../utils/staff-time-work-date');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -114,6 +114,29 @@ router.post('/end-break', async (req, res, next) => {
     res.json(entry);
   } catch (err) {
     if (err.message.includes('No active break')) return res.status(409).json({ error: err.message });
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /no-lunch { noLunch: boolean }
+//
+// "No lunch today": skip the 30-minute auto lunch (GATE_AUTO_LUNCH) for the
+// caller's own CURRENT ET work day. Past days are an admin correction. An
+// approved day or week is refused with 409. The day and week are recomputed
+// under the staff week lock.
+// ---------------------------------------------------------------------------
+router.post('/no-lunch', async (req, res, next) => {
+  try {
+    const { noLunch } = req.body || {};
+    if (typeof noLunch !== 'boolean') {
+      return res.status(400).json({ error: 'noLunch must be true or false.' });
+    }
+    const workDate = staffWorkDate(new Date());
+    const summary = await timeTracking.setDayNoLunch(req.technicianId, workDate, noLunch);
+    res.json({ workDate, noLunch: Boolean(summary?.no_lunch), summary });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
   }
 });

@@ -62,6 +62,8 @@ function rowsFrom(result) {
   return Array.isArray(result) ? result : (result?.rows || []);
 }
 
+// Inputs are PAID minutes (shift less the unpaid meal, GATE_AUTO_LUNCH); with
+// the gate off the unpaid meal is 0 and they are the shift minutes.
 function expectedDailyOvertimeMinutes(priorWeekShiftMinutes, dayShiftMinutes) {
   const prior = Number(priorWeekShiftMinutes) || 0;
   const day = Number(dayShiftMinutes) || 0;
@@ -163,6 +165,8 @@ const checks = [
           ('time_entry_daily_summary', 'first_clock_in'),
           ('time_entry_daily_summary', 'last_clock_out'),
           ('time_entry_daily_summary', 'overtime_minutes'),
+          ('time_entry_daily_summary', 'unpaid_meal_minutes'),
+          ('time_entry_daily_summary', 'no_lunch'),
           ('time_entry_daily_summary', 'utilization_pct'),
           ('time_entry_daily_summary', 'revenue_generated'),
           ('time_entry_daily_summary', 'rpmh_actual'),
@@ -181,6 +185,7 @@ const checks = [
           ('time_weekly_summary', 'total_drive_minutes'),
           ('time_weekly_summary', 'regular_minutes'),
           ('time_weekly_summary', 'overtime_minutes'),
+          ('time_weekly_summary', 'unpaid_meal_minutes'),
           ('time_weekly_summary', 'days_worked'),
           ('time_weekly_summary', 'job_count'),
           ('time_weekly_summary', 'total_revenue'),
@@ -991,7 +996,11 @@ const checks = [
         SELECT summary.*, to_jsonb(summary) AS day_json,
                DATE_TRUNC('week', summary.work_date::timestamp)::date AS week_start,
                COALESCE(
-                 SUM(COALESCE(summary.total_shift_minutes, 0)) OVER (
+                 SUM(GREATEST(
+                   COALESCE(summary.total_shift_minutes, 0)
+                     - COALESCE(summary.unpaid_meal_minutes, 0),
+                   0::numeric
+                 )) OVER (
                    PARTITION BY summary.technician_id,
                      DATE_TRUNC('week', summary.work_date::timestamp)::date
                    ORDER BY summary.work_date, summary.id
@@ -1006,9 +1015,17 @@ const checks = [
                  GREATEST(
                    0::numeric,
                    LEAST(
-                     COALESCE(total_shift_minutes, 0),
+                     GREATEST(
+                       COALESCE(total_shift_minutes, 0)
+                         - COALESCE(unpaid_meal_minutes, 0),
+                       0::numeric
+                     ),
                      prior_week_shift_minutes
-                       + COALESCE(total_shift_minutes, 0)
+                       + GREATEST(
+                         COALESCE(total_shift_minutes, 0)
+                           - COALESCE(unpaid_meal_minutes, 0),
+                         0::numeric
+                       )
                        - ${WEEKLY_OVERTIME_THRESHOLD_MINUTES}
                    )
                  ),
@@ -1032,6 +1049,7 @@ const checks = [
              d.revenue_generated, e.revenue_generated AS entry_revenue_generated,
              d.rpmh_actual, e.rpmh_actual AS entry_rpmh_actual,
              d.overtime_minutes,
+             d.unpaid_meal_minutes,
              d.expected_overtime_minutes
       FROM daily d
       LEFT JOIN entry_totals e
@@ -1060,6 +1078,9 @@ const checks = [
               IS DISTINCT FROM COALESCE(e.rpmh_actual, 0::numeric)
          OR d.overtime_minutes
               IS DISTINCT FROM d.expected_overtime_minutes
+         OR COALESCE(d.unpaid_meal_minutes, 0::numeric) < 0
+         OR COALESCE(d.unpaid_meal_minutes, 0::numeric)
+              > COALESCE(d.total_shift_minutes, 0::numeric)
       ORDER BY d.work_date, d.technician_id, d.id
     `,
   },
@@ -1074,12 +1095,19 @@ const checks = [
                ROUND(SUM(COALESCE(total_job_minutes, 0)), 2) AS expected_job_minutes,
                ROUND(SUM(COALESCE(total_drive_minutes, 0)), 2) AS expected_drive_minutes,
                ROUND(SUM(COALESCE(overtime_minutes, 0)), 2) AS stored_daily_overtime_minutes,
+               ROUND(SUM(COALESCE(unpaid_meal_minutes, 0)), 2) AS expected_unpaid_meal_minutes,
                LEAST(
-                 ROUND(SUM(COALESCE(total_shift_minutes, 0)), 2),
+                 ROUND(SUM(GREATEST(
+                   COALESCE(total_shift_minutes, 0) - COALESCE(unpaid_meal_minutes, 0),
+                   0::numeric
+                 )), 2),
                  ${WEEKLY_OVERTIME_THRESHOLD_MINUTES}
                ) AS expected_regular_minutes,
                GREATEST(
-                 ROUND(SUM(COALESCE(total_shift_minutes, 0)), 2)
+                 ROUND(SUM(GREATEST(
+                   COALESCE(total_shift_minutes, 0) - COALESCE(unpaid_meal_minutes, 0),
+                   0::numeric
+                 )), 2)
                    - ${WEEKLY_OVERTIME_THRESHOLD_MINUTES},
                  0::numeric
                ) AS expected_overtime_minutes,
@@ -1119,6 +1147,7 @@ const checks = [
              w.total_job_minutes, a.expected_job_minutes,
              w.total_drive_minutes, a.expected_drive_minutes,
              w.regular_minutes, a.expected_regular_minutes,
+             w.unpaid_meal_minutes, a.expected_unpaid_meal_minutes,
              w.overtime_minutes AS weekly_overtime_minutes,
              COALESCE(a.stored_daily_overtime_minutes, 0) AS stored_daily_overtime_minutes,
              COALESCE(a.expected_overtime_minutes, 0) AS expected_overtime_minutes,
@@ -1144,6 +1173,8 @@ const checks = [
               IS DISTINCT FROM a.expected_drive_minutes
          OR COALESCE(w.regular_minutes, 0::numeric)
               IS DISTINCT FROM a.expected_regular_minutes
+         OR COALESCE(w.unpaid_meal_minutes, 0::numeric)
+              IS DISTINCT FROM COALESCE(a.expected_unpaid_meal_minutes, 0::numeric)
          OR w.overtime_minutes
               IS DISTINCT FROM COALESCE(a.expected_overtime_minutes, 0::numeric)
          OR COALESCE(a.stored_daily_overtime_minutes, 0::numeric)
@@ -1330,9 +1361,15 @@ const checks = [
              NULLIF(w.week_json ->> 'total_drive_minutes', '')::numeric AS total_drive_minutes,
              COALESCE(e.drive_minutes, 0) AS entry_drive_minutes,
              w.regular_minutes,
-             LEAST(COALESCE(e.shift_minutes, 0), 2400) AS entry_regular_minutes,
+             LEAST(
+               GREATEST(COALESCE(e.shift_minutes, 0) - COALESCE(w.unpaid_meal_minutes, 0), 0),
+               2400
+             ) AS entry_regular_minutes,
              w.overtime_minutes,
-             GREATEST(COALESCE(e.shift_minutes, 0) - 2400, 0) AS entry_overtime_minutes,
+             GREATEST(
+               COALESCE(e.shift_minutes, 0) - COALESCE(w.unpaid_meal_minutes, 0) - 2400,
+               0
+             ) AS entry_overtime_minutes,
              w.job_count, COALESCE(e.job_count, 0) AS entry_job_count,
              w.days_worked, COALESCE(e.days_worked, 0) AS entry_days_worked
       FROM (
@@ -1361,9 +1398,21 @@ const checks = [
             ) IS DISTINCT FROM COALESCE(e.drive_minutes, 0::numeric)
           )
           OR COALESCE(w.regular_minutes, 0::numeric) IS DISTINCT FROM
-            LEAST(COALESCE(e.shift_minutes, 0::numeric), 2400::numeric)
+            LEAST(
+              GREATEST(
+                COALESCE(e.shift_minutes, 0::numeric)
+                  - COALESCE(w.unpaid_meal_minutes, 0::numeric),
+                0::numeric
+              ),
+              2400::numeric
+            )
           OR COALESCE(w.overtime_minutes, 0::numeric) IS DISTINCT FROM
-            GREATEST(COALESCE(e.shift_minutes, 0::numeric) - 2400::numeric, 0::numeric)
+            GREATEST(
+              COALESCE(e.shift_minutes, 0::numeric)
+                - COALESCE(w.unpaid_meal_minutes, 0::numeric)
+                - 2400::numeric,
+              0::numeric
+            )
           OR COALESCE(w.job_count, 0) <> COALESCE(e.job_count, 0)
           OR COALESCE(w.days_worked, 0) <> COALESCE(e.days_worked, 0)
         )
