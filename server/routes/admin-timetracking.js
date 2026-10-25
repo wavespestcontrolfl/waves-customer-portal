@@ -31,7 +31,6 @@ const {
 } = require('../utils/staff-identity');
 const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 const analyticsMath = require('../services/time-tracking-analytics');
-const featureGates = require('../config/feature-gates');
 const { validDateOnly } = require('../utils/date-only');
 const { recordAuditEvent } = require('../services/audit-log');
 const { mintResetToken } = require('../services/staff-reset-token');
