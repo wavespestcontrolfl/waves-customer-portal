@@ -213,14 +213,14 @@ describe('foldLaneCosts', () => {
 describe('failed calls and unknown usage', () => {
   const prices = new Map([['claude-sonnet-5', { input: 3, output: 15 }]]);
   const M = 1_000_000;
-  // usage_unknown comes from the ledger query, which counts only successful
-  // calls with null counters (the PostgreSQL tests below prove that SQL)
+  // usage_unknown comes from the ledger query, which does not count failed calls the
+  // provider refused with an HTTP error (the PostgreSQL tests below prove that SQL)
   const laneRow = (over) => ({ lane_id: 'sms_draft', provider: 'anthropic', model: 'claude-sonnet-5', calls: 1, usage_unknown: 0, input_tokens: M, output_tokens: 0, ...over });
   const day = new Map([['sms_draft', { usd: 12, unpricedCalls: 0 }]]);
   const spikeLanes = (baselineRows) => llmCost.findSpikes(day, llmCost.foldLaneCosts(baselineRows, prices), { minUsd: 5, multiplier: 3, baselineDays: 7 }).map((s) => s.laneId);
 
-  test('a failed call with no usage leaves the lane priced, so its spike check still runs', () => {
-    // 7 priced calls ($21 over 7 days = $3 a day) + 2 failed calls with null counters (summed to 0, none unknown)
+  test('a refused call with no usage leaves the lane priced, so its spike check still runs', () => {
+    // 7 priced calls ($21 over 7 days = $3 a day) + 2 refused calls with null counters (summed to 0, none unknown)
     const rows = [laneRow({ calls: 7, input_tokens: 7 * M }), laneRow({ calls: 2, usage_unknown: 0, input_tokens: 0 })];
     expect(llmCost.foldLaneCosts(rows, prices).get('sms_draft').unpricedCalls).toBe(0);
     expect(spikeLanes(rows)).toEqual(['sms_draft']); // $12 is 4 x the $3 average: the baseline is judged, so the spike is found
@@ -334,6 +334,7 @@ postgres('llm cost (PostgreSQL)', () => {
       t.bigIncrements('id');
       t.string('row_kind', 20).notNullable().defaultTo('chain');
       t.boolean('ok');
+      t.string('error_code', 80);
       t.string('provider', 40);
       t.string('lane_id', 80);
       t.string('workload', 40);
@@ -429,31 +430,36 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
   });
 
-  test('a failed call with no usage is not unknown usage; a successful one still is (grouped and per-call rows)', async () => {
+  test('a refused call (HTTP error) with no usage is not unknown usage; a timeout or a successful one still is (grouped and per-call rows)', async () => {
     const sol = { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015' }] } };
     await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }, sol])), now: NOW });
     const at = atET('2026-09-30');
     const window = [atET('2026-09-30', '00'), atET('2026-10-01', '00')];
-    // sms_draft: one priced call and two failed calls whose usage was never captured
-    await app('llm_dispatch_log').insert([row({ created_at: at }), row({ created_at: at, ok: false, input_tokens: null }), row({ created_at: at, ok: false, input_tokens: null })]);
+    // sms_draft: one priced call and two calls the provider refused (HTTP 400 / 503), no usage captured
+    await app('llm_dispatch_log').insert([row({ created_at: at }), row({ created_at: at, ok: false, error_code: 'anthropic_400', input_tokens: null }), row({ created_at: at, ok: false, error_code: 'anthropic_503', input_tokens: null })]);
     let res = await llmCost.laneCosts(...window, { conn: app });
     expect(res.byLane.get('sms_draft').usd).toBeCloseTo(3, 9);
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
     // the same lane's baseline is therefore judged: a $12 day against it is a spike
     expect(llmCost.findSpikes(new Map([['sms_draft', { usd: 12 }]]), res.byLane, { minUsd: 5, multiplier: 3, baselineDays: 1 }).map((x) => x.laneId)).toEqual(['sms_draft']);
 
-    // a successful call with null usage stays unknown and blocks the check
-    await app('llm_dispatch_log').insert(row({ created_at: at, input_tokens: null }));
+    // a timed-out call may have been processed and billed: its usage stays unknown and blocks the check
+    await app('llm_dispatch_log').insert(row({ created_at: at, ok: false, error_code: 'anthropic_timeout', input_tokens: null }));
     res = await llmCost.laneCosts(...window, { conn: app });
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(1);
     expect(llmCost.findSpikes(new Map([['sms_draft', { usd: 12 }]]), res.byLane, { minUsd: 5, multiplier: 3, baselineDays: 1 })).toEqual([]);
 
-    // per-call rows (prompt at or above the tier floor): a failed one is not unknown
+    // so does an unclassified failure, and a successful call with null usage
+    await app('llm_dispatch_log').insert([row({ created_at: at, ok: false, error_code: 'error', input_tokens: null }), row({ created_at: at, input_tokens: null })]);
+    res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(3);
+
+    // per-call rows (prompt at or above the tier floor): a refused one is not unknown
     const openai = { provider: 'openai', requested_model: 'gpt-6-sol', served_model: 'gpt-6-sol', created_at: at, lane_id: 'report' };
-    await app('llm_dispatch_log').insert([row({ ...openai, input_tokens: 300_000 }), row({ ...openai, ok: false, input_tokens: null }), row({ ...openai, ok: false, input_tokens: null })]);
+    await app('llm_dispatch_log').insert([row({ ...openai, input_tokens: 300_000 }), row({ ...openai, ok: false, error_code: 'openai_401', input_tokens: null }), row({ ...openai, ok: false, error_code: 'openai_429', input_tokens: null })]);
     res = await llmCost.laneCosts(...window, { conn: app });
     expect(res.byLane.get('report').unpricedCalls).toBe(0);
-    await app('llm_dispatch_log').insert(row({ ...openai, input_tokens: null }));
+    await app('llm_dispatch_log').insert(row({ ...openai, ok: false, error_code: 'openai_timeout', input_tokens: null }));
     res = await llmCost.laneCosts(...window, { conn: app });
     expect(res.byLane.get('report').unpricedCalls).toBe(1);
   });
