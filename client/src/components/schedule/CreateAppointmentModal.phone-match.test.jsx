@@ -34,7 +34,7 @@ function futureDate(days = 30) {
 
 const PEST = { id: 'svc-q', service_key: 'pest_control_quarterly', name: 'Quarterly Pest Control', billing_type: 'recurring', frequency: 'quarterly', base_price: 100, default_duration_minutes: 30 };
 
-function installFetch({ search = {}, quickAdd = () => json({ customer: CREATED }), catalog = [PEST] } = {}) {
+function installFetch({ search = {}, quickAdd = () => json({ customer: CREATED }), catalog = [PEST], discounts = [] } = {}) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.includes('/admin/customers?search=')) {
@@ -51,7 +51,7 @@ function installFetch({ search = {}, quickAdd = () => json({ customer: CREATED }
     if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
     if (url.includes('/reservice-request-suggestion')) return Promise.resolve(json({ enabled: false, suggestion: null }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
-    if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
+    if (url.endsWith('/admin/discounts')) return Promise.resolve(json(discounts));
     if (url.includes('/admin/schedule/mosquito-onetime-quote')) return Promise.resolve(json({ price: 129 }));
     if (url.endsWith('/annual-prepay-availability')) return Promise.resolve(json({ enabled: false }));
     if (url.endsWith('/card-request-availability')) return Promise.resolve(json({ enabled: false }));
@@ -167,6 +167,30 @@ describe('New customer phone match (gate on)', () => {
     fireEvent.change(notes, { target: { value: 'Dog in the back yard' } });
     await waitFor(() => expect(posts(fetcher, '/admin/schedule')).toHaveLength(1));
     expect(JSON.parse(posts(fetcher, '/admin/schedule')[0][1].body).internalNotes).toBe('Dog in the back yard');
+  });
+
+  it('a discount picked before the customer exists does not hold Save; the booking still waits for its price check', async () => {
+    // The price preview runs only for a selected customer, so before one exists it
+    // can never confirm: Save must still add the caller, then book once it does.
+    const CREDIT = { id: 'd-credit', name: 'Neighbor credit', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, is_stackable: true };
+    const fetcher = installFetch({ discounts: [CREDIT] });
+    mount({ newCustomerPhoneMatch: true });
+    await fillCaller();
+    await addService();
+    const discountBox = await screen.findByPlaceholderText(/^Search discounts/);
+    fireEvent.focus(discountBox);
+    fireEvent.click(await screen.findByRole('button', { name: /Neighbor credit/ }));
+    expect(await screen.findByLabelText('Remove discount')).toBeTruthy();
+    const save = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(posts(fetcher, '/admin/schedule')).toHaveLength(1));
+    // The preview ran for the new customer before the booking went out.
+    const order = fetcher.mock.calls.map(([u, o]) => (o?.method === 'POST' ? String(u) : '')).filter((u) => /quick-add|\/admin\/schedule(\/preview)?$/.test(u));
+    expect(order[0]).toMatch(/quick-add$/);
+    const previewAt = order.findIndex((u) => /\/preview$/.test(u));
+    expect(previewAt).toBeGreaterThan(0);
+    expect(previewAt).toBeLessThan(order.findIndex((u) => /\/admin\/schedule$/.test(u)));
   });
 
   it('a known phone stops at the Attach / Separate account choice and books nothing', async () => {

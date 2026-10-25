@@ -5107,11 +5107,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // list, address checks and price preview run exactly as after Add
   // customer. A known phone or address stops at the same Attach / Separate
   // account choice; after that choice staff press Save again.
+  // The server price preview runs only for a selected customer, so before one
+  // exists it can never confirm: adding the customer does not wait on it, and
+  // the booking after it does (canSubmit holds it as for any customer).
   const quickAddSaveMode = newCustomerPhoneMatch && !selectedCustomer && showQuickAdd;
   const canSaveNewCustomer = quickAddSaveMode && timeChosen
     && !!(quickAdd.firstName && quickAdd.lastName && quickAdd.phone)
     && services.length > 0 && !saving && !quickAddSubmitting && !quickAddConflict && !pendingQuickAddSave
-    && !discountSaveBlockedReason && !previewConfirming && !previewGroupError && !tierCatalogBlocksSave;
+    && !discountSaveBlockedReason && !tierCatalogBlocksSave;
   // Locked while a one-Save booking waits for the form to settle, so a tap
   // then cannot book twice.
   const saveEnabled = !pendingQuickAddSave && (quickAddSaveMode ? canSaveNewCustomer : canSubmit);
