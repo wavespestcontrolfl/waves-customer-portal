@@ -52,6 +52,9 @@ describe('estimateNeedsConsumerNotice', () => {
     ['a pre-slab line', estimate([], [{ service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide', price: 900 }])],
     ['a one-time foam line', estimate([], [{ service: 'termite_foam', name: 'Termite Foam Treatment', price: 300 }])],
     ['a Bora-Care add-on on a pest plan', estimate([PEST], [{ service: 'bora_care', name: 'Bora-Care Attic Treatment', price: 900 }])],
+    // engineInputs-only estimates: the engine replay is the only place their one-time lines exist (the page shows them).
+    ['an inputs-only pest plan with one-time trenching', { estimate_data: { engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { pest: { frequency: 'quarterly' }, trenching: { perimeterLF: 240 } } } } }],
+    ['an inputs-only trenching quote with no recurring line', { estimate_data: { engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { trenching: { perimeterLF: 240 } } } } }],
     ['a bait line inside an engine-invocation result', { estimate_data: { engineResult: { lineItems: [{ service: 'termite_bait', name: 'Termite Bait Stations', annual: 480 }] } } }],
     ['estimate data stored as a JSON string', { estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Termite Bait Stations' }] } } }) }],
   ])('%s needs the notice', (_label, row) => {
@@ -64,6 +67,7 @@ describe('estimateNeedsConsumerNotice', () => {
     ['a lawn-only estimate', estimate([{ service: 'lawn_care', name: 'Lawn Care' }])],
     ['a commercial rodent bait line (not a termite treatment)', estimate([{ service: 'commercial_rodent_bait', name: 'Commercial Rodent Bait Stations' }])],
     ['a WDO inspection (an inspection is not a treatment)', estimate([], [{ service: 'wdo_inspection', name: 'WDO Inspection', price: 150 }])],
+    ['an inputs-only pest plan', { estimate_data: { engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { pest: { frequency: 'quarterly' } } } } }],
     ['an engine-invocation pest result', { estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest Control', annual: 480 }] } } }],
     ['an estimate with no data', { estimate_data: {} }],
   ])('%s does not', (_label, row) => {

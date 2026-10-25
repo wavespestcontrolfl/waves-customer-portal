@@ -37,8 +37,27 @@ const REQUIRED_MESSAGE = 'Please sign the Florida consumer notice above before y
 const estimateRoute = () => require('../routes/estimate-public');
 const refusal = (status, code, error) => ({ ok: false, status, code, error });
 
+// An engineInputs-only estimate (no stored result) holds its lines only as engine inputs; the page replays the engine
+// to show them (buildPricingBundle). withSupplementedRecurringServices keeps just the replay's recurring rows (and the
+// misting install), so its one-time lines are read here from the same replay: a pest plan with one-time trenching
+// needs the notice too. A failed replay reads nothing, as the supplement does.
+function replayedOneTimeItems(estData, route) {
+  if (!estData || typeof estData !== 'object' || estData.result || estData.engineResult) return [];
+  const engineInputs = route.extractEngineInputs(estData);
+  if (!engineInputs) return [];
+  try {
+    const { generateEstimate } = require('./pricing-engine');
+    const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
+    const items = mapV1ToLegacyShape(generateEstimate(engineInputs)).oneTime?.items;
+    return Array.isArray(items) ? items : [];
+  } catch (err) {
+    logger.warn(`[estimate-consumer-notice] engine replay failed: ${err.code || 'error'}`);
+    return [];
+  }
+}
+
 // True when ANY recurring or one-time line is a termite or wood-destroying-organism treatment. Not the
-// primary line only: a pest plan with a Bora-Care add-on needs the notice too. Pure.
+// primary line only: a pest plan with a Bora-Care add-on needs the notice too. No writes.
 function estimateNeedsConsumerNotice(estimate, estData = estimateRoute().parseEstimateDataSafe(estimate)) {
   const route = estimateRoute();
   let effective = estData || {};
@@ -46,8 +65,9 @@ function estimateNeedsConsumerNotice(estimate, estData = estimateRoute().parseEs
     effective = route.withSupplementedRecurringServices(effective);
   } catch { /* raw data stands, as in estimateFamilyKeysForAdoption */ }
   const { recurringSvcList, oneTimeList } = route.acceptanceServiceLists(effective);
+  const oneTimeItems = [...oneTimeList, ...replayedOneTimeItems(estData, route)];
   return recurringSvcList.some((svc) => TERMITE_FAMILY_KEYS.has(route.serviceFamilyKeyForAdoption(svc)))
-    || oneTimeList.some((item) => route.oneTimeItemFamilyKeys(item).some((key) => TERMITE_FAMILY_KEYS.has(key)));
+    || oneTimeItems.some((item) => route.oneTimeItemFamilyKeys(item).some((key) => TERMITE_FAMILY_KEYS.has(key)));
 }
 
 // signed: a notice dated on or before today (e-signed or an office-filed scan). awaiting: an open
