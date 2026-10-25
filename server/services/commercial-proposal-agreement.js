@@ -352,11 +352,6 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
     const lockedFound = signEligibility(locked);
     if (!lockedFound.ok) return refusal(404, 'not_signable', 'Estimate not found');
     await lockActiveVersionForIssue(trx, { template, activeVersion: version });
-    // Only Net 30 may print from a version without the payment paragraph slot (version 1 fixes Net 30): an Auto Pay
-    // agreement on it would carry the Net 30 paragraph.
-    if (lockedFound.proposal.commercialTerms?.paymentTerms !== INVOICE_PAYMENT_TERMS && !PAYMENT_TERMS_SLOT.test(String(version.body || ''))) {
-      return refusal(409, 'template_unavailable', 'Online signing is not available right now. Please call us.');
-    }
 
     const values = buildAgreementValues(locked, lockedFound.proposal, lockedFound.totals);
     // The whole quote this agreement is for. An open agreement is reused only when the quote is identical.
@@ -374,8 +369,8 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
     // (live gate re-read at the commit boundary).
     if (!require('../config/feature-gates').commercialProposalSignLive()) return refusal(404, 'not_signable', 'Estimate not found');
     // The payment term is judged again here for the same reason: GATE_COMMERCIAL_AUTOPAY (and Bill by invoice on the
-    // locked row) may have changed while this request waited.
-    if (paymentTermsConflict(lockedFound.proposal.commercialTerms?.paymentTerms, { billByInvoice: locked.bill_by_invoice === true })) {
+    // locked row) may have changed while this request waited. lockedFound is eligible, so it carries a payment term.
+    if (paymentTermsConflict(lockedFound.proposal.commercialTerms.paymentTerms, { billByInvoice: locked.bill_by_invoice === true })) {
       return refusal(404, 'not_signable', 'Estimate not found');
     }
     if (existing?.status === 'signed') return refusal(409, 'already_signed', 'This agreement has already been signed.');
@@ -409,8 +404,10 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
     const context = buildCustomerDocumentContext(customer, values);
     context.customer = { ...context.customer, name: values.customer.name || context.customer.name, address: values.customer.address || context.customer.address };
     const rendered = renderDocumentTemplate({ template, version, context });
-    if (rendered.unresolvedVariables.length) {
-      logger.warn(`[commercial-agreement] unresolved variables for estimate ${locked.id}: ${rendered.unresolvedVariables.join(', ')}`);
+    // The signed text must also carry the payment paragraph its term promises: version 1 fixes Net 30, so an Auto Pay
+    // agreement cannot print from it (version 2 fills the paragraph from agreement.payment_terms).
+    if (rendered.unresolvedVariables.length || !rendered.body.includes(values.agreement.payment_terms)) {
+      logger.warn(`[commercial-agreement] agreement for estimate ${locked.id} lacks its payment paragraph or has unresolved variables [${rendered.unresolvedVariables.join(', ')}]`);
       return refusal(409, 'template_unavailable', 'Online signing is not available right now. Please call us.');
     }
     const [row] = await trx('customer_contracts')
@@ -426,7 +423,6 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
 }
 
 const STALE_PROPOSAL_MESSAGE = 'This proposal was updated. Please open the latest proposal to sign.';
-const PAYMENT_TERMS_SLOT = /\{\{\s*agreement\.payment_terms\s*\}\}/;
 
 // Sign boundary, step 1 (contracts-public POST /:token/sign, AFTER it has locked the contract's customer row and
 // BEFORE it locks the contract row): for a contract this feature issued, lock the estimate row and run the issuer's own
@@ -486,20 +482,40 @@ async function refuseStaleSignature({ trx, contract, estimateLock, req = {} }) {
 }
 
 // The alert's payment sentence (with a trailing space), or '' for an agreement issued before the payment paragraph.
-// Auto Pay reads the customer's live Auto Pay state; an unreadable state says "not confirmed", never "on".
-async function paymentSentence(paymentTerms, customerId, database) {
+// `snapshotEstimate` is the signed contract's frozen estimate block. Auto Pay reads the customer's live Auto Pay state;
+// an unreadable state says "not confirmed", never "on".
+async function paymentSentence(snapshotEstimate, customerId, database) {
+  const paymentTerms = snapshotEstimate.proposal?.commercialTerms?.paymentTerms;
   if (paymentTerms === INVOICE_PAYMENT_TERMS) return 'Payment: Net 30 by invoice. ';
   if (paymentTerms !== AUTOPAY_PAYMENT_TERMS) return '';
   let on = false;
+  let chargesEachService = false;
   try {
     const customer = customerId ? await database('customers').where({ id: customerId }).first() : null;
     on = await require('./autopay-eligibility').customerOnAutopay(customer, { db: database, failClosed: true });
+    chargesEachService = on && chargesEachCompletedService(customer);
   } catch (err) {
     logger.warn(`[commercial-agreement] Auto Pay state unreadable for customer ${customerId}: ${err.code || 'error'}`);
   }
-  return on
-    ? 'Payment: Auto Pay, and a card or bank account is saved. '
-    : 'Payment: Auto Pay, but no card or bank account is saved yet. The signing page offered the Auto Pay setup step; if none is saved before the first visit, send an Auto Pay setup link from the customer page. ';
+  if (on && chargesEachService) return 'Payment: Auto Pay, and a card or bank account is saved. ';
+  if (on) {
+    return 'Payment: Auto Pay, and a card or bank account is saved, but this account\'s billing type does not charge each completed service: check it on the customer page before the first visit. ';
+  }
+  return 'Payment: Auto Pay, but no card or bank account is saved yet. The signing page offered the Auto Pay setup step; if none is saved before the first visit, send an Auto Pay setup link from the customer page. ';
+}
+
+// The Auto Pay setup link's own rule for "each completed service is charged to the saved method" (the per-visit lane
+// while GATE_COMPLETION_AUTOPAY_CHARGE is on, or per application): an Auto Pay agreement is only "on" where it is true.
+function chargesEachCompletedService(customer) {
+  return Boolean(customer) && require('./autopay-setup-link').billingLaneSupported(customer);
+}
+
+// The variables snapshot of a SIGNED agreement this module issued (its estimate marker), else null: every other
+// template, a commercial agreement staff issued by hand, and a contract not yet signed.
+function issuedSignedSnapshot(contract) {
+  if (!contract || contract.document_template_key !== TEMPLATE_KEY || contract.status !== 'signed') return null;
+  const snapshot = parseJson(contract.document_variables_snapshot);
+  return snapshot?.estimate?.source === SNAPSHOT_SOURCE && snapshot.estimate.id ? snapshot : null;
 }
 
 // After a customer signs (contracts-public, after commit): tell the office the
@@ -508,10 +524,9 @@ async function paymentSentence(paymentTerms, customerId, database) {
 async function handleAgreementSigned({ contractId, database = db }) {
   try {
     const contract = await database('customer_contracts').where({ id: contractId }).first();
-    if (!contract || contract.document_template_key !== TEMPLATE_KEY || contract.status !== 'signed') return { skipped: 'not_commercial_agreement' };
-    const snapshot = parseJson(contract.document_variables_snapshot);
-    const est = snapshot?.estimate;
-    if (est?.source !== SNAPSHOT_SOURCE || !est.id) return { skipped: 'no_estimate' };
+    const snapshot = issuedSignedSnapshot(contract);
+    if (!snapshot) return { skipped: 'not_ours' };
+    const est = snapshot.estimate;
 
     const { raiseAdminAlert } = require('./admin-alert-compose');
     const { fitAction, tidyName } = require('./admin-alert-names');
@@ -520,7 +535,7 @@ async function handleAgreementSigned({ contractId, database = db }) {
     const signedOn = contract.signed_at
       ? new Date(contract.signed_at).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' })
       : '';
-    const payment = await paymentSentence(est.proposal?.commercialTerms?.paymentTerms, contract.customer_id, database);
+    const payment = await paymentSentence(est, contract.customer_id, database);
 
     await raiseAdminAlert('customer', {
       area: 'Estimates',
@@ -571,14 +586,19 @@ async function autopayNextStep({ contractId, database = db }) {
     if (!commercialAutopayLive()) return null;
     const contract = await database('customer_contracts').where({ id: contractId })
       .first('id', 'customer_id', 'status', 'document_template_key', 'document_variables_snapshot');
-    if (!contract?.customer_id || contract.status !== 'signed' || contract.document_template_key !== TEMPLATE_KEY) return null;
-    const snapshot = parseJson(contract.document_variables_snapshot);
-    if (snapshot?.estimate?.source !== SNAPSHOT_SOURCE) return null;
-    if (snapshot.estimate.proposal?.commercialTerms?.paymentTerms !== AUTOPAY_PAYMENT_TERMS) return null;
+    const snapshot = issuedSignedSnapshot(contract);
+    if (snapshot?.estimate.proposal?.commercialTerms?.paymentTerms !== AUTOPAY_PAYMENT_TERMS) return null;
     const { requestAutopaySetupLink } = require('./autopay-setup-link');
     const result = await requestAutopaySetupLink({ customerId: contract.customer_id, delivery: 'inline', trigger: SNAPSHOT_SOURCE });
     if (result?.action === 'link_created' && result.secureUrl) return { state: 'setup', url: result.secureUrl };
-    if (result?.action === 'auto_secured' || result?.reason === 'autopay_already_active') return { state: 'on' };
+    // The link service enrolls a saved card only on a lane that charges each completed service, but it reports an
+    // account already on Auto Pay BEFORE that lane check: judged here, or the page would promise a charge after each
+    // completed service that never runs (a membership lane, or per visit with the completion charge off).
+    if (result?.action === 'auto_secured') return { state: 'on' };
+    if (result?.reason === 'autopay_already_active') {
+      const customer = await database('customers').where({ id: contract.customer_id }).first();
+      if (chargesEachCompletedService(customer)) return { state: 'on' };
+    }
     logger.info(`[commercial-agreement] no Auto Pay next step for contract ${contract.id}: ${result?.reason || 'unknown'}`);
     return null;
   } catch (err) {

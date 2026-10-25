@@ -13,7 +13,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../routes/estimate-public', () => ({ commercialAgreementBlockedFor: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
-jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn() }));
+jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn(), billingLaneSupported: jest.fn(() => true) }));
 
 const NotificationService = require('../services/notification-service');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
@@ -22,7 +22,7 @@ const {
   signEligibility, agreementTermsConflict, AGREEMENT_TERMS, lockEstimateForSign, refuseStaleSignature, handleAgreementSigned,
   AGREEMENT_PAYMENT_TEXT, autopayNextStep, STALE_PROPOSAL_MESSAGE, quoteFingerprint, buildAgreementValues, signableProposal,
 } = require('../services/commercial-proposal-agreement');
-const { requestAutopaySetupLink } = require('../services/autopay-setup-link');
+const { requestAutopaySetupLink, billingLaneSupported } = require('../services/autopay-setup-link');
 const AutopayEligibility = require('../services/autopay-eligibility');
 
 const { BODY, TEMPLATE, VERSION, CUSTOMER, estimateRow, makeDb } = require('./helpers/commercial-agreement-fake-db');
@@ -366,7 +366,9 @@ describe('agreement terms: online signing only when EVERY structured term agrees
 
 describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () => {
   const NOTE = (detail) => `Online signing needs the proposal terms to match the agreement: ${detail}.`;
-  const SLOT_BODY = `${BODY}\nBilling and payment: {{agreement.payment_terms}} Pricing may be adjusted at renewal or with at least thirty (30) days\u2019 written notice.`;
+  // Version 2 as the migration builds it: version 1's paragraph replaced by the slot.
+  const { V1_PAYMENT: V1, V2_PAYMENT: V2 } = require('../models/migrations/20261025120000_commercial_agreement_payment_terms');
+  const SLOT_BODY = BODY.replace(V1, V2);
   const slotDb = (estimate) => makeDb({
     estimate,
     version: { ...VERSION, id: 'ver-2', version_number: 2, body: SLOT_BODY },
@@ -513,7 +515,16 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
       jest.spyOn(AutopayEligibility, 'customerOnAutopay').mockResolvedValue(true);
       const { database } = await signedAutopay();
       await handleAgreementSigned({ contractId: 'contract-1', database });
-      expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toContain('Payment: Auto Pay, and a card or bank account is saved.');
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toContain('Payment: Auto Pay, and a card or bank account is saved. ');
+    });
+
+    test('Auto Pay on, but the billing type does not charge each completed service: the alert says to check it', async () => {
+      jest.spyOn(AutopayEligibility, 'customerOnAutopay').mockResolvedValue(true);
+      billingLaneSupported.mockReturnValueOnce(false);
+      const { database } = await signedAutopay();
+      await handleAgreementSigned({ contractId: 'contract-1', database });
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].detail)
+        .toContain("but this account's billing type does not charge each completed service: check it on the customer page before the first visit.");
     });
 
     test('an unreadable Auto Pay state never reads as on', async () => {
@@ -555,6 +566,14 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
       requestAutopaySetupLink.mockResolvedValue(result);
       const { database } = await signed();
       expect(await autopayNextStep({ contractId: 'contract-1', database })).toEqual({ state: 'on' });
+    });
+
+    test('an account already on Auto Pay whose billing type does not charge each completed service gets no "Auto Pay is set up"', async () => {
+      requestAutopaySetupLink.mockResolvedValue({ requested: false, action: 'skipped', reason: 'autopay_already_active' });
+      billingLaneSupported.mockReturnValueOnce(false);
+      const { database } = await signed();
+      expect(await autopayNextStep({ contractId: 'contract-1', database })).toBeNull();
+      expect(billingLaneSupported).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }));
     });
 
     test('a declined link (payer-billed, gate off, unsupported lane) is no next step', async () => {
