@@ -72,6 +72,11 @@ async function sendReminders(now) {
     // The lead is read before the claim: a failed read leaves the row as it was.
     const customer = await loadCustomer(row.customer_id);
     if (!customer) continue;
+    // A lead who became a customer since booking gets no promise of a call.
+    if (shared().REAL_CUSTOMER_STAGES.includes(customer.pipeline_stage)) {
+      await db('lead_callback_requests').where({ id: row.id, state: 'scheduled' }).update({ state: 'cancelled', updated_at: now });
+      continue;
+    }
     if (!(await claim(row, 'reminded_at', 'scheduled', now))) continue;
     const time = formatETTime(new Date(row.scheduled_for));
     const rung = await raiseLeadBell({

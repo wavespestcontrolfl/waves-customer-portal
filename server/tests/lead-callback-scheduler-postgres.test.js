@@ -215,6 +215,15 @@ jest.setTimeout(30000);
     expect(mockSettle.mock.calls.map(([id]) => id)).toEqual([stranded]);
   });
 
+  test('a lead who became a customer since booking gets no reminder and the booking closes', async () => {
+    const { customer, row } = await booked();
+    await database('customers').where({ id: customer.id }).update({ pipeline_stage: 'active_customer' });
+    await runLeadCallbackTick({ now: BEFORE });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect((await rowNow(row.id)).state).toBe('cancelled');
+  });
+
   test('gate off: nothing is read', async () => {
     isEnabled.mockImplementation(() => false);
     await expect(runLeadCallbackTick({ now: SLOT })).resolves.toEqual({ skipped: 'gate_off' });
