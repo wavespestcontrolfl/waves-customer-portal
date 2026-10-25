@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { COLORS } from '../../theme-brand';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../../constants/business';
 import { estimateCard } from './cardStyles';
@@ -30,6 +30,17 @@ export default function ConsumerNoticeSign({ token, consumerNotice }) {
   const inFlight = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // A tap leaves the button busy while the signing page loads. Back on this page from the browser's cache (the
+  // customer left without signing), it works again.
+  useEffect(() => {
+    const onPageShow = (event) => {
+      if (!event.persisted) return;
+      inFlight.current = false;
+      setBusy(false);
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
   if (!consumerNotice) return null;
   const { canSign, state } = consumerNotice;
 

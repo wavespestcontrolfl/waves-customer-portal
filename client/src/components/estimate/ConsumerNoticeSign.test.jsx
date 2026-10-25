@@ -29,6 +29,22 @@ describe('ConsumerNoticeSign', () => {
     expect(screen.getByRole('button', { name: 'Read and sign the notice' })).toBeEnabled();
   });
 
+  it('back from the signing page without signing (a cache restore), the button works again', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({ signingUrl: 'https://portal.example.test/contract/abc' }, 201)));
+    render(<ConsumerNoticeSign token="t1" consumerNotice={{ state: 'awaiting', canSign: true }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Read and sign the notice' }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('https://portal.example.test/contract/abc'));
+    expect(screen.getByRole('button', { name: 'Opening the notice…' })).toBeDisabled();
+    // A normal load is not a restore: nothing changes.
+    window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: false }));
+    expect(screen.getByRole('button', { name: 'Opening the notice…' })).toBeDisabled();
+    window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+    const again = await screen.findByRole('button', { name: 'Read and sign the notice' });
+    expect(again).toBeEnabled();
+    fireEvent.click(again);
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(2));
+  });
+
   it('state awaiting: pick up where you left off', () => {
     render(<ConsumerNoticeSign token="t1" consumerNotice={{ state: 'awaiting', canSign: true }} />);
     expect(screen.getByText('Florida consumer notice')).toBeInTheDocument();
