@@ -26,7 +26,7 @@ import {
   Button, Badge, Card, CardHeader, CardTitle, CardBody,
   Table, THead, TBody, TR, TH, TD, Select, Textarea,
   Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter,
-  ActionFeedback, Field, UiSurface, buttonStyles, cn,
+  ActionFeedback, Field, Input, UiSurface, buttonStyles, cn,
 } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -123,7 +123,7 @@ export function completionDeepLink(visit) {
   return `/admin/dispatch?${params.toString()}`;
 }
 
-function VisitRow({ visit, busy, billing, onBill, onFree }) {
+function VisitRow({ visit, busy, billing, onBill, onFree, onElsewhere }) {
   const statusOnly = visit.leak_kind === "completed_no_service_record";
   const ago = daysSince(visit.completed_at);
   return (
@@ -144,6 +144,11 @@ function VisitRow({ visit, busy, billing, onBill, onFree }) {
         {visit.voided_invoice_number && (
           <div className="text-ui-caption text-ink-secondary mt-1">
             Invoice {visit.voided_invoice_number} was voided — check for a replacement invoice before billing
+          </div>
+        )}
+        {visit.billed_elsewhere_invoice_number && (
+          <div className="text-ui-caption text-alert-fg mt-1">
+            Marked as billed on {visit.billed_elsewhere_invoice_number}, which is now {visit.billed_elsewhere_invoice_status || "no longer live"} — bill this visit or mark it free
           </div>
         )}
         </div>
@@ -169,6 +174,15 @@ function VisitRow({ visit, busy, billing, onBill, onFree }) {
               title={!visit.billable ? "No completion record — cannot invoice" : undefined}
             >
               Bill
+            </Button>
+          )}
+          {/* A status-only visit must finish its closeout first (the server refuses). */}
+          {!statusOnly && (
+            <Button size="sm" variant="ghost" disabled={busy} onClick={(event) => {
+              event.currentTarget.focus({ preventScroll: true });
+              onElsewhere(visit);
+            }}>
+              Billed elsewhere
             </Button>
           )}
           <Button size="sm" variant="ghost" disabled={busy} onClick={(event) => {
@@ -198,6 +212,10 @@ export default function BillingRecoveryPage() {
   const [freeFor, setFreeFor] = useState(null); // visit pending "mark free"
   const [freeReason, setFreeReason] = useState(FREE_REASONS[0]);
   const [freeNote, setFreeNote] = useState("");
+  const [elsewhereFor, setElsewhereFor] = useState(null); // visit pending "billed elsewhere"
+  const [elsewhereInvoice, setElsewhereInvoice] = useState("");
+  const [elsewhereNote, setElsewhereNote] = useState("");
+  const [elsewhereError, setElsewhereError] = useState(null);
 
   const load = useCallback(async () => {
     setActionError(null);
@@ -267,6 +285,29 @@ export default function BillingRecoveryPage() {
     }
   }, [freeFor, freeReason, freeNote, load]);
 
+  const submitElsewhere = useCallback(async () => {
+    if (!elsewhereFor || busyRef.current) return;
+    const invoiceNumber = elsewhereInvoice.trim();
+    if (!invoiceNumber) { setElsewhereError("Enter the invoice number that bills this visit."); return; }
+    busyRef.current = true;
+    setElsewhereError(null);
+    setBusyId(elsewhereFor.scheduled_service_id);
+    try {
+      await adminFetch(`/admin/billing-recovery/${elsewhereFor.scheduled_service_id}/billed-elsewhere`, {
+        method: "POST", body: JSON.stringify({ invoiceNumber, note: elsewhereNote.trim() || null }),
+      });
+      setElsewhereFor(null);
+      setElsewhereInvoice("");
+      setElsewhereNote("");
+      await load();
+    } catch (e) {
+      setElsewhereError(e.message || "Could not record the covering invoice");
+    } finally {
+      busyRef.current = false;
+      setBusyId(null);
+    }
+  }, [elsewhereFor, elsewhereInvoice, elsewhereNote, load]);
+
   const summary = !loading && !error ? data?.summary : null;
   const visibleAging = !loading && !error ? aging : null;
   const agingBuckets = aging?.aging || {};
@@ -278,6 +319,14 @@ export default function BillingRecoveryPage() {
     setFreeError(null);
   };
   const closeFree = () => { if (!busyRef.current) setFreeFor(null); };
+  const showElsewhere = (visit) => {
+    setActionError(null);
+    setElsewhereFor(visit);
+    setElsewhereInvoice("");
+    setElsewhereNote("");
+    setElsewhereError(null);
+  };
+  const closeElsewhere = () => { if (!busyRef.current) setElsewhereFor(null); };
 
   return (
     <UiSurface density="comfortable" className="max-w-[1300px] mx-auto">
@@ -322,7 +371,7 @@ export default function BillingRecoveryPage() {
                   <THead><TR><TH>Customer</TH><TH>Visit</TH><TH>Service</TH><TH align="right">Price</TH><TH align="right">Action</TH></TR></THead>
                   <TBody>
                     {data.leaks.map((v) => (
-                      <VisitRow key={v.scheduled_service_id} visit={v} busy={!!busyId} billing={busyId === v.scheduled_service_id && !freeFor} onBill={(x) => bill(x)} onFree={showFree} />
+                      <VisitRow key={v.scheduled_service_id} visit={v} busy={!!busyId} billing={busyId === v.scheduled_service_id && !freeFor && !elsewhereFor} onBill={(x) => bill(x)} onFree={showFree} onElsewhere={showElsewhere} />
                     ))}
                   </TBody>
                 </Table>
@@ -343,7 +392,7 @@ export default function BillingRecoveryPage() {
                   <THead><TR><TH>Customer</TH><TH>Visit</TH><TH>Service</TH><TH align="right">Price</TH><TH align="right">Action</TH></TR></THead>
                   <TBody>
                     {data.needs_review.map((v) => (
-                      <VisitRow key={v.scheduled_service_id} visit={v} busy={!!busyId} billing={busyId === v.scheduled_service_id && !freeFor} onBill={(x) => bill(x, { confirm: true })} onFree={showFree} />
+                      <VisitRow key={v.scheduled_service_id} visit={v} busy={!!busyId} billing={busyId === v.scheduled_service_id && !freeFor && !elsewhereFor} onBill={(x) => bill(x, { confirm: true })} onFree={showFree} onElsewhere={showElsewhere} />
                     ))}
                   </TBody>
                 </Table>
@@ -445,6 +494,27 @@ export default function BillingRecoveryPage() {
         <DialogFooter>
           <Button variant="ghost" disabled={!!busyId} onClick={closeFree}>Cancel</Button>
           <Button variant="primary" loading={!!busyId} onClick={submitFree}>Mark free</Button>
+        </DialogFooter>
+      </Dialog>
+      <Dialog open={!!elsewhereFor} onClose={closeElsewhere} size="sm">
+        <DialogHeader><DialogTitle>Billed on another invoice</DialogTitle></DialogHeader>
+        <DialogBody>
+          <p className="text-ui-body text-zinc-600 mb-3">
+            {elsewhereFor?.customer} · {elsewhereFor?.service_type} · {formatMoney(elsewhereFor?.price)}. Name the invoice that already bills this visit. The visit leaves this list and keeps its revenue. If that invoice is voided later, the visit comes back here. For a duplicate row or a visit that never happened, use Mark free instead.
+          </p>
+          <fieldset disabled={!!busyId} className="min-w-0 m-0 p-0 border-0 space-y-3">
+          <Field label="Invoice number">
+            <Input value={elsewhereInvoice} onChange={(e) => setElsewhereInvoice(e.target.value)} placeholder="WPC-2026-0000" autoComplete="off" />
+          </Field>
+          <Field label="Optional note">
+            <Textarea value={elsewhereNote} onChange={(e) => setElsewhereNote(e.target.value)} placeholder="Optional note" rows={2} />
+          </Field>
+          </fieldset>
+          {elsewhereError && <ActionFeedback error className="mt-3">{elsewhereError}</ActionFeedback>}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" disabled={!!busyId} onClick={closeElsewhere}>Cancel</Button>
+          <Button variant="primary" loading={!!busyId} onClick={submitElsewhere}>Save</Button>
         </DialogFooter>
       </Dialog>
     </UiSurface>

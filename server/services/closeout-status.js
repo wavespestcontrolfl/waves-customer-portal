@@ -482,7 +482,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
       .orderBy('scheduled_date', 'asc')
       .first('id', 'status', 'scheduled_date')),
     // Human billing ruling from the Billing Recovery workbench — durable,
-    // one row per visit ('billed' | 'intentionally_free').
+    // one row per visit ('billed' | 'intentionally_free' | 'billed_elsewhere').
     probe('visit_billing_dispositions', unavailable, () => knex('visit_billing_dispositions')
       .where({ scheduled_service_id: serviceId })
       .first('id', 'disposition', 'reason', 'invoice_id', 'created_at')),
@@ -531,6 +531,19 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.followupChildLookupFailed = Boolean(childProbe.error);
   inputs.disposition = dispositionProbe.value || null;
   inputs.dispositionLookupFailed = Boolean(dispositionProbe.error);
+  // 'billed_elsewhere' names the OTHER invoice that bills this visit; it
+  // settles the visit only while that invoice is live.
+  if (inputs.disposition?.disposition === 'billed_elsewhere' && inputs.disposition.invoice_id) {
+    const coveringProbe = await probe('billed_elsewhere_invoice', unavailable, () => knex('invoices')
+      .where({ id: inputs.disposition.invoice_id })
+      .first('id', 'invoice_number', 'status', 'total'));
+    const covering = coveringProbe.value || null;
+    // Lazy: the dead-status list lives on the invoice service.
+    inputs.dispositionInvoice = covering
+      ? { ...covering, live: !require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(covering.status)) }
+      : null;
+    inputs.dispositionLookupFailed = inputs.dispositionLookupFailed || Boolean(coveringProbe.error);
+  }
 
   // The reads above are not one snapshot: a completion can commit between
   // the first visit read and the record probes. Re-read the visit row and,
@@ -1042,6 +1055,17 @@ function deriveCloseoutFacts(inputs) {
     }
   } else if (inputs.dispositionLookupFailed) {
     invoice = fact('unknown', 'billing_disposition_lookup_failed', { expectation: expectation?.kind || null });
+  } else if (inputs.disposition?.disposition === 'billed_elsewhere' && inputs.dispositionInvoice?.live === true) {
+    // A human named the live invoice that already bills this visit (a plan
+    // prepay, a combined multi-home invoice, a duplicate row's invoice). A
+    // dead covering invoice falls through to the facts below.
+    const covering = inputs.dispositionInvoice;
+    invoice = fact('done', 'disposition_billed_elsewhere', {
+      ruleSource: 'billing_disposition', dispositionId: inputs.disposition.id, decidedAt: isoOrNull(inputs.disposition.created_at),
+      invoiceId: covering.id, invoiceNumber: covering.invoice_number || null, status: covering.status || null,
+      total: covering.total != null ? Number(covering.total) : null,
+      dispositionReason: inputs.disposition.reason ? String(inputs.disposition.reason).slice(0, 120) : null,
+    });
   } else if (inputs.disposition?.disposition === 'intentionally_free') {
     // A human ruled this visit free in the Billing Recovery workbench —
     // that durable disposition outranks any live prediction or frozen mint.
@@ -1083,6 +1107,10 @@ function deriveCloseoutFacts(inputs) {
     invoiceDelivery = invoice.state === 'not_required'
       ? fact('not_required', invoice.reason, { ruleSource: invoice.ruleSource || 'lane' })
       : fact(invoice.state === 'unknown' ? 'unknown' : 'pending', invoice.state === 'unknown' ? 'invoice_unknown' : 'no_invoice_yet');
+  } else if (invoice.reason === 'disposition_billed_elsewhere') {
+    // The covering invoice belongs to another flow (a plan prepay, a
+    // combined or duplicate row's invoice); its delivery is tracked there.
+    invoiceDelivery = fact('not_required', 'disposition_billed_elsewhere', { ruleSource: 'billing_disposition', invoiceId: invoice.invoiceId || null });
   } else {
     const inv = live || inputs.siblingInvoice?.invoice;
     const status = String(inv.status || '').toLowerCase();

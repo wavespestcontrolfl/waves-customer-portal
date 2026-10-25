@@ -351,6 +351,36 @@ async function preMintRefusal({ owner, visit, price, scheduledServiceId, expecte
   return null;
 }
 
+// Dispositions that settle a visit only through an invoice: 'billed' (the
+// invoice Bill cut) and 'billed_elsewhere' (an operator named the invoice that
+// already bills it). Once that invoice is void / refunded / cancelled the
+// disposition no longer settles anything: the visit returns to Billing
+// Recovery, and Bill / Mark free / Billed elsewhere replace the stale row.
+// 'intentionally_free' never goes stale.
+const INVOICE_BACKED_DISPOSITIONS = ['billed', 'billed_elsewhere'];
+const deadInvoiceStatuses = () => InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES;
+
+// The visit's disposition, with whether it went stale. null = none.
+async function currentDisposition(trx, scheduledServiceId) {
+  const row = await trx('visit_billing_dispositions')
+    .where('scheduled_service_id', scheduledServiceId)
+    .first('id', 'disposition', 'invoice_id');
+  if (!row) return null;
+  if (!INVOICE_BACKED_DISPOSITIONS.includes(row.disposition)) return { ...row, stale: false };
+  const invoice = row.invoice_id ? await trx('invoices').where({ id: row.invoice_id }).first('status') : null;
+  return { ...row, stale: !invoice || deadInvoiceStatuses().includes(String(invoice.status)) };
+}
+
+// Under the caller's per-visit mint lock: refuse a visit that is already
+// handled, or clear a stale disposition so the caller can record a new one.
+async function claimDispositionSlot(trx, scheduledServiceId) {
+  const existing = await currentDisposition(trx, scheduledServiceId);
+  if (!existing) return null;
+  if (!existing.stale) return 'Visit has already been handled.';
+  await trx('visit_billing_dispositions').where({ id: existing.id }).del();
+  return null;
+}
+
 async function alreadyHandledRefusal(trx, visit, scheduledServiceId) {
   const existingInvoice = await trx('invoices')
     .where(function () {
@@ -359,11 +389,7 @@ async function alreadyHandledRefusal(trx, visit, scheduledServiceId) {
     .whereNot('status', 'void')
     .first();
   if (existingInvoice) return 'An invoice already exists for this visit.';
-  const existingDisposition = await trx('visit_billing_dispositions')
-    .where('scheduled_service_id', scheduledServiceId)
-    .first();
-  if (existingDisposition) return 'Visit has already been handled.';
-  return null;
+  return claimDispositionSlot(trx, scheduledServiceId);
 }
 
 // After the mint: the invoice must be the approved one. createFromService
@@ -518,4 +544,5 @@ async function previewBillVisit(scheduledServiceId, options = {}) {
 
 module.exports = {
   assessVisitBillable, billVisit, previewBillVisit, pendingDepositForVisit, liveCardHoldForVisit, dueDateFromVisit, siblingCoverageStatus,
+  INVOICE_BACKED_DISPOSITIONS, deadInvoiceStatuses, claimDispositionSlot, loadBillingMode,
 };

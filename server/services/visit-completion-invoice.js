@@ -4,7 +4,9 @@
 // and member links share the caller's transaction. No delivery or charge here.
 const db = require('../models/db');
 const InvoiceService = require('./invoice');
-const { acquireScheduledInvoiceMintLock, TERMINAL_INVOICE_STATUSES } = require('./scheduled-invoice-mint');
+const {
+  acquireScheduledInvoiceMintLock, assertScheduledInvoiceNotBilledElsewhere, TERMINAL_INVOICE_STATUSES,
+} = require('./scheduled-invoice-mint');
 const { lockStop, dateOnly } = require('./visit-groups');
 const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
@@ -59,6 +61,15 @@ async function memberBillingEligibility(member, customer, trx) {
       || ['inspection_only', 'customer_declined'].includes(notes.visitOutcome)) return { lineItems: [] };
   if (member.record_status !== 'completed') return office('record_not_completed', member.id);
   if (notes.oneTimeRecapOnly) return { lineItems: [] };
+  // Billing Recovery "Billed elsewhere": another live invoice already bills
+  // this member. The combined invoice links only its first member, so every
+  // member is checked here, under the mint locks the packet mint holds.
+  try {
+    await assertScheduledInvoiceNotBilledElsewhere(trx, member.id);
+  } catch (err) {
+    if (err?.code === 'VISIT_BILLED_ELSEWHERE') return office('member_billed_elsewhere', member.id);
+    throw err;
+  }
   if (['monthly_membership', 'annual_prepay'].includes(resolveBillingLane(customer).mode)) {
     return office('covered_billing_lane');
   }

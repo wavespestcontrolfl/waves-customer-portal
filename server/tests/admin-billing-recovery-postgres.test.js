@@ -10,7 +10,10 @@ jest.mock('../models/db', () => {
   return database;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/invoice', () => ({ createFromService: jest.fn() }));
+jest.mock('../services/invoice', () => ({
+  createFromService: jest.fn(),
+  CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'refunded', 'canceled', 'cancelled'],
+}));
 jest.mock('../services/job-costing', () => ({ calculateJobCost: jest.fn(async () => ({})) }));
 jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn(), autopayActivePredicate: jest.fn() }));
 jest.mock('../services/mrr-breakdown', () => ({ listAtRiskMrrAccounts: jest.fn() }));
@@ -101,6 +104,36 @@ postgres('billing-recovery dismissal on migrated PostgreSQL', () => {
       expect(rows).toHaveLength(0);
       expect(calculateJobCost).not.toHaveBeenCalled();
     }
+  });
+
+  // "Billed elsewhere" on real PostgreSQL: the case-insensitive number match,
+  // the owner joins and the disposition row; a status-only visit (no service
+  // record yet) still runs the completion flow, so it is refused.
+  test('billed elsewhere records the covering invoice and refuses a status-only visit', async () => {
+    const markElsewhere = (body) => fetch(`${baseUrl}/billing-recovery/${ids.visit}/billed-elsewhere`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-fixture-actor': ids.actor }, body: JSON.stringify(body),
+    });
+    const number = `QA-${randomUUID().slice(0, 24)}`;
+    const coverId = randomUUID();
+    await mockTransaction('invoices').insert({
+      id: coverId, token: randomUUID(), invoice_number: number, customer_id: ids.customer, status: 'sent', total: 480,
+    });
+    const statusOnly = await markElsewhere({ invoiceNumber: number });
+    expect(statusOnly.status).toBe(422);
+    expect((await statusOnly.json()).error).toMatch(/Finish this visit's closeout first/);
+    await mockTransaction('service_records').insert({
+      id: ids.record, customer_id: ids.customer, scheduled_service_id: ids.visit,
+      service_date: '2025-01-01', service_type: 'Synthetic visit', status: 'completed',
+    });
+    const res = await markElsewhere({ invoiceNumber: number.toLowerCase(), note: 'Synthetic plan prepay' });
+    expect(res.status).toBe(200);
+    expect((await res.json()).invoice).toEqual({ id: coverId, invoice_number: number, status: 'sent' });
+    expect(await mockTransaction('visit_billing_dispositions').where('scheduled_service_id', ids.visit)).toEqual([
+      expect.objectContaining({
+        disposition: 'billed_elsewhere', invoice_id: coverId, service_record_id: ids.record, actor_user_id: ids.actor, reason: 'Synthetic plan prepay',
+      }),
+    ]);
+    expect((await markElsewhere({ invoiceNumber: number })).status).toBe(409);
   });
 
   test('the invoice check waits for the canonical mint lock', async () => {
