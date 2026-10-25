@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { RescheduleModal } from './SchedulePage';
 
 vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
-vi.mock('../../components/schedule/useBestTimes', () => ({ useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: [] }) }));
+vi.mock('../../components/schedule/useBestTimes', () => ({ useBestTimes: () => ({ pickedByTech: [], availability: undefined }) }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const service = { id: 'fixture-visit', customerName: 'Fixture customer', serviceType: 'Pest service', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:30' };
 

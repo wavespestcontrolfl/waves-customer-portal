@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { etDateString } from '../../lib/timezone';
-import { resetSummaryAvailability } from './useBestTimes';
+import { resetHintsGated } from './useBestTimes';
 
 vi.mock('../AddressAutocomplete', () => ({
   default: ({ value, onSelect }) => (
@@ -30,7 +30,7 @@ const slot = (date, start) => ({
 
 let fetcher;
 beforeEach(() => {
-  resetSummaryAvailability();
+  resetHintsGated();
   fetcher = vi.fn(async (url) => ({
     ok: true,
     status: 200,

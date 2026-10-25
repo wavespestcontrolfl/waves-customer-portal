@@ -1,5 +1,5 @@
-// Availability strip under an admin date/time picker (useBestTimes with
-// summary:true) — the replacement for the three stacked advisories (route
+// Availability strip under an admin date/time picker (useBestTimes) — the
+// replacement for the three stacked advisories (route
 // warning, "doesn't fit", one "best in the next 3 days" chip). Owner
 // rulings 2026-10-02:
 //   1. One verdict on the hour in the fields, with the remedy in the same
@@ -18,10 +18,9 @@
 // `bestRows` (every admin picker since 2026-10-08) the box shows two rows of four: the best
 // hours on the picked date and the best date + hours in the 7 days from
 // today, always, in place of the "closest" offers.
-// Warn-only like the hint it replaces: picking a chip only fills fields
+// Warn-only like the advisories it replaced: picking a chip only fills fields
 // (onPick), never submits, and no consumer disables a save on this data.
-// Renders nothing without an availability answer (gate off, search failed)
-// — the consumer falls back to BestTimeHint.
+// Renders nothing without an availability answer (hints gated, search failed).
 
 import { useEffect, useState } from 'react';
 import { etDateString } from '../../lib/timezone';
@@ -360,8 +359,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
   if (!verdict) return null;
   const ink = TONE_INK[verdict.tone];
   const viewed = availability.days.find((day) => day.date === viewDate) || null;
-  // Same rule as BestTimeHint's isCurrentPick: the hour is only "current"
-  // when taking it would change nothing. An hour scored for a technician the
+  // The hour is only "current" when taking it would change nothing. An hour scored for a technician the
   // visit does not have (an unassigned visit adopts it on pick) stays tappable.
   const techMatches = (hour) => !hour.technicianId || String(hour.technicianId) === String(currentTechnicianId ?? '');
   const isCurrent = (hour) => hour.date === currentDate && sameStart(hour.start, currentStart) && techMatches(hour);

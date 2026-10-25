@@ -3851,16 +3851,6 @@ const gates = {
   // with no slots and every picker renders exactly as today.
   bestTimeHints: gateEnvValue('GATE_BEST_TIME_HINTS'),
 
-  // Reschedule availability strip (owner ask 2026-10-02): the find-time
-  // hint endpoint also answers `summary.days` — every hour that fits on
-  // each day around the picked one, with a reason on the picked hour's
-  // verdict — when a picker asks with `summary:true`. Read-only and
-  // advisory like the hint it extends; no save is blocked on it. OFF in
-  // every environment; the route reads it through gateEnvValue() at call
-  // time. Kill switch: unset — the flag is ignored and the endpoint answers
-  // the plain three-line hint, so pickers render exactly as today.
-  rescheduleAvailability: gateEnvValue('GATE_RESCHEDULE_AVAILABILITY'),
-
   // Best-times road times (owner 2026-10-06): the best-times chips in the
   // availability strip (summary.best) and the picked hour's verdict get
   // their drive-in and added-drive numbers from Google's traffic-aware route
@@ -3879,7 +3869,7 @@ const gates = {
   // that address alone, no customer record needed, on a 30-minute search
   // until a service sets the length. A chip fills the day and hour only: no
   // service is known yet, so the chip's technician is not pinned (Codex #6411
-  // r1 on the retired drawer). Nothing is written until staff save. It needs GATE_BEST_TIME_HINTS + GATE_RESCHEDULE_AVAILABILITY
+  // r1 on the retired drawer). Nothing is written until staff save. It needs GATE_BEST_TIME_HINTS
   // on to get an answer. OFF in every environment; the admin schedule day
   // view carries it to Dispatch as addressFirstTimes. Kill switch: unset —
   // the time box waits for a customer, as before.

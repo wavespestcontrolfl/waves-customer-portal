@@ -14,7 +14,7 @@ import { __resetDiscountStackingCache } from '../../hooks/useDiscountStacking';
 import { stackVisitDiscounts } from '../../lib/discountStack';
 
 vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
-vi.mock('../../components/schedule/useBestTimes', () => ({ useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: [] }) }));
+vi.mock('../../components/schedule/useBestTimes', () => ({ useBestTimes: () => ({ pickedByTech: [], availability: undefined }) }));
 
 const MILITARY = {
   id: 'disc-military', name: 'Military Discount', discount_type: 'fixed_amount', amount: 5,

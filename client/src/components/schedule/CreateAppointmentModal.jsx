@@ -38,11 +38,10 @@ import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import SlotConflictNotice from './SlotConflictNotice';
 import CallBookingConflictNotice from './CallBookingConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
-import BestTimeHint, { detourPhrase } from './BestTimeHint';
+import { detourPhrase } from './detour-phrase';
 import HourTechCompare from './HourTechCompare';
 import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
 import { useBestTimes } from './useBestTimes';
-import { etDateString } from '../../lib/timezone';
 import {
   stackVisitDiscounts, stackablePresets, stackGroupConflict, isCustomAmountPreset, isCustomPercentagePreset,
   percentageDiscountDollars,
@@ -4021,10 +4020,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     appliedSuggestionRef.current = true;
   };
   const bestTimesTarget = addressOnlyTimes ? quickAddTarget : bookingPropertyTarget(selectedBookingProperty);
-  // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
-  // availability strip (days around the chosen date) instead.
-  const { bestTimes, picked, pickedByTech, bestInRange, availability } = useBestTimes({
-    summary: true,
+  // One search answers the availability strip (days around the chosen date).
+  const { pickedByTech, availability } = useBestTimes({
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
     addressOnly: addressOnlyTimes,
@@ -4049,7 +4046,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     serviceTypes: services.map((svc) => svc?.name).filter(Boolean),
     // Same order as serviceTypes: the selected catalog row's key.
     serviceKeys: services.filter((svc) => svc?.name).map((svc) => (svc?.service_key ?? svc?.serviceKey) || ''),
-    rangeFrom: etDateString(),
     bestRows: true,
   });
 
@@ -5554,24 +5550,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               setTechMode('choose');
               setTechId(row.technicianId);
               appliedSuggestionRef.current = true;
-            }}
-            style={{ marginBottom: 10 }}
-          />
-          <BestTimeHint
-            bestTimes={bestTimes}
-            picked={picked}
-            bestInRange={bestInRange}
-            currentStart={windowStart}
-            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
-            currentTechnicianId={techMode === 'choose' ? techId : null}
-            onPick={(slot) => {
-              setWindowStart(slot.start);
-              adoptChipTechnician(slot);
-            }}
-            onPickDate={(slot) => {
-              setApptDate(slot.date);
-              setWindowStart(slot.start);
-              adoptChipTechnician(slot);
             }}
             style={{ marginBottom: 10 }}
           />

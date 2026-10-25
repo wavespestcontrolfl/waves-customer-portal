@@ -163,7 +163,6 @@ import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
 import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
 
-import BestTimeHint from "../../components/schedule/BestTimeHint";
 import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning } from "../../components/schedule/AvailabilityStrip";
 import IntelligenceBarShell from "../../components/admin/IntelligenceBarShell";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
@@ -2061,13 +2060,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     { name: form.serviceType, key: form.serviceKey },
     ...serviceLines.map((line) => ({ name: line.serviceType, key: line.serviceKey })),
   ].filter((item) => typeof item.name === "string" && item.name.trim());
-  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
+  const { availability } = useBestTimes({
     enabled: !isTerminalVisit,
     moveScope: comboMove,
-    // Availability strip (GATE_RESCHEDULE_AVAILABILITY): one search over the
-    // days around the picked date. Gate off = no `availability`, and the
-    // three-line hint below renders exactly as before.
-    summary: true,
+    // Availability strip: one search over the days around the picked date.
     arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
@@ -2084,7 +2080,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // stay (picking one adopts its technician); no verdict (Codex #4120 r6 P2).
     pickedStart: form.technicianId ? form.windowStart : undefined,
     pickedEnd: form.windowEnd,
-    rangeFrom: etDateString(),
     // A re-picked Service address is where the save sends the visit —
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
@@ -5986,47 +5981,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 currentStart={form.windowStart}
                 currentTechnicianId={form.technicianId}
                 onPick={(slot) =>
-                  // Same adoption rule as the hint chips below: an
+                  // Same adoption rule as the create modal's chips: an
                   // unassigned visit takes the technician the hour was
                   // scored for; an assigned visit's technician never changes.
                   setForm((f) => ({
                     ...f,
                     scheduledDate: slot.date,
-                    windowStart: slot.start,
-                    windowEnd: slot.end,
-                    technicianId: !f.technicianId && slot.technicianId
-                      ? slot.technicianId
-                      : f.technicianId,
-                  }))
-                }
-                style={{ marginTop: -2, marginBottom: 14 }}
-              />{" "}
-              <BestTimeHint
-                bestTimes={bestTimes}
-                picked={picked}
-                bestInRange={bestInRange}
-                currentStart={form.windowStart}
-                currentDate={form.scheduledDate}
-                currentTechnicianId={form.technicianId}
-                onPickDate={(slot) =>
-                  setForm((f) => ({
-                    ...f,
-                    scheduledDate: slot.date,
-                    windowStart: slot.start,
-                    windowEnd: slot.end,
-                    technicianId: !f.technicianId && slot.technicianId
-                      ? slot.technicianId
-                      : f.technicianId,
-                  }))
-                }
-                onPick={(slot) =>
-                  // An unassigned visit searched all techs, so the detour
-                  // is slot.technicianId's — adopt that tech with the
-                  // window (visible in the Technician select before save),
-                  // mirroring the create modal. An assigned visit's search
-                  // was already scoped; its tech never changes here.
-                  setForm((f) => ({
-                    ...f,
                     windowStart: slot.start,
                     windowEnd: slot.end,
                     technicianId: !f.technicianId && slot.technicianId
@@ -9339,10 +9299,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     excludeServiceIds: [service.id],
     enabled: showManual && !!manualDate,
   });
-  // Advisory drive-detour suggestions for the picked day — a chip only sets
-  // the start select, never submits the reschedule.
-  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange, availability: manualAvailability } = useBestTimes({
-    summary: true,
+  // Advisory availability strip for the picked day — a chip only sets the
+  // date and start select, never submits the reschedule.
+  const { availability: manualAvailability } = useBestTimes({
     // Same route check as the manual save and the edit form: under
     // GATE_ADMIN_ARRIVAL_WINDOWS the verdict and the chips must not endorse
     // an hour the save would refuse for another customer's window
@@ -9358,7 +9317,6 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     // visit's all-tech detours would be unactionable — no tech, no hint.
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
     pickedStart: manualTime,
-    rangeFrom: etDateString(),
     // The same two best-times rows as New Appointment (owner 2026-10-08).
     // The server reads what the visit books from its own rows (serviceId).
     bestRows: true,
@@ -9533,9 +9491,6 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       durationMinutes={durationMinutes}
       handleManualReschedule={handleManualReschedule}
       manualConflicts={manualConflicts}
-      manualBestTimes={manualBestTimes}
-      manualPicked={manualPicked}
-      manualBestInRange={manualBestInRange}
       manualAvailability={manualAvailability}
       onClose={onClose}
     />
