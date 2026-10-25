@@ -10,9 +10,11 @@
 //   3. Every hour chip carries what it adds to the day's driving
 //      ("+11 min drive"); no "on route" / "tight" labels.
 //   4. Day pills run around the PICKED date, not today.
-// Owner 2026-10-06 (replaces rule 3): a chip shows BOTH numbers, the drive
-// here from the stop before ("19 min here") and what the stop adds to the
-// day's driving ("+34 min day"), plus the chance of rain at that hour. With
+// Owner 2026-10-24 (replaces the 2026-10-06 chip): a chip is read on the
+// phone, so it carries the hour and ONE number, the drive to get there
+// ("~7 min"; the added day drive when no single leg exists). What the hour
+// adds to the day, the rain chance, the technician and the stop before stay
+// in the engine's ranking and in the verdict sentence, not on the chip. With
 // `bestRows` (every admin picker since 2026-10-08) the box shows two rows of four: the best
 // hours on the picked date and the best date + hours in the 7 days from
 // today, always, in place of the "closest" offers.
@@ -235,7 +237,8 @@ const chipStyle = {
   minHeight: 44, padding: '5px 10px', borderRadius: 4, border: '0.5px solid #D4D4D8', background: '#fff', fontFamily: 'inherit',
   color: '#18181B', fontSize: 14, fontWeight: 500, lineHeight: 1.2, fontVariantNumeric: 'tabular-nums', cursor: 'pointer',
 };
-const chipCompact = { minHeight: 0, padding: '6px 4px', gap: 1 };
+const chipCompact = { minHeight: 56, padding: '8px 6px', gap: 2 };
+const hourStyle = { fontSize: 16, fontWeight: 600 };
 const bestRowStyle = {
   display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(96px, 1fr)', gap: 6, overflowX: 'auto', paddingBottom: 2,
 };
@@ -261,25 +264,24 @@ function emptyDayLine(day) {
   return 'no hour fits.';
 }
 
-// The stop a chip's hour would follow (GATE_BEST_TIMES_CHIP_STOP_NAMES,
-// owner 2026-10-21): "after <name>", or "from home base" for a first stop.
-// null when the engine named neither (capacity mode, an unpinned neighbour).
-export function stopPhrase(hour) {
-  if (hour.fromHomeBase === true) return 'from home base';
-  return hour.fromName ? `after ${hour.fromName}` : null;
+// The one number under the hour: the drive to get there ("~7 min"), else
+// what the stop adds to the day's driving when no single leg exists
+// (arrival windows), else nothing.
+export function chipDrivePhrase(hour) {
+  const here = driveHerePhrase(hour);
+  if (here) return here === 'drive unknown' ? here : here.replace(/ here$/, '');
+  return addedPhrase(hour);
 }
 
-// One line per fact, so four chips side by side stay readable: the time,
-// the drive here, what it adds to the day, rain, and whose route it is.
-export function HourChip({ hour, withDay, current, onPick, compact = false, stopNames = false }) {
-  const here = driveHerePhrase(hour);
-  const added = addedPhrase(hour);
-  const rain = rainPhrase(hour.rainChance);
-  const stop = stopNames ? stopPhrase(hour) : null;
-  const lines = [here, added, rain, hour.technicianName, stop].filter(Boolean);
+// Two lines, read at a glance: the hour, then the drive minutes. A rain
+// surface (the rain-out sheet, the drag-drop confirm) adds the hour's rain
+// chance with `showRain`; a booking chip never does.
+export function HourChip({ hour, withDay, current, onPick, compact = false, showRain = false }) {
+  const rain = showRain ? rainPhrase(hour.rainChance) : null;
+  const lines = [chipDrivePhrase(hour), rain].filter(Boolean);
+  const rainInk = !current && Number(hour.rainChance) >= 40 ? { color: '#B45309' } : null;
   const label = withDay && compact ? fmtHour(hour.start) : `${withDay ? `${fmtDay(hour.date)} · ` : ''}${fmtHour(hour.start)}`;
   const muted = current ? { color: '#fff', opacity: 0.8 } : null;
-  const rainInk = !current && Number(hour.rainChance) >= 40 ? { color: '#B45309' } : null;
   return (
     <button
       type="button"
@@ -290,7 +292,7 @@ export function HourChip({ hour, withDay, current, onPick, compact = false, stop
       style={{ ...chipStyle, ...(compact ? chipCompact : null), ...(current ? chipCurrent : null) }}
     >
       {withDay && compact ? <span style={{ ...subStyle, ...muted }}>{fmtDay(hour.date).replace(/ \w+ /, ' ')}</span> : null}
-      <span>{label}</span>
+      <span style={hourStyle}>{label}</span>
       {lines.map((line) => (
         <span key={line} style={{ ...subStyle, ...muted, ...(line === rain ? rainInk : null) }}>{line}</span>
       ))}
@@ -300,7 +302,7 @@ export function HourChip({ hour, withDay, current, onPick, compact = false, stop
 
 // A row of best-times chips: four side by side, scrolling sideways on a
 // narrow screen rather than wrapping.
-export function BestRow({ title, hours, withDay, empty, isCurrent, onPick, stopNames }) {
+export function BestRow({ title, hours, withDay, empty, isCurrent, onPick, showRain = false }) {
   return (
     <div style={{ marginTop: 10 }}>
       <div style={{ marginBottom: 6, color: '#52525B' }}>{title}</div>
@@ -310,7 +312,7 @@ export function BestRow({ title, hours, withDay, empty, isCurrent, onPick, stopN
       {hours.length ? (
         <div data-testid="best-row" style={bestRowStyle}>
           {hours.map((hour) => (
-            <HourChip key={`${hour.date}-${hour.start}-${hour.technicianId || ''}`} hour={hour} withDay={withDay} compact current={isCurrent(hour)} onPick={onPick} stopNames={stopNames} />
+            <HourChip key={`${hour.date}-${hour.start}-${hour.technicianId || ''}`} hour={hour} withDay={withDay} compact current={isCurrent(hour)} onPick={onPick} showRain={showRain} />
           ))}
         </div>
       ) : <div style={{ color: '#52525B' }}>{empty}</div>}
@@ -322,7 +324,7 @@ export function BestRow({ title, hours, withDay, empty, isCurrent, onPick, stopN
 // are the previous answer's, so they are titled with its date (Codex #6045
 // r2). No week row when its search did not answer, rather than a false
 // "nothing fits".
-function BestRows({ availability, currentDate, isCurrent, onPick }) {
+function BestRows({ availability, currentDate, isCurrent, onPick, showRain }) {
   const { best } = availability;
   return (
     <>
@@ -333,7 +335,7 @@ function BestRows({ availability, currentDate, isCurrent, onPick }) {
         empty="No open hours that day. The note above says why."
         isCurrent={isCurrent}
         onPick={onPick}
-        stopNames={availability.chipStopNames === true}
+        showRain={showRain}
       />
       {best.weekCovered !== false && (
         <BestRow
@@ -343,14 +345,14 @@ function BestRows({ availability, currentDate, isCurrent, onPick }) {
           empty="Nothing fits in the next 7 days."
           isCurrent={isCurrent}
           onPick={onPick}
-          stopNames={availability.chipStopNames === true}
+          showRain={showRain}
         />
       )}
     </>
   );
 }
 
-export default function AvailabilityStrip({ availability, currentDate, currentStart, currentTechnicianId, onPick, style, bestRows = false }) {
+export default function AvailabilityStrip({ availability, currentDate, currentStart, currentTechnicianId, onPick, style, bestRows = false, showRain = false }) {
   const [viewDate, setViewDate] = useState(currentDate);
   // A new pick (typed, or filled by a chip) brings the browse row back to it.
   useEffect(() => { setViewDate(currentDate); }, [currentDate]);
@@ -381,13 +383,13 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
             {verdict.detail ? ` ${verdict.detail}` : null}
           </div>
         </div>
-        {showBest && <BestRows availability={availability} currentDate={currentDate} isCurrent={isCurrent} onPick={pick} />}
+        {showBest && <BestRows availability={availability} currentDate={currentDate} isCurrent={isCurrent} onPick={pick} showRain={showRain} />}
         {!showBest && verdict.offers.length > 0 && (
           <div style={{ marginTop: 10 }}>
             {verdict.lead ? <div style={{ marginBottom: 6, color: '#52525B' }}>{verdict.lead}</div> : null}
             <div style={chipGridStyle}>
               {verdict.offers.map((hour) => (
-                <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={verdict.withDay} current={isCurrent(hour)} onPick={pick} />
+                <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={verdict.withDay} current={isCurrent(hour)} onPick={pick} showRain={showRain} />
               ))}
             </div>
           </div>
@@ -437,7 +439,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
           {viewed.hours.length > 0 && (
             <div style={chipGridStyle}>
               {viewed.hours.map((hour) => (
-                <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={pick} />
+                <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={pick} showRain={showRain} />
               ))}
             </div>
           )}

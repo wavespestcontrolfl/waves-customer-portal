@@ -282,7 +282,7 @@ export default function RescheduleConfirmModal({
           />
           {/* Display-only like the hint: the drop fixes the window, so the
               chips carry no onPick (cancel and re-drop to take one). */}
-          <AvailabilityStrip availability={availability} currentDate={toDate} currentStart={toStart} currentTechnicianId={technicianId} bestRows />
+          <AvailabilityStrip availability={availability} currentDate={toDate} currentStart={toStart} currentTechnicianId={technicianId} bestRows showRain />
           <BestTimeHint bestTimes={bestTimes} picked={picked} bestInRange={bestInRange} currentStart={toStart} currentDate={toDate} />
         </div>
 

@@ -7096,8 +7096,8 @@ router.get('/', async (req, res, next) => {
     res.json({
       date, services: enriched,
       visitCloseout: legacyCloseoutEnabled,
-      // GATE_DISPATCH_FIND_TIME_PANEL: shows the Dispatch board's "Find a time" button.
-      findTimePanel: isEnabled('dispatchFindTimePanel'),
+      // GATE_NEW_APPT_ADDRESS_TIMES: New Appointment's time box answers on a new caller's address alone.
+      addressFirstTimes: isEnabled('newApptAddressTimes'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,

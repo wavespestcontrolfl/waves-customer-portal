@@ -888,6 +888,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               } : undefined}
               style={{ marginTop: -8, marginBottom: 18 }}
               bestRows
+              showRain
             />
             <BestTimeHint
               bestTimes={bestTimes}

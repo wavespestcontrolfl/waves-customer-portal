@@ -3858,18 +3858,18 @@ const gates = {
   // time. Kill switch: unset — chips show the model's numbers.
   bestTimesRoadTimes: gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES'),
 
-  // Dispatch "Find a time" panel (owner 2026-10-21, option C): an address-first
-  // panel on the admin Dispatch board. Office staff on a call with a NEW caller
-  // type an address and see the best hours for it (the find-time best-times
-  // chips, no customer record needed); tapping a chip opens New Appointment
-  // filled with that day and hour and the address in its New customer
-  // block; the form's own time box then re-checks the hour for the chosen
-  // service and technician. The panel itself writes nothing. It needs
-  // GATE_BEST_TIME_HINTS + GATE_RESCHEDULE_AVAILABILITY on to get an answer;
-  // without them it says best times are off. OFF in every environment; the
-  // admin schedule day view carries it to the page (findTimePanel). Kill
-  // switch: unset — the button does not render.
-  dispatchFindTimePanel: gateEnvValue('GATE_DISPATCH_FIND_TIME_PANEL'),
+  // New Appointment address-first best times (owner 2026-10-24, replacing the
+  // 2026-10-21 Dispatch "Find a time" drawer): office staff on a call with a
+  // NEW caller open New Appointment, pick the address in its New customer
+  // block, and the time box (now above Services) shows the best hours for
+  // that address alone, no customer record needed, on a 30-minute search
+  // until a service sets the length. A chip fills the day and hour only: no
+  // service is known yet, so the chip's technician is not pinned (Codex #6411
+  // r1 on the retired drawer). Nothing is written until staff save. It needs GATE_BEST_TIME_HINTS + GATE_RESCHEDULE_AVAILABILITY
+  // on to get an answer. OFF in every environment; the admin schedule day
+  // view carries it to Dispatch as addressFirstTimes. Kill switch: unset —
+  // the time box waits for a customer, as before.
+  newApptAddressTimes: gateEnvValue('GATE_NEW_APPT_ADDRESS_TIMES'),
 
   // Booking rain rank (owner 2026-10-06): the New Appointment best-times rows
   // rank by rain fit before drive. Outdoor bookings (pest, lawn, T&S,
@@ -3893,15 +3893,6 @@ const gates = {
   // every environment; read through gateEnvValue() at call time. Kill switch:
   // unset — every route starts and ends at the office, as before.
   techStartPoints: gateEnvValue('GATE_TECH_START_POINTS'),
-
-  // Best-times chip stop names (owner 2026-10-21): each best-times chip in
-  // the admin availability strip names the stop it would follow ("after
-  // <customer>") or "from home base" for a first stop, so the office sees
-  // why an hour is cheap without opening the route. Display only: which
-  // hours fit, their order and the save are unchanged. OFF in every
-  // environment; scheduling/find-time-hints.js reads it through
-  // gateEnvValue() at call time. Kill switch: unset — chips show numbers only.
-  bestTimesChipStopNames: gateEnvValue('GATE_BEST_TIMES_CHIP_STOP_NAMES'),
 
   // Customer rain rank (owner 2026-10-08): the same rain-fit rule on the
   // customer booking surfaces. buildBookingAvailability (routes/booking.js:
