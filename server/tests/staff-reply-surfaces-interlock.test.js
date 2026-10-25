@@ -62,6 +62,7 @@ describe('staff SMS surfaces use the interlocked wrapper', () => {
     'ai_assistant_send_sms_tool', // the same assistant's tool call
     'lead_webhook_auto_reply', // lead auto-reply
     'lead_response_auto_reply', // lead auto-reply
+    'lead_call_text_followup', // the answer to a lead's own CALL / TEXT reply
     'tech_line_text', // owns reserveHumanReply itself
   ]);
   test('no direct conversational send outside the automated list, anywhere in server/', () => {

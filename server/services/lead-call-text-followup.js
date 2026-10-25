@@ -144,7 +144,7 @@ async function sendFollowup({ customer, phone, body, kind, requestId, requireSta
       purpose: 'conversational',
       customerId: customer.id,
       identityTrustLevel: 'phone_matches_customer',
-      entryPoint: ENTRY_POINT,
+      entryPoint: 'lead_call_text_followup',
       // The request row stays locked through the provider request: a TEXT
       // that cancels it waits, so a text never goes for a changed request.
       ...(requireState ? {
