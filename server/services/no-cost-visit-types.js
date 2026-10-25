@@ -45,4 +45,21 @@ function isAlwaysFreeServiceType(serviceType) {
   return ALWAYS_FREE_SERVICE_TYPE_RE.test(String(serviceType || ''));
 }
 
-module.exports = { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, isAlwaysFreeServiceType };
+// Consultation visits — the "Waves Assessment" advisory walkthrough (formerly
+// "Lawn Assessment"): no treatment, no catalog price. A consultation is not
+// an application, so a per-application plan's fee never prices it. Unlike
+// the always-free terms above, a consultation row that carries its OWN price
+// still bills that price; only the fee fallback is off. Billing Recovery
+// only — same whole-word matching, same bind-never-interpolate rule.
+const CONSULTATION_SERVICE_TYPE_REGEX_SOURCE = '(^|[^a-z0-9])assessments?($|[^a-z0-9])';
+const CONSULTATION_SERVICE_TYPE_RE = new RegExp(CONSULTATION_SERVICE_TYPE_REGEX_SOURCE, 'i');
+const CONSULTATION_SERVICE_TYPE_SQL_REGEX = CONSULTATION_SERVICE_TYPE_REGEX_SOURCE;
+
+function isConsultationServiceType(serviceType) {
+  return CONSULTATION_SERVICE_TYPE_RE.test(String(serviceType || ''));
+}
+
+module.exports = {
+  ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, isAlwaysFreeServiceType,
+  CONSULTATION_SERVICE_TYPE_SQL_REGEX, isConsultationServiceType,
+};

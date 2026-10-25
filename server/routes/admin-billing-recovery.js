@@ -32,7 +32,9 @@ const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { listAtRiskMrrAccounts } = require('../services/mrr-breakdown');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require('../services/no-cost-visit-types');
+const {
+  ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX, isConsultationServiceType,
+} = require('../services/no-cost-visit-types');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require('../services/billing-lane').stampedZeroFreeLive();
@@ -140,7 +142,11 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
     .whereRaw('COALESCE(sr.is_callback, false) = false')
     .whereRaw(`COALESCE(ss.prepaid_amount, 0) < ${effectivePriceSql}`) // not FULLY prepaid (partial surfaces in needs-review)
     .whereRaw(`${effectivePayerSql} IS NULL`) // self-pay only (v1); payer-billed = payer AP flow
-    .whereRaw("COALESCE(ss.service_type, '') !~* ?", [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX]);
+    .whereRaw("COALESCE(ss.service_type, '') !~* ?", [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX])
+    // A consultation (Waves Assessment) never takes the per-application fee
+    // (no-cost-visit-types), so one surfaces only on its OWN row price —
+    // the same result as dropping the fee arm from the effective price.
+    .whereRaw("NOT (COALESCE(ss.service_type, '') ~* ? AND COALESCE(ss.estimated_price, 0) <= 0)", [CONSULTATION_SERVICE_TYPE_SQL_REGEX]);
   // Conservative v1 scope (owner priority: never risk double-billing an autopay
   // customer). The completion predicate only treats autopay as covering NO-price
   // visits, so an autopay customer's one-off explicitly-priced visit is
@@ -205,6 +211,12 @@ router.get('/leaks', async (req, res) => {
         'c.monthly_rate',
         'c.waveguard_tier',
         ...(perAppAware ? ['c.billing_mode', 'c.per_application_fee'] : []),
+        // A voided invoice puts its visit back in this queue (HAS_INVOICE_SQL
+        // skips void), and the void often had a replacement elsewhere (another
+        // row, a combined or prepay invoice). Name it so the operator checks.
+        db.raw(`(SELECT i.invoice_number FROM invoices i
+          WHERE (i.service_record_id = sr.id OR i.scheduled_service_id = ss.id) AND i.status = 'void'
+          ORDER BY i.updated_at DESC NULLS LAST, i.created_at DESC LIMIT 1) AS voided_invoice_number`),
       )
       .orderBy('ss.completed_at', 'desc');
 
@@ -231,11 +243,12 @@ router.get('/leaks', async (req, res) => {
     const activeRows = prepayActiveRows.filter((_, i) => siblingStatuses[i] !== 'covered');
 
     // Effective price mirrors the query + the bill route: row price →
-    // per-application fee (never monthly_rate).
+    // per-application fee (never monthly_rate; never for a consultation).
     const effectivePrice = (r) => {
       const rowPrice = parseFloat(r.estimated_price || 0);
       if (rowPrice > 0) return rowPrice;
-      return r.billing_mode === 'per_application' ? parseFloat(r.per_application_fee || 0) : 0;
+      return r.billing_mode === 'per_application' && !isConsultationServiceType(r.service_type)
+        ? parseFloat(r.per_application_fee || 0) : 0;
     };
     const shape = (r) => ({
       scheduled_service_id: r.scheduled_service_id,
@@ -255,6 +268,7 @@ router.get('/leaks', async (req, res) => {
       leak_kind: r.service_record_id ? 'uninvoiced' : 'completed_no_service_record',
       // Dispatch-day deep link target for status-only rows (date-only string).
       scheduled_date: dueDateFromVisit({ service_date: r.scheduled_date }) || null,
+      voided_invoice_number: r.voided_invoice_number || null,
     });
 
     // Recurring (monthly_rate>0), partially-prepaid, ambiguous-type

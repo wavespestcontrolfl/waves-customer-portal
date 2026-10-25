@@ -7,7 +7,10 @@
 // lane 5). The SQL regex the two query consumers bind must agree with the
 // JS predicate on the same fixtures — the Postgres half runs only when
 // DATABASE_URL is set (any database: it evaluates a bare `~*`).
-const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const {
+  ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, isAlwaysFreeServiceType,
+  CONSULTATION_SERVICE_TYPE_SQL_REGEX, isConsultationServiceType,
+} = require('../services/no-cost-visit-types');
 
 const BILLABLE = [
   'Every 6 Weeks Lawn Care Service',
@@ -55,6 +58,26 @@ describe('isAlwaysFreeServiceType', () => {
   });
 });
 
+// Consultations (the Waves Assessment walkthrough, and its old "Lawn
+// Assessment" label) never take a per-application fee in Billing Recovery.
+// They are NOT always-free: a consultation row with its own price still bills.
+const CONSULTATION = ['Waves Assessment', 'Lawn Assessment', 'Lawn Assessment Service', 'waves_assessment', 'ASSESSMENTS'];
+const NOT_CONSULTATION = ['Quarterly Pest Control Service', 'Every 6 Weeks Lawn Care Service', 'Assessmentfee', 'WDO Inspection Service'];
+
+describe('isConsultationServiceType', () => {
+  test.each(CONSULTATION)('%s is a consultation', (t) => {
+    expect(isConsultationServiceType(t)).toBe(true);
+    expect(isAlwaysFreeServiceType(t)).toBe(false);
+  });
+  test.each(NOT_CONSULTATION)('%s is not a consultation', (t) => {
+    expect(isConsultationServiceType(t)).toBe(false);
+  });
+  test('empty / null are not consultations', () => {
+    expect(isConsultationServiceType('')).toBe(false);
+    expect(isConsultationServiceType(null)).toBe(false);
+  });
+});
+
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 postgres('ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX agrees with the JS predicate in Postgres', () => {
@@ -66,5 +89,9 @@ postgres('ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX agrees with the JS predicate in Pos
   test.each([...BILLABLE, ...ALWAYS_FREE])('%s', async (t) => {
     const row = await knex.raw('SELECT ? ~* ? AS free', [t, ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX]);
     expect(row.rows[0].free).toBe(isAlwaysFreeServiceType(t));
+  });
+  test.each([...CONSULTATION, ...NOT_CONSULTATION])('consultation regex agrees for %s', async (t) => {
+    const row = await knex.raw('SELECT ? ~* ? AS consultation', [t, CONSULTATION_SERVICE_TYPE_SQL_REGEX]);
+    expect(row.rows[0].consultation).toBe(isConsultationServiceType(t));
   });
 });

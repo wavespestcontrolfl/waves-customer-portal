@@ -141,6 +141,11 @@ function VisitRow({ visit, busy, billing, onBill, onFree }) {
         {statusOnly && (
           <div className="text-ui-caption text-alert-fg mt-1">Completed by status only — no service record yet</div>
         )}
+        {visit.voided_invoice_number && (
+          <div className="text-ui-caption text-ink-secondary mt-1">
+            Invoice {visit.voided_invoice_number} was voided — check for a replacement invoice before billing
+          </div>
+        )}
         </div>
       </TD>
       <TD data-label="Price" nums>{visit.price == null ? "—" : formatMoney(visit.price)}</TD>

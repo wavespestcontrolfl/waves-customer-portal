@@ -12,7 +12,7 @@ const { computeMrrBreakdown } = require('../mrr-breakdown');
 const { pendingPrepayIds } = require('../mrr-snapshot');
 const logger = require('../logger');
 const { whereLiveCustomer, CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../customer-stages');
-const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime, validCalendarDate } = require('../../utils/datetime-et');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime, validCalendarDate, dateOnlyString } = require('../../utils/datetime-et');
 
 // Internal/test customers excluded from sales-funnel analytics. Names are
 // matched lowercase against both estimates.customer_name (denormalized
@@ -1318,11 +1318,11 @@ async function getOutstandingBalances(input) {
 
     let age = 0;
     if (row.due_date) {
-      // due_date may arrive as 'YYYY-MM-DD' (string) or a Date object
-      // depending on the driver. Normalize via ET noon either way.
-      const dueStr = typeof row.due_date === 'string'
-        ? row.due_date.slice(0, 10)
-        : etDateString(new Date(row.due_date));
+      // due_date is a Postgres DATE: a 'YYYY-MM-DD' string, or (pg's default)
+      // a JS Date at UTC midnight. Take that calendar day as-is, then ET noon.
+      // Reading the Date as an ET instant lands on the PREVIOUS day and aged
+      // every invoice one day: a bill due today counted as overdue.
+      const dueStr = dateOnlyString(row.due_date);
       const dueET = parseETDateTime(`${dueStr}T12:00`);
       age = Math.floor((todayET - dueET) / 86400000);
     }
