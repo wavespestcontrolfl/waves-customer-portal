@@ -353,7 +353,7 @@ async function scorePickedHourByTech({
   return verdicts.filter((v) => v.fits).sort((a, b) => rank(a) - rank(b));
 }
 
-// Summary mode (GATE_RESCHEDULE_AVAILABILITY): the availability strip shows
+// Summary mode: the availability strip shows
 // a run of days around the picked one, so the search is bounded here rather
 // than by the 90-day ceiling the ranged Find-a-Time button gets.
 const SUMMARY_MAX_DAYS = 14;
@@ -368,7 +368,7 @@ function nextYmd(ymd) {
  * What one find-time request searches, for every caller: the range, the date
  * the picked hour's verdict is scored on, and the start step. The plain hint
  * and the ranged button get back exactly what they asked for. A summary
- * request (hint + summary:true + the gate) is narrowed three ways:
+ * request (hint + summary:true) is narrowed three ways:
  *   - it starts today at the earliest — the gap engine still walks past
  *     dates, and a past hour must not be ranked, listed or called a fit;
  *   - it covers at most SUMMARY_MAX_DAYS, so a debounced picker hint cannot
@@ -385,9 +385,9 @@ function summaryRequestError(message) {
   return err;
 }
 
-function hintSearchPlan({ hint, summary, summaryEnabled, from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes }) {
+function hintSearchPlan({ hint, summary, from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes }) {
   const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined;
-  if (!(hint && summary === true && summaryEnabled)) {
+  if (!(hint && summary === true)) {
     return { summary: false, from, to: maxTo && to > maxTo ? maxTo : to, verdictDate: from, step };
   }
   // The legacy ceiling (maxTo) is measured from the asked `from`; a summary

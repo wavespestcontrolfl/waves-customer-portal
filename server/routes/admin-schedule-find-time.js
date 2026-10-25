@@ -16,8 +16,7 @@
  *     arrivalWindows?,        // supported edit/drag picker opt-in
  *     hint?,                  // advisory best-times consumer — gated (GATE_BEST_TIME_HINTS)
  *     summary?,               // hint mode only: also answer `summary.days`, one row per date in
- *                             // the range with every hour that fits (GATE_RESCHEDULE_AVAILABILITY;
- *                             // gate off = the flag is ignored and the answer is the plain hint)
+ *                             // the range with every hour that fits (the availability strip)
  *     pickedDate?,            // summary mode: the date `pickedStart` is on (default dateFrom)
  *     compareTechs?,          // hint mode, all techs, gap mode: answer `pickedByTech` — the
  *                             // picked hour on every technician's route that fits it,
@@ -300,14 +299,13 @@ router.post('/', async (req, res) => {
     const maxTo = etDateString(addETDays(parseETDateTime(`${from}T12:00`), MAX_FIND_TIME_DAYS));
     // What this request searches (find-time-hints.js hintSearchPlan). Every
     // caller but one gets back exactly what it asked for; an availability-
-    // strip summary (hint + summary:true, behind its own call-time gate on
-    // top of the hint gate) is clamped to today, capped in length and forced
-    // hourly. Gate off = the flag is ignored and the plain hint answers. A
-    // summary it cannot answer (range in the past, picked date outside the
-    // range) throws a 400 the handler's catch reports like every other.
+    // strip summary (hint + summary:true, behind the hint gate) is clamped to
+    // today, capped in length and forced hourly. A summary it cannot answer
+    // (range in the past, picked date outside the range) throws a 400 the
+    // handler's catch reports like every other.
     const startedAt = Date.now();
     const plan = hintSearchPlan({
-      hint, summary, summaryEnabled: gateEnvValue('GATE_RESCHEDULE_AVAILABILITY'),
+      hint, summary,
       from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes,
     });
 

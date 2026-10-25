@@ -20,7 +20,6 @@ import useIsMobile from '../../hooks/useIsMobile';
 import psl from 'psl';
 import { TIMEZONE } from '../../lib/timezone';
 import { useBestTimes } from './useBestTimes';
-import BestTimeHint from './BestTimeHint';
 import AvailabilityStrip from './AvailabilityStrip';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -526,15 +525,13 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [selectedDate, selectedStart, selectedEnd, service.id]);
-  // Advisory best-times chips for the landing day in play — the custom
+  // Advisory availability strip for the landing day in play — the custom
   // picker's date when it's active, otherwise the highlighted preset's day.
   // On a rest-of-route move the hint advises the tapped visit only; that's
   // fine, it's advisory (commit still shifts siblings by the window delta).
   const landingDate = isCustom ? customDate : (selected?.date || null);
-  // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
-  // availability strip (days around the landing date) instead.
-  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
-    summary: true,
+  // One search answers the availability strip (days around the landing date).
+  const { availability } = useBestTimes({
     date: landingDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
@@ -548,10 +545,8 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
     // Quick Move can't reassign, so an unassigned visit's all-tech
     // detours would be unactionable — no tech, no hint.
     enabled: !!landingDate && !!(service.technicianId || service.technician_id),
-    // What the chosen hour costs (preset window or the custom field), and
-    // the cheapest date+hour from the earliest day the move can land.
+    // What the chosen hour costs (preset window or the custom field).
     pickedStart: isCustom ? customStart : selected?.window?.start,
-    rangeFrom: todayStr,
     // A same-day landing is floored at the next top-of-hour — raised
     // further by running_late (server enforces target_not_later). The
     // server applies it while choosing, so no chip ever advertises an
@@ -889,17 +884,6 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               style={{ marginTop: -8, marginBottom: 18 }}
               bestRows
               showRain
-            />
-            <BestTimeHint
-              bestTimes={bestTimes}
-              picked={picked}
-              bestInRange={bestInRange}
-              currentStart={isCustom ? customStart : selected?.window?.start}
-              currentDate={landingDate}
-              currentTechnicianId={service.technicianId || service.technician_id}
-              onPick={isCustom ? (slot) => setCustomStart(slot.start) : undefined}
-              onPickDate={isCustom && !options?.sameDayOnly ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
-              style={{ marginTop: -8, marginBottom: 18 }}
             />
 
             {customElapsed && (

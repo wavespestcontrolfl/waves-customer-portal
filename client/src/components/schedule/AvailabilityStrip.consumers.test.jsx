@@ -14,7 +14,7 @@ const hooks = vi.hoisted(() => ({ availability: null, conflicts: [] }));
 vi.mock('./useBestTimes', () => ({
   useBestTimes: (args) => {
     hooks.bestTimesArgs = args;
-    return { bestTimes: [], picked: null, bestInRange: null, availability: hooks.availability, checking: false };
+    return { pickedByTech: [], availability: hooks.availability, checking: false };
   },
 }));
 vi.mock('./useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: hooks.conflicts }) }));
@@ -81,7 +81,7 @@ it('drag-drop confirm: asks for the best-times rows and shows them display-only'
   expect(hooks.bestTimesArgs.serviceTypes).toBeUndefined();
 });
 
-it('drag-drop confirm with the gate off: no strip, the route warning stays', () => {
+it('drag-drop confirm with no availability answer: no strip, the route warning stays', () => {
   vi.stubGlobal('fetch', vi.fn(async () => json({ enabled: false })));
   hooks.conflicts = [ROUTE_WARNING];
   render(

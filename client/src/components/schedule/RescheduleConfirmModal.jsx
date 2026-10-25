@@ -22,8 +22,6 @@ import { Button } from '../ui';
 import { useSlotConflicts } from './useSlotConflicts';
 import SlotConflictNotice from './SlotConflictNotice';
 import { useBestTimes } from './useBestTimes';
-import { etDateString } from '../../lib/timezone';
-import BestTimeHint from './BestTimeHint';
 import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
 import SeriesMoveNotice from './SeriesMoveNotice';
 import {
@@ -113,14 +111,10 @@ export default function RescheduleConfirmModal({
     enabled: open && !!toStart,
   });
 
-  // Best times on the landing day — display-only by design: the landing
-  // window is fixed by the drop, so the chips carry no onPick (cancel and
-  // re-drop to take a suggestion). If the drop IS a best time, its chip
-  // shows as selected.
-  // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
-  // availability strip (days around the landing date) instead.
-  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
-    summary: true,
+  // Availability strip for the landing day (days around the landing date) —
+  // display-only by design: the landing window is fixed by the drop, so the
+  // chips carry no onPick (cancel and re-drop to take a suggestion).
+  const { availability } = useBestTimes({
     arrivalWindows: true,
     date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
     serviceId: serviceId != null ? serviceId : undefined,
@@ -134,7 +128,6 @@ export default function RescheduleConfirmModal({
     enabled: open && technicianId != null,
     pickedStart: toStart || undefined,
     pickedEnd: toEnd || undefined,
-    rangeFrom: etDateString(),
     // The same two best-times rows as New Appointment (owner 2026-10-08).
     // The server reads what the visit books from its own rows (serviceId).
     bestRows: true,
@@ -280,10 +273,9 @@ export default function RescheduleConfirmModal({
               ? (conflicts || []).filter((conflict) => !conflict.warning)
               : conflicts}
           />
-          {/* Display-only like the hint: the drop fixes the window, so the
-              chips carry no onPick (cancel and re-drop to take one). */}
+          {/* Display-only: the drop fixes the window, so the chips carry no
+              onPick (cancel and re-drop to take one). */}
           <AvailabilityStrip availability={availability} currentDate={toDate} currentStart={toStart} currentTechnicianId={technicianId} bestRows showRain />
-          <BestTimeHint bestTimes={bestTimes} picked={picked} bestInRange={bestInRange} currentStart={toStart} currentDate={toDate} />
         </div>
 
         {/* Footer */}

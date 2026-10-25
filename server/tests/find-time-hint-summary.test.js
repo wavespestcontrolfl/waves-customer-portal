@@ -1,12 +1,11 @@
 /**
  * POST /admin/schedule/find-time — hint summary mode (the reschedule
- * availability strip's data), behind GATE_RESCHEDULE_AVAILABILITY.
+ *  availability strip's data).
  *
  * What this locks down:
- *  1. With the summary gate OFF the flag is ignored: no `summary`, the same
- *     top-N slots, and a picked verdict with no `reason` — the three-line
- *     hint's contract is untouched.
- *  2. With it ON the answer carries one row per date in the searched range,
+ *  1. A hint request without `summary: true` gets no `summary`, the same
+ *     top-N slots, and a picked verdict with no `reason`.
+ *  2. A summary request's answer carries one row per date in the searched range,
  *     empty days included, each empty day's status taken from the engine's
  *     per-date refusal reasons; the engine-internal counts never leave.
  *  3. The search is capped at 14 days however wide the request.
@@ -77,7 +76,7 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
-const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_RESCHEDULE_AVAILABILITY', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
 const ORIGINAL = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 afterAll(() => {
   for (const name of GATES) {
@@ -130,8 +129,8 @@ const BASE = {
   dateFrom: '2026-09-01', dateTo: '2026-09-05',
 };
 
-test('summary gate off: the flag is ignored and the plain hint answers', async () => {
-  const res = await post({ ...BASE, summary: true, topN: 1, pickedDate: '2026-09-03', pickedStart: '13:00' });
+test('without summary:true the plain hint answers', async () => {
+  const res = await post({ ...BASE, topN: 1, pickedDate: '2026-09-03', pickedStart: '13:00' });
   expect(res.status).toBe(200);
   const body = await res.json();
   expect(body.summary).toBeUndefined();
@@ -140,8 +139,7 @@ test('summary gate off: the flag is ignored and the plain hint answers', async (
   expect(body.picked).toEqual({ start: '13:00', fits: false });
 });
 
-test('summary gate on: one row per date, empty days carry a status, hours in clock order', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
+test('one row per date, empty days carry a status, hours in clock order', async () => {
   const res = await post({ ...BASE, summary: true, topN: 1 });
   expect(res.status).toBe(200);
   const body = await res.json();
@@ -165,7 +163,6 @@ test('summary gate on: one row per date, empty days carry a status, hours in clo
 });
 
 test('gap mode lists every start in a multi-hour gap, vetoing only the occupied hours', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   // The gap engine emits ONE candidate per route gap: earliest start plus
   // latest_start_min. A free 09:00–13:00 gap fits a one-hour visit at 9, 10,
   // 11 and 12.
@@ -194,7 +191,6 @@ test('gap mode lists every start in a multi-hour gap, vetoing only the occupied 
 });
 
 test('a gap ending at an after-hours stop lists no hour past the day close', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   // Next anchor is an 18:30 stop, so latest_start_min (17:00) runs past the
   // 17:00 close; the last hour a one-hour visit can hold is 16:00.
   findAvailableSlots.mockResolvedValue({
@@ -215,7 +211,6 @@ test('a hint search spends no Google drive-time; the ranged button keeps it', as
 });
 
 test('summary days carry the calendar: closed days (blackout, Sunday) and the technician off', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
   const { absentTechDays } = require('../services/technician-eligibility');
   getBlackoutDates.mockResolvedValueOnce(new Set(['2026-09-03']));
@@ -239,13 +234,11 @@ test('summary days carry the calendar: closed days (blackout, Sunday) and the te
 });
 
 test('summary is a hint-mode construct: ignored without the hint flag', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   const body = await (await post({ ...BASE, hint: undefined, summary: true })).json();
   expect(body.summary).toBeUndefined();
 });
 
 test('the summary search is capped at 14 days however wide the request', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   const res = await post({ ...BASE, dateTo: '2026-11-30', summary: true });
   expect(res.status).toBe(200);
   const body = await res.json();
@@ -258,7 +251,6 @@ test('the summary search is capped at 14 days however wide the request', async (
 });
 
 test('a summary never searches before today: the engine, the range and every field start today', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   findAvailableSlots.mockResolvedValue({ slots: [slot('2026-09-01', '09:00', 3)], evaluated: 1 });
   const body = await (await post({ ...BASE, dateFrom: '2026-08-29', dateTo: '2026-09-01', summary: true })).json();
   // The gap engine walks whatever range it is given — past dates included —
@@ -276,7 +268,6 @@ test('a summary never searches before today: the engine, the range and every fie
 });
 
 test('a summary is hourly whatever step the caller sends', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   findAvailableSlots.mockResolvedValue({
     slots: [slot('2026-09-01', '09:00', 4, { latest_start_min: 11 * 60 })], evaluated: 1,
   });
@@ -285,14 +276,12 @@ test('a summary is hourly whatever step the caller sends', async () => {
     expect(findAvailableSlots.mock.lastCall[0].slotStepMinutes).toBe(60);
     expect(body.summary.days[0].hours.map((hour) => hour.start_time)).toEqual(['09:00', '10:00', '11:00']);
   }
-  // Gate off: the caller's step is its own again.
-  delete process.env.GATE_RESCHEDULE_AVAILABILITY;
-  await post({ ...BASE, slotStepMinutes: 15, dateTo: '2026-09-01', summary: true });
+  // Without summary:true the caller's step is its own.
+  await post({ ...BASE, slotStepMinutes: 15, dateTo: '2026-09-01' });
   expect(findAvailableSlots.mock.lastCall[0].slotStepMinutes).toBe(15);
 });
 
 test('gap mode: the verdict is scored on pickedDate and names no_gap / occupied', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   const req = { ...BASE, summary: true, pickedDate: '2026-09-03' };
   // 09:00 on Sep 3 sits in a gap; on Sep 1 (dateFrom) it would too — the
   // technician proves which day was scored.
@@ -316,7 +305,6 @@ test('gap mode: the verdict is scored on pickedDate and names no_gap / occupied'
 });
 
 test('an hour no verdict can cover answers fits:null with a reason, never a miss', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   const req = { ...BASE, summary: true, pickedDate: '2026-09-03' };
   for (const extra of [{ pickedStart: '09:15' }, { pickedStart: '10:00', pickedEnd: '09:00' }, { pickedStart: '05:00' }]) {
     const body = await (await post({ ...req, ...extra })).json();
@@ -325,7 +313,6 @@ test('an hour no verdict can cover answers fits:null with a reason, never a miss
 });
 
 test('arrival mode: the route checker runs on pickedDate and its reason passes through', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
   const db = require('../models/db');
   db.raw = jest.fn((sql) => sql);
@@ -371,7 +358,6 @@ test('arrival mode: the route checker runs on pickedDate and its reason passes t
 });
 
 test('garbage summary / pickedDate 400 before the engine runs; pickedDate must be in range', async () => {
-  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   // 2026-09-31 has the right shape and sorts inside a Sept–Oct range, but names no day.
   for (const extra of [
     { summary: 'yes' }, { summary: 1 }, { pickedDate: '09/03/2026' }, { pickedDate: 20260903 },
@@ -389,27 +375,26 @@ describe('summary helpers', () => {
   test('hintSearchPlan leaves every non-summary request exactly as asked', () => {
     const asked = { from: '2026-08-01', to: '2026-11-01', today: '2026-08-31', slotStepMinutes: 15, pickedDate: '2026-09-03' };
     for (const flags of [
-      { hint: false, summary: true, summaryEnabled: true },
-      { hint: true, summary: false, summaryEnabled: true },
-      { hint: true, summary: true, summaryEnabled: false },
+      { hint: false, summary: true },
+      { hint: true, summary: false },
     ]) {
       expect(hintSearchPlan({ ...asked, ...flags })).toEqual({ summary: false, from: '2026-08-01', to: '2026-11-01', verdictDate: '2026-08-01', step: 15 });
     }
-    expect(hintSearchPlan({ ...asked, hint: true, summary: true, summaryEnabled: true }))
+    expect(hintSearchPlan({ ...asked, hint: true, summary: true }))
       .toEqual({ summary: true, from: '2026-08-31', to: '2026-09-13', verdictDate: '2026-08-31', step: 60 });
-    expect(hintSearchPlan({ ...asked, pickedStart: '09:00', hint: true, summary: true, summaryEnabled: true }).verdictDate).toBe('2026-09-03');
+    expect(hintSearchPlan({ ...asked, pickedStart: '09:00', hint: true, summary: true }).verdictDate).toBe('2026-09-03');
     expect(hintSearchPlan({ ...asked, slotStepMinutes: undefined, hint: true }).step).toBeUndefined();
   });
 
   test('the legacy 90-day ceiling caps a plain request but not a long-overdue summary', () => {
     const overdue = { from: '2026-05-01', to: '2026-09-10', maxTo: '2026-07-30', today: '2026-08-31' };
     expect(hintSearchPlan({ ...overdue, hint: true }).to).toBe('2026-07-30');
-    expect(hintSearchPlan({ ...overdue, hint: true, summary: true, summaryEnabled: true }))
+    expect(hintSearchPlan({ ...overdue, hint: true, summary: true }))
       .toEqual({ summary: true, from: '2026-08-31', to: '2026-09-10', verdictDate: '2026-08-31', step: 60 });
   });
 
   test('an omitted pickedDate defaults to dateFrom, so a past pick is out of range', () => {
-    const past = { hint: true, summary: true, summaryEnabled: true, from: '2026-08-20', to: '2026-09-10', today: '2026-08-31' };
+    const past = { hint: true, summary: true, from: '2026-08-20', to: '2026-09-10', today: '2026-08-31' };
     expect(() => hintSearchPlan({ ...past, pickedStart: '09:00' })).toThrow('pickedDate must be inside the searched range');
     expect(hintSearchPlan({ ...past, pickedStart: '09:00', from: '2026-09-02' }).verdictDate).toBe('2026-09-02');
     expect(hintSearchPlan({ ...past, pickedStart: '09:00', pickedDate: '2026-09-03' }).verdictDate).toBe('2026-09-03');

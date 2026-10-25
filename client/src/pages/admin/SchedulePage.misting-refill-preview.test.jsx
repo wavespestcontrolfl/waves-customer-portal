@@ -9,7 +9,7 @@ import { EditServiceModal } from './SchedulePage';
 
 vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
 vi.mock('../../components/schedule/useBestTimes', () => ({
-  useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: [], availability: undefined }),
+  useBestTimes: () => ({ pickedByTech: [], availability: undefined }),
 }));
 
 const service = { id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account', serviceType: 'Mosquito Misting Service Plan', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00', status: 'confirmed' };

@@ -10,7 +10,7 @@ const bestTimesState = vi.hoisted(() => ({ availability: undefined }));
 vi.mock('../../components/schedule/useBestTimes', () => ({
   useBestTimes: (args) => {
     bestTimesState.args = args;
-    return { bestTimes: [], picked: null, bestInRange: [], availability: bestTimesState.availability };
+    return { pickedByTech: [], availability: bestTimesState.availability };
   },
 }));
 const saveNotice = vi.hoisted(() => ({ shown: [] }));
