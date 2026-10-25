@@ -135,3 +135,42 @@ test('the why stays inside 110 characters even for a long cause', async () => {
   expect(raised(deps)).toHaveLength(1);
   expect(raised(deps)[0][2].length).toBeLessThanOrEqual(110);
 });
+
+// GATE_AUTO_DISPATCH_ARRIVAL_SEARCH (owner 2026-10-24) makes the slot search
+// slower; past AUTO_DISPATCH_PROOFREADER_DEADLINE_SECONDS a planned move is
+// "not asked" and stays put. A night where that stopped every check rang
+// nothing before (deadline is not a broken check).
+test('a night the deadline stopped every check: one notice that says the run ran out of time', async () => {
+  const deps = depsOf();
+  const state = tally({ calls: 0, unsure: 0, broke: 0, brokeCause: null, notAsked: 4, timedOut: 4 });
+  expect(await checkDown.noteRun(state, { nowDate: NOW, deps })).toEqual({ action: 'down' });
+  const [, , body, opts] = raised(deps)[0];
+  expect(body).toBe('4 planned moves stayed put: no move check could run (the run ran out of time).');
+  expect(opts.detail).toContain('no check could run (deadline): the run reached its time limit for move checks');
+  expect(opts.detail).toContain('AUTO_DISPATCH_PROOFREADER_DEADLINE_SECONDS');
+  expect(opts.detail).toContain('GATE_AUTO_DISPATCH_ARRIVAL_SEARCH');
+  expect(opts.detail).not.toContain('spend limit');
+  expect(opts.metadata).toMatchObject({ cause: 'deadline', broke: 0 });
+});
+
+test('broken and timed-out checks on one night: the broken cause names it, and both count', async () => {
+  const deps = depsOf();
+  await checkDown.noteRun(tally({ broke: 2, unsure: 2, notAsked: 3, timedOut: 3 }), { nowDate: NOW, deps });
+  const [, , body, opts] = raised(deps)[0];
+  expect(body).toBe('5 planned moves stayed put: every move check failed (the provider refused the call).');
+  expect(opts.metadata).toMatchObject({ cause: 'anthropic_400', broke: 2 });
+});
+
+test('timed-out checks on a night another check answered: no notice, and a standing one closes', async () => {
+  const deps = depsOf();
+  expect(await checkDown.noteRun(tally({ broke: 0, unsure: 0, answered: 2, notAsked: 3, timedOut: 3 }), { nowDate: NOW, deps }))
+    .toEqual({ action: 'closed' });
+  expect(raised(deps)).toHaveLength(0);
+});
+
+test('checks stopped only by the call cap (not the deadline) still change nothing', async () => {
+  const deps = depsOf();
+  expect(await checkDown.noteRun(tally({ calls: 60, broke: 0, unsure: 0, notAsked: 4, timedOut: 0 }), { nowDate: NOW, deps }))
+    .toEqual({ action: 'none' });
+  expect(raised(deps)).toHaveLength(0);
+});

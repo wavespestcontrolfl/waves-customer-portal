@@ -587,6 +587,68 @@ describe('class rules', () => {
     expect((await reasonFor(leadNote())).cls).toBe('new_lead');
   });
 
+  // The fake answers the contact read (sms_log through deliveredTexts) with
+  // whatever rows it holds; the delivered-text SQL is auto-text-holds.js's own.
+  test('repeat-form alert (codex #6625 P2s): closed once a staff text reached the lead after its latest form, or by work on the lead; a call row, an automated text or another customer\'s text never counts', async () => {
+    const repeat = () => note({
+      category: 'lead', link: `/admin/leads?lead=${LEAD}`,
+      metadata: { dedupeKey: `lead-repeat-form:${CUST}`, customerId: CUST, leadId: LEAD, source: 'lead_repeat_form' },
+    });
+    mockTables.leads = [lead()];
+    expect(await reasonFor(repeat())).toEqual({ cls: 'lead_repeat_form', reason: null });
+    // A staff text after the alert closes it; one from before its latest form
+    // never does (a later form re-rings the row and moves its time).
+    mockTables.sms_log = [{ customer_id: CUST, direction: 'outbound', message_type: 'manual', latest_created_at: AFTER_BELL }];
+    expect((await reasonFor(repeat())).reason).toBe('Lead was contacted');
+    expect((await reasonFor({ ...repeat(), created_at: new Date('2026-09-27T16:00:00Z') })).reason).toBeNull();
+    // An automated text, or another customer's staff text, never counts.
+    mockTables.sms_log = [
+      { customer_id: CUST, direction: 'outbound', message_type: 'auto_reply', latest_created_at: AFTER_BELL },
+      { customer_id: uid(99), direction: 'outbound', message_type: 'manual', latest_created_at: AFTER_BELL },
+    ];
+    expect((await reasonFor(repeat())).reason).toBeNull();
+    // A dialer call row is not contact, even one staff bridged after the alert:
+    // it is written before Twilio dials and does not prove the lead answered.
+    mockTables.sms_log = [];
+    mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'admin-click', bridged_at: AFTER_BELL, created_at: AFTER_BELL }];
+    expect((await reasonFor(repeat())).reason).toBeNull();
+    mockTables.call_log = [];
+    // Work on the lead after the alert closes it too. The fake answers the
+    // handoff witness (handedOffWithin + the ownership fence) with whatever
+    // estimates it holds; a suppressed send is proved in the Postgres suite.
+    mockTables.estimates = [{ id: EST, customer_id: CUST, sent_at: AFTER_BELL }];
+    expect((await reasonFor(repeat())).reason).toBe('Estimate was sent');
+    mockTables.estimates = [];
+    mockTables.leads = [lead()];
+    mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: AFTER_BELL }];
+    expect((await reasonFor(repeat())).reason).toBe('A visit was booked');
+    mockTables.scheduled_services = [];
+    mockTables.leads = [lead({ deleted_at: AFTER_BELL })];
+    expect((await reasonFor(repeat())).reason).toBe('Lead was deleted');
+    // A lead marked handled before this form is the lead coming back: still open
+    // (the new-lead bell's handled shortcut does not apply).
+    mockTables.leads = [lead({ status: 'handled' })];
+    expect((await reasonFor(repeat())).reason).toBeNull();
+    // Another Leads alert is not this class.
+    expect(classify(note({ category: 'lead', metadata: { dedupeKey: `sms-lead:${LEAD}`, customerId: CUST } }))).toBeNull();
+  });
+
+  test('repeat-form alert with no lead row (it opens the customer): a quote, a booking or contact for that customer still closes it', async () => {
+    const customerOnly = () => note({
+      category: 'lead', link: `/admin/customers?customerId=${CUST}`,
+      metadata: { dedupeKey: `lead-repeat-form:${CUST}`, customerId: CUST, leadId: null, source: 'lead_repeat_form' },
+    });
+    expect(await reasonFor(customerOnly())).toEqual({ cls: 'lead_repeat_form', reason: null });
+    mockTables.estimates = [{ id: EST, customer_id: CUST, sent_at: AFTER_BELL }];
+    expect((await reasonFor(customerOnly())).reason).toBe('Estimate was sent');
+    mockTables.estimates = [];
+    mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: AFTER_BELL }];
+    expect((await reasonFor(customerOnly())).reason).toBe('A visit was booked');
+    mockTables.scheduled_services = [];
+    mockTables.sms_log = [{ customer_id: CUST, direction: 'outbound', message_type: 'manual', latest_created_at: AFTER_BELL }];
+    expect((await reasonFor(customerOnly())).reason).toBe('Lead was contacted');
+  });
+
   test('customer-contact bells and money-owed alerts are never in the table, whatever their metadata says', () => {
     const lookalike = { customerId: CUST, invoiceId: INV, scheduled_service_id: VISIT, alertKind: 'diverged', seriesMoveId: 'm', estimateId: EST, payload: { leadId: LEAD } };
     for (const category of ['inbound_sms', 'inbound_email', 'missed_call', 'voicemail_callback', 'review', 'payment', 'payment_failed', 'refund', 'dispute', 'system']) {
@@ -898,6 +960,14 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     mockTables.notifications = [chaser];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0, retired: 0 });
     expect([chaser.done_by, chaser.resolution]).toEqual(['relevance', 'The promise was closed']);
+  });
+
+  test('a repeat-form retirement is final: never put back beside the fresh row the lead\'s next form rings', async () => {
+    mockTables.leads = [lead()];
+    const bell = swept(note({ category: 'lead', link: `/admin/leads?lead=${LEAD}`, metadata: { dedupeKey: `lead-repeat-form:${CUST}`, customerId: CUST, leadId: LEAD } }), 'Lead was contacted');
+    mockTables.notifications = [bell];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0, retired: 0 });
+    expect([bell.done_by, bell.resolution]).toEqual(['relevance', 'Lead was contacted']);
   });
 
   test('a retired bell whose subject is relevant again is unread again with the stamp gone; one still moved on stays retired', async () => {

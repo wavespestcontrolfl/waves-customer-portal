@@ -468,7 +468,7 @@ export default function LoginPage() {
             font-size: 32px;
           }
           .portal-login-brand p {
-            font-size: 15px;
+            font-size: 16px;
           }
           .portal-login-tools {
             grid-template-columns: 1fr;
@@ -572,6 +572,7 @@ export default function LoginPage() {
                 type="submit"
                 className="portal-login-submit"
                 data-glass-accent=""
+                data-glass-size="primary"
                 style={{ position: 'relative' }}
                 disabled={submitDisabled}
                 aria-live="polite"
@@ -652,7 +653,7 @@ export default function LoginPage() {
               <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
                 Your home team, one tap away.
               </div>
-              <div style={{ marginTop: 6, fontSize: 14, color: '#3F4A65', lineHeight: 1.5, maxWidth: 420, marginLeft: 'auto', marginRight: 'auto' }}>
+              <div style={{ marginTop: 6, fontSize: 16, color: '#3F4A65', lineHeight: 1.5, maxWidth: 420, marginLeft: 'auto', marginRight: 'auto' }}>
                 See when we're coming, read every report the moment it's ready, and pay in seconds.
               </div>
               <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center' }}>

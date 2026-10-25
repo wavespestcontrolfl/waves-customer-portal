@@ -34,26 +34,16 @@ const renderModal = (props = {}) => render(
   </MemoryRouter>,
 );
 
-describe('CreateAppointmentModal defaultQuickAddAddress', () => {
-  it('opens New customer with the address filled and creates nothing', () => {
-    const fetcher = stubFetch();
-    renderModal({ defaultQuickAddAddress: { address: '100 Example Way', city: 'Bradenton', state: 'FL', zip: '34200' } });
-    expect(screen.getByLabelText('quick-add address').value).toBe('100 Example Way');
-    expect(screen.getByDisplayValue('Bradenton')).toBeTruthy();
-    expect(screen.getByDisplayValue('34200')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Add customer' })).toBeTruthy();
-    const writes = fetcher.mock.calls.filter(([, options]) => options?.method && options.method !== 'GET');
-    expect(writes).toEqual([]);
-  });
-
+describe('CreateAppointmentModal New customer address', () => {
   it('a re-geocode of the address keeps its apartment unit (Codex #6411 r1)', () => {
     stubFetch();
-    renderModal({ defaultQuickAddAddress: { address: '200 Example Way Apt 4', city: 'Bradenton', state: 'FL', zip: '34200' } });
+    renderModal();
+    fireEvent.click(screen.getByText('+ New customer'));
     fireEvent.click(screen.getByText('regeocode'));
     expect(screen.getByLabelText('quick-add address').value).toBe('200 Example Way Apt 4');
   });
 
-  it('leaves New customer closed without it', () => {
+  it('leaves New customer closed on open', () => {
     stubFetch();
     renderModal();
     expect(screen.queryByRole('button', { name: 'Add customer' })).toBeNull();

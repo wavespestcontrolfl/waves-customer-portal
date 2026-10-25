@@ -43,6 +43,7 @@ const {
   buildAutomatedLeadDraftEstimate,
   evaluateLeadEstimateAutomationReadiness,
 } = require('../services/lead-estimate-automation');
+const { cachedLeadMeasurements, pendingLeadMeasurements, scheduleLeadDraftPropertyLookup } = require('../services/lead-draft-measurements');
 
 const LEAD_PREFILL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -650,7 +651,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // Customer record + interaction note are written above so we still have an
       // audit trail. Existing customers must not continue into lead acquisition:
       // no new-lead notifications, lead auto-replies, lead intake state, draft
-      // estimates, leads rows, or lead-agent processing.
+      // estimates, leads rows, or lead-agent processing. A row that is still a
+      // lead is the one exception under GATE_LEAD_REPEAT_FORM: it keeps an open
+      // intake state (buildExistingCustomerLeadUpdates) and rings one Leads
+      // alert (ringRepeatFormAlert); still no text, lead row or draft here.
       //
       // The voicemail text-back prefill attach DOES still run here: the open
       // call-pipeline lead predates this customers row (voicemail recovery
@@ -686,6 +690,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       } catch (attachErr) {
         logger.warn(`[lead-webhook] existing-customer prefill attach failed: ${attachErr.message}`);
       }
+      // A double submit inside the 5-minute window rings nothing more.
+      if (!isDuplicateSubmission) await ringRepeatFormAlert(customer, attachedLead?.id || null);
       return res.json({
         success: true,
         customerId: customer.id,
@@ -911,6 +917,26 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     let createdEstimateId = null;
     let createdEstimateServiceInterest = serviceInterest || null;
     let automatedDraftEstimate = null;
+    // The live catalog verdict rides with the key: a cadence edit or the
+    // termite rental gate can turn an instant product into quote-on-
+    // request after the map was written, and the draft must follow the
+    // catalog as it is NOW, not the static map (pre-push codex P1).
+    // A submitted key that could NOT be verified (catalog read failed,
+    // or the key is not publicly selectable) must never fall back to
+    // label inference — the label lookalike is exactly the mispricing
+    // the key exists to prevent (GH codex #3585 r4 P1). The lead is
+    // still captured; only the automated draft parks.
+    const draftReadiness = {
+      ...estimateAutomationReadiness,
+      serviceKey: leadServiceKey,
+      serviceKeyInstant: keyedService ? keyedService.instant === true : null,
+      serviceKeyUnverified: !!serviceKey && !keyedService,
+    };
+    // County home and lot size from the lookup cache (null while
+    // GATE_LEAD_DRAFT_PROPERTY_LOOKUP is off), read BEFORE the phone lock:
+    // the read takes its own pool connection, which must never wait while
+    // the lock's transaction holds one.
+    const draftMeasurements = draftReadiness.ready ? await cachedLeadMeasurements(fullAddress) : null;
     try {
       await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {
         const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phoneFormatted, { database: trx });
@@ -922,21 +948,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             intake,
             customer,
             body,
-            // The live catalog verdict rides with the key: a cadence edit or the
-            // termite rental gate can turn an instant product into quote-on-
-            // request after the map was written, and the draft must follow the
-            // catalog as it is NOW, not the static map (pre-push codex P1).
-            // A submitted key that could NOT be verified (catalog read failed,
-            // or the key is not publicly selectable) must never fall back to
-            // label inference — the label lookalike is exactly the mispricing
-            // the key exists to prevent (GH codex #3585 r4 P1). The lead is
-            // still captured; only the automated draft parks.
-            readiness: {
-              ...estimateAutomationReadiness,
-              serviceKey: leadServiceKey,
-              serviceKeyInstant: keyedService ? keyedService.instant === true : null,
-              serviceKeyUnverified: !!serviceKey && !keyedService,
-            },
+            readiness: draftReadiness,
+            measurements: draftMeasurements,
           });
           const crypto = require('crypto');
           const estimateToken = crypto.randomBytes(16).toString('hex');
@@ -969,12 +982,25 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             lead_source_detail: leadSource.detail,
             token: estimateToken,
             estimate_data: JSON.stringify(estimateData),
-            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(estimateAutomationReadiness)}${draftAutomationNote}`,
+            // The draft's own intake record: on a county-sized draft its
+            // review names the county size, not the default.
+            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(draftAutomation?.readiness || estimateAutomationReadiness)}${draftAutomationNote}`,
           }).returning(['id', 'service_interest']);
           createdEstimateId = estimateRow?.id || null;
           createdEstimateServiceInterest = estimateRow?.service_interest || createdEstimateServiceInterest;
         }
       });
+      // A draft priced on the default size gets the county's real home and
+      // lot size from one background property lookup, after the row is
+      // committed (GATE_LEAD_DRAFT_PROPERTY_LOOKUP). The rebuild reuses this
+      // submission's own inputs; the website's answer never waits on it.
+      if (createdEstimateId && automatedDraftEstimate?.automation?.sizeSource === 'default') {
+        scheduleLeadDraftPropertyLookup({
+          estimateId: createdEstimateId,
+          address: fullAddress,
+          rebuild: (measurements) => buildAutomatedLeadDraftEstimate({ intake, customer, body, readiness: draftReadiness, measurements }),
+        });
+      }
     } catch (estErr) {
       logger.error(`Lead estimate creation failed: ${estErr.message}`);
     }
@@ -1237,6 +1263,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                 customer,
                 body,
                 readiness: triageReadiness,
+                // The county sizes the draft's background lookup proves, when
+                // one is still in flight: this write would otherwise land
+                // first, on the defaults, and the lookup's re-price then
+                // stands down for a row it no longer recognizes.
+                measurements: await pendingLeadMeasurements(createdEstimateId),
               });
               const estimateUpdateQuery = db('estimates')
                 .where({
@@ -2197,8 +2228,72 @@ function buildExistingCustomerLeadUpdates({ existing, leadSource }) {
   const updates = { last_contact_date: new Date(), last_contact_type: 'form_submission' };
   if (!existing.lead_source) updates.lead_source = leadSource.source;
   if (!existing.lead_source_detail) updates.lead_source_detail = leadSource.detail;
-  if (existing.lead_intake_status) updates.lead_intake_status = null;
+  // A repeat form from a lead keeps an open intake state: clearing it dropped
+  // the lead's next CALL / TEXT note and its draft quote (2026-10-15: a lead
+  // sent the form again 29 s before replying TEXT).
+  const keepsIntake = isRepeatFormFromLead(existing) && OPEN_INTAKE_STATUSES.includes(existing.lead_intake_status);
+  if (existing.lead_intake_status && !keepsIntake) updates.lead_intake_status = null;
   return updates;
+}
+
+// Pipeline stages a row holds before it is a customer (the stageMap in
+// services/pipeline-manager.js). Any other stage, or none, is a customer.
+const LEAD_PIPELINE_STAGES = ['new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'lost'];
+// The intake states our lead text opens; lead-intake.js answers the lead's
+// next text from them.
+const OPEN_INTAKE_STATUSES = ['awaiting_service', 'awaiting_address'];
+
+// GATE_LEAD_REPEAT_FORM (owner 2026-10-24, "A: both parts"): a form whose
+// phone matches a row that is still a lead comes from that same lead, whose
+// texts still answer our lead text.
+function isRepeatFormFromLead(existing) {
+  return isEnabled('leadRepeatForm') && LEAD_PIPELINE_STAGES.includes(existing?.pipeline_stage);
+}
+
+// One Leads alert for a form from a row that is still a lead. Before, such a
+// form wrote only a note: from Aug 17 to Oct 18 five leads sent the form again
+// and nobody was told. One open row per lead: each form is a new version, so a
+// form while the row is open rings it again and moves its time to that form;
+// the relevance sweep judges contact against that time. Never throws; the
+// form is already saved.
+async function ringRepeatFormAlert(customer, attachedLeadId = null) {
+  if (!isRepeatFormFromLead(customer)) return;
+  try {
+    const { raiseAdminAlert } = require('../services/admin-alert-compose');
+    const { fitAction, fullName, shortDateET, tidyName } = require('../services/admin-alert-names');
+    const leadId = attachedLeadId || (await db('leads')
+      .where({ customer_id: customer.id })
+      .whereNull('deleted_at')
+      .orderBy('created_at', 'desc')
+      .first('id'))?.id || null;
+    const first = tidyName(customer.first_name) || 'The lead';
+    const since = shortDateET(customer.created_at);
+    await raiseAdminAlert('lead', {
+      area: 'Leads',
+      action: fitAction('Leads', fullName(customer) || 'a lead', [
+        (who) => `call ${who} about the quote form`,
+        (who) => `call ${who}`,
+      ]),
+      why: since
+        ? `${first} sent the quote form; on file as a lead since ${since}.`
+        : `${first} sent the quote form and is still a lead.`,
+      severity: 'needs-you',
+      link: leadId ? `/admin/leads?lead=${leadId}` : `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+      subject: leadId ? { type: 'lead', id: String(leadId) } : { type: 'customer', id: String(customer.id) },
+      doneWhen: 'lead_contacted',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `lead-repeat-form:${customer.id}`,
+      dedupeOpenOnly: true,
+      refreshOnDedupe: true,
+      bumpOnRefresh: true,
+      dedupeVersion: new Date().toISOString(),
+      metadata: { customerId: customer.id, leadId, source: 'lead_repeat_form' },
+    });
+  } catch (e) {
+    logger.error(`[lead-webhook] repeat-form alert failed for customer ${customer.id}: ${e.code || e.name || 'error'}`);
+  }
 }
 
 module.exports = router;
@@ -2208,6 +2303,7 @@ module.exports._test = {
   leadCommercialSignalFromReadiness,
   commercialLeadFields,
   buildExistingCustomerLeadUpdates,
+  ringRepeatFormAlert,
   attachVoicemailPrefillLead,
   attachOpenCallLeadByPhone,
   scrubLeadAlertProviderError,

@@ -267,6 +267,14 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/dashboard');
   });
 
+  test('address redaction never starts at a clock time: the time stays, the street goes', () => {
+    const at = (body) => __private.sanitizeBuiltNotification({ title: 't', body, link: '/admin' }).body;
+    expect(at('Monday, Nov 2 at 8:00 AM at 421 Spring Ave')).toBe('Monday, Nov 2 at 8:00 AM at [address]');
+    expect(at('Visit 8 AM at 421 Spring Ave')).toBe('Visit 8 AM at [address]');
+    expect(at('Tue 10:30 am, 12 Oak Dr')).toBe('Tue 10:30 am, [address]');
+    expect(at('Address:421 Spring Ave')).toBe('Address:[address]');
+  });
+
   test('phone redaction leaves digit runs inside identifiers alone', () => {
     // payment_failed: any non-exempt trigger — twilio_failure is
     // allowContactDetails (owner ruling 2026-07-30) and skips redaction.
@@ -401,8 +409,8 @@ describe('triggerNotification bell outcome', () => {
     expect(took.metadata.payload).toMatchObject({ twilioSid: 'SM-new', textCount: 3 });
   });
 
-  // The bell title always matches the text the row displays: a label belongs to ONE text
-  // (GATE_LEAD_CALL_TEXT_PREFERENCE), the next newer text replaces it, an older late text cannot move it.
+  // The bell title always matches the text the row displays: a label belongs to ONE text,
+  // the next newer text replaces it, an older late text cannot move it.
   describe('lead CALL / TEXT label on a standing thread row', () => {
     const ring = async (payload, keepOlder) => {
       NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'thread-row', deduped: true, refreshed: true });

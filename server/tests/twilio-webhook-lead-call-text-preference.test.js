@@ -1,4 +1,4 @@
-// Inbound SMS webhook plumbing for GATE_LEAD_CALL_TEXT_PREFERENCE: when the
+// Inbound SMS webhook plumbing for the lead CALL / TEXT preference: when the
 // intake machine reports a bare CALL / TEXT choice (it consumes nothing), the
 // reply still takes the ordinary known-sender bell path and that bell is told
 // the choice. Without the choice the bell call is exactly as before. Real
@@ -94,6 +94,9 @@ jest.mock('../services/lead-intake', () => ({
   recordCallTextReply: (...args) => mockRecord(...args),
 }));
 
+const mockRing = jest.fn(async () => ({ rang: true }));
+jest.mock('../services/lead-call-reply-ring', () => ({ ringForCallReply: (...args) => mockRing(...args) }));
+
 const { EventEmitter } = require('node:events');
 const numbers = require('../config/twilio-numbers');
 const TwilioService = require('../services/twilio');
@@ -105,13 +108,13 @@ const locationLine = Object.values(numbers.locations).map((l) => l.number)
   .find((n) => numbers.findByNumber(n)?.type === 'location' && n !== numbers.tollFree.number);
 const CUSTOMER = { id: 'ffffffff-0000-4111-8222-333333333333', first_name: 'Dana', last_name: 'Reed', phone: sender, lead_intake_status: 'awaiting_service' };
 
-async function receive(body) {
+async function receive(body, to = locationLine) {
   const res = new EventEmitter();
   mockState.res = res;
   res.status = (code) => { res.statusCode = code; return res; };
   res.type = () => res;
   res.send = (value) => { res.body = value; return res; };
-  await handler({ body: { From: sender, To: locationLine, Body: body, MessageSid: `SM-pref-${Date.now()}`, NumMedia: '0' } }, res);
+  await handler({ body: { From: sender, To: to, Body: body, MessageSid: `SM-pref-${Date.now()}`, NumMedia: '0' } }, res);
   await new Promise((r) => setTimeout(r, 20));
   return res;
 }
@@ -140,7 +143,7 @@ test.each(['call', 'text'])('a %s choice from recordCallTextReply: the bell is t
   expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });
 
-test('no choice (gate off, or an ordinary reply): the bell is told nothing', async () => {
+test('no choice (an ordinary reply): the bell is told nothing', async () => {
   mockIntake.mockResolvedValue({ handled: false });
   mockRecord.mockResolvedValue(undefined);
   await receive('ants in the kitchen');
@@ -163,4 +166,42 @@ test('a failure inside the preference step is swallowed and the bell still rings
   await receive('call');
   expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
   expect(ringSmsReplyBell.mock.calls[0][0].leadPreference).toBeUndefined();
+});
+
+// GATE_LEAD_CALL_REPLY_RING plumbing: the webhook hands every unconsumed text
+// to the ring service after the ack; the service owns every rule.
+test('an unconsumed reply goes to the ring service only after the ack', async () => {
+  mockIntake.mockResolvedValue({ handled: false });
+  mockRecord.mockResolvedValue('call');
+  const res = await receive('call');
+  expect(mockRing).not.toHaveBeenCalled();
+  res.emit('finish');
+  expect(mockRing).toHaveBeenCalledTimes(1);
+  expect(mockRing.mock.calls[0][0]).toMatchObject({ customer: { id: CUSTOMER.id }, body: 'call', fromPhone: sender });
+});
+
+test('a lead with no intake status still reaches the ring service', async () => {
+  mockState.customer = { ...CUSTOMER, lead_intake_status: null };
+  const res = await receive('call');
+  expect(mockIntake).not.toHaveBeenCalled();
+  res.emit('finish');
+  expect(mockRing).toHaveBeenCalledTimes(1);
+});
+
+test('a reply the intake machine consumed never reaches the ring service', async () => {
+  mockIntake.mockResolvedValue({ handled: true, next: 'estimate_drafted' });
+  const res = await receive('100 Sample St');
+  res.emit('finish');
+  expect(mockRing).not.toHaveBeenCalled();
+});
+
+test('a CALL to a technician line or the AI line never reaches the ring service', async () => {
+  mockIntake.mockResolvedValue({ handled: false });
+  const techLine = numbers.fieldTech[0]?.number;
+  expect(techLine).toBeTruthy();
+  for (const to of [numbers.tollFree.number, techLine]) {
+    const res = await receive('call', to);
+    res.emit('finish');
+  }
+  expect(mockRing).not.toHaveBeenCalled();
 });

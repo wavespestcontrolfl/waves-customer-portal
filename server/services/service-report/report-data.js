@@ -21,6 +21,7 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { isOneTimePressureExcludedRecord } = require('../pest-pressure/one-time-exclusion');
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
+const { COMPLETION_ACCESS_CODE_RE } = require('../completion-access-code');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { lawnLayoutPayload } = require('./lawn-report-layout');
@@ -81,6 +82,7 @@ const {
 } = require('../../utils/technician-name');
 const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
+const { printableCitations } = require('./tip-library');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { buildReserviceReportCard } = require('./reservice-report-card');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
@@ -2059,22 +2061,31 @@ async function photoUrl(photo) {
   return photo.s3_url || null;
 }
 
+// Report/track egress (AGENTS.md): a stored line that reads like an entry
+// code never reaches the report. The completion screen refuses new ones;
+// this covers records saved before it screened every source (the protocol
+// actions and their [Protocol] / [Protocol optional] / [Action] lines were
+// not screened at first).
+function withoutAccessCodeLines(lines) {
+  return lines.filter((line) => !COMPLETION_ACCESS_CODE_RE.test(line));
+}
+
 function buildProtocolPayload(record) {
   const structured = parseJsonObject(record.structured_notes);
   const serviceData = parseJsonObject(record.service_data);
   const protocol = parseJsonObject(serviceData.protocol);
   const structuredObservations = uniqueStrings(parseJsonArray(structured.formObservations));
   return {
-    actions: uniqueStrings([
+    actions: withoutAccessCodeLines(uniqueStrings([
       ...parseJsonArray(protocol.actions),
       ...parseJsonArray(structured.protocolActionsCompleted),
       ...taggedNoteLines(record.technician_notes, ['protocol', 'protocol optional', 'action']),
-    ]),
-    observations: uniqueStrings([
+    ])),
+    observations: withoutAccessCodeLines(uniqueStrings([
       ...parseJsonArray(protocol.observations),
       ...parseJsonArray(structured.observations),
       ...taggedNoteLines(record.technician_notes, ['found']),
-    ]),
+    ])),
     // Safe customer-facing provenance: completion form/chip values only.
     // Never substitute the merged observations list, which also contains
     // raw [Found] technician-note lines.
@@ -2087,11 +2098,11 @@ function buildProtocolPayload(record) {
     ...(structuredObservations.length ? {
       structuredObservationsProvenance: 'completion_form_snapshot',
     } : {}),
-    recommendations: uniqueStrings([
+    recommendations: withoutAccessCodeLines(uniqueStrings([
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),
       ...taggedNoteLines(record.technician_notes, ['next']),
-    ]),
+    ])),
     // Provenance-guaranteed source ONLY: structured_notes.formRecommendations
     // is written at completion from the form's recommendation field alone.
     // The merged lists (protocol.recommendations, structured.recommendations)
@@ -2114,6 +2125,12 @@ function buildProtocolPayload(record) {
         ...(tip.aftercare === true ? { aftercare: true } : {}),
         ...(tip.link && typeof tip.link.path === 'string' && tip.link.path.startsWith('/portal')
           ? { link: { label: String(tip.link.label || 'My Property'), path: tip.link.path } }
+          : {}),
+        // The sources behind the tip (GATE_TECH_TIP_SOURCES): the frozen
+        // snapshot, re-checked against the registry's host rule before it
+        // prints; never a label without an allowed https URL.
+        ...(featureGates.techTipSourcesLive?.() === true && printableCitations(tip.citations).length
+          ? { citations: printableCitations(tip.citations) }
           : {}),
       })),
     visitOutcome: protocol.visitOutcome || structured.visitOutcome || null,
@@ -7858,6 +7875,7 @@ module.exports = {
   applicationAreaValues,
   locationAreaLabels,
   taggedNoteLines,
+  buildProtocolPayload,
   minutesFromElapsed,
   methodFromProduct,
   metricValue,

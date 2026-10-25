@@ -107,6 +107,21 @@ function isProofreaderEnabled() {
   }
 }
 
+// GATE_AUTO_DISPATCH_ARRIVAL_SEARCH: 'shadow', 'true' or 'off', same
+// call-time, fail-closed convention. Off unless the shared model is on: an
+// arrival-search slot may sit in an hour the writer's one-stop-per-hour probe
+// refuses, and only the shared model's slot_taken filter drops those before
+// the write (the 2026-09-26 night with GATE_SCHEDULING_CAPACITY on: 72 failed
+// writes, all SLOT_TAKEN).
+function arrivalSearchMode() {
+  const { autoDispatchArrivalSearchMode, autoDispatchSharedModelLive } = require('../../config/feature-gates');
+  try {
+    return autoDispatchSharedModelLive() ? autoDispatchArrivalSearchMode() : 'off';
+  } catch {
+    return 'off';
+  }
+}
+
 // The 2026-10-09 move rules (move-rules.js), resolved apart from
 // getAutoDispatchConfig to keep that function inside its complexity budget.
 function moveRuleConfig(overrides) {
@@ -152,6 +167,11 @@ function moveRuleConfig(overrides) {
     // call can take two minutes, so 300 ends the last one by about 04:17.
     proofreaderDeadlineSeconds: overrides.proofreaderDeadlineSeconds
       ?? intEnv('AUTO_DISPATCH_PROOFREADER_DEADLINE_SECONDS', 300, { min: 0, max: 3600 }),
+    // ARRIVAL SEARCH (GATE_AUTO_DISPATCH_ARRIVAL_SEARCH, owner 2026-10-24):
+    // 'true' = the candidate search uses find-time's arrival-window engine
+    // (candidate-slots.js); 'shadow' = the run also records what that search
+    // would do for each visit and decides on today's search; 'off' = today.
+    arrivalSearch: overrides.arrivalSearch ?? arrivalSearchMode(),
   };
 }
 

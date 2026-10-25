@@ -87,7 +87,7 @@ const { CITABILITY_AGENT_GUIDANCE } = require('./citability-agent-guidance');
 const WRITER_AGENT_CONFIG = {
   name: 'waves-content-writer',
   description: 'Brief-driven writer for new city-service, customer-question, and supporting-blog pages',
-  model: MODELS.FLAGSHIP,
+  model: MODELS.CONTENT,
   system: `You are the Waves Pest Control content writer.
 
 ${HUMAN_PROSE_RULES}

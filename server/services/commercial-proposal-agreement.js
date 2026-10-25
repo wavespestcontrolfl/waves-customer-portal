@@ -518,6 +518,7 @@ module.exports = {
   refuseStaleSignature,
   agreementStateForEstimate,
   agreementCtaFor,
+  newContractRow,
   ensureAgreement,
   handleAgreementSigned,
 };

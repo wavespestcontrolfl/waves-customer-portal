@@ -19,7 +19,7 @@ function json(body, ok = true) {
 
 beforeEach(() => {
   calls = [];
-  status = { enabled: true };
+  status = { enabled: true, actual_method: true };
   bills = [bill];
   home = { year: 2026, row: null, deduction: 0 };
   localStorage.setItem('waves_admin_token', 'test-token');
@@ -93,6 +93,59 @@ it('previews the home office deduction, caps it at 300 sq ft, and saves it', asy
   await waitFor(() => expect(calls.some((c) => c.method === 'PUT' && c.url.includes('/home-office/'))).toBe(true));
   // the server refuses 400 sq ft: what was typed goes up as typed, never silently changed
   expect(calls.find((c) => c.method === 'PUT').body).toMatchObject({ sq_ft: '400', months: '12' });
+});
+
+it('offers the actual method: no 300 sq ft limit, the year costs over the home share, and saves what was typed', async () => {
+  render(<SharedBillsPanel />);
+  await screen.findByText('Phone plan');
+  expect(screen.getByText(/timely original return/)).toBeInTheDocument();
+  expect(screen.queryByLabelText('Home square feet')).toBeNull();
+  fireEvent.change(screen.getByLabelText('Home office method'), { target: { value: 'actual' } });
+  expect(screen.queryByLabelText('Months used')).toBeNull();
+  fireEvent.change(screen.getByLabelText('Square feet'), { target: { value: '300' } });
+  fireEvent.change(screen.getByLabelText('Home square feet'), { target: { value: '1000' } });
+  fireEvent.change(screen.getByLabelText('Rent for the year'), { target: { value: '12000' } });
+  fireEvent.change(screen.getByLabelText('Utilities for the year'), { target: { value: '600' } });
+  expect(screen.getByTestId('home-office-deduction')).toHaveTextContent('$3,780.00'); // 12,600 x 300/1000
+  fireEvent.change(screen.getByLabelText('Square feet'), { target: { value: '500' } });
+  expect(screen.getByTestId('home-office-deduction')).toHaveTextContent('$6,300.00'); // no 300 sq ft limit
+  fireEvent.click(screen.getByRole('button', { name: 'Save home office' }));
+  await waitFor(() => expect(calls.some((c) => c.method === 'PUT' && c.url.includes('/home-office/'))).toBe(true));
+  expect(calls.find((c) => c.method === 'PUT').body).toMatchObject({
+    method: 'actual', sq_ft: '500', home_sq_ft: '1000', rent: '12000', utilities: '600', insurance: '', other: '',
+  });
+});
+
+it('hides the method picker while the return engine is off', async () => {
+  status = { enabled: true, actual_method: false };
+  render(<SharedBillsPanel />);
+  await screen.findByText('Phone plan');
+  expect(screen.getByLabelText('Square feet')).toBeInTheDocument();
+  expect(screen.queryByLabelText('Home office method')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Save home office' })).toBeInTheDocument();
+});
+
+it('shows a saved actual-method year read-only while the return engine is off', async () => {
+  status = { enabled: true, actual_method: false };
+  home = { year: 2026, row: { tax_year: 2026, method: 'actual', sq_ft: 300, months: 12, home_sq_ft: 1200, rent: '1000.00', utilities: '50.50', insurance: '0.00', other: null, notes: null }, deduction: 262.63 };
+  render(<SharedBillsPanel />);
+  await screen.findByText(/Actual method \(return engine off\)/);
+  await waitFor(() => expect(screen.getByLabelText('Home square feet')).toHaveValue('1200'));
+  expect(screen.getByLabelText('Square feet')).toBeDisabled();
+  expect(screen.getByLabelText('Rent for the year')).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Save home office' })).toBeNull();
+  expect(screen.queryByLabelText('Home office method')).toBeNull();
+  expect(screen.getByRole('button', { name: /^Remove \d{4}$/ })).toBeInTheDocument();
+  expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+});
+
+it('loads a saved actual-method row into the form', async () => {
+  home = { year: 2026, row: { tax_year: 2026, method: 'actual', sq_ft: 300, months: 12, home_sq_ft: 1200, rent: '1000.00', utilities: '50.50', insurance: '0.00', other: null, notes: null }, deduction: 320.12 };
+  render(<SharedBillsPanel />);
+  await waitFor(() => expect(screen.getByLabelText('Home square feet')).toHaveValue('1200'));
+  expect(screen.getByLabelText('Home office method')).toHaveValue('actual');
+  expect(screen.getByLabelText('Utilities for the year')).toHaveValue('50.5');
+  expect(screen.getByLabelText('Other home costs for the year')).toHaveValue('');
 });
 
 it('keeps the newer year when an older year answers late, and blocks Save until the year loads', async () => {

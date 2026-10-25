@@ -50,6 +50,7 @@ const db = require('../models/db');
 const OpenBalance = require('../services/open-balance');
 const { recordManualPayment } = require('../services/invoice-manual-payment');
 const NotificationService = require('../services/notification-service');
+const logger = require('../services/logger');
 const { maybeHandleZelleNotice, isZelleReconcileEnabled, recoverStaleClaims, sweepStaleClaims, reofferMarkedEmails, RECORDED_BY, ZELLE_RETRY_MARK } = require('../services/zelle-notice-reconciler');
 
 const TEXT = fs.readFileSync(path.join(__dirname, 'fixtures', 'zelle-notice-capitalone.txt'), 'utf8');
@@ -164,7 +165,7 @@ describe('not ours', () => {
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'sender_unverified' });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_parked:sender_unverified' });
     expect(recordManualPayment).not.toHaveBeenCalled();
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.stringContaining('sender unverified'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-1' }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — review Pat Doe's $117.00 Zelle", 'The email did not prove it came from Capital One.', expect.objectContaining({ dedupeKey: 'zelle-notice:notice-1', bellDefault: true }));
   });
 
   test('a lost claim (another sync owns the email) decides nothing', async () => {
@@ -192,7 +193,9 @@ describe('auto-apply', () => {
     expect(fenceTrx.locked).toBe(true); // FOR UPDATE — the claim row stays locked through the paid flip
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', match_method: 'amount_name', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: RECORDED_BY });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500', classification: 'other' });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: queued on the receipt queue'), expect.anything());
+    // Good news is FYI (docs/admin-notifications.md): no alert row; the log keeps the receipt legs.
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('receipt: queued on the receipt queue'));
   });
 
   test('the memo invoice number picks one of several exact-cent invoices', async () => {
@@ -312,7 +315,7 @@ describe('settlement without a held transaction (pool floor is 2)', () => {
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(closesOf('inbound_payment_notices').filter((p) => p.status === 'auto_applied')).toHaveLength(1); // only the failed CAS attempt
     expect(tables.inbound_payment_notices.calls).not.toContainEqual(['where', { id: 'notice-1', claim_token: 'tok-1' }]); // the forced-close path never ran
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.stringContaining('reclaimed'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-1:late', bellDefault: true }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — check Pat Doe's $117.00 Zelle", expect.stringContaining('after someone reopened it'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-1:late', bellDefault: true }));
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500' });
   });
 
@@ -342,7 +345,7 @@ describe('post-commit failures', () => {
     tables.invoices = { firsts: [null, { id: 'inv-1', invoice_number: 'WPC-2026-0500', customer_id: 'cust-1', status: 'paid', payment_method: 'zelle', payment_recorded_by: RECORDED_BY, payment_reference: 'Pat Doe' }], returning: [], calls: [] }; // [direct-dup read, post-commit re-read]
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied', matched_invoice_id: 'inv-1' });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('receipt: unknown'), expect.anything());
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — check the receipt for Pat Doe's $117.00 Zelle", expect.stringContaining('could not confirm the receipt went out'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-1:receipt', bellDefault: true }));
   });
 
   test('a non-refusal error with the invoice still open parks apply_failed with an "uncertain" note', async () => {
@@ -471,19 +474,18 @@ describe('park reasons', () => {
 });
 
 describe('owner surfacing under the bell policy', () => {
-  test('a parked notice defaults the bell ON (bellDefault — owner override still wins); an applied FYI does not', async () => {
+  test('a parked notice defaults the bell ON (bellDefault — owner override still wins); an applied notice raises no alert (FYI)', async () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async () => []);
     expect(await maybeHandleZelleNotice(notice())).toBe(true); // no_match → parked
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.any(String), expect.objectContaining({ bellDefault: true }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — review Pat Doe's $117.00 Zelle", 'No open invoice is $117.00, so the portal did not record it.', expect.objectContaining({ bellDefault: true }));
     jest.clearAllMocks();
     tables.inbound_payment_notices.returning = []; tables.inbound_payment_notices.calls = [];
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [openRow()]));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
-    const applied = NotificationService.notifyAdmin.mock.calls.find(([, title]) => title === 'Zelle payment applied');
-    expect(applied).toBeTruthy();
-    expect(applied[3].bellDefault).toBeUndefined();
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'auto_applied' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 });
 
@@ -498,7 +500,7 @@ describe('stale claim recovery', () => {
     expect(patch).toMatchObject({ status: 'parked', park_reason: 'apply_failed' });
     expect(patch.apply_error).toMatch(/interrupted/);
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_parked:apply_failed' });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment needs review', expect.stringContaining('interrupted'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-old' }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — review Old Payer's $50.00 Zelle", expect.stringContaining('stopped before it finished recording'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-old' }));
     expect(patch).toMatchObject({ matched_invoice_id: null, applied_by: null }); // frees the one-notice-per-invoice index
     // The CAS re-checks status + age so a row another pod just finished is left alone.
     expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-old', status: 'processing', claim_token: 'tok-old' }]);
@@ -514,7 +516,7 @@ describe('stale claim recovery', () => {
     expect(closesOf('inbound_payment_notices')).toEqual([expect.objectContaining({ status: 'auto_applied', park_reason: null, apply_error: null, matched_customer_id: 'cust-7' })]);
     expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { id: 'notice-old', status: 'processing', claim_token: 'tok-old' }]);
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0507' });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', 'Zelle payment applied', expect.stringContaining('WPC-2026-0507'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-old' }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — check the receipt for Old Payer's $50.00 Zelle", expect.stringContaining('WPC-2026-0507'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-old:receipt' }));
   });
 
   test('a stamped invoice settled by someone ELSE (or still open) is not ours — the claim parks apply_failed as before', async () => {

@@ -77,6 +77,8 @@ export default function CustomerDialogHost() {
         padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
         background: 'rgba(15,23,42,0.48)',
         backdropFilter: 'blur(6px)',
+        boxSizing: 'border-box',
+        overflowY: 'auto',
       }}
     >
       <div
@@ -96,6 +98,10 @@ export default function CustomerDialogHost() {
           boxShadow: '0 24px 70px rgba(4,57,94,0.24)',
           fontFamily: FONTS.body,
           boxSizing: 'border-box',
+          maxHeight: 'calc(100dvh - 40px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))',
+          overflowY: 'auto',
+          overscrollBehavior: 'contain',
+          WebkitOverflowScrolling: 'touch',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
@@ -125,9 +131,10 @@ export default function CustomerDialogHost() {
             <p id="customer-dialog-message" style={{
               margin: '7px 0 0',
               color: CUSTOMER_SURFACE.body,
-              fontSize: 14,
+              fontSize: 16,
               lineHeight: 1.55,
               whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
             }}>
               {message}
             </p>
@@ -141,7 +148,7 @@ export default function CustomerDialogHost() {
               data-glass="chip"
               onClick={() => settle(false)}
               style={{
-                minHeight: 42,
+                minHeight: 44,
                 padding: '0 17px',
                 borderRadius: 10,
                 border: `1px solid ${CUSTOMER_SURFACE.borderStrong}`,
@@ -160,9 +167,10 @@ export default function CustomerDialogHost() {
             type="button"
             autoFocus={!confirm}
             data-glass-accent={danger ? undefined : ''}
+            data-glass-size="primary"
             onClick={() => settle(true)}
             style={{
-              minHeight: 42,
+              minHeight: 48,
               padding: '0 18px',
               borderRadius: 10,
               border: danger ? `1px solid ${COLORS.red}` : '1px solid rgba(4,57,94,0.16)',

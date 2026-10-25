@@ -105,6 +105,13 @@ describe('review location resolver', () => {
       expect(resolveReviewLocationId({ city: 'Longboat Key' })).toBe('bradenton');
     });
 
+    test('Osprey reviews go to the Venice profile (owner 2026-10-24); its leads stay Sarasota', () => {
+      const { resolveLocation } = require('../config/locations');
+      expect(resolveReviewLocationId({ city: 'Osprey' })).toBe('venice');
+      expect(resolveReviewLocationId({ zip: '34229' })).toBe('venice');
+      expect(resolveLocation('Osprey').id).toBe('sarasota');
+    });
+
     test('city and ZIP matching is case- and whitespace-insensitive', () => {
       expect(resolveReviewLocationId({ city: '  pArRiSh  ' })).toBe('parrish');
       expect(resolveReviewLocationId({ zip: ' 34236-1234 ' })).toBe('sarasota');

@@ -143,9 +143,20 @@ async function resolveSeparatedTarget(conn, target, serviceId) {
   return { ...target, memberServices: [{ service_type: target.service_type, service_id: target.service_id }] };
 }
 
+// planningMinutes false (loadArrivalRouteContext): every stop on the route
+// keeps its own window/estimate length. Any other value: the same rows.
+function exemptFromPlanning(rows, planningMinutes) {
+  return planningMinutes === false ? rows.map(row => ({ ...row, planning_exempt: true })) : rows;
+}
+
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
   changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false, alone = false,
+  // false: every stop on the route keeps its own window/estimate length
+  // (planning-minutes.js `planning_exempt`, the convention the placed visit
+  // already uses) — the nightly auto-dispatch arrival search (find-time.js),
+  // so it plans a day the way the 04:20 route pass does. Unset: unchanged.
+  planningMinutes,
   // Staff callers only: start the day at the tech's start point
   // (GATE_TECH_START_POINTS). Public and commit-time callers keep the office.
   startPoints = false,
@@ -221,9 +232,9 @@ async function loadArrivalRouteContext({
   const grouped = hasLiveSibling && !movedTarget;
   (movedTarget?.memberIds || []).forEach(id => excluded.add(String(id)));
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
-  return { target: movedTarget || target, rows: rows.filter(row => !excluded.has(String(row.id))
+  return { target: movedTarget || target, rows: exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
-    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)),
+    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)), planningMinutes),
   date, now, grouped, activeTarget, prospective: !!prospective,
   insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
     || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),

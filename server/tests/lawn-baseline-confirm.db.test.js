@@ -26,6 +26,23 @@ describeDb('confirmed lawn baseline transactions', () => {
     expect(new Date(installed.confirmed_at).getTime()).toBeGreaterThan(Date.now() - 10000);
   });
 
+  test('score scale 2: the first scale-2 confirm takes its own baseline and leaves the scale-1 flag, so an earlier report keeps its history identity', async () => {
+    const f = await fixture(knex);
+    const oldVisit = await f.visit(-40);
+    const newVisit = await f.visit(-5);
+    const old = await f.assessment(oldVisit, { confirmed_by_tech: false });
+    await confirm(old);
+    const next = await f.assessment(newVisit, { confirmed_by_tech: false, score_scale: 2 });
+    const identityOf = async (row) => (await history.historyForAssessment(await knex('lawn_assessments').where({ id: row.id }).first(), { knex })).identity;
+    const before = await identityOf(old);
+    expect((await confirm(next)).is_baseline).toBe(true);
+    expect((await knex('lawn_assessments').where({ id: old.id }).first()).is_baseline).toBe(true);
+    expect(await identityOf(old)).toBe(before);
+    const scale2 = await history.historyForAssessment(await knex('lawn_assessments').where({ id: next.id }).first(), { knex });
+    expect(scale2.rows.map((row) => row.id)).toEqual([next.id]);
+    expect(scale2.isBaseline).toBe(true);
+  });
+
   test('out-of-order first-visit confirmation takes baseline from the later visit', async () => {
     const f = await fixture(knex);
     const later = await f.assessment(await f.visit(-5), { confirmed_by_tech: false });

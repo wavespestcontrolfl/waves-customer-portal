@@ -25,7 +25,7 @@ describe('staff-contact is the one definition both callers use', () => {
   });
 
   test('the exports keep the reviewed contract', () => {
-    expect(staff.STAFF_CALL_SOURCES).toEqual(['admin-click', 'admin-callback', 'tech-click']);
+    expect(staff.STAFF_CALL_SOURCES).toEqual(['admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring']);
     expect(staff.STAFF_APPROVED_SMS_TYPES).toEqual(['ai_approved', 'ai_revised']);
     // A bare 'manual' type is never a person's text: automations reuse it.
     expect(staff.operatorReply({ message_type: 'manual', operator_sent: false })).toBe(false);
@@ -34,6 +34,10 @@ describe('staff-contact is the one definition both callers use', () => {
     const call = { source: 'admin-click', v2_extraction_status: 'valid', is_voicemail: 'false', customer_leg_status: null };
     expect(staff.personCallBack(call)).toBe(true);
     expect(staff.personCallBack({ ...call, source: 'collections_voice' })).toBe(false);
+    // A connected lead call-reply ring is a staff call back; the same
+    // live-conversation evidence still decides.
+    expect(staff.personCallBack({ ...call, source: 'lead-call-reply-ring' })).toBe(true);
+    expect(staff.personCallBack({ ...call, source: 'lead-call-reply-ring', is_voicemail: 'true' })).toBe(false);
     expect(staff.personCallBack({ ...call, is_voicemail: 'true' })).toBe(false);
     expect(staff.personCallBack({ ...call, customer_leg_status: 'completed', customer_leg_seconds: '59' })).toBe(false);
     expect(staff.personCallBack({ ...call, customer_leg_status: 'completed', customer_leg_seconds: '60' })).toBe(true);
@@ -47,7 +51,7 @@ describe('staff-contact is the one definition both callers use', () => {
     for (const sql of [staff.operatorReplySql('os'), staff.smsDeliveredSql('os'), staff.personCallBackSql('ev')]) expect(sql).not.toMatch(/\?/);
     expect(staff.operatorReplySql('os')).toContain("os.message_type IN ('ai_approved', 'ai_revised')");
     expect(staff.smsDeliveredSql('os')).toContain("os.status = 'delivered'");
-    expect(staff.personCallBackSql('ev')).toContain("ev.source IN ('admin-click', 'admin-callback', 'tech-click')");
+    expect(staff.personCallBackSql('ev')).toContain("ev.source IN ('admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring')");
     expect(staff.personCallBackSql()).toContain('call_log.v2_extraction_status');
   });
 

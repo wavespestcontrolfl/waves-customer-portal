@@ -1,0 +1,7 @@
+{
+  "name": "@waves/invoice-property-groups",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Groups an invoice's line items by the saved property each line names, for invoices that span more than one of a customer's properties. Imported by BOTH the server (PDF, billing email) and the customer pay/receipt pages so the grouping cannot drift. Pure CommonJS, no dependencies.",
+  "main": "index.js"
+}

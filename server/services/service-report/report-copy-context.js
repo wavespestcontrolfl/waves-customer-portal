@@ -25,6 +25,7 @@ const {
 } = require('./tree-shrub-tech-findings');
 const { redactAccessCodes } = require('../context-aggregator');
 const { buildWriterRecords } = require('./report-writer-records');
+const { pestsNamedToday } = require('./label-pest-facts');
 const {
   pestReportExpectationsGateOn, buildWhatToExpect, toExpectationProduct,
 } = require('./pest-report-expectations');
@@ -262,7 +263,7 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessm
 function lawnAssessmentEntries(row) {
   return [
     ['turf density', lawnScoreValue(row?.turf_density)],
-    ['weed suppression', lawnScoreValue(row?.weed_suppression)],
+    ['weed control', lawnScoreValue(row?.weed_suppression)],
     ['color health', lawnScoreValue(row?.color_health)],
     ['stress/damage control', resolveStressDamage(row || {})],
   ];
@@ -582,6 +583,9 @@ async function buildReportCopyContext({
   // The technician's promise marks, resolved by the route against the
   // customer's open promises (visit-promises.js).
   visitPromises = [],
+  // The technician's own words for this visit (the redacted note and
+  // observations): GATE_PEST_LABEL_FACTS reads only which pests they name.
+  visitTexts = [],
   knex = db,
 } = {}) {
   const line = serviceLine || detectServiceLine(serviceType) || null;
@@ -829,6 +833,14 @@ async function buildReportCopyContext({
   let writerAllowedDates = [];
   let writerPromiseCount = 0;
   if (writerRules) {
+    // GATE_PEST_LABEL_FACTS: the pests named today (note, observations and
+    // the pests tagged on the product rows); null with the gate off.
+    const namedPests = line === 'pest' && require('../../config/feature-gates').pestLabelFactsLive()
+      ? pestsNamedToday({
+        texts: Array.isArray(visitTexts) ? visitTexts : [],
+        targets: productEvidence.writerApplications.flatMap((application) => application.targets || []),
+      })
+      : null;
     const records = buildWriterRecords({
       serviceYmd,
       line,
@@ -836,6 +848,7 @@ async function buildReportCopyContext({
       serviceKind,
       applications: productEvidence.writerApplications,
       promises: visitPromises,
+      namedPests,
     });
     sections.push(...records.sections);
     writerAllowedPhrases = records.allowedPhrases;

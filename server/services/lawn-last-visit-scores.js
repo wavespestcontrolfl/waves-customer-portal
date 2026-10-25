@@ -42,13 +42,16 @@ function shape(row, date) {
   };
 }
 
-async function lastVisitScores(scheduledService, knex = db) {
+// `scoreScale` (GATE_LAWN_SCORE_SCALE_V2): the score scale this visit's AI read is
+// on, so the row beside it is the last visit on the same scale (none at the first
+// visit on a new scale). Omitted, the history's own rule picks the newest row's.
+async function lastVisitScores(scheduledService, knex = db, { scoreScale } = {}) {
   const visitDate = ymd(scheduledService?.scheduled_date);
   const customerId = scheduledService?.customer_id;
   if (!customerId || !visitDate) return null;
   if (gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')) {
     const { previous } = await require('./lawn-assessment-history')
-      .historyBeforeVisit({ customerId, scheduledService, throughVisitDate: visitDate }, knex);
+      .historyBeforeVisit({ customerId, scheduledService, throughVisitDate: visitDate, scoreScale }, knex);
     return shape(previous, previous?.visit_date || null);
   }
   const rows = await knex('lawn_assessments as la')

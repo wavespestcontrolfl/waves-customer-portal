@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS } = require('../config/county-zips');
+const { slabHomeNoTaxLive } = require('../config/feature-gates');
 
 // Waves operates in ET. Use ET calendar date regardless of server TZ (Railway=UTC).
 function todayET() {
@@ -64,27 +65,8 @@ const TaxCalculator = {
     const isCommercial = opts.isCommercial === true
       || customer.property_type === 'commercial' || customer.property_type === 'business';
 
-    if (serviceType) {
-      // Normalize service type to key format
-      const serviceKey = serviceType.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_');
-      const taxability = await conn('service_taxability')
-        .where(function () {
-          this.where('service_key', serviceKey)
-            .orWhere('service_key', 'ilike', `%${serviceKey}%`)
-            .orWhere('service_label', 'ilike', `%${serviceType}%`);
-        })
-        .first();
-
-      if (taxability) {
-        // Check residential_taxable override
-        if (!isCommercial && taxability.residential_taxable === false) {
-          return { rate: 0, amount: 0, taxable: false, county: null, reason: `${taxability.service_label} — not taxable for residential (FL)` };
-        }
-        if (!taxability.is_taxable) {
-          return { rate: 0, amount: 0, taxable: false, county: null, reason: `${taxability.service_label} — not taxable (${taxability.fl_statute_ref || 'FL law'})` };
-        }
-      }
-    }
+    const notTaxable = await this.serviceNotTaxable(conn, serviceType, isCommercial);
+    if (notTaxable) return notTaxable;
 
     // 3. Look up county tax rate
     const county = this.inferCountyFromZip(customer.zip);
@@ -140,6 +122,55 @@ const TaxCalculator = {
       county,
       reason: `${county} County — ${(rate * 100).toFixed(1)}% (state ${taxRate ? (parseFloat(taxRate.state_rate) * 100).toFixed(0) : '6'}% + county ${taxRate ? (parseFloat(taxRate.county_surtax) * 100).toFixed(0) : '1'}% surtax)`,
     };
+  },
+
+  /**
+   * Step 2 of calculateTax: the no-tax answer this service earns, or null when
+   * the county rate applies (a taxable or unknown service).
+   */
+  async serviceNotTaxable(conn, serviceType, isCommercial) {
+    if (!serviceType) return null;
+    // Pre-construction termite treatment (slab pre-treat): Florida taxes it
+    // only for a nonresidential building (Rule 12A-1.009); for a home it is
+    // residential pest control, even when the customer is a builder whose
+    // account is commercial. No record stores the building's use, so the
+    // service name carries it (GATE_SLAB_HOME_NO_TAX).
+    if (slabHomeNoTaxLive() && this.isHomeSlabPretreat(serviceType)) {
+      return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Pre-construction termite treatment for a home — not taxable (FL Rule 12A-1.009)' };
+    }
+
+    // Normalize service type to key format
+    const serviceKey = serviceType.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_');
+    const taxability = await conn('service_taxability')
+      .where(function () {
+        this.where('service_key', serviceKey)
+          .orWhere('service_key', 'ilike', `%${serviceKey}%`)
+          .orWhere('service_label', 'ilike', `%${serviceType}%`);
+      })
+      .first();
+    if (!taxability) return null;
+
+    // Check residential_taxable override
+    if (!isCommercial && taxability.residential_taxable === false) {
+      return { rate: 0, amount: 0, taxable: false, county: null, reason: `${taxability.service_label} — not taxable for residential (FL)` };
+    }
+    if (!taxability.is_taxable) {
+      return { rate: 0, amount: 0, taxable: false, county: null, reason: `${taxability.service_label} — not taxable (${taxability.fl_statute_ref || 'FL law'})` };
+    }
+    return null;
+  },
+
+  /**
+   * A pre-construction termite treatment for a home: the name says pre-slab,
+   * pre-treat, pretreatment or pre-construction and names termites, Termidor,
+   * a slab or a borate. A name that says Commercial or nonresidential is the
+   * office's mark for a nonresidential building, which stays taxable.
+   */
+  isHomeSlabPretreat(serviceType) {
+    const name = String(serviceType || '');
+    return /\bpre[-\s]?(?:slab|treat(?:ment)?|construction)\b/i.test(name)
+      && /termit|termidor|slab|\bbora/i.test(name)
+      && !/\b(?:commercial|non-?residential)\b/i.test(name);
   },
 
   /**

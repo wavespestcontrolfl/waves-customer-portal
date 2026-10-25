@@ -19,6 +19,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { loadPreviewService } = require('../services/service-report/report-preview');
+const { reportTemplatePayload } = require('../services/service-report/report-template');
 
 router.use(adminAuthenticate);
 router.use(requireAdmin);
@@ -67,6 +68,8 @@ router.get('/:scheduledServiceId/data', async (req, res, next) => {
     // The customer route's live-view glass default (no recap in a preview: a
     // recap video exists only after completion).
     data.glassDefault = true;
+    // GATE_REPORT_SHARED_TEMPLATE: the preview shows the customer's live view, so it takes the same key.
+    Object.assign(data, reportTemplatePayload());
     // No token means no tokened URLs: the PDF download and the standalone map
     // endpoint do not exist for a visit with no record, so the page gets none
     // (a null pdfUrl disables the Download button).

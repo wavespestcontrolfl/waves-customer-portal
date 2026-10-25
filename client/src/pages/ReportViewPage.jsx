@@ -10,7 +10,8 @@ import PoisonControlCopy, { applicatorIdLine } from '../components/report/Poison
 import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
 import LawnNewSodCard from '../components/report/lawnV2/LawnNewSodCard';
-import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow, withoutRepeatedAppliedCard } from '../components/report/lawnV2/lawnLayoutRules';
+import { alsoSteps, lawnLayoutStatusData, lawnStoryActive, lawnTodaysResult, reentryIsTimed, reentryRow, withoutRepeatedAppliedCard } from '../components/report/lawnV2/lawnLayoutRules';
+import '../components/report/lawnV2/lawnStory.css';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
@@ -59,6 +60,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
+import CustomerReportHeader, { sharedReportTemplateActive } from '../components/report/CustomerReportHeader';
 import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -477,13 +479,11 @@ export function visitTimeLabel(data = {}) {
   return arrived || exited || '';
 }
 
-// Mirrors the estimate hero's phone display: 10-digit US numbers get the
-// (xxx) xxx-xxxx treatment, anything else renders as stored.
-function formatCustomerPhone(phone) {
-  const raw = String(phone || '').replace(/\D/g, '');
-  const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
-  if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
-  return String(phone || '').trim();
+// The greeting's first name. ALL-CAPS records (older customer rows) title-case for display, same rule
+// as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16).
+function greetingFirstName(data) {
+  const raw = reportGreetingFirstName(data) || 'there';
+  return raw.length > 1 && raw === raw.toUpperCase() ? raw[0] + raw.slice(1).toLowerCase() : raw;
 }
 
 // "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
@@ -1816,7 +1816,7 @@ function lawnMetricRows(assessment = {}) {
   const scores = assessment.scores || {};
   return [
     ['Density / Coverage', scores.turfDensity],
-    ['Weed Cleanliness', scores.weedSuppression],
+    ['Weed control', scores.weedSuppression],
     ['Color / Nutrients', scores.colorHealth],
     ['Stress / Damage', scores.stressDamage],
   ];
@@ -1949,9 +1949,9 @@ function lawnAssessmentBody(assessment = {}) {
   // in LawnWaterBalance; we no longer surface a tech's manual wet/dry observation.
   const rawGrass = String(profile?.grassType || '').toLowerCase().trim();
   if (rawGrass && rawGrass !== 'unknown' && rawGrass !== 'mixed') {
-    return `Assessment captured for ${formatEnumLabel(profile.grassType).toLowerCase()} turf. Scores reflect visible turf density, weed pressure, color, fungus signal, and thatch conditions.`;
+    return `Assessment captured for ${formatEnumLabel(profile.grassType).toLowerCase()} turf. Scores reflect visible turf density, weed control, color, fungus signal, and thatch conditions.`;
   }
-  return 'Assessment scores reflect visible turf density, weed suppression, color health, fungus control, and thatch conditions documented during this lawn visit.';
+  return 'Assessment scores reflect visible turf density, weed control, color health, fungus control, and thatch conditions documented during this lawn visit.';
 }
 
 function weatherIconInfo(conditions = {}, weatherCall) {
@@ -2589,6 +2589,24 @@ export function TechNoteCard({ data, mode = 'live' }) {
                 <a href={tip.link.path}>{tip.link.label || 'My Property'}</a>
               </>
             ) : null}
+            {/* The sources behind the tip (GATE_TECH_TIP_SOURCES, owner
+                2026-10-24): each label a link after the sentence, inside the
+                quote, never the raw URL. The server sends them only with an
+                https URL on an allowed host. */}
+            {Array.isArray(tip.citations) && tip.citations.length ? (
+              <>
+                {' '}
+                <span className="tech-note-source" style={{ fontSize: 14, color: 'var(--muted, #475569)' }}>
+                  {tip.citations.length > 1 ? 'Sources: ' : 'Source: '}
+                  {tip.citations.map((citation, j) => (
+                    <Fragment key={`${citation.url}-${j}`}>
+                      {j ? ', ' : ''}
+                      <a href={citation.url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>{citation.label}</a>
+                    </Fragment>
+                  ))}
+                </span>
+              </>
+            ) : null}
             {i === tips.length - 1 ? <span aria-hidden="true" style={{ fontFamily: 'Georgia, serif', fontSize: 22, lineHeight: 0, verticalAlign: -6, marginLeft: 3, color: 'var(--line-strong, rgba(4,57,94,0.55))' }}>”</span> : null}
           </p>
         ))}
@@ -2769,27 +2787,24 @@ function polishStatusProps(data, mode, override, layout) {
 
 // The lawn status card, standard or on the lawn layout (the layout drops "Your documents" and a next appointment the
 // plan area prints; see lawnLayoutStatusData).
-function LawnStatusCard({ data, mode, layout }) {
+function LawnStatusCard({ data, mode, layout, story = false }) {
   const base = layout ? lawnLayoutStatusData(data, mode) : data;
   const props = polishStatusProps(base, mode, layout ? lawnTodaysResult(data) : (data.reportV2?.todaysResult || null), layout);
-  return <ServiceStatusCard data={props.data} mode={mode} resultOverride={props.override} />;
+  return <ServiceStatusCard data={props.data} mode={mode} resultOverride={props.override} compact={story} />;
 }
 
-function ServiceStatusCard({ data, mode, resultOverride = null }) {
+// compact: GATE_LAWN_REPORT_STORY. The headline names the lawn service plainly, the technician line steps aside
+// when the technician's note prints right below, and a lawn score card ("Your lawn today") joins the hero.
+function ServiceStatusCard({ data, mode, resultOverride = null, compact = false }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
   const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
   const readinessBadge = readinessStatusBadge(data.dynamicContext?.reentry, mode, nowMs);
   const smartStatus = smartStatusSummary(data, mode, nowMs);
-  // ALL-CAPS records (older customer rows) title-case for display, same rule
-  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
-  const rawFirstName = reportGreetingFirstName(data) || 'there';
-  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
-    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
-    : rawFirstName;
+  const firstName = greetingFirstName(data);
   const serviceLabel = serviceDisplayName(data);
   // "Quarterly Pest Control Service" → "Quarterly Pest Control" so the
   // headline never reads "... Service service is complete".
-  const headlineServiceLabel = String(serviceLabel || '').replace(/\s+service$/i, '').trim();
+  const headlineServiceLabel = compact ? 'lawn care' : String(serviceLabel || '').replace(/\s+service$/i, '').trim();
   const headline = headlineServiceLabel
     ? String(smartStatus.heading || '').replace(/^your service\b/, `your ${headlineServiceLabel} service`)
     : smartStatus.heading;
@@ -2802,41 +2817,20 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
 
   return (
     <section className="service-report-hero" id="service-status">
-      <div className="service-report-hero-copy">
-        <div className="section-eyebrow">Service report{serviceLabel ? ` \u00B7 ${serviceLabel}` : ''}</div>
-        <h1 className="sr-title">Hi {firstName}, {headline}</h1>
-        {(() => {
-          // Mirrors the estimate header's contact block: each of name / email /
-          // phone / address on its own line, rendered mixed-case ("Chris Whitney",
-          // not "CHRIS WHITNEY" — owner 2026-07-09). Records stored ALL-CAPS
-          // (common on older customer rows) are title-cased for display only.
-          const displayContactLine = (raw) => {
-            const s = String(raw || '').trim();
-            if (!s || s !== s.toUpperCase()) return s;
-            if (s.includes('@')) return s.toLowerCase();
-            return s.toLowerCase()
-              .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
-              .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
-          };
-          // GATE_LAWN_REPORT_STAGE1_FIXES (the server sets lawnStage1Fixes on a lawn report only): the report link can be
-          // shared, so the web hero keeps the name and the service address and leaves out the email and phone. The PDF
-          // prints its own contact block.
-          const hideContact = data.lawnStage1Fixes === true;
-          const contactLines = [
-            data.customerName,
-            hideContact ? null : data.customerEmail,
-            hideContact ? null : formatCustomerPhone(data.customerPhone),
-            data.serviceAddress,
-          ].map(displayContactLine).filter(Boolean);
-          return contactLines.length ? (
-            <div className="service-meta-contact">
-              {contactLines.map((line, index) => (
-                <div key={`${index}-${line}`} className="service-meta-address">{line}</div>
-              ))}
-            </div>
-          ) : null;
-        })()}
-      </div>
+      {/* GATE_LAWN_REPORT_STAGE1_FIXES (the server sets lawnStage1Fixes on a lawn report only): the report link can be
+          shared, so the web hero keeps the name and the service address and leaves out the email and phone. The PDF
+          prints its own contact block. Outside the shared template the header keeps the classes and text it had
+          before: no style reads the report-header-* names outside .customer-report-template. */}
+      <CustomerReportHeader
+        className="service-report-hero-copy"
+        eyebrow={`Service report${serviceLabel ? ` \u00B7 ${serviceLabel}` : ''}`}
+        title={`Hi ${firstName}, ${headline}`}
+        customerName={data.customerName}
+        customerEmail={data.customerEmail}
+        customerPhone={data.customerPhone}
+        address={data.serviceAddress}
+        hideContact={data.lawnStage1Fixes === true}
+      />
       <div data-glass="card" className="service-status-card">
         <div className="service-status-main">
           <div>
@@ -2918,7 +2912,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             );
           })()}
         </div>
-        {data.techVisitCard && <TechnicianVisitLine data={data} />}
+        {data.techVisitCard && !(compact && data.techNote?.tips?.length) && <TechnicianVisitLine data={data} />}
         {smartStatus.detail && <p className="smart-status-detail">{smartStatus.detail}</p>}
         <HeroConditions
           conditions={data.conditions || {}}
@@ -2939,6 +2933,28 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             : null}
         />
       </div>
+      {compact && Number.isFinite(data.reportV2?.snapshot?.overallScore) && (
+        <div data-glass="card" className="lawn-story-condition">
+          <div className="section-eyebrow">Your lawn today</div>
+          <div className="lawn-story-score">{Math.round(data.reportV2.snapshot.overallScore)}<span>/100</span></div>
+          <p>{data.reportV2.snapshot.statusHeadline || data.reportV2.lead?.headline || 'Lawn condition'}</p>
+          <a
+            href="#lawn-section-score"
+            onClick={(event) => {
+              const section = document.getElementById('lawn-section-score');
+              const details = section?.querySelector('details');
+              if (!details) return;
+              event.preventDefault();
+              details.open = true;
+              if (window.location.hash !== '#lawn-section-score') {
+                window.history.pushState(window.history.state, '', '#lawn-section-score');
+              }
+              section.scrollIntoView({ block: 'start', behavior: 'instant' });
+              details.querySelector('summary')?.focus({ preventScroll: true });
+            }}
+          >View lawn details <span aria-hidden="true">↓</span></a>
+        </div>
+      )}
     </section>
   );
 }
@@ -3747,6 +3763,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
           list exposed to assistive tech; each tile is a <div> group wrapper
           (valid dl content per the HTML spec). */}
       <dl
+        className="report-template-stack"
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
@@ -4271,7 +4288,73 @@ function appliedProductsKind(data) {
   return something ? 'poison' : 'none';
 }
 
-function AppliedProductsSection({ data, mode = 'live' }) {
+// The product card's "why" line; a seasonal substitution says so first.
+function productWhyText(why, substitution) {
+  return substitution ? `This approved seasonal equivalent was used for today's protocol window. ${why}` : why;
+}
+
+// GATE_LAWN_REPORT_STORY (presentation 'story', lawn only): one product as the lawn story explains it, purpose
+// first, then the product, where it went, why it was used, how it works, and its label and safety notes. The card's
+// details accordion is shared with the record presentation.
+function TreatmentStoryFace({ facts }) {
+  const { productName, purpose, why, usedIn, productSummary, precautionSummary, reentrySummary, manufacturer, reportCopy, substitution } = facts;
+  // Approved report_copy already says why the product is used (owner 2026-10-05), so the generic why line (which
+  // can carry the recorded targets) prints only where the record card prints it: no approved copy, or a substitution.
+  const showWhy = !reportCopy || substitution;
+  const howItWorks = reportCopy ? reportCopy.how_it_works : productSummary;
+  const labelLine = reportCopy?.also_labeled_for;
+  const petsKids = reportCopy?.pets_kids;
+  const safetyLines = petsKids ? [sanitizeReentryCopy(petsKids)] : [precautionSummary, reentrySummary].filter(Boolean);
+  return (
+    <>
+      <h3>{purpose.replace(/\s+application$/i, '')}</h3>
+      <div className="treatment-story-product">
+        <span className="sr-cell-label">Product</span>
+        <span>{productName}</span>
+      </div>
+      {manufacturer && <div className="applied-product-maker">by {manufacturer}</div>}
+      {/* usedIn is null when the report hides treated areas. */}
+      {usedIn && (
+        <div className="treatment-story-area">
+          <span className="sr-cell-label">Applied in</span>
+          <span>{usedIn}</span>
+        </div>
+      )}
+      <div className="treatment-story-columns">
+        {showWhy && (
+          <div className="treatment-story-column">
+            <div className="sr-cell-label">Why we used it</div>
+            <p>{productWhyText(why, substitution)}</p>
+          </div>
+        )}
+        {howItWorks && (
+          <div className="treatment-story-column">
+            <div className="sr-cell-label">How it works</div>
+            <p>{howItWorks}</p>
+          </div>
+        )}
+      </div>
+      {(labelLine || safetyLines.length > 0) && (
+        <div className="treatment-story-notes">
+          {labelLine && (
+            <div className="treatment-story-note">
+              <div className="sr-cell-label">On the label</div>
+              <p>{labelLine}</p>
+            </div>
+          )}
+          {safetyLines.length > 0 && (
+            <div className="treatment-story-note">
+              <div className="sr-cell-label">{petsKids ? 'Pets & kids' : 'Safety & re-entry'}</div>
+              {safetyLines.map((line) => <p key={line}>{line}</p>)}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function AppliedProductsSection({ data, mode = 'live', presentation = 'record', intro = null }) {
   // Shared product-identity rule (lib/product-application.js) on EVERY
   // line, matching the PDF document and the header count: termite / rodent
   // monitoring devices (stations, cartridges) are checks, not products
@@ -4296,6 +4379,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
     );
   }
   const isLawn = data.serviceLine === 'lawn';
+  const storyPresentation = presentation === 'story';
   const hideAreas = hidesTreatedAreas(data);
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
   const substitutions = Array.isArray(data.dynamicContext?.lawnProtocol?.application?.substitutions)
@@ -4308,10 +4392,15 @@ function AppliedProductsSection({ data, mode = 'live' }) {
   );
 
   return (
-    <section data-glass="card" className="sr-section applied-products-section" id="products-applied">
+    <section
+      data-glass="card"
+      className={`sr-section applied-products-section${storyPresentation ? ' treatment-story' : ''}`}
+      id="products-applied"
+    >
       <div className="applied-products-header">
         <div>
-          <h2>Products Applied</h2>
+          <h2>{storyPresentation ? 'Your treatment, explained' : 'Products Applied'}</h2>
+          {storyPresentation && intro ? <p className="treatment-story-intro">{intro}</p> : null}
         </div>
       </div>
       {isLawn && (
@@ -4339,6 +4428,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const watering = isLawn ? lawnWateringGuidance(app) : null;
             const substitution = substitutionByName.get(String(productName).toLowerCase());
             const technicalFacts = [
+              storyPresentation && active ? `Active ingredient: ${active}` : null,
               epa ? `EPA reg. ${epa}` : null,
               app.product?.facts_approved ? 'Approved product facts' : null,
               app.rate && app.rateUnit ? `Rate: ${app.rate} ${app.rateUnit}` : null,
@@ -4346,92 +4436,99 @@ function AppliedProductsSection({ data, mode = 'live' }) {
               substitution ? `Approved substitute for ${substitution.originalProductName || 'planned protocol product'}` : null,
             ].filter(Boolean);
             return (
-              <article className="applied-product-card product-group-card" key={app.id || `${productName}-${index}`}>
-                <h3>{productName}</h3>
-                {isLawn && manufacturer && (
-                  <div className="applied-product-maker">by {manufacturer}</div>
-                )}
-                <div className="product-purpose-grid">
-                  <div>
-                    <div className="sr-cell-label">Purpose</div>
-                    <p>{purpose}</p>
-                  </div>
-                  {!hideAreas && (
-                    <div>
-                      <div className="sr-cell-label">Used in</div>
-                      <p>{usedIn}</p>
-                    </div>
-                  )}
-                  {active && (
-                    <div>
-                      <div className="sr-cell-label">Active ingredient</div>
-                      <p>{active}</p>
-                    </div>
-                  )}
-                  {epa && (
-                    <div>
-                      <div className="sr-cell-label">EPA Reg. No.</div>
-                      <p>{epa}</p>
-                    </div>
-                  )}
-                </div>
-                {/* Approved report_copy (How it works / On the label / Pets &
-                    kids, below) says why the product is used and what the
-                    re-entry rule is, so the generic "Why used today", "Safety
-                    & re-entry" and "Product note" lines are filler next to it
-                    (owner 2026-10-05). A seasonal substitution keeps its
-                    "Why used today" line: the swap needs saying. */}
-                {(!reportCopy || substitution) && (
-                  <div className="product-why">
-                    <div className="sr-cell-label">Why used today</div>
-                    <p>
-                      {substitution
-                        ? `This approved seasonal equivalent was used for today's protocol window. ${why}`
-                        : why}
-                    </p>
-                  </div>
-                )}
-                {/* Label-derived safety protocol, visible on the card face —
-                    not buried in Details (owner 2026-07-21). Sourced from the
-                    approved per-product label facts only. */}
-                {!reportCopy && (precautionSummary || reentrySummary) && (
-                  <div className="product-why">
-                    <div className="sr-cell-label">Safety &amp; re-entry</div>
-                    {precautionSummary && <p>{precautionSummary}</p>}
-                    {reentrySummary && <p>{reentrySummary}</p>}
-                  </div>
-                )}
-                {!reportCopy && productSummary && (
-                  <div className="product-why">
-                    <div className="sr-cell-label">Product note</div>
-                    <p>{productSummary}</p>
-                  </div>
-                )}
-                {/* Owner-approved product wording (GATE_REPORT_PRODUCT_COPY,
-                    2026-09-28) — customer-display only, never fed into the
-                    AI report writer. also_labeled_for describes the LABEL,
-                    never what was treated on this visit, so it never reads
-                    next to "Why used today" above. Since 2026-09-29 the
-                    line itself is a full sentence ("Labeled for 75+
-                    Bradenton pests") rather than a named pest list, so the
-                    cell label reads "On the label" instead of "Also labeled
-                    for" to avoid "Also labeled for: Labeled for ..."
-                    (owner ruling 2026-09-29). Narrow products (gel baits,
-                    granular bait, IGRs) and LESCO carry no also_labeled_for
-                    key at all (owner ruling). */}
-                {reportCopy && (
-                  <div className="product-why">
-                    <div className="sr-cell-label">How it works</div>
-                    <p>{reportCopy.how_it_works}</p>
-                    {reportCopy.also_labeled_for && (
-                      <>
-                        <div className="sr-cell-label">On the label</div>
-                        <p>{reportCopy.also_labeled_for}</p>
-                      </>
+              <article
+                className={`applied-product-card product-group-card${storyPresentation ? ' treatment-story-card' : ''}`}
+                key={app.id || `${productName}-${index}`}
+              >
+                {storyPresentation ? (
+                  <TreatmentStoryFace
+                    facts={{ productName, purpose, why, usedIn, productSummary, precautionSummary, reentrySummary, manufacturer, reportCopy, substitution }}
+                  />
+                ) : (
+                  <>
+                    <h3>{productName}</h3>
+                    {isLawn && manufacturer && (
+                      <div className="applied-product-maker">by {manufacturer}</div>
                     )}
-                    <div className="sr-cell-label">Pets &amp; kids</div>
-                    <p>{sanitizeReentryCopy(reportCopy.pets_kids)}</p>
-                  </div>
+                    <div className="product-purpose-grid">
+                      <div>
+                        <div className="sr-cell-label">Purpose</div>
+                        <p>{purpose}</p>
+                      </div>
+                      {!hideAreas && (
+                        <div>
+                          <div className="sr-cell-label">Used in</div>
+                          <p>{usedIn}</p>
+                        </div>
+                      )}
+                      {active && (
+                        <div>
+                          <div className="sr-cell-label">Active ingredient</div>
+                          <p>{active}</p>
+                        </div>
+                      )}
+                      {epa && (
+                        <div>
+                          <div className="sr-cell-label">EPA Reg. No.</div>
+                          <p>{epa}</p>
+                        </div>
+                      )}
+                    </div>
+                    {/* Approved report_copy (How it works / On the label / Pets &
+                        kids, below) says why the product is used and what the
+                        re-entry rule is, so the generic "Why used today", "Safety
+                        & re-entry" and "Product note" lines are filler next to it
+                        (owner 2026-10-05). A seasonal substitution keeps its
+                        "Why used today" line: the swap needs saying. */}
+                    {(!reportCopy || substitution) && (
+                      <div className="product-why">
+                        <div className="sr-cell-label">Why used today</div>
+                        <p>{productWhyText(why, substitution)}</p>
+                      </div>
+                    )}
+                    {/* Label-derived safety protocol, visible on the card face —
+                        not buried in Details (owner 2026-07-21). Sourced from the
+                        approved per-product label facts only. */}
+                    {!reportCopy && (precautionSummary || reentrySummary) && (
+                      <div className="product-why">
+                        <div className="sr-cell-label">Safety &amp; re-entry</div>
+                        {precautionSummary && <p>{precautionSummary}</p>}
+                        {reentrySummary && <p>{reentrySummary}</p>}
+                      </div>
+                    )}
+                    {!reportCopy && productSummary && (
+                      <div className="product-why">
+                        <div className="sr-cell-label">Product note</div>
+                        <p>{productSummary}</p>
+                      </div>
+                    )}
+                    {/* Owner-approved product wording (GATE_REPORT_PRODUCT_COPY,
+                        2026-09-28) — customer-display only, never fed into the
+                        AI report writer. also_labeled_for describes the LABEL,
+                        never what was treated on this visit, so it never reads
+                        next to "Why used today" above. Since 2026-09-29 the
+                        line itself is a full sentence ("Labeled for 75+
+                        Bradenton pests") rather than a named pest list, so the
+                        cell label reads "On the label" instead of "Also labeled
+                        for" to avoid "Also labeled for: Labeled for ..."
+                        (owner ruling 2026-09-29). Narrow products (gel baits,
+                        granular bait, IGRs) and LESCO carry no also_labeled_for
+                        key at all (owner ruling). */}
+                    {reportCopy && (
+                      <div className="product-why">
+                        <div className="sr-cell-label">How it works</div>
+                        <p>{reportCopy.how_it_works}</p>
+                        {reportCopy.also_labeled_for && (
+                          <>
+                            <div className="sr-cell-label">On the label</div>
+                            <p>{reportCopy.also_labeled_for}</p>
+                          </>
+                        )}
+                        <div className="sr-cell-label">Pets &amp; kids</div>
+                        <p>{sanitizeReentryCopy(reportCopy.pets_kids)}</p>
+                      </div>
+                    )}
+                  </>
                 )}
               <details className="solution-detail report-accordion" open={mode !== 'live'}>
                 <summary>
@@ -6408,19 +6505,17 @@ function NotFoundState() {
 }
 
 function LegacyReport({ data, token, glass = false }) {
+  // GATE_REPORT_SHARED_TEMPLATE: a live older report takes the shared customer header and the
+  // stacked layout. The older payload carries the customer's name and city, not a street address.
+  const sharedTemplate = glass && sharedReportTemplateActive(data);
   const pdfUrl = `${API_BASE}/reports/${token}`;
-  // ALL-CAPS records (older customer rows) title-case for display, same rule
-  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
-  const rawFirstName = reportGreetingFirstName(data) || 'there';
-  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
-    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
-    : rawFirstName;
+  const firstName = greetingFirstName(data);
   // The /report route is shell-wrapped (owner 2026-07-06), so the shell's
   // sticky header replaces this page-local top bar — rendering both stacked
   // two headers (codex P2, PR #2439). Kept for any standalone render.
   const { inShell } = useWavesShell();
   return (
-    <div style={{ flex: 1, background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, color: glass ? '#04395E' : ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
+    <div className={sharedTemplate ? 'customer-report-template' : undefined} style={{ flex: 1, background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, color: glass ? '#04395E' : ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
       {!inShell ? (
       <header style={{ background: '#fff', borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
@@ -6441,15 +6536,24 @@ function LegacyReport({ data, token, glass = false }) {
       ) : null}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
       <CustomerColumn>
-        <div style={{ padding: '8px 0 24px' }}>
-          <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
-            Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
+        {sharedTemplate ? (
+          <CustomerReportHeader
+            eyebrow={`Service report${data.serviceType ? ` · ${data.serviceType}` : ''}`}
+            title={`Hi ${firstName}, here's your service report!`}
+            customerName={data.customerName}
+            address={data.cityState}
+          />
+        ) : (
+          <div style={{ padding: '8px 0 24px' }}>
+            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
+              Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
+            </div>
+            <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
+              Hi {firstName}, here's your service report!
+            </h1>
+            {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
           </div>
-          <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
-            Hi {firstName}, here's your service report!
-          </h1>
-          {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
-        </div>
+        )}
         <section data-glass={glass ? 'card' : undefined} style={{ background: glass ? undefined : '#fff', borderRadius: 16, padding: 24, border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}` }}>
           <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
@@ -6537,6 +6641,9 @@ function visualProofMomentIntro(moments = []) {
 }
 
 function ServiceReportV1({ data, token, mode = 'live' }) {
+  // GATE_REPORT_SHARED_TEMPLATE: the live web view takes the shared customer header and the stacked
+  // layout (reportTemplate.css). The PDF document and the static render never do.
+  const sharedTemplate = mode === 'live' && sharedReportTemplateActive(data);
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
   const serviceCoverage = normalizeServiceCoverage(data);
@@ -6544,6 +6651,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
+  // GATE_LAWN_REPORT_STORY: a live lawn report the lawn layout orders takes the story order (lawnStory.css).
+  const storyLayout = lawnStoryActive(data, mode);
   const customerSafeObservationLabels = new Set(
     serviceCompletionChoicesFor(data.serviceLine, 'observations').map(({ label }) => label),
   );
@@ -6768,7 +6877,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     </div>
   );
   return (
-    <div className="service-report-v1">
+    <div className={`service-report-v1${sharedTemplate ? ' customer-report-template' : ''}`}>
       <style>{`
         .service-report-v1 {
           --text: ${ESTIMATE_TEXT};
@@ -8498,6 +8607,68 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
+        /* GATE_LAWN_REPORT_STORY: the products explained inside "what we did" (presentation 'story'). */
+        .treatment-story .applied-products-header {
+          margin-bottom: 20px;
+        }
+        .treatment-story .applied-products-grid {
+          gap: 16px;
+        }
+        .treatment-story-card {
+          padding: 20px;
+        }
+        .treatment-story-card h3 {
+          margin: 0 0 4px;
+          font-size: 20px;
+        }
+        .treatment-story-product {
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1.5;
+          overflow-wrap: anywhere;
+        }
+        .treatment-story-product .sr-cell-label,
+        .treatment-story-area .sr-cell-label {
+          display: block;
+          margin-bottom: 4px;
+        }
+        .treatment-story-card .applied-product-maker {
+          margin: 2px 0 0;
+        }
+        .treatment-story-columns {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 20px;
+          margin-top: 16px;
+          border-top: 1px solid var(--line);
+          padding-top: 16px;
+        }
+        .treatment-story-card .treatment-story-column p,
+        .treatment-story-card .treatment-story-note p {
+          margin-top: 4px;
+          color: var(--text);
+          font-size: 16px;
+          line-height: 1.5;
+        }
+        .treatment-story-area {
+          display: block;
+          margin-top: 8px;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1.5;
+        }
+        .treatment-story-notes {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 12px;
+          margin-top: 16px;
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 16px;
+        }
+        .treatment-story-card .treatment-story-note p + p {
+          margin-top: 8px;
+        }
         /* Owner 2026-10-22: the product facts read top to bottom in one
            box (Purpose, then Active ingredient, then EPA Reg. No.), the
            same grammar as the "How it works" box under it. */
@@ -9947,7 +10118,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Ask Waves floats with the customer: sticky under the shell header for
             the whole scroll (owner ask 2026-07-09). Live only — the pdf/static
             document keeps the legacy section below instead. */}
-        <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
+        {/* GATE_LAWN_REPORT_STORY: the story order prints Ask Waves in the page (its "ask" section) instead. */}
+        {!storyLayout && <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />}
 
         {/* GATE_LAWN_REPORT_LAYOUT: from the status card down to the review ask the page body is the
             standard one, unless the payload carries the lawn layout key on a live lawn report: then
@@ -9960,8 +10132,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           layout={(
             <LawnLayoutBody
               data={data}
+              story={storyLayout}
               slots={{
-                status: <LawnStatusCard data={data} mode={mode} layout />,
+                ask: <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />,
+                status: <LawnStatusCard data={data} mode={mode} layout story={storyLayout} />,
                 blog: <BlogPostCard data={data} mode={mode} />,
                 reservice: <ReserviceReportCard data={data} mode={mode} />,
                 plan: <PlanSummaryCard data={data} mode={mode} />,

@@ -730,6 +730,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     jest.restoreAllMocks();
     if (originalPlacementGate === undefined) delete process.env.GATE_CUSTOMER_RECURRING_DISPATCH;
     else process.env.GATE_CUSTOMER_RECURRING_DISPATCH = originalPlacementGate;
+    delete process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS;
   });
   beforeEach(() => {
     jest.clearAllMocks();
@@ -822,7 +823,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ technicianId: 'tech-9' });
   });
 
-  test.each(['staff_deferred', 'sms_deferred', 'web_gate_off_deferred', 'staff_timed_marker', 'staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped', 'customer_reminder_race', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {
+  test.each(['staff_deferred', 'sms_deferred', 'web_gate_off_deferred', 'staff_timed_marker', 'staff', 'customer', 'customer_closed_day', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped', 'customer_reminder_race', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {
     const existingHandoff = ['staff_deferred', 'sms_deferred', 'web_gate_off_deferred', 'staff_timed_marker'].includes(actor);
     process.env.GATE_CUSTOMER_RECURRING_DISPATCH = actor === 'web_gate_off_deferred' ? 'false' : 'true';
     jest.spyOn(require('../services/auto-dispatch/config'), 'isCustomerRecurringDispatchEnabled').mockReturnValue(actor !== 'web_gate_off_deferred');
@@ -857,6 +858,19 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       // Every later date is blacked out; only the selected date is open.
       jest.spyOn(require('../services/scheduling/blackout-dates'), 'getBlackoutDates')
         .mockResolvedValue({ has: date => date !== TARGET });
+    }
+    // Owner 2026-10-24 ("FIX"): a customer web move put an untimed hand-off on
+    // Christmas. With GATE_SERIES_MOVE_SKIP_CLOSED_DAYS on, the next visit's
+    // closed cadence date moves to the next open day, due date included.
+    let closedCadenceDate = null;
+    if (actor === 'customer_closed_day') {
+      process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS = 'true';
+      closedCadenceDate = SmartRebooker.nextRecurringDate(TARGET, 'quarterly', 1, SmartRebooker.recurrenceOrdinalOptions(TARGET));
+      const blackout = require('../services/scheduling/blackout-dates');
+      jest.spyOn(blackout, 'getBlackoutLayers')
+        .mockResolvedValue({ dates: new Set([closedCadenceDate]), weeklyDaysOff: new Set(), closedHolidays: new Set() });
+      jest.spyOn(blackout, 'lockClosureState').mockResolvedValue(undefined);
+      jest.spyOn(blackout, 'getBlackoutDates').mockResolvedValue(new Set());
     }
     const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
@@ -995,6 +1009,12 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       expect(sibUpdate.update).toHaveBeenCalledTimes(preservesFuture ? 2 : 3);
       for (const [update] of sibUpdate.update.mock.calls) expect(update.recurring_dispatch_due_date).toBe(update.scheduled_date);
       if (preservesFuture) expect(result.preservedOccurrences).toEqual([{ id: 'svc-2', date: dayOffset(100) }]);
+      if (actor === 'customer_closed_day') {
+        const nextOpen = etDateString(addETDays(parseETDateTime(`${closedCadenceDate}T12:00`), 1));
+        expect(sibUpdate.update.mock.calls[0][0]).toMatchObject({ scheduled_date: nextOpen, recurring_dispatch_due_date: nextOpen });
+        // Re-read under the closure fence inside the move's transaction.
+        expect(require('../services/scheduling/blackout-dates').lockClosureState).toHaveBeenCalledWith(trx);
+      }
       expect(result.rescheduledOccurrences[1]).toMatchObject({ awaitingPlacement: true, conflicted: false });
       expect(anchorUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ window_start: '09:00', window_end: '11:00' }), expect.any(Array));
     }

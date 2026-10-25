@@ -196,6 +196,12 @@ const DEFAULTS = Object.freeze({
   // newsletterWriter policy pins effort explicitly rather than relying on
   // the model's own default.
   NEWSLETTER: 'claude-opus-5-5',
+  // Website content writers (owner 2026-10-24, "make them all claude opus
+  // 5.5"): blog-writer drafts (websiteContent policy), the Codex remediation
+  // fix on content PRs, and the content Managed Agent configs. The direct
+  // paths take effort from MODEL_ANTHROPIC_EFFORT; each Managed Agent keeps
+  // the level it was registered with.
+  CONTENT: 'claude-opus-5-5',
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
@@ -250,6 +256,11 @@ const DEFAULTS = Object.freeze({
   // GATE_REPORT_ASK_AI; override with MODEL_REPORT_ASK.
   REPORT_ASK: 'claude-sonnet-5-5',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
+  // Lawn visit assessment + paired recheck Gemini leg (owner 2026-10-24, lawn
+  // scoring review): its own selector, off MODEL_GEMINI_VISION, so the lawn read
+  // stays on Flash while the other photo lanes run Argon. Argon took 48-64 s per
+  // 4-photo read against the 70 s lawn budget and timed out on 1 of 3.
+  GEMINI_LAWN_ASSESSMENT: 'gemini-3.8-flash',
   // App lawn + tree/shrub/palm Photo ID (owner 2026-10-02, "same as pest"):
   // the model for photoIdPlantV2's one Gemini read; set from the 27-photo eval.
   GEMINI_PHOTO_ID_PLANT: 'gemini-3.6-flash',
@@ -327,6 +338,10 @@ const VOICE_JUDGE = process.env.MODEL_VOICE_JUDGE || DEFAULTS.VOICE_JUDGE;
 // so this one lane can move to Opus 5.5 without affecting every other
 // FLAGSHIP/WORKHORSE call site.
 const NEWSLETTER = process.env.MODEL_NEWSLETTER || DEFAULTS.NEWSLETTER;
+// Website content writers (owner 2026-10-24). Own selector, like NEWSLETTER,
+// so the content lanes sit on Opus 5.5 without moving every other
+// FLAGSHIP/WORKHORSE call site.
+const CONTENT = process.env.MODEL_CONTENT || DEFAULTS.CONTENT;
 
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
@@ -393,6 +408,7 @@ const REPORT_ASK           = process.env.MODEL_REPORT_ASK          || DEFAULTS.R
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 const GEMINI_PHOTO_ID_PLANT = process.env.MODEL_GEMINI_PHOTO_ID_PLANT || DEFAULTS.GEMINI_PHOTO_ID_PLANT;
 const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
+const GEMINI_LAWN_ASSESSMENT = process.env.MODEL_GEMINI_LAWN_ASSESSMENT || DEFAULTS.GEMINI_LAWN_ASSESSMENT;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
 // experimental third leg drafts with it so Gemini can be ranked against the
@@ -675,8 +691,9 @@ const TEXT_POLICIES = Object.freeze({
     // Gemini vision model reads every visit photo at once; when it misses,
     // OpenAI takes over — GPT-6 Sol since the 2026-09-29 ruling (was Astra).
     // No Claude leg and no parallel providers — the one lane that
-    // deliberately departs from the Claude-fallback rule.
-    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
+    // deliberately departs from the Claude-fallback rule. The Gemini leg has its
+    // own selector (MODEL_GEMINI_LAWN_ASSESSMENT, owner 2026-10-24: Flash).
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_LAWN_ASSESSMENT }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
   }),
   lawnPairedRecheck: Object.freeze({
@@ -689,7 +706,7 @@ const TEXT_POLICIES = Object.freeze({
     // lawnVisitAssessment (the lawn photo lane's models; no Claude leg, no
     // parallel providers): Gemini answers, OpenAI stands in only when it
     // returns nothing usable.
-    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_LAWN_ASSESSMENT }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
   }),
   photoIdVision: Object.freeze({
@@ -781,6 +798,14 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: NEWSLETTER, effort: 'max' }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
+  websiteContent: Object.freeze({
+    name: 'websiteContent',
+    // blog-writer's post drafts and idea lists (owner 2026-10-24: every
+    // website content writer on Opus 5.5). Same OpenAI backup as
+    // contentDraft, which keeps the non-website copy lanes.
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: CONTENT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
 });
 
 module.exports = {
@@ -807,6 +832,7 @@ module.exports = {
   CALL_EXTRACTION_ANTHROPIC,
   VOICE_JUDGE,
   NEWSLETTER,
+  CONTENT,
   // Cross-provider routing (additive — legacy tier exports above are unchanged)
   PROVIDER,
   ROUTES,
@@ -834,6 +860,7 @@ module.exports = {
   SMS_SONNET,
   GEMINI_VISION_BEST,
   GEMINI_PHOTO_ID_PEST,
+  GEMINI_LAWN_ASSESSMENT,
   GEMINI_PHOTO_ID_PLANT,
   GEMINI_TEXT_BEST,
   GEMINI_VISION_FALLBACK,

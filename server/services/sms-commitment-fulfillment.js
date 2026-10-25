@@ -15,7 +15,7 @@ const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callCont
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
 const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require('./email/email-strip');
-const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
+const { gateEnvValue, gateEnvTimestamp, smsFollowupWitnessFixLive } = require('../config/feature-gates');
 
 const LIMIT = 50;
 // email_reply reads this many raw candidates before resolving them to the
@@ -299,7 +299,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         conn.raw("sms_log.metadata->>'property_id' as linked_property_id")),
     call: conn('call_log').where({ customer_id: customerId, direction: 'outbound' })
       .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-      .modify(toPeer)
+      // GATE_SMS_FOLLOWUP_WITNESS_FIX: a call back reaches the customer on ANY
+      // of their phones (primary, alternate, service contact). The query is
+      // already scoped to the customer's own call rows, so the texting number
+      // is not required. Off = the call must go to the number that texted.
+      .modify(smsFollowupWitnessFixLive() ? (q) => q : toPeer)
       .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
       // Who placed the call and whether it reached the customer (personCallBack).
       .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', ...callContactSelects(conn)),
@@ -761,6 +765,11 @@ function scopedToProperty(record, commitment) {
   // property — an office invoice, autopay, a staff-recorded payment (owner
   // ruling 2026-09-27: count it unless it is clearly for another property).
   if (record.type === 'payment') return !propertyId || !witnessProperty || witnessProperty === propertyId;
+  // GATE_SMS_FOLLOWUP_WITNESS_FIX: a request that names no property (the
+  // customer has two or more) is answered by any estimate sent to that
+  // customer after it; the evidence query is customer-scoped and the model
+  // still judges whether the estimate covers the requested service.
+  if (!propertyId && record.type === 'estimate' && smsFollowupWitnessFixLive()) return true;
   return !!propertyId && witnessProperty === propertyId;
 }
 
@@ -1015,7 +1024,11 @@ function fulfillmentFingerprint(commitment, evidence, { eventOnly = false } = {}
     evidence: commitment.evidence, due_at: commitment.due_at, sms_context };
   return { obligation, evidenceHash: hashExtractionSource(JSON.stringify({ version: VERSION, fulfillmentPolicy: FULFILLMENT_POLICY, policy: MODELS.TEXT_POLICIES.highStakes,
     obligation, records: [...evidence.records].sort((a, b) => a.ref.localeCompare(b.ref)),
-    failures: [...evidence.failures].sort(), ...(eventOnly ? { eventOnly: true } : {}) })) };
+    failures: [...evidence.failures].sort(), ...(eventOnly ? { eventOnly: true } : {}),
+    // GATE_SMS_FOLLOWUP_WITNESS_FIX changes which records are admissible, so a
+    // verdict cached under one policy must not answer under the other. Gate
+    // off adds nothing: today's hashes (and cached verdicts) stay as they are.
+    ...(smsFollowupWitnessFixLive() ? { witnessFix: true } : {}) })) };
 }
 
 // An unowned commercial proposal belongs to the customer only through live
@@ -1130,11 +1143,14 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
 // How long a provider/schema failure is reused before the model is retried.
 const PROVIDER_RETRY_MS = 3600000;
 
-async function verifySmsFulfillment(commitment, evidence, { now = new Date(), eventOnly = false } = {}) {
+// requireModel: no shortcut closes the obligation without the model's quoted
+// proof (a call promise, call-promise-ai-close.js): a person's later text is
+// then evidence for the model to judge, never a close of its own.
+async function verifySmsFulfillment(commitment, evidence, { now = new Date(), eventOnly = false, requireModel = false } = {}) {
   const previous = commitment.sms_context?.fulfillment_check;
   const { obligation, evidenceHash } = fulfillmentFingerprint(commitment, evidence, { eventOnly });
   if (previous?.evidence_hash === evidenceHash && (!previous.retry_after || new Date(previous.retry_after) > now)) return previous;
-  const verdict = await checkSmsFulfillment(obligation, evidence, { eventOnly });
+  const verdict = await checkSmsFulfillment(obligation, evidence, { eventOnly, requireModel });
   // Retry provider/schema failures after a bounded pause. Semantic open or
   // uncertain results remain valid until their evidence or contract changes.
   return { ...verdict, evidence_hash: evidenceHash, ...(eventOnly ? { event_only: true } : {}),
@@ -1142,8 +1158,8 @@ async function verifySmsFulfillment(commitment, evidence, { now = new Date(), ev
       ? new Date(now.getTime() + PROVIDER_RETRY_MS).toISOString() : null };
 }
 
-async function checkSmsFulfillment(commitment, evidence, { eventOnly = false } = {}) {
-  const reply = replyFulfillment(evidence, commitment, { eventOnly });
+async function checkSmsFulfillment(commitment, evidence, { eventOnly = false, requireModel = false } = {}) {
+  const reply = requireModel ? null : replyFulfillment(evidence, commitment, { eventOnly });
   if (reply) return reply;
   // Only a supporting channel's truncation may wait for the witness; every
   // other failure is settled before a provider sees the evidence.

@@ -44,6 +44,17 @@ const FEED_PROVIDERS = Object.freeze({ anthropic: 'anthropic', openai: 'openai',
 const LIVE_WORKLOAD = "(workload IS NULL OR workload = 'live')";
 // Same rows the hub sums: per-call rows and per-turn session deltas.
 const ROW_KINDS = ['call', 'session_turn'];
+// A call whose usage was never captured is unknown spend, except a single call the provider REFUSED
+// with a status the SDKs never retry (error_code '<provider>_<status>': a bad, unauthorized, unpaid,
+// forbidden, missing, too-large or invalid request, e.g. anthropic_400, openai_401, gemini_402). Such a
+// status ends the first and only attempt before any processing, so the call billed nothing. A retryable
+// status (408, 409, 429, 5xx incl. 503/529) can be the last of several SDK attempts, an earlier one of
+// which may have billed, so it stays unknown, like a timeout, a body read failure or an unclassified
+// 'error' (pre-push review rounds on #6669). Single calls only: a Managed Agent session_turn can carry a
+// refused status from its event stream after the agent already did billable work (the message is posted
+// before the stream opens), so a session turn with no usage stays unknown (Codex P2 on #6669).
+const REFUSED_STATUSES = ['400', '401', '402', '403', '404', '413', '422'];
+const USAGE_UNKNOWN_SQL = `input_tokens IS NULL AND NOT (row_kind = 'call' AND ok IS FALSE AND COALESCE(error_code, '') ~ '^[a-z0-9]+_(${REFUSED_STATUSES.join('|')})$')`;
 
 // Spend-spike rule: yesterday's estimated spend on a lane is at least
 // MIN_USD AND at least MULTIPLIER × its average day over the 7 days before.
@@ -287,7 +298,10 @@ function costUsd(provider, t, p) {
 }
 
 // Token sums per lane × provider × model over [from, to). `usage_unknown`
-// counts rows whose usage was never captured (null counters). With a
+// counts calls whose usage was never captured (null counters), except failed
+// calls the provider refused before processing (USAGE_UNKNOWN_SQL): those bill
+// nothing, and counting them turned a lane's spike check off for a week after
+// one refused call. With a
 // `tierFloor`, calls whose prompt reaches it come back one row each
 // (`per_call`), so each can be priced at its own long-prompt tier; a sum of
 // several calls cannot say which tier any of them reached. A session_turn
@@ -318,7 +332,7 @@ function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
       'provider',
       conn.raw('COALESCE(served_model, requested_model) AS model'),
       conn.raw('COUNT(*)::int AS calls'),
-      conn.raw('COUNT(*) FILTER (WHERE input_tokens IS NULL)::int AS usage_unknown'),
+      conn.raw(`COUNT(*) FILTER (WHERE ${USAGE_UNKNOWN_SQL})::int AS usage_unknown`),
       ...sums,
     );
   if (tierFloor == null) return grouped;
@@ -330,7 +344,7 @@ function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
       'provider',
       conn.raw('COALESCE(served_model, requested_model) AS model'),
       conn.raw('1 AS calls'),
-      conn.raw('(input_tokens IS NULL)::int AS usage_unknown'),
+      conn.raw(`(${USAGE_UNKNOWN_SQL})::int AS usage_unknown`),
       conn.raw('true AS per_call'),
       ...['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens']
         .map((c) => conn.raw(`COALESCE(${c}, 0)::bigint AS ${c}`)),
@@ -340,7 +354,8 @@ function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
 
 /**
  * Fold lane × model rows into per-lane estimates (pure):
- * Map(laneId → { usd, unpricedCalls }). unpricedCalls = calls with no usage,
+ * Map(laneId → { usd, unpricedCalls }). unpricedCalls = calls with no usage
+ * (not counting failed calls the provider refused: they bill nothing),
  * plus every call on a model the price table does not list, at a
  * long-prompt tier the feed gives no rate for, or in a session turn whose
  * total prompt reaches a tier (one turn can be several shorter calls).

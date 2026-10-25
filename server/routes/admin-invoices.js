@@ -19,7 +19,7 @@ const { generateInvoiceSummary, generateThankYouMessage } = require('../services
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+const { technicianServicesCustomer, isTechnicianRequest } = require('../services/technician-visit-scope');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: the invoice workspace is owner-only, with ONE
@@ -610,6 +610,19 @@ router.get('/customers/search', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /customers/:customerId/properties — the saved properties a line item may
+// name on a multi-property invoice (owner 2026-10-24: no gate). Customer-facing-
+// safe columns only; the editor shows its picker only with 2+ properties.
+router.get('/customers/:customerId/properties', requireAdmin, async (req, res, next) => {
+  try {
+    const properties = await db('customer_properties')
+      .where({ customer_id: req.params.customerId, active: true })
+      .select('id', 'label', 'is_primary', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+      .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
+    res.json({ properties });
+  } catch (err) { next(err); }
+});
+
 // GET /service-records/:customerId — get recent services for a customer (to link invoice)
 router.get('/service-records/:customerId', async (req, res, next) => {
   try {
@@ -679,6 +692,17 @@ router.post('/email-message/ai', requireAdmin, async (req, res, next) => {
 // staff exemption above does not apply (admin only). These stay live with
 // the gate off so parked history remains actionable after a kill.
 const PAYMENT_NOTICE_LIST_MAX = 100;
+// The reconciler raises one review alert per parked notice; resolving the
+// notice here is its done-when (docs/admin-notifications.md). Never fails
+// the resolution itself.
+async function closeZelleNoticeAlert(noticeId, reason, resolution) {
+  try {
+    const { noticeAlertKey } = require('../services/zelle-notice-reconciler');
+    await require('../services/admin-alert-episodes').closeAdminAlertKeys(db, [noticeAlertKey(noticeId)], reason, { resolution });
+  } catch (err) {
+    logger.warn(`[admin-invoices:payment-notices] alert close failed for ${noticeId}: ${err.message}`);
+  }
+}
 router.get('/payment-notices', requireAdmin, async (req, res, next) => {
   try {
     const status = req.query.status === 'all' ? null : 'parked';
@@ -709,6 +733,14 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
     }
     if (notice.amount_cents == null) {
       return res.status(400).json({ error: 'This notice carries no amount — record the payment from the invoice instead' });
+    }
+    // A bank-feed notice settles only the credit the bank still lists as it
+    // was read: Plaid can withdraw or correct a transaction (an open row is
+    // replaced under the same Plaid id, a reviewed one carries the change).
+    // Checked again under the bank-row lock in the settlement fence below.
+    const { bankEvidenceHolds, BANK_CHANGED_ERROR } = require('../services/zelle-notice-reconciler');
+    if (!(await bankEvidenceHolds(db, notice))) {
+      return res.status(409).json({ error: BANK_CHANGED_ERROR });
     }
     // LIVE eligibility, never the stored list (which is only the dropdown and
     // deliberately includes ±$5 leads and may be stale): the invoice must be
@@ -783,12 +815,13 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
         // The OPERATOR tapped Apply: the receipt is operator-initiated,
         // exactly like Add payment (automated stays false). Pre-lock and
         // under the invoice lock (FOR UPDATE through the paid flip): our
-        // claim must still be ours.
-        settlementFence: (conn) => conn('inbound_payment_notices')
+        // claim must still be ours, and a bank-feed notice's bank row must
+        // still hold, FOR SHARE under the lock (`locked`, second call).
+        settlementFence: async (conn, locked) => Boolean(await conn('inbound_payment_notices')
           .where({ id, status: 'processing', claim_token: claimToken })
           .forUpdate()
-          .first('id')
-          .then(Boolean),
+          .first('id'))
+          && bankEvidenceHolds(conn, notice, { lock: !!locked }),
       });
     } catch (err) {
       // A statusCode-shaped refusal settled nothing. Anything else may have
@@ -841,8 +874,12 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
           .catch((e) => logger.warn(`[admin-invoices:payment-notices] owner notification failed: ${e.message}`));
       }
     }
-    await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || exact.invoice_number}`, updated_at: new Date() })
-      .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
+    // A bank-feed notice has no email row to stamp.
+    if (notice.email_id) {
+      await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || exact.invoice_number}`, updated_at: new Date() })
+        .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
+    }
+    await closeZelleNoticeAlert(id, 'zelle notice applied', `Recorded on ${invoice?.invoice_number || exact.invoice_number}`);
     res.json({ ok: true, invoice, receipt });
   } catch (err) {
     if ([400, 404, 409].includes(err.statusCode)) {
@@ -867,6 +904,7 @@ router.post('/payment-notices/:id/ignore', requireAdmin, async (req, res, next) 
       if (!notice) return res.status(404).json({ error: 'Payment notice not found' });
       return res.status(409).json({ error: `Payment notice is ${notice.status}, not parked`, status: notice.status });
     }
+    await closeZelleNoticeAlert(id, 'zelle notice ignored', 'Ignored on the Invoices page');
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -891,6 +929,13 @@ router.get('/:id', async (req, res, next) => {
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     if (!(await technicianServicesCustomer(req, invoice.customer_id))) {
       return res.status(404).json({ error: 'Not found' });
+    }
+    // A technician is authorised per customer by an assignment at ONE
+    // property: a multi-property invoice's frozen line addresses would name
+    // the customer's other homes, so they are dropped (money fields kept),
+    // like accountProperties on the technician Customer 360 payload.
+    if (isTechnicianRequest(req)) {
+      invoice.line_items = require('../services/invoice-property-lines').techSafeInvoiceLineItems(invoice.line_items);
     }
     // Coverage-service suggestion for the annual-prepay modal (real recurring
     // service, not the invoice title). Modal-only; safe to attach for all GETs.

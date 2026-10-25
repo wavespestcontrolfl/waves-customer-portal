@@ -72,6 +72,80 @@ describe('ReportViewPage — temporary load failures', () => {
   });
 });
 
+describe('ReportViewPage — shared customer header (GATE_REPORT_SHARED_TEMPLATE)', () => {
+  const contact = {
+    customerName: 'SAMPLE CUSTOMER',
+    customerEmail: 'SAMPLE@EXAMPLE.COM',
+    customerPhone: '+19415550190',
+    serviceAddress: '123 TEST ST, TESTVILLE, FL 34000',
+  };
+  const contactLines = (container) => [...container.querySelectorAll('.report-header-contact > div')].map(line => line.textContent);
+
+  it.each([
+    ['pest', pestReportV2],
+    ['lawn', lawnReportV2],
+    ['mosquito', mosquitoReportV2],
+    ['termite', termiteReportV2],
+    ['tree and shrub', treeShrubReportV2],
+    ['historical lawn', legacyLawnReport],
+  ])('gate on: %s reports take the template class and the same contact order and formatting', async (_label, fixture) => {
+    const { container } = renderReport({ ...fixture, ...contact, reportTemplate: true });
+    await screen.findByRole('heading', { level: 1 });
+    expect(container.querySelector('.service-report-v1')).toHaveClass('customer-report-template');
+    expect(contactLines(container)).toEqual([
+      'Sample Customer', 'sample@example.com', '(941) 555-0190', '123 Test St, Testville, FL 34000',
+    ]);
+  });
+
+  it('gate off (no key): no template class, and the header prints the same lines as before', async () => {
+    const { container } = renderReport({ ...pestReportV2, ...contact });
+    await screen.findByRole('heading', { level: 1 });
+    expect(container.querySelector('.service-report-v1')).not.toHaveClass('customer-report-template');
+    expect(container.querySelector('.customer-report-template')).toBeNull();
+    expect(container.querySelector('.service-report-hero-copy .sr-title')).toHaveTextContent(/^Hi /);
+    expect(contactLines(container)).toEqual([
+      'Sample Customer', 'sample@example.com', '(941) 555-0190', '123 Test St, Testville, FL 34000',
+    ]);
+  });
+
+  it('gate on: a typed WDO inspection keeps its own page (no template class)', async () => {
+    const { container } = renderReport({ ...pestReportV2, ...contact, reportTemplate: true, typedReport: { ...(pestReportV2.typedReport || {}), type: 'wdo_inspection' } });
+    await screen.findByRole('heading', { level: 1 });
+    expect(container.querySelector('.customer-report-template')).toBeNull();
+  });
+
+  it('gate on: an older report payload takes the shared header with its name and city, and keeps its stored content', async () => {
+    const { container } = renderReport({
+      reportVersion: null,
+      customerName: 'SAMPLE CUSTOMER',
+      customerFirstName: 'Sample',
+      cityState: 'Testville, FL',
+      serviceType: 'Pest Control',
+      notes: 'Stored visit summary.',
+      reportTemplate: true,
+    });
+    await screen.findByRole('heading', { level: 1 });
+    expect(container.querySelector('.customer-report-template .report-header')).not.toBeNull();
+    expect(contactLines(container)).toEqual(['Sample Customer', 'Testville, FL']);
+    expect(screen.getByText('Stored visit summary.')).toBeInTheDocument();
+  });
+
+  it('gate off: an older report payload keeps its own header', async () => {
+    const { container } = renderReport({
+      reportVersion: null,
+      customerName: 'Sample Customer',
+      customerFirstName: 'Sample',
+      cityState: 'Testville, FL',
+      serviceType: 'Pest Control',
+      notes: 'Stored visit summary.',
+    });
+    await screen.findByRole('heading', { level: 1, name: "Hi Sample, here's your service report!" });
+    expect(container.querySelector('.report-header')).toBeNull();
+    expect(container.querySelector('.customer-report-template')).toBeNull();
+    expect(screen.getByText('Testville, FL')).toBeInTheDocument();
+  });
+});
+
 describe('ReportViewPage — recap SMS anchor (#visit-recap)', () => {
   // The recap SMS links /report/:token#visit-recap, but the card only exists
   // after /data resolves — the browser's native fragment scroll runs against
@@ -1049,6 +1123,22 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
 
     expect(container.querySelector('.lawn-trend-chart')).toBeNull();
     expect(container.querySelector('.lawn-assessment-layout-no-trend')).not.toBeNull();
+  });
+
+  it('names the weed score "Weed control" on the lawn metric rows (owner 2026-10-24, one name everywhere)', async () => {
+    const withWeed = {
+      ...legacyLawnReport,
+      lawnAssessment: {
+        ...legacyLawnReport.lawnAssessment,
+        scores: { ...legacyLawnReport.lawnAssessment.scores, weedSuppression: 88 },
+      },
+    };
+    const { container } = renderReport(withWeed);
+    await screen.findByText('Visit Summary');
+
+    const card = container.querySelector('[data-section="lawn-assessment"]');
+    expect(card.textContent).toContain('Weed control');
+    expect(card.textContent).not.toMatch(/Weed Cleanliness|Weed suppression/i);
   });
 
   it('shows the lawn trend chart once two or more assessments exist', async () => {

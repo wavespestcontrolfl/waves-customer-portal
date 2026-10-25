@@ -66,4 +66,18 @@ describe('admin report preview route', () => {
     expect(opts).toMatchObject({ mode: 'live', preview: true, staffViewer: false, planSummary: false });
     expect(reportsPublic.trackServiceReportView).not.toHaveBeenCalled();
   });
+
+  test('GATE_REPORT_SHARED_TEMPLATE: the preview carries reportTemplate only while the gate is on, like the customer view', async () => {
+    const previous = process.env.GATE_REPORT_SHARED_TEMPLATE;
+    try {
+      loadPreviewService.mockResolvedValue({ service: { id: null, report_view_token: null } });
+      reportsPublic.buildServiceReportV1ResponseData.mockResolvedValue({ serviceLine: 'lawn', token: null });
+      delete process.env.GATE_REPORT_SHARED_TEMPLATE;
+      expect('reportTemplate' in (await get('/abc/data')).body).toBe(false);
+      process.env.GATE_REPORT_SHARED_TEMPLATE = 'true';
+      expect((await get('/abc/data')).body.reportTemplate).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_REPORT_SHARED_TEMPLATE; else process.env.GATE_REPORT_SHARED_TEMPLATE = previous;
+    }
+  });
 });

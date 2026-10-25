@@ -174,7 +174,7 @@ The 6-visit Standard program is the mandated default and the pre-selected/auto-r
 Estimated bed area is priced in full. Manual review is required for fallback
 bed area, bed area at or above 8,000 sqft, tree count 15+, or difficult access
 with bed area 4,000 sqft+; the 8,000-sqft threshold does not clamp priced area.
-The call pipeline (`estimator-engine/draft-builder.js`) puts a trusted lookup palm count on the T&S service line only (never on `property.palmCount`, which palm injection reads). Density-estimated trees stay, net of those palms, for a lookup-sourced count (`palmCountFromLookup`). With no trusted count it sets `services.treeShrub.palmCountUnverified`, and a line that priced zero palms then carries the `palm_count_unverified` review reason (count the palms on the aerial photo before sending). A trusted lookup count that prices (satellite read, which can over-count) is kept for the draft's price, and the draft pipeline (`estimator-engine/lookup-palm-review.js`, applied to the fresh draft result only, never the pricer, so replays of sent quotes are unchanged) adds the same `palm_count_unverified` reason: the draft lands yellow and the admin counts the palms on the aerial photo and confirms in AI Draft Review before sending.
+The call pipeline (`estimator-engine/draft-builder.js`) puts a trusted lookup palm count on the T&S service line only (never on `property.palmCount`, which palm injection reads). Density-estimated trees stay, net of those palms, for a lookup-sourced count (`palmCountFromLookup`). With no trusted count it sets `services.treeShrub.palmCountUnverified`, and a line that priced zero palms then carries the `palm_count_unverified` review reason (count the palms on the aerial photo before sending). A trusted lookup count that prices (satellite read, which can over-count) is kept for the draft's price, and the draft pipeline (`estimator-engine/lookup-palm-review.js`, applied to the fresh draft result only, never the pricer, so replays of sent quotes are unchanged) adds the same `palm_count_unverified` reason: the draft lands yellow and the admin counts the palms on the aerial photo and confirms in AI Draft Review before sending. With `GATE_SATELLITE_PALM_COUNT_TYPED` on, that confirmation is not enough: the first send of any estimate whose stored T&S line still prices a satellite count (`satellitePalmCountToConfirm`) needs the admin's typed count, and a count other than the priced one is refused until the quote is rebuilt with it (`routes/admin-estimates.js` `assertEstimateSendable`).
 
 **Recommendation logic:** The 6-visit Standard plan is the mandated default and is always the recommended tier. Light (4x) is RETIRED for new sales (owner directive 2026-09-24) — legacy/grandfathered-only, priceable but never offered or auto-recommended to a new customer. `recommendationReasons` (bed area 2,000 sqft+, heavy shrub density, moderate/complex landscaping, tree count 8+, difficult access, known pest/disease pressure) are advisory signals that the property warrants the full 6-visit program (originally: reasons not to downsell to the now-retired Light tier); they no longer change the recommended tier.
 
@@ -371,6 +371,25 @@ and requires manual review. Add-ons remain stations × $75 and Bti dunks × $15.
 Urgency and WaveGuard tier discounts do not apply; active recurring customers
 receive the 15% one-time perk. Live database pricing can override these
 defaults.
+
+**Operator price override (per line):** `input.linePriceOverrides` —
+`{ [service]: { price, reason } }` (a bare number is accepted as `price`) —
+replaces the engine price of any priced one-time or specialty line
+(`one_time_pest`, `stinging_insect`, `wdo_inspection`, `flea_package`, …) with
+the typed amount. Owner ask 2026-10-09 (a $240 engine quote on a carpenter-ant
+job worth $400). Applied in `estimate-engine.js` right after the pricers run
+(`applyLinePriceOverrides`): the typed amount is the line's final price — the
+automatic one-time perk is not re-applied on top of it; an estimate-level
+manual discount still is. The line keeps the engine number as `enginePrice` /
+`engineTotal` and carries `priceOverridden: true` + `priceOverrideReason`
+(mapped through to the stored one-time / specialty item). Recurring (annual)
+lines, retainer programs (`trap_only_retainer`, billed yearly), quote-required
+lines and `pest_initial_roach` (which has its own `priceOverride` input) are
+never overridden; an invalid amount surfaces as a line warning and the engine
+price stands. The admin builder sends it as `options.linePriceOverrides`, so a
+persisted `engineRequest` replays the override on every server reprice. Agent
+estimate tools cannot set it: the forbidden-input wall refuses any `*override*`
+key.
 
 > **Public quote mapping:** `public-quote.js` maps supported website selections
 > to recurring services and to one-time pest, lawn, mosquito, and specialty

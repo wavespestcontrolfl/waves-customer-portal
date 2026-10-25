@@ -55,6 +55,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   blogPostAllowedFor, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, frozenBlogPostWithImage, searchTerms, registryLink, wordsOnTheSite,
+  liveBlogPostsByPath, tipBlogPosts, isTownTitled,
 } = require('../services/service-report/report-blog-post');
 const router = require('../routes/admin-dispatch');
 
@@ -950,3 +951,94 @@ describe('frozenBlogPostWithImage', () => {
     expect(await frozenBlogPostWithImage(knexWith(null, calls), { ...FROZEN, url: 'https://evil.example/' })).toBeNull();
   });
 });
+
+describe('the post a tip fills in (tips with facts, GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  // A knex fake that records the one registry read and answers the rows given.
+  function registryKnex(rows) {
+    const calls = [];
+    const chain = {};
+    for (const m of ['where', 'whereIn', 'whereRaw', 'orWhereRaw', 'select', 'limit']) {
+      chain[m] = (...args) => {
+        calls.push([m, args]);
+        if (m === 'where' && typeof args[0] === 'function') args[0].call(chain);
+        return chain;
+      };
+    }
+    chain.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+    const knex = (table) => { calls.push(['table', [table]]); return chain; };
+    knex.raw = (sql) => ({ toString: () => sql });
+    knex.calls = calls;
+    return knex;
+  }
+  const MICE_PATH = '/pest-control/get-rid-of-mice/';
+  const MICE = {
+    ...REGISTRY_LIVE,
+    id: '66666666-6666-4666-8666-666666666666',
+    title: 'How to Get Rid of Mice in Southwest Florida: Seal, Trap, and Clean Up Safely',
+    live_url: `https://www.wavespestcontrol.com${MICE_PATH}`,
+    canonical_url: `https://www.wavespestcontrol.com${MICE_PATH}`,
+    canonical_url_normalized: MICE_PATH,
+    metadata: { frontmatter: { title: 'How to Get Rid of Mice in Southwest Florida: Seal, Trap, and Clean Up Safely' } },
+  };
+
+  test('liveBlogPostsByPath pairs each path with the live hub post at it and leaves the rest out; paths are bindings', async () => {
+    const other = { ...MICE, id: '44444444-4444-4444-8444-444444444444', live_url: 'https://www.wavespestcontrol.com/pest-control/other/', canonical_url: 'https://www.wavespestcontrol.com/pest-control/other/', canonical_url_normalized: '/pest-control/other/' };
+    const dead = { ...MICE, id: '55555555-5555-4555-8555-555555555555', live_status: 'missing' };
+    const knex = registryKnex([dead, MICE, other]);
+    const found = await liveBlogPostsByPath(knex, [MICE_PATH, '/mosquito/nothing-here/']);
+    expect([...found.entries()]).toEqual([[MICE_PATH, { id: MICE.id, title: MICE.title, url: MICE.live_url }]]);
+    expect(knex.calls.filter(([m]) => m === 'table')).toEqual([['table', ['content_registry']]]);
+    const raw = knex.calls.filter(([m]) => m === 'orWhereRaw');
+    for (const [, [sql]] of raw) expect(sql).not.toContain('get-rid-of-mice');
+    expect(raw.some(([, [, bindings]]) => String(bindings[0]).includes('get-rid-of-mice'))).toBe(true);
+    expect(knex.calls.find(([m, args]) => m === 'whereIn' && args[0] === 'canonical_url_normalized')[1][1]).toEqual([MICE_PATH, '/mosquito/nothing-here/']);
+  });
+
+  test('liveBlogPostsByPath: no paths, no read', async () => {
+    const knex = registryKnex([MICE]);
+    expect((await liveBlogPostsByPath(knex, [])).size).toBe(0);
+    expect((await liveBlogPostsByPath(knex, ['', null, '/'])).size).toBe(0);
+    expect(knex.calls).toEqual([]);
+  });
+
+  test('tipBlogPosts maps each tip to its live post, by id; a tip whose post is gone, or titled for one town, gets none (decision 2)', async () => {
+    const townPath = '/pest-control/ghost-ant-control-sarasota/';
+    const tips = [
+      { id: 'seal_door_sweeps', blog: { path: MICE_PATH } },
+      { id: 'seal_penetrations', blog: { path: MICE_PATH } },
+      { id: 'interior_pet_bowls', blog: { path: townPath } },
+      { id: 'water_gutters', blog: { path: '/mosquito/nothing-here/' } },
+      { id: 'ts_mulch_trunk' },
+    ];
+    const posts = await tipBlogPosts(registryKnex([MICE, REGISTRY_LIVE]), tips);
+    const mouse = { id: MICE.id, title: MICE.title, url: MICE.live_url };
+    expect(posts).toEqual({ seal_door_sweeps: mouse, seal_penetrations: mouse });
+    // "Ghost Ant Control in Sarasota" is live, but titled for one town.
+    expect(registryLink(REGISTRY_LIVE)).not.toBeNull();
+  });
+
+  test('tipBlogPosts reads nothing when no tip names a post', async () => {
+    const knex = registryKnex([MICE]);
+    expect(await tipBlogPosts(knex, [{ id: 'ts_mulch_trunk' }])).toEqual({});
+    expect(await tipBlogPosts(knex, null)).toEqual({});
+    expect(knex.calls).toEqual([]);
+  });
+
+  test('isTownTitled: a service-area town anywhere, a county by name, and a town that is also a word only as a place (pre-push P1 on 2c9b6e0664)', () => {
+    for (const title of [
+      'Get Rid Of Fleas In Lakewood Ranch, FL', 'Ghost Ants in Sarasota: Identification and Next Steps', 'Termites in Venice, FL', 'North Port, Florida lawn guide',
+      'Sarasota Mosquito Prevention Guide', 'Why Bradenton Gutters Breed Mosquitoes', 'Port Charlotte Termite Season', 'Sarasota County fertilizer rules',
+      'Manatee County Watering Days', 'Pest Control in Palmetto, FL', 'Termites near Osprey', 'Myakka City Fire Ants',
+      // every served locality, not only the whole-county cities (local Codex P2 on 849035c271)
+      'Clogged Gutters and Mosquitoes in University Park', 'Ruskin Fire Ant Season', 'Cortez Termite Swarms', 'Apollo Beach Mosquito Guide', 'Lakewood Ranch Lawn Care', 'Fruitville Roof Rats',
+      // a town that is also a word, used as the town with no "in", "near" or ", FL" (local Codex P2 on 6fbfefdcc8)
+      'Palmetto Mosquito Prevention Guide', 'Osprey Termite Season', 'Why Laurel Gutters Breed Mosquitoes', 'Myakka Fire Ant Guide', 'Saw Palmetto Removal for Palmetto Homes',
+    ]) expect([title, isTownTitled(title)]).toEqual([title, true]);
+    for (const title of [
+      'Palmetto Bugs vs. Cockroaches', 'Osprey Nests and Your Roof', 'Laurel Wilt in Avocado Trees', 'Myakka River Mosquitoes After Rain',
+      'Saw Palmetto in Your Landscape', 'Ospreys Return to Southwest Florida', 'Bay Laurel Pests', 'Myakka State Park Ticks', 'Palmetto Weevils in Cabbage Palms',
+      'How to Get Rid of Mice in Southwest Florida', 'Get Rid of Mosquitoes: Mosquito Control for Southwest Florida Homes', 'Manatees and Lawn Fertilizer', '', null,
+    ]) expect([title, isTownTitled(title)]).toEqual([title, false]);
+  });
+});
+

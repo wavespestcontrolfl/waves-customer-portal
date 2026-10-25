@@ -40,6 +40,11 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/service-report/tech-tip-yard', () => ({ loadTechTipYard: jest.fn(async () => null) }));
+jest.mock('../services/service-report/report-blog-post', () => ({
+  ...jest.requireActual('../services/service-report/report-blog-post'),
+  tipBlogPosts: jest.fn(async () => ({})),
+}));
 jest.mock('../services/job-costing', () => ({
   calculateJobCost: jest.fn(async () => ({})),
   resolveServiceRecord: jest.requireActual('../services/job-costing').resolveServiceRecord,
@@ -269,7 +274,7 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body.completionChoicesEnabled).toBe(false);
     expect(res.body.line).toBe('mosquito');
     expect(res.body.season).toBe('wet');
-    expect(res.body.groups.flatMap((g) => g.tips).map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes('mosquito') && !tip.services).map((tip) => tip.id).sort());
+    expect(res.body.groups.flatMap((g) => g.tips).map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes('mosquito') && !tip.services && !tip.sourcedOnly).map((tip) => tip.id).sort());
     expect(res.body.groups[0].primary).toBe(true);
     // newest send wins per id
     expect(res.body.lastSent).toEqual({ water_bromeliads: '2026-08-03', light_warm_bulbs: '2026-07-01' });
@@ -845,12 +850,70 @@ describe('GET /:serviceId/tech-tips', () => {
   });
 });
 
+describe('tips with facts on the picker (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  const { loadTechTipYard } = require('../services/service-report/tech-tip-yard');
+  const { tipBlogPosts } = require('../services/service-report/report-blog-post');
+  afterEach(() => { delete process.env.GATE_TECH_TIP_SOURCES; loadTechTipYard.mockClear(); tipBlogPosts.mockClear(); });
+
+  test('gate on: the yard is read from the visit address, matched, and summed up in one line; a sourced tip shows its sourced words', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    process.env.GATE_TECH_TIP_SOURCES = 'true';
+    loadTechTipYard.mockResolvedValueOnce({ grass: 'st_augustine', grassTrusted: true, grassLabel: 'St. Augustine', irrigationSystem: false, county: 'Sarasota', city: 'venice' });
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(loadTechTipYard).toHaveBeenCalledWith(expect.anything(), { customerId: 'cust-1', zip: '34205-1234', city: 'Sarasota' });
+    expect(res.body.yard).toEqual({ grass: 'St. Augustine', irrigationSystem: false, county: 'Sarasota' });
+    const served = [...res.body.groups.flatMap((group) => group.tips), ...res.body.more].find((tip) => tip.id === 'water_gutters');
+    expect(served.copy).toBe(TIPS.find((tip) => tip.id === 'water_gutters').sourcedCopy);
+  });
+
+  test('gate on: the flag the office form reads, the post each tip fills in, and the sources on each tip', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    process.env.GATE_TECH_TIP_SOURCES = 'true';
+    const post = { id: 'post-1', title: 'Get Rid of Mosquitoes: Mosquito Control for Southwest Florida Homes', url: 'https://www.wavespestcontrol.com/mosquito/get-rid-of-mosquitoes/' };
+    tipBlogPosts.mockResolvedValueOnce({ water_bromeliads: post });
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(tipBlogPosts).toHaveBeenCalledWith(expect.anything(), TIPS);
+    expect(res.body.tipSources).toBe(true);
+    expect(res.body.blogPosts).toEqual({ water_bromeliads: post });
+    const served = [...res.body.groups.flatMap((group) => group.tips), ...res.body.more].find((tip) => tip.id === 'water_bromeliads');
+    expect(served.citations.map((citation) => citation.label)).toEqual(['UF/IFAS']);
+  });
+
+  test('gate on: a failed post read offers no post and still serves the tips', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    process.env.GATE_TECH_TIP_SOURCES = 'true';
+    tipBlogPosts.mockRejectedValueOnce(new Error('registry down'));
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.available).toBe(true);
+    expect(res.body.blogPosts).toEqual({});
+    expect(res.body.groups.length).toBeGreaterThan(0);
+  });
+
+  test('gate off: no yard read, no summary, the registry copy', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(loadTechTipYard).not.toHaveBeenCalled();
+    expect(tipBlogPosts).not.toHaveBeenCalled();
+    for (const key of ['yard', 'tipSources', 'blogPosts']) expect(res.body).not.toHaveProperty(key);
+    expect([...res.body.groups.flatMap((group) => group.tips), ...res.body.more].some((tip) => tip.citations)).toBe(false);
+    const served = [...res.body.groups.flatMap((group) => group.tips), ...res.body.more].find((tip) => tip.id === 'water_gutters');
+    expect(served.copy).toBe(TIPS.find((tip) => tip.id === 'water_gutters').copy);
+  });
+});
+
 describe('completion freeze contract', () => {
   test('the complete route freezes the picks through freezeTechTips into structured_notes.techTips', () => {
     const start = completionSource.indexOf('async function completeScheduledService(');
     expect(start).toBeGreaterThan(-1);
     const block = completionSource.slice(start);
-    expect(block).toContain('freezeTechTips(completionInput.body?.techTips)');
+    // the sourced words and citations freeze only behind GATE_TECH_TIP_SOURCES,
+    // read at the freeze (owner 2026-10-24)
+    expect(block).toContain('freezeTechTips(completionInput.body?.techTips, { sourced: techTipSourcesOn() })');
     expect(block).toMatch(/techTips: techTipsFreeze\.tips/);
     // a rejected pick is an actionable 400 for a FRESH attempt, never a silent drop —
     // deferred past replay/conflict handling so a same-key retry keeps replaying

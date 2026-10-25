@@ -57,9 +57,7 @@ function additionalApplications(value) {
     .filter((row) => row && typeof row === 'object' && Object.values(row).some((v) => text(v)));
 }
 
-// The warranty text describes one preventive soil treatment. A borate wood
-// treatment, a bait system (its own program agreement) or a combined job
-// needs other wording, so only a single soil-barrier application qualifies.
+// A legacy "Other" pick keeps the real method in treatment_method_other.
 function treatmentMethod(findings) {
   const method = text(findings.treatment_method);
   return method === 'Other' ? text(findings.treatment_method_other) : method;
@@ -75,11 +73,25 @@ function targetsSubterranean(value) {
   return (Array.isArray(targets) ? targets : [targets]).some((target) => SUBTERRANEAN_TARGETS.includes(text(target)));
 }
 
+// The methods the warranty has wording for (the server's rule): a soil
+// barrier alone, Bora-Care alone, or a soil barrier with one Bora-Care
+// application as its secondary treatment. A bait system has its own program
+// agreement; any other mix has no wording.
+const SOIL = 'Soil barrier (chemical)';
+const BORATE = 'Wood treatment (borate)';
+function warrantyMethod(findings = {}) {
+  const extras = additionalApplications(findings.additional_applications);
+  const first = treatmentMethod(findings);
+  if (first === SOIL && extras.length === 0) return 'soil';
+  if (first === BORATE && extras.length === 0) return 'borate';
+  if (first === SOIL && extras.length === 1 && treatmentMethod(extras[0]) === BORATE) return 'combined';
+  return null;
+}
+
 export function warrantyEligible(findings = {}) {
   return Boolean(warrantyPlanYears(findings.warranty_type))
-    && treatmentMethod(findings) === 'Soil barrier (chemical)'
-    && targetsSubterranean(findings.wdo_target)
-    && additionalApplications(findings.additional_applications).length === 0;
+    && Boolean(warrantyMethod(findings))
+    && targetsSubterranean(findings.wdo_target);
 }
 
 // The certificate's own values; '' where the certificate has nothing, so the
@@ -94,12 +106,16 @@ function propertyAddress(findings, lot) {
   return '';
 }
 
-export function pretreatWarrantyValues({ project = {}, findings = {}, today = etDateString() } = {}) {
+export function pretreatWarrantyValues({ project = {}, findings = {}, today = etDateString(), basisKind = 'signed' } = {}) {
   // project_date is the treatment date (the server refuses a legacy findings date that disagrees).
   const initial = parseDateOnly(project.project_date);
   const years = warrantyPlanYears(findings.warranty_type);
-  const termEnd = initial && years ? formatUs(addYears(initial, years)) : '';
   const finalDate = parseDateOnly(findings.final_exterior_date);
+  // A builder lot under the master agreement runs from its final treatment
+  // date; an owner contract from the initial one (the server's rule). A
+  // Bora-Care only job has one treatment, so it is also the final one.
+  const start = basisKind === 'master' && warrantyMethod(findings) !== 'borate' ? finalDate : initial;
+  const termEnd = start && years ? formatUs(addYears(start, years)) : '';
   const lot = [text(findings.lot_block), text(findings.subdivision)].filter(Boolean).join(', ');
   // A legacy "Other" pick keeps the real product in product_name_other, as
   // the certificate page and the send gate read it.
@@ -130,6 +146,8 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
       number: project.id ? `NCW-${String(project.id).toUpperCase()}` : '',
       structures: WARRANTY_DEFAULT_STRUCTURES,
       plan: text(findings.warranty_type),
+      start_basis: basisKind === 'master' ? 'final' : 'initial',
+      start_date: start ? formatUs(start) : '',
       term_end: termEnd,
       renewal_due: termEnd,
       payer: '',
@@ -194,13 +212,29 @@ export function daysSinceTreatment(initialDate, issueDate) {
   return Math.round((Date.UTC(b.y, b.m - 1, b.d) - Date.UTC(a.y, a.m - 1, a.d)) / 86400000);
 }
 
+// The latest usable FDACS-13692 notice signed on or before the treatment date
+// and the contract basis date (Rule 5E-14.105(1)); the server picks the same
+// one. `notices` is the consumer-notices list (signedOn MM/DD/YYYY, newest
+// first). Without a real basis date yet, only the treatment date limits it.
+export function consumerNoticeOnFile(notices, initialDate, basisDate) {
+  const limits = [parseUsDate(initialDate), parseUsDate(basisDate)].filter(Boolean).map(dateKey);
+  if (!limits.length) return null;
+  const limit = Math.min(...limits);
+  return (notices || []).find((notice) => {
+    const day = notice.usable && parseUsDate(notice.signedOn);
+    return day && dateKey(day) <= limit;
+  }) || null;
+}
+
 // What blocks Create in the issue dialog: every office field filled, both
 // dates real and on or before treatment, and a plan with a treatment date.
-export function warrantyIssueReadiness(base, office) {
+// With a notice on file the typed FDACS-13692 date is not asked for.
+export function warrantyIssueReadiness(base, office, { noticeOnFile = false } = {}) {
   const initial = base.treatment.initial_date;
   const basisProblem = text(office.basisDate) ? basisDateProblem(office.basisDate, initial) : '';
-  const noticeProblem = text(office.noticeDate) ? basisDateProblem(office.noticeDate, initial) : '';
-  const filled = Object.values(office).every((v) => text(v));
+  const noticeProblem = !noticeOnFile && text(office.noticeDate) ? basisDateProblem(office.noticeDate, initial) : '';
+  const required = noticeOnFile ? Object.fromEntries(Object.entries(office).filter(([field]) => field !== 'noticeDate')) : office;
+  const filled = Object.values(required).every((v) => text(v));
   return {
     basisProblem,
     noticeProblem,

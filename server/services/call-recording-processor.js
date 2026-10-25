@@ -3983,7 +3983,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp, operatorAttach = false, officeConfirmedBy = null, conn = db } = {}) {
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
@@ -3992,14 +3992,16 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // stranger). Refused here, at the one slot writer, like #6028's intake rule.
   if (contact && contact.phone && isImpossibleNanpPhone(contact.phone)) contact = { ...contact, phone: null };
   const onSiteOnly = !!contact && contact.wants_notifications !== true && onSiteAskEligible && onSiteOptinAskTrigger(contact);
-  if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly)) return 'skipped_no_intent';
+  // operatorAttach: the office chose to file this person on the account (the family-account card's Attach as
+  // contact). It is the intent the caller's own words otherwise supply; every guard below still applies.
+  if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly && !operatorAttach)) return 'skipped_no_intent';
   // Nobody asked for this person to get notifications: their opt-in covers
   // appointment TEXTS only, so their email is not filed (service-report
   // emails fan out to every slot email).
   if (onSiteOnly && contact.email) contact = { ...contact, email: null };
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
-  const customer = await db('customers').where({ id: customerId }).first();
+  const customer = await conn('customers').where({ id: customerId }).first();
   if (!customer) return 'skipped_no_customer';
 
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -4022,7 +4024,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       || (contact.email && lowerEmail(customer[s.email]) && lowerEmail(customer[s.email]) === lowerEmail(contact.email))
     ));
     if (!matched || String(customer[matched.roleCol] || '').trim()) return false;
-    const wrote = await db('customers')
+    const wrote = await conn('customers')
       .where({ id: customerId })
       .where((q) => q.whereNull(matched.roleCol).orWhere(matched.roleCol, ''))
       // Re-assert the slot still holds the SAME person as the snapshot the
@@ -4046,6 +4048,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
         after: { ...customer, [matched.roleCol]: roleToRecord.slice(0, 30) },
         source: 'call',
         occurredAt: roleWriteAt,
+        ...(conn !== db ? { conn } : {}),
       });
     }
     return !!wrote;
@@ -4060,7 +4063,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // service_contact_authorized trust. The call site escalates this to its own
   // review flag so the office adjudicates the collision.
   if (contact.phone) {
-    const otherCustomer = await db('customers')
+    const otherCustomer = await conn('customers')
       .whereNull('deleted_at')
       .whereNot('id', customerId)
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10(contact.phone)])
@@ -4118,7 +4121,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   if (contact.phone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
   if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
   if (Object.keys(prefsToSet).length) {
-    await db('notification_prefs')
+    await conn('notification_prefs')
       .insert({ customer_id: customerId, ...prefsToSet })
       .onConflict('customer_id')
       .merge(prefsToSet);
@@ -4127,7 +4130,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // emptiness in the UPDATE's WHERE — a concurrent admin edit or reprocessed
   // call filling it between read and write must make this a 0-row no-op, never
   // an overwrite.
-  let write = db('customers').where({ id: customerId });
+  let write = conn('customers').where({ id: customerId });
   for (const col of [emptySlot.name, emptySlot.phone, emptySlot.email]) {
     write = write.where((q) => q.whereNull(col).orWhere(col, ''));
   }
@@ -4164,12 +4167,21 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // A kept stamp also records the phones it covers right now (grandfathered
     // contacts often have no opt-in row): if a later edit clears the stamp,
     // the held person's YES can still restore it.
+    //
+    // officeConfirmedBy (the family-account card's Attach as contact, GATE_CALL_ADDRESS_FAMILY_CARD): the office
+    // tapping Attach IS the human confirmation that this person belongs to the account, so their next call may
+    // link (owner 2026-10-24; that is how the duplicate stops). That is recorded as an explicit, separate fact,
+    // service_preferences.office_confirmed_slot_phones [{ phone_key, by, at, source }], read by
+    // slotOnlyLinkAllowed. It is NOT texting consent: the phone stays on the unconsented list above.
     ...((contact.phone && holdPhone) ? {
-      service_preferences: db.raw(
-        "jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb)",
+      service_preferences: conn.raw(
+        officeConfirmedBy
+          ? "jsonb_set(jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb), '{office_confirmed_slot_phones}', COALESCE(service_preferences -> 'office_confirmed_slot_phones', '[]'::jsonb) || ?::jsonb)"
+          : "jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb)",
         [last10(contact.phone), JSON.stringify(customer.service_contacts_consent_at
           ? SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean)
-          : [])],
+          : []),
+        ...(officeConfirmedBy ? [JSON.stringify([{ phone_key: last10(contact.phone), by: String(officeConfirmedBy), at: new Date().toISOString(), source: 'family_card_attach' }])] : [])],
       ),
     } : {}),
     ...((contact.phone && !smsConsentExplicit && !keepConsentStamp && customer.service_contacts_consent_at) ? {
@@ -4179,7 +4191,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       // The phones the cleared stamp DID cover (pre-double-opt-in slots have
       // no recipient_optin row): kept so the new recipient's YES can restore
       // the account stamp instead of being blocked by them forever.
-      service_preferences: db.raw(
+      service_preferences: conn.raw(
         "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{consent_covered_phone_keys}', ?::jsonb)",
         [JSON.stringify(SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean))],
       ),
@@ -4201,6 +4213,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     after: { ...customer, ...slotWrite },
     source: 'call',
     occurredAt: slotWriteAt,
+    ...(conn !== db ? { conn } : {}),
   });
   return 'written';
 }
@@ -4339,7 +4352,7 @@ const FORCE_CLAIM_QUIET_MINUTES = 3;
 // branch — permanently unreclaimable, the worst possible bug in a lock.
 const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
   + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
-// A pass interrupted by a deploy (GATE_CALL_PROC_SHUTDOWN_RELEASE). At SIGTERM
+// A pass interrupted by a deploy. At SIGTERM
 // every pass this process holds a claim for is STAMPED — nothing else changes:
 // the claim, token and status stay with the dying pass, so no second pass can
 // run while it is still alive (a released claim let the replacement pod resend
@@ -4352,8 +4365,6 @@ const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
 // write refreshes the heartbeat in the same statement: the pass IS alive at
 // SIGTERM, and a beat that had gone stale behind a long provider call must not
 // make the row reclaimable during the old pod's last 25 seconds (Codex r5 P1).
-// The clause is read only while the gate is on: a gate-off pod after a rollback
-// ignores stamps a gate-on pod left behind (Codex r5 P1).
 const SHUTDOWN_RECLAIM_QUIET_MINUTES = 2;
 const SHUTDOWN_STAMP_KEY = 'shutdown_interrupted_at';
 const shutdownInterruptedClaim = "("
@@ -4364,14 +4375,12 @@ const shutdownInterruptedClaim = "("
 // webhook's immediate path win; the claim itself refreshes updated_at, so a
 // deploy-stamped quarantined claim would wait the full window behind it
 // (Codex r6 P2). This alternative opens that gate for a stamped dead claim.
-const stampedDeadClaimOrFalse = () => (isEnabled('callProcShutdownRelease')
-  ? `(processing_status = 'processing' AND ${shutdownInterruptedClaim})`
-  : 'FALSE');
+const stampedDeadClaim = `(processing_status = 'processing' AND ${shutdownInterruptedClaim})`;
 const reclaimableClaim = (quietMinutes) => "("
   + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
   + ` OR (NOT (${CURRENT_BEAT}) AND`
   + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
-  + (isEnabled('callProcShutdownRelease') ? ` OR ${shutdownInterruptedClaim}` : '')
+  + ` OR ${shutdownInterruptedClaim}`
   + ")";
 // Passes this process currently holds a claim for (call_log.id → claim token),
 // so markInFlightForShutdown knows which rows to stamp. Filled right after the
@@ -4525,6 +4534,7 @@ function decideOnSiteOptinAsk(contact, { doNotContact = false, optinRailLive = f
 // unconditional link would book the new visit on the old customer. Household
 // role or a first-name agreement with the slot's OWN name links.
 function slotOnlyLinkAllowed(customer, phone, extracted = {}) {
+  if (!attachSlotOfficeConfirmed(customer, phone)) return false;
   const slotEntry = matchedSlotEntry(customer, phone);
   const slotRole = String(slotEntry?.contactRole || '').toLowerCase();
   if (AGENT_TYPE_SLOT_ROLES.has(slotRole)) return false;
@@ -4532,6 +4542,20 @@ function slotOnlyLinkAllowed(customer, phone, extracted = {}) {
   const extractedFirst = normalizeNamePart(extracted.first_name);
   const slotFirst = normalizeNamePart(String(slotEntry?.name || '').split(/\s+/)[0]);
   return !!extractedFirst && !!slotFirst && sameFirstName(extractedFirst, slotFirst);
+}
+
+// A slot the family-account card's Attach filed (GATE_CALL_ADDRESS_FAMILY_CARD) is identity only on the office's own
+// confirmation: its service_preferences.office_confirmed_slot_phones entry must name who confirmed it and when. A
+// slot with no such entry (every pre-existing slot) and the gate off are untouched.
+function attachSlotOfficeConfirmed(customer, phone) {
+  if (!require('../config/feature-gates').callAddressFamilyCardLive()) return true;
+  let prefs = customer.service_preferences;
+  if (typeof prefs === 'string') {
+    try { prefs = JSON.parse(prefs); } catch { prefs = null; }
+  }
+  const key = phoneKey(phone).slice(-10);
+  const entry = ((prefs && prefs.office_confirmed_slot_phones) || []).find((e) => e && e.source === 'family_card_attach' && e.phone_key === key);
+  return !entry || Boolean(entry.by && entry.at);
 }
 
 function matchedSlotEntry(customer, phone) {
@@ -10961,7 +10985,7 @@ const CallRecordingProcessor = {
             // lands with the claim even if the forced exit kills the process
             // before the post-commit check below (Codex r9 P2); that check
             // covers the flag flipping while this transaction is open.
-            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+            metadata: shuttingDown
               ? shutdownStampSql(trx)
               : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
@@ -11035,7 +11059,7 @@ const CallRecordingProcessor = {
             // lands with the claim even if the forced exit kills the process
             // before the post-commit check below (Codex r9 P2); that check
             // covers the flag flipping while this transaction is open.
-            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+            metadata: shuttingDown
               ? shutdownStampSql(trx)
               : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
@@ -11061,7 +11085,7 @@ const CallRecordingProcessor = {
     // the registry before the transaction and the row is committed, so the
     // marker's UPDATE matches). Token-fenced, so a row a peer has since
     // taken is left alone.
-    if (!claimBlocked && shuttingDown && isEnabled('callProcShutdownRelease')) {
+    if (!claimBlocked && shuttingDown) {
       await db('call_log')
         .where({ id: call.id })
         .where('processing_token', procToken)
@@ -14422,6 +14446,15 @@ const CallRecordingProcessor = {
     // could be written (a failed card write must never turn into a duplicate customer).
     let spokenNumberSuggested = false;
     let phoneMatchedThisPass = false;
+    // GATE_CALL_ADDRESS_FAMILY_CARD (owner 2026-10-24): an unknown-number caller whose stated address (or
+    // name) an account already has got a suggest-only family-account card above. With the gate on, that card
+    // is the pass's whole answer: no new customer is minted around it (the duplicate the card exists to
+    // stop), the call stays customer-less like the shared-phone case, and the workable-lead path below still
+    // captures the prospect. The card's New customer action closes it and reprocesses, which mints the old
+    // way. A card an operator already closed is never filed again, so it holds nothing.
+    let familyCardHold = false;
+    const familyCardCovers = !!familyCardReport.filed && familyCardReport.filed !== 'callback_spoken_number'
+      && require('../config/feature-gates').callAddressFamilyCardLive();
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -14474,6 +14507,9 @@ const CallRecordingProcessor = {
         // relink (customer_link_override).
         // A failed card write is the card's own warn line; the next reprocess files it again.
         logger.info(`[call-proc] ${maskSid(callSid)}: callback voicemail's spoken number matches an account — suggest-only card, no link, no new customer`);
+      } else if (familyCardCovers && (extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
+        familyCardHold = true;
+        logger.info(`[call-proc] ${maskSid(callSid)}: an account matches this caller (${familyCardReport.filed}) — suggest-only card, no link, no new customer`);
       } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -16399,7 +16435,7 @@ const CallRecordingProcessor = {
     // never a creation failure to file a card for on every reprocess.
     // …and a spoken-number suggestion (GATE_CALLBACK_SPOKEN_NUMBER_LINK) is the same: the pass
     // deliberately created nobody and the family-account card names the account.
-    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink && !spokenNumberSuggested);
+    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink && !spokenNumberSuggested && !familyCardHold);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -16641,7 +16677,7 @@ const CallRecordingProcessor = {
         const sameCallEligibility = {
           customerId,
           workableUnnamedLead,
-          unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberSuggested),
+          unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberSuggested || familyCardHold),
         };
         const { lead: existingLead, matchedVia: existingLeadVia, phoneNameConflictLeadId } = await findReusableCallLead(db, {
           phone,
@@ -18446,7 +18482,7 @@ const CallRecordingProcessor = {
             if (bounceVerdict?.outcome === 'opted_out') {
               optOutStillActive = !!(await db('messaging_suppression')
                 .where({ phone: smsAni || phone, active: true })
-                .first('id')
+                .first('phone')
                 .catch(() => null));
             }
             const bounceOutcome = bounceVerdict
@@ -24858,22 +24894,18 @@ const CallRecordingProcessor = {
    * SHUTDOWN_RECLAIM_QUIET_MINUTES (reclaimableClaim), and the claim that
    * takes the row clears it. Also marks this process as draining so a claim
    * taken from here on stamps itself.
-   *
-   * No-op (counts only) while GATE_CALL_PROC_SHUTDOWN_RELEASE is off.
    */
   async markInFlightForShutdown({ deadlineMs = 5000 } = {}) {
-    const enabled = isEnabled('callProcShutdownRelease');
     // Flag FIRST, snapshot second, with no await between: a pass whose claim
     // commits after this snapshot reads the flag in its post-commit check and
     // stamps itself; a pass that read the flag as false before this line is
     // in the snapshot with a committed claim.
-    if (enabled) shuttingDown = true;
-    if (!enabled) return { enabled, inFlight: inFlightPasses.size, stamped: 0, failed: 0 };
+    shuttingDown = true;
     const deadline = new Promise((resolve) => {
       const t = setTimeout(() => resolve('deadline'), Math.max(0, deadlineMs));
       if (typeof t.unref === 'function') t.unref();
     });
-    const summary = { enabled, inFlight: 0, stamped: 0, failed: 0 };
+    const summary = { inFlight: 0, stamped: 0, failed: 0 };
     const seen = new Set();
     // One token-fenced stamp per entry, all concurrent, each racing the
     // shared deadline. Returns the tokens whose stamp landed (1 row).
@@ -25005,7 +25037,7 @@ const CallRecordingProcessor = {
             })
             .andWhere(function quarantineBackstopAge() {
               this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
-                .orWhereRaw(stampedDeadClaimOrFalse());
+                .orWhereRaw(stampedDeadClaim);
             });
         });
       })
@@ -25412,6 +25444,8 @@ CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustome
 // caller recognition mirrors the call pipeline exactly instead of forking a
 // parallel matcher — the two can never drift.
 CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
+// The one service-contact slot writer, for the family-account card's Attach as contact action (routes/admin-triage.js).
+CallRecordingProcessor.persistCallSecondaryContact = persistCallSecondaryContact;
 CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
 
 /**

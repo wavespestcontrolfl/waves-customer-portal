@@ -7,6 +7,9 @@ const { hashContractToken, publicContractUrl } = require('./contracts');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
+const { warranty13692CheckLive } = require('../config/feature-gates');
+const { CONSUMER_NOTICE_GRACE_END, findConsumerNotice } = require('./consumer-notices');
+const { woodBasePlatePct } = require('./project-types');
 
 const NEW_CONSTRUCTION_WARRANTY_KEY = 'service_agreement.termite_new_construction_warranty';
 const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
@@ -163,13 +166,28 @@ function targetsSubterranean(value) {
   return targets.some((target) => SUBTERRANEAN_TARGETS.includes(oneLine(target)));
 }
 
-// Same rule as the admin button: one soil-barrier application with a plan,
-// aimed at subterranean termites.
+// The warranty has wording for three methods (owner 10-24 Q6): a soil
+// barrier alone; Bora-Care alone as the primary treatment; or a soil barrier
+// with one Bora-Care application as its secondary treatment (Rule
+// 5E-14.106(9)). Anything else (a bait system, a borate primary with soil,
+// two extra applications) has no wording and is refused.
+const SOIL = 'Soil barrier (chemical)';
+const BORATE = 'Wood treatment (borate)';
+function warrantyMethod(findings) {
+  const extras = extraApplications(findings.additional_applications);
+  const first = treatmentMethod(findings);
+  if (first === SOIL && extras.length === 0) return 'soil';
+  if (first === BORATE && extras.length === 0) return 'borate';
+  if (first === SOIL && extras.length === 1 && treatmentMethod(extras[0]) === BORATE) return 'combined';
+  return null;
+}
+
+// Same rule as the admin button: a plan, a method with wording, aimed at
+// subterranean termites.
 function warrantyEligible(findings) {
   return Boolean(PLAN_YEARS[oneLine(findings.warranty_type)])
-    && treatmentMethod(findings) === 'Soil barrier (chemical)'
-    && targetsSubterranean(findings.wdo_target)
-    && extraApplications(findings.additional_applications).length === 0;
+    && Boolean(warrantyMethod(findings))
+    && targetsSubterranean(findings.wdo_target);
 }
 
 // The treated site from the certificate only: the customer's own address may
@@ -204,12 +222,58 @@ function money(value, label) {
   return `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function officeFields(body, initial) {
+// The Builder Master Agreement caps a lot warranty's renewal fee (owner
+// 10-24 Q5); its text prints the same amount.
+const BUILDER_RENEWAL_FEE_CAP = 149;
+
+// Rule 5E-14.105(1): the signed FDACS-13692 comes before the contract.
+// GATE_WARRANTY_13692_CHECK (owner 2026-10-24): a signed notice on file (an
+// e-signed Document Request or an uploaded paper scan) supplies the printed
+// date on the warranty and on the Builder Master Agreement; with none, the
+// typed date still works through the grace end, then the issue refuses.
+const noticeWarning = (document) => `No signed FDACS-13692 consumer notice is on file for this customer. Until ${us(parseIso(CONSUMER_NOTICE_GRACE_END))} you can type the date it was signed. After that, ${document} cannot be issued until the notice is signed (send it from Document Requests) or the paper form is uploaded.`;
+const WARRANTY_NOTICE = {
+  warning: noticeWarning('the warranty'),
+  required: 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form) on or before the contract basis date, then issue the warranty.',
+};
+const MASTER_AGREEMENT_NOTICE = {
+  warning: noticeWarning('the master agreement'),
+  required: 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form), then issue the master agreement.',
+};
+
+// { signedOn } when a signed notice dated on or before `onOrBefore` is on
+// file, else { warnings } while the grace lasts (through the grace end, an
+// Eastern date); refuses after it. `messages` names the contract.
+async function noticeOnOrBefore(customer, onOrBefore, conn, messages) {
+  const found = await findConsumerNotice(conn, customer.id, { onOrBefore });
+  if (found) return { signedOn: found.signedOn, warnings: [] };
+  if (key(parseIso(etDateString())) > key(parseIso(CONSUMER_NOTICE_GRACE_END))) throw bad(messages.required, 409);
+  return { signedOn: null, warnings: [messages.warning] };
+}
+
+// The warranty's notice. Gate off = nothing here (the typed date).
+async function consumerNoticeOnFile(body, customer, initial, conn) {
+  if (!warranty13692CheckLive()) return { signedOn: null, warnings: [] };
+  const basis = parseUs(body?.values?.basis?.date);
+  if (!basis) throw bad('Enter the contract basis date as MM/DD/YYYY.');
+  // The notice comes before the contract and before the treatment.
+  return noticeOnOrBefore(customer, key(basis) < key(initial) ? basis : initial, conn, WARRANTY_NOTICE);
+}
+
+function officeFields(body, initial, noticeSignedOn = null) {
   const warranty = body?.values?.warranty || {};
   const out = Object.fromEntries(OFFICE_FIELDS.map((field) => [field, oneLine(warranty[field])]));
   out.treatment_price = money(out.treatment_price, 'treatment price');
   out.renewal_fee = money(out.renewal_fee, 'annual renewal fee');
+  if (body?.values?.basis?.kind === 'master' && Number(out.renewal_fee.replace(/[$,]/g, '')) > BUILDER_RENEWAL_FEE_CAP) {
+    throw bad('The Builder Master Agreement caps the annual renewal fee at $149.00.');
+  }
   if (out.plan_price !== PLAN_PRICE_INCLUDED) out.plan_price = money(out.plan_price, 'plan price');
+  // A notice on file prints its own signed date: the typed one is ignored.
+  if (noticeSignedOn) {
+    out.consumer_notice_date = noticeSignedOn;
+    return out;
+  }
   const notice = parseUs(out.consumer_notice_date);
   if (!notice || key(notice) > key(initial)) throw bad('The FDACS-13692 date must be a real date on or before the treatment date.');
   // Rule 5E-14.105(1): the signed consumer notice comes before the contract.
@@ -255,27 +319,40 @@ function isShortText(value) {
 function amount(findings, field) {
   return Number(withoutUnit(findings[field], AMOUNT_FIELDS[field]).replace(/,/g, '')) || 0;
 }
-function positiveAmountProblems(findings) {
+
+// A soil liquid's finished solution: its concentration and gallons must be
+// above zero. Bora-Care has none to record: the certificate form clears
+// both for it (1:1 label dilution; volume varies by saturation), and the
+// send gate measures it by treated area alone.
+const LIQUID_AMOUNTS = ['concentration_pct', 'gallons_applied'];
+
+// An application's amounts: plain numbers once their unit is removed, a
+// positive treated area, and each of `positive` above zero.
+function amountProblems(application, positive) {
   return [
-    ...['concentration_pct', 'gallons_applied'].filter((field) => !(amount(findings, field) > 0)),
-    ...(amount(findings, 'square_footage') > 0 || amount(findings, 'linear_feet') > 0 ? [] : ['square_footage or linear_feet']),
+    ...Object.entries(AMOUNT_FIELDS)
+      .filter(([field, unit]) => oneLine(application[field]) && !/^(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?$/.test(withoutUnit(application[field], unit)))
+      .map(([field]) => field),
+    ...positive.filter((field) => !(amount(application, field) > 0)),
+    ...(amount(application, 'square_footage') > 0 || amount(application, 'linear_feet') > 0 ? [] : ['square_footage or linear_feet']),
   ];
 }
 
-function assertStructuredCertificate(findings) {
+function assertStructuredCertificate(findings, positive) {
   const failing = [
     ...SHORT_TEXT_FIELDS.filter((field) => !isShortText(findings[field])),
-    ...Object.entries(AMOUNT_FIELDS)
-      .filter(([field, unit]) => oneLine(findings[field]) && !/^(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?$/.test(withoutUnit(findings[field], unit)))
-      .map(([field]) => field),
     ...(/^[A-Z0-9-]{3,20}$/i.test(oneLine(findings.applicator_fdacs_id)) ? [] : ['applicator_fdacs_id']),
-    ...positiveAmountProblems(findings),
+    ...amountProblems(findings, positive),
   ];
   if (failing.length) throw bad(`Fix these certificate fields first (a short value, not a sentence): ${failing.join(', ')}.`, 409);
 }
 
-function certificateValues(project, findings) {
-  assertStructuredCertificate(findings);
+// A builder lot under the master agreement runs from its final treatment
+// date, an owner contract from the initial one (Rule 5E-14.105(3)(a) allows
+// either; owner 10-24 Q3). The term, its end and the 30-day issue window
+// count from that date.
+function certificateValues(project, findings, { basisKind, positive } = {}) {
+  assertStructuredCertificate(findings, positive);
   // project_date is the certificate's treatment date; a legacy
   // findings.treatment_date must agree with it, never override it.
   const initial = parseIso(project.project_date);
@@ -284,20 +361,24 @@ function certificateValues(project, findings) {
   if (key(initial) > key(today)) throw bad('The treatment date on the certificate is in the future.', 409);
   const legacyDate = certificateDate(findings, 'treatment_date', 'The treatment date');
   if (legacyDate && key(legacyDate) !== key(initial)) throw bad('The certificate has two different treatment dates. Fix the certificate first.', 409);
-  const termEnd = us(addYears(initial, PLAN_YEARS[oneLine(findings.warranty_type)]));
   const lot = [oneLine(findings.lot_block), oneLine(findings.subdivision)].filter(Boolean).join(', ');
   const finalDate = certificateDate(findings, 'final_exterior_date', 'The final exterior date');
   if (finalDate && (key(finalDate) < key(initial) || key(finalDate) > key(today))) {
     throw bad('The final exterior date on the certificate must be between the treatment date and today.', 409);
   }
+  // A Bora-Care only job has one treatment: it is the initial and the final.
+  const fromFinal = basisKind === 'master' && warrantyMethod(findings) !== 'borate';
+  if (fromFinal && !finalDate) {
+    throw bad('A builder lot warranty runs from the final exterior treatment. Record its date on the certificate and send the certificate again first.', 409);
+  }
+  const start = fromFinal ? finalDate : initial;
+  const termEnd = us(addYears(start, PLAN_YEARS[oneLine(findings.warranty_type)]));
   const recordedRenewal = certificateDate(findings, 'renewal_due', 'Renewal due by');
   // Renewal is due when the guaranteed term ends; a recorded date that
   // differs would end coverage early, so it stops the issue.
   if (recordedRenewal && us(recordedRenewal) !== termEnd) {
     throw bad(`Renewal due by on the certificate must be the term end, ${termEnd}.`, 409);
   }
-  // The send gate takes square or linear feet; one of them must be there.
-  if (!oneLine(findings.square_footage) && !oneLine(findings.linear_feet)) throw bad('The certificate has no square or linear feet.', 409);
   const product = oneLine(findings.product_name) === 'Other' ? oneLine(findings.product_name_other) : oneLine(findings.product_name);
   return {
     initial,
@@ -319,6 +400,8 @@ function certificateValues(project, findings) {
         // The whole project id: a shortened one can repeat across jobs.
         number: `NCW-${String(project.id).toUpperCase()}`,
         plan: oneLine(findings.warranty_type),
+        start_basis: basisKind === 'master' ? 'final' : 'initial',
+        start_date: us(start),
         term_end: termEnd,
         renewal_due: termEnd,
       },
@@ -402,6 +485,131 @@ function soilLiquid(treatment) {
   return { product: known.product, active_ingredient: treatment.active_ingredient || known.ingredient };
 }
 
+// ── Method wording (owner 10-24 Q6) ─────────────────────────────────────────
+// Section 3's treatment paragraph and three CONDITIONS lines (template
+// version 9) are fixed text from this file, chosen by the certificate's
+// method. The soil text is version 8's, word for word.
+const SOIL_CONDITIONS = {
+  first: 'The final exterior treatment must be completed before the building is occupied. If the builder does not allow it, we tell the owner in writing, and the untreated exterior is excluded until it is treated.',
+  second: 'These can break the treated barrier: soil, mulch or landscaping added against the foundation; new slabs, patios or stoops; digging next to the foundation; plumbing or irrigation leaks; wood, siding or stucco touching soil; moisture against the foundation.',
+  third: 'Call us before work that disturbs treated soil. We can re-treat the disturbed area for a fee.',
+};
+const BORATE_CONDITIONS = {
+  first: 'Wood added, replaced or exposed after our treatment is not treated. Tell us before such work; we can treat it for a fee.',
+  second: 'These can let termites reach untreated wood or wear away the treatment: rain, standing water or leaks on treated wood; wood, siding, stucco or foam touching soil; soil or mulch above the slab edge; moisture against the walls.',
+  third: 'The borate treatment lasts while the treated wood is kept from rain, continuous water and contact with the ground, as its label states.',
+};
+const COMBINED_CONDITIONS = {
+  ...SOIL_CONDITIONS,
+  third: `${SOIL_CONDITIONS.third} The Bora-Care wood treatment is a secondary treatment: wood added after it is not treated, and its treated wood must be kept from rain, continuous water and contact with the ground. This does not reduce the coverage of the soil barrier.`,
+};
+const BORA_CARE = { product: 'Bora-Care', ingredient: 'disodium octaborate tetrahydrate', epa: '64405-1' };
+// Label: "Do not use for new construction treatments if the total linear
+// footage of the cellulosic base plates is less than 60%" (no override).
+const BORATE_PLATE_MINIMUM = 60;
+const FINAL_EXTERIOR_KEYS = ['final_exterior_date', 'final_exterior_time', 'final_exterior_product', 'final_exterior_active_ingredient', 'final_exterior_applicator_name'];
+
+// A Bora-Care application's product, ingredient and EPA number must be
+// Bora-Care's; the certificate is corrected, never rewritten.
+function assertBoraCare(app) {
+  const product = oneLine(app.product_name) === 'Other' ? oneLine(app.product_name_other) : oneLine(app.product_name);
+  if (product.toLowerCase() !== BORA_CARE.product.toLowerCase()) {
+    throw bad(`The borate wording is written for Bora-Care. The certificate names "${product}".`, 409);
+  }
+  const ingredient = oneLine(app.active_ingredient);
+  if (ingredient && !/^disodium octaborate tetrahydrate(\s*\d+(\.\d+)?\s*%)?$/i.test(ingredient)) {
+    throw bad(`The certificate's active ingredient (${ingredient}) does not match Bora-Care (${BORA_CARE.ingredient}). Fix the certificate first.`, 409);
+  }
+  const epa = oneLine(app.epa_registration);
+  if (epa && epa !== BORA_CARE.epa) throw bad(`Bora-Care is EPA Reg. No. ${BORA_CARE.epa}; the certificate says ${epa}.`, 409);
+}
+
+// "2400 sq ft · 220 linear ft": the area a Bora-Care application records,
+// in checked numbers.
+function boraCareArea(app) {
+  return [['square_footage', 'sq ft'], ['linear_feet', 'linear ft']]
+    .filter(([field]) => amount(app, field) > 0)
+    .map(([field, unit]) => `${withoutUnit(app[field], AMOUNT_FIELDS[field])} ${unit}`)
+    .join(' · ');
+}
+
+// Bora-Care alone, as the primary treatment (application 1). Its label
+// treats after the final framing inspection and only with wood base plates
+// at 60% or more; its text says no soil barrier was installed.
+function boraCareOnlyRecord(findings, initial) {
+  assertBoraCare(findings);
+  if (FINAL_EXTERIOR_KEYS.some((field) => oneLine(findings[field]))) {
+    throw bad('This certificate records a final exterior treatment, so the job is not Bora-Care only. A Bora-Care job with a soil treatment has no warranty wording.', 409);
+  }
+  const applied = certificateDate(findings, 'borate_treatment_date', 'The Bora-Care application date');
+  if (applied && key(applied) !== key(initial)) {
+    throw bad('On a Bora-Care only job the Bora-Care date is the treatment date. Clear the separate Bora-Care application date.', 409);
+  }
+  const framing = certificateDate(findings, 'framing_inspection_date', 'The final framing inspection date');
+  if (!framing) throw bad('Record the final framing inspection date on the certificate first. The Bora-Care label treats after it.', 409);
+  if (key(framing) > key(initial)) {
+    throw bad('The Bora-Care label treats after the final framing inspection, and this inspection date is after the treatment date (the label then requires a second visit).', 409);
+  }
+  const pct = woodBasePlatePct(findings.wood_base_plate_pct);
+  if (pct === null) throw bad('Record the wood base plates as a percent of all base plates (0 to 100) on the certificate first.', 409);
+  if (pct < BORATE_PLATE_MINIMUM) {
+    throw bad('The Bora-Care label does not allow a new-construction treatment when wood base plates are under 60% of all base plates. This job cannot have a Bora-Care only warranty.', 409);
+  }
+  return { framing, pct, area: boraCareArea(findings) };
+}
+
+// Bora-Care as the secondary treatment on a soil job (Rule 5E-14.106(9)):
+// the one additional application, on its own date with its own amounts.
+function secondaryBoraCareRecord(findings, initial) {
+  const app = extraApplications(findings.additional_applications)[0];
+  assertBoraCare(app);
+  const applied = certificateDate(findings, 'borate_treatment_date', 'The Bora-Care application date');
+  if (!applied) throw bad('Record the date of the Bora-Care application on the certificate first.', 409);
+  if (key(applied) < key(initial) || key(applied) > key(parseIso(etDateString()))) {
+    throw bad('The Bora-Care application date must be between the treatment date and today.', 409);
+  }
+  const failing = amountProblems(app, []);
+  if (failing.length) throw bad(`Fix these fields on the Bora-Care application first (a short value, not a sentence): ${failing.join(', ')}.`, 409);
+  return { date: applied, area: boraCareArea(app) };
+}
+
+function soilText(t) {
+  return `A preventive soil treatment for subterranean termites during construction. No termite infestation was known to be present. Product: ${t.product} (${t.active_ingredient}) at ${t.concentration}% · ${t.gallons} gallons · ${t.sq_ft} sq ft · ${t.linear_ft} linear ft. Initial treatment date: ${t.initial_date}. ${t.final_exterior_line} Applicator: ${t.applicator}, ID card ${t.applicator_id}.`;
+}
+
+// Per method: application 1's amounts that must be above zero, the checked
+// record its wording needs, the treatment fields it prints, and its wording.
+// `wording` gets screened values (`t`) and the record, whose values are
+// checked dates and numbers.
+const METHODS = {
+  soil: {
+    positive: LIQUID_AMOUNTS,
+    record: () => null,
+    treatment: soilLiquid,
+    wording: (t) => ({ description: soilText(t), conditions: SOIL_CONDITIONS }),
+  },
+  borate: {
+    positive: [],
+    record: boraCareOnlyRecord,
+    // No final exterior line: there is no soil treatment. Left blank, it also
+    // stops version 8, whose soil paragraph prints it, from rendering this job.
+    treatment: (t) => ({ product: BORA_CARE.product, active_ingredient: t.active_ingredient || BORA_CARE.ingredient, final_exterior_line: '' }),
+    wording: (t, b) => ({
+      description: `A preventive borate wood treatment for subterranean termites during construction, applied to the structural wood as the primary treatment, as its label directs (Florida Building Code 1816.1 / R318.1; Rule 5E-14.106(6), F.A.C.). No termite infestation was known to be present. No soil-applied termiticide barrier was installed under or around the foundation. Product: ${BORA_CARE.product} (${BORA_CARE.ingredient}), EPA Reg. No. ${BORA_CARE.epa}, mixed as its label directs. Area treated: ${b.area}. Treatment date: ${t.initial_date}, after the final framing inspection on ${us(b.framing)}. Wood base plates: ${b.pct}% of all base plates. Applicator: ${t.applicator}, ID card ${t.applicator_id}.`,
+      conditions: BORATE_CONDITIONS,
+    }),
+  },
+  combined: {
+    positive: LIQUID_AMOUNTS,
+    record: secondaryBoraCareRecord,
+    treatment: soilLiquid,
+    wording: (t, b) => ({
+      description: `${soilText(t)} Secondary treatment (Rule 5E-14.106(9), F.A.C.): ${BORA_CARE.product} (${BORA_CARE.ingredient}), EPA Reg. No. ${BORA_CARE.epa}, mixed as its label directs and applied to the structural wood on ${us(b.date)}. Area treated: ${b.area}.`,
+      conditions: COMBINED_CONDITIONS,
+    }),
+  },
+};
+
 function dayKey(value) {
   const day = parseIso(value);
   return day ? us(day) : '';
@@ -452,8 +660,9 @@ function sentCertificate(project, customer) {
 // transaction with `trx`, which locks the certificate row, so the snapshot is
 // the certificate as it stands at insert time. Any other template passes its
 // values through.
-async function templateIssueValues(templateKey, body, customer, conn = db) {
-  if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return body?.values || {};
+async function templateIssueWithWarnings(templateKey, body, customer, conn = db) {
+  if (BUILDER_DOCUMENT_KEYS.includes(templateKey)) return builderDocumentIssue(templateKey, body, customer, conn);
+  if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return { values: body?.values || {}, warnings: [] };
   const projectId = issueRequestProjectId(body);
   // Customer row before the certificate row: the order the issue route and
   // a customer merge both take, so the two cannot deadlock.
@@ -471,22 +680,96 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   assertCustomerPrintable(locked);
   const { asSent, findings } = sentCertificate(project, customer);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
-  const { initial, values } = certificateValues(asSent, findings);
-  Object.assign(values.treatment, soilLiquid(values.treatment));
+  const method = METHODS[warrantyMethod(findings)];
+  const { initial, values } = certificateValues(asSent, findings, { basisKind: body?.values?.basis?.kind, positive: method.positive });
+  const record = method.record(findings, initial);
+  Object.assign(values.treatment, method.treatment(values.treatment));
   const issuer = body?.values?.issuer || {};
-  return screenValues({
+  const notice = await consumerNoticeOnFile(body, customer, initial, conn);
+  const printed = screenValues({
     ...values,
     // Named here, or the context falls back to the customer's plan tier.
     service: { name: 'New Construction Termite Warranty' },
     warranty: {
       ...values.warranty,
-      ...officeFields(body, initial),
+      ...officeFields(body, initial, notice.signedOn),
       contract_basis: contractBasis(body?.values?.basis, values.project.builder, initial),
       // The day Waves signs it (the signature line); delivery keeps its own time.
       issue_date: us(parseIso(etDateString())),
     },
     issuer: { name: oneLine(issuer.name), title: oneLine(issuer.title), license: WAVES_FDACS_LICENSE_NUMBER },
   });
+  // The method's fixed wording, filled with the screened values and the
+  // checked record. The fixed text itself is not screened: version 8 printed
+  // "No termite infestation was known to be present." unscreened.
+  const { description, conditions } = method.wording(printed.treatment, record);
+  return { values: { ...printed, treatment: { ...printed.treatment, description }, conditions }, warnings: notice.warnings };
+}
+
+// ── Builder Master Agreement and Lot Order (owner 10-24) ────────────────────
+// The office types these values; they print on a contract the builder signs,
+// so each one is a single screened line, every date is real, every price is
+// a dollar amount, and the day Waves signs is the server's ET date.
+const BUILDER_MASTER_AGREEMENT_KEY = 'service_agreement.termite_builder_master_agreement';
+const BUILDER_LOT_ORDER_KEY = 'service_agreement.termite_builder_lot_order';
+const BUILDER_DOCUMENT_KEYS = [BUILDER_MASTER_AGREEMENT_KEY, BUILDER_LOT_ORDER_KEY];
+const BUILDER_TEXT_FIELDS = {
+  [BUILDER_MASTER_AGREEMENT_KEY]: { agreement: ['price_schedule'] },
+  [BUILDER_LOT_ORDER_KEY]: { lot: ['lot_block', 'subdivision', 'address', 'permit', 'structures', 'treatment', 'price_basis'] },
+};
+
+function builderDate(value, label, { notAfter } = {}) {
+  const date = parseUs(value);
+  if (!date) throw bad(`Enter the ${label} as MM/DD/YYYY.`);
+  if (notAfter && key(date) > key(notAfter)) throw bad(`The ${label} cannot be in the future.`);
+  return us(date);
+}
+
+function builderDocumentValues(templateKey, body, noticeSignedOn = null) {
+  if (body?.allowUnresolved === true) throw bad('This builder document cannot be issued with blank fields.');
+  const today = parseIso(etDateString());
+  const input = body?.values || {};
+  const values = {};
+  for (const [group, fields] of Object.entries(BUILDER_TEXT_FIELDS[templateKey])) {
+    values[group] = {};
+    for (const field of fields) {
+      const raw = input[group]?.[field];
+      if (!isShortText(raw) || !oneLine(raw)) throw bad(`Enter ${group}.${field} as one short line.`);
+      values[group][field] = oneLine(raw);
+    }
+  }
+  if (templateKey === BUILDER_MASTER_AGREEMENT_KEY) {
+    // Rule 5E-14.105(1): the consumer notice is signed before the agreement,
+    // and the agreement is signed today at the earliest. A notice on file
+    // prints its own signed date: the typed one is ignored.
+    values.agreement.consumer_notice_date = noticeSignedOn
+      || builderDate(input.agreement?.consumer_notice_date, 'FDACS-13692 date', { notAfter: today });
+  } else {
+    const lot = input.lot || {};
+    values.lot.agreement_date = builderDate(lot.agreement_date, 'master agreement date', { notAfter: today });
+    values.lot.scheduled_date = builderDate(lot.scheduled_date, 'expected slab pour date');
+    values.lot.price_total = money(oneLine(lot.price_total), 'total price for this lot');
+    values.lot.disturbed_soil_price = money(oneLine(lot.disturbed_soil_price), 're-treatment price');
+    values.lot.renewal_fee = money(oneLine(lot.renewal_fee), 'annual renewal fee');
+    if (Number(values.lot.renewal_fee.replace(/[$,]/g, '')) > BUILDER_RENEWAL_FEE_CAP) {
+      throw bad('The Builder Master Agreement caps the annual renewal fee at $149.00.');
+    }
+  }
+  const issuer = input.issuer || {};
+  values.issuer = { name: oneLine(issuer.name), title: oneLine(issuer.title), date: us(today) };
+  if (!values.issuer.name || !values.issuer.title) throw bad('Enter the name and title of the person signing for Waves.');
+  return screenValues(values);
+}
+
+// A builder document's values. The master agreement looks for the signed
+// notice on file when the 13692 check is on: Waves signs it today, so the
+// notice must be dated today or earlier. A lot order runs under the master
+// agreement and prints no notice date.
+async function builderDocumentIssue(templateKey, body, customer, conn) {
+  const notice = templateKey === BUILDER_MASTER_AGREEMENT_KEY && warranty13692CheckLive()
+    ? await noticeOnOrBefore(customer, parseIso(etDateString()), conn, MASTER_AGREEMENT_NOTICE)
+    : { signedOn: null, warnings: [] };
+  return { values: builderDocumentValues(templateKey, body, notice.signedOn), warnings: notice.warnings };
 }
 
 // Staff read the full warranty text before it is created: the preview
@@ -520,10 +803,13 @@ function issueDeliveryState(templateKey, token, expiresAt, now = new Date()) {
 
 module.exports = {
   NEW_CONSTRUCTION_WARRANTY_KEY,
+  BUILDER_MASTER_AGREEMENT_KEY,
+  BUILDER_LOT_ORDER_KEY,
+  CONSUMER_NOTICE_GRACE_END,
   issueDeliveryState,
   assertConfirmedRender,
   renderHash,
   supersedeOpenNewConstructionWarranty,
   snapshotWarrantyNumber,
-  templateIssueValues,
+  templateIssueWithWarnings,
 };

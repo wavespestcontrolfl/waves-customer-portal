@@ -4,7 +4,7 @@
 // their route. Renders nothing with no rows (one tech chosen, hints gated,
 // or nobody can take the hour).
 
-import { detourPhrase } from './BestTimeHint';
+import { detourPhrase } from './detour-phrase';
 
 function fmtHour(hhmm) {
   const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);

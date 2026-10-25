@@ -52,6 +52,16 @@ describe('pretreatWarrantyValues', () => {
     expect(v.warranty.plan_price).toBe('');
   });
 
+  it('runs a builder lot from its final treatment date, and gives no term until that date is recorded', () => {
+    const project = { project_date: '2026-10-01' };
+    const lot = pretreatWarrantyValues({ project, findings: { ...findings, final_exterior_date: '2026-12-15' }, basisKind: 'master' });
+    expect(lot.warranty).toMatchObject({ start_basis: 'final', start_date: '12/15/2026', term_end: '12/15/2027', renewal_due: '12/15/2027' });
+    const unfinished = pretreatWarrantyValues({ project, findings, basisKind: 'master' });
+    expect(unfinished.warranty).toMatchObject({ start_date: '', term_end: '' });
+    const owner = pretreatWarrantyValues({ project, findings: { ...findings, final_exterior_date: '2026-12-15' } });
+    expect(owner.warranty).toMatchObject({ start_basis: 'initial', start_date: '10/01/2026', term_end: '10/01/2027' });
+  });
+
   it('takes the treatment date from the project and handles Feb 29', () => {
     const v = pretreatWarrantyValues({ project: { project_date: '2028-02-29' }, findings: { ...findings, treatment_date: '' } });
     expect(v.treatment.initial_date).toBe('02/29/2028');
@@ -64,16 +74,26 @@ describe('pretreatWarrantyValues', () => {
   });
 
 
-  it('offers the warranty only for one soil-barrier application with a plan', () => {
+  it('offers the warranty for soil, Bora-Care only, or soil + one Bora-Care application, with a plan', () => {
+    const boraCare = { treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care' };
     expect(warrantyEligible(findings)).toBe(true);
-    expect(warrantyEligible({ ...findings, treatment_method: 'Wood treatment (borate)' })).toBe(false);
+    expect(warrantyEligible({ ...findings, ...boraCare })).toBe(true);
+    expect(warrantyEligible({ ...findings, additional_applications: [boraCare] })).toBe(true);
     expect(warrantyEligible({ ...findings, treatment_method: 'Bait system' })).toBe(false);
+    expect(warrantyEligible({ ...findings, additional_applications: [{ treatment_method: 'Bait system', product_name: 'Trelona ATBB' }] })).toBe(false);
+    expect(warrantyEligible({ ...findings, ...boraCare, additional_applications: [{ treatment_method: 'Soil barrier (chemical)', product_name: 'Termidor SC' }] })).toBe(false);
+    expect(warrantyEligible({ ...findings, additional_applications: [boraCare, boraCare] })).toBe(false);
     expect(warrantyEligible({ ...findings, wdo_target: ['Drywood termites'] })).toBe(false);
     expect(warrantyEligible({ ...findings, wdo_target: 'Drywood termites, Formosan subterranean termites' })).toBe(true);
     expect(warrantyEligible({ ...findings, treatment_method: 'Other', treatment_method_other: 'Soil barrier (chemical)' })).toBe(true);
-    expect(warrantyEligible({ ...findings, additional_applications: [{ treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care' }] })).toBe(false);
     expect(warrantyEligible({ ...findings, additional_applications: JSON.stringify([{ product_name: '' }]) })).toBe(true);
     expect(warrantyEligible({ ...findings, warranty_type: 'Addition to an existing building (no warranty required)' })).toBe(false);
+  });
+
+  it('runs a Bora-Care only builder lot from its one treatment date, with no final exterior to wait for', () => {
+    const lot = pretreatWarrantyValues({ project: { project_date: '2026-10-01' }, findings: { ...findings, treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care' }, basisKind: 'master' });
+    expect(lot.warranty).toMatchObject({ start_basis: 'final', start_date: '10/01/2026', term_end: '10/01/2027' });
+    expect(lot.treatment.product).toBe('Bora-Care');
   });
 
   it('uses the lot when there is no street, the term end as renewal, and the real product behind "Other"', () => {

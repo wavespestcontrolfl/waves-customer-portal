@@ -16,7 +16,7 @@ const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
-const { pestReportVoiceLive } = require('../config/feature-gates');
+const { pestReportVoiceLive, pestQuietVisitLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
@@ -109,10 +109,13 @@ const { calculateBoundedTrackingEta } = require('../services/customer-tracking-e
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const SeriesPriceGuards = require('../services/series-price-guards');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { isReService } = require('../services/re-service');
+const { recentTrappingVisits } = require('../services/rodent-trap-visits');
+const { validDateOnly } = require('../utils/date-only');
 const reserviceOfficeRequest = require('../services/reservice-office-request');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
@@ -140,7 +143,7 @@ const ActivityIndicators = require('../services/service-report/activity-indicato
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
-  TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
+  TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, observedAndReportedLines, writerRulesRejection,
   noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
   activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation,
 } = require('../services/service-report/report-writer-rules');
@@ -1394,6 +1397,18 @@ function noticeOptions(options = {}, dateStr, startHHMM) {
   return { expectedPhone: options.expectedPhone, stopWide: stopWideMeta(options.stopWideFor, dateStr, startHHMM) };
 }
 
+// The operator's line for a reschedule text that reached nobody. The email
+// version goes first (GATE_MOVE_NOTICE_EMAIL): an email that went out is said
+// plainly, so staff do not chase a customer who was told.
+async function rescheduleTextNotSentError(noticeOutcome, emailArgs) {
+  if (await require('../services/appointment-reminders').deliverMoveNoticeEmail(emailArgs)) {
+    return 'The text could not be delivered, so the customer got the reschedule notice by email.';
+  }
+  return noticeOutcome.retryable === true
+    ? 'customer was not notified: notification preferences could not be read — send the reschedule notice again'
+    : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+}
+
 // `stopWideFor`: the service_visits id when this ONE notice speaks for a
 // whole grouped stop (admin-dispatch moves a stop as a unit and quotes the
 // stop's landed start). It rides into the message metadata as the
@@ -1422,6 +1437,8 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
   const AppointmentReminders = require('../services/appointment-reminders');
   const { captureReminderGuards, rearmRescheduleReminderWindows } = require('./admin-dispatch');
   const noticeTime = `${dateStr}T${start}`;
+  // This notice's own stamp: the key of its email version (deliverMoveNoticeEmail).
+  const noticeAt = new Date();
   // Snapshot the just-synced reminder state BEFORE the send — the failure
   // re-arm and the success mark below both guard on it so neither can stomp
   // a newer reschedule that lands during a slow send.
@@ -1491,6 +1508,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           const at = parseETDateTime(`${dateStr}T${start || '08:00'}`);
           return at && !Number.isNaN(at.getTime()) ? at.getTime() : undefined;
         })(),
+        move_notice_at: noticeAt.toISOString(),
       }, {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
@@ -1518,9 +1536,10 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         },
       });
       if (!sent) {
-        error = noticeOutcome.retryable === true
-          ? 'customer was not notified: notification preferences could not be read — send the reschedule notice again'
-          : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+        error = await rescheduleTextNotSentError(noticeOutcome, {
+          kind: 'rescheduled', customerId: customer.id, scheduledServiceId: serviceId, apptTime, serviceLabel,
+          arrivalWindow: spokenArrivalWindow(start), notificationEventKey: stopWide.notificationEventKey, noticeAt, sendOutcome: noticeOutcome,
+        });
       }
     }
   } catch (e) {
@@ -2888,6 +2907,27 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
       ? computed
       : (Number.isFinite(catalogBase) && catalogBase > 0 ? Math.round(catalogBase * 100) / 100 : null);
     res.json({ price, source: computed != null ? 'engine_default' : (price != null ? 'catalog_base' : null) });
+  } catch (err) { next(err); }
+});
+
+// GET /rodent-trapping-visits?customerId=&propertyId=&date= — the rodent
+// trapping notice in the create-appointment modal (owner ruling 2026-09-26:
+// trapping covers the setup visit + 1 trap check; visit 3 and later is the
+// office-booked "Rodent Trap Check - Additional"). Lists the customer's
+// active trapping visits at the booking's address in the 60 days up to the
+// booking date. Read-only and advisory: it never decides included vs.
+// billable, and nothing is priced from it. requireAdmin for the same reason
+// as the mosquito quote above.
+router.get('/rodent-trapping-visits', requireAdmin, async (req, res, next) => {
+  try {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const customerId = String(req.query.customerId || '').trim();
+    if (!uuid.test(customerId)) throw httpError(400, 'customerId must be a valid customer id');
+    const propertyId = req.query.propertyId == null ? '' : String(req.query.propertyId).trim();
+    if (propertyId && !uuid.test(propertyId)) throw httpError(400, 'propertyId must be a valid property id');
+    const date = req.query.date == null ? '' : String(req.query.date).trim();
+    if (date && !validDateOnly(date)) throw httpError(400, 'date must be a calendar date (YYYY-MM-DD)');
+    res.json(await recentTrappingVisits(db, customerId, { propertyId: propertyId || null, date: date || null }));
   } catch (err) { next(err); }
 });
 
@@ -6431,6 +6471,10 @@ router.get('/', async (req, res, next) => {
     // the shared entry for a visit whose customer has no gate code. A failed
     // read just shows no fallback.
     let neighborhoodGateByVisit = new Map();
+    // The neighborhood's pinned gate per visit (owner 2026-10-24): the
+    // Directions link routes through it before the house. Only visits with
+    // a pin have a key, so every other row is byte-identical to before.
+    let gateWaypointByVisit = new Map();
     // Visits whose stop is in an active neighborhood, when a visit's assigned
     // technician may add a gate code or mark one wrong
     // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
@@ -6440,6 +6484,7 @@ router.get('/', async (req, res, next) => {
       if (require('../config/feature-gates').neighborhoodAccessLive()) {
         const neighborhoodAccess = require('../services/neighborhood-access');
         neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
+        gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
         if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
       }
     } catch (err) {
@@ -6916,6 +6961,7 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
         lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,
@@ -7046,28 +7092,35 @@ router.get('/', async (req, res, next) => {
     // helper's deadline regardless of zone count, and any NWS failure or
     // deadline leaves rainChance null / zoneRain values null (Codex
     // 2026-07-20: decorative weather must never hold the payload).
+    // The per-zone HOURLY outlook rides the same wave and stamps each row's
+    // rainAtStop (chance at its window-start hour in its zone) for the day
+    // list card — bounded the same way, null when the forecast is late.
     let rainChance = null;
     let zoneRain;
+    const { attachStopRain, zoneHourlyOutlooks } = require('../services/scheduling/stop-rain');
+    attachStopRain(enriched, date, {});
     try {
       const zonesPresent = [...new Set(enriched.map((s) => s.zone))].filter((z) => ZONE_COORDS[z]);
-      const [outlook, ...perZone] = await Promise.all([
+      const [outlook, perZone, hourlyByZone] = await Promise.all([
         rainOutlookPromise,
-        ...zonesPresent.map(async (z) => {
+        Promise.all(zonesPresent.map(async (z) => {
           const zoneOutlook = await getDailyRainOutlookBounded(ZONE_COORDS[z].lat, ZONE_COORDS[z].lng).catch(() => null);
           const chance = zoneOutlook?.[date]?.rainChance;
           return [z, Number.isFinite(chance) ? chance : null];
-        }),
+        })),
+        zoneHourlyOutlooks(zonesPresent, ZONE_COORDS).catch(() => ({})),
       ]);
       const officeChance = outlook?.[date]?.rainChance;
       rainChance = Number.isFinite(officeChance) ? officeChance : null;
       if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);
+      attachStopRain(enriched, date, hourlyByZone);
     } catch { /* rain outlook is optional */ }
 
     res.json({
       date, services: enriched,
       visitCloseout: legacyCloseoutEnabled,
-      // GATE_DISPATCH_FIND_TIME_PANEL: shows the Dispatch board's "Find a time" button.
-      findTimePanel: isEnabled('dispatchFindTimePanel'),
+      // GATE_NEW_APPT_ADDRESS_TIMES: New Appointment's time box answers on a new caller's address alone.
+      addressFirstTimes: isEnabled('newApptAddressTimes'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -20836,6 +20889,20 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           return spawnedVisit;
         }
       }
+      // Series price guards (GATE_SERIES_PRICE_GUARDS; off = no reads, no
+      // change): this child's price against what the series last collected
+      // (rationale on services/series-price-guards.js). A cancelled root's
+      // price that the last paid visit does not back is not minted at all.
+      const priceVerdict = SeriesPriceGuards.seriesPriceGuardsLive()
+        ? await SeriesPriceGuards.extensionPriceVerdict(conn, { parent, parentId, child: nextData })
+        : null;
+      const priceAlertContext = { parent, parentId, childDate: nextStr, serviceLabel: childIdentity.service_type };
+      if (priceVerdict?.skip) {
+        logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — ${nextStr} price ${priceVerdict.price} is templated from a cancelled series root and not backed by the last paid visit (${priceVerdict.lastPaid ?? 'none'})`);
+        SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, priceAlertContext);
+        onSkip?.('cancelled_root_price');
+        return spawnedVisit;
+      }
       const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
       // Annual-prepay coverage for the row we just inserted.
       //
@@ -20884,6 +20951,9 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // extension or register its reminder.
       if (autoExtLive && autoExtRow?.id) {
         await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars);
+        if (priceVerdict && !(await SeriesPriceGuards.insertedRowIsPrepaid(conn, autoExtRow.id))) {
+          SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, { ...priceAlertContext, childId: autoExtRow.id });
+        }
         spawnedVisit = {
           scheduledServiceId: autoExtRow.id,
           customerId: parent.customer_id,
@@ -26192,7 +26262,7 @@ router.post('/generate-report', async (req, res) => {
     // GATE_REPORT_WRITER_RULES, read once per request. It applies only to
     // writers in its scope (never lawn or tree/shrub/palm — owner
     // 2026-09-30, another lane owns them); see report-writer-rules.js.
-    const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
+    const { selectReportCopyPrompt, writerRulesInScope, pestVoiceServes } = require('../services/service-report/lawn-report-copy-prompt');
     const writerRulesGate = reportWriterRulesLive();
 
     // A technician writes a report only for a visit of their own: the id-less
@@ -26996,6 +27066,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         writerRules: writerRulesOn,
         findingsType: reportPromptContext.findingsType || null,
         serviceKind: reportPromptContext.serviceKind || null,
+        visitTexts: [promptNotes, ...promptObs],
         visitPromises,
       });
       contextText = ctx.contextText || '';
@@ -27093,11 +27164,18 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       }
     }
 
-    const selectedSystemPrompt = selectReportCopyPrompt(
-      systemPrompt,
-      groundingServiceType,
-      writerRulesOn ? { ...reportPromptContext, writerRules: true, pestVoice: pestReportVoiceLive() } : reportPromptContext,
-    );
+    const promptContext = writerRulesOn
+      ? { ...reportPromptContext, writerRules: true, pestVoice: pestReportVoiceLive(), pestQuietVisit: pestQuietVisitLive() }
+      : reportPromptContext;
+    const selectedSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, promptContext);
+    // GATE_PEST_QUIET_VISIT trims empty inputs under the one-voice pest prompt only.
+    const inputLines = observedAndReportedLines({
+      quiet: promptContext.pestQuietVisit === true && pestVoiceServes(groundingServiceType, promptContext),
+      observations: promptObs,
+      stationObserved: stationLines.observed,
+      interaction: customerInteraction,
+      concern: promptConcern,
+    });
     // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY; owner 2026-10-02: the
     // instruction is THE guard, no word filter). In the system prompt so it
     // reaches every tree & shrub generation even when the grounding context
@@ -27133,14 +27211,9 @@ ${writerRulesOn
     : `Products Applied / Active Ingredients: ${productsText || 'Not specified'}`}
 
 [OBSERVED BY TECHNICIAN]
-Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}${stationLines.observed}
-Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
+${inputLines.observed}Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
 
-[REPORTED BY CUSTOMER]
-Customer interaction: ${customerInteraction || 'Not specified'}
-Customer concern (as reported, not a verified finding): ${promptConcern || 'None'}
-
-[FUTURE ADVICE — not completed work]
+${inputLines.customer}[FUTURE ADVICE — not completed work]
 Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
 
 Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;

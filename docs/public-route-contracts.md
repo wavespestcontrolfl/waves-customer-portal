@@ -133,6 +133,25 @@ opens "Here is what to expect after this visit:"). Tips frozen before this
 change carry no key and render as before. Auth, headers and routes are
 unchanged.
 
+Tips with facts, citations (owner 2026-10-24): on the same payload
+(`/api/reports/:token/data` and the renders that share `buildReportV1Data`),
+an entry of `techNote.tips` may carry the optional key
+`citations: [{ label, url }]` (one or two entries), present only while
+`GATE_TECH_TIP_SOURCES` is exactly `true` (dark; read at call time). The
+server freezes them at completion from the tip registry's `sources` (facts in
+`server/services/email-division/fact-register-data.js`), together with the
+tip's sourced words, in `structured_notes.techTips`; the client never
+supplies them. Before a citation is sent, report-data re-checks it with
+`printableCitations` (`tip-library.js`): a non-empty label of at most 60
+characters and an `https` URL on an allowed host (`CITATION_HOSTS`, the host
+or a subdomain, no userinfo). Anything else is dropped, never repaired. The
+web report prints each label as a link after the tip's sentence, inside the
+quote, and never prints the raw URL. Rollback: unset
+`GATE_TECH_TIP_SOURCES`. The payload then carries no `citations`, frozen ones
+included, and new completions freeze the registry copy exactly as before. A
+tip frozen while the gate was on keeps its sourced words. Auth, headers and
+routes are unchanged.
+
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
@@ -399,6 +418,24 @@ render (gate on or off, every service line) — `report-data.js`'s
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
 
+Pest rain outlook (owner 2026-10-24, `GATE_PEST_RAIN_OUTLOOK` — dark, off
+unless exactly `'true'`, read at call time; no new route, token, key, privacy or
+rate-limit surface): on the pest-line service-report payload
+(`/api/reports/:token/data` and the PDF) the existing `weatherCall.body` (inside
+`premiumExperience` and the `pestReportV2.weatherCall` copy) may carry the
+frozen rain outlook while the gate is on: one fixed sentence for dry weather
+ahead, or a fixed rain sentence plus one fixed sentence on dried spray. It
+replaces a record-only body (the two wind bodies and the default one) and
+follows a factual body (good treatment window, recent rainfall).
+`headline`, `factsLine`, `sourceLabel` and `sourceKeys` are unchanged (the
+report page picks its weather icon from the headline, which still reads the
+visit's own weather). The frozen summary itself,
+`service_records.structured_notes.rainOutlook`, is never in any public payload:
+`structured_notes` is read server side only and no public route returns it. Gate
+off, or any state the card does not cover (light rain, rain inside four hours,
+no supported spray, an incomplete or missing outlook, a non-pest line), leaves
+the payload byte-identical. The PDF cache key gains `-rain1` while the gate is on.
+
 Tree & Shrub "From your technician" paragraph (owner 2026-10-05, go-ahead; fixed
 sentences; `GATE_TS_TECH_PARAGRAPH` — dark, strict `'true'`, read at call time,
 effective only while `GATE_TS_TECH_FINDINGS_COPY` is also live; off leaves the
@@ -621,6 +658,15 @@ These values freeze the billed row's service ownership for combined-visit
 closeout. They are opaque, non-bearer references that grant no read or write
 access; no sibling invoice, report, receipt, or other bearer token rides a line
 item. Legacy and unrelated invoice rows may omit the ownership fields.
+On a multi-property invoice, a service line may also carry `property_id` (the
+customer's own `customer_properties` row; opaque, non-bearer, grants no access)
+and `property_address` (the street, city, state and ZIP frozen from that
+property when the invoice was written). Line-item discount rows inherit both
+from their parent line. When the service lines span two or more properties,
+`/api/pay/:token`, `/api/receipt/:token` and both PDFs group the lines under
+each property's address with that property's discounts and subtotal; every
+other invoice renders as the flat list. Amounts, recipients, payer bill-to and
+tokens are unchanged.
 
 Visit note: `/api/pay/:token` returns `service.techNotes` only as the reviewed
 report text (`customerSafeVisitNotes` with `projectLine`, server/services/context-aggregator.js;
@@ -2527,6 +2573,7 @@ whole-landscape reassurance. Public and queued PDFs share the tree-only `tsrevie
 cache revision so older PDFs cannot retain the substituted scores. Token, access,
 privacy, and rate-limit guards are unchanged.
 Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
+Under `GATE_LAWN_SCORE_SCALE_V2` (owner 2026-10-24, lawn scoring review; dark, strict `true`, read at call time; needs `GATE_LAWN_VISIT_ASSESSMENT` and `GATE_LAWN_PROPERTY_HISTORY`): each new lawn assessment carries `lawn_assessments.score_scale` (2 = the four 0-100 anchored ratings; NULL = scale 1), and the property-scoped history above holds rows of ONE score scale, the report visit's own. On the `/api/reports/:token/data` lawn payload (and the PDF and report-email renders that share `buildReportV1Data`) a scale-2 visit's `lawnAssessment.trend[]`, initial scores, `beforeAfter` (photo pair and `improvement`), baseline flag, since-last progress and treatment memory, the paired-photo recheck and the report writer's prior-visit score line use only that lawn's scale-2 visits. At a lawn's first scale-2 visit there is no prior visit, so the report reads as after a baseline reset: no trend, no before/after, a baseline visit. A report for a scale-1 visit keeps its scale-1 history. Payload keys are unchanged. Until a row has `score_scale = 2` the filter is a no-op, so payloads, PDFs, history identities, PDF signatures and signed `h1` pins are byte-identical; after the flip a scale-1 visit's report keeps its own rows and identity. Rollback: unset the gate; rows already on scale 2 stay on it and compare only with each other. Token, access, eligibility, privacy and rate-limit guards are unchanged.
 Lawn report payload cleanup (lawn report rebuild P6): the `/api/reports/:token/data` lawn `reportV2` no longer carries `snapshot.mainWatch` or the top-level `seasonalNote` (the web hero and PDF never rendered either; `snapshot.seasonalNote`, which the hero renders, and `trends.seasonalNote` are unchanged), and `reportV2.photoSummary` is `null` instead of the stock “No additional observations from the photo review.” placeholder so no empty-evidence sentence prints under the photos or in the PDF. The lawn narrative model no longer writes `mainWatch` or `treatmentSummary`; older frozen payloads and cached narratives that still carry those keys are tolerated (extra keys are ignored). No token, eligibility, privacy or rate-limit change; `LAWN_RENDER_STRATEGY` and `SERVICE_REPORT_PDF_STORAGE_VERSION` bumped so cached renders re-key.
 Lawn result-timing copy (lawn report rebuild P16, owner 2026-10-03): on the `/api/reports/:token/data` lawn `reportV2` (and the PDF and report-email renders that share `buildReportV1Data`) no hand-written lawn copy states an unsourced result timeline. The seasonal dormancy explanation on the color diagnosis card (`diagnosis[].customerExplanation` / `explanation` when `seasonal` is true) now comes from the approved `seasonal_dip` expectation row in `server/config/lawn-expectations.js` ("...often returns as nights warm", no count) instead of "should green back up as it warms"; while the row is not `approved` it falls back to the same sentence without the promise. The cross-season notes (`progressionNote`, `trends.seasonalNote`, and the progress engine's in-process `seasonalLine`) carry the same hedge ("...and color often returns as nights warm" / "...often returns as nights warm") in place of "greens back up" / "recovers as it warms"; all three copy sites ask one shared check (`approvedSeasonalDipRow` in `lawn-seasonality.js`, read at call time), and while the row is not `approved` the notes end at "...in the cooler months." with no returns clause. The gated lawn re-service `expectation` (GATE_RESERVICE_REPORT_COPY, lawn treated outcome) no longer says "two to three weeks" or "after three weeks"; it reads "Lawn treatments take time to show, and how fast depends on the problem and the weather. Contact us if the problem areas are not improving." These apply with or without the lawn gates, so gate-off lawn output changes by those sentences only. `LAWN_RENDER_STRATEGY` was bumped to `p9-lawn-seasonal-timing-20261003` (now `p10-...`, see the lead section) so cached lawn PDFs and renders re-key once (`SERVICE_REPORT_PDF_STORAGE_VERSION` is unchanged: the lawn signature already feeds the PDF key). No token, eligibility, privacy or rate-limit change.
 Lawn field rules (v13, owner 2026-10-06 and 2026-10-07): on the `/api/reports/:token/data` lawn payload (and the PDF and report-email renders that share `buildReportV1Data`) three things change. (1) The program line (`reportV2` / `snapshot` program copy, `PROGRAM_LINES_V13`) reads "... where it fits the property" for the June micronutrient-and-barrier claim and the August and September micronutrient claims (North Port holds the Nutra-TECH pass June to September until the city confirms), and the November line no longer says "sedge" ("... plus spot treatment for large patch where needed"; Dismiss is retired). April says "a slow-release feeding" (owner 2026-10-23: the 12x April bag is the polymer-coated LESCO 44-0-0, and the 9x bag is 50% slow-release). (2) Frozen Acelepryn caterpillar aftercare: when a v13 completion applies Acelepryn and the applied protocol row carries `delayWateringOrMowingHours`, the completion freezes a 24-hour hold into that product's internal report facts (`approved_report_product_facts.wateringRule` `{ mode: 'hold', hold_hours: 24, source: 'label' }` and `mowHoldDays: 1`) ONLY when a recorded application target is a caterpillar pest (caterpillar, armyworm, sod webworm, looper, cutworm or grassworm) and the catalog carries no watering rule of its own. The watering instruction the report builds and freezes (`wateringInstruction`, `aftercare` lines, `mowHold`) then says to skip turf watering and hold off mowing for 24 hours ("Skip your turf watering until ...", "Mowing: hold off until ..., 1 day after today's treatment."). A grub, billbug or other target, or no recorded target, adds nothing, so grub use keeps its water-in advice; both facts stay server-internal (never on `data.applications[].product`) and older frozen records are unchanged. (3) `LAWN_RENDER_STRATEGY` is `p10-lawn-field-rules-20261007` (was `p10-lawn-report-consistency-20261005`) so cached lawn PDFs and renders re-key once; `SERVICE_REPORT_PDF_STORAGE_VERSION` is unchanged (the lawn signature already feeds the PDF key). No token, eligibility, privacy, rate-limit or key-set change.
@@ -2606,15 +2653,31 @@ UNFROZEN build (a completion, or a visit that froze nothing); a frozen visit
 replays what it froze in either gate state. (1) A catalog rule with `by_target`
 entries picks the direction per logged target (`service_products.targets`), so
 one product can add a hold and a water-in; no covered target reads the product's
-top-level rule, or the first entry of a target-only rule. (2) A same-day water-in
-the label requires beside a hold that leaves it no deadline shortens each hold
-that carries a `label_minimum` to that minimum ("Skip your turf watering until
+top-level rule, or the first entry of a target-only rule. (2) A water-in whose
+window the label writes (a same-day rule, or a catalog `label_window`, since
+2026-10-24) counts from the application and never follows a hold; one that
+also carries `rain_counts` reads as a water-in run, not the long-window rain
+sentences. When a hold
+leaves it no deadline, as few holds as it needs that carry a `label_minimum`
+shorten to that minimum, latest-ending first ("Skip your turf watering until
 today’s treatment has dried." or a nearer clock time), judged with a 2-hour
-drying allowance; a hold without one stays and the visit is no claim, as before.
-(3) A hold's `then_water_in` adds the long-window sentences ("Today’s treatment
-then needs about ½ inch of water by <date>." / "Rain and your regular watering
-both count.") whatever the window's length. No new key, state or route; the
-no-claim reason the office alert uses never enters the payload. The unfrozen PDF
+drying allowance: a label direction shortens any such hold, a "for best
+results" window (`label_window: 'best_results'`) only our own rule. A hold
+whose part above the minimum is the label's own "for best results" line
+(`label_best_results`) then goes first and that window follows it (a
+hold-then-water-in, the deadline counted from the printed hold end). Late in
+the day a same-day deadline may read "by 11:59 PM tonight", and a minimum
+marked `advisory` may end by 9 PM to leave a 3-hour run. A hold that still
+leaves no deadline keeps the visit no claim, as before. (3) A hold's
+`then_water_in` adds the long-window sentences ("Today’s treatment then needs
+about ½ inch of water by <date>." / "Rain and your regular watering both
+count.") whatever the window's length. (4) A bait hold marked
+`yields_to_label_water_in` gives way to a water-in the label directs: the
+banner is that water-in with no hold line. (5) Beside any hold, a water-in with
+`beside_hold_by_hours` (a humectant's one-day root-zone step) takes that window
+instead of its own one- or two-hour one. No new key, state or route; the
+no-claim reason the office alert uses, and the frozen instruction's `yielded`
+(for the staff note), never enter the payload. The unfrozen PDF
 cache key adds the gate state and the logged targets (`:wr=1e:`); off, it is the
 same key as before. Rollback: unset the variable (frozen visits keep their text).
 `reportV2.aftercare` is a record of the visit and never changes by the clock
@@ -2872,6 +2935,12 @@ Two changes exist, both only while the gate is live, only for a frozen instructi
 
 The PDF cache key gains `:wir=c` (rain covered it) or `:wir=a` (the amount line) for such a visit only while the gate is live; the stamp reads the location through the frozen identity map center, like the render.
 
+`GATE_LAWN_REPORT_STORY` (dark, strict `true`, read at call time; needs `GATE_LAWN_REPORT_LAYOUT`;
+gate off leaves the payload, the PDF and every cached PDF key byte-identical) adds one optional
+member inside the `lawnLayout` key that `GATE_LAWN_REPORT_LAYOUT` (next paragraph) adds:
+`lawnLayout.story: true` (lawn only, only while that key is present; no new route, token, privacy
+or rate-limit surface). The live web page then prints the story order (`STORY_LAYOUT_ORDER`); the
+PDF document, static and SMS renders ignore it.
 `GATE_LAWN_REPORT_LAYOUT` (dark, strict `true`, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) adds one optional key to the lawn
 `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit
@@ -2881,6 +2950,17 @@ Mowing Height table (`HEIGHT_BAND_BY_GRASS`, `turf-height.js`) for the lawn's gr
 own reading, else the turf profile); null for a grass the table does not list. The live web page
 orders and trims the lawn report from the key (a lead is also needed); the PDF document, static
 and SMS renders ignore it, so the lawn PDF signature carries no part for this gate.
+`GATE_REPORT_SHARED_TEMPLATE` (dark, strict `true`, read at call time; gate off leaves every
+payload below byte-identical) adds one optional top-level key, `reportTemplate: true`, to the
+LIVE web payloads of the regular customer reports (`server/services/service-report/report-template.js`):
+`/api/reports/:token/data` in `live` mode only (a `service_report_v1` record and an older record;
+the `pdf`, `static` and `sms_preview` modes, the PDF and every cached PDF key never carry it),
+`/api/reports/project/:token/data` (the page has only the live view), the lawn-diagnostic and
+pest-identifier report GETs (beside `report`, see below), and the staff-only
+`/api/admin/report-preview/:scheduledServiceId/data`. No new route, token, privacy or
+rate-limit surface; nothing about the customer is added or removed. The page prints the pest
+report's customer header and one stacked layout from the key; WDO inspection and pre-treatment
+certificate pages ignore it (the page decides from the report type).
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
@@ -3624,7 +3704,11 @@ before receipt persistence remains ambiguous and can repeat a provider handoff.
 
 `GATE_SMS_SHARED_PHONE_LINK` (dark; owner 2026-10-10 "link text"): the inbound SMS matcher (`findSingleCustomerByPhone`) links a sender phone that two or more non-deleted customer rows share ONLY to the one row staff marked `customers.sms_primary_for_shared_phone` (admin `PUT /api/admin/customers/:id` field `smsPrimaryForSharedPhone`, audited as a sensitive field); no mark, or more than one mark, keeps today's behaviour (unlinked, unknown-sender path). The contact-correction queue's locked match applies the same rule. No recency or any other guess, ever: the linked customer feeds the reschedule-reply and draft paths. Any writer that changes a marked row's phone identity (last 10 digits) clears the mark unless that write sets it for the new number. A mark-linked text joins the customer's unified-inbox thread as that one message; the number's earlier unknown-contact thread is never promoted into the marked account. Gate off = byte-identical to before. Sends nothing.
 
-`GATE_LEAD_CALL_TEXT_PREFERENCE` (dark; owner 2026-10-14): on `POST /api/webhooks/twilio/sms`, a sender in lead intake (`lead_intake_status` set, not `estimate_drafted`, re-read under a row lock) whose whole text is a bare CALL or TEXT (`parseCallTextReply`) gets one note on their newest lead (`lead_activities`). The text is not consumed: it takes the ordinary inbox path and the `sms_reply` bell title for that text leads with "Wants a call:" or "Prefers text:". Stores no preference, sends nothing and leaves `lead_intake_status` alone. Gate off = inbound handling as before, except that `classifyServiceIntent` returns no service for a bare CALL / TEXT reply (no paid model call) whatever the gate.
+Lead CALL / TEXT preference (owner 2026-10-14; always on): on `POST /api/webhooks/twilio/sms`, a sender in lead intake (`lead_intake_status` set, not `estimate_drafted`, re-read under a row lock) whose whole text is a bare CALL or TEXT (`parseCallTextReply`) gets one note on their newest lead (`lead_activities`). The text is not consumed: it takes the ordinary inbox path and the `sms_reply` bell title for that text leads with "Wants a call:" or "Prefers text:". Stores no preference, sends nothing and leaves `lead_intake_status` alone. `classifyServiceIntent` returns no service for a bare CALL / TEXT reply (no paid model call).
+
+`GATE_LEAD_CALL_REPLY_RING` (dark; owner 2026-10-24): on `POST /api/webhooks/twilio/sms`, after the TwiML ack, a known sender whose whole text is a bare CALL (`parseCallTextReply`) and that the intake machine did not consume is checked by `ringForCallReply` (`server/services/lead-call-reply-ring.js`). It places ONE outbound call, never a text: between 8 AM and 8 PM ET, for a `+1` ten-digit sender, when this phone got a "Reply CALL" text from us in the last 7 days (real Twilio sid, not failed / undelivered / canceled), the customer row is not `active_customer` / `won` / `at_risk`, no ring went to the phone in 24 h and no outbound call in 10 min (all read under a per-phone advisory lock), Twilio rings Adam's cell (not the sender) for 20 s from the lead-alert line through the shared press-1 bridge (`placeBridgeCall`, `call_log.source` `lead-call-reply-ring`, `metadata.type` `lead_call_reply_ring`). The sender's phone rings only after Adam presses 1. `lead_intake_status` is not read or changed, and the inbound text still takes its ordinary path and bell. On `POST /api/webhooks/twilio/call-status`, a terminal status on such a row without `bridged_at` raises one `lead` needs-you bell (claimed by `metadata.missed_bell_at`, released if the bell never lands) in place of the generic Twilio failure bell. A connected ring counts as a staff call back (`STAFF_CALL_SOURCES`). Gate off = no call, no bell, and every response byte-identical.
+
+`GATE_LEAD_CALL_TEXT_FOLLOWUP` (dark; owner 2026-10-24): on `POST /api/webhooks/twilio/sms`, after the TwiML ack, the same unconsumed text goes to `handleLeadReply` (`server/services/lead-call-text-followup.js`). For a `+1` lead sender who got our "Reply CALL" text in 7 days (not `active_customer` / `won` / `at_risk`), it can send ONE text per event through `sendCustomerMessage` (audience `lead`, entry point `lead_call_text_followup`, a customer action in the send window): the service question for a bare TEXT, the time question for a bare CALL from 8 PM to 8 AM ET, and the booked-time confirmation for a clear time answer to that question. It writes `lead_callback_requests` (one open row per phone, one `scheduled` row per 15-minute slot) and may set a NULL or `awaiting_address` `lead_intake_status` to `awaiting_service`; otherwise it raises one `lead` needs-you bell and sends nothing. The inbound text still takes its ordinary path and bell. Gate off = no text, no row, no bell, and every response byte-identical.
 
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
@@ -3775,7 +3859,16 @@ default), no call goes out at any hour: the lead takes the after-hours path
 (the `new_lead` bell; the legacy lead SMS to the owner only if that bell
 fails). The gate never changes the response, the lead's one automated text,
 or the estimate draft. A diff that places the call with the gate off is a
-P0. An enforced Turnstile failure answers 403
+P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
+2026-10-24): a submission whose phone matches a live customers row still
+takes the existing-customer branch (its note; no leads row, no automated
+text, no draft, no new-lead bell) and the response is unchanged. When that
+row is still a lead (`pipeline_stage` new_lead, contacted, estimate_sent,
+estimate_viewed, follow_up or lost), an open `lead_intake_status`
+(`awaiting_service`, `awaiting_address`) is kept instead of cleared, and
+one Leads admin alert rings (`ringRepeatFormAlert`; none inside the
+5-minute duplicate window). Any other row is unchanged, nothing is sent to
+the submitter, and gate off = as before. An enforced Turnstile failure answers 403
 `{ error: 'Verification failed. Please try again.' }` with no write, with
 ONE exception, the unverified hold (`GATE_LEAD_UNVERIFIED_HOLD`, default
 on, `false` = no exception): when the verdict is `missing_token` AND
@@ -3894,7 +3987,24 @@ excludes pricing, vendor, SKU, dilution, MOA, inventory fields),
 `/api/service-outlines/:token` (approved/sent/viewed packets only,
 43-char base64url token format gate, 60 req/min read limit, 120 req/min
 CTA telemetry limit, privacy headers `no-store`/`noindex`/`no-referrer`,
-generic 404 for missing, draft, revoked, or malformed tokens),
+generic 404 for missing, draft, revoked, or malformed tokens; the payload's
+`content` is the packet's stored `content_json`, frozen when the packet was
+built. A packet built while `GATE_LAWN_OUTLINE_V13` was live (stamped
+`content_library_version` `lawn-v13-copy-1`) may carry a `visual` object on a
+section, beside the unchanged `title`/`body`/`bullets`, which stay the text
+version of the same content: `{ type: 'tiles', items: [{ icon, title, text }] }`,
+`{ type: 'chips', items: [{ key, label, tier: 'main' | 'as_needed' }], note }`,
+`{ type: 'year', months: [{ month, label, main: [key], asNeeded: [key],
+limited }], labels: { key: label }, limitLabel }`, `{ type: 'categories',
+items: [{ key, label, text }] }`, `{ type: 'steps', items: [{ icon, title,
+text }] }` and `{ type: 'tags', items: [string], note }`. Such a packet's
+`property` carries `programLabel` (a fixed program name the page shows in
+place of the grass) and `turfType: null`; the gate-off packet keeps
+`turfType` and has no `programLabel`. `icon` and step `key` values are a closed set
+(`server/services/lawn-service-outline.js` `V13_COPY` / `V13_STEP_LABELS`) that
+`client/src/pages/ServiceOutlinePage.jsx` maps to icons; an unknown `type` or key
+renders as text. No PII is added. Unsetting the gate changes only packets built
+after it: a stored packet keeps its content until staff regenerate it),
 `/api/public/estimates/:token/deposit-intent` (RETIRED VERDICT STUB —
 owner ruling 2026-08-10: acceptance deposits are permanently
 not-enforced. Token format gate + deposit rate limit, then an
@@ -4161,6 +4271,9 @@ success/autoExtended/expiresAt/smsSent/emailSent — no PII),
 diagnostics, strictly whitelisted customer-safe payload — no internal
 scores, raw AI, product names, label constraints, reconciliation/QA
 internals, or tech notes — generic 404 for missing/draft/expired/malformed.
+`GATE_REPORT_SHARED_TEMPLATE` (dark; off leaves the payload unchanged) adds
+top-level `reportTemplate: true` beside `report` and `glassDefault`; `report`
+itself never changes.
 `GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
 for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
 "Based on N photos." from a count of the diagnostic's stored photos (capped at
@@ -4209,7 +4322,14 @@ the wavespestcontrol.com lead-magnet funnel — no auth, no token. Paid
 dual-model vision per accepted request, so it carries the full abuse triad:
 entire surface 404s unless GATE_LAWN_ASSESSMENT is on, honeypot drop,
 Turnstile verified and enforced with GATE_LEAD_TURNSTILE, 5 req/hour per-IP
-in-route limit plus the shared 40/day photoAssessmentDailyLimiter at mount,
+in-route limit plus the 40/day per-IP photoAssessmentDailyLimiter at mount
+(in-memory, resets on deploy; with GATE_PUBLIC_LLM_SHARED_CAP on, a Postgres
+shared daily cap is consumed inside the handler, once per request, after the
+honeypot, Turnstile and photo validation and the in-route limiter, right before
+the paid vision call: one `photo-assessment` bucket for this route and
+pest-identifier, 300/day by default, env PUBLIC_LLM_DAILY_CAP_PHOTO, counted
+on the America/New_York calendar day, 429 with the same message when over,
+fail-open on a database error, off = no database call),
 ≤5 photos with per-photo size cap. Persists a `lawn_diagnostics` row
 (mode=prospect, source=public_funnel) via the SAME shared analysis ladder as
 the tech flow; the response is a TEASER ONLY — a strict subset of the public
@@ -4262,7 +4382,9 @@ exact mirror of `/api/public/lawn-assessment/analyze` behind
 GATE_PEST_IDENTIFIER, writing `pest_identifications`. Customer-visible copy
 comes ONLY from the fixed PEST_LIBRARY allowlist in
 services/pest-identification.js — model output never reaches a prospect, and
-low-confidence/conflicting IDs degrade to generic category labels.)
+low-confidence/conflicting IDs degrade to generic category labels. Shares the
+`photo-assessment` GATE_PUBLIC_LLM_SHARED_CAP daily bucket with the lawn
+route, consumed at the same point (after validation, before `identifyPest`).)
 `/api/public/pest-identifier/:id/claim` (write; mirror of the lawn claim —
 same one-shot lead+token transaction, 409 on replay, same best-effort
 ad_service_attribution row (lead_source=pest_identifier), typical-home
@@ -4276,7 +4398,9 @@ payload via buildPublicPestReport, generic 404, plus a set-once
 `report_first_viewed_at` funnel stamp. Deliberately NOT behind
 GATE_PEST_IDENTIFIER: sent reports are owner-initiated communications
 (admin manual send works pre-launch), and an invalid token 404s exactly
-like the dark surface — only analyze/claim are gated.)
+like the dark surface — only analyze/claim are gated. `GATE_REPORT_SHARED_TEMPLATE`
+(dark; off leaves the payload unchanged) adds top-level `reportTemplate: true`
+beside `report`; `report` itself never changes.)
 `/api/public/pest-forecast` (+ `/pest-forecast/locations`, `/pest-forecast/nearest`) (read-only,
 no auth, no DB writes, no PII — returns a deterministic Florida
 pest-pressure model keyed only on a curated city slug / FL ZIP plus
@@ -4706,7 +4830,14 @@ marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 /message bodies only (paid-LLM surface, same rationale as
 paidEstimatorDailyLimiter; GET /status, non-POST probes, gate-off probes,
 and empty/oversized bodies are all LLM-free — they 503/400 without spending
-the cap, so shared-IP noise can't lock out real chat turns). PII contract:
+the cap, so shared-IP noise can't lock out real chat turns). With
+GATE_PUBLIC_LLM_SHARED_CAP on, a Postgres shared daily cap follows the per-IP
+limiter (bucket `ask-waves`, 1500/day by default, env
+PUBLIC_LLM_DAILY_CAP_ASK_WAVES, counted on the America/New_York calendar day).
+It is consumed inside the `/message` handler, once per turn, after the gate,
+the in-route limiter and body validation, right before `processIntakeMessage`
+(the model fallback inside it does not count again). 429 with the same message
+when over, fail-open on a database error, off = no database call. PII contract:
 requires NO PII and
 asks for none — visitor free-text + client-echoed history (both length- and
 turn-clamped, roles allowlisted) is sent to the LLM and logged best-effort to
@@ -6825,13 +6956,16 @@ is unset (that IS the kill switch), then 120/15-min per-IP limiter
 409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
 a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
 reporting stays on email), 503 when no row landed; the caller emails on
-any non-2xx so nothing is lost. A failure observed at or before this key's
-latest clean observation returns 200 `{ ok: true, stale: true }` without a
-bell or email fallback. `/resolve` shares the 404 → limiter → 401
+any non-2xx so nothing is lost. A failure observed strictly before this
+key's latest clean observation returns 200 `{ ok: true, stale: true }`
+without a bell or email fallback; one observed at the same instant (the same
+ops-crons run, which stamps every post and resolve with one runStartedAt)
+still posts. `/resolve` shares the 404 → limiter → 401
 → 400 layers but deliberately has NO 409: retiring history must never
 depend on the ingest lane being on. Under the same per-key advisory lock
-as ingest, it atomically retires rows by observation time (using created_at
-only when no observation stamp exists) and advances a durable clean watermark
+as ingest, it atomically retires rows observed strictly before the clean
+observation (using created_at only when no observation stamp exists; a row
+from the same run is kept) and advances a durable clean watermark
 even when no rows stand; success answers 200 `{ resolved: N }` (N may be 0),
 and a DB failure answers retryable 503, never false success. Writes exactly
 one admin `ops_digest` row
@@ -7048,6 +7182,7 @@ dark those fields are ignored so the plain decline stays byte-identical.
 Treat the gate, the lock ordering, the no-comms contract, and the no-
 estimate-write contract as security-critical.)
 `/api/estimates/:token/commercial-agreement` (POST; the commercial proposal's "Accept & sign agreement" tap, GATE_COMMERCIAL_PROPOSAL_SIGN. Issues, or re-opens, one `customer_contracts` row from the document template `service_agreement.commercial_pest` for the estimate's customer and returns `{ signingUrl }`, the public `/contract/:token` URL the customer signs on (the existing `POST /api/contracts/:token/sign`). Idempotent per estimate: a second tap returns the same open agreement with a fresh link (the link is stored as a hash only, so each mint replaces the previous link) only when the quote fingerprint matches (a sha256 over the normalized proposal lines, programs, corrective work, scope, terms and tax rate, its totals, the rendered merge values, the customer and the template version, stored in the snapshot as `estimate.fingerprint`); any difference cancels the stale open agreement and issues a new one; a signed agreement answers 409 `already_signed`. The estimate is NEVER mutated, never accepted, and no visit, invoice or charge is created (owner ruling 2026-09-24: staff confirm commercial). The customer is not messaged by this route; the signed copy goes out through the existing signed-contract email after signing. Guards mirror contact-phone: `commercialAgreementPreGuard`, mounted in `server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter, stamps the privacy headers (`no-store`, `no-cache`, `noindex`, `no-referrer`) on every response of this route (router.param's malformed-token 404, the global limiter's 429, the route limiter's 429 and the handler's answers) and answers the generic 404 with the gate dark, ahead of any limiter; then the gate-aware route limiter skip (dark = generic 404, 10/hr shared IPv6-safe key), token format gate through `router.param`, the durable call-side linkage verdict, full customer-viewability + accepted/declined/expired/archived/unpublished exclusion (`isEstimateCustomerViewable` + `isEstimateAcceptActive`), an authored proposal with a recurring price whose structured commercial terms agree with every fixed term of the agreement template (`agreementTermsConflict`: Net 30 required, initial term blank or 12 months, renewal / cancellation / price adjustment blank or the agreement-aligned text; an unknown structured term fails closed; site access and free-text additional terms do not block; any conflict answers the same 404), and the staff-preview marker `?adminPreview=1` = 404; all of those answer the same generic 404. The gate is read again after the last lock and before any write, so a request that waited on locks while the kill switch was thrown writes nothing and answers the generic 404. The eligibility checks are re-run on the estimate row locked in the issuing transaction (customer first: the comms fence, customers, then estimates, leads, call_log, the template row, the contracts; an estimate whose customer changed between the route's unlocked read and the lock is refused with the generic 404 and nothing is written), so a decline, expiry or linkage correction landing in between wins. The one distinct answer, 409 `no_customer` for an estimate with no customer account, is given only after every check above passed. Privacy headers (`no-store`, `no-referrer`) on every response; logging is `err.code` only, never the token. The same gate adds `cta.commercialAgreement` (`{ canSign, state }`, no token, id or contract detail) to `GET /api/estimates/:token/data`, only for an open authored proposal and never to a staff preview. `POST /api/contracts/:token/sign` also guards the signature itself for a contract carrying the snapshot marker `estimate.source = commercial_proposal_sign`: the customer row is locked first and the estimate row next, before the contract row (the issuer's order, customer first like every customer contact write such as the operator email change and its estimate fanout, so none of them can deadlock), an estimate that no longer belongs to the locked customer is never checked further, and the sign is refused with 409 `proposal_changed` and the stale open contract cancelled in the same transaction when the gate is off, the estimate is no longer open and viewable, the terms no longer agree with the agreement, the customer changed, or the quote fingerprint differs from the one stored at issue; for every other contract the route is unchanged. The post-signature hook (an admin alert plus an `activity_log` row, after commit, never throwing) reads only the same marker, so it is inert for every other contract. Treat the gate, the no-acceptance rule, the no-comms-from-this-route rule and the locked re-check as security-critical.)
+`/api/estimates/:token/consumer-notice` (POST; the estimate page's "Read and sign the notice" tap, GATE_ESTIMATE_CONSUMER_NOTICE. Issues, or re-opens, one `customer_contracts` row from the document template `consumer_notice.fdacs_13692` (Florida Consumer Notice Form FDACS-13692, Rule 5E-14.105(1), F.A.C.) for the estimate's customer and returns `{ signingUrl }`, the public `/contract/:token` URL the customer signs on (the existing `POST /api/contracts/:token/sign`). Idempotent: a second tap returns the same open notice with a fresh link (stored as a hash only, so each mint replaces the previous link) only when the notice reads exactly as one issued now (same form version, customer name, representative and date); otherwise the stale open notice is cancelled and a new one issued. Only a notice carrying the snapshot marker `estimate.source = estimate_consumer_notice` is reused, so a notice staff issued by hand is never re-linked. A notice already on file answers 409 `already_signed`; an estimate with no customer account 409 `no_account`; no active creator or single active admin to print as the Waves representative 409 `no_representative`. The estimate is NEVER mutated and no visit, invoice or charge is created. The customer is not messaged by this route. Guards mirror commercial-agreement: `consumerNoticePreGuard`, mounted in `server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter, stamps the privacy headers (`no-store`, `no-cache`, `noindex`, `no-referrer`) and answers the generic 404 with the gate dark, ahead of any limiter; then the gate-aware route limiter skip (dark = generic 404, 10/hr shared IPv6-safe key), token format gate through `router.param`, the durable call-side linkage verdict, `isEstimateCustomerViewable` + `isEstimateAcceptActive`, an estimate with at least one termite-family line, and the staff-preview marker `?adminPreview=1` = 404; all of those answer the same generic 404. The gate is read again after the last lock and before any write. The customer row is locked first (comms fence, then customers, then the template row, then contracts). The distinct 409s come only after every check above passed. Logging is `err.code` only, never the token. The same gate adds `cta.consumerNotice` (`{ state, canSign, reason? }`, no token, id or contract detail) to `GET /api/estimates/:token/data` for an open estimate with a termite line, never to a staff preview, a draft preview or the document render, and makes `PUT /api/estimates/:token/accept` answer 409 `consumer_notice_required` (after the viewability, inactive, blocking-state and Bermuda answers, before any contact validation, write, charge or booking) until the customer has a notice on file. `GET /api/contracts/:token` and the sign response add `fromEstimate: true` for a contract carrying that marker so the signing page can offer "Back to your estimate"; every other contract payload is unchanged. Treat the gate, the no-write refusal order in accept and the no-comms-from-this-route rule as security-critical.)
 `/api/public/careers/apply` (POST; public job-application intake for the
 careers funnel. Guards mirror the lead webhook: GATE_JOB_APPLICATIONS
 (404 dark until flipped, unobservable-when-dark), IP limiter (6/10min)
@@ -7459,5 +7594,7 @@ document holds the per-route entries only.
 Report greeting first name (follow-up to #5559 / #5612): the service-report V1 payload (`/api/reports/:token/data`, and the PDF and report-email renders that share `buildReportV1Data`), the legacy-format service-report payload from the same route, and the project report payload (`/api/reports/project/:token/data`) now carry `customerFirstName` beside the unchanged `customerName`: the customer's own trimmed `first_name`, or `null` when it is blank (the call booker's last-name-only customers, where the composed `customerName` is only the surname). The report pages, the report email, and the visit recap greet by it and fall back to "there" when it is `null`; a payload without the key (cached or older frozen payloads) greets by the first token of `customerName` as before. On a service record that carries a completion-time identity snapshot the value comes from the snapshot's first name, the same source as `customerName`, so a frozen report keeps greeting the way it did at completion. It is the customer's own first name only, already shown inside `customerName`: no new exposure, token, eligibility, privacy or rate-limit change, and no display change to the full name. A report-email recipient's own contact name still greets by its first token.
 
 Pre-treat sticker report (GATE_PRETREAT_STICKER_REPORT, dark): the project report payload (`/api/reports/project/:token/data`) carries a new boolean `pretreatStickerReport`. It is `true` only when the project is a `pre_treatment_termite_certificate` AND the gate is on; every other type and gate-off return `false`. The client then renders the certificate as the Notice of Termite Protection label (form WV-001) with a details block under it; `false` or a missing key renders today's certificate. The certificate's `findings` may also carry five new optional keys, `final_exterior_date`, `final_exterior_time` (HH:MM, added 2026-10-23), `final_exterior_product`, `final_exterior_active_ingredient` and `final_exterior_applicator_name`, entered by staff on the certificate form; they ride the same `findings` object, with the same token, hold and fee-scrub rules as every other certificate field. The three free-text keys also pass the customer copy screen (`customerCopyViolations` + `containsReportAccessCode`): the admin create/update routes refuse a failing value with 422 `final_exterior_copy`, and `/data` blanks one that is already stored. `final_exterior_date` must be blank or a real date no later than today (ET), else 422 `final_exterior_date_invalid`. `final_exterior_time` must be blank or a clock time (HH:MM), else 422 `final_exterior_time_invalid`, and `/data` blanks a stored non-time value. No new route, token, eligibility, privacy or rate-limit change. Send readiness (2026-10-23, staff send only): a warranty from the form's choices, and a clock-time `treatment_time`, re-judged after the delivery claim (422 `missing_compliance_details`). The final-exterior keys never gate the send: they fill the notice's reference blank, and the later visit's full record is its own certificate. On a certificate that already has a link, `PUT /admin/projects/:id` refuses an edit that leaves a field it changed failing these checks (422 `published_certificate_incomplete`).
+
+Pre-treat certificate Bora-Care record (owner 2026-10-24, no gate): the certificate's `findings` may carry three new optional keys, `framing_inspection_date`, `wood_base_plate_pct` and `borate_treatment_date`, entered by staff on the certificate form for Bora-Care jobs. They ride the same `findings` object on the project report payload (`/api/reports/project/:token/data`), with the same token, hold and fee-scrub rules as every other certificate field, and the certificate prints them on one "Bora-Care record" line on both layouts. The admin create/update routes store only checked values: `framing_inspection_date` blank or a real date no later than today (ET), else 422 `framing_inspection_date_invalid`; `borate_treatment_date` blank or a real date from the initial treatment to today, else 422 `borate_treatment_date_invalid`; `wood_base_plate_pct` blank or a plain percent from 0 to 100, else 422 `wood_base_plate_pct_invalid`. Those routes are the only writers of certificate findings, so `/data` blanks none of these keys; the certificate prints a base plate share only when it is a plain percent. A recorded `borate_treatment_date` scopes the applicator signature to the initial treatment, as a final exterior record does. The keys never gate the send. No new route, token, eligibility, privacy or rate-limit change.
 
 Lawn protocol card, December potassium bag (GATE_LAWN_DEC_LARGE_PATCH_K, dark, owner 2026-10-23): the `/api/reports/:token/data` lawn payload (and the PDF and report-email renders that share `buildReportV1Data`) carries `dynamicContext.lawnProtocol.products`, the products of the visit's protocol window. The staged December row for LESCO Black Out 0-0-24 AM Spar-TECH (a non-default row that exists for every v13 window) is listed in it ONLY when all of these hold: the swap gate is live (strict `true`, read at call time; it also needs `GATE_LAWN_TROUBLE_AREAS` and its prerequisites, and `GATE_LAWN_SPOT_TARGET`), AND the visit's `service_products` shows that product was applied on this record. With the gate off, with any prerequisite gate off, for a lawn whose visit did not apply it, or when the `service_products` read fails (the read fails closed: the row is dropped), the payload lists exactly the products it listed before the row existed (byte-identical). The row is identified by its stored trigger (`gates.trigger = active_large_patch_mapped`) or name, never by free text. No new key, route, token, privacy or rate-limit surface; every other product, and a window with no such row, is returned untouched. The same row is also left out of the technician pre-visit brief unless the gate is live (a technician surface, not public).

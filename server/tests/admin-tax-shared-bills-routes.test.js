@@ -122,7 +122,7 @@ afterAll(() => { delete process.env.GATE_BANK_IMPORT; delete process.env.GATE_TA
 
 describe('gate darkness', () => {
   test('status answers enabled:false and every other route is a 404 that touches nothing', async () => {
-    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: false });
+    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: false, actual_method: false });
     const calls = [
       ['GET', '/shared-bills'], ['POST', '/shared-bills'], ['PUT', '/shared-bills/b-1'], ['DELETE', '/shared-bills/b-1'],
       ['GET', '/home-office/2026'], ['PUT', '/home-office/2026'], ['DELETE', '/home-office/2026'],
@@ -139,15 +139,18 @@ describe('gate darkness', () => {
   test('the shared-bills gate alone is not enough without GATE_BANK_IMPORT', async () => {
     process.env.GATE_TAX_SHARED_BILLS = 'true';
     delete process.env.GATE_BANK_IMPORT;
-    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: false });
+    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: false, actual_method: false });
   });
 });
 
 describe('gate on', () => {
   beforeEach(() => { process.env.GATE_TAX_SHARED_BILLS = 'true'; });
 
-  test('status says enabled', async () => {
-    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: true });
+  test('status says enabled, and offers the actual method only with the return engine on too', async () => {
+    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: true, actual_method: false });
+    process.env.GATE_TAX_RETURN_ENGINE = 'true';
+    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: true, actual_method: true });
+    delete process.env.GATE_TAX_RETURN_ENGINE;
   });
 
   test('list, create (201), update and delete go through the service', async () => {

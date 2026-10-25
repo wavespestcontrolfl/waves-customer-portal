@@ -97,6 +97,9 @@ test('palm-type table lists every palm, says type does not change price or ferti
   expect(within(section).getByRole('rowheader', { name: /Queen palm/ })).toBeTruthy();
   expect(within(section).getByRole('rowheader', { name: /Other \/ not sure/ })).toBeTruthy();
   expect(within(section).getByText(/does not change the plan price or the fertilizer/)).toBeTruthy();
+  // The counting rule and the soil-first feeding rule sit above the table.
+  expect(within(section).getByText(reference.palmTypes.countNote)).toBeTruthy();
+  expect(within(section).getByText(reference.palmTypes.feedingNote)).toBeTruthy();
   expect(within(section).getByRole('link', { name: /PP163/ }).getAttribute('href')).toBe('https://edis.ifas.ufl.edu/publication/PP163');
 });
 

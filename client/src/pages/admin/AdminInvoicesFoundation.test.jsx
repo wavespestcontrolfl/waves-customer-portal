@@ -30,6 +30,8 @@ beforeEach(() => {
     if (key === "GET /api/admin/invoices/payment-notices") return response({ notices: [] });
     if (key === "GET /api/admin/invoices/customers/search") return response({ customers: [customer] });
     if (key === `GET /api/admin/invoices/service-records/${customer.id}`) return response({ records: [] });
+    // Multi-property invoices: the editor loads the customer's saved properties for the per-line picker (hidden under 2).
+    if (key === `GET /api/admin/invoices/customers/${customer.id}/properties`) return response({ properties: [] });
     if (key === "GET /api/admin/discounts") return response({ discounts: [] });
     // GATE_DISCOUNT_STACKING probe (useDiscountStacking.js) — every money
     // surface with a discount preview issues this once per mount; off by

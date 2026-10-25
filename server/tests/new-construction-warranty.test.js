@@ -60,8 +60,8 @@ describe('supersedeOpenNewConstructionWarranty', () => {
 const mockReadiness = jest.fn(() => ({ missing: [] }));
 jest.mock('../routes/admin-projects', () => ({ _private: { evaluateProjectSendReadiness: (...args) => mockReadiness(...args) } }));
 
-describe('templateIssueValues (server-built warranty)', () => {
-  const { templateIssueValues } = require('../services/new-construction-warranty');
+describe('templateIssueWithWarnings (server-built warranty)', () => {
+  const { templateIssueWithWarnings } = require('../services/new-construction-warranty');
   const KEY = 'service_agreement.termite_new_construction_warranty';
   const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Owner', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' };
   const findings = {
@@ -78,7 +78,7 @@ describe('templateIssueValues (server-built warranty)', () => {
   // sets lockedCustomer to model an edit that committed in between.
   const issue = (body, cust, row, lockedRow = cust) => {
     lockedCustomer = lockedRow;
-    return templateIssueValues(KEY, body, cust, conn(row));
+    return templateIssueWithWarnings(KEY, body, cust, conn(row)).then(({ values }) => values);
   };
   const conn = (row) => (table) => ({
     where() { return this; },
@@ -101,13 +101,42 @@ describe('templateIssueValues (server-built warranty)', () => {
       plan_price: 'Included in the treatment price', renewal_fee: '99', consumer_notice_date: '09/01/2026',
       term_end: '01/01/2099', product: 'FORGED', issue_date: '01/01/2000',
     },
-    basis: { kind: 'master', date: '09/01/2026' },
+    // An owner contract runs from the initial treatment date; the builder
+    // lot (master agreement) cases set their own basis and final date.
+    basis: { kind: 'signed', date: '09/01/2026' },
     issuer: { name: 'Pat Office', title: 'Office Manager' },
   };
 
+  test('a builder lot runs from its final treatment date; an owner contract from the initial one', async () => {
+    const master = { ...office, basis: { kind: 'master', date: '09/01/2026' } };
+    await expect(issue({ projectId: project.id, values: master }, customer, project))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining('final exterior treatment') });
+    const finished = { ...project, findings: { ...findings, final_exterior_date: '2026-10-20' } };
+    const v = await issue({ projectId: project.id, values: master }, customer, finished);
+    expect(v.warranty).toMatchObject({ start_basis: 'final', start_date: '10/20/2026', term_end: '10/20/2027', renewal_due: '10/20/2027' });
+    expect(v.warranty.contract_basis).toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
+    // The certificate's renewal date must match the term that counts from the final date.
+    const initialBased = { ...finished, findings: { ...finished.findings, renewal_due: '2027-10-01' } };
+    await expect(issue({ projectId: project.id, values: master }, customer, initialBased)).rejects.toMatchObject({ status: 409 });
+    const owner = await issue({ projectId: project.id, values: office }, customer, finished);
+    expect(owner.warranty).toMatchObject({ start_basis: 'initial', start_date: '10/01/2026', term_end: '10/01/2027' });
+  });
+
+  test('the master agreement caps a builder lot renewal fee at $149.00', async () => {
+    const finished = { ...project, findings: { ...findings, final_exterior_date: '2026-10-20' } };
+    const at = (renewal_fee, kind = 'master') => ({ ...office, warranty: { ...office.warranty, renewal_fee }, basis: { kind, date: '09/01/2026' } });
+    await expect(issue({ projectId: project.id, values: at('$149.00') }, customer, finished)).resolves.toMatchObject({ warranty: { renewal_fee: '$149.00' } });
+    await expect(issue({ projectId: project.id, values: at('$149.01') }, customer, finished))
+      .rejects.toMatchObject({ status: 400, message: expect.stringContaining('$149.00') });
+    // An owner contract is not under the master agreement.
+    await expect(issue({ projectId: project.id, values: at('$175.00', 'signed') }, customer, finished)).resolves.toMatchObject({ warranty: { renewal_fee: '$175.00' } });
+  });
+
   test('other templates keep their own values', async () => {
     const values = { a: 1 };
-    await expect(templateIssueValues('service_agreement.termite_bond_retreatment', { values }, customer, conn(null))).resolves.toBe(values);
+    const result = await templateIssueWithWarnings('service_agreement.termite_bond_retreatment', { values }, customer, conn(null));
+    expect(result).toEqual({ values, warnings: [] });
+    expect(result.values).toBe(values);
   });
 
   test('builds the job fields from the saved certificate and takes only office fields', async () => {
@@ -118,7 +147,8 @@ describe('templateIssueValues (server-built warranty)', () => {
     expect(v.warranty.number).toBe('NCW-ABCD1234-0000-0000');
     expect(v.warranty.notice_location).toBe('beside the electric panel');
     expect(v.warranty.payer).toBe('Owner Test');
-    expect(v.warranty.contract_basis).toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
+    expect(v.warranty.contract_basis).toBe('Signed by the owner or authorized agent before treatment, on 09/01/2026.');
+    expect(v.warranty).toMatchObject({ start_basis: 'initial', start_date: '10/01/2026' });
     // The server stamps Waves' signing date; a posted one is ignored.
     expect(v.warranty.issue_date).not.toBe('01/01/2000');
     expect(v.warranty.issue_date).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
@@ -237,7 +267,7 @@ describe('templateIssueValues (server-built warranty)', () => {
       const row = { ...project, findings: { ...findings, ...ok } };
       await expect(issue({ projectId: project.id, values: office }, customer, row)).resolves.toBeTruthy();
     }
-    const lateNotice = { ...office, warranty: { ...office.warranty, consumer_notice_date: '09/15/2026' }, basis: { kind: 'master', date: '09/01/2026' } };
+    const lateNotice = { ...office, warranty: { ...office.warranty, consumer_notice_date: '09/15/2026' }, basis: { kind: 'signed', date: '09/01/2026' } };
     await expect(issue({ projectId: project.id, values: lateNotice }, customer, project)).rejects.toMatchObject({ status: 400 });
   });
 
@@ -353,12 +383,150 @@ describe('templateIssueValues (server-built warranty)', () => {
       await expect(issue({ projectId: project.id, values: office, ...override }, customer, project)).rejects.toMatchObject({ status: 400 });
     }
     await expect(issue({ projectId: project.id, values: office }, { id: 'someone-else' }, project)).rejects.toMatchObject({ status: 404 });
-    const borate = { ...project, findings: { ...findings, treatment_method: 'Wood treatment (borate)' } };
-    await expect(issue({ projectId: project.id, values: office }, customer, borate)).rejects.toMatchObject({ status: 409 });
+    const bait = { ...project, findings: { ...findings, treatment_method: 'Bait system' } };
+    await expect(issue({ projectId: project.id, values: office }, customer, bait)).rejects.toMatchObject({ status: 409 });
     const lateBasis = { ...office, basis: { kind: 'signed', date: '10/05/2026' } };
     await expect(issue({ projectId: project.id, values: lateBasis }, customer, project)).rejects.toMatchObject({ status: 400 });
     const badNotice = { ...office, warranty: { ...office.warranty, consumer_notice_date: '2026-09-01' } };
     await expect(issue({ projectId: project.id, values: badNotice }, customer, project)).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+// Owner 10-24 Q6: the warranty names the job's method. Version 9 prints a
+// soil job exactly as version 8 did; Bora-Care alone and soil + Bora-Care
+// get their own section 3 paragraph and CONDITIONS lines.
+describe('method wording (soil, Bora-Care only, soil + Bora-Care)', () => {
+  const { templateIssueWithWarnings } = require('../services/new-construction-warranty');
+  const { renderDocumentTemplate, buildCustomerDocumentContext } = require('../services/document-template-library');
+  const { BODY_V8 } = require('../models/migrations/20261024211000_new_construction_warranty_start_date');
+  const { BODY_V9 } = require('../models/migrations/20261024230000_new_construction_warranty_methods');
+  const KEY = 'service_agreement.termite_new_construction_warranty';
+  const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Owner', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' };
+  const soil = {
+    treatment_method: 'Soil barrier (chemical)', treatment_address: '12 Test Lane, Bradenton, FL 34202', builder_contractor: 'Example Homes LLC',
+    product_name: 'Termidor SC', active_ingredient: 'fipronil', concentration_pct: '0.06', gallons_applied: '180', square_footage: '1800',
+    applicator_name: 'Sam Tester', applicator_fdacs_id: 'JF000000', warranty_type: 'Builder 1-year, renewable yearly to year 5', wdo_target: ['Subterranean termites'],
+  };
+  // As the certificate form records Bora-Care: the product picker's chemistry
+  // and no concentration or gallons (the form clears both for it).
+  const boraCare = {
+    ...soil, treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care', active_ingredient: 'Disodium octaborate tetrahydrate 40.0%',
+    epa_registration: '64405-1', concentration_pct: '', gallons_applied: '', square_footage: '2400', wdo_target: ['Formosan subterranean termites'],
+    framing_inspection_date: '2026-09-28', wood_base_plate_pct: '85',
+  };
+  const secondary = { treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care', epa_registration: '64405-1', active_ingredient: 'Disodium octaborate tetrahydrate 40.0%', concentration_pct: '', gallons_applied: '', square_footage: '1,800' };
+  const combined = { ...soil, additional_applications: [secondary], borate_treatment_date: '2026-10-15' };
+  const office = {
+    warranty: { structures: 'The new home', notice_location: 'beside the electric panel', payer: 'Owner Test', treatment_price: '$1,250.00', plan_price: 'Included in the treatment price', renewal_fee: '99', consumer_notice_date: '09/01/2026' },
+    basis: { kind: 'signed', date: '09/01/2026' },
+    issuer: { name: 'Pat Office', title: 'Office Manager' },
+  };
+  const master = { ...office, basis: { kind: 'master', date: '09/01/2026' } };
+  const row = (findings) => ({
+    id: 'abcd1234-0000-0000', customer_id: 'cust-1', project_date: '2026-10-01', project_type: 'pre_treatment_termite_certificate',
+    findings, pretreat_sent_snapshot: { findings, project_date: '2026-10-01' },
+  });
+  const conn = (project) => (table) => ({
+    where() { return this; },
+    forUpdate() { return this; },
+    first: async () => (table === 'customers' ? customer : project),
+  });
+  const issue = (findings, values = office) => templateIssueWithWarnings(KEY, { projectId: 'abcd1234-0000-0000', values }, customer, conn(row(findings)))
+    .then(({ values: printed }) => printed);
+  const render = (body, values) => renderDocumentTemplate({ version: { title: 'Warranty', body }, context: buildCustomerDocumentContext(customer, values) });
+
+  test('a soil job renders version 9 exactly as version 8, on both contract bases', async () => {
+    for (const [findings, values] of [[soil, office], [{ ...soil, final_exterior_date: '2026-10-20' }, master]]) {
+      const v = await issue(findings, values);
+      const v8 = render(BODY_V8, v);
+      const v9 = render(BODY_V9, v);
+      expect(v9.unresolvedVariables).toEqual([]);
+      expect(v9.body).toBe(v8.body);
+    }
+  });
+
+  test('Bora-Care only prints its own paragraph and conditions, and runs from its one treatment date', async () => {
+    const v = await issue(boraCare);
+    expect(v.treatment).toMatchObject({ product: 'Bora-Care', active_ingredient: 'Disodium octaborate tetrahydrate 40.0%' });
+    expect(v.treatment.description).toBe('A preventive borate wood treatment for subterranean termites during construction, applied to the structural wood as the primary treatment, as its label directs (Florida Building Code 1816.1 / R318.1; Rule 5E-14.106(6), F.A.C.). No termite infestation was known to be present. No soil-applied termiticide barrier was installed under or around the foundation. Product: Bora-Care (disodium octaborate tetrahydrate), EPA Reg. No. 64405-1, mixed as its label directs. Area treated: 2400 sq ft. Treatment date: 10/01/2026, after the final framing inspection on 09/28/2026. Wood base plates: 85% of all base plates. Applicator: Sam Tester, ID card JF000000.');
+    expect(v.conditions.first).toMatch(/^Wood added, replaced or exposed after our treatment is not treated\./);
+    expect(v.warranty).toMatchObject({ start_basis: 'initial', start_date: '10/01/2026', term_end: '10/01/2027' });
+    const body = render(BODY_V9, v);
+    expect(body.unresolvedVariables).toEqual([]);
+    expect(body.body).toContain('INCLUDING FORMOSAN AND ASIAN SUBTERRANEAN TERMITES');
+    expect(body.body).not.toMatch(/final exterior treatment|preventive soil treatment/i);
+    // A builder lot has no later visit to wait for: its one treatment is its final one.
+    await expect(issue(boraCare, master)).resolves.toMatchObject({ warranty: { start_basis: 'final', start_date: '10/01/2026' } });
+    // Version 8's soil paragraph cannot render a Bora-Care job, even one
+    // with hand-typed amounts: its final exterior line stays blank.
+    expect(render(BODY_V8, v).unresolvedVariables).toContain('treatment.final_exterior_line');
+    expect(render(BODY_V8, await issue({ ...boraCare, concentration_pct: '23', gallons_applied: '40' })).unresolvedVariables).toEqual(['treatment.final_exterior_line']);
+  });
+
+  test('Bora-Care only refuses what its label does not allow, with no override', async () => {
+    for (const ok of [
+      { wood_base_plate_pct: '60' }, { wood_base_plate_pct: '100%' }, { framing_inspection_date: '2026-10-01' }, { borate_treatment_date: '2026-10-01' },
+      { product_name: 'Other', product_name_other: 'bora-care', active_ingredient: '' },
+      // A linear-feet-only record, and a hand-typed amount the form would clear: neither changes the text's product line.
+      { square_footage: '', linear_feet: '220 LF' }, { concentration_pct: '23', gallons_applied: '40' },
+    ]) {
+      const v = await issue({ ...boraCare, ...ok });
+      expect(v.treatment.description).toContain('EPA Reg. No. 64405-1, mixed as its label directs. Area treated: ');
+    }
+    expect((await issue({ ...boraCare, square_footage: '', linear_feet: '220 LF' })).treatment.description).toContain('Area treated: 220 linear ft.');
+    for (const [bad, said] of [
+      [{ wood_base_plate_pct: '59.9' }, 'under 60%'],
+      [{ wood_base_plate_pct: '' }, 'wood base plates'],
+      [{ wood_base_plate_pct: 'most of them' }, 'wood base plates'],
+      [{ framing_inspection_date: '' }, 'framing inspection'],
+      [{ framing_inspection_date: '2026-10-02' }, 'second visit'],
+      [{ final_exterior_date: '2026-10-05' }, 'not Bora-Care only'],
+      [{ final_exterior_product: 'Termidor SC' }, 'not Bora-Care only'],
+      [{ borate_treatment_date: '2026-10-03' }, 'Clear the separate'],
+      [{ product_name: 'Termidor SC' }, 'written for Bora-Care'],
+      [{ active_ingredient: 'fipronil' }, 'does not match Bora-Care'],
+      [{ epa_registration: '7969-210' }, '64405-1'],
+      [{ square_footage: '', linear_feet: '' }, 'square_footage or linear_feet'],
+      [{ square_footage: 'the whole house' }, 'square_footage'],
+    ]) {
+      await expect(issue({ ...boraCare, ...bad })).rejects.toMatchObject({ status: 409, message: expect.stringContaining(said) });
+    }
+  });
+
+  test('soil + Bora-Care prints Bora-Care as the secondary treatment on its own date, with soil conditions', async () => {
+    const v = await issue(combined);
+    expect(v.treatment.description).toMatch(/^A preventive soil treatment for subterranean termites during construction\./);
+    expect(v.treatment.description).toMatch(/ Applicator: Sam Tester, ID card JF000000\. Secondary treatment \(Rule 5E-14\.106\(9\), F\.A\.C\.\): Bora-Care \(disodium octaborate tetrahydrate\), EPA Reg\. No\. 64405-1, mixed as its label directs and applied to the structural wood on 10\/15\/2026\. Area treated: 1,800 sq ft\.$/);
+    expect(v.conditions.first).toMatch(/^The final exterior treatment must be completed before the building is occupied\./);
+    expect(v.conditions.third).toMatch(/^Call us before work that disturbs treated soil\..*This does not reduce the coverage of the soil barrier\.$/);
+    expect(render(BODY_V9, v).unresolvedVariables).toEqual([]);
+    // The soil barrier is primary: a builder lot still waits for its final exterior treatment.
+    await expect(issue(combined, master)).rejects.toMatchObject({ status: 409, message: expect.stringContaining('final exterior') });
+    await expect(issue({ ...combined, final_exterior_date: '2026-10-20' }, master))
+      .resolves.toMatchObject({ warranty: { start_basis: 'final', start_date: '10/20/2026' } });
+    for (const [bad, said] of [
+      [{ borate_treatment_date: '' }, 'date of the Bora-Care application'],
+      [{ borate_treatment_date: '2026-09-30' }, 'between the treatment date and today'],
+      [{ borate_treatment_date: '2099-01-01' }, 'between the treatment date and today'],
+      [{ additional_applications: [{ ...secondary, product_name: 'Termidor SC' }] }, 'written for Bora-Care'],
+      [{ additional_applications: [{ ...secondary, square_footage: '' }] }, 'square_footage or linear_feet'],
+      [{ additional_applications: [{ ...secondary, concentration_pct: 'full strength' }] }, 'concentration_pct'],
+      // The soil barrier is still a liquid: its concentration and gallons stay required.
+      [{ gallons_applied: '' }, 'gallons_applied'],
+    ]) {
+      await expect(issue({ ...combined, ...bad })).rejects.toMatchObject({ status: 409, message: expect.stringContaining(said) });
+    }
+  });
+
+  test('a method with no wording is refused: bait, a Bora-Care primary with soil, two extra applications', async () => {
+    const soilExtra = { ...secondary, treatment_method: 'Soil barrier (chemical)', product_name: 'Termidor SC', epa_registration: '', active_ingredient: 'fipronil' };
+    for (const findings of [
+      { ...soil, additional_applications: [{ ...secondary, treatment_method: 'Bait system', product_name: 'Trelona ATBB' }] },
+      { ...boraCare, additional_applications: [soilExtra] },
+      { ...combined, additional_applications: [secondary, secondary] },
+    ]) {
+      await expect(issue(findings)).rejects.toMatchObject({ status: 409, message: expect.stringContaining('does not qualify') });
+    }
   });
 });
 

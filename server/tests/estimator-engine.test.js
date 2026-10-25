@@ -1561,6 +1561,18 @@ describe('Tree & Shrub palm count from the lookup (owner ruling 2026-10-05)', ()
       const { result } = draftFor({ treeShrub: { tier: 'standard', treeCount: 2 } }, { ...trusted, estimatedPalmCount: 8 });
       expect(treeShrubPalmProvenanceForReplay({ engineResult: result, result })).toBe('service_line');
     });
+
+    test('the send gate reads the priced satellite count off a stored or recomputed draft, and nothing off a caller-stated line', () => {
+      const { satellitePalmCountToConfirm } = require('../services/estimator-engine/lookup-palm-review');
+      const stored = (result) => JSON.parse(JSON.stringify({ engineResult: result }));
+      const { input, result } = draftFor({ treeShrub: { tier: 'standard', treeCount: 2 } }, { ...trusted, estimatedPalmCount: 8 });
+      expect(satellitePalmCountToConfirm(stored(result))).toBe(8);
+      // A recompute from engineInputs drops the review reason but still prices the satellite count.
+      expect(satellitePalmCountToConfirm(stored(generateEstimate(JSON.parse(JSON.stringify(input)))))).toBe(8);
+      const caller = draftFor({ treeShrub: { tier: 'standard', treeCount: 2, palmCount: 4 } }, { ...trusted, estimatedPalmCount: 8 });
+      expect(satellitePalmCountToConfirm(stored(caller.result))).toBeNull();
+      expect(satellitePalmCountToConfirm({})).toBeNull();
+    });
   });
 });
 
@@ -1599,6 +1611,112 @@ describe('lookup bed areas carry their confidence into the agent draft', () => {
       estimatedBedAreaSf: 2600, bedAreaConfidence: 90, aiConfidence: 90,
       fieldVerifyFlags: [{ field: 'yearBuilt', reason: 'county mismatch', priority: 'LOW' }],
     }).estimatedBedAreaSf).toBe(2600);
+  });
+});
+
+describe('the lookup turf estimate reaches the agent draft engine input', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+  const facts = {
+    home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+  };
+  const build = (enriched, extra = {}) => buildEngineInput({
+    intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched, ...extra,
+  });
+  const lawnServices = { lawn: { track: 'st_augustine', tier: 'enhanced', lawnFreq: 9 } };
+
+  test('a trusted vision estimate forwards with its provenance (residential only)', () => {
+    const input = build({ estimatedTurfSf: 4200, turfSource: 'vision', aiConfidence: 88 });
+    expect(input.estimatedTurfSf).toBe(4200);
+    expect(input.turfSource).toBe('vision');
+    expect(input.turfCappedToParcel).toBe(false);
+
+    // Commercial prices off footprint/risk-type, not homeowner measurements.
+    const commercial = buildEngineInput({
+      intent: { ...baseIntent(), is_commercial: true, category: 'COMMERCIAL' },
+      propertyFacts: facts,
+      context: {},
+      lookupEnriched: { estimatedTurfSf: 4200, turfSource: 'vision', aiConfidence: 88 },
+    });
+    expect(commercial.estimatedTurfSf).toBeUndefined();
+  });
+
+  test('a lawn draft prices from the AI measurement, not the lot heuristic', () => {
+    const withTurf = build({ estimatedTurfSf: 4200, turfSource: 'vision', aiConfidence: 88 });
+    const lawn = generateEstimate({ ...withTurf, services: lawnServices })
+      .lineItems.find((li) => li.service === 'lawn_care');
+    expect(lawn.lawnSqFt).toBe(4200);
+    expect(lawn.turfBasis).toBe('estimatedTurfSf');
+
+    // Without the forwarding, the same property fell to the lot heuristic —
+    // the exact miss the owner reported (2026-08-27).
+    const withoutTurf = build({});
+    const lawnFallback = generateEstimate({ ...withoutTurf, services: lawnServices })
+      .lineItems.find((li) => li.service === 'lawn_care');
+    expect(['lotFallback', 'legacyHardscapeEstimate', 'plausibleMaxTurfCap'])
+      .toContain(lawnFallback.turfBasis);
+  });
+
+  test('a saved profile measurement still beats the AI estimate', () => {
+    const input = build(
+      { estimatedTurfSf: 4200, turfSource: 'vision', aiConfidence: 88 },
+      {
+        context: { customer: { property_sqft: 5000 } },
+        profileDescribesQuotedProperty: true,
+      },
+    );
+    expect(input.measuredTurfSf).toBe(5000);
+    const lawn = generateEstimate({ ...input, services: lawnServices })
+      .lineItems.find((li) => li.service === 'lawn_care');
+    expect(lawn.lawnSqFt).toBe(5000);
+    expect(lawn.turfBasis).toBe('measuredTurfSf');
+  });
+
+  test('provenance is preserved: county seeds grade as county, parcel clamps keep their flag', () => {
+    // A county-prior seed must never price (or display) as a satellite
+    // measurement — computeTurfArea grades it LOW + field-verify.
+    const county = build({ estimatedTurfSf: 3000, turfSource: 'county_prior', aiConfidence: 80 });
+    expect(county.turfSource).toBe('county_prior');
+    const countyLawn = generateEstimate({ ...county, services: lawnServices })
+      .lineItems.find((li) => li.service === 'lawn_care');
+    expect(countyLawn.turfBasis).toBe('countyPrior');
+
+    // A parcel-clamped vision figure carries the clamp so downstream display
+    // reads "estimated from property records", not "AI satellite".
+    const capped = build({
+      estimatedTurfSf: 3267, turfSource: 'vision', turfCappedToParcel: true, aiConfidence: 88,
+    });
+    expect(capped.turfCappedToParcel).toBe(true);
+    const cappedResult = generateEstimate({ ...capped, services: lawnServices });
+    expect(cappedResult.property.turfFlags).toContain('TURF_CAPPED_TO_PARCEL');
+  });
+
+  test('an untrusted read forwards nothing and the heuristic fallback stands', () => {
+    // The lookup flagged its own turf read.
+    expect(build({
+      estimatedTurfSf: 4200, turfSource: 'vision', aiConfidence: 90,
+      fieldVerifyFlags: [{ field: 'estimatedTurfSf', reason: 'stale imagery', priority: 'HIGH' }],
+    }).estimatedTurfSf).toBeUndefined();
+    // Inadequate overall confidence.
+    expect(build({ estimatedTurfSf: 4200, turfSource: 'vision', aiConfidence: 41 }).estimatedTurfSf)
+      .toBeUndefined();
+    // A wrong-premises lookup rejects the whole payload, turf included.
+    expect(build({
+      estimatedTurfSf: 4200, turfSource: 'vision', aiConfidence: 90,
+      fieldVerifyFlags: [{ field: 'address', reason: 'snapped premise', priority: 'HIGH' }],
+    }).estimatedTurfSf).toBeUndefined();
+  });
+
+  test('a unit/suite scope with a cleared lot keeps the parcel estimate out', () => {
+    // The lookup measured the development's master parcel, not the unit.
+    const input = buildEngineInput({
+      intent: baseIntent(),
+      propertyFacts: { ...facts, lot: { value: null, source: 'not_applicable:common_master_parcel', confidence: 'high' } },
+      context: {},
+      lookupEnriched: { estimatedTurfSf: 4200, turfSource: 'vision', aiConfidence: 88 },
+    });
+    expect(input.estimatedTurfSf).toBeUndefined();
+    expect(input.turfSource).toBeUndefined();
   });
 });
 

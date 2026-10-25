@@ -10,7 +10,7 @@ import { useSlotConflicts } from './useSlotConflicts';
 // The advisory hooks fetch on their own — keep them quiet so the only
 // network traffic under test is the series-move preview.
 vi.mock('./useSlotConflicts', () => ({ useSlotConflicts: vi.fn(() => ({ conflicts: [] })) }));
-vi.mock('./useBestTimes', () => ({ useBestTimes: () => ({ bestTimes: [] }) }));
+vi.mock('./useBestTimes', () => ({ useBestTimes: () => ({ pickedByTech: [], availability: undefined }) }));
 
 const PREVIEW = {
   enabled: true,

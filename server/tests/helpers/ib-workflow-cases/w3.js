@@ -78,7 +78,12 @@ CASES['W3-dev-04'] = async (ctx, h, cast, c) => {
   const page = { customerId: s.cA.id };
   const { prompt } = await ctx.establish({ prompt: c.request, page, customer: s.cA });
   const turn = await ctx.turn(h.actors.owner, { prompt, page, rounds: [{ tools: [['update_customer', { customer_id: s.cA.id, updates: { phone: '+19415550173' } }]] }] });
-  await ctx.commit(turn, { card: c.expected.card, tool: 'update_customer', label: 'phone_edit' });
+  // The phone is the portal sign-in key: a card, even for the viewed customer (owner 2026-10-24).
+  ctx.check(turn.cards.length === 1, 'proposal', 'no_card_for_phone_change', `cards ${turn.cards.length}`);
+  const mid = await customersState(h, ids);
+  ctx.check(mid[s.cA.id].phone === before[s.cA.id].phone, 'side_effect', 'phone_changed_before_confirm', `phone ${mid[s.cA.id].phone}`);
+  // "Yes, confirm it.": the card commits the new number.
+  await ctx.commit(turn, { card: c.corrections[0].expected.card, tool: 'update_customer', label: 'phone_edit' });
   const after = await customersState(h, ids);
   ctx.check(String(after[s.cA.id].phone).replace(/\D/g, '').endsWith('9415550173'), 'read_back', 'phone_not_saved', `phone ${after[s.cA.id].phone}`);
   ctx.check(after[s.cA.id].email === before[s.cA.id].email && after[s.cA.id].address_line1 === before[s.cA.id].address_line1, 'side_effect', 'unnamed_field_changed', 'email or address changed');

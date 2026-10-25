@@ -123,7 +123,30 @@ it("Add entry posts a keypad code and shows a server error inline", async () => 
   expect(await screen.findByText("That code is already on file for this neighborhood")).toBeInTheDocument();
   const post = rawAdminFetch.mock.calls.find(([, o]) => o?.method === "POST");
   expect(post[0]).toBe("/admin/neighborhood-access/n1/entries");
-  expect(JSON.parse(post[1].body)).toEqual({ gate_label: "Main gate", access_type: "keypad", code: "2468" });
+  expect(JSON.parse(post[1].body)).toEqual({ gate_label: "Main gate", access_type: "keypad", code: "2468", gate_location: null });
+});
+
+it("a gate's map point shows on its row, prefills Edit, and travels on Add as gate_location", async () => {
+  // Owner 2026-10-24: the office pins the main gate once; every visit's
+  // Directions link in the neighborhood then routes through it.
+  const pinned = { total: 1, neighborhoods: [{ id: "n1", name: "Synthetic Oaks", county: "Manatee", propertyCount: 3, hasConflict: false,
+    entries: [entry({ gateLocation: { lat: 27.4321, lng: -82.4567 } })] }] };
+  rawAdminFetch.mockImplementation((path, options) => (options?.method ? response({ id: "e1" }) : response(pinned)));
+  renderPage();
+  await screen.findByText("Synthetic Oaks");
+  expect(screen.getByText(/Directions route through this gate/)).toBeInTheDocument();
+  const pin = screen.getByRole("link", { name: "27.4321, -82.4567" });
+  expect(pin.getAttribute("href")).toBe("https://www.google.com/maps/search/?api=1&query=27.4321%2C-82.4567");
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  expect(screen.getByLabelText("Gate location")).toHaveValue("27.4321, -82.4567");
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add entry" }));
+  fireEvent.change(screen.getByLabelText("Code"), { target: { value: "2468" } });
+  fireEvent.change(screen.getByLabelText("Gate location"), { target: { value: " https://www.google.com/maps/@27.5,-82.6,17z " } });
+  fireEvent.click(screen.getByRole("button", { name: "Save entry" }));
+  await waitFor(() => expect(rawAdminFetch.mock.calls.some(([, o]) => o?.method === "POST")).toBe(true));
+  const post = rawAdminFetch.mock.calls.find(([, o]) => o?.method === "POST");
+  expect(JSON.parse(post[1].body)).toEqual({ gate_label: "Main gate", access_type: "keypad", code: "2468", gate_location: "https://www.google.com/maps/@27.5,-82.6,17z" });
 });
 
 it("shows the not-turned-on state when the API answers 404 enabled:false", async () => {
@@ -387,4 +410,44 @@ it("a new search term clears the old results at once and no result can be picked
   release();
   await waitFor(() => expect(screen.queryByText("Searching…")).toBeNull());
   expect(screen.queryByRole("button", { name: /Lee Example/ })).toBeNull();
+});
+
+// ---- The found-codes bell links here with ?view=found ----
+
+it("a bell link (?view=found) opens Found in messages without a click", async () => {
+  rawAdminFetch.mockImplementation(foundRoutes());
+  renderPage("/?view=found");
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Found in messages (1)" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.queryByText("Synthetic Oaks")).toBeNull();
+});
+
+it("a bell link with the access codes section off shows the neighborhoods", async () => {
+  rawAdminFetch.mockImplementation((path) => (path.startsWith("/admin/access-codes/found")
+    ? response({ enabled: false }, { ok: false, status: 404 })
+    : response(ALL)));
+  renderPage("/?view=found");
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Found in messages/ })).toBeNull();
+});
+
+it("a bell link on a page already open switches to Found in messages with a fresh read, and works again", async () => {
+  rawAdminFetch.mockImplementation(foundRoutes());
+  function GoToBell() {
+    const navigate = useNavigate();
+    return <button type="button" onClick={() => navigate("/?view=found")}>Open found bell</button>;
+  }
+  render(<MemoryRouter initialEntries={["/"]}><GoToBell /><NeighborhoodGateCodesPage /></MemoryRouter>);
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  const foundReads = () => rawAdminFetch.mock.calls.filter(([p]) => p.startsWith("/admin/access-codes/found")).length;
+  await waitFor(() => expect(foundReads()).toBe(1));
+  fireEvent.click(screen.getByRole("button", { name: "Open found bell" }));
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+  await waitFor(() => expect(foundReads()).toBe(2));
+  // Back to the neighborhoods, then the bell again: the marker was dropped, so it opens again.
+  fireEvent.click(screen.getByRole("button", { name: "Neighborhoods" }));
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Open found bell" }));
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+  await waitFor(() => expect(foundReads()).toBe(3));
 });

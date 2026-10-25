@@ -46,15 +46,16 @@ function CustomerFailureScreen({ title, message, onRetry }) {
         <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: CUSTOMER_SURFACE.text, fontFamily: FONTS.heading }}>
           {title}
         </h1>
-        <p style={{ margin: '9px 0 21px', fontSize: 14, color: CUSTOMER_SURFACE.body, lineHeight: 1.55 }}>
+        <p style={{ margin: '9px 0 21px', fontSize: 16, color: CUSTOMER_SURFACE.body, lineHeight: 1.55 }}>
           {message}
         </p>
         <button
           type="button"
           data-glass-accent=""
+          data-glass-size="primary"
           onClick={onRetry}
           style={{
-            minHeight: 42,
+            minHeight: 48,
             padding: '0 19px',
             background: COLORS.glassNavy,
             color: '#fff',

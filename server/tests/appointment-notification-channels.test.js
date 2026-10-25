@@ -13,11 +13,15 @@ jest.mock('../services/appointment-email', () => ({
   sendAppointmentConfirmationEmail: jest.fn(async () => ({ ok: true })),
   sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })),
   sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
+  // The recipient resolution the confirmation email itself uses; the
+  // new-client promotion (GATE_NEW_CLIENT_CONFIRM_EMAIL) reuses it.
+  _private: { loadCustomer: jest.fn(async (id) => ({ id })), resolveRecipients: jest.fn(async () => []) },
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+jest.mock('../services/messaging/send-window', () => ({ isWithinSendWindowET: jest.fn(() => true) }));
 // gateEnvValue: getReminderPrefs now consults the per-property toggle resolver
 // (app property scope, PR 3), which reads GATE_APP_PROPERTY_SCOPE at call time.
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false), newClientConfirmEmailLive: jest.fn(() => false) }));
 
 const db = require('../models/db');
 const AppointmentEmail = require('../services/appointment-email');
@@ -25,8 +29,8 @@ const NotificationService = require('../services/notification-service');
 const { getAppointmentContacts } = require('../services/customer-contact');
 const AppointmentReminders = require('../services/appointment-reminders');
 
-const { apptChannel, resolve72hChannel, isOneTimeVisit, deliverAppointmentNotice, deliverConfirmationByChannel, getReminderPrefs } = AppointmentReminders._test;
-const { isEnabled } = require('../config/feature-gates');
+const { apptChannel, resolve72hChannel, resolveConfirmationChannel, deliverConfirmation, isOneTimeVisit, deliverAppointmentNotice, deliverConfirmationByChannel, getReminderPrefs } = AppointmentReminders._test;
+const { isEnabled, newClientConfirmEmailLive } = require('../config/feature-gates');
 
 // Minimal knex-style chainable mock. first() resolves null so the
 // no-reachable-channel alert dedupe check finds no prior row and proceeds.
@@ -355,6 +359,256 @@ describe('getReminderPrefs account-level channel resolution', () => {
     const prefs = await getReminderPrefs('primary-1');
     expect(prefs.confirmationChannel).toBe('both');
     expect(prefs.reminder24hChannel).toBe('both');
+  });
+});
+
+describe('resolveConfirmationChannel — new client gets text AND email (GATE_NEW_CLIENT_CONFIRM_EMAIL)', () => {
+  const sampleRecipients = [{ email: 'sample.lead@example.com', name: 'Sample Lead', holder: true }];
+  const prefsOf = (extra = {}) => ({
+    unavailable: false,
+    confirmationChannel: 'sms',
+    confirmationChannelExplicit: false,
+    emailEnabled: true,
+    appointmentConfirmation: true,
+    ...extra,
+  });
+  const ids = { customerId: 'c1', scheduledServiceId: 'ss1' };
+  // scheduled_services stub: first() resolves the given row (the completed-visit lookup);
+  // customers stub: first() resolves `longStandingRow` (the member_since lookup).
+  const visitsDb = (completedRow, { fail = false, longStandingRow = null } = {}) => {
+    db.mockImplementation((table) => {
+      const q = chain();
+      if (table === 'scheduled_services') {
+        q.first = jest.fn(async () => { if (fail) throw new Error('db down'); return completedRow; });
+      }
+      if (table === 'customers') q.first = jest.fn(async () => longStandingRow);
+      return q;
+    });
+  };
+
+  beforeEach(() => {
+    newClientConfirmEmailLive.mockImplementation(() => true);
+    AppointmentEmail._private.loadCustomer.mockImplementation(async (id) => ({ id }));
+    AppointmentEmail._private.resolveRecipients.mockImplementation(async () => sampleRecipients);
+    visitsDb(null);
+  });
+  afterEach(() => {
+    newClientConfirmEmailLive.mockImplementation(() => false);
+  });
+
+  test('gate ON, new client, usable email: the default sms channel is promoted to both', async () => {
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('both');
+    // Looked for a COMPLETED visit of this customer, and resolved the email
+    // recipients the way the confirmation email does.
+    expect(db).toHaveBeenCalledWith('scheduled_services');
+    expect(AppointmentEmail._private.resolveRecipients).toHaveBeenCalledWith(
+      { id: 'c1' }, { scheduledServiceId: 'ss1', eventType: 'appointment.confirmation' },
+    );
+  });
+
+  test('gate OFF: stays sms and reads nothing', async () => {
+    newClientConfirmEmailLive.mockImplementation(() => false);
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
+    expect(db).not.toHaveBeenCalled();
+    expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
+  });
+
+  test('explicit portal choice of the confirmation channel (stamp) keeps sms', async () => {
+    await expect(resolveConfirmationChannel(prefsOf({ confirmationChannelExplicit: true }), ids)).resolves.toBe('sms');
+    expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
+  });
+
+  test('fail closed: unreadable prefs keep sms (the email leg bypasses the consent validator)', async () => {
+    await expect(resolveConfirmationChannel(prefsOf({ unavailable: true }), ids)).resolves.toBe('sms');
+    await expect(resolveConfirmationChannel(null, ids)).resolves.toBe('sms');
+    expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
+  });
+
+  test('portal-wide email off, or the confirmation toggle off, keeps sms', async () => {
+    await expect(resolveConfirmationChannel(prefsOf({ emailEnabled: false }), ids)).resolves.toBe('sms');
+    await expect(resolveConfirmationChannel(prefsOf({ appointmentConfirmation: false }), ids)).resolves.toBe('sms');
+    expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
+  });
+
+  test('no usable email for the account keeps sms', async () => {
+    AppointmentEmail._private.resolveRecipients.mockImplementation(async () => []);
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
+    AppointmentEmail._private.loadCustomer.mockImplementation(async () => null);
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
+  });
+
+  test('a customer with a completed visit is an existing client: stays sms', async () => {
+    visitsDb({ id: 'done-1' });
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
+    expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
+  });
+
+  test('a customer since more than 90 days ago with no completed visit (imported history) stays sms', async () => {
+    visitsDb(null, { longStandingRow: { id: 'c1' } });
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
+    expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
+    // The DATE column is compared in SQL to the ET calendar day 90 days back.
+    const customersQuery = db.mock.results[db.mock.calls.findIndex(([table]) => table === 'customers')].value;
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    expect(customersQuery.where).toHaveBeenCalledWith({ id: 'c1' });
+    expect(customersQuery.where).toHaveBeenCalledWith('member_since', '<', etDateString(addETDays(new Date(), -90)));
+  });
+
+  test('a stored email / both / push channel is returned untouched, with no lookups', async () => {
+    await expect(resolveConfirmationChannel(prefsOf({ confirmationChannel: 'email' }), ids)).resolves.toBe('email');
+    await expect(resolveConfirmationChannel(prefsOf({ confirmationChannel: 'both' }), ids)).resolves.toBe('both');
+    expect(db).not.toHaveBeenCalled();
+    expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
+  });
+
+  test('any thrown lookup keeps sms and warns (completed-visit read, recipient resolution, gate read)', async () => {
+    const logger = require('../services/logger');
+    visitsDb(null, { fail: true });
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
+    visitsDb(null);
+    AppointmentEmail._private.resolveRecipients.mockImplementation(async () => { throw new Error('prefs held'); });
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
+    AppointmentEmail._private.resolveRecipients.mockImplementation(async () => sampleRecipients);
+    newClientConfirmEmailLive.mockImplementation(() => { throw new Error('gate unreadable'); });
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
+    expect(logger.warn).toHaveBeenCalledTimes(3);
+  });
+
+  test('no customer id keeps sms', async () => {
+    await expect(resolveConfirmationChannel(prefsOf(), { scheduledServiceId: 'ss1' })).resolves.toBe('sms');
+  });
+
+  describe('deliverConfirmationByChannel uses the promoted channel', () => {
+    function firstChain(value) {
+      const q = {};
+      ['where', 'whereIn'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.first = jest.fn(async () => value);
+      return q;
+    }
+    function setDbQueues(queues) {
+      const tableQueues = new Map(Object.entries(queues));
+      db.mockImplementation((table) => {
+        const queue = tableQueues.get(table);
+        if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
+        return queue.shift();
+      });
+    }
+    const call = (smsAttempt) => deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'X', apptTime: new Date('2026-06-20T12:00:00Z'), smsAttempt,
+    });
+
+    test('new client on the default channel: the text AND the email both go out (existing both path)', async () => {
+      setDbQueues({
+        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+        // Owner resolution, then the member_since read (a customer since less than 90 days, or never).
+        customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true }), firstChain(undefined)],
+        scheduled_services: [firstChain(undefined)], // no completed visit
+        appointment_reminders: [firstChain(null), firstChain(null)], // move-hold checks: notice entry + email handoff
+      });
+      const smsAttempt = jest.fn(async () => true);
+      const reached = await call(smsAttempt);
+      expect(reached).toBe(true);
+      expect(smsAttempt).toHaveBeenCalledTimes(1);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+    });
+
+    test('existing client (a completed visit) stays on the sms path: no email', async () => {
+      setDbQueues({
+        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+        customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+        scheduled_services: [firstChain({ id: 'done-1' })],
+      });
+      const smsAttempt = jest.fn(async () => true);
+      const reached = await call(smsAttempt);
+      expect(reached).toBe(true);
+      expect(smsAttempt).toHaveBeenCalledTimes(1);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    });
+
+    test('explicit Text choice (stamp) stays on the sms path even for a new client', async () => {
+      setDbQueues({
+        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms', appointment_confirmation_channel_explicit: true })],
+        customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+      });
+      const smsAttempt = jest.fn(async () => true);
+      await call(smsAttempt);
+      expect(smsAttempt).toHaveBeenCalledTimes(1);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    });
+
+    test('gate OFF: a new client is text-only, exactly as before', async () => {
+      newClientConfirmEmailLive.mockImplementation(() => false);
+      setDbQueues({
+        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+        customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+      });
+      const smsAttempt = jest.fn(async () => true);
+      await call(smsAttempt);
+      expect(smsAttempt).toHaveBeenCalledTimes(1);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('deliverConfirmation (admin manual / inline bookings) uses the promoted channel', () => {
+    // Outside the 8AM-8PM window the 'both' channel sends its email NOW and
+    // defers only the text; the default 'sms' channel just defers. That
+    // difference proves the send-window hold and the held email leg read the
+    // promoted channel, without driving the real SMS send.
+    const { isWithinSendWindowET } = require('../services/messaging/send-window');
+    function tableAwareDb({ completedRow, longStandingRow = null }) {
+      db.mockImplementation((table) => {
+        const q = {};
+        ['whereIn', 'whereRaw', 'whereNotNull', 'orderBy', 'select', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+        // The member_since read (where('member_since', '<', day)) answers on its own.
+        q.where = jest.fn((col) => { if (col === 'member_since') q.memberSince = true; return q; });
+        q.update = jest.fn(async () => 1);
+        const rows = {
+          notification_prefs: { appointment_confirmation_channel: 'sms' },
+          customers: { id: 'c1', account_id: 'acct-1', is_primary_profile: true, first_name: 'Sample' },
+          scheduled_services: completedRow,
+        };
+        q.first = jest.fn(async () => (q.memberSince ? longStandingRow : rows[table] ?? null));
+        return q;
+      });
+    }
+    const run = () => deliverConfirmation(
+      { id: 'rem1' },
+      { scheduledServiceId: 'ss1', customerId: 'c1', apptTime: new Date(Date.now() + 3 * 86400000), serviceLabel: 'X' },
+    );
+
+    beforeEach(() => {
+      isEnabled.mockImplementation((k) => k === 'smsSendWindow');
+      isWithinSendWindowET.mockReturnValue(false);
+    });
+    afterEach(() => {
+      isEnabled.mockImplementation(() => false);
+      isWithinSendWindowET.mockReturnValue(true);
+    });
+
+    test('new client after hours: the email leg goes out now, the text waits for the window', async () => {
+      tableAwareDb({ completedRow: null });
+      await expect(run()).resolves.toBe(false);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+    });
+
+    test('existing client after hours: the whole confirmation waits, no email', async () => {
+      tableAwareDb({ completedRow: { id: 'done-1' } });
+      await expect(run()).resolves.toBe(false);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    });
+
+    test('a customer since more than 90 days ago after hours: the whole confirmation waits, no email', async () => {
+      tableAwareDb({ completedRow: null, longStandingRow: { id: 'c1' } });
+      await expect(run()).resolves.toBe(false);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    });
+
+    test('gate OFF: a new client after hours keeps the old behavior, no email', async () => {
+      newClientConfirmEmailLive.mockImplementation(() => false);
+      tableAwareDb({ completedRow: null });
+      await expect(run()).resolves.toBe(false);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    });
   });
 });
 

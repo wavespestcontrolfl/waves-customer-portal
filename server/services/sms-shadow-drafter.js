@@ -27,7 +27,7 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
-const { gateEnvValue, multiTechTextTimesLive } = require('../config/feature-gates');
+const { gateEnvValue, multiTechTextTimesLive, smsVoiceProfilePinVersion, smsEditLearningLive, smsPromptB1Live } = require('../config/feature-gates');
 const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
@@ -213,6 +213,15 @@ const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}25_n`;
 // behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
 // gate moves. A prompt or facts revision moves BOTH numbers.
 const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}26_n`;
+// PROMPT B1 (owner 2026-10-24 "go b1" / "yes all", GATE_SMS_PROMPT_B1): the drafter stops stalling (a missed visit and a covered pest
+// re-service text get real times to offer) and stops false promises (no claimed sends, no promised office actions, the follow-up
+// wording promises only a reply, no name greeting mid-thread), and the latest finished visit's customer-safe notes and findings
+// reach the facts. A prompt AND facts revision, so both bases move once more: "27" (scheduler gate off) / "28" (on). Same
+// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers28_n'
+// is 32 chars, 39 with the six tags b c e l m v (+ separator), under PROMPT_VERSION_COLUMN_MAX (40) - pinned by a test. The
+// effective version follows the gate (realAnswersBaseVersion), so B1 drafts never pool with the 25/26 cohorts.
+const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}27_n`;
+const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}28_n`;
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -251,18 +260,39 @@ const SHADOW_STATUS = 'shadow';
 const PROMPT_VERSION_COLUMN_MAX = 40;
 // The real-answers identity before any '+category' tags (see NEXT_OF_SERIES_PROMPT_VERSION).
 function realAnswersBaseVersion() {
-  return gateEnvValue('GATE_SMS_OFFERS_SCHEDULER') ? NEXT_OF_SERIES_PROMPT_VERSION : REAL_ANSWERS_PROMPT_VERSION;
+  const nextOfSeries = gateEnvValue('GATE_SMS_OFFERS_SCHEDULER');
+  if (smsPromptB1Live()) return nextOfSeries ? B1_NEXT_OF_SERIES_PROMPT_VERSION : B1_PROMPT_VERSION;
+  return nextOfSeries ? NEXT_OF_SERIES_PROMPT_VERSION : REAL_ANSWERS_PROMPT_VERSION;
+}
+// VOICE INPUT TAGS (owner 2026-10-24, GATE_SMS_VOICE_PROFILE_PIN + GATE_SMS_EDIT_LEARNING). Neither gate edits the
+// prompt text or the facts block; each changes WHICH voice text the draft receives, so each is a cohort of its own:
+//   'v' = a voice profile pin is set (the drafter reads that profile version, not the newest approved one),
+//   'e' = edit learning is on (the few-shot exemplars rank edited-suggestion and human_better replies first).
+// They join the single-character '+' tag set the four hand-off categories already use (b c l m), sorted with them, so
+// the flip order never changes the identity: real-answers base (32 chars) + '+' + up to six tags = 39, under
+// PROMPT_VERSION_COLUMN_MAX (40), pinned by a test. The tag follows the INPUT, not just the env var: 'v' needs the
+// voice-profile kill switch on (SHADOW_VOICE_PROFILE) and 'e' needs the exemplars to reach the prompt (SHADOW_FEWSHOT and
+// SHADOW_DRAFT_VERIFY on). Both apply to the bare v11 identity too (a draft that used the old prompt still got the pinned
+// profile or the ranked exemplars). sms-sealed-eval's fact-marker contract reads only the category tags it knows, so 'v'
+// and 'e' add no fact marker: the facts block is unchanged. The tag says the gate was set, not that the pinned version
+// resolved; the version actually used is always in intended_actions.voice_profile_version.
+function voiceInputTags() {
+  const tags = [];
+  if (smsVoiceProfilePinVersion() !== null && VOICE_PROFILE_ENABLED) tags.push('v');
+  if (smsEditLearningLive() && FEWSHOT_ENABLED && VERIFY_ENABLED) tags.push('e');
+  return tags;
+}
+function withVoiceInputTags(base, categoryTags = []) {
+  const tags = [...categoryTags, ...voiceInputTags()].sort();
+  return tags.length ? `${base}+${tags.join('')}` : base;
 }
 function currentPromptVersion() {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return PROMPT_VERSION;
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return withVoiceInputTags(PROMPT_VERSION);
   const activeCategoryTags = REAL_ANSWERS_HANDOFF_CATEGORIES
     .filter((c) => gateEnvValue(c.gate))
-    .map((c) => c.tag)
-    .sort();
+    .map((c) => c.tag);
   const base = realAnswersBaseVersion();
-  const version = activeCategoryTags.length
-    ? `${base}+${activeCategoryTags.join('')}`
-    : base;
+  const version = withVoiceInputTags(base, activeCategoryTags);
   if (version.length > PROMPT_VERSION_COLUMN_MAX) {
     // Fail closed to the bare identity rather than risk a DB write erroring
     // out mid-draft — a truncated-to-the-wrong-thing label is a smaller
@@ -316,6 +346,36 @@ const REAL_ANSWERS_HANDOFF_CATEGORIES = [
   { gate: 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', label: 'chemical/medical concerns', tag: 'm' },
   { gate: 'GATE_SMS_AGENT_LEGAL', label: 'legal threats', tag: 'l' },
 ];
+
+// The CANCELLATIONS bullet (owner ruling 2026-10-09; unchanged text with GATE_SMS_PROMPT_B1 off).
+const CANCELLATIONS_LINE = '- CANCELLATIONS are never escalated as their own category. Accept it in ONE plain sentence: no question about why, no attempt to change their mind, and NEVER a promise that the owner or anyone will call them. Say the team will confirm the cancellation, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW. Offer skipping or rescheduling the next visit (2–3 SPECIFIC times from OPEN TIMES) ONLY when the customer asks what their options are. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation. ONLY when the customer wants to end their recurring service plan altogether (not skip, move or cancel ONE visit) AND the facts carry the exact line "PORTAL SELF-CANCEL: available (customer portal, Plan tab, Account Options)", also tell them ONCE that they can cancel the plan on their own at any time in the customer portal, under Plan. When that line reads "not available" or is missing, NEVER mention cancelling in the portal. Never say the plan is cancelled, and never point a one-visit request at the portal plan cancellation.';
+// B1 (owner 2026-10-24): same ruling, minus the promised office action. The one accepting sentence never says the office, the team or a
+// teammate will confirm, cancel or process it (a person still processes it through the cancel_request escalation); the follow-up wording
+// may add when they will hear back, which promises only a reply.
+function CANCELLATIONS_LINE_B1() {
+  return CANCELLATIONS_LINE.replace(
+    'Say the team will confirm the cancellation, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.',
+    () => 'Never say the office, the team or a teammate will confirm, cancel or process it. The one sentence may add when they will hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW (that wording promises only a reply), for example "Got it, I\'ve noted that you want to cancel and a person will reply within the hour."',
+  );
+}
+// B1: the covered free re-service offer in the PEST REPORTS bullet. A teammate texts the link, so the reply never says it is being sent.
+const PEST_REPORT_ELIGIBLE_OFFER_B1 = 'acknowledge what they\'re seeing, then offer the free re-service: when the facts carry a FREE RE-SERVICE OPENINGS section, offer 2–3 SPECIFIC times from THAT section (verbatim - they are the free re-service booking page\'s own openings, not OPEN TIMES; record EACH one you offer in offered_times exactly as in OPEN TIMES), say a teammate will text their free re-service booking link and book the one they pick, and do NOT ask where or how many; with no FREE RE-SERVICE OPENINGS section, say a teammate will text their free re-service booking link and ALSO ask in the same reply where they are seeing the activity and about how many (so the technician treats the right place). Never say the link is being sent, on its way or coming, and give no time for it. Add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts the link; when you offered times, also add {"type":"escalate","note":"reservice_times: <the offered days and windows>"} so a person books the one they pick. Never add book_appointment for a re-service (no automatic booking).';
+// The MISSED VISIT bullets of the VISIT STATUS & OPEN LOOPS rules (unchanged text with GATE_SMS_PROMPT_B1 off).
+const MISSED_VISIT_RULES = `- With MISSED VISIT, apologize in one plain sentence (no corporate hedging), say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions — the office rebooks it. Never offer OPEN TIMES for the missed visit.
+- With WINDOW PASSED or MISSED VISIT listed, a reply without that FOLLOW-UP SLA RIGHT NOW wording and that escalation is not accepted.
+`;
+// B1: a missed visit is rebooked from real times when OPEN TIMES is listed (sized for that visit's own service); with none, today's hand-off.
+const MISSED_VISIT_RULES_B1 = `- With MISSED VISIT, apologize ONCE in one plain sentence (no corporate hedging). When OPEN TIMES is listed, offer 2–3 SPECIFIC times from it to rebook that visit (verbatim, each recorded in offered_times) and add {"type":"book_appointment"} only once they confirm one. With no OPEN TIMES, say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions - never promise that the office will rebook it.
+- With WINDOW PASSED listed, a reply without that FOLLOW-UP SLA RIGHT NOW wording and that escalation is not accepted. With MISSED VISIT listed, a reply needs either valid OPEN TIMES slots in offered_times or that wording and that escalation.
+`;
+// B1 rule block (system prompt, real-answers only). The false-promise rules, the sends rule, the follow-up wording and the greeting.
+const B1_RULES = `
+NO FALSE PROMISES (these override the house voice examples above):
+- Never say a link, text, email, report, quote, proposal or photo "is being sent", "on its way", "coming" or "going out", and never write "I'm sending" or "I'll send" for one, unless the reply itself carries it. When a teammate must send it, say a teammate will text it, with no time.
+- Never promise that the office, the team, a teammate or someone will confirm, cancel, add, move, call, email or send something. Say a person will check and reply instead, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW when you give a time.
+- The FOLLOW-UP SLA RIGHT NOW wording promises only a REPLY. Never pair it with a quote, proposal, photo, report, link or visit arriving by then.
+- In an ongoing thread (the user message says Waves texted recently) never open with Hi, Hello or Hey and a name; just answer.
+`;
 
 // 1-business-hour follow-up SLA (owner ruling 2026-09-27): 8am-8pm ET reads
 // "within the hour". Outside that window, "9 AM" means the NEXT 9 AM on the
@@ -421,8 +481,9 @@ function realAnswersHandoffBullets() {
   // generateGroundedDraft's auto-send-safety check), so a model that misreads
   // a complaint as a plain pest report is caught by the human in the loop,
   // not by code.
-  lines.push(`- PEST REPORTS ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don't hold this for a person, but ONLY when it is a plain report of pest activity. If the SAME text is ALSO a complaint — ${pestComplaintTieBreakLabels()} — ${pestComplaintTieBreak}; pest activity never overrides an actual complaint. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they're seeing, say CONCRETELY that you're sending their free re-service booking link now, ALSO ask in the same reply where they are seeing the activity and about how many (so the technician treats the right place — ask AND send the link, never ask instead of sending it), and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says that service line is ALREADY BOOKED, do NOT offer a new link, OPEN TIMES or a paid visit for it — acknowledge what they're seeing and refer to the appointment already on the schedule (the date/window in the fact), offering to help with that visit. When FREE RE-SERVICE says not eligible, is absent, or doesn't list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.`);
-  lines.push('- CANCELLATIONS are never escalated as their own category. Accept it in ONE plain sentence: no question about why, no attempt to change their mind, and NEVER a promise that the owner or anyone will call them. Say the team will confirm the cancellation, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW. Offer skipping or rescheduling the next visit (2–3 SPECIFIC times from OPEN TIMES) ONLY when the customer asks what their options are. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation. ONLY when the customer wants to end their recurring service plan altogether (not skip, move or cancel ONE visit) AND the facts carry the exact line "PORTAL SELF-CANCEL: available (customer portal, Plan tab, Account Options)", also tell them ONCE that they can cancel the plan on their own at any time in the customer portal, under Plan. When that line reads "not available" or is missing, NEVER mention cancelling in the portal. Never say the plan is cancelled, and never point a one-visit request at the portal plan cancellation.');
+  const eligibleReserviceOffer = smsPromptB1Live() ? PEST_REPORT_ELIGIBLE_OFFER_B1 : `acknowledge what they're seeing, say CONCRETELY that you're sending their free re-service booking link now, ALSO ask in the same reply where they are seeing the activity and about how many (so the technician treats the right place — ask AND send the link, never ask instead of sending it), and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service).`;
+  lines.push(`- PEST REPORTS ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don't hold this for a person, but ONLY when it is a plain report of pest activity. If the SAME text is ALSO a complaint — ${pestComplaintTieBreakLabels()} — ${pestComplaintTieBreak}; pest activity never overrides an actual complaint. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: ${eligibleReserviceOffer} When FREE RE-SERVICE says that service line is ALREADY BOOKED, do NOT offer a new link, OPEN TIMES or a paid visit for it — acknowledge what they're seeing and refer to the appointment already on the schedule (the date/window in the fact), offering to help with that visit. When FREE RE-SERVICE says not eligible, is absent, or doesn't list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.`);
+  lines.push(smsPromptB1Live() ? CANCELLATIONS_LINE_B1() : CANCELLATIONS_LINE);
   return lines.join('\n');
 }
 
@@ -480,7 +541,7 @@ function openTimesDayLabel(d) {
 // that same engine whatever the gate says by then. A snapshot with no source is
 // the old finder's, and is rechecked there.
 const {
-  SCHEDULER_OFFER_SOURCE, ESTIMATE_OFFER_SOURCE, BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE,
+  SCHEDULER_OFFER_SOURCE, ESTIMATE_OFFER_SOURCE, BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE,
 } = require('./sms-offer-sources');
 const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'next_of_series', 'named_scheduled_visit']);
 // The picker chain (visit load, page eligibility, booking config, the
@@ -568,6 +629,15 @@ async function loadBookDays({ customerId, serviceKey }) {
   return availability ? { days: availability.days || [] } : null;
 }
 
+// The openings the customer's free re-service booking page lists right now for the reported lane(s) (offer.serviceKey is
+// 'pest', 'lawn' or 'pest+lawn'): the page's own builder, via the route's reserviceOpeningsFor. null = the page shows none.
+async function loadReserviceDays({ customerId, serviceKey }) {
+  if (!customerId || !serviceKey) return null;
+  const page = await require('../routes/reservice-public')._internals.reserviceOpeningsFor(customerId, { lanes: String(serviceKey).split('+') });
+  // the page's slots carry start_time; the recheck and the renderers read startTime24 beside it
+  return page && { days: page.days.map((d) => ({ ...d, slots: (d.slots || []).map((slot) => ({ ...slot, startTime24: slot.start_time })) })) };
+}
+
 // The days (plus, for a visit, its own current window) the picker that would
 // commit this offer shows. `offer` is { source, scheduledServiceId? |
 // estimateId? | serviceKey? } — what the snapshot lookup carries so the
@@ -578,6 +648,7 @@ async function loadSchedulerDays(offer, customerId, { fresh = false } = {}) {
   if (offer.source === ESTIMATE_OFFER_SOURCE) return loadEstimateDays({ customerId, estimateId: offer.estimateId, fresh });
   if (offer.source === BOOK_OFFER_SOURCE) return loadBookDays({ customerId, serviceKey: offer.serviceKey });
   if (offer.source === WEBSITE_OFFER_SOURCE) return loadWebsiteEngineDays({ offer, customerId });
+  if (offer.source === RESERVICE_OFFER_SOURCE) return loadReserviceDays({ customerId, serviceKey: offer.serviceKey });
   return null;
 }
 
@@ -1729,6 +1800,10 @@ function bookedReserviceLanes(factsBlock) {
 // — bookable ("offer the covered free re-service") or ALREADY BOOKED ("refer to the appointment on the schedule") —
 // the reply may not declare offered_times or add book_appointment, whatever else the inbound asks or says
 // ("The ants are back, cancel my plan and book my lawn visit": the cancellation may suppress the OWED offer, never this).
+// B1: the facts carry the free re-service booking page's own openings, so a covered pest report may offer THOSE times.
+function reserviceOpeningsOfferable(factsBlock) {
+  return smsPromptB1Live() && parseOpenTimesDaysFromFactsBlock(factsBlock, RESERVICE_OPENINGS_HEADER_PREFIX).length > 0;
+}
 function reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTimes, actions }) {
   if (!([].concat(offeredTimes || []).length || actions.some((a) => a && a.type === 'book_appointment'))) return null;
   const covered = factsCoveredReserviceLanes(factsBlock);
@@ -1741,7 +1816,8 @@ function reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTi
     if (linkDownReserviceLanes(factsBlock).includes(lane)) {
       return `the customer reported a ${lane} issue and is COVERED, but the free re-service booking link is unavailable right now — never offer paid OPEN TIMES, declare offered_times or add book_appointment; acknowledge, add {"type":"escalate","note":"<what they need>"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW`;
     }
-    if (eligibleReserviceLanes(factsBlock).includes(lane)) {
+    // B1: with FREE RE-SERVICE OPENINGS in the facts the reply offers THEIR times (declared in offered_times); a booking action stays refused
+    if (eligibleReserviceLanes(factsBlock).includes(lane) && !(reserviceOpeningsOfferable(factsBlock) && !actions.some((a) => a && a.type === 'book_appointment'))) {
       return `the customer reported a ${lane} issue and FREE RE-SERVICE in the facts says they are eligible — the re-service link shows its own availability, so never declare offered_times or add book_appointment; hand any OTHER request to the office with {"type":"escalate","note":"<the other request>"} and the FOLLOW-UP SLA wording`;
     }
   }
@@ -1840,7 +1916,7 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
     // Codex round-5 P2 (finding #3): the re-service link page shows the customer its OWN real
     // availability — a promise that ALSO offers or books a specific slot right here is a second,
     // conflicting offer (and a book_appointment has no eligibility/pricing checks of its own).
-    [[].concat(offeredTimes || []).length, 'the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'],
+    [[].concat(offeredTimes || []).length && !reserviceOpeningsOfferable(factsBlock), 'the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'],
     [actions.some((a) => a && a.type === 'book_appointment'), 'the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'],
     [!lanes.length, 'the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'],
     [reportedReserviceExcludedSpecialty(inboundMessage) && !reportedLanes.length, 'the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'],
@@ -3916,9 +3992,12 @@ function replyBindsDeclaredDays(reply, offeredTimes) {
 // empty list and the exam would grade drift toward deferral. Parses our own
 // rendered "- <date>: <w1>, <w2>" lines only — never model prose.
 const OPEN_TIMES_SECTION_HEADER = 'OPEN TIMES (real, bookable slots, ET';
-// [start, endExclusive) line range of the OPEN TIMES section, or null.
-function openTimesSectionRange(lines) {
-  const start = lines.findIndex((l) => l.startsWith(OPEN_TIMES_SECTION_HEADER));
+// B1: the free re-service booking page's own openings, a section of its own (a teammate texts the link and books the pick).
+const RESERVICE_OPENINGS_HEADER_PREFIX = 'FREE RE-SERVICE OPENINGS (';
+const RESERVICE_OPENINGS_HEADER = `${RESERVICE_OPENINGS_HEADER_PREFIX}the free re-service booking page's own openings, ET - offer ONLY from this list, never invent one; a teammate texts the link and books the one they pick):\n`;
+// [start, endExclusive) line range of a times section (OPEN TIMES by default), or null.
+function openTimesSectionRange(lines, header = OPEN_TIMES_SECTION_HEADER) {
+  const start = lines.findIndex((l) => l.startsWith(header));
   if (start === -1) return null;
   let end = start + 1;
   while (end < lines.length && lines[end].startsWith('- ') && lines[end].includes(': ')) end++;
@@ -3929,15 +4008,47 @@ function openTimesSectionRange(lines) {
 // arrival window, a history line).
 function stripOpenTimesSection(factsBlock) {
   if (!factsBlock) return '';
-  const lines = String(factsBlock).split('\n');
-  const range = openTimesSectionRange(lines);
-  if (!range) return String(factsBlock);
-  return [...lines.slice(0, range[0]), ...lines.slice(range[1])].join('\n');
+  // both times sections are OFFERS, never "already grounded elsewhere" (the re-service openings join OPEN TIMES here)
+  return [OPEN_TIMES_SECTION_HEADER, RESERVICE_OPENINGS_HEADER_PREFIX].reduce((text, header) => {
+    const lines = text.split('\n');
+    const range = openTimesSectionRange(lines, header);
+    return range ? [...lines.slice(0, range[0]), ...lines.slice(range[1])].join('\n') : text;
+  }, String(factsBlock));
 }
-function parseOpenTimesDaysFromFactsBlock(factsBlock) {
+// B1 (change A): how much of the LATEST finished visit's customer-safe notes reach SERVICE HISTORY (older visits keep 300).
+const LATEST_VISIT_NOTES_CAP = 1200;
+// The latest visit's service_findings as ONE history part ([] when none or the gate is off): title, detail and recommendation,
+// severity/category as a label. Each is a single capped line, injection-screened and compliance-screened like every other
+// tech-authored fact; the aggregator loads them only when the visit's customer-safe notes exist (never raw technician_notes).
+// The COMPLETE customer-copy screen (AGENTS.md: every path admitting free text into report/treatment copy runs customerCopyViolations, never
+// the findBannedCustomerCopy subset) plus the access-code shapes. Fails closed: if the screen cannot load, the text is rejected.
+function findingCopyRejected(text) {
+  try {
+    const { customerCopyViolations, containsReportAccessCode } = require('./service-report/technician-report-copy');
+    return customerCopyViolations(text).length > 0 || containsReportAccessCode(text);
+  } catch {
+    return true;
+  }
+}
+function latestVisitFindingParts(findings) {
+  if (!smsPromptB1Live() || !Array.isArray(findings)) return [];
+  const rows = findings.slice(0, 5).map((f) => {
+    const text = [
+      sanitizeSingleLine(f?.title, 120),
+      sanitizeSingleLine(f?.detail, 300),
+      f?.recommendation ? `recommended: ${sanitizeSingleLine(f.recommendation, 200)}` : '',
+    ].filter(Boolean).join(' - ');
+    const label = [f?.severity, f?.category].map((v) => sanitizeSingleLine(v, 30)).filter(Boolean).join('/');
+    const row = text ? `${text}${label ? ` (${label})` : ''}` : '';
+    // the whole rendered row, label included, passes the screens
+    return row && !EXEMPLAR_INJECTION_RE.test(row) && !findingCopyRejected(row) ? row : '';
+  }).filter(Boolean);
+  return rows.length ? [`findings: "${rows.join(' | ')}"`] : [];
+}
+function parseOpenTimesDaysFromFactsBlock(factsBlock, header = OPEN_TIMES_SECTION_HEADER) {
   if (!factsBlock) return [];
   const lines = String(factsBlock).split('\n');
-  const range = openTimesSectionRange(lines);
+  const range = openTimesSectionRange(lines, header);
   if (!range) return [];
   const days = [];
   for (let i = range[0] + 1; i < range[1]; i++) {
@@ -4240,7 +4351,7 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
       ...(schedulerOffer ? {
         source: schedulerOffer.source,
         ...(schedulerOffer.scheduledServiceId ? { scheduledServiceId: schedulerOffer.scheduledServiceId } : {}),
-        ...(schedulerOffer.source === BOOK_OFFER_SOURCE || schedulerOffer.source === WEBSITE_OFFER_SOURCE ? { serviceKey: schedulerOffer.serviceKey } : {}),
+        ...([BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE].includes(schedulerOffer.source) ? { serviceKey: schedulerOffer.serviceKey } : {}),
       } : {}),
     },
     quotedWindows,
@@ -4403,8 +4514,28 @@ const VOICE_PROFILE_ENABLED = process.env.SHADOW_VOICE_PROFILE !== 'false';
  */
 async function resolveEffectiveVoiceProfile({ dbi = db } = {}) {
   if (!VOICE_PROFILE_ENABLED) return null;
-  const { getApprovedVoiceProfile } = require('./voice-profile-distiller');
+  const { getApprovedVoiceProfile, getPinnedVoiceProfile } = require('./voice-profile-distiller');
+  // GATE_SMS_VOICE_PROFILE_PIN (owner 2026-10-24): the pinned version stands in for the newest approved one, here, so
+  // the drafter, graduation's readiness pin, the sealed-exam run pin and auto-send's staleness check all read the SAME
+  // profile. The distiller keeps approving nightly; only this reader is pinned. A pin that does not resolve to a
+  // once-approved profile falls back to today's behavior (newest approved) and logs once per distinct problem.
+  const pin = smsVoiceProfilePinVersion();
+  if (pin !== null) {
+    const pinned = await getPinnedVoiceProfile(pin, { dbi });
+    if (pinned) return pinned;
+    warnPinFallbackOnce(`missing:${pin}`, `voice profile pin v${pin} is not an approved profile version; using the newest approved profile`);
+  } else if (String(process.env.GATE_SMS_VOICE_PROFILE_PIN || '').trim()) {
+    warnPinFallbackOnce('invalid', 'GATE_SMS_VOICE_PROFILE_PIN is not a whole version number; no pin applied');
+  }
   return getApprovedVoiceProfile({ dbi });
+}
+
+// One warning per distinct pin problem per process, so a bad pin does not log on every draft. No customer data.
+const pinFallbackWarned = new Set();
+function warnPinFallbackOnce(key, message) {
+  if (pinFallbackWarned.has(key)) return;
+  pinFallbackWarned.add(key);
+  logger.warn(`[sms-shadow] ${message}`);
 }
 
 /**
@@ -4466,20 +4597,19 @@ LABEL FACTS (product timing from the label):
   // per-draft data (buildFactsBlock), never interpolated here, so this stays
   // time-invariant. The tightened voice bans live HERE, not in the shared
   // CUSTOMER_SMS_HOUSE_VOICE constant other agents use. '' gate-off (byte-identical).
+  const missedVisitRules = smsPromptB1Live() ? MISSED_VISIT_RULES_B1 : MISSED_VISIT_RULES;
   const visitLoopsRules = realAnswersOn
     ? `
 VISIT STATUS & OPEN LOOPS:
 - When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
 - Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on this visit.").
-- With MISSED VISIT, apologize in one plain sentence (no corporate hedging), say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions — the office rebooks it. Never offer OPEN TIMES for the missed visit.
-- With WINDOW PASSED or MISSED VISIT listed, a reply without that FOLLOW-UP SLA RIGHT NOW wording and that escalation is not accepted.
-- Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
+${missedVisitRules}- Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
     : '';
   // ATTENTION RULES (text agent fix plan part 3, 2026-10-09; 14-day audit: drafts answered
   // one topic of two, handed off without answering what the facts covered, or picked one of
   // two conflicting dates). Gate-on only; '' gate-off keeps the prompt byte-identical.
-  const realAnswersAttentionBullets = realAnswersOn ? REAL_ANSWERS_ATTENTION_BULLETS : '';
+  const attentionBullets = realAnswersOn ? realAnswersAttentionBullets() : '';
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
     : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
@@ -4513,7 +4643,7 @@ VISIT STATUS & OPEN LOOPS:
   const paymentMoneyExtra = realAnswersOn
     ? `
 - Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — name the methods in the Payment options line (card or bank account through their pay link), and for ANYTHING about Zelle copy the Zelle sentence from "Payment status sentences" word for word; never write a Zelle contact, an amount, or a Zelle answer in your own words. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
-- MONEY ("did you get my payment", "is my invoice paid", "was I refunded", "do I owe anything", "how much is my plan", any amount or balance question): BILLING carries "Payment status sentences". State a payment, invoice, refund or balance status, ANY dollar amount (a balance, an invoice, the monthly plan price or card charge), or anything about Zelle ONLY by copying one of those sentences word for word, as a whole sentence (nothing added to it, put inside it or cut from it), and only a sentence that is about the payment or invoice the customer asked about. Never write a dollar figure any other way. If none fits - or BILLING says none is on file - do NOT state, imply or deny any status ("you're all set", "paid up", "we got it", "it's processing", "it failed", "it isn't showing", "you owe nothing" are all forbidden unless copied from a sentence): say a teammate will confirm, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}. Never name how a payment was made unless a copied sentence does.`
+- MONEY ("did you get my payment", "is my invoice paid", "was I refunded", "do I owe anything", "how much is my plan", any amount or balance question): BILLING carries "Payment status sentences". State a payment, invoice, refund or balance status, ANY dollar amount (a balance, an invoice, the monthly plan price or card charge), or anything about Zelle ONLY by copying one of those sentences word for word, as a whole sentence (nothing added to it, put inside it or cut from it), and only a sentence that is about the payment or invoice the customer asked about. Never write a dollar figure any other way. If none fits - or BILLING says none is on file - do NOT state, imply or deny any status ("you're all set", "paid up", "we got it", "it's processing", "it failed", "it isn't showing", "you owe nothing" are all forbidden unless copied from a sentence): say ${smsPromptB1Live() ? 'a person will check and reply' : 'a teammate will confirm'}, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}. Never name how a payment was made unless a copied sentence does.`
     : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
@@ -4531,7 +4661,7 @@ FACT DISCIPLINE — the single most important rule. A fabricated detail is the w
 
 BILLING & MONEY RULES:
 - Real amounts shown in BILLING or PENDING ESTIMATE are facts you MAY state, exactly as written ("your balance is $120.00"). Never round, never estimate, never compute a new total, and never state a figure the facts don't show — an invented or derived amount is the worst kind of fabrication. A figure the CUSTOMER mentions ("I think my balance is $50") is a question to answer from BILLING, never a fact to confirm.
-- When the customer needs to act on an amount: point them to portal.wavespestcontrol.com (the one URL you may write), or say we'll text their pay link — and add {"type":"send_payment_link"} to intended_actions so a teammate actually sends it. NEVER invent or guess any other URL.${paymentMoneyExtra}
+- When the customer needs to act on an amount: point them to portal.wavespestcontrol.com (the one URL you may write), or say ${smsPromptB1Live() ? 'a teammate will text their pay link (no time)' : "we'll text their pay link"} — and add {"type":"send_payment_link"} to intended_actions so a teammate actually sends it. NEVER invent or guess any other URL.${paymentMoneyExtra}
 - If the open invoice is BILLED TO A THIRD-PARTY PAYER, never ask the customer to pay it.
 - Autopay and card questions: answer from the Autopay and Card-on-file lines (brand + last-4 only — a full card number never exists here).
 
@@ -4539,13 +4669,13 @@ PROPERTY & ACCESS RULES:
 - PROPERTY & PREFERENCES facts (pets, irrigation, HOA, instructions) are there so you respect them in replies — reference them naturally when relevant.
 - Access codes: you may confirm one is on file; NEVER include a code value in a reply (you never see them, and they must never be texted).
 ${deferRule}
-${companyFactsRules}${visitLoopsRules}
+${companyFactsRules}${visitLoopsRules}${smsPromptB1Live() ? B1_RULES : ''}
 USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and ${liveStatusMeaning}${liveEtaUseRule} If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
 
 ALSO:
 ${handoffBullet}
 - Each intended_actions entry's "type" must be one of: ${INTENDED_ACTION_TYPES.join(', ')}.
-${realAnswersAttentionBullets}- When CLASSIFIED INTENT is gratitude_reply, the customer may be expressing standalone thanks. Inspect the recent conversation and account flags first. Only when a completed answer/service or payment acknowledgement clearly explains the thanks, and there is no unresolved request, complaint, instruction, booking acceptance or operational question, return exactly the APPROVED GRATITUDE REPLY and intended_actions [{"type":"none"}]. If context is uncertain or anything still needs attention, return reply "". Never add a question, sales offer, review request, promise, sign-off or CTA. Never answer a reaction or continue an exchange after our own courtesy reply. Names mentioned by the customer are addressees, not customer identity. The server independently checks eligibility after a quiet period; this is only a draft.
+${attentionBullets}- When CLASSIFIED INTENT is gratitude_reply, the customer may be expressing standalone thanks. Inspect the recent conversation and account flags first. Only when a completed answer/service or payment acknowledgement clearly explains the thanks, and there is no unresolved request, complaint, instruction, booking acceptance or operational question, return exactly the APPROVED GRATITUDE REPLY and intended_actions [{"type":"none"}]. If context is uncertain or anything still needs attention, return reply "". Never add a question, sales offer, review request, promise, sign-off or CTA. Never answer a reaction or continue an exchange after our own courtesy reply. Names mentioned by the customer are addressees, not customer identity. The server independently checks eligibility after a quiet period; this is only a draft.
 - For other intents, if the message is a pure courtesy acknowledgement that warrants NO reply at all (e.g. "Thanks!", a bare "ok" closing the thread), set "reply" to "" and intended_actions to [{"type":"none","note":"no reply warranted"}]. But a short confirmation that answers a question we asked (a "yes" to a proposed time) DOES warrant a reply.
 
 Respond with ONLY a JSON object, no prose, no code fences:
@@ -4580,11 +4710,13 @@ Respond with ONLY a JSON object, no prose, no code fences:
   return { system: base, applied: false, realAnswersApplied: realAnswersOn };
 }
 
-const REAL_ANSWERS_ATTENTION_BULLETS = [
-  '- A text with MORE THAN ONE question or request gets an answer to EACH one. Before you finish, check the customer\'s message for anything the reply did not address.',
-  '- When part of the text needs a person, still answer the parts the facts DO answer in the same reply. A hand-off covers only what the facts cannot answer; never reply with only "we\'ll get back to you" when a fact answers part of it.',
-  '- When two facts give DIFFERENT dates or times for what looks like the same visit, do not pick one and do not tell the customer our records disagree: say you will confirm the exact time, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}.',
+function realAnswersAttentionBullets() {
+  return [
+    '- A text with MORE THAN ONE question or request gets an answer to EACH one. Before you finish, check the customer\'s message for anything the reply did not address.',
+    '- When part of the text needs a person, still answer the parts the facts DO answer in the same reply. A hand-off covers only what the facts cannot answer; never reply with only "we\'ll get back to you" when a fact answers part of it.',
+    `- When two facts give DIFFERENT dates or times for what looks like the same visit, do not pick one and do not tell the customer our records disagree: say ${smsPromptB1Live() ? 'a person will check the exact time and reply' : 'you will confirm the exact time'}, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}.`,
 ].map((l) => `${l}\n`).join('');
+}
 
 function buildSystemPrompt(voiceProfileText = '') {
   return buildSystemPromptWithProfile(voiceProfileText).system;
@@ -4891,7 +5023,10 @@ function visitLoopMissedLine(missed) {
   const type = visitLoopText(missed.type, 60) || 'visit';
   const date = visitLoopText(formatEtDate(missed.date), 40);
   const win = visitLoopText(missed.windowDisplay, 40);
-  return `- MISSED VISIT: the ${type} visit${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was missed and has not been rebooked — apologize once, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised so the office rebooks it; never offer OPEN TIMES for it`;
+  const which = `the ${type} visit${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was missed and has not been rebooked`;
+  // B1: with OPEN TIMES listed the reply offers real times to rebook it; with none it keeps the hand-off. A person rebooks it either way.
+  if (smsPromptB1Live()) return `- MISSED VISIT: ${which} — apologize once; when OPEN TIMES is listed offer 2–3 of its times to rebook it (each declared in offered_times), and with no OPEN TIMES quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised so a person rebooks it`;
+  return `- MISSED VISIT: ${which} — apologize once, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised so the office rebooks it; never offer OPEN TIMES for it`;
 }
 // WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
 // timingGuard: OUR promises (WE OWE THEM) also pass the rain / re-entry timing mode —
@@ -4967,12 +5102,27 @@ const MISSED_LINE_RE = /^- MISSED VISIT\b/;
 function factsListMissedVisit(factsBlock) {
   return visitLoopItemLinesIn(factsBlock).some((line) => MISSED_LINE_RE.test(line));
 }
+// B1: a MISSED VISIT reply that offers real OPEN TIMES slots to rebook needs neither the follow-up wording nor the escalation.
+// The slots themselves are validated against OPEN TIMES by validateOfferedTimes; this only recognizes that times were offered
+// where the facts list some (and no WINDOW PASSED line, which stays a hand-off).
+function offeredBeyondReserviceOpenings(offeredTimes, factsBlock) {
+  const openings = new Set(parseOpenTimesDaysFromFactsBlock(factsBlock, RESERVICE_OPENINGS_HEADER_PREFIX)
+    .flatMap((d) => d.windows.map((w) => `${d.date}|${w}`)));
+  return (Array.isArray(offeredTimes) ? offeredTimes : []).filter((e) => !(smsPromptB1Live() && openings.has(`${e?.date}|${e?.window}`)));
+}
+function missedRebookOffered({ factsBlock, offeredTimes }) {
+  return smsPromptB1Live() && offeredBeyondReserviceOpenings(offeredTimes, factsBlock).length > 0
+    && factsListMissedVisit(factsBlock)
+    && !visitLoopItemLinesIn(factsBlock).some((line) => /^- WINDOW PASSED\b/.test(line))
+    && parseOpenTimesDaysFromFactsBlock(factsBlock).length > 0;
+}
 function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null, offeredTimes = null }) {
   const text = String(reply || '').trim();
   if (factsListOpenLoop(factsBlock) && !text) {
     return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
   }
   if (!factsListHandoff(factsBlock)) return { ok: true, violations: [] };
+  if (missedRebookOffered({ factsBlock, offeredTimes })) return { ok: true, violations: [] };
   const { SLA_PHRASES } = require('./sms-followup-sla');
   // any escalation counts for a real-answers draft (sms-followup-sla draftPromisedFollowup)
   const escalated = Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate');
@@ -4990,8 +5140,47 @@ function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null, off
   if (!quotesFactTiming) violations.push('WINDOW PASSED / MISSED VISIT is listed: say when they will hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
   if (!escalated) violations.push('WINDOW PASSED / MISSED VISIT is listed: add {"type":"escalate","note":"followup_promised"} to intended_actions');
   // the office rebooks a miss: no customer-selectable times beside it (a frozen block may still carry OPEN TIMES)
-  if (Array.isArray(offeredTimes) && offeredTimes.length && factsListMissedVisit(factsBlock)) {
+  // (B1: a covered pest report beside the miss may still offer the free re-service page's own openings - those are not rebooking times)
+  if (offeredBeyondReserviceOpenings(offeredTimes, factsBlock).length && factsListMissedVisit(factsBlock)) {
     violations.push('MISSED VISIT is listed: the office rebooks it — offer no times (leave offered_times empty)');
+  }
+  return { ok: violations.length === 0, violations };
+}
+// ── PROMPT B1 post-draft checks (GATE_SMS_PROMPT_B1; owner 2026-10-24) ──
+// No claimed sends, no promised office actions, the follow-up wording promises only a reply, no name greeting mid-thread. The same
+// loop as the other deterministic checks; pure, and "ok" with the gate off.
+const B1_SENT_OBJECT = '(?:link|text|email|e-mail|report|quote|proposal|photos?|pictures?|estimate|invoice|booking page)';
+const B1_CLAIMED_SEND_RES = [
+  new RegExp(`\\b${B1_SENT_OBJECT}s?\\b[^.?!]{0,40}\\b(?:being sent|on (?:its|the|their|your) way|coming (?:your way|shortly|soon|right over|now)|headed your way|going out|will be (?:sent|texted|emailed)|(?:is|are) (?:sent|texted|emailed) (?:now|right now|right away))`, 'i'),
+  new RegExp(`\\b(?:i['’]m|i am|we['’]re|we are|i['’]ll|i will|we['’]ll|we will|let me)\\s+(?:be\\s+)?(?:sending|send|texting|text|emailing|email)\\b[^.?!]{0,50}\\b${B1_SENT_OBJECT}s?\\b`, 'i'),
+];
+const B1_CARRIES_LINK_RE = /https?:\/\/|\b[a-z0-9-]+\.(?:com|net|org)\b|\/l\/\w+/i;
+const B1_OFFICE_ACTION_RE = /\b(?:the\s+)?(?:office|team|teammate|team member|someone|somebody|a person|dispatch|staff)\b[^.?!]{0,25}?\b(?:will|['’]ll|is going to|are going to|gonna)\s+(?:be\s+)?(?:confirm|cancel|add|move|call|email|send)\w*/i;
+const B1_SLA_DELIVERY_RE = /\b(?:(?:quote|proposal|photos?|pictures?|report|link|estimate)s?\b[^.?!]{0,40}\b(?:ready|sent|arrive|there|over|texted|emailed)|(?:send|sending|text|texting|email|emailing|have|get)\b[^.?!]{0,30}\b(?:quote|proposal|photos?|pictures?|report|link|estimate)|arriv\w+|(?:tech|technician)\b[^.?!]{0,30}\b(?:be|come|coming|out|there)|visit\b[^.?!]{0,20}\b(?:is|will|within|by))/i;
+const B1_NAME_GREETING_RE = /^\s*(?:[Hh]i|[Hh]ello|[Hh]ey)\b[\s,!.-]*[A-Z][a-z]+/;
+const B1_ONGOING_THREAD_MS = 3 * 24 * 60 * 60 * 1000;
+// Waves texted this customer in the last three days (the live context's own thread; a frozen replay has no context, so no hint and no check).
+function wavesTextedRecently(context, now = Date.now()) {
+  return (context?.smsHistory || []).some((m) => m && m.direction === 'outbound' && now - new Date(m.date).getTime() < B1_ONGOING_THREAD_MS);
+}
+const ONGOING_THREAD_HINT = 'ONGOING THREAD: Waves texted this customer within the last three days. Do not open the reply with Hi, Hello or Hey and a name; just answer.';
+function validateB1Promises({ reply, context = null }) {
+  if (!smsPromptB1Live() || !reply) return { ok: true, violations: [] };
+  const text = String(reply);
+  const { SLA_PHRASES } = require('./sms-followup-sla');
+  const violations = [];
+  if (B1_CLAIMED_SEND_RES.some((re) => re.test(text)) && !B1_CARRIES_LINK_RE.test(text)) {
+    violations.push('the reply says a link, text, email, report, quote, proposal or photo is being sent or coming, but the reply carries none - when a teammate must send it, say a teammate will text it, with no time');
+  }
+  if (B1_OFFICE_ACTION_RE.test(text)) {
+    violations.push('the reply promises that the office or a teammate will confirm, cancel, add, move, call, email or send something - say a person will check and reply instead');
+  }
+  const slaSentences = text.split(/(?<=[.!?])\s+/).filter((sentence) => SLA_PHRASES.some((p) => sentence.toLowerCase().includes(p.toLowerCase())));
+  if (slaSentences.some((sentence) => B1_SLA_DELIVERY_RE.test(sentence))) {
+    violations.push('the follow-up wording (FOLLOW-UP SLA RIGHT NOW) promises only a reply - never that a quote, proposal, photo, report, link or visit arrives by then');
+  }
+  if (B1_NAME_GREETING_RE.test(text) && wavesTextedRecently(context)) {
+    violations.push('Waves texted this customer recently, so the reply must not open with Hi, Hello or Hey and a name - just answer');
   }
   return { ok: violations.length === 0, violations };
 }
@@ -5058,6 +5247,11 @@ function buildFactsBlock(context, extras = {}) {
   // passes its own captured factsAt here for every live draft too (Codex
   // #5194 P2 — see its comment), so the phrase rendered here and the
   // instant returned as factsGeneratedAt are always the same moment.
+  // B1: the free re-service booking page's own openings (before the SLA line, like OPEN TIMES, so the trusted
+  // "...SLA\nFREE RE-SERVICE\n[COMPANY FACTS][LABEL FACTS]BILLING:" tail is untouched).
+  const reserviceOpeningsSection = extras.reserviceOpeningsBlock && smsPromptB1Live()
+    ? `${RESERVICE_OPENINGS_HEADER}${extras.reserviceOpeningsBlock}\n`
+    : '';
   const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
     : '';
@@ -5225,9 +5419,11 @@ function buildFactsBlock(context, extras = {}) {
   const history = (context.serviceHistory || []).filter((s) => s && s.date);
   const historyBlock = history.length
     ? history
-        .map((s) => {
+        .map((s, i) => {
           const parts = [`${s.type} on ${formatEtDate(s.date)}`];
-          if (s.notes) parts.push(`notes: "${sanitizeSingleLine(s.notes, 300)}"`);
+          // B1 (change A): the LATEST finished visit's customer-safe notes run to ~1,200 characters; older visits keep 300.
+          if (s.notes) parts.push(`notes: "${sanitizeSingleLine(s.notes, i === 0 && smsPromptB1Live() ? LATEST_VISIT_NOTES_CAP : 300)}"`);
+          if (i === 0) parts.push(...latestVisitFindingParts(s.findings));
           if (Array.isArray(s.areasServiced) && s.areasServiced.length) {
             parts.push(`areas: ${s.areasServiced.slice(0, 8).map((a) => sanitizeSingleLine(a, 40)).filter(Boolean).join(', ')}`);
           }
@@ -5293,7 +5489,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-${visitLoopsSection}${openTimesSection}${slaSection}${reserviceSection}${companyFactsSection}${labelFactsSection}BILLING:
+${visitLoopsSection}${openTimesSection}${reserviceOpeningsSection}${slaSection}${reserviceSection}${companyFactsSection}${labelFactsSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 ${portalCancelSection}PROPERTY & PREFERENCES:
@@ -5371,7 +5567,28 @@ ${lines}`;
  * Fail-safe: any error (or the kill switch, or no intent) → [] so drafting is
  * never blocked on the corpus.
  */
-async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false } = {}) {
+// GATE_SMS_EDIT_LEARNING exemplar ranking (owner 2026-10-24). All three facts are read at FETCH time from the live
+// tables, never stamped on the corpus row at mine time: the corpus is insert-ignore (a row never changes after it is
+// mined), a judgment lands days after the reply, and rows mined before the gate went on would otherwise never rank.
+//   the reply's send resolved a suggestion decision: sms_log.metadata.agent_decision_id -> agent_decisions.id (the link
+//     both send paths stamp; the nightly judge and the corrections view join the same way). The uuid cast sits behind a
+//     shape check so one malformed metadata value cannot fail the query.
+//   edited   = that decision's human_verdict is 'corrected', or the send is a legacy 'ai_revised' draft-queue send.
+//   verbatim = human_verdict 'accepted': staff sent the suggestion unchanged, so the text is the drafter's own.
+//   judged   = shadow_draft_judgments.human_reply_sms_id = the corpus row's source_id (both sms_log ids) with verdict
+//     'human_better': the judge scored the human's reply above the draft for the same inbound.
+const LINKED_DECISION_VERDICT_SQL = (verdict) => `EXISTS (
+  SELECT 1 FROM sms_log sl JOIN agent_decisions ad
+    ON ad.id = CASE WHEN sl.metadata->>'agent_decision_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    THEN (sl.metadata->>'agent_decision_id')::uuid END
+   WHERE sl.id = voice_corpus_examples.source_id AND ad.human_verdict = '${verdict}')`;
+const EDITED_SUGGESTION_SQL = `(${LINKED_DECISION_VERDICT_SQL('corrected')}
+  OR EXISTS (SELECT 1 FROM sms_log sl WHERE sl.id = voice_corpus_examples.source_id AND sl.message_type = 'ai_revised'))`;
+const JUDGED_HUMAN_BETTER_SQL = `EXISTS (SELECT 1 FROM shadow_draft_judgments j
+   WHERE j.human_reply_sms_id = voice_corpus_examples.source_id AND j.verdict = 'human_better')`;
+const OUTCOME_RANK_SQL = `CASE WHEN ${EDITED_SUGGESTION_SQL} OR ${JUDGED_HUMAN_BETTER_SQL} THEN 0 ELSE 1 END`;
+
+async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false, outcomeRanked = false } = {}) {
   if (!FEWSHOT_ENABLED || !intent || limit <= 0) return [];
   try {
     const query = dbi('voice_corpus_examples')
@@ -5387,10 +5604,17 @@ async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, ex
       // backfill, and exam paths share this fetch), not just during runs:
       // "sealed" means never trained on, not merely not trained on today.
       // (source_id for sms_human_reply rows IS the reply's sms_log id.)
-      .whereNotIn('source_id', dbi('sms_sealed_eval_items').select('human_reply_sms_id').whereNotNull('human_reply_sms_id'))
-      .orderBy('occurred_at', 'desc')
-      .limit(limit)
-      .select('inbound_text', 'reply_text');
+      .whereNotIn('source_id', dbi('sms_sealed_eval_items').select('human_reply_sms_id').whereNotNull('human_reply_sms_id'));
+    if (outcomeRanked) {
+      // Edit learning: never teach the drafter its own text (a suggestion sent unchanged), then edited-suggestion and
+      // human_better replies first, newest within each tier. Off, the query below is the original newest-first one.
+      query
+        .whereRaw(`NOT ${LINKED_DECISION_VERDICT_SQL('accepted')}`)
+        .orderByRaw(`${OUTCOME_RANK_SQL} ASC, occurred_at DESC`);
+    } else {
+      query.orderBy('occurred_at', 'desc');
+    }
+    query.limit(limit).select('inbound_text', 'reply_text');
     if (excludeCustomerIds.length) query.whereNotIn('customer_id', excludeCustomerIds);
     return await query;
   } catch (err) {
@@ -5699,6 +5923,36 @@ function draftSnapshots({ context, parsed, factsBlock, inboundMessage, askedText
   };
 }
 
+// B1: the identity of a text while a MISSED VISIT is listed - the missed visit itself, so OPEN TIMES is sized for ITS service (its own
+// reschedule-link picker with GATE_SMS_OFFERS_SCHEDULER, else the finder / website engine for its service type). No model call.
+function missedVisitIdentity(missed) {
+  return {
+    serviceType: missed?.type ? String(missed.type) : null,
+    certain: true,
+    reason: 'named_scheduled_visit',
+    ...(missed?.visitId ? { scheduledServiceId: missed.visitId } : {}),
+  };
+}
+
+// B1: the free re-service booking page's own openings for a covered pest report that decides the reply. { block, days, offer } with
+// offer = the snapshot lookup source the send-time recheck asks again; all empty when the page lists none or the gate is off.
+async function fetchReserviceOpeningsData({ reserviceState, reserviceLaneDecides, inboundMessage, context }) {
+  const none = { block: null, days: [], offer: null };
+  if (!smsPromptB1Live() || !reserviceLaneDecides) return none;
+  const lanes = reportedLaneSet(inboundMessage, context, reserviceStateCoveredLanes(reserviceState)).filter((lane) => reserviceState.lanes.includes(lane));
+  if (!lanes.length) return none;
+  const offer = { source: RESERVICE_OFFER_SOURCE, serviceKey: lanes.join('+') };
+  const { block, days } = await fetchSchedulerOpenTimesData({ customerId: context?.customer?.id || null, schedulerOffer: offer });
+  return block ? { block, days, offer } : none;
+}
+
+// Per-draft hints appended to the user prompt (never the pinned system prompt): the mixed-request hint, and with B1 the ongoing-thread hint.
+function draftPromptHints({ context, reserviceLaneDecides, reserviceState, inboundMessage }) {
+  const mixed = reserviceLaneDecides && reserviceMixedRequest({ inboundMessage, context, coveredLanes: reserviceStateCoveredLanes(reserviceState) }) ? RESERVICE_MIXED_REQUEST_HINT : '';
+  const ongoing = smsPromptB1Live() && wavesTextedRecently(context) ? ONGOING_THREAD_HINT : '';
+  return [mixed, ongoing].filter(Boolean).join('\n');
+}
+
 /**
  * Draft → verify → revise convergence loop. Generates a draft, then runs the
  * adversarial verifier; if the draft asserts facts the context doesn't
@@ -5740,7 +5994,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // rendered under e.g. "complaints handled" stamps a version distinct from
   // one rendered with complaints still held — the one identity every other
   // consumer (graduation cohorts, sealed-eval exam checks) shares.
-  const promptVersion = realAnswersApplied ? currentPromptVersion() : PROMPT_VERSION;
+  const promptVersion = realAnswersApplied ? currentPromptVersion() : withVoiceInputTags(PROMPT_VERSION);
   // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
   // saw the day of the original message — building from a live context here
   // would grade the draft against today's schedule/balance (the exact drift
@@ -5783,11 +6037,17 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // A listed MISSED VISIT withholds OPEN TIMES for the whole reply (owner 10-02,
   // #5610: the office rebooks a miss — a "can we rebook the one you missed?" must
   // not converge with customer-selectable times; Codex r3).
-  const missedVisitListed = Boolean(context?.visitLoops?.missedVisit) && gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const needsOpenTimes = !missedVisitListed && (Boolean(schedulingIntent)
+  // B1: with GATE_SMS_PROMPT_B1 on the miss is rebooked from real times instead: OPEN TIMES sized for the missed visit's own
+  // service is fetched for any text while one is listed (missedVisitIdentity), and none available keeps today's hand-off.
+  const missedVisit = context?.visitLoops?.missedVisit;
+  const missedVisitListed = Boolean(missedVisit) && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  // A text linked to an estimate prices the estimate's service, so the missed visit's own times cannot be told apart from it: that draft
+  // keeps today's hand-off (OPEN TIMES withheld for the whole reply).
+  const missedRebook = missedVisitListed && smsPromptB1Live() && !estimateId;
+  const needsOpenTimes = missedRebook || (!missedVisitListed && (Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
-    || pestReportSignal(inboundMessage, context));
+    || pestReportSignal(inboundMessage, context)));
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
   // or with no city to look up (fetchOpenTimesData returns nothing then —
@@ -5813,7 +6073,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const identity = willFetchOpenTimes && !estimateId
-    ? await serviceIdentityFor(inboundMessage, context, { openEstimate })
+    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(inboundMessage, context, { openEstimate }))
     : { serviceType: liveServiceType(context), certain: true };
   const serviceType = identity.serviceType;
   const pricingEstimateId = estimateId || identity.estimateId || null;
@@ -5842,6 +6102,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain && !reserviceLaneDecides, estimateId: pricingEstimateId, serviceType,
       schedulerOffer,
     });
+  // B1: a covered pest report offers the free re-service booking page's own openings (a section of its own, never OPEN TIMES)
+  const reserviceOpenings = presetFactsBlock
+    ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock, RESERVICE_OPENINGS_HEADER_PREFIX), offer: null }
+    : await fetchReserviceOpeningsData({ reserviceState, reserviceLaneDecides, inboundMessage, context });
+  const offerDays = [...openTimesDays, ...reserviceOpenings.days];
   const reserviceLanes = reserviceState ? reserviceState.lanes : null;
   const reserviceBooked = reserviceState ? reserviceState.booked : {};
   // PAYMENT OPTIONS / Zelle target resolution + live Zelle facts (see resolveDraftPaymentState).
@@ -5874,7 +6139,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { portalCancelAvailable, openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, ...paymentFactsExtras, labelFacts, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { portalCancelAvailable, openTimesBlock, reserviceOpeningsBlock: reserviceOpenings.block, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, ...paymentFactsExtras, labelFacts, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -5885,9 +6150,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // Gratitude has fixed server-approved copy. Mutable corpus examples add no
   // value here and would change the examined prompt without a version change.
   const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
-    ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
+    ? await fetchVoiceExemplars({ intent: intent?.intent, outcomeRanked: smsEditLearningLive() }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
-  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, reserviceLaneDecides && reserviceMixedRequest({ inboundMessage, context, coveredLanes: reserviceStateCoveredLanes(reserviceState) }) ? RESERVICE_MIXED_REQUEST_HINT : '');
+  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, draftPromptHints({ context, reserviceLaneDecides, reserviceState, inboundMessage }));
 
   // Route once for the whole loop (revisions included) — routing looks at the
   // intent label AND the raw message so complaints mislabeled as scheduling
@@ -5940,7 +6205,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // allowance exists so the LLM verifier can judge a confirmation of a
     // booked visit; with that verifier OFF nothing can, so an undeclared
     // quote of any OPEN TIMES window is a violation outright.
-    const singlePassCheck = validateOfferedTimes({ offeredTimes: parsed?.offered_times, openTimesDays, reply: parsed?.reply });
+    const singlePassCheck = validateOfferedTimes({ offeredTimes: parsed?.offered_times, openTimesDays: offerDays, reply: parsed?.reply });
     if (singlePassCheck.ok && !replyBindsDeclaredDays(parsed?.reply, parsed?.offered_times)) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
@@ -5962,6 +6227,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassOpenLoop.violations);
     }
+    const singlePassB1 = validateB1Promises({ reply: parsed?.reply, context });
+    if (!singlePassB1.ok) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push(...singlePassB1.violations);
+    }
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
@@ -5973,7 +6243,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     }
     return {
       parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked,
-      ...draftSnapshots({ context, parsed, factsBlock, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock, city, pricingEstimateId, serviceType, schedulerOffer }),
+      ...draftSnapshots({ context, parsed, factsBlock, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock: openTimesBlock || reserviceOpenings.block, city, pricingEstimateId, serviceType, schedulerOffer: schedulerOffer || reserviceOpenings.offer }),
     };
   }
 
@@ -5996,14 +6266,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // any violation is a verifier-grade failure and feeds the SAME
     // revise/verify loop below via a synthesized verdict, exactly like an
     // LLM-caught fact-check miss.
-    const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
+    const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays: offerDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
     // Payment status (owner ruling 2026-10-01): only a word-for-word copy of a rendered "Payment status sentences" line may state one.
     const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, offeredTimes: parsed.offered_times });
     const paymentStatusCheck = draftPaymentStatusCheck({ realAnswersApplied, parsed, factsBlock, inboundMessage, context });
-    for (const check of [reserviceCheck, complianceCheck, liveEtaCheck, openLoopCheck, paymentStatusCheck]) {
+    const b1Check = validateB1Promises({ reply: parsed.reply, context });
+    for (const check of [reserviceCheck, complianceCheck, liveEtaCheck, openLoopCheck, paymentStatusCheck, b1Check]) {
       if (!check.ok) {
         timesCheck.ok = false;
         timesCheck.violations.push(...check.violations);
@@ -6082,7 +6353,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   return {
     parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked,
     // Computed off the FINAL parsed.reply (after every revision pass) — see draftSnapshots.
-    ...draftSnapshots({ context, parsed, factsBlock, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock, city, pricingEstimateId, serviceType, schedulerOffer }),
+    ...draftSnapshots({ context, parsed, factsBlock, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock: openTimesBlock || reserviceOpenings.block, city, pricingEstimateId, serviceType, schedulerOffer: schedulerOffer || reserviceOpenings.offer }),
   };
 }
 
@@ -6663,6 +6934,14 @@ module.exports = {
   PROMPT_VERSION,
   REAL_ANSWERS_PROMPT_VERSION,
   NEXT_OF_SERIES_PROMPT_VERSION,
+  B1_PROMPT_VERSION,
+  B1_NEXT_OF_SERIES_PROMPT_VERSION,
+  validateB1Promises,
+  draftPromptHints,
+  wavesTextedRecently,
+  reserviceOpeningsOfferable,
+  missedVisitIdentity,
+  latestVisitFindingParts,
   REAL_ANSWERS_VERSION_FAMILY,
   currentPromptVersion,
   VERIFY_ENABLED,

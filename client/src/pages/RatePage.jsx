@@ -124,7 +124,7 @@ export default function RatePage() {
             <div style={{ fontSize: 14, lineHeight: 1.45, color: MUTED }}>
               Public Google reviews help local neighbors choose a provider.
             </div>
-            <a href={data.reviewUrl} data-glass-accent="" style={{ ...primaryActionStyle, width: '100%', marginTop: 16, boxSizing: 'border-box' }}>
+            <a href={data.reviewUrl} data-glass-accent="" data-glass-size="primary" style={{ ...primaryActionStyle, width: '100%', marginTop: 16, boxSizing: 'border-box' }}>
               Open Google
             </a>
           </>

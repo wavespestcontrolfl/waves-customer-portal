@@ -5,6 +5,7 @@ const { savepointRead, failSoftRead, savepointScope } = require('../utils/savepo
 const { storeNextVisitNote } = require('./next-visit-note');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { sendLawnWateringSms } = require('../services/service-report/lawn-watering-sms');
+const { storeLawnWateringYieldNote } = require('../services/service-report/lawn-watering-yield-note');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -88,6 +89,7 @@ const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
 const TurfHeightOcr = require('../services/turf-height-ocr');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
+const { capturePestRainOutlook } = require('../services/service-report/pest-rain-outlook');
 const {
   buildServiceReportV1DeliveryContext,
   shouldSendServiceReportV1Delivery,
@@ -136,15 +138,7 @@ const areaAddOnGovernedRate = require('./area-addon-governed-rate');
 const areaAddOnLimits = require('./area-addon-limits');
 const tsOrnamental = require('./tree-shrub-ornamental-fertilizer-limits');
 
-// Report/track egress (AGENTS.md): entry-code shapes that must never persist
-// into customer-visible completion text. Three shapes: a code word near a
-// location word ("gate ... code"), a code word followed by digits
-// ("pin 9921"), and the bare shorthand of a code-carrying location word
-// followed directly by a code-shaped number ("Gate 1234", "lockbox is
-// 2468" — codex r3). Ordinary copy ("entry points treated", "gate was
-// open") never trips; a street address near the word "gate" may — that
-// false positive fails closed and the tech rephrases.
-const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}[a-z]?\d{2,4}(?:[-\s]\d{2,4}){0,2}|\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,12}\b(?:[a-z]?\d{3,8}|[a-z]?\d{2,4}(?:[-\s]\d{2,4}){1,2})\b)/i;
+const { COMPLETION_ACCESS_CODE_RE } = require('./completion-access-code');
 
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -2270,6 +2264,13 @@ function techTipsGateOn() {
   return typeof gateEnvValue === 'function' && gateEnvValue('GATE_TECH_TIPS') === true;
 }
 
+// GATE_TECH_TIP_SOURCES at call time (tips with facts, owner 2026-10-24): on,
+// a sourced tip freezes its sourced words and its citations; off, the freeze
+// is what it was. A partial feature-gates mock reads as off.
+function techTipSourcesOn() {
+  return require('../config/feature-gates').techTipSourcesLive?.() === true;
+}
+
 // POST /api/admin/dispatch/:serviceId/complete
 // Pre-submit report reconciliation block (409) — pure for testability
 // (_test), like the other completion block-payload helpers. Returns
@@ -2532,6 +2533,7 @@ function shouldCaptureApplicationConditions({
 // All coverage guards still apply, and autopayCoversVisit already requires
 // !hasVisitPrice, so a price-free autopay-covered visit is never billed here.
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const SeriesPriceGuards = require('../services/series-price-guards');
 
 function completionSavedCardFallbackPolicy({
   suppressAlternateCollection,
@@ -3910,6 +3912,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Returns {status, body} on rejection, null when valid; mutates the
     // typed* locals on success.
     const runTypedValidation = () => {
+      // The completed protocol actions publish as the report's actions (the
+      // lawn and tree & shrub "Today's focus"): the picked labels and every
+      // [Protocol] / [Protocol optional] / [Action] note line, the same
+      // sources reportProtocolActions persists below. Both branches screen
+      // them for entry codes.
+      const protocolActionCopy = [
+        ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
+        ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
+      ];
       // Untyped completions render the same tech-entered copy on customer
       // reports (observations feed the pest-pressure main-driver line,
       // recommendations feed the recap, captions sit under photos) — the
@@ -3956,7 +3967,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // reach customer-facing reports. These free-text fields render
         // verbatim (pressure driver line, photo captions), so a line that
         // reads like an entry code fails closed instead of persisting.
-        if (untypedCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+        if ([...untypedCopySources, ...protocolActionCopy]
+          .some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
           return {
             status: 422,
             body: {
@@ -4107,7 +4119,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // r4): typed completions carry the identical customer-visible
         // free-text surfaces, and an entry code in any of them would
         // persist into the report the same way.
-        if (customerCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+        if ([...customerCopySources, ...protocolActionCopy]
+          .some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
           return {
             status: 422,
             body: {
@@ -4392,7 +4405,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Gated at the freeze too: with the kill switch unset a stale or crafted
     // client cannot keep the feature alive through the completion body.
     const techTipsFreeze = techTipsGateOn()
-      ? freezeTechTips(completionInput.body?.techTips)
+      ? freezeTechTips(completionInput.body?.techTips, { sourced: techTipSourcesOn() })
       : { tips: [], dropped: [] };
     // T&S tech findings (GATE_TS_TECH_FINDINGS_COPY): freeze the technician's
     // keep / confirm / hide / edit decisions on the service record whether or
@@ -4554,6 +4567,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const activityScoresAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_activity_scores'), false);
     const useServiceReportV1 = true;
     let conditionsAtApplication = null;
+    // GATE_PEST_RAIN_OUTLOOK: the frozen 48-hour forecast summary, or null (gate off, not pest, unavailable).
+    let rainOutlookAtCompletion = null;
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit
       && await failSoftRead(db, (k) => k.schema.hasColumn('lawn_assessments', 'service_record_id'), false);
@@ -6039,10 +6054,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // stays honestly unknown. See the helper's comment.
           isBackfillCompletion,
         })
-          ? await fetchApplicationConditions({
-            latitude: svc.customer_latitude,
-            longitude: svc.customer_longitude,
-          }).catch(() => null)
+          // The pest rain outlook rides the same predicate and runs beside the
+          // weather fetch (completion waits for the slower one, not both). Its
+          // summary goes to structured_notes.rainOutlook, never into
+          // `conditions`, which the FDACS application ledger copies verbatim.
+          ? await Promise.all([
+            fetchApplicationConditions({
+              latitude: svc.customer_latitude,
+              longitude: svc.customer_longitude,
+            }).catch(() => null),
+            capturePestRainOutlook({ svc }),
+          ]).then(([captured, rainOutlook]) => {
+            rainOutlookAtCompletion = rainOutlook;
+            return captured;
+          })
           : null;
 
         // Auto-generate the customer-facing report summary from the tech's notes
@@ -6924,6 +6949,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // original completed visit, not whatever the mutable schedule
             // row may describe when a failed photo upload is retried.
             servicePhotoVisit,
+            ...(rainOutlookAtCompletion ? { rainOutlook: rainOutlookAtCompletion } : {}),
             // The trace the report flow judged this record against (its
             // updated_at, or null for none): the report shows only that one
             // (treatment-zone-maps.js traceJudgedAllows).
@@ -10882,17 +10908,28 @@ async function completeScheduledService(completionInput, packetContext = null) {
               .forUpdate()
               .select('id', 'status', 'line_items', 'notes')
             : [];
+          // GATE_SETUP_FEE_SETTLED_ANYWHERE: re-read the customer-wide settlement HERE, locked
+          // on this transaction, instead of trusting the earlier unlocked lookup (gate off: no read).
+          const SetupFeeObligationNow = require('../services/setup-fee-obligation');
+          const settledNowTerm = unmintedSetupFeeObligation
+            ? await SetupFeeObligationNow.setupFeeSettledElsewhere(trx, {
+              customerId: svc.customer_id, expectedFeeCents: termExpectedFeeCents,
+              visitDate: await SetupFeeObligationNow.settledVisitDate(trx, svc.id), lock: true,
+            })
+            : { settled: false };
           const termFeeRows = [...new Map(
             [...onVisitLockedRows, ...stampedFeeRowsNow].map((r) => [String(r.id), r]),
           ).values()];
           const liveFeeCentsOnVisit = termFeeRows
             .filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void')
-            .reduce((sum, r) => sum + terminalFeeCents(r), 0);
+            .reduce((sum, r) => sum + terminalFeeCents(r), 0)
+            // GATE_SETUP_FEE_SETTLED_ANYWHERE: fee money paid on other invoices (0 when off).
+            + require('../services/setup-fee-obligation').partialElsewhereCents(settledNowTerm.partial, termFeeRows);
           const refundedFeeCentsTerm = termFeeRows
             .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
             .reduce((sum, r) => sum + terminalFeeCents(r), 0);
-          const terminalFeeCovered = termExpectedFeeCents > 0
-            && (liveFeeCentsOnVisit + refundedFeeCentsTerm) >= termExpectedFeeCents;
+          const terminalFeeCovered = settledNowTerm.settled || (termExpectedFeeCents > 0
+            && (liveFeeCentsOnVisit + refundedFeeCentsTerm) >= termExpectedFeeCents);
           const termFeeEstimateRef = unmintedSetupFeeObligation
             ? (unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId)
             : null;
@@ -11133,6 +11170,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             return true;
           }
+          // GATE_SETUP_FEE_SETTLED_ANYWHERE: fresh, locked customer-wide re-read under the mint
+          // locks. The fee may have been paid or waived on an unrelated invoice since the
+          // unlocked lookup; its settled result and partial cents replace the carried ones.
+          const SetupFeeObligationFresh = require('../services/setup-fee-obligation');
+          const settledNow = await SetupFeeObligationFresh.setupFeeSettledElsewhere(trx, {
+            customerId: svc.customer_id,
+            expectedFeeCents: Math.round(Number(unmintedSetupFeeObligation.setupFee || 0) * 100),
+            visitDate: await SetupFeeObligationFresh.settledVisitDate(trx, svc.id),
+            lock: true,
+          });
+          // A fee settled in the race window is treated as COVERED below, never as a reason to
+          // drop the alert: the hold already suppressed this visit's application mint, so the
+          // application-coverage checks must still run (an application-only alert stands).
+          const feeSettledNow = settledNow.settled === true;
           const stampedNowRows = await trx('invoices')
             .where({ customer_id: svc.customer_id })
             .where('notes', 'ilike', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
@@ -11188,11 +11239,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const uniqueLiveNow = [...new Map(
             [...liveStampedRows, ...liveOnVisitRows].map((r) => [String(r.id), r]),
           ).values()];
-          const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
-          const feeCovered = expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents;
+          const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0)
+            // GATE_SETUP_FEE_SETTLED_ANYWHERE: fee money paid on other invoices (0 when off).
+            + require('../services/setup-fee-obligation').partialElsewhereCents(settledNow.partial, [...liveStampedRows, ...liveOnVisitRows, ...stampedNowRows, ...onVisitLockedRows]);
+          const feeCovered = feeSettledNow || (expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents);
           const feeCoveredBy = feeCovered
             ? (liveStampedRows.find(invoiceHasPositiveSetupFeeLine)
-              || liveOnVisitRows.find(invoiceHasPositiveSetupFeeLine) || uniqueLiveNow[0] || null)
+              || liveOnVisitRows.find(invoiceHasPositiveSetupFeeLine)
+              || (feeSettledNow
+                ? { id: settledNow.invoiceId || settledNow.termId || 'another invoice', invoice_number: null, status: 'settled elsewhere' }
+                : uniqueLiveNow[0])
+              || null)
             : null;
           // Only the durable base-application identity counts on every
           // row (Codex P0, round 18), and stamped first-application
@@ -12843,6 +12900,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
+    // A performed visit that billed nothing, on ANY lane, with no prepay,
+    // dues, paid or minted invoice behind it rings the office once per visit
+    // (GATE_SERIES_PRICE_GUARDS; off = the two log lines above only).
+    // Non-blocking: the closeout is already committed.
+    if (!packetEffects && !recapReviewOnly && !systemQuietCloseout && !isBackfillCompletion
+      && SeriesPriceGuards.seriesPriceGuardsLive()
+      && SeriesPriceGuards.unbilledCompletionAlertDue({
+        visitPerformed, isCallback: svc.is_callback, serviceType: svc.service_type, reviewedVisitPrice,
+        authoritativeZeroPrice: hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price),
+        invoiceAmount: mintInvoiceAmount, prepaidCovered, autopayCoversVisit, alreadyPaid, invoice, invoiceCreated,
+      })) {
+      try {
+        const created = await SeriesPriceGuards.raiseUnbilledCompletionAlert(svc);
+        if (!created) logger.error(`[dispatch] unbilled-completion alert NOT recorded for visit ${svc.id}`);
+      } catch (alertErr) {
+        logger.error(`[dispatch] unbilled-completion alert failed for visit ${svc.id} (non-blocking): ${alertErr.message}`);
+      }
+    }
+
     // An annual-prepay-COVERED visit's invoice and its add-ons — the covered
     // base settled or voided, never collectible; the add-ons billed alone or
     // alerted (ADMIN-BUG-R13, GATE_ANNUAL_PREPAY_ADDON_BILLING) — decided in
@@ -14261,6 +14337,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
         // Same for the watering-instruction freeze (its own key, first writer wins).
         if (gate.wateringFreeze) recordStructuredNotes.lawnWateringFreeze = gate.wateringFreeze;
+        // A bait's no-water hold that gave way to a label water-in: one staff note on the next lawn visit (best-effort, never throws).
+        if (gate.wateringFreeze) await storeLawnWateringYieldNote({ svc, instruction: gate.wateringFreeze.wateringInstruction });
         // GATE_LAWN_WATERING_EVERY_VISIT: why no instruction froze, for the watering text's office alert.
         if (gate.wateringNoClaim) wateringNoClaim = gate.wateringNoClaim;
         // And the "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH), keyed by assessment.
@@ -15937,7 +16015,6 @@ module.exports = {
   throwIfDeliveryUnverified,
   completionSmsDefiniteRejectionError,
   definiteRejectionMarkerFromAttemptError,
-  COMPLETION_ACCESS_CODE_RE,
   serviceReportEmailEligible,
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
@@ -15998,5 +16075,4 @@ module.exports.isPestStockAdvisoryCompletion = isPestStockAdvisoryCompletion;
 module.exports.isLawnTsStockAdvisoryCompletion = isLawnTsStockAdvisoryCompletion;
 module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
-module.exports.COMPLETION_ACCESS_CODE_RE = COMPLETION_ACCESS_CODE_RE;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;

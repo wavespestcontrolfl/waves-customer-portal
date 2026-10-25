@@ -139,3 +139,67 @@ describe('ContractSignPage contract text', () => {
     expect(queryByText(/\*\*/)).toBeNull();
   });
 });
+
+describe('ContractSignPage "Back to your estimate" (Florida consumer notice)', () => {
+  const NOTICE = {
+    ...CONTRACT_A,
+    contractType: 'document_template',
+    documentTemplateKey: 'consumer_notice.fdacs_13692',
+    fromEstimate: true,
+    title: 'Consumer Notice Form (FDACS-13692)',
+  };
+  const BACK = 'Back to your estimate';
+
+  async function signContract(contract, { historyLength = 2 } = {}) {
+    Object.defineProperty(window.history, 'length', { configurable: true, value: historyLength });
+    const back = vi.spyOn(window.history, 'back').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/sign')
+      ? jsonResponse({ contract: { ...contract, status: 'signed', signedAt: '2026-10-25T14:00:00.000Z', signedName: 'Pat Owner' }, signed: true })
+      : jsonResponse({ contract }))));
+    const view = render(
+      <MemoryRouter initialEntries={[`/contract/${CONTRACT_A.token}`]}>
+        <Routes><Route path="/contract/:token" element={<ContractSignPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(input(view.container, 'signedName')).toBeInTheDocument());
+    fireEvent.change(input(view.container, 'initials'), { target: { value: 'PO' } });
+    fireEvent.change(input(view.container, 'signedName'), { target: { value: 'Pat Owner' } });
+    view.container.querySelectorAll('input[type="checkbox"]').forEach((cb) => { if (!cb.checked) fireEvent.click(cb); });
+    fireEvent.submit(view.container.querySelector('form'));
+    await waitFor(() => expect(view.getByText('Document signed')).toBeInTheDocument());
+    return { ...view, back };
+  }
+
+  it('is not offered before the signature', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ contract: NOTICE })));
+    const { container, queryByText } = render(
+      <MemoryRouter initialEntries={[`/contract/${CONTRACT_A.token}`]}>
+        <Routes><Route path="/contract/:token" element={<ContractSignPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(input(container, 'signedName')).toBeInTheDocument());
+    expect(queryByText(BACK)).toBeNull();
+  });
+
+  it('after signing a notice opened from the estimate, the button goes back in history', async () => {
+    const { getByRole, back } = await signContract(NOTICE);
+    fireEvent.click(getByRole('button', { name: BACK }));
+    expect(back).toHaveBeenCalledTimes(1);
+  });
+
+  it('is hidden when there is no history to go back to', async () => {
+    const { queryByText } = await signContract(NOTICE, { historyLength: 1 });
+    expect(queryByText(BACK)).toBeNull();
+  });
+
+  it('is hidden for a consumer notice staff issued by hand (no estimate marker)', async () => {
+    const { fromEstimate: _drop, ...staffIssued } = NOTICE;
+    const { queryByText } = await signContract(staffIssued);
+    expect(queryByText(BACK)).toBeNull();
+  });
+
+  it('is hidden for any other document, even one carrying the marker', async () => {
+    const { queryByText } = await signContract({ ...NOTICE, documentTemplateKey: 'service_agreement.commercial_pest' });
+    expect(queryByText(BACK)).toBeNull();
+  });
+});

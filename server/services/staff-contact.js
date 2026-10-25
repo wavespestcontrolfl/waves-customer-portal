@@ -20,7 +20,10 @@ const operatorReply = (record) => record.operator_sent === true || STAFF_APPROVE
 // sourced by admin-communications.js and tech-line.js). Automated outbound
 // calls log other sources ('collections_voice'), so the list is an allowlist
 // (Codex #5169 r1 P1: a completed call alone proves no person).
-const STAFF_CALL_SOURCES = ['admin-click', 'admin-callback', 'tech-click'];
+// 'lead-call-reply-ring' is the same press-1 bridge, started by a lead's
+// CALL reply (services/lead-call-reply-ring.js): a person dials only after
+// pressing 1, so a connected one is a staff call back like a click.
+const STAFF_CALL_SOURCES = ['admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring'];
 // A call back that reached the customer: placed through the staff bridge,
 // and the recording's reviewed extraction heard a live conversation, not
 // voicemail — the bar call-commitments.js sets for a returned callback. The

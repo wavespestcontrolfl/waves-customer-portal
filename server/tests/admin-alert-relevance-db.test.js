@@ -177,6 +177,26 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect((await get(cancel.id)).done_at).toBeNull();
   });
 
+  test('a repeat-form alert closes on a real handoff to its customer after its latest form, never on a suppressed send (sent_at alone)', async () => {
+    const now = new Date();
+    const bellAt = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    const after = new Date(bellAt.getTime() + 60 * 60 * 1000);
+    const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+    const customer = await insert('customers', { first_name: 'Repeat', phone: '+15555557006' });
+    const lead = await insert('leads', { first_name: 'Repeat', phone: '+15555557006', status: 'new', customer_id: customer.id });
+    const alert = await bell({ category: 'lead', link: `/admin/leads?lead=${lead.id}`, created_at: bellAt,
+      metadata: { dedupeKey: `lead-repeat-form:${customer.id}`, customerId: customer.id, leadId: lead.id, source: 'lead_repeat_form' } });
+    // A suppressed send after the form (sent_at stamped, nothing delivered): still open.
+    await insert('estimates', { status: 'sent', customer_id: customer.id, sent_at: after });
+    await relevance.runAdminAlertRelevanceSweep({ now });
+    expect((await get(alert.id)).done_at).toBeNull();
+    // A real delivery after the form closes it.
+    await insert('estimates', { status: 'sent', customer_id: customer.id, sent_at: after, estimate_data: delivered(after) });
+    await relevance.runAdminAlertRelevanceSweep({ now });
+    const closed = await get(alert.id);
+    expect([closed.done_by, closed.resolution]).toEqual(['relevance', 'Estimate was sent']);
+  });
+
   test('a quote sent to the lead\'s customer after the bell keeps its bell retired when a newer draft takes over the lead\'s estimate pointer', async () => {
     const now = new Date();
     const bellAt = new Date(now.getTime() - 3 * 60 * 60 * 1000);

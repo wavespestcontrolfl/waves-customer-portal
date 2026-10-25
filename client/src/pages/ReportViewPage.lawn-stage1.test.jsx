@@ -139,6 +139,15 @@ describe('the lawn layout page', () => {
     await waitForReport();
     expect(appliedLabels(container)).toHaveLength(1);
   });
+
+  it('GATE_LAWN_REPORT_STORY: the distinct applied sentence opens the explained products instead of its own card', async () => {
+    const payload = withStage1(mixedBase, { result: 'We visited today.' });
+    payload.lawnLayout = { ...payload.lawnLayout, story: true };
+    const { container } = renderReport(payload);
+    await waitForReport();
+    expect(appliedLabels(container)).toHaveLength(0);
+    expect(container.querySelector('#products-applied .treatment-story-intro')).toHaveTextContent(payload.reportV2.lead.applied);
+  });
 });
 
 describe('the standard page (no layout key)', () => {

@@ -29,8 +29,10 @@ const {
 } = require('../services/pest-identification');
 const { isEnabled } = require('../config/feature-gates');
 const { verifyTurnstileToken } = require('../utils/turnstile');
+const { consumeSharedDailyCap, DAILY_LIMIT_MESSAGE, PHOTO_ASSESSMENT_CAP } = require('../middleware/public-llm-shared-cap');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { setPublicPrivacyHeaders, sanitizePricingSnapshot } = require('../utils/public-report-egress');
+const { reportTemplatePayload } = require('../services/service-report/report-template');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
 const { sanitizeAttribution, isPlausibleAnalyzeBody } = require('./public-lawn-assessment');
 const { etDateString } = require('../utils/datetime-et');
@@ -207,6 +209,11 @@ router.post('/analyze', requirePestGate, analyzeLimiter, async (req, res, next) 
     // Prospect free-text goes to the ADMIN view only — never into the model
     // context (prompt-injection surface) and never into customer-facing copy.
     const prospectNote = cleanString(body.note, 500);
+
+    // Shared daily paid-LLM ceiling (GATE_PUBLIC_LLM_SHARED_CAP): counted here,
+    // after every rejection above, once per request, right before the paid call.
+    const sharedCap = await consumeSharedDailyCap(PHOTO_ASSESSMENT_CAP);
+    if (!sharedCap.allowed) return res.status(429).json(DAILY_LIMIT_MESSAGE);
 
     const result = await identifyPest(photos);
     if (!result.ok) {
@@ -481,7 +488,8 @@ router.get('/:token', readLimiter, async (req, res, next) => {
         .update({ report_first_viewed_at: db.fn.now() })
         .catch((err) => logger.warn(`[public-pest-identifier] view stamp failed: ${err.message}`));
     }
-    return res.json({ success: true, report: buildPublicPestReport(row) });
+    // GATE_REPORT_SHARED_TEMPLATE: the shared customer header and the stacked layout. Absent = byte-identical payload.
+    return res.json({ success: true, report: buildPublicPestReport(row), ...reportTemplatePayload() });
   } catch (err) {
     return next(err);
   }

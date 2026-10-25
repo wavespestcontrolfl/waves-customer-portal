@@ -16,6 +16,7 @@ const scenarios = [
   { name: 'secure-pest', url: '/preview-secure.html?v=pest', ready: 'Quarterly Pest Control' },
   { name: 'secure-lawn', url: '/preview-secure.html?v=lawn', ready: 'Lawn Care' },
   { name: 'service-report', url: '/preview-service-report.html', ready: 'Quarterly Pest Control' },
+  { name: 'lawn-story', url: '/preview-service-report.html?scenario=lawn-story', ready: 'Your lawn today', verify: verifyLawnStoryPrint },
   { name: 'completion', url: '/preview-completion-presets.html', ready: 'Completion' },
   { name: 'track', url: '/preview-track.html', ready: 'Alex arrives in', verify: verifyTracker },
   { name: 'track-scheduled', url: '/preview-track.html?state=scheduled', ready: 'stops before yours' },
@@ -36,6 +37,57 @@ async function verifyLogin(page) {
   assert.equal(await page.getByRole('button', { name: 'Send code', exact: true }).isEnabled(), true);
   // Exercise input/focus without submitting an authentication request.
   assert.equal(await phone.evaluate((element) => document.activeElement === element), true);
+}
+
+async function verifyLawnStoryPrint(page, key) {
+  const score = page.locator('.lawn-story-score');
+  const scoreText = await score.innerText();
+  assert.match(scoreText.replace(/\s/g, ''), /^72\/100$/);
+  await page.getByRole('link', { name: 'View lawn details' }).focus();
+  await page.keyboard.press('Enter');
+  const breakdown = page.locator('#lawn-section-score details.lawn-layout-score');
+  assert.equal(await breakdown.evaluate((element) => element.open), true);
+  assert.equal(await breakdown.locator(':scope > summary').evaluate((element) => document.activeElement === element), true);
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  assert.equal(await score.isVisible(), true, 'The overall score must survive printing the live story report');
+  assert.equal(await score.innerText(), scoreText);
+  assert.equal(await page.getByRole('link', { name: 'View lawn details' }).isVisible(), false);
+  await page.screenshot({ path: path.join(artifactDir, `${key}-print.png`), fullPage: true });
+  await page.emulateMedia({ media: 'screen' });
+  assert.equal(await breakdown.locator(':scope > summary').innerText(), 'Score details', 'Printing must not restore a duplicate score on screen');
+}
+
+async function verifyGlassPointer(page) {
+  // Exercise a real edge click during the entrance. Cancelling the transform
+  // on pointer-down moves the button before pointer-up and silently loses it.
+  await page.evaluate(() => {
+    const card = document.createElement('section');
+    card.id = 'qa-glass-pointer';
+    card.setAttribute('data-glass', 'card');
+    card.style.cssText = 'position:relative;z-index:4;width:320px;max-width:calc(100% - 32px);height:250px;margin:20px auto;padding:20px;box-sizing:border-box;display:flex;flex-direction:column';
+    card.innerHTML = '<p>Glass pointer check</p><button type="button" data-glass-accent style="margin-top:auto;height:44px;flex:none">Continue</button>';
+    card.querySelector('button').onclick = () => card.setAttribute('data-clicked', 'true');
+    document.body.prepend(card);
+    window.scrollTo(0, 0);
+  });
+  await page.waitForFunction(() => document.getElementById('qa-glass-pointer').getAnimations().some((animation) => animation.effect.getTiming().duration === 1000));
+  await page.evaluate(() => {
+    const animation = document.getElementById('qa-glass-pointer').getAnimations().find((item) => item.effect.getTiming().duration === 1000);
+    animation.pause();
+    animation.currentTime = 0;
+  });
+  const button = page.locator('#qa-glass-pointer button');
+  const box = await button.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height - 2);
+  const before = await button.boundingBox();
+  await page.mouse.down();
+  const held = await button.boundingBox();
+  assert.ok(Math.abs(held.y - before.y) < 1 && Math.abs(held.height - before.height) < 1, 'Glass entrance moved a pressed button');
+  await page.mouse.up();
+  await page.waitForFunction(() => document.getElementById('qa-glass-pointer').getAttribute('data-clicked') === 'true');
+  await page.waitForFunction(() => !document.getElementById('qa-glass-pointer').hasAttribute('data-glass-motion-state'));
+  await page.locator('#qa-glass-pointer').evaluate((card) => card.remove());
 }
 
 async function assertShellSafeArea(page, scenario, viewport, insets) {
@@ -121,6 +173,7 @@ async function checkScenario(browser, baseUrl, scenario, viewportName, viewport,
     if (safeAreaInsets) await assertShellSafeArea(page, scenario, viewport, safeAreaInsets);
     await page.screenshot({ path: path.join(artifactDir, `${key}.png`), fullPage: true });
     if (scenario.verify) await scenario.verify(page, key);
+    if (scenario.name === 'service-report') await verifyGlassPointer(page);
     await assertNoOverflow(page);
     assert.deepEqual(errors, [], 'Browser runtime errors');
   } catch (error) {

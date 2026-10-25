@@ -114,6 +114,13 @@ describe('findReportProductCopyEntry / reportProductCopyFor — matching', () =>
     expect(findReportProductCopyEntry({ epaReg: null, name: 'Demand' })).toBeNull();
   });
 
+  it('a moved registration matches under both numbers: Delta Dust 432-772 and its Envu number 101563-6', () => {
+    const old = findReportProductCopyEntry({ epaReg: '432-772', name: 'Delta Dust' });
+    expect(old).toBeTruthy();
+    expect(findReportProductCopyEntry({ epaReg: '101563-6', name: 'Delta Dust' })).toBe(old);
+    expect(reportProductCopyFor({ epaReg: '101563-6', name: 'Delta Dust' }).how_it_works).toMatch(/does not clump or absorb moisture/);
+  });
+
   it('a present but UNRECOGNIZED EPA reg is authoritative — never falls back to a name alias for a different product (codex P1 2026-09-28)', () => {
     // Talstar XTRA's real EPA reg (279-3206) is not in the config; "Taurus
     // SC" IS an alias, but for a DIFFERENT product's entry. Before the fix
@@ -232,7 +239,7 @@ describe('reportProductCopyForApplicationProduct — report-data.js shape', () =
   it('falls back to the legacy `epa_reg` field when `epa_reg_number` is absent', () => {
     const copy = reportProductCopyForApplicationProduct({ product_name: 'ignored', epa_reg: '432-772' });
     expect(copy).not.toBeNull();
-    expect(copy.how_it_works).toMatch(/waterproof dust/);
+    expect(copy.how_it_works).toMatch(/does not clump or absorb moisture/);
   });
 
   it('a product with no product_id / no catalog join still resolves by its snapshotted product_name — Gentrol is a narrow IGR with no also_labeled_for line', () => {

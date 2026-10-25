@@ -15,7 +15,7 @@ describe('the water target source line', () => {
     render(<WaterIntakeBar water={{ ...water, targetNote: 'Based on the weather in your area for the week ending on this visit, your grass type and the time of year.' }} />);
     const note = screen.getByTestId('lawn-water-target-note');
     expect(note).toHaveTextContent('Based on the weather in your area for the week ending on this visit, your grass type and the time of year.');
-    expect(screen.getByText('Target range').parentElement).toContainElement(note);
+    expect(screen.getByRole('group', { name: 'Weekly water readings' })).toContainElement(note);
     expect(screen.getByText('Target range').compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -29,8 +29,8 @@ describe('the water target source line', () => {
 
 describe('the weed score card', () => {
   it('prints the label the server sends, with the same status word', () => {
-    render(<VisualDiagnosisCards categories={[{ key: 'weed_pressure', label: 'Weed Cleanliness', score: 90, status: 'strong', explanation: 'Very little weed activity visible today.' }]} />);
-    expect(screen.getByText('Weed Cleanliness')).toBeInTheDocument();
+    render(<VisualDiagnosisCards categories={[{ key: 'weed_pressure', label: 'Weed control', score: 90, status: 'strong', explanation: 'Very little weed activity visible today.' }]} />);
+    expect(screen.getByText('Weed control')).toBeInTheDocument();
     expect(screen.queryByText('Weed Pressure')).toBeNull();
     expect(screen.getByText('Strong')).toBeInTheDocument();
   });

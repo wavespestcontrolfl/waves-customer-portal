@@ -210,6 +210,36 @@ describe('foldLaneCosts', () => {
   });
 });
 
+describe('failed calls and unknown usage', () => {
+  const prices = new Map([['claude-sonnet-5', { input: 3, output: 15 }]]);
+  const M = 1_000_000;
+  // usage_unknown comes from the ledger query, which does not count failed calls the
+  // provider refused before processing (the PostgreSQL tests below prove that SQL)
+  const laneRow = (over) => ({ lane_id: 'sms_draft', provider: 'anthropic', model: 'claude-sonnet-5', calls: 1, usage_unknown: 0, input_tokens: M, output_tokens: 0, ...over });
+  const day = new Map([['sms_draft', { usd: 12, unpricedCalls: 0 }]]);
+  const spikeLanes = (baselineRows) => llmCost.findSpikes(day, llmCost.foldLaneCosts(baselineRows, prices), { minUsd: 5, multiplier: 3, baselineDays: 7 }).map((s) => s.laneId);
+
+  test('a refused call with no usage leaves the lane priced, so its spike check still runs', () => {
+    // 7 priced calls ($21 over 7 days = $3 a day) + 2 refused calls with null counters (summed to 0, none unknown)
+    const rows = [laneRow({ calls: 7, input_tokens: 7 * M }), laneRow({ calls: 2, usage_unknown: 0, input_tokens: 0 })];
+    expect(llmCost.foldLaneCosts(rows, prices).get('sms_draft').unpricedCalls).toBe(0);
+    expect(spikeLanes(rows)).toEqual(['sms_draft']); // $12 is 4 x the $3 average: the baseline is judged, so the spike is found
+  });
+
+  test('a successful call with no usage still counts as unpriced and still turns the lane check off', () => {
+    const rows = [laneRow({ calls: 7, input_tokens: 7 * M }), laneRow({ calls: 1, usage_unknown: 1, input_tokens: 0 })];
+    expect(llmCost.foldLaneCosts(rows, prices).get('sms_draft').unpricedCalls).toBe(1);
+    expect(spikeLanes(rows)).toEqual([]);
+  });
+
+  test('a provider with no rate (typesafe, cloudflare) stays unpriced: its calls are never priced as $0', () => {
+    for (const provider of ['typesafe', 'cloudflare']) {
+      const out = llmCost.foldLaneCosts([laneRow({ lane_id: 'decide', provider, model: 'jev', calls: 2, usage_unknown: 2, input_tokens: 0 })], prices);
+      expect(out.get('decide')).toEqual({ usd: 0, unpricedCalls: 2 });
+    }
+  });
+});
+
 describe('findSpikes', () => {
   test('a spike clears both the minimum and the multiple of the lane average; a lane new this week needs only the minimum', () => {
     const day = new Map([['a', { usd: 12 }], ['b', { usd: 12 }], ['c', { usd: 4 }], ['d', { usd: 6 }]]);
@@ -304,6 +334,7 @@ postgres('llm cost (PostgreSQL)', () => {
       t.bigIncrements('id');
       t.string('row_kind', 20).notNullable().defaultTo('chain');
       t.boolean('ok');
+      t.string('error_code', 80);
       t.string('provider', 40);
       t.string('lane_id', 80);
       t.string('workload', 40);
@@ -397,6 +428,66 @@ postgres('llm cost (PostgreSQL)', () => {
     const res = await llmCost.laneCosts(atET('2026-09-30', '00'), atET('2026-10-01', '00'), { conn: app });
     expect(res.byLane.get('sms_draft').usd).toBeCloseTo(0.4 * 2 + 0.3 * 4, 9);
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
+  });
+
+  test('a call refused with a non-retryable status is not unknown usage; a timeout, retryable status, session turn or successful null row still is (grouped and per-call rows)', async () => {
+    const sol = { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015' }] } };
+    await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }, sol])), now: NOW });
+    const at = atET('2026-09-30');
+    const window = [atET('2026-09-30', '00'), atET('2026-10-01', '00')];
+    // sms_draft: one priced call and two calls the provider refused with a status the SDKs never retry
+    await app('llm_dispatch_log').insert([row({ created_at: at }), row({ created_at: at, ok: false, error_code: 'anthropic_400', input_tokens: null }), row({ created_at: at, ok: false, error_code: 'anthropic_403', input_tokens: null })]);
+    let res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('sms_draft').usd).toBeCloseTo(3, 9);
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
+    // the same lane's baseline is therefore judged: a $12 day against it is a spike
+    expect(llmCost.findSpikes(new Map([['sms_draft', { usd: 12 }]]), res.byLane, { minUsd: 5, multiplier: 3, baselineDays: 1 }).map((x) => x.laneId)).toEqual(['sms_draft']);
+
+    // a timed-out call may have been processed and billed: its usage stays unknown and blocks the check
+    await app('llm_dispatch_log').insert(row({ created_at: at, ok: false, error_code: 'anthropic_timeout', input_tokens: null }));
+    res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(1);
+    expect(llmCost.findSpikes(new Map([['sms_draft', { usd: 12 }]]), res.byLane, { minUsd: 5, multiplier: 3, baselineDays: 1 })).toEqual([]);
+
+    // so do an unclassified failure, a successful call with null usage, and statuses that do not prove
+    // the request was refused before processing (504 gateway timeout, 500, 502)
+    await app('llm_dispatch_log').insert([
+      row({ created_at: at, ok: false, error_code: 'error', input_tokens: null }),
+      row({ created_at: at, input_tokens: null }),
+      row({ created_at: at, ok: false, error_code: 'anthropic_504', input_tokens: null }),
+      row({ created_at: at, ok: false, error_code: 'openai_500', input_tokens: null }),
+      row({ created_at: at, ok: false, error_code: 'gemini_502', input_tokens: null }),
+    ]);
+    res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(6);
+    // a retryable status (429, 503, 529) can end several SDK attempts, an earlier one of which may have
+    // billed: it stays unknown
+    await app('llm_dispatch_log').insert(['anthropic_429', 'anthropic_503', 'anthropic_529']
+      .map((code) => row({ created_at: at, ok: false, error_code: code, input_tokens: null })));
+    res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(9);
+    // a session turn with even a non-retryable refusal may still have billed agent work: it stays unknown
+    await app('llm_dispatch_log').insert(row({ created_at: at, row_kind: 'session_turn', ok: false, error_code: 'anthropic_400', input_tokens: null }));
+    res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(10);
+
+    // per-call rows (prompt at or above the tier floor): a refused one is not unknown
+    const openai = { provider: 'openai', requested_model: 'gpt-6-sol', served_model: 'gpt-6-sol', created_at: at, lane_id: 'report' };
+    await app('llm_dispatch_log').insert([row({ ...openai, input_tokens: 300_000 }), row({ ...openai, ok: false, error_code: 'openai_401', input_tokens: null }), row({ ...openai, ok: false, error_code: 'openai_422', input_tokens: null })]);
+    res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('report').unpricedCalls).toBe(0);
+    await app('llm_dispatch_log').insert(row({ ...openai, ok: false, error_code: 'openai_timeout', input_tokens: null }));
+    res = await llmCost.laneCosts(...window, { conn: app });
+    expect(res.byLane.get('report').unpricedCalls).toBe(1);
+  });
+
+  test('a successful call on a provider with no rate stays unpriced', async () => {
+    await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }])), now: NOW });
+    const at = atET('2026-09-30');
+    const jev = { provider: 'typesafe', lane_id: 'decide', requested_model: 'jev', served_model: 'jev', created_at: at, input_tokens: null };
+    await app('llm_dispatch_log').insert([row(jev), row(jev)]);
+    const res = await llmCost.laneCosts(atET('2026-09-30', '00'), atET('2026-10-01', '00'), { conn: app });
+    expect(res.byLane.get('decide')).toEqual({ usd: 0, unpricedCalls: 2 });
   });
 
   test('a cache-writing call on a model with no listed write rate leaves only that call unpriced', async () => {

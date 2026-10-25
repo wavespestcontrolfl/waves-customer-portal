@@ -18,6 +18,7 @@
  * html[data-glass-theme] so nothing leaks while a gate is off.
  */
 import { useLayoutEffect } from 'react';
+import { attachGlassMotion } from './glass-motion';
 import './glass-theme.css';
 
 /**
@@ -73,7 +74,9 @@ export function applyGlassScene() {
     document.body.appendChild(grain);
   }
 
+  const detachMotion = attachGlassMotion();
   const cleanup = () => {
+    detachMotion();
     if (orbs) orbs.remove();
     if (grain) grain.remove();
     html.removeAttribute('data-glass-theme');
@@ -99,13 +102,15 @@ export function applyGlassScene() {
  */
 export function attachGlassPointerFx(html, orbs, reduced) {
   if (!orbs) return () => {};
+  const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let motionReduced = reduced;
   let raf = 0;
   let lastEvt = null;
   let px = 0;
   let py = 0;
   const orbEls = orbs.querySelectorAll('.glass-orb');
   const parallax = () => {
-    if (reduced) return;
+    if (motionReduced) return;
     const sy = window.scrollY;
     orbEls.forEach((c, i) => {
       const f = 0.015 + i * 0.012;
@@ -134,12 +139,28 @@ export function attachGlassPointerFx(html, orbs, reduced) {
   // `parallax()` left `--mx`/`--my` tracking the cursor, so the specular
   // highlight went on sliding across every card — motion the user asked not to
   // see, from the one path that was not checking the flag.
-  if (!reduced) document.addEventListener('pointermove', onMove, { passive: true });
-  window.addEventListener('scroll', onScroll, { passive: true });
+  const syncPreference = () => {
+    document.removeEventListener('pointermove', onMove);
+    window.removeEventListener('scroll', onScroll);
+    if (!motionReduced) {
+      document.addEventListener('pointermove', onMove, { passive: true });
+      window.addEventListener('scroll', onScroll, { passive: true });
+    } else {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      orbEls.forEach((orb) => orb.style.removeProperty('transform'));
+      html.style.removeProperty('--mx');
+      html.style.removeProperty('--my');
+    }
+  };
+  const onPreference = () => { motionReduced = preference.matches; syncPreference(); };
+  syncPreference();
+  preference.addEventListener('change', onPreference);
 
   return () => {
     document.removeEventListener('pointermove', onMove);
     window.removeEventListener('scroll', onScroll);
+    preference.removeEventListener('change', onPreference);
     if (raf) cancelAnimationFrame(raf);
     html.style.removeProperty('--mx');
     html.style.removeProperty('--my');
@@ -174,7 +195,8 @@ export function fireGlassConfetti(cx, cy) {
 /**
  * Theme hook for surfaces that author their own data-glass markup (portal,
  * reports, future glass adoptions). Mounts the scene + pointer FX and tears
- * both down on unmount — no auto-tagging, no observers. Legacy inline-styled
+ * both down on unmount. Entrances observe authored material tags; there is
+ * no auto-tagging or computed-style classification. Legacy inline-styled
  * pages that need DOM tagging use useGlassTheme from EstimateGlassTheme.
  *
  * Layout effect, not effect: the theme attribute must be on <html> before

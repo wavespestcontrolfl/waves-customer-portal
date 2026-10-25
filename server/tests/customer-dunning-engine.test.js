@@ -2273,6 +2273,8 @@ describe('the engine never applies account credit (owner ruling 2026-09-30)', ()
     expect(mockNotify).toHaveBeenCalledWith('alert', 'Billing — apply account credit for Pat', 'Unused account credit is holding their overdue reminders until it is applied.', expect.objectContaining({
       // one alert per HOLD: the hold's start is part of the key
       dedupeKey: `customer-dunning-held:${SCHEDULE_ID}:1:account_credit_available:${NOW.getTime()}`,
+      // the live bell policy admits it: the site asks to ring by default
+      bellDefault: true,
       link: `/admin/customers?customerId=${CUSTOMER_ID}`,
       metadata: expect.objectContaining({
         customer_id: CUSTOMER_ID, area: 'Billing', severity: 'needs-you', doneWhen: 'credit_applied', who: 'person',

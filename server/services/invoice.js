@@ -3070,7 +3070,15 @@ async function calculateUpdateFinancials({
     err.code = "DISCOUNT_STACKING_GATE_DIVERGED";
     throw err;
   }
-  const items = normalizeInvoiceLineItems(lineItems);
+  // Multi-property invoices: a line whose property is unchanged keeps the
+  // address frozen at creation; a new or changed property is checked against
+  // the invoice's customer and frozen now (400 otherwise).
+  const items = await require("./invoice-property-lines").attachInvoiceLineProperties(
+    db,
+    invoice?.customer_id || customer?.id || null,
+    normalizeInvoiceLineItems(lineItems),
+    { existingLineItems: parseInvoiceLineItems(invoice?.line_items) },
+  );
   const subtotal =
     Math.round(
       items.reduce((sum, item) => {
@@ -6511,7 +6519,12 @@ const InvoiceService = {
         const stampedIds = new Set(stampedCoverage.map((row) => String(row.id)));
         const unstampedOwners = [...new Map(packetOwners.map((row) => [String(row.id), row])).values()]
           .filter((row) => !stampedIds.has(String(row.id)) && !['void', 'canceled', 'cancelled'].includes(row.status));
-        const packetFeeCents = unstampedOwners.reduce((sum, row) => sum + sumPositiveSetupFeeCents(row), 0);
+        // GATE_SETUP_FEE_SETTLED_ANYWHERE: the obligation's remainder already
+        // credits fee money on unstamped invoices (settledElsewherePartial);
+        // subtract only what it has not credited, so nothing counts twice.
+        const creditedElsewhere = new Map((obligation.settledElsewherePartial || []).map((p) => [String(p.id), p.cents]));
+        const packetFeeCents = unstampedOwners.reduce((sum, row) => sum
+          + Math.max(0, sumPositiveSetupFeeCents(row) - (creditedElsewhere.get(String(row.id)) || 0)), 0);
         separateSetupFeeAllowed = obligation.owed && Number.isSafeInteger(obligation.setupFeeRemainingCents)
           && sumPositiveSetupFeeCents({ line_items: normalizedSetupLines }) <= obligation.setupFeeRemainingCents - packetFeeCents;
       }
@@ -6747,16 +6760,22 @@ const InvoiceService = {
     }
 
     // Calculate financials
-    const items = (lineItems || []).map((item) => {
-      const quantity = Number(item.quantity) || 1;
-      const unitPrice = Number(item.unit_price) || 0;
-      return {
-        ...item,
-        quantity,
-        unit_price: unitPrice,
-        amount: Math.round(quantity * unitPrice * 100) / 100,
-      };
-    });
+    // Multi-property invoices: a line's property_id must be this customer's
+    // saved property; its address is frozen onto the line here (400 otherwise).
+    const items = await require("./invoice-property-lines").attachInvoiceLineProperties(
+      database,
+      customerId,
+      (lineItems || []).map((item) => {
+        const quantity = Number(item.quantity) || 1;
+        const unitPrice = Number(item.unit_price) || 0;
+        return {
+          ...item,
+          quantity,
+          unit_price: unitPrice,
+          amount: Math.round(quantity * unitPrice * 100) / 100,
+        };
+      }),
+    );
     const serviceSubtotal = items.reduce((sum, item) => {
       const amount = Number(
         item.amount ??

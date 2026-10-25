@@ -232,10 +232,16 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
     // ONE family LIKE (Codex #5392 r3 P0): keyed off the family, not the
     // current constant, so a suffix bump ('_cf', later ones) never strands
     // rows stamped under an earlier version.
+    // Plus the tagged bare-v11 identity (voice-pin 'v' / edit-learning 'e'
+    // tags reach v11 gratitude drafts when real answers is off; Codex #6568).
     expect(orWhereCalls).toEqual([
+      ['md.prompt_version', 'like', 'house\\_voice\\_v11+%'],
       ['md.prompt_version', 'like', 'house\\_voice\\_v12\\_real\\_answers%'],
     ]);
-    const pattern = orWhereCalls[0][2];
+    const toRe = (p) => new RegExp(`^${p.replace(/\\(.)/g, '\u0000$1').replace(/%/g, '.*').replace(/\u0000(.)/g, (_, c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).replace(/\+/g, '\\+')}$`);
+    for (const tagged of ['house_voice_v11+e', 'house_voice_v11+v', 'house_voice_v11+bcev']) expect(toRe(orWhereCalls[0][2]).test(tagged)).toBe(true);
+    for (const other of ['house_voice_v110', 'house_voice_v11', 'house_voice_v11_x']) expect(toRe(orWhereCalls[0][2]).test(other)).toBe(false);
+    const pattern = orWhereCalls[1][2];
     const likeRe = new RegExp(`^${pattern.replace(/\\(.)/g, '\u0000$1').replace(/%/g, '.*').replace(/\u0000(.)/g, (_, c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))}$`);
     for (const stamped of [
       'house_voice_v12_real_answers', // stamped before the bump

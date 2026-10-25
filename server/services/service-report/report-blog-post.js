@@ -24,6 +24,8 @@
 
 const { isSiteUrl, SITE_HOST } = require('../link-library');
 const { detectServiceLine } = require('./service-line-configs');
+const { CITY_COUNTY } = require('../../config/address-county');
+const { CITY_TO_LOCATION, REVIEW_CITY_EXTRAS } = require('../../config/locations');
 const logger = require('../logger');
 
 const MAX_RESULTS = 8;
@@ -256,12 +258,15 @@ const liveRegistryRows = (knex) => knex('content_registry')
     "(live_url ~* ? OR (COALESCE(live_url, '') !~* ? AND (COALESCE(canonical_url, '') !~* ? OR canonical_url ~* ?)))",
     [HUB_URL_RE, ABSOLUTE_URL_RE, ABSOLUTE_URL_RE, HUB_URL_RE],
   );
+// The columns registryLink judges a row by, with only the frontmatter of the
+// metadata (the sites a post renders on).
+const registrySelect = (knex) => [
+  ...REGISTRY_COLUMNS.filter((column) => column !== 'metadata'),
+  knex.raw("jsonb_build_object('frontmatter', metadata -> 'frontmatter', 'astro', jsonb_build_object('frontmatter', metadata -> 'astro' -> 'frontmatter')) AS metadata"),
+];
 function registryMatches(knex, terms) {
   return anyTermIn(liveRegistryRows(knex), REGISTRY_FIELDS, terms, 'published_at')
-    .select([
-      ...REGISTRY_COLUMNS.filter((column) => column !== 'metadata'),
-      knex.raw("jsonb_build_object('frontmatter', metadata -> 'frontmatter', 'astro', jsonb_build_object('frontmatter', metadata -> 'astro' -> 'frontmatter')) AS metadata"),
-    ]);
+    .select(registrySelect(knex));
 }
 // A registry row's deployed words, by where they sit: the title (and the
 // headline), the keyword, and the summary.
@@ -308,6 +313,83 @@ async function linkableEntries(knex, terms) {
 }
 
 /**
+ * The live hub post at each of the given paths (`/{category}/{slug}/`), as a
+ * Map path → post; a path with no live post is absent. The registry rows the
+ * search reads, judged by registryLink and matched on the live URL's own
+ * path, so a path links only what the sweep verified on the hub (tips with
+ * facts, owner 2026-10-24).
+ */
+async function liveBlogPostsByPath(knex, paths) {
+  const wanted = new Map();
+  for (const raw of Array.isArray(paths) ? paths : []) {
+    const key = pathKey(`https://www.${SITE_HOST}${String(raw || '')}`);
+    if (key) wanted.set(key, String(raw));
+  }
+  if (!wanted.size) return new Map();
+  // Each path, anchored: the normalized canonical (a hub post's own path), or
+  // the live or canonical URL ending in it. Every pattern is a binding.
+  const keys = [...wanted.keys()];
+  const anchored = keys.map((key) => `${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`);
+  const rows = await liveRegistryRows(knex)
+    .where(function atPaths() {
+      this.whereIn('canonical_url_normalized', keys.map((key) => `${key}/`));
+      for (const pattern of anchored) this.orWhereRaw("COALESCE(live_url, '') ~* ?", [pattern]).orWhereRaw("COALESCE(canonical_url, '') ~* ?", [pattern]);
+    })
+    .select(registrySelect(knex))
+    .limit(MAX_READ);
+  const found = new Map();
+  for (const row of rows) {
+    const post = registryLink(row);
+    if (!post) continue;
+    const path = wanted.get(pathKey(post.url));
+    if (path && !found.has(path)) found.set(path, post);
+  }
+  return found;
+}
+
+// A post titled for one place ("Get Rid Of Fleas In Lakewood Ranch, FL",
+// "Sarasota Mosquito Prevention Guide", "Manatee County fertilizer rules"):
+// never filled in from a tip, and never the general post the tip seeder asks
+// for, since the customer may live elsewhere (owner 2026-10-24, decision 2).
+// A served town anywhere in the title counts: every locality the offices
+// serve (locations.js, south Hillsborough and the neighborhoods included)
+// and every whole-county city, and so does a county by name. A town that is
+// also an ordinary word (Palmetto, Osprey, Laurel, Myakka) counts as a place
+// too, unless the title uses it as that word: a palmetto bug or a saw
+// palmetto, an osprey's nest or ospreys, laurel wilt or a laurel oak, the
+// Myakka River or its state park. "Palmetto Mosquito Prevention Guide" is a
+// town title with no "in", "near" or ", FL" (local Codex P2 on 6fbfefdcc8).
+const TOWN_NAMES = [...new Set([...Object.keys(CITY_COUNTY), ...Object.keys(CITY_TO_LOCATION), ...Object.keys(REVIEW_CITY_EXTRAS)])];
+const WORD_TOWNS = new Set(['palmetto', 'osprey', 'laurel', 'myakka']);
+const WORD_TOWN_AS_WORD_RE = /\b(?:(?:saw|dwarf|scrub|cabbage)\s+palmettos?|palmettos?\s+(?:bugs?|berr(?:y|ies)|fronds?|palms?|weevils?)|ospreys|osprey'?s?\s+(?:nests?|chicks?|platforms?|eggs?)|laurel\s+(?:wilt|oaks?|trees?)|(?:bay|cherry|mountain|carolina)\s+laurels?|myakka\s+(?:river|state|head|prairie))\b/gi;
+const alternation = (names) => names.map((town) => town.replace(/\s+/g, '\\s+')).join('|');
+const PLAIN_TOWN_RE = new RegExp(`\\b(?:${alternation(TOWN_NAMES.filter((town) => !WORD_TOWNS.has(town)))})\\b`, 'i');
+const WORD_TOWN_RE = new RegExp(`\\b(?:${alternation([...WORD_TOWNS])})\\b`, 'i');
+const PLACED_TOWN_RE = new RegExp(`\\b(?:in|near)\\s+(?:${alternation(TOWN_NAMES)})\\b|\\b(?:${alternation(TOWN_NAMES)}),?\\s+(?:fl|florida)\\b|\\b(?:manatee|sarasota|charlotte)\\s+county\\b`, 'i');
+const isTownTitled = (title) => {
+  const text = String(title || '');
+  return PLAIN_TOWN_RE.test(text) || PLACED_TOWN_RE.test(text) || WORD_TOWN_RE.test(text.replace(WORD_TOWN_AS_WORD_RE, ' '));
+};
+
+/**
+ * The live hub post each tip names (tip-library `blog.path`), by tip id, for
+ * the office form to fill an empty blog slot when the tip is picked (tips
+ * with facts, GATE_TECH_TIP_SOURCES, owner 2026-10-24). A tip whose path has
+ * no live post is absent, and so is one whose post is titled for a town.
+ */
+async function tipBlogPosts(knex, tips) {
+  const linking = (Array.isArray(tips) ? tips : []).filter((tip) => tip?.blog?.path);
+  if (!linking.length) return {};
+  const live = await liveBlogPostsByPath(knex, linking.map((tip) => tip.blog.path));
+  const posts = {};
+  for (const tip of linking) {
+    const post = live.get(tip.blog.path);
+    if (post && !isTownTitled(post.title)) posts[tip.id] = post;
+  }
+  return posts;
+}
+
+/**
  * The site's live hub posts that answer a search, best first, at most eight,
  * each marked `exact` when it holds every word:
  * those holding every word first, then those holding the rarest of the
@@ -316,8 +398,12 @@ async function linkableEntries(knex, terms) {
  * content registry's verified-live posts (each URL once). When no post holds
  * the last word and it is still being typed, that word matches by its start
  * (wordBeingTyped) and every post says whether it `starts` the search so.
+ * `limit` (eight unless given): the tip seeder's coverage check reads every
+ * match, so a general post ranked behind eight town-titled ones still counts.
+ * `withHeadline` (the seeder's too) adds each post's deployed title and H1 as
+ * `headline`, so a post whose H1 names a town is judged by it.
  */
-async function searchReportBlogPosts(knex, query) {
+async function searchReportBlogPosts(knex, query, { limit = MAX_RESULTS, withHeadline = false } = {}) {
   let terms = searchTerms(query);
   if (!terms.length) return [];
   // Every word of the search, not only the first MAX_TERMS the read and the
@@ -355,7 +441,7 @@ async function searchReportBlogPosts(knex, query) {
   // posts holding only the first words (pre-push P1 on d1f230dfa2).
   return entries
     .sort((a, b) => Number(b.exact) - Number(a.exact) || Number(every(b)) - Number(every(a)) || specific(b) - specific(a) || b.placed - a.placed || b.when - a.when)
-    .slice(0, MAX_RESULTS)
+    .slice(0, limit)
     // `exact`: the post holds every word. With none exact, the forms say no
     // post covers the search, show these as the closest, and offer to
     // suggest one (owner mockup approval 2026-10-03). `starts`, on every post
@@ -363,7 +449,7 @@ async function searchReportBlogPosts(knex, query) {
     // word that way. The forms show those as the matches for a word still
     // being typed, and with the field present offer no suggestion (the word
     // is on no post whole; GitHub Codex P2 on 7331ef2402).
-    .map((entry) => ({ ...entry.post, exact: entry.exact, ...(started ? { starts: entry.starts } : {}) }));
+    .map((entry) => ({ ...entry.post, exact: entry.exact, ...(started ? { starts: entry.starts } : {}), ...(withHeadline ? { headline: entry.texts.title } : {}) }));
 }
 
 // The most words a suggestion's site-words read checks.
@@ -475,4 +561,7 @@ module.exports = {
   searchTerms,
   registryLink,
   wordsOnTheSite,
+  liveBlogPostsByPath,
+  tipBlogPosts,
+  isTownTitled,
 };

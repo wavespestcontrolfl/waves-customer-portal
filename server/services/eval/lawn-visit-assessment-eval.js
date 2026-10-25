@@ -280,7 +280,9 @@ function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeas
     return { ...base, derived: null, adjusted: null, deltas: null, undeterminable: SCORE_KEYS.slice(), causeNamedBelowModerate: [], findings: [], severities: null, observations: analysis.observations || null };
   }
   const derived = deriveLegacyScores(analysis);
-  const adjusted = adjustAvailableScores(derived, (scores) => adjust(scores, testCase.month));
+  // A score-scale-2 read is stored as read, with no season multiplier
+  // (lawn-visit-scores.js scoreVisit, GATE_LAWN_SCORE_SCALE_V2).
+  const adjusted = analysis.scoreScale === 2 ? { ...derived } : adjustAvailableScores(derived, (scores) => adjust(scores, testCase.month));
   const deltas = { vsConfirmed: {}, vsLegacyAi: {} };
   const undeterminable = [];
   for (const key of SCORE_KEYS) {
@@ -528,7 +530,7 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
           log(`skip ${testCase.assessmentId} run ${i + 1}/${repeat}: ${err.message}`);
           break;
         }
-        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext, shotList: shotListMode, lighting: variantOfVersion(analysis.promptVersion).lighting }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
+        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext, shotList: shotListMode, lighting: variantOfVersion(analysis.promptVersion).lighting, scale2: variantOfVersion(analysis.promptVersion).scale2 }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
         log(`${testCase.assessmentId} run ${i + 1}/${repeat}: ${analysis.status}${analysis.status === 'complete' ? ` via ${analysis.provider}${analysis.fallbackUsed ? ' (fallback)' : ''}` : ` (${analysis.reason})`} ${analysis.latencyMs} ms`);
       }
     }

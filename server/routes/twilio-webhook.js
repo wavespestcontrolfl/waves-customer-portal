@@ -132,10 +132,13 @@ async function queryOutboundHistory(phone) {
       .first('messages.id');
     if (unified) return true;
   }
+  // messaging_suppression is keyed by phone and has no id column: selecting
+  // id failed every lookup that reached here, and the fail-open caller then
+  // treated every first-contact sender as eligible.
   const suppressed = await db('messaging_suppression')
     .where({ active: true })
     .whereIn(fullDigits('phone'), variants)
-    .first('id');
+    .first('phone');
   return Boolean(suppressed);
 }
 
@@ -1154,13 +1157,18 @@ router.post('/sms', async (req, res) => {
     // hand. Only the quote-generating branch is skipped.
     let intakeScopeVetoed = false;
     // 'call' | 'text' when a lead in intake sent a bare CALL / TEXT and
-    // GATE_LEAD_CALL_TEXT_PREFERENCE noted it; only names the choice on the bell.
+    // recordCallTextReply noted it; only names the choice on the bell.
     let intakeLeadPreference;
     // A reschedule/away ask about an EXISTING visit must never be consumed
     // by the intake flow (codex #3232 r29) — consumption returns before
     // the durable reschedule flag below, silently dropping the guard.
+    // GATE_LEAD_CALL_TEXT_FOLLOWUP: a lead answering our "what time
+    // tomorrow" question is answering that, not the intake machine ("10 AM
+    // works" reads as an address there); the follow-up below takes it.
+    const pendingTimeAnswer = !!(customer && Body) && !isAiNumber && !TWILIO_NUMBERS.isTechLine(To)
+      && await require('../services/lead-call-text-followup').hasOpenTimeAsk({ customer, fromPhone: From });
     if (customer && Body && customer.lead_intake_status &&
-        customer.lead_intake_status !== 'estimate_drafted' && !rescheduleAsk) {
+        customer.lead_intake_status !== 'estimate_drafted' && !rescheduleAsk && !pendingTimeAnswer) {
       try {
         const LeadIntake = require('../services/lead-intake');
         const intakeResult = await LeadIntake.handleIntakeReply(customer, Body, { triggerSmsLogId: smsLogEntry.id });
@@ -1184,6 +1192,26 @@ router.post('/sms', async (req, res) => {
         }
         intakeLeadPreference = await LeadIntake.recordCallTextReply(customer, Body, { triggerSmsLogId: smsLogEntry.id });
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
+    }
+
+    // GATE_LEAD_CALL_REPLY_RING (owner 2026-10-24): a lead's bare CALL in
+    // answer to our lead text rings Adam's cell with the press-1 bridge,
+    // 8 AM-8 PM ET. Keyed on our sent text, not lead_intake_status, so a lead
+    // whose intake state never seeded still counts. Post-ack, never awaited;
+    // the service holds every other rule.
+    // Never the AI line (its own auto-reply answers there) or a technician's
+    // line (no automated replies on those conversations).
+    const leadFollowupLine = !isAiNumber && !TWILIO_NUMBERS.isTechLine(To);
+    if (Body && customer?.id && !smsReaction && !rescheduleAsk && leadFollowupLine) {
+      const ringInput = { customer, body: Body, fromPhone: From, smsLogId: smsLogEntry?.id || null };
+      res.once('finish', () => {
+        void require('../services/lead-call-reply-ring').ringForCallReply(ringInput)
+          .catch((err) => logger.warn(`[lead-call-reply-ring] post-ack ring failed: ${err.code || err.name || 'error'}`));
+        // GATE_LEAD_CALL_TEXT_FOLLOWUP: the TEXT answer, the night CALL time
+        // ask and the time reply (services/lead-call-text-followup.js).
+        void require('../services/lead-call-text-followup').handleLeadReply(ringInput)
+          .catch((err) => logger.warn(`[lead-call-text-followup] post-ack follow-up failed: ${err.code || err.name || 'error'}`));
+      });
     }
 
     // DOMAIN / VAN TRACKING — first text from an unknown number to a
@@ -1237,11 +1265,12 @@ router.post('/sms', async (req, res) => {
       // texts fall through to the general quote-intent trigger. The
       // message continues into normal inbox handling either way.
       const { handleClarifyReply } = require('../services/estimate-clarify-asks');
-      const clarifyReply = (!intakeScopeVetoed && Body && String(Body).trim())
+      // A callback-time answer ("2" = 2 PM) is never quote data: no clarify, no draft.
+      const clarifyReply = (!intakeScopeVetoed && !pendingTimeAnswer && Body && String(Body).trim())
         ? await handleClarifyReply({ phone: From, body: Body, triggerSmsLogId: smsLogEntry.id })
         : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
-      if (!intakeScopeVetoed && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
+      if (!intakeScopeVetoed && !pendingTimeAnswer && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
         await startSmsThreadDraft({ phone: From, triggerBody: Body, triggerSmsLogId: smsLogEntry.id });
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }

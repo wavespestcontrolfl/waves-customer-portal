@@ -620,6 +620,14 @@ function mcNemarExact(b, c) {
   return Math.min(1, 2 * cum);
 }
 
+// Which judge ruler graded these result rows: 'j1' (no stamp, the old judge) or the stamped version, sorted and
+// joined when a run mixes them. GATE_SMS_JUDGE_V2 grades stricter, so two runs on different rulers must not be
+// compared (a gate flip between runs, or mid-run on a resume, would read as a regression or an improvement).
+function judgeRulerOf(rows) {
+  const versions = new Set(rows.filter((r) => r.verdict !== 'ungradable').map((r) => parseScores(r.scores)?.judge_version || 'j1'));
+  return [...versions].sort().join('+');
+}
+
 function parseScores(scores) {
   if (!scores) return null;
   try {
@@ -787,7 +795,13 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
     return false;
   }
 
+  // GATE_SMS_JUDGE_V2: the owner-question answer rides in the scores jsonb (no migration); every reader
+  // picks named keys from it, so the extra key is tolerated. Absent when the gate is off.
   const scores = parseScores(judgment.scores);
+  // judge_version rides along so a run (and a baseline comparison) can tell which ruler graded it.
+  const storedScores = scores && judgment.could_send
+    ? { ...scores, could_send: judgment.could_send, judge_version: judgment.judge_version }
+    : scores;
   await dbi('sms_sealed_eval_results')
     .insert({
       run_id: run.id,
@@ -797,7 +811,7 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
       passes,
       converged,
       verdict: judgment.verdict,
-      scores: scores ? JSON.stringify(scores) : null,
+      scores: storedScores ? JSON.stringify(storedScores) : null,
       notes: judgment.notes || null,
       judge_model: judgment.model || null,
       draft_ms: Date.now() - startedAt,
@@ -819,12 +833,15 @@ async function finalizeRun({ runId, dbi = db } = {}) {
   const results = await dbi('sms_sealed_eval_results').where({ run_id: runId })
     .select('item_id', 'verdict', 'scores');
   const verdictCounts = {};
+  const couldSendCounts = {};
   let unsafe = 0;
   const sums = { safety: [], voice: [], overall: [] };
   for (const r of results) {
     if (r.verdict) verdictCounts[r.verdict] = (verdictCounts[r.verdict] || 0) + 1;
     if (r.verdict === 'draft_unsafe') unsafe += 1;
     const s = parseScores(r.scores);
+    // GATE_SMS_JUDGE_V2 runs only: count the owner-question answers beside the verdicts (flat keys).
+    if (s?.could_send) couldSendCounts[`could_send_${s.could_send}`] = (couldSendCounts[`could_send_${s.could_send}`] || 0) + 1;
     if (s) {
       for (const key of Object.keys(sums)) {
         if (Number.isFinite(Number(s[key]))) sums[key].push(Number(s[key]));
@@ -851,7 +868,14 @@ async function finalizeRun({ runId, dbi = db } = {}) {
     const baselineResults = await dbi('sms_sealed_eval_results')
       .where({ run_id: run.baseline_run_id })
       .select('item_id', 'verdict', 'scores');
-    significance = computeSignificance({ candidateResults: results, baselineResults });
+    // Different rulers (or a run that mixes them, even against an equally mixed baseline) make McNemar
+    // meaningless: leave significance unset, as with no baseline. A mixed ruler reads 'j1+j2'.
+    const ruler = judgeRulerOf(results);
+    if (!ruler.includes('+') && ruler === judgeRulerOf(baselineResults)) {
+      significance = computeSignificance({ candidateResults: results, baselineResults });
+    } else {
+      logger.warn(`[sealed-eval] run ${String(runId).slice(0, 8)}: no significance verdict, judge ruler differs from its baseline (${ruler} vs ${judgeRulerOf(baselineResults)})`);
+    }
   }
 
   const patch = {
@@ -863,7 +887,7 @@ async function finalizeRun({ runId, dbi = db } = {}) {
     avg_safety: avg(sums.safety),
     avg_voice: avg(sums.voice),
     avg_overall: avg(sums.overall),
-    verdict_counts: JSON.stringify(verdictCounts),
+    verdict_counts: JSON.stringify({ ...verdictCounts, ...couldSendCounts }),
   };
   if (done) {
     patch.status = 'complete';

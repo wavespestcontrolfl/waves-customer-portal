@@ -1846,7 +1846,10 @@ const nodeCrypto = require('crypto');
 const bankImport = require('../services/bank-import');
 const taxLedgerRules = require('../services/tax-ledger-rules');
 const sharedBills = require('../services/tax-shared-bills');
-const { gateEnvValue } = require('../config/feature-gates');
+const taxYears = require('../services/tax-years');
+const returnEngine = require('../services/tax-return-engine');
+const { hasYearConstants, YEARS: TAX_YEAR_CONSTANTS } = require('../services/tax-year-constants');
+const { gateEnvValue, taxReturnEngineLive } = require('../config/feature-gates');
 
 const MAX_STATEMENT_BYTES = 2 * 1024 * 1024;
 
@@ -1943,14 +1946,23 @@ router.get('/bank-import/plaid/status', async (req, res, next) => {
   } catch (err) { plaidRouteError(res, next, err); }
 });
 
-// itemId present = update mode (re-authenticate an existing connection)
+// itemId present = update mode: re-authenticate an existing connection, or
+// (addAccounts) change which of the login's accounts it shares
 router.post('/bank-import/plaid/link-token', async (req, res, next) => {
   try {
-    const { itemId } = req.body || {};
+    const { itemId, addAccounts } = req.body || {};
     if (itemId !== undefined && itemId !== null && !UUID_RE.test(String(itemId))) {
       return res.status(400).json({ error: 'invalid itemId' });
     }
-    const out = await plaidSync.createLinkToken({ clientUserId: req.technicianId, itemId: itemId || null });
+    if (addAccounts !== undefined && typeof addAccounts !== 'boolean') {
+      return res.status(400).json({ error: 'addAccounts must be true or false' });
+    }
+    if (addAccounts && !itemId) {
+      return res.status(400).json({ error: 'addAccounts needs an existing connection (itemId)' });
+    }
+    const out = await plaidSync.createLinkToken({
+      clientUserId: req.technicianId, itemId: itemId || null, addAccounts: addAccounts === true,
+    });
     res.json(out);
   } catch (err) { plaidRouteError(res, next, err); }
 });
@@ -1979,6 +1991,16 @@ router.post('/bank-import/plaid/items/:plaidItemId/reconnected', async (req, res
   try {
     await plaidSync.markReconnected(req.params.plaidItemId);
     res.json({ success: true, sync: await plaidSync.syncItem(req.params.plaidItemId) });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// "Add accounts" finished in Link: a newly shared account waits for the
+// operator to confirm it (nothing syncs meanwhile); otherwise the feed syncs
+// as after a re-login.
+router.post('/bank-import/plaid/items/:plaidItemId/accounts-changed', async (req, res, next) => {
+  try {
+    const out = await plaidSync.refreshAccounts(req.params.plaidItemId);
+    res.json({ success: true, ...out, sync: out.setup ? null : await plaidSync.syncItem(req.params.plaidItemId) });
   } catch (err) { plaidRouteError(res, next, err); }
 });
 
@@ -3360,7 +3382,8 @@ router.put('/bank-import/ledger/rules/:id', async (req, res, next) => {
 // the home office is the simplified method, one row per tax year. /status
 // answers {enabled:false} when dark; every other route here 404s when dark.
 router.get('/shared-bills/status', (req, res) => {
-  res.json({ enabled: !!sharedBills.isOn() });
+  // actual_method: the home office may use the actual method (needs the return engine too)
+  res.json({ enabled: !!sharedBills.isOn(), actual_method: !!(sharedBills.isOn() && taxReturnEngineLive()) });
 });
 
 function sharedBillsDark(req, res, next) {
@@ -3412,6 +3435,59 @@ router.delete('/home-office/:year', async (req, res, next) => {
     await sharedBills.deleteHomeOffice(req.params.year);
     res.json({ success: true });
   } catch (err) { sharedBillsError(err, res, next); }
+});
+
+// ── Tax return engine (GATE_TAX_RETURN_ENGINE, nested under GATE_BANK_IMPORT) ──
+// Tax-year records and the federal return computed from the books. /status
+// answers {enabled:false} when dark; every other route here 404s when dark.
+router.get('/return-engine/status', (req, res) => {
+  res.json({ enabled: !!taxReturnEngineLive() });
+});
+
+function returnEngineDark(req, res, next) {
+  if (!taxReturnEngineLive()) return res.status(404).json({ error: 'not found' });
+  next();
+}
+router.use('/tax-years', returnEngineDark);
+router.use('/return-engine', returnEngineDark);
+
+function yearDetail(detail) {
+  return { ...detail, constants_loaded: hasYearConstants(detail.year) };
+}
+
+router.get('/tax-years', async (req, res, next) => {
+  try {
+    res.json({ years: await taxYears.listYears(), supported_years: Object.keys(TAX_YEAR_CONSTANTS).map(Number) });
+  } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.get('/tax-years/:year', async (req, res, next) => {
+  try { res.json(yearDetail(await taxYears.getYearDetail(req.params.year))); } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.put('/tax-years/:year', async (req, res, next) => {
+  try {
+    await taxYears.upsertYear(req.params.year, req.body || {});
+    res.json(yearDetail(await taxYears.getYearDetail(req.params.year)));
+  } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.post('/tax-years/:year/file', async (req, res, next) => {
+  try {
+    await returnEngine.fileYear(req.params.year, req.body || {});
+    res.json(yearDetail(await taxYears.getYearDetail(req.params.year)));
+  } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.post('/tax-years/:year/unfile', async (req, res, next) => {
+  try {
+    await taxYears.unmarkFiled(req.params.year);
+    res.json(yearDetail(await taxYears.getYearDetail(req.params.year)));
+  } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.get('/tax-years/:year/return', async (req, res, next) => {
+  try { res.json(await returnEngine.computeYear(req.params.year)); } catch (err) { sharedBillsError(err, res, next); }
 });
 
 module.exports = router;

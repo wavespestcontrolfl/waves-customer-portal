@@ -1298,6 +1298,11 @@ function initScheduledJobs() {
         const out = await require('./plaid-sync').syncAllItems();
         const failed = (out.results || []).filter(r => r.error);
         if (failed.length) logger.warn(`[plaid-sync] hourly sync: ${failed.length}/${out.items} connection(s) failed`);
+        // Zelle credits the sync just staged → their invoices
+        // (GATE_ZELLE_BANK_RECONCILE, read inside). Its own failure never
+        // fails the sync job.
+        await require('./zelle-notice-reconciler').reconcileZelleBankFeed()
+          .catch((err) => logger.error(`[zelle-notice] hourly bank-feed pass failed: ${err.message}`));
       });
     } catch (err) {
       logger.error(`[plaid-sync] hourly sync failed: ${err.message}`);
@@ -2389,6 +2394,23 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[access-codes] sweep tick failed (${err.code || err.name || 'error'})${err.tally ? ` ${JSON.stringify(err.tally)}` : ''}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // The found-codes bell (owner ruling 2026-10-24): one standing admin row for
+  // the codes waiting on Customers → Gate codes, 90 seconds after each sweep
+  // tick so a code the sweep just filed is listed. It rings when a code joins,
+  // refreshes quietly when one leaves and closes itself when none wait. Dark
+  // behind GATE_ACCESS_CODES_FOUND_BELL, read at each tick. No cron lease: the
+  // sync holds the row's own advisory lock in one transaction (one pooled
+  // connection). Logs the outcome and count only, never a code.
+  cron.schedule('30 4,9,14,19,24,29,34,39,44,49,54,59 * * * *', async () => {
+    try {
+      if (!require('../config/feature-gates').accessCodesFoundBellLive()) return;
+      const result = await require('./access-code-found-bell').syncFoundCodesBell();
+      if (!['unchanged', 'clear'].includes(result?.outcome)) logger.info(`[access-codes] found bell: ${result?.outcome} (${result?.count ?? 0})`);
+    } catch (err) {
+      logger.error(`[access-codes] found bell failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4889,6 +4911,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKDAYS 11:47AM — Quiet overdue invoices (GATE_QUIET_OVERDUE_LIST; returns
+  // before any read when off). Owner 2026-10-24: one standing Billing bell
+  // lists the open self-pay invoices no reminder reaches (paused with no end,
+  // stopped, finished, Auto Pay hold 7+ days, never set up); it rings only
+  // when an invoice joins and closes itself when the list is empty. After the
+  // 10:16 dunning run, so an invoice that run adopts or re-arms is never
+  // listed as quiet; outside the 10am stagger plan. Sends nothing to a customer.
+  // =========================================================================
+  cron.schedule('47 11 * * 1-5', async () => {
+    if (!require('../config/feature-gates').quietOverdueListLive()) return;
+    try {
+      await runExclusive('quiet-overdue-invoices', async () => {
+        const result = await require('./quiet-overdue-invoices').runQuietOverdueList();
+        logger.info(`Quiet overdue invoices: ${result.count ?? 0} listed (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Quiet overdue invoices failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN (offset one minute) — Delayed gratitude replies
   // Independent of the scheduled-SMS sweep: queued operational sends never
   // wait behind courtesy replies, and a stalled scheduled-SMS recovery never
@@ -6416,7 +6459,7 @@ function initScheduledJobs() {
           // the attempts ran out; parked as send_failed with no due time it
           // is inert, as the sibling release leaves a held row (pre-push
           // codex P1 on #3750; codex r18 P2 on #3804).
-          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED', 'LEGACY_AUTOFILL_PRICE'].includes(e.code));
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED', 'LEGACY_AUTOFILL_PRICE', 'PALM_COUNT_REQUIRED', 'PALM_COUNT_MISMATCH'].includes(e.code));
           // A reviewed attempt cannot be retimed: its receipt and pinned
           // offer belong to the original schedule. Even a bookkeeping throw
           // can follow provider acceptance, so stop for explicit staff review.
@@ -8621,6 +8664,43 @@ function initScheduledJobs() {
       logger.error(`Missed appointment check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 6:47AM — Plan-rate ledger invariant reconcile
+  // (services/plan-rate-ledger-reconcile.js). For every live customer whose
+  // customer_plan_rates lines no longer add up to customers.monthly_rate:
+  // a shortfall is parked in the 'unattributed' line and an overshoot is left
+  // alone, each with one Billing alert per distinct gap. Never changes the
+  // billed rate, never charges, never messages a customer. Before the 8:00
+  // dues run, so a gap is in front of the owner before that day bills.
+  // Minute 47 of the 6am hour has no other fixed or hourly job (#3208 rule:
+  // only the every-minute jobs and the every-5-minute visit-closeout resume
+  // share it). Dark: planRateLedgerReconcileLive() is read BEFORE the cron
+  // lock, so off (or GATE_PLAN_RATE_LEDGER off) = no lock, no query, no
+  // job_health row. runExclusive: a deploy-overlap tick must not run twice.
+  // A deploy that kills the run re-runs it (a second run the same day is
+  // harmless: every gap is judged again under the locks and alerts dedupe).
+  // =========================================================================
+  const runPlanRateLedgerReconcileTick = async () => {
+    if (!require('../config/feature-gates').planRateLedgerReconcileLive()) return;
+    const tickStartedAt = Date.now();
+    try {
+      // The body returns nothing: a run result that said `skipped` must not
+      // read as a lock skip below.
+      const lockRes = await runExclusive('plan-rate-ledger-reconcile', async () => {
+        const result = await require('./plan-rate-ledger-reconcile').runPlanRateLedgerReconcile();
+        logger.info(`[plan-rate-reconcile] cron run: ${JSON.stringify(result)}`);
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('plan-rate-ledger-reconcile', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`plan-rate ledger reconcile tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Plan-rate ledger reconcile failed: ${err.message}`);
+    }
+  };
+  cron.schedule('47 6 * * *', runPlanRateLedgerReconcileTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('plan-rate-ledger-reconcile', runPlanRateLedgerReconcileTick);
 
   // =========================================================================
   // DAILY 6:55AM — Lead-to-cash invariants sweep (read-only registry over

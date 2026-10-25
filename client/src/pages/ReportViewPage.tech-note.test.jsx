@@ -90,6 +90,26 @@ describe('TechNoteCard', () => {
     expect(document.querySelector('#tech-note')).toHaveAttribute('data-glass', 'card');
   });
 
+  it('prints a tip\'s source as a labelled link after the sentence, inside the quote, never the raw URL (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+    const sourced = { id: 'seal_door_sweeps', copy: 'The CDC puts a mouse through a hole about a quarter inch wide.', source: 'library', citations: [{ label: 'CDC', url: 'https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html' }] };
+    render(<TechNoteCard data={payload({ techNote: { tips: [sourced, TIPS[2]], technicianFirstName: 'Adam' } })} mode="live" />);
+    const link = screen.getByRole('link', { name: 'CDC' });
+    expect(link).toHaveAttribute('href', 'https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(link.closest('p').textContent).toContain('quarter inch wide. Source: CDC');
+    expect(link.closest('blockquote')).not.toBeNull();
+    expect(document.querySelector('#tech-note').textContent).not.toContain('https://');
+  });
+
+  it('two sources read "Sources:" with both links; a tip without citations prints nothing extra', () => {
+    const twoSources = { id: 'lawn_water_morning', copy: 'Water in the early-morning hours.', source: 'library', citations: [{ label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH040' }, { label: 'SWFWMD', url: 'https://www.swfwmd.state.fl.us/business/epermitting/district-water-restrictions' }] };
+    render(<TechNoteCard data={payload({ techNote: { tips: [twoSources, TIPS[0]], technicianFirstName: 'Adam' } })} mode="live" />);
+    expect(screen.getByRole('link', { name: 'UF/IFAS' }).closest('p').textContent).toContain('Sources: UF/IFAS, SWFWMD');
+    expect(screen.getByRole('link', { name: 'SWFWMD' })).toHaveAttribute('href', 'https://www.swfwmd.state.fl.us/business/epermitting/district-water-restrictions');
+    expect(document.querySelectorAll('.tech-note-source')).toHaveLength(1);
+  });
+
   it('a blank-first-name customer is greeted "Hey there," (customerName is only the surname)', () => {
     render(<TechNoteCard data={payload({ customerName: 'Example', customerFirstName: null })} mode="live" />);
     expect(screen.getByText('Hey there,')).toBeInTheDocument();

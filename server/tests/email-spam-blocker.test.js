@@ -393,3 +393,123 @@ describe('manualBlockSender — the ONE operator-confirmed manual blocker (GH r9
     expect(res.warning).toMatch(/Gmail auto-trash filter could NOT be created/);
   });
 });
+
+describe('government senders are never auto-blocked (outside review 2026-10-25)', () => {
+  const gmailClient = require('../services/email/gmail-client');
+  const { blockSpamSender, reconcileStaleAutoBlocks } = require('../services/email/spam-blocker');
+  // Not a customer and not a lead: only the government domain protects these senders.
+  const noIdentity = (table) => {
+    if (table === 'customers') {
+      const chain = { whereNull: jest.fn(() => chain), first: jest.fn(async () => null) };
+      return { whereRaw: jest.fn(() => chain) };
+    }
+    if (table === 'leads') {
+      const chain = { whereNull: jest.fn(() => chain), where: jest.fn(() => chain), first: jest.fn(async () => null) };
+      return { whereRaw: jest.fn(() => chain) };
+    }
+    if (table === 'emails') {
+      const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain), select: jest.fn(async () => []) };
+      return chain;
+    }
+    throw new Error(`unexpected table ${table}`);
+  };
+
+  beforeEach(() => {
+    db.mockReset();
+    jest.clearAllMocks();
+  });
+
+  test('blockSpamSender returns before any lookup or Gmail filter for a government sender', async () => {
+    await blockSpamSender({ id: 1, from_address: 'licensing@fdacs.gov' });
+    await blockSpamSender({ id: 2, from_address: 'News@FreshFromFlorida.com' });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a stale AUTOMATIC block on a government sender is removed, not enforced', async () => {
+    const del = jest.fn(async () => 1);
+    db.mockImplementation((table) => {
+      if (table === 'blocked_email_senders') {
+        const chain = {
+          where: jest.fn(() => chain),
+          whereRaw: jest.fn(() => chain),
+          whereNull: jest.fn(() => chain),
+          first: jest.fn(async () => ({ id: 'g1', reason: 'spam_auto', email_address: 'licensing@fdacs.gov', gmail_filter_id: null, created_at: '2026-07-01T00:00:00Z' })),
+          del,
+        };
+        return chain;
+      }
+      return noIdentity(table);
+    });
+    gmailClient.getMessageLabels.mockResolvedValue(['TRASH']);
+
+    await expect(isBlocked('licensing@fdacs.gov')).resolves.toBe(false);
+    expect(del).toHaveBeenCalled();
+  });
+
+  test('a MANUAL admin block on a government sender still stands', async () => {
+    const increment = jest.fn(async () => {});
+    db.mockImplementation((table) => {
+      if (table === 'blocked_email_senders') {
+        return {
+          where: jest.fn((arg) => {
+            if (arg && arg.id === 'g2') return { increment };
+            return { first: jest.fn(async () => ({ id: 'g2', reason: 'manual', email_address: 'licensing@fdacs.gov' })) };
+          }),
+        };
+      }
+      return noIdentity(table);
+    });
+
+    await expect(isBlocked('licensing@fdacs.gov')).resolves.toBe(true);
+    expect(increment).toHaveBeenCalledWith('blocked_count', 1);
+  });
+
+  test('a MANUAL admin block of a whole government domain still stands (Codex P2, #6668)', async () => {
+    const increment = jest.fn(async () => {});
+    db.mockImplementation((table) => {
+      if (table === 'blocked_email_senders') {
+        const chain = {
+          where: jest.fn((arg) => {
+            if (arg && arg.id === 'gd1') return { increment };
+            if (arg === 'email_address') chain.scope = 'exact';
+            if (arg === 'domain') chain.scope = 'domain';
+            return chain;
+          }),
+          whereNull: jest.fn(() => chain),
+          first: jest.fn(async () => (chain.scope === 'domain'
+            ? { id: 'gd1', reason: 'manual', domain: 'fdacs.gov', email_address: null }
+            : null)),
+        };
+        return chain;
+      }
+      return noIdentity(table);
+    });
+
+    await expect(isBlocked('licensing@fdacs.gov')).resolves.toBe(true);
+    expect(increment).toHaveBeenCalledWith('blocked_count', 1);
+  });
+
+  test('reconcileStaleAutoBlocks unwinds an automatic block on a government sender', async () => {
+    const del = jest.fn(async () => 1);
+    db.mockImplementation((table) => {
+      if (table === 'blocked_email_senders') {
+        const chain = {
+          where: jest.fn(() => chain),
+          whereRaw: jest.fn(() => chain),
+          select: jest.fn(async () => [
+            { id: 'g1', email_address: 'licensing@fdacs.gov' },
+            { id: 'b2', email_address: 'stranger@junk.example' },
+          ]),
+          first: jest.fn(async () => ({ id: 'g1', reason: 'spam_auto', email_address: 'licensing@fdacs.gov', gmail_filter_id: null })),
+          del,
+        };
+        return chain;
+      }
+      return noIdentity(table);
+    });
+
+    const counts = await reconcileStaleAutoBlocks();
+    expect(counts).toEqual({ reconciled: 1, failed: 0 });
+    expect(del).toHaveBeenCalledTimes(1);
+  });
+});

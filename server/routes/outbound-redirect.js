@@ -78,25 +78,50 @@ router.get('/:code', async (req, res) => {
 });
 
 function notFoundPage() {
-  return messagePage('Link not found', 'This link doesn\'t match anything in our system. If you got it from a Waves email, reach out to us at <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we\'ll resend it.');
+  return messagePage({
+    title: 'Link not found',
+    heading: 'Link not found',
+    body: "This link doesn't match anything in our system. If you got it from a Waves email, reach out and we'll resend it.",
+    ctas: SUPPORT_CTAS,
+  });
 }
 
 function genericErrorPage() {
-  return messagePage('Something went wrong', 'Try again in a minute, or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a>.');
+  return messagePage({
+    title: 'Something went wrong',
+    heading: 'Something went wrong',
+    body: 'Try again in a minute, or email us.',
+    ctas: SUPPORT_CTAS,
+  });
 }
 
-function messagePage(heading, body) {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${heading} — Waves</title>
+const SUPPORT_CTAS = [
+  { href: 'mailto:contact@wavespestcontrol.com', label: 'Email contact@wavespestcontrol.com' },
+];
+
+// Glass UI (owner 2026-10-24): same frosted-card-over-scene treatment the
+// public newsletter pages and /l/ short links use (public-shortlinks.js), with the support
+// phone/email as gold pill CTAs (buttons.css .btn-primary customer surface:
+// #FFD700 on #04395E ink, 999px pill, 48px tap target).
+function messagePage({ title, heading, body, ctas = [] }) {
+  const buttons = ctas
+    .map((c) => `<a class="btn" href="${c.href}">${c.label}</a>`)
+    .join('');
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title} — Waves</title>
   <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
   <style>
     *{box-sizing:border-box}
-    body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#FAF8F3;color:#1B2C5B;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px 20px}
-    .box{max-width:520px;background:#fff;border:1px solid #E7E2D7;border-radius:8px;padding:36px;text-align:center}
-    h1{font-family:'Source Serif 4',Georgia,serif;font-size:32px;line-height:1.12;font-weight:500;margin:0 0 12px;color:#1B2C5B;letter-spacing:0}
-    p{font-size:15px;line-height:1.6;color:#3F4A65;margin:0}
-    a{color:#1B2C5B;font-weight:700}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text',Inter,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;color:#04395E;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px 20px;background:#EDF4FA;background-image:radial-gradient(1200px 800px at -8% 12%,rgba(10,126,194,.22),transparent 60%),radial-gradient(1000px 700px at 108% 0%,rgba(56,170,225,.16),transparent 60%),radial-gradient(900px 700px at 96% 90%,rgba(6,90,140,.13),transparent 62%),radial-gradient(800px 600px at -6% 100%,rgba(240,165,0,.15),transparent 58%),linear-gradient(180deg,#EAF3FB 0%,#F6FAFE 48%,#EAF2F9 100%);background-attachment:fixed}
+    .box{width:100%;max-width:520px;background:rgba(255,255,255,.55);background-image:linear-gradient(135deg,rgba(255,255,255,.3),rgba(255,255,255,.08));backdrop-filter:blur(20px) saturate(185%);-webkit-backdrop-filter:blur(20px) saturate(185%);border:1px solid rgba(255,255,255,.62);border-radius:20px;padding:36px 28px;text-align:center;box-shadow:0 28px 90px rgba(4,57,94,.18),0 5px 18px rgba(4,57,94,.07),inset 0 1px 0 rgba(255,255,255,.52)}
+    h1{font-size:32px;line-height:1.08;font-weight:700;letter-spacing:-.03em;margin:0 0 12px;color:#04395E}
+    p{font-size:16px;line-height:1.6;color:#2A3F5F;margin:0}
+    .ctas{display:flex;flex-direction:column;gap:12px;margin-top:24px}
+    .btn{display:flex;align-items:center;justify-content:center;min-height:48px;padding:14px 24px;border-radius:999px;background:#FFD700;color:#04395E;font-size:15px;font-weight:700;line-height:1.2;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.15);overflow-wrap:anywhere;transition:background .15s}
+    .btn:hover{background:#FFF176}
+    .btn:focus-visible{outline:2px solid #04395E;outline-offset:3px}
+    @media (prefers-reduced-transparency:reduce){.box{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
   </style></head>
-  <body><main class="box"><h1>${heading}</h1><p>${body}</p></main></body></html>`;
+  <body><main class="box"><h1>${heading}</h1><p>${body}</p>${buttons ? `<div class="ctas">${buttons}</div>` : ''}</main></body></html>`;
 }
 
 module.exports = router;

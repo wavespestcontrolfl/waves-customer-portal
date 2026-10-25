@@ -504,6 +504,8 @@ app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
 // Commercial proposal signing (GATE_COMMERCIAL_PROPOSAL_SIGN): same reason. Privacy headers and the dark gate's generic 404 land before the global limiter.
 app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
+// Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): same reason, same shape.
+app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 
 app.use('/api/', limiter);
 
@@ -753,6 +755,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/schedule/:serviceId/property-areas', require('./routes/admin-property-service-areas').serviceRouter);
 app.use('/api/admin/customers/:customerId/properties/:propertyId/areas', require('./routes/admin-property-service-areas').propertyRouter);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
+app.use('/api/admin/customers/:customerId/consumer-notices', require('./routes/admin-consumer-notices'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
 app.use('/api/admin/neighborhood-access', require('./routes/admin-neighborhood-access'));
@@ -1775,13 +1778,13 @@ function shutdown(signal) {
   // A call-processing pass in flight (transcription + extraction run for
   // minutes) dies with this process. Stamp its row so the next pod reclaims
   // it after 2 quiet minutes instead of 10; the pass keeps its claim until the
-  // kill, so nothing overlaps it. Gated (GATE_CALL_PROC_SHUTDOWN_RELEASE);
-  // fail-soft; one bounded UPDATE per pass; done before the pool closes.
+  // kill, so nothing overlaps it. Fail-soft; one bounded UPDATE per pass;
+  // done before the pool closes.
   const callPassesMarked = (async () => {
     try {
       const processor = require('./services/call-recording-processor');
       const r = await processor.markInFlightForShutdown({ deadlineMs: 5000 });
-      if (r.inFlight) logger.info(`[shutdown] call passes: ${r.inFlight} in flight, ${r.stamped} stamped, ${r.failed} not stamped, gate ${r.enabled ? 'on' : 'off'}`);
+      if (r.inFlight) logger.info(`[shutdown] call passes: ${r.inFlight} in flight, ${r.stamped} stamped, ${r.failed} not stamped`);
     } catch (err) {
       logger.warn(`[shutdown] call pass stamp failed: ${err.message}`);
     }

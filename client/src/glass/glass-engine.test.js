@@ -65,6 +65,21 @@ describe('attachGlassPointerFx', () => {
     expect(document.documentElement.style.getPropertyValue('--my')).toBe('');
     cleanup();
   });
+
+  it('stops pointer sheen and orb movement when reduced motion changes while mounted', () => {
+    const preference = window.matchMedia();
+    const { orbs, cleanup } = applyGlassScene();
+    const detach = attachGlassPointerFx(document.documentElement, orbs, false);
+    const onChange = preference.addEventListener.mock.calls.find(([event]) => event === 'change')[1];
+    orbs.querySelector('.glass-orb').style.transform = 'translateX(20px)';
+    document.documentElement.style.setProperty('--mx', '40%');
+    preference.matches = true;
+    onChange();
+    expect(orbs.querySelector('.glass-orb').style.transform).toBe('');
+    expect(document.documentElement.style.getPropertyValue('--mx')).toBe('');
+    detach();
+    cleanup();
+  });
 });
 
 describe('fireGlassConfetti', () => {

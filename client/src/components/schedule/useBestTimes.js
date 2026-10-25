@@ -1,33 +1,20 @@
-// Advisory best-times hook for the admin date/time pickers — the
-// drive-detour sibling of useSlotConflicts (same 300ms debounce, same
-// abort-stale, same fail-open contract: any error just hides the hint).
-// Backed by POST /admin/schedule/find-time with hint:true, which is gated
-// server-side (GATE_BEST_TIME_HINTS) — while the gate is off the endpoint
-// answers gated:true and this hook reports nothing, so every picker
-// renders exactly as today. Warn-only: picking a chip only fills the
-// date/time fields; consumers never disable a save button on this data.
+// Availability hook for the admin date/time pickers — the drive-detour
+// sibling of useSlotConflicts (same 300ms debounce, same abort-stale, same
+// fail-open contract: any error just hides the strip). Backed by POST
+// /admin/schedule/find-time with hint:true and summary:true, which is gated
+// server-side (GATE_BEST_TIME_HINTS) — while that gate is off the endpoint
+// answers gated:true and this hook reports nothing, so every picker renders
+// without the strip. Warn-only: picking a chip only fills the date/time
+// fields; consumers never disable a save button on this data.
 //
-// Three answers, two searches (owner spec 2026-09-07):
-//   picked      — what the hour already in the picker costs on `date`: the
-//                 drive INTO the stop from the previous anchor (home base
-//                 for the first stop) and what it adds to the route.
-//   bestTimes   — the cheapest hours on `date` (first = best that day).
-//   bestInRange — the single cheapest date+hour from `rangeFrom` through
-//                 RANGE_DAYS days out (the engine's sooner-day preference
-//                 applies). Only searched when the consumer passes rangeFrom.
+// ONE search over the days around `date` (SUMMARY_BACK back, never before
+// today, through SUMMARY_FORWARD forward) answers `availability` — every hour
+// that fits on each of those days plus the picked hour's verdict with its
+// reason. A date before today has no days around it to offer, so nothing is
+// searched for it. Also answered:
 //   pickedByTech — with `compareTechsAt` (an HH:MM, all-tech searches only):
 //                 that hour on every technician's route that fits it, least
-//                 added drive first (owner 2026-10-05). Replaces `picked`.
-//
-// Summary mode (`summary: true`, the availability strip): ONE search over
-// the days around `date` (SUMMARY_BACK back, never before today, through
-// SUMMARY_FORWARD forward) answers `availability` — every hour that fits on
-// each of those days plus the picked hour's verdict with its reason — and
-// the three-line answers above stay empty. The server only answers it
-// behind GATE_RESCHEDULE_AVAILABILITY; a response with no `summary` (gate
-// off, or a server that predates it) falls back to the two searches above
-// and is not asked again for SUMMARY_RETRY_MS, so a dark gate costs one
-// extra request per ten minutes, not one per keystroke.
+//                 added drive first (owner 2026-10-05).
 
 import { useEffect, useMemo, useState } from 'react';
 import { etDateString } from '../../lib/timezone';
@@ -42,20 +29,17 @@ function authHeaders() {
 }
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
-// The hint's third line says "next 3 days" — keep the two in step.
-const RANGE_DAYS = 3;
 // Availability strip window around the picked date (owner default 2026-10-02).
 const SUMMARY_BACK = 3;
 const SUMMARY_FORWARD = 7;
 // The best-times week row: today and the six days after it.
 const WEEK_DAYS = 7;
-const SUMMARY_RETRY_MS = 10 * 60 * 1000;
-let summaryUnavailableUntil = 0;
-// The parent kill switch (GATE_BEST_TIME_HINTS off answers `gated: true`):
-// every search would come back empty, so none is sent for the same window.
+const HINTS_GATED_RETRY_MS = 10 * 60 * 1000;
+// The kill switch (GATE_BEST_TIME_HINTS off answers `gated: true`): every
+// search would come back empty, so none is sent for the same window.
 let hintsGatedUntil = 0;
-// Test seam: forget that the server declined a summary or gated the hint.
-export function resetSummaryAvailability() { summaryUnavailableUntil = 0; hintsGatedUntil = 0; }
+// Test seam: forget that the server gated the hint.
+export function resetHintsGated() { hintsGatedUntil = 0; }
 
 // What a search can stand on: a customer, a visit, or (addressOnly) a bare address.
 function hasSearchSubject({ customerId, serviceId, addressOnly, address, lat, lng }) {
@@ -66,28 +50,6 @@ function addDays(ymd, days) {
   const d = new Date(`${ymd}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
-}
-
-function mapSlot(s, scopedToTech) {
-  return {
-    date: s.date,
-    start: s.start_time,
-    end: s.end_time,
-    detourMinutes: s.detour_minutes,
-    // Arrival-window slots score the whole route and carry no single
-    // insertion leg — driveIn stays null and the label shows the detour only.
-    driveInMinutes: s.drive_in_minutes ?? null,
-    // A capacity slot has no insertion; it carries its own origin labels.
-    fromHomeBase: s.insertion ? !s.insertion.after_stop_id : (s.from_home_base ?? null),
-    fromName: s.insertion?.after_name || s.from_name || null,
-    stopsThatDay: s.stops_that_day,
-    estimatedArrival: s.estimated_arrival || null,
-    arrivalWindows: s.route_mode === 'arrival_windows',
-    // Id always travels — a consumer that can assign (create modal
-    // auto mode) must adopt the tech the detour was scored for.
-    technicianId: s.technician?.id || null,
-    technicianName: scopedToTech ? null : (s.technician?.name || null),
-  };
 }
 
 // The summary's rows, in the strip's own shape. `fits` on the verdict stays
@@ -112,8 +74,6 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
       week: (data.summary.best.week || []).map((h) => summaryHour(h, scopedToTech)),
       weekCovered: data.summary.best.week_covered !== false,
     } : null,
-    // GATE_BEST_TIMES_CHIP_STOP_NAMES: the chips name the stop they follow.
-    chipStopNames: data.summary.chip_stop_names === true,
     picked: p ? {
       start: p.start,
       fits: p.fits === true ? true : (p.fits === false ? false : null),
@@ -158,33 +118,6 @@ export function normalizePickedByTech(rows) {
     fromHomeBase: r.from_home_base ?? null,
     fromName: r.from_name || null,
   }));
-}
-
-function normalizePicked(p, scopedToTech) {
-  if (!p) return null;
-  return {
-    start: p.start,
-    fits: !!p.fits,
-    detourMinutes: p.detour_minutes ?? null,
-    driveInMinutes: p.drive_in_minutes ?? null,
-    fromHomeBase: p.from_home_base ?? null,
-    fromName: p.from_name || null,
-    technicianId: p.technician?.id || null,
-    technicianName: scopedToTech ? null : (p.technician?.name || null),
-  };
-}
-
-// Unscoped searches rank technician/time PAIRS, so two techs can surface
-// the same hour — keep only the best-ranked slot per start (the engine
-// sorts ascending) and carry whose route the detour belongs to so the chip
-// can say so. Scoped searches have one tech; no name needed.
-function normalizeDay(day, scopedToTech) {
-  if (!day) return { bestTimes: [], picked: null };
-  const seen = new Set();
-  const bestTimes = day.slots
-    .filter((s) => { if (seen.has(s.start_time)) return false; seen.add(s.start_time); return true; })
-    .map((s) => mapSlot(s, scopedToTech));
-  return { bestTimes, picked: normalizePicked(day.picked, scopedToTech) };
 }
 
 // The summary search: the days around `date` (SUMMARY_BACK back, never
@@ -257,22 +190,6 @@ function hintRequestBody({
   };
 }
 
-// The plain three-line hint (no summary): the picked day's best hours and
-// verdict, and the single best date + hour from `rangeKey` when asked.
-async function searchPlainHint(search, { date, rangeKey, pickedArgs, scopedToTech }) {
-  const [day, range] = await Promise.all([
-    search({ dateFrom: date, dateTo: date, topN: 3, ...pickedArgs }),
-    rangeKey ? search({ dateFrom: rangeKey, dateTo: addDays(rangeKey, RANGE_DAYS), topN: 1 }) : Promise.resolve(null),
-  ]);
-  const normalized = normalizeDay(day, scopedToTech);
-  return {
-    bestTimes: normalized.bestTimes,
-    picked: normalized.picked,
-    pickedByTech: normalizePickedByTech(day?.pickedByTech),
-    bestInRange: range?.slots?.length ? mapSlot(range.slots[0], scopedToTech) : null,
-  };
-}
-
 // `address` / `lat` / `lng` pin the search to a specific service address (the
 // create modal's property picker); the server prefers coords, then geocodes
 // the address, and only falls back to the customer's primary when both are
@@ -280,7 +197,7 @@ async function searchPlainHint(search, { date, rangeKey, pickedArgs, scopedToTec
 export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
-  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false, compareTechsAt, serviceTypes, serviceKeys,
+  pickedStart, pickedEnd, sameDayFloorMin, durationEdit = false, compareTechsAt, serviceTypes, serviceKeys,
   // The two best-times rows (New Appointment, Quick Move, Edit and the
   // reschedule dialogs): asked for only by a consumer that shows them (the
   // server skips the rain and road-time work otherwise).
@@ -292,21 +209,18 @@ export function useBestTimes({
   // may stand on `address` / `lat` / `lng` alone, with no customer or visit.
   addressOnly = false,
 }) {
-  const [bestTimes, setBestTimes] = useState([]);
-  const [picked, setPicked] = useState(null);
   const [pickedByTech, setPickedByTech] = useState([]);
-  const [bestInRange, setBestInRange] = useState(null);
   // The last summary answer, with the request it answered: { data, requestKey, subjectKey }.
   const [answer, setAnswer] = useState(null);
   const setAvailability = (data, keys) => setAnswer(data ? { data, ...keys } : null);
   const [checking, setChecking] = useState(false);
-  // The server declined to answer (hints or the summary are off), as opposed
-  // to a search that failed or found nothing.
+  // The server declined to answer (hints are off), as opposed to a search
+  // that failed or found nothing.
   const [gated, setGated] = useState(false);
   // Stable dep for the (usually tiny) id array.
   const excludeKey = (excludeServiceIds || []).map(String).join(',');
   // Only a complete value is worth scoring; a half-typed field would 400
-  // and (fail-open) blank the whole hint. Stored windows arrive as
+  // and (fail-open) blank the whole strip. Stored windows arrive as
   // PostgreSQL time values ('09:00:00') on the edit form's initial state —
   // trim to HH:MM so the current hour is scored before the operator touches
   // the field.
@@ -314,7 +228,6 @@ export function useBestTimes({
   // The edit form's window end travels with the start so the picked hour
   // is scored over the whole window, like the live conflict check.
   const pickedEndKey = /^\d{2}:\d{2}(:\d{2})?$/.test(String(pickedEnd || '')) ? String(pickedEnd).slice(0, 5) : '';
-  const rangeKey = YMD.test(String(rangeFrom || '')) ? String(rangeFrom) : '';
   // The hour to price on every route: all-tech searches with no single
   // picked hour of their own.
   // The booking's services, so the compared list leaves out a tech who
@@ -335,7 +248,7 @@ export function useBestTimes({
   const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
   const requestKey = [
     enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
-    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows, addressOnly,
+    address, lat, lng, propertyId, pickedKey, pickedEndKey, sameDayFloorMin, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows, addressOnly,
   ].map((v) => v ?? '').join('|');
   const availability = useMemo(() => {
     if (!answer || !enabled) return null;
@@ -343,20 +256,17 @@ export function useBestTimes({
     return answer.subjectKey === subjectKey ? { ...answer.data, stale: true } : null;
   }, [answer, enabled, requestKey, subjectKey]);
   useEffect(() => {
-    setBestTimes([]);
-    setPicked(null);
     setPickedByTech([]);
-    setBestInRange(null);
     const hasSubject = hasSearchSubject({ customerId, serviceId, addressOnly, address, lat, lng });
-    const gatedNow = () => Date.now() < hintsGatedUntil || (summary && Date.now() < summaryUnavailableUntil);
-    if (!enabled || !hasSubject || !YMD.test(String(date || '')) || Date.now() < hintsGatedUntil) {
+    const hintsGated = () => Date.now() < hintsGatedUntil;
+    // A summary starts today at the earliest (the engine never searches
+    // before today), so a past date has no days around it to offer.
+    if (!enabled || !hasSubject || !YMD.test(String(date || '')) || date < etDateString() || hintsGated()) {
       setAvailability(null);
       setChecking(false);
-      setGated(enabled && hasSubject && Date.now() < hintsGatedUntil);
+      setGated(enabled && hasSubject && hintsGated());
       return undefined;
     }
-    // A held answer survives only while a summary is about to replace it.
-    if (!(summary && date >= etDateString() && Date.now() >= summaryUnavailableUntil)) setAvailability(null);
     const controller = new AbortController();
     const pickedArgs = compareKey
       ? { pickedStart: compareKey, compareTechs: true, serviceTypes: serviceTypesKey ? serviceTypesKey.split('\n') : undefined }
@@ -377,53 +287,33 @@ export function useBestTimes({
           }),
         });
         const data = await res.json().catch(() => null);
-        if (!controller.signal.aborted && res.ok && data?.gated) hintsGatedUntil = Date.now() + SUMMARY_RETRY_MS;
+        if (!controller.signal.aborted && res.ok && data?.gated) hintsGatedUntil = Date.now() + HINTS_GATED_RETRY_MS;
         if (controller.signal.aborted || !res.ok || data?.gated || !Array.isArray(data?.slots)) return null;
         return data;
       };
       try {
         const scopedToTech = !!technicianId;
         const today = etDateString();
-        // A past date has no days around it to offer (the engine never
-        // searches before today) — the plain hint handles it as it always has.
-        if (summary && date >= today && Date.now() >= summaryUnavailableUntil) {
-          const rainArgs = bestRows && serviceTypesKey ? {
-            serviceTypes: serviceTypesKey.split('\n'),
-            serviceKeys: serviceKeysKey.split('\n').some(Boolean) ? serviceKeysKey.split('\n') : undefined,
-          } : {};
-          const data = await searchSummary(search, { date, today, pickedArgs, bestRows, rainArgs });
-          if (controller.signal.aborted) return;
-          const summarized = normalizeAvailability(data, { date, scopedToTech });
-          if (summarized) {
-            setPickedByTech(normalizePickedByTech(data?.pickedByTech));
-            setAvailability(summarized, { requestKey, subjectKey });
-            setGated(false);
-            setChecking(false);
-            return;
-          }
-          // Answered, but with no summary: the gate is off. A failed
-          // request (null) says nothing about the gate — ask again next time.
-          if (data) summaryUnavailableUntil = Date.now() + SUMMARY_RETRY_MS;
-          // No summary this time: a held (stale) one must not outlive it.
-          setAvailability(null);
-          // Hints gated altogether: the fallbacks would be gated too.
-          if (Date.now() < hintsGatedUntil) { setGated(true); setChecking(false); return; }
-        }
-        const plain = await searchPlainHint(search, { date, rangeKey, pickedArgs, scopedToTech });
+        const rainArgs = bestRows && serviceTypesKey ? {
+          serviceTypes: serviceTypesKey.split('\n'),
+          serviceKeys: serviceKeysKey.split('\n').some(Boolean) ? serviceKeysKey.split('\n') : undefined,
+        } : {};
+        const data = await searchSummary(search, { date, today, pickedArgs, bestRows, rainArgs });
         if (controller.signal.aborted) return;
-        setBestTimes(plain.bestTimes);
-        setPicked(plain.picked);
-        setPickedByTech(plain.pickedByTech);
-        setBestInRange(plain.bestInRange);
-        setGated(gatedNow());
+        const summarized = normalizeAvailability(data, { date, scopedToTech });
+        if (summarized) setPickedByTech(normalizePickedByTech(data?.pickedByTech));
+        // A search that failed or answered with no summary clears the strip:
+        // a held (stale) answer must not outlive it.
+        setAvailability(summarized, { requestKey, subjectKey });
+        setGated(hintsGated());
       } catch {
-        // Advisory only — a failed search just shows no hint (and drops a
+        // Advisory only — a failed search just shows no strip (and drops a
         // held summary, unless a newer pick already owns the state).
         if (!controller.signal.aborted) setAvailability(null);
       }
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows, addressOnly]);
-  return { bestTimes, picked, pickedByTech, bestInRange, availability, checking, gated };
+  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, sameDayFloorMin, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows, addressOnly]);
+  return { pickedByTech, availability, checking, gated };
 }

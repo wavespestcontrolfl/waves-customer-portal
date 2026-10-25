@@ -8355,5 +8355,8 @@ ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 
 // The review page reads the same delivered-ask evidence the sender trusts.
 ReviewService.reviewAskDeliveryEvidenceFor = reviewAskDeliveryEvidenceFor;
+// Shared with rodent-trap-visits.js: the booking notice lists one premise's
+// trapping visits with the same premise rules.
+ReviewService.trappingPremiseMatcher = trappingPremiseMatcher;
 
 module.exports = ReviewService;

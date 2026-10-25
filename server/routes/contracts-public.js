@@ -19,6 +19,14 @@ const { ANNUAL_TEMPLATE_KEY: ANNUAL_TERMITE_TEMPLATE_KEY } = require('../service
 // does not load the service for every other contract).
 const COMMERCIAL_AGREEMENT_TEMPLATE_KEY = 'service_agreement.commercial_pest';
 
+// The public payload of a contract. A consumer notice issued from the estimate page
+// (services/estimate-consumer-notice.js marks its snapshot) also carries fromEstimate: true, so the
+// signing page can offer "Back to your estimate". The estimate id and token never leave the server.
+function publicContract(row) {
+  const fromEstimate = row.document_variables_snapshot?.estimate?.source === 'estimate_consumer_notice';
+  return { ...serializeContract(row, { includeAudit: false }), ...(fromEstimate ? { fromEstimate: true } : {}) };
+}
+
 const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -120,7 +128,7 @@ router.get('/:token', async (req, res, next) => {
       return generateContractPDF(latest, customer || {}, res, { signed: latest.status === 'signed' });
     }
 
-    res.json({ contract: serializeContract(latest, { includeAudit: false }) });
+    res.json({ contract: publicContract(latest) });
   } catch (err) { next(err); }
 });
 
@@ -307,7 +315,7 @@ router.post('/:token/sign', async (req, res, next) => {
       }
 
       const updated = await contractQuery(trx).where('cc.id', contract.id).first();
-      response = { status: 200, body: { contract: serializeContract(updated, { includeAudit: false }), signed: true } };
+      response = { status: 200, body: { contract: publicContract(updated), signed: true } };
     });
 
     if (!response) {

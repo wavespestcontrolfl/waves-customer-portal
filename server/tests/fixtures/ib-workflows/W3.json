@@ -224,18 +224,17 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "customers[cust-murphy-a].phone = +19415550173"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
+          "customers[cust-murphy-a].phone",
           "customers[cust-murphy-b]",
           "customers[cust-murphy-a].email",
           "customers[cust-murphy-a].address_line1"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Direct internal edit, receipt shown."
+        "card": true,
+        "say": "A card shows the new number; nothing changes until confirmed (the phone is the portal sign-in key)."
       },
       "call": {
         "tool": "update_customer",
@@ -262,7 +261,37 @@
           "page": "/admin/customers (customer detail) reload"
         }
       ],
-      "corrections": [],
+      "corrections": [
+        {
+          "request": "Yes, confirm it.",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "customers[cust-murphy-a].phone = +19415550173"
+            ],
+            "unchanged": [
+              "customers[cust-murphy-b]",
+              "customers[cust-murphy-a].email",
+              "customers[cust-murphy-a].address_line1"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "After confirm: the phone changes; receipt shown."
+          },
+          "call": {
+            "tool": "update_customer",
+            "input": {
+              "customer_id": "cust-murphy-a",
+              "updates": {
+                "phone": "+19415550173"
+              }
+            }
+          },
+          "forbidden": [
+            "a change to the other Murphy"
+          ]
+        }
+      ],
       "tags": [],
       "covers": [],
       "negative": false
@@ -664,17 +693,16 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "partial",
-        "changes": [
-          "customers[cust-murphy-a].phone = +19415550172"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
+          "customers[cust-murphy-a].phone",
           "customers[cust-murphy-a].email",
           "customers[cust-murphy-b]"
         ],
         "sends": 0,
         "card": true,
-        "say": "Split execution: the phone change commits directly with a receipt, and the email change stops at a confirmation card that names the opt-in email. The bar reports both halves; the email is unchanged until confirmed."
+        "say": "Both changes stop at a confirmation card: the new number (the phone is the portal sign-in key) and the email, whose card names the opt-in email. Nothing changes until confirmed, and the bar does not report either change as done."
       },
       "call": [
         {
@@ -781,16 +809,15 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "customers[cust-murphy-b].phone = +19415550199"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
-          "customers[cust-murphy-a]"
+          "customers[cust-murphy-a]",
+          "customers[cust-murphy-b].phone"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Edits the viewed customer first."
+        "card": true,
+        "say": "A card for the viewed customer first; nothing changes until confirmed."
       },
       "call": {
         "tool": "update_customer",
@@ -821,16 +848,16 @@
         {
           "request": "no, the other Murphy",
           "expected": {
-            "outcome": "completed",
-            "changes": [
-              "customers[cust-murphy-a].phone = +19415550199"
-            ],
+            "outcome": "awaiting_operator",
+            "changes": [],
             "unchanged": [
-              "customers[cust-murphy-a].email"
+              "customers[cust-murphy-a].phone",
+              "customers[cust-murphy-a].email",
+              "customers[cust-murphy-b].phone"
             ],
             "sends": 0,
-            "card": false,
-            "say": "New operation and receipt for cust-murphy-a; the first change stays on cust-murphy-b and is reported, not claimed undone."
+            "card": true,
+            "say": "A new card for cust-murphy-a; the first card was never confirmed, so cust-murphy-b is unchanged."
           },
           "call": {
             "tool": "update_customer",
@@ -842,6 +869,34 @@
             }
           },
           "forbidden": []
+        },
+        {
+          "request": "That one, go ahead and save it.",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "customers[cust-murphy-a].phone = +19415550199"
+            ],
+            "unchanged": [
+              "customers[cust-murphy-a].email",
+              "customers[cust-murphy-b].phone"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "After confirm: cust-murphy-a gets the new number; cust-murphy-b was never changed."
+          },
+          "call": {
+            "tool": "update_customer",
+            "input": {
+              "customer_id": "cust-murphy-a",
+              "updates": {
+                "phone": "+19415550199"
+              }
+            }
+          },
+          "forbidden": [
+            "a change to cust-murphy-b"
+          ]
         }
       ],
       "tags": [],
@@ -1171,16 +1226,15 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "completed",
-        "changes": [
-          "customers[cust-murphy-a].phone = +19415550140"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
+          "customers[cust-murphy-a].phone",
           "customers[cust-murphy-b]"
         ],
         "sends": 0,
-        "card": false,
-        "say": "Reports unknown readback, then finds the receipt on resume; does not write a second time."
+        "card": true,
+        "say": "A card shows the new number; nothing changes until confirmed."
       },
       "call": {
         "tool": "update_customer",
@@ -1207,7 +1261,33 @@
           "page": "/admin/customers (customer detail) reload"
         }
       ],
-      "corrections": [],
+      "corrections": [
+        {
+          "request": "Looks right, save the new number.",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "customers[cust-murphy-a].phone = +19415550140"
+            ],
+            "unchanged": [
+              "customers[cust-murphy-b]"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "After confirm: reports unknown readback, then finds the receipt on resume; does not write a second time."
+          },
+          "call": {
+            "tool": "update_customer",
+            "input": {
+              "customer_id": "cust-murphy-a",
+              "updates": {
+                "phone": "+19415550140"
+              }
+            }
+          },
+          "forbidden": []
+        }
+      ],
       "tags": [
         "timeout_unknown",
         "second_step_failure"

@@ -111,6 +111,7 @@ function emptyContext() {
     noProgram: false,
     grassType: null,
     grassTypeLabel: null,
+    grassTypeSource: null,
     trackKey: null,
     sunExposure: null,
     irrigationSystem: null,
@@ -146,6 +147,10 @@ async function loadCustomerGrassContext(customerId, knex = db, { strict = false 
     noProgram: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, customer?.lawn_type),
     grassType,
     grassTypeLabel: grassTypeLabel(grassType),
+    // Who set it (GRASS_SOURCE, or null when the profile predates the
+    // column); 'customer_record' when the grass came from customers.lawn_type
+    // because there is no profile grass.
+    grassTypeSource: profile?.grass_type ? (profile.grass_type_source || null) : (grassType ? 'customer_record' : null),
     trackKey: resolveTrackKey(profile?.track_key, grassType),
     sunExposure: profile?.sun_exposure || null,
     irrigationSystem: profile?.irrigation_type || null,

@@ -303,7 +303,8 @@ describe('tipsForVisit', () => {
     const { line, groups } = tipsForVisit({ serviceLine, date: '2026-08-15' });
     const all = groups.flatMap((group) => group.tips);
     expect(line).toBe(serviceLine);
-    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine) && !tip.services).map((tip) => tip.id).sort());
+    // (a tip written for tips with facts is listed only behind its gate)
+    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine) && !tip.services && !tip.sourcedOnly).map((tip) => tip.id).sort());
     expect(groups.every((group) => group.tips.length > 0)).toBe(true);
   });
 
@@ -407,7 +408,7 @@ describe('tipsForVisit', () => {
 
   test('every service tip names catalog-shaped service keys', () => {
     const withServices = TIPS.filter((tip) => tip.services);
-    expect(withServices).toHaveLength(88);
+    expect(withServices).toHaveLength(91);
     for (const tip of withServices) {
       expect(tip.services.length).toBeGreaterThan(0);
       expect(new Set(tip.services).size).toBe(tip.services.length);
@@ -605,8 +606,10 @@ describe('open search and pest tags (owner 2026-10-09)', () => {
       const visit = tipsForVisit({ serviceLine, serviceKey, date: '2026-10-09' });
       const listed = visit.groups.flatMap((group) => group.tips).map((tip) => tip.id);
       const more = visit.more.map((tip) => tip.id);
-      expect([...listed, ...more].sort()).toEqual(TIPS.map((tip) => tip.id).sort());
-      expect(new Set([...listed, ...more]).size).toBe(TIPS.length);
+      // (a tip written for tips with facts exists only behind its gate)
+      const offered = TIPS.filter((tip) => !tip.sourcedOnly);
+      expect([...listed, ...more].sort()).toEqual(offered.map((tip) => tip.id).sort());
+      expect(new Set([...listed, ...more]).size).toBe(offered.length);
     }
   });
 
@@ -652,3 +655,329 @@ describe('open search and pest tags (owner 2026-10-09)', () => {
     }
   });
 });
+
+describe('tips with facts (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  const { FACTS } = require('../services/email-division/fact-register-data');
+  const { CITATION_HOSTS, citationUrlAllowed, printableCitations } = require('../services/service-report/tip-library');
+  const { etDateString } = require('../utils/datetime-et');
+  const factBySlug = new Map(FACTS.map((fact) => [fact.slug, fact]));
+  const sourcedTips = TIPS.filter((tip) => tip.sources);
+  const spoken = (tip) => tip.sourcedCopy || tip.copy;
+  // A figure is digits (with a decimal or thousands separator) or a vulgar
+  // fraction. A year is a date, not a figure: a study's year, an order's end.
+  const figures = (text) => (String(text).match(/\d+(?:[.,]\d+)*|[¼½¾⅓⅔⅛⅜⅝⅞]/g) || [])
+    .filter((n) => !/^(?:19|20)\d\d$/.test(n));
+  // Copy that names an authority owes a source under that authority's label.
+  const AUTHORITY_NAMES = [
+    [/\bUF\/IFAS\b/, 'UF/IFAS'],
+    [/\bCDC\b/, 'CDC'],
+    [/\bEPA\b/, 'EPA'],
+    [/\bSWFWMD\b/, 'SWFWMD'],
+    [/\bFlorida(?:'s)? Department of Agriculture\b|\bFDACS\b/, 'Florida Dept. of Agriculture'],
+    [/\bFlorida Department of Health\b/, 'Florida Dept. of Health'],
+    [/\bFWC\b/, 'FWC'],
+  ];
+  // Figures that are an example of what to write down, not a claim.
+  const INSTRUCTION_FIGURES = new Set(['rt_note_noises', 'ri_listen']);
+
+  test('the first batch is in', () => {
+    expect(sourcedTips.length).toBeGreaterThanOrEqual(60);
+  });
+
+  test.each(sourcedTips.map((tip) => [tip.id, tip]))('%s names one or two live register facts, each link on an allowed host', (id, tip) => {
+    expect(tip.sources.length).toBeGreaterThanOrEqual(1);
+    expect(tip.sources.length).toBeLessThanOrEqual(2);
+    const today = etDateString(new Date());
+    for (const source of tip.sources) {
+      const fact = factBySlug.get(source.fact);
+      expect(fact).toBeDefined();
+      // An expired fact fails here on purpose: refresh the fact (or change
+      // the tip) before its words go stale on customers' reports.
+      if (fact.expiresOn) expect(fact.expiresOn > today).toBe(true);
+      expect(source.label.trim().length).toBeGreaterThan(0);
+      expect(source.label.length).toBeLessThanOrEqual(60);
+      const url = source.url || fact.sourceUrls[0];
+      expect(fact.sourceUrls).toContain(url);
+      expect(citationUrlAllowed(url)).toBe(true);
+    }
+  });
+
+  test.each(sourcedTips.map((tip) => [tip.id, tip]))('%s: every figure in the sourced words appears in its facts\' quotes', (id, tip) => {
+    const quoted = new Set(figures(tip.sources.map((source) => factBySlug.get(source.fact).quote).join(' ')));
+    expect(figures(spoken(tip)).filter((n) => !quoted.has(n))).toEqual([]);
+  });
+
+  test.each(sourcedTips.filter((tip) => tip.sourcedCopy).map((tip) => [tip.id, tip.sourcedCopy]))('%s sourced words pass the customer-copy screen, stay advice, and fit 300 characters', (id, copy) => {
+    expect(customerCopyViolations(copy)).toEqual([]);
+    expect(copy).not.toMatch(VISIT_CLAIM_RE);
+    expect(copy.length).toBeLessThanOrEqual(300);
+  });
+
+  test('an authority named in a tip\'s words is one of its cited sources', () => {
+    const missing = [];
+    for (const tip of TIPS) {
+      for (const text of [tip.copy, tip.sourcedCopy].filter(Boolean)) {
+        for (const [name, label] of AUTHORITY_NAMES) {
+          if (name.test(text) && !(tip.sources || []).some((source) => source.label === label)) missing.push(`${tip.id}: ${label}`);
+        }
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  test('an unsourced tip states no figure, except an example of what to write down', () => {
+    const offenders = TIPS.filter((tip) => !tip.sources && figures(tip.copy).length && !INSTRUCTION_FIGURES.has(tip.id)).map((tip) => tip.id);
+    expect(offenders).toEqual([]);
+  });
+
+  test('the host rule: https on a listed host or its subdomain, nothing else', () => {
+    for (const ok of ['https://www.cdc.gov/ticks/prevention/index.html', 'https://ask.ifas.ufl.edu/publication/LH040', 'https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/', 'https://www.swfwmd.state.fl.us/business/epermitting/district-water-restrictions', 'https://myfwc.com/conservation/', 'https://www.fdacs.gov/x', 'https://www.epa.gov/x']) {
+      expect(citationUrlAllowed(ok)).toBe(true);
+    }
+    for (const bad of ['http://www.cdc.gov/x', 'https://cdc.gov.evil.example/x', 'https://notmyfwc.com/x', 'https://user:pw@www.cdc.gov/x', 'https://evil.state.fl.us/x', 'https://example.com/x', 'javascript:alert(1)', '', null]) {
+      expect(citationUrlAllowed(bad)).toBe(false);
+    }
+    expect(CITATION_HOSTS).not.toContain('state.fl.us');
+  });
+
+  test('a citation prints only with a label and an allowed link', () => {
+    expect(printableCitations([
+      { label: 'CDC', url: 'https://www.cdc.gov/x' },
+      { label: '', url: 'https://www.cdc.gov/x' },
+      { label: 'Anyone', url: 'https://example.com/claim' },
+      { label: 'x'.repeat(61), url: 'https://www.cdc.gov/x' },
+      null,
+      'CDC',
+    ])).toEqual([{ label: 'CDC', url: 'https://www.cdc.gov/x' }]);
+    expect(printableCitations(undefined)).toEqual([]);
+  });
+
+  test('gate off: the freeze is exactly what it was', () => {
+    for (const tip of resolveTipIds(['water_gutters', 'lawn_water_morning', 'ext_leaf_litter'])) {
+      expect(tip.citations).toBeUndefined();
+      expect(tip.copy).toBe(TIPS.find((t) => t.id === tip.id).copy);
+    }
+    expect(freezeTechTips({ ids: ['water_gutters'] }).tips[0].citations).toBeUndefined();
+  });
+
+  test('gate on: a sourced tip freezes its sourced words and its citations, as a snapshot', () => {
+    const [gutters, morning, litter] = resolveTipIds(['water_gutters', 'lawn_water_morning', 'ext_leaf_litter'], { sourced: true, date: '2026-10-24' });
+    expect(gutters.copy).toBe(TIPS.find((t) => t.id === 'water_gutters').sourcedCopy);
+    expect(gutters.citations).toEqual([{ label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1045' }]);
+    // its live copy already names the sources, so the words stay and the links come
+    expect(morning.copy).toBe(TIPS.find((t) => t.id === 'lawn_water_morning').copy);
+    expect(morning.citations.map((c) => c.label)).toEqual(['UF/IFAS', 'SWFWMD']);
+    expect(litter.citations).toBeUndefined();
+    gutters.citations[0].label = 'edited';
+    expect(resolveTipIds(['water_gutters'], { sourced: true, date: '2026-10-24' })[0].citations[0].label).toBe('UF/IFAS');
+    expect(freezeTechTips({ ids: ['water_gutters'] }, { sourced: true }).tips[0].citations).toHaveLength(1);
+  });
+
+  test('a fact gives no citation from its expiresOn day on, as the register reads it', () => {
+    const labels = (date) => resolveTipIds(['lawn_water_morning'], { sourced: true, date })[0].citations.map((c) => c.label);
+    expect(labels('2027-03-31')).toEqual(['UF/IFAS', 'SWFWMD']);
+    expect(labels('2027-04-01')).toEqual(['UF/IFAS']);
+  });
+});
+
+describe('the picker shows the words the completion freezes (GATE_TECH_TIP_SOURCES)', () => {
+  const served = (opts) => {
+    const library = tipsForVisit({ serviceLine: 'mosquito', date: '2026-07-15', ...opts });
+    return [...library.groups.flatMap((group) => group.tips), ...library.more];
+  };
+
+  test('gate on: a sourced tip is served with its sourced words, matching the freeze', () => {
+    const tip = served({ sourced: true }).find((t) => t.id === 'water_gutters');
+    expect(tip.copy).toBe(TIPS.find((t) => t.id === 'water_gutters').sourcedCopy);
+    expect(tip.copy).toBe(resolveTipIds(['water_gutters'], { sourced: true, date: '2026-07-15' })[0].copy);
+    expect(Object.isFrozen(tip)).toBe(true);
+  });
+
+  test('gate off: the registry entries themselves, unchanged', () => {
+    const tip = served({}).find((t) => t.id === 'water_gutters');
+    expect(tip).toBe(TIPS.find((t) => t.id === 'water_gutters'));
+  });
+});
+
+describe('tips matched to the yard (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  const { yardMatches } = require('../services/service-report/tip-library');
+  const ids = (opts) => {
+    const library = tipsForVisit(opts);
+    return new Set([...library.groups.flatMap((group) => group.tips), ...library.more].map((tip) => tip.id));
+  };
+  const knockdown = { serviceLine: 'lawn', serviceKey: 'lawn_pest_knockdown', date: '2026-07-15' };
+
+  test('no filter fits every yard; grass, county and city need a known match (fail closed)', () => {
+    expect(yardMatches(undefined, null)).toBe(true);
+    expect(yardMatches({ grass: ['st_augustine'] }, { grass: 'st_augustine', grassTrusted: true })).toBe(true);
+    expect(yardMatches({ grass: ['st_augustine'] }, { grass: 'st_augustine', grassTrusted: false })).toBe(false);
+    expect(yardMatches({ grass: ['st_augustine'] }, { grass: 'bahia', grassTrusted: true })).toBe(false);
+    expect(yardMatches({ grass: ['st_augustine'] }, null)).toBe(false);
+    expect(yardMatches({ county: ['Sarasota'] }, { county: 'Sarasota' })).toBe(true);
+    expect(yardMatches({ county: ['Sarasota'] }, { county: null })).toBe(false);
+    expect(yardMatches({ city: ['north port'] }, { city: 'north port' })).toBe(true);
+    expect(yardMatches({ city: ['north port'] }, { city: 'venice' })).toBe(false);
+  });
+
+  test('an irrigation tip hides only where the yard is known to have no system', () => {
+    expect(yardMatches({ irrigation: 'system' }, { irrigationSystem: false })).toBe(false);
+    expect(yardMatches({ irrigation: 'system' }, { irrigationSystem: true })).toBe(true);
+    expect(yardMatches({ irrigation: 'system' }, { irrigationSystem: null })).toBe(true);
+    expect(yardMatches({ irrigation: 'system' }, null)).toBe(true);
+  });
+
+  test('gate off: nothing is filtered', () => {
+    expect(ids(knockdown).has('lk_fills_from_edges')).toBe(true);
+    expect(ids(knockdown).has('lawn_shade_dry_between')).toBe(true);
+    expect(ids({ ...knockdown, yard: { irrigationSystem: false } }).has('lawn_check_heads_after_mow')).toBe(true);
+  });
+
+  test('gate on: a grass tip needs a trusted, matching grass, in every list including search', () => {
+    expect(ids({ ...knockdown, sourced: true }).has('lk_fills_from_edges')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true, yard: { grass: 'bahia', grassTrusted: true } }).has('lk_fills_from_edges')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true, yard: { grass: 'zoysia', grassTrusted: false } }).has('lk_fills_from_edges')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true, yard: { grass: 'zoysia', grassTrusted: true } }).has('lk_fills_from_edges')).toBe(true);
+  });
+
+  test('gate on: the sprinkler tips leave a yard known to have no system', () => {
+    const noSystem = ids({ ...knockdown, sourced: true, yard: { irrigationSystem: false } });
+    expect(noSystem.has('lawn_check_heads_after_mow')).toBe(false);
+    expect(noSystem.has('lawn_irrigation_portal')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true }).has('lawn_check_heads_after_mow')).toBe(true);
+  });
+
+  test('gate on: a month-bound tip shows only in its months (large patch, November through May)', () => {
+    expect(ids({ ...knockdown, sourced: true }).has('lawn_shade_dry_between')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true, date: '2026-01-15' }).has('lawn_shade_dry_between')).toBe(true);
+  });
+
+  test('every yard filter and month list names real values', () => {
+    const GRASSES = new Set(['st_augustine', 'bermuda', 'zoysia', 'bahia']);
+    for (const tip of TIPS.filter((t) => t.yard)) {
+      expect(Object.keys(tip.yard).every((key) => ['grass', 'irrigation', 'county', 'city', 'water'].includes(key))).toBe(true);
+      if (tip.yard.water) expect(['county', 'reclaimed', 'well']).toContain(tip.yard.water);
+      for (const grass of tip.yard.grass || []) expect(GRASSES.has(grass)).toBe(true);
+      for (const county of tip.yard.county || []) expect(['Manatee', 'Sarasota', 'Charlotte']).toContain(county);
+      for (const city of tip.yard.city || []) expect(city).toBe(city.toLowerCase());
+      if (tip.yard.irrigation) expect(tip.yard.irrigation).toBe('system');
+    }
+    for (const tip of TIPS.filter((t) => t.showMonths)) {
+      for (const month of tip.showMonths) expect(Number.isInteger(month) && month >= 1 && month <= 12).toBe(true);
+    }
+  });
+});
+
+describe('the picker shows the sources and names the post (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  const served = (opts) => {
+    const library = tipsForVisit(opts);
+    return [...library.groups.flatMap((group) => group.tips), ...library.more];
+  };
+
+  test('gate on: a sourced tip carries the citations the completion would freeze that day; off, none', () => {
+    const on = served({ serviceLine: 'lawn', date: '2026-07-15', sourced: true }).find((tip) => tip.id === 'lawn_water_morning');
+    expect(on.citations).toEqual(resolveTipIds(['lawn_water_morning'], { sourced: true, date: '2026-07-15' })[0].citations);
+    expect(on.citations.map((citation) => citation.label)).toEqual(['UF/IFAS', 'SWFWMD']);
+    expect(Object.isFrozen(on.citations)).toBe(true);
+    expect(served({ serviceLine: 'lawn', date: '2026-07-15' }).some((tip) => tip.citations)).toBe(false);
+    // The water-shortage order ends 2027-03-31: from the next day the picker,
+    // like the freeze, names UF/IFAS alone.
+    const after = served({ serviceLine: 'lawn', date: '2027-04-01', sourced: true }).find((tip) => tip.id === 'lawn_water_morning');
+    expect(after.citations.map((citation) => citation.label)).toEqual(['UF/IFAS']);
+  });
+
+  test('a named post is a hub path on a line that carries posts, and never one the review found titled for a town (decision 2)', () => {
+    const named = TIPS.filter((tip) => tip.blog?.path);
+    expect(named.length).toBeGreaterThan(0);
+    for (const tip of TIPS.filter((t) => t.blog)) {
+      expect(Object.keys(tip.blog).every((key) => ['path', 'topic'].includes(key))).toBe(true);
+      expect(Boolean(tip.blog.path || tip.blog.topic)).toBe(true);
+      // tree, shrub & palm reports carry no post (NO_POST_LINES)
+      expect(tip.lines.some((line) => line !== 'tree_shrub')).toBe(true);
+    }
+    for (const tip of named) expect(tip.blog.path).toMatch(/^\/[a-z0-9-]+\/[a-z0-9-]+\/$/);
+    // The six posts titled for one town (2026-10-24), and the porch-light post
+    // that still says warm bulbs draw fewer insects (held until the blog is
+    // corrected), are named by no tip.
+    const NEVER = [
+      '/pest-control/get-rid-of-roof-rats-lakewood-ranch/', '/termite/termite-infestation-in-venice/',
+      '/mosquito/professional-mosquito-treatment/', '/pest-control/get-rid-of-ghost-ants-in-sarasota/',
+      '/pest-control/get-rid-of-cockroaches/', '/pest-control/get-rid-of-fleas/',
+      '/pest-control/why-spiders-come-back-after-treatment/',
+    ];
+    expect(named.filter((tip) => NEVER.includes(tip.blog.path)).map((tip) => tip.id)).toEqual([]);
+  });
+});
+
+describe('a topic for the post a tip lacks (tech-tip-blog-seeder, owner 2026-10-24, decisions 2 and 3)', () => {
+  const { phraseProblem, normalizePhrase } = require('../services/service-report/report-blog-suggestion');
+  test('every topic is one the blog queue takes as written: plain, lower case, a topic and not a place or person', () => {
+    const topics = TIPS.filter((tip) => tip.blog?.topic);
+    expect(topics.length).toBeGreaterThan(0);
+    for (const tip of topics) {
+      expect(tip.blog.topic).toBe(normalizePhrase(tip.blog.topic));
+      expect([tip.id, phraseProblem(tip.blog.topic)]).toEqual([tip.id, null]);
+    }
+  });
+
+  test('the pairings dropped for a town-titled or off-subject post carry a topic instead (decision 2)', () => {
+    const DROPPED = [
+      'ext_shrub_clearance', 'ext_palm_roof', 'seal_soffit_vents', 'rodent_bird_feeders', 'rodent_fallen_fruit',
+      'ext_mulch_gap', 'termite_slab_edge', 'water_lanai_drains', 'interior_pet_bowls', 'interior_trash_night',
+      'flea_shady_spots', 'moisture_bath_fan', 'interior_range_grease', 'interior_cardboard', 'water_gutters',
+      'water_floor_mats', 'moisture_ac_drip', 'termite_wood_soil',
+    ];
+    for (const id of DROPPED) {
+      const tip = TIPS.find((t) => t.id === id);
+      expect([id, Boolean(tip?.blog?.topic), Boolean(tip?.blog?.path)]).toEqual([id, true, false]);
+    }
+  });
+});
+
+describe('tips written for tips with facts exist only behind the gate (sourcedOnly, owner 2026-10-24, part 4)', () => {
+  const { yardMatches } = require('../services/service-report/tip-library');
+  const ids = (opts) => {
+    const library = tipsForVisit(opts);
+    return new Set([...library.groups.flatMap((group) => group.tips), ...library.more].map((tip) => tip.id));
+  };
+  const NEW = TIPS.filter((tip) => tip.sourcedOnly);
+
+  test('each has its own sources and one text, its copy', () => {
+    expect(NEW.length).toBeGreaterThan(0);
+    for (const tip of NEW) {
+      expect([tip.id, Array.isArray(tip.sources) && tip.sources.length > 0]).toEqual([tip.id, true]);
+      expect([tip.id, tip.sourcedCopy]).toEqual([tip.id, undefined]);
+    }
+  });
+
+  test('gate off: never listed, never searched, never frozen', () => {
+    const off = ids({ serviceLine: 'lawn', date: '2026-07-15' });
+    const offPest = ids({ serviceLine: 'pest', date: '2026-07-15' });
+    for (const tip of NEW) {
+      expect([tip.id, off.has(tip.id) || offPest.has(tip.id)]).toEqual([tip.id, false]);
+    }
+    expect(resolveTipIds(['lawn_mow_dry', 'lawn_water_morning'])).toEqual([expect.objectContaining({ id: 'lawn_water_morning' })]);
+  });
+
+  test('gate on: listed where the yard and month fit, and frozen with their citations', () => {
+    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', sourced: true }).has('lawn_mow_dry')).toBe(true);
+    const [frozen] = resolveTipIds(['lawn_mow_dry'], { sourced: true, date: '2026-07-15' });
+    expect(frozen.id).toBe('lawn_mow_dry');
+    expect(frozen.citations.map((citation) => citation.label)).toEqual(['UF/IFAS']);
+  });
+
+  test('a reclaimed-water tip needs the source saved for this home', () => {
+    expect(yardMatches({ water: 'reclaimed' }, { waterSource: 'reclaimed' })).toBe(true);
+    expect(yardMatches({ water: 'reclaimed' }, { waterSource: 'county' })).toBe(false);
+    expect(yardMatches({ water: 'reclaimed' }, { waterSource: null })).toBe(false);
+    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', sourced: true }).has('lawn_reclaimed_water')).toBe(false);
+    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', sourced: true, yard: { waterSource: 'reclaimed' } }).has('lawn_reclaimed_water')).toBe(true);
+  });
+
+  test('the Sarasota County fertilizer season is never shown in North Port, whose season starts April 1', () => {
+    const july = { serviceLine: 'lawn', date: '2026-07-15', sourced: true };
+    expect(ids({ ...july, yard: { county: 'Sarasota', city: 'venice' } }).has('lawn_fertilizer_season')).toBe(true);
+    expect(ids({ ...july, yard: { county: 'Sarasota', city: 'north port' } }).has('lawn_fertilizer_season')).toBe(false);
+    expect(ids({ ...july, yard: { county: 'Charlotte', city: 'port charlotte' } }).has('lawn_fertilizer_season')).toBe(false);
+  });
+});
+

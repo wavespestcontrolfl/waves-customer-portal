@@ -24,7 +24,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const emailLib = require('./email-template-library');
-const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY } = require('../constants/email-replay-exclusions');
+const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY } = require('../constants/email-replay-exclusions');
 const billingReplay = require('./billing-email-provider-replay');
 const { isSenderRenderedEmail, alertFinalNoticeMissed } = require('./billing-email-no-replay');
 const NotificationService = require('./notification-service');
@@ -165,7 +165,7 @@ function recoveryIdFromMessage(message) {
  */
 function decideRecoveryAction({
   candidate, suppressed, ownedByOther, hasAttachments,
-  addressOnFile = true, senderRendered = false, averageCopy = false, min = 'high',
+  addressOnFile = true, senderRendered = false, averageCopy = false, moveNoticeCopy = false, min = 'high',
 }) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
@@ -191,6 +191,9 @@ function decideRecoveryAction({
   // A follow-up carrying the monthly average: the price may have changed since it was
   // written, so the stored copy is not replayed (the sender's next sweep builds fresh copy).
   if (averageCopy) return { action: 'skip', status: 'monthly_average_not_replayed' };
+  // A reschedule or cancellation notice is true only while the visit stays as it says;
+  // its stored copy is not replayed (the visit's later reminders carry the current details).
+  if (moveNoticeCopy) return { action: 'skip', status: 'move_notice_not_replayed' };
   return { action: 'send', status: 'resent' };
 }
 
@@ -792,6 +795,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     candidate, suppressed, ownedByOther, hasAttachments, addressOnFile,
     senderRendered: isSenderRenderedEmail(bouncedMessage),
     averageCopy: parseJsonArray(bouncedMessage.categories).includes(ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY),
+    moveNoticeCopy: parseJsonArray(bouncedMessage.categories).includes(MOVE_NOTICE_CATEGORY),
     min: minConfidence(),
   });
 
@@ -817,7 +821,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     // when we have one, e.g. a medium-confidence typo below the auto-send bar).
     if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other',
       'has_attachments', 'address_no_longer_on_file', 'billing_replay_reauthorization_required',
-      'sender_rendered_not_replayed', 'monthly_average_not_replayed'].includes(decision.status)) {
+      'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed'].includes(decision.status)) {
       await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
       // Audio re-verification lane (gated, best-effort): the domain
       // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
@@ -1425,6 +1429,7 @@ const UNRECOVERABLE_REASONS = {
   send_failed: 're-sending to the corrected address failed',
   sender_rendered_not_replayed: 'billing reminders are not re-sent from their old copy',
   monthly_average_not_replayed: 'estimate follow-ups with a monthly average are not re-sent from their old copy',
+  move_notice_not_replayed: 'reschedule and cancellation notices are not re-sent from their old copy',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',
 };
@@ -1441,7 +1446,7 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
   const suggestion = candidate?.corrected
-    && ['skipped_low_confidence', 'send_failed', 'has_attachments', 'sender_rendered_not_replayed', 'monthly_average_not_replayed'].includes(status)
+    && ['skipped_low_confidence', 'send_failed', 'has_attachments', 'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed'].includes(status)
     ? ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`
     : '';
   await adminAlertDeduped({

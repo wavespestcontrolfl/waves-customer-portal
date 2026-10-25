@@ -9,13 +9,14 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const {
-  CONTENT_LIBRARY_VERSION,
   PRODUCT_REGISTRY_VERSION,
+  contentLibraryVersion,
   protocolVersion,
   TEMPLATE_VERSION,
   buildOutline,
   createPublicToken,
   hashToken,
+  regenerationTurfType,
 } = require('../services/lawn-service-outline');
 
 const router = express.Router();
@@ -175,7 +176,7 @@ async function insertPacket(trx, { estimate, outline, input, req, rawToken, stat
     season_band: outline.inputSnapshot.seasonBand,
     jurisdiction_id: rule?.jurisdiction_id || outline.inputSnapshot.jurisdictionId || null,
     fertilizer_rule_version: rule?.version || null,
-    content_library_version: CONTENT_LIBRARY_VERSION,
+    content_library_version: contentLibraryVersion(),
     protocol_version: protocolVersion(),
     product_registry_version: PRODUCT_REGISTRY_VERSION,
     template_version: TEMPLATE_VERSION,
@@ -219,7 +220,7 @@ async function insertPacket(trx, { estimate, outline, input, req, rawToken, stat
 function inputFromPacket(packet) {
   const snapshot = packet?.input_snapshot_json || {};
   return {
-    turfType: packet?.turf_type || snapshot.turfType || null,
+    turfType: regenerationTurfType(packet),
     detailLevel: snapshot.detailLevel || 'standard',
     includeProductCards: Array.isArray(packet?.content_json?.productCards) && packet.content_json.productCards.length > 0,
     includeProductCategories: true,
@@ -246,7 +247,7 @@ router.post('/preview', async (req, res, next) => {
       validation: outline.validation,
       meta: {
         templateVersion: TEMPLATE_VERSION,
-        contentLibraryVersion: CONTENT_LIBRARY_VERSION,
+        contentLibraryVersion: contentLibraryVersion(),
         protocolVersion: protocolVersion(),
         productRegistryVersion: PRODUCT_REGISTRY_VERSION,
       },

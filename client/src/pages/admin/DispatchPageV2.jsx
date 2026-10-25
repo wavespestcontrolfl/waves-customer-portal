@@ -74,7 +74,6 @@ import TreatmentPlanPanel from "../../components/schedule/TreatmentPlanPanel";
 import MarkPrepaidModal from "../../components/schedule/MarkPrepaidModal";
 import RecurringAlertsBannerV2 from "../../components/schedule/RecurringAlertsBannerV2";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
-import FindTimePanel from "../../components/schedule/FindTimePanel";
 import HeldVisitsStrip, { heldVisitFormDefaults } from "./HeldVisitsStrip";
 import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
@@ -1030,6 +1029,9 @@ export default function DispatchPageV2({
     customerId: pickOf(row, 'customerId', 'customer_id') || null,
     fullAddress: typeof row.address === "string" ? row.address : "",
     customerPhone: pickOf(row, 'customerPhone', 'customer_phone') || "",
+    // The neighborhood's pinned gate, when the day feed carries one: the
+    // directions link routes through it before the house.
+    gateWaypoint: row.gateWaypoint || null,
     // When the technician checked in (the Time on-site clock), by the full
     // form's own rule: the on-site status-log entry, else checkInTime.
     onSiteAt: onSiteTimeOf(row) || null,
@@ -1583,16 +1585,6 @@ export default function DispatchPageV2({
         <div className="max-w-md mx-auto mb-4">
           {" "}
           <ScheduleClientSearch onSelect={handleClientSearchSelect} />{" "}
-          {/* GATE_DISPATCH_FIND_TIME_PANEL: best times from an address alone, for a new caller. Admin only, like Book. */}
-          <div className="mt-2 flex justify-center">
-            <FindTimePanel
-              enabled={safeData.findTimePanel === true && getAdminUser()?.role === "admin"}
-              onBook={({ date: slotDate, windowStart, quickAddAddress }) => {
-                setNewApptDefaults({ date: slotDate, windowStart, quickAddAddress });
-                setShowNewAppt(true);
-              }}
-            />
-          </div>
         </div>
       )}
       {/* Centered view-mode selector — schedule grid sub-tab + desktop only. */}
@@ -1652,7 +1644,8 @@ export default function DispatchPageV2({
           defaultTechId={newApptDefaults?.techId}
           defaultCustomer={newApptDefaults?.customer || null}
           defaultInternalNotes={newApptDefaults?.internalNotes || ""}
-          defaultQuickAddAddress={newApptDefaults?.quickAddAddress || null}
+          // GATE_NEW_APPT_ADDRESS_TIMES: a new caller's picked address alone answers the time box.
+          addressFirstTimes={safeData.addressFirstTimes === true}
           requireTimeChoice={newApptDefaults?.requireTimeChoice === true}
           onClose={() => {
             setShowNewAppt(false);
@@ -1946,7 +1939,7 @@ export default function DispatchPageV2({
             const rp = rainProbability ?? 0;
             const weatherIcon = rp > 40 ? "" : rp > 15 ? "" : "";
             return (
-              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center justify-center gap-2 text-12 text-zinc-700 overflow-x-auto whitespace-nowrap">
+              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center justify-center gap-2 text-13 font-bold text-zinc-700 overflow-x-auto whitespace-nowrap">
                 {" "}
                 <span className="text-16" aria-hidden="true">
                   {weatherIcon}
@@ -2061,7 +2054,6 @@ export default function DispatchPageV2({
                 setShowNewAppt(true);
               } : undefined}
               services={services}
-              rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}
               owesCompletion={completionResumeMarked}
               onRefresh={() => fetchSchedule(date)}
