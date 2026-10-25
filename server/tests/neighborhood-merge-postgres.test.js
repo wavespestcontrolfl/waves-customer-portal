@@ -156,7 +156,7 @@ postgres('neighborhood merge routes', () => {
     expect(await hoodRow(source)).toEqual({ active: false, merged_into_id: target });
     const row = await trx('neighborhood_merges').where({ id: r.body.mergeId }).first();
     expect(row).toMatchObject({ source_id: source, target_id: target, merged_by: mockActor, undone_at: null });
-    expect(row.journal.properties.sort()).toEqual([live.propertyId, gone.propertyId].sort());
+    expect(row.journal.properties.map((h) => h.id).sort()).toEqual([live.propertyId, gone.propertyId].sort());
 
     const list = await call('GET', '/');
     expect(list.body.mergeEnabled).toBe(true);
@@ -242,6 +242,7 @@ postgres('neighborhood merge routes', () => {
     const source = await neighborhood('Undo Source');
     const target = await neighborhood('Undo Target');
     const h = await home(source);
+    const picked = await home(source);
     await filing(h.customerId, source);
     const moved = await entry(source, { code: '6060' });
     const edited = await entry(source, { code: '7070', gate_label: 'Side gate' });
@@ -252,9 +253,13 @@ postgres('neighborhood merge routes', () => {
     expect(r.body).toMatchObject({ entries: 2, duplicatesRetired: 1, relabeled: 2 });
     // The office edits one moved entry after the merge: it stays on the target.
     await trx('neighborhood_access').where({ id: edited }).update({ updated_at: trx.raw("now() + interval '1 minute'") });
+    // …and picks the kept entry for one moved home by hand: that home stays too.
+    expect((await call('PUT', `/properties/${picked.propertyId}/neighborhood`, { neighborhoodId: target })).status).toBe(200);
+    await trx('customer_properties').where({ id: picked.propertyId }).update({ neighborhood_checked_at: trx.raw("now() + interval '1 minute'") });
 
     const u = await call('POST', `/merges/${r.body.mergeId}/undo`);
-    expect(u).toEqual({ status: 200, body: { homes: 1, homesKept: 0, entries: 2, entriesKept: 1 } });
+    expect(u).toEqual({ status: 200, body: { homes: 1, homesKept: 1, entries: 2, entriesKept: 1 } });
+    expect(await homeHood(picked.propertyId)).toBe(target);
     expect(await entryRow(moved)).toEqual({ neighborhood_id: source, gate_label: 'Main gate', status: 'active' });
     expect(await entryRow(dupSource)).toEqual({ neighborhood_id: source, gate_label: 'Main gate', status: 'active' });
     expect(await entryRow(edited)).toMatchObject({ neighborhood_id: target, gate_label: `Side gate (${hoodName('Undo Source')})` });
@@ -288,8 +293,17 @@ postgres('neighborhood merge routes', () => {
     const b = await neighborhood('Chain B');
     const c = await neighborhood('Chain C');
     const ha = await home(a);
+    const ea = await entry(a, { code: '4141' });
+    await entry(b, { code: '4242' });
+    await entry(c, { code: '4343' });
+    const before = (await trx('neighborhood_access').where({ id: ea }).first(trx.raw('updated_at::text AS t'))).t;
     const first = await merge(a, b);
+    // The test runs in one transaction, so now() never moves: date the first
+    // merge (and the rows it stamped) an hour back, as if made earlier.
+    await trx('neighborhood_merges').where({ id: first.body.mergeId }).update({ merged_at: trx.raw("merged_at - interval '1 hour'") });
+    await trx('neighborhood_access').where({ id: ea }).update({ updated_at: trx.raw("updated_at - interval '1 hour'") });
     const second = await merge(b, c);
+    expect(await entryRow(ea)).toMatchObject({ neighborhood_id: c, gate_label: `Main gate (${hoodName('Chain A')}) (${hoodName('Chain B')})` });
     expect(await homeHood(ha.propertyId)).toBe(c);
     const up = await upsertNeighborhood(trx, { county: 'Manatee', subdivision: hoodName('Chain A').toUpperCase() });
     expect(up.id).toBe(c);
@@ -298,7 +312,12 @@ postgres('neighborhood merge routes', () => {
     expect(blocked).toEqual({ status: 409, body: { error: `Undo the later merge into ${hoodName('Chain C')} first`, code: 'later' } });
     expect((await call('POST', `/merges/${second.body.mergeId}/undo`)).status).toBe(200);
     expect(await homeHood(ha.propertyId)).toBe(b);
-    expect((await call('POST', `/merges/${first.body.mergeId}/undo`)).status).toBe(200);
+    expect(await entryRow(ea)).toMatchObject({ neighborhood_id: b, gate_label: `Main gate (${hoodName('Chain A')})` });
+    const back = await call('POST', `/merges/${first.body.mergeId}/undo`);
+    expect(back.body).toMatchObject({ homes: 1, homesKept: 0, entries: 1, entriesKept: 0 });
     expect(await homeHood(ha.propertyId)).toBe(a);
+    expect(await entryRow(ea)).toEqual({ neighborhood_id: a, gate_label: 'Main gate', status: 'active' });
+    // Every undo wrote back the stamp the row had before: A's code reads untouched.
+    expect((await trx('neighborhood_access').where({ id: ea }).first(trx.raw('updated_at::text AS t'))).t).toBe(before);
   });
 });

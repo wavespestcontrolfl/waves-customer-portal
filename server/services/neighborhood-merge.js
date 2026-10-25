@@ -80,9 +80,16 @@ function checkPair(source, target) {
   return null;
 }
 
+// The journal keeps each row's updated_at as it was (Postgres text, microseconds
+// intact): undo writes it back, so a row an undo restores reads as untouched to
+// the earlier merge it came through (A into B, B into C, undo both in turn).
 async function moveEntries(trx, source, targetId, sourceLive, targetLive) {
+  // Read before anything is written, so every journaled stamp is the prior one.
+  const all = await trx('neighborhood_access').where({ neighborhood_id: source.id })
+    .select('id', 'gate_label', 'status', trx.raw('updated_at::text AS updated_at'));
+  const entries = all.map((e) => ({ id: e.id, gate_label: e.gate_label, updated_at: e.updated_at }));
   const losers = duplicateLosers(sourceLive, targetLive);
-  const retired = losers.map((e) => ({ id: e.id, status: e.status }));
+  const retired = losers.map((e) => ({ id: e.id, status: e.status, updated_at: e.updated_at }));
   // Retire first: the live-code unique index would refuse the move otherwise.
   if (losers.length) {
     await trx('neighborhood_access').whereIn('id', losers.map((e) => e.id))
@@ -90,8 +97,6 @@ async function moveEntries(trx, source, targetId, sourceLive, targetLive) {
   }
   const loserIds = new Set(losers.map((e) => e.id));
   const targetKeepsOwn = targetLive.some((e) => !loserIds.has(e.id));
-  const all = await trx('neighborhood_access').where({ neighborhood_id: source.id }).select('id', 'gate_label', 'status');
-  const entries = all.map((e) => ({ id: e.id, gate_label: e.gate_label }));
   let relabeled = 0;
   for (const e of all) {
     const live = e.status !== 'retired' && !loserIds.has(e.id);
@@ -125,23 +130,30 @@ async function mergeNeighborhood(trx, { sourceId, targetId, actorId = null }) {
   if (refused) return { error: refused };
 
   const live = (id) => trx('neighborhood_access').where({ neighborhood_id: id }).whereNot('status', 'retired')
-    .orderBy('id').forUpdate().select('id', 'code', 'status', 'gate_lat', 'last_confirmed_at', 'created_at');
+    .orderBy('id').forUpdate()
+    .select('id', 'code', 'status', 'gate_lat', 'last_confirmed_at', 'created_at', trx.raw('updated_at::text AS updated_at'));
   const sourceLive = await live(sourceId);
   const targetLive = await live(targetId);
   // One pinned gate per neighborhood: the office clears one pin first.
   if (pinned(sourceLive) && pinned(targetLive)) return { error: 'pins' };
 
   const moved = await moveEntries(trx, source, targetId, sourceLive, targetLive);
-  // The journal lists exactly the homes this update moved.
-  const homes = await trx('customer_properties').where({ neighborhood_id: sourceId })
-    .update({ neighborhood_id: targetId, updated_at: trx.fn.now() }, ['id', 'active']);
+  // The journal lists exactly the homes this update moved, with how each was
+  // linked (source and checked-at), so undo leaves a home the office or the
+  // county re-linked since.
+  const homes = (await trx.raw(`UPDATE customer_properties SET neighborhood_id = ?, updated_at = now()
+    WHERE neighborhood_id = ?
+    RETURNING id, active, neighborhood_source, neighborhood_checked_at::text AS checked_at`, [targetId, sourceId])).rows;
   const filings = await trx('neighborhood_access_filings').where({ neighborhood_id: sourceId })
     .update({ neighborhood_id: targetId }).returning('customer_id');
   await trx('neighborhoods').where({ id: sourceId })
     .update({ active: false, merged_into_id: targetId, updated_at: trx.fn.now() });
 
+  // Journal: properties [{ id, source, checked_at }], entries [{ id, gate_label,
+  // updated_at }], retired [{ id, status, updated_at }], filings [customer_id].
+  // Ids, labels, statuses and stamps only; never a code.
   const journal = {
-    properties: homes.map((h) => h.id),
+    properties: homes.map((h) => ({ id: h.id, source: h.neighborhood_source, checked_at: h.checked_at })),
     entries: moved.entries,
     retired: moved.retired,
     filings: filings.map((f) => (typeof f === 'object' ? f.customer_id : f)),
@@ -162,12 +174,15 @@ async function mergeNeighborhood(trx, { sourceId, targetId, actorId = null }) {
 // (one transaction, one now()), so an equal stamp means nobody changed it since.
 const UNCHANGED_SINCE = 'updated_at = (SELECT merged_at FROM neighborhood_merges WHERE id = ?)';
 
+// A journaled stamp written back exactly; now() when the journal has none.
+const priorStamp = (trx, text) => (text ? trx.raw('?::timestamptz', [text]) : trx.fn.now());
+
 async function restoreEntries(trx, merge, journal) {
-  const retiredPrior = new Map((journal.retired || []).map((r) => [r.id, r.status]));
+  const retiredPrior = new Map((journal.retired || []).map((r) => [r.id, r]));
   let back = 0;
   for (const e of journal.entries || []) {
-    const restore = { neighborhood_id: merge.source_id, gate_label: e.gate_label, updated_at: trx.fn.now() };
-    if (retiredPrior.has(e.id)) restore.status = retiredPrior.get(e.id);
+    const restore = { neighborhood_id: merge.source_id, gate_label: e.gate_label, updated_at: priorStamp(trx, e.updated_at) };
+    if (retiredPrior.has(e.id)) restore.status = retiredPrior.get(e.id).status;
     back += await trx('neighborhood_access')
       .where({ id: e.id, neighborhood_id: merge.target_id }).whereRaw(UNCHANGED_SINCE, [merge.id])
       .update(restore);
@@ -175,14 +190,14 @@ async function restoreEntries(trx, merge, journal) {
   // The target's own copy the merge retired as a duplicate: live again when
   // untouched and no live copy of that code is there now.
   const moved = new Set((journal.entries || []).map((e) => e.id));
-  for (const [id, status] of retiredPrior) {
+  for (const [id, prior] of retiredPrior) {
     if (moved.has(id)) continue;
     const row = await trx('neighborhood_access').where({ id, status: 'retired' }).whereRaw(UNCHANGED_SINCE, [merge.id])
       .first('id', 'neighborhood_id', 'code');
     if (!row) continue;
     const twin = row.code && await trx('neighborhood_access').where({ neighborhood_id: row.neighborhood_id })
       .whereNot('status', 'retired').whereRaw('lower(code) = lower(?)', [row.code]).first('id');
-    if (!twin) await trx('neighborhood_access').where({ id }).update({ status, updated_at: trx.fn.now() });
+    if (!twin) await trx('neighborhood_access').where({ id }).update({ status: prior.status, updated_at: priorStamp(trx, prior.updated_at) });
   }
   return { back, total: (journal.entries || []).length };
 }
@@ -200,7 +215,8 @@ async function undoMerge(trx, { mergeId, actorId = null }) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [communityLockKey(peek.county, peek.name)]);
   const merge = await trx('neighborhood_merges').where({ id: mergeId }).first();
   const journal = typeof merge.journal === 'string' ? JSON.parse(merge.journal) : merge.journal;
-  const propertyIds = journal.properties || [];
+  const homes = journal.properties || [];
+  const propertyIds = homes.map((p) => p.id);
   const owners = propertyIds.length ? await trx('customer_properties').whereIn('id', propertyIds).pluck('customer_id') : [];
   await lockCustomers(trx, owners);
   if (propertyIds.length) await trx('customer_properties').whereIn('id', propertyIds).orderBy('id').forUpdate().select('id');
@@ -216,9 +232,15 @@ async function undoMerge(trx, { mergeId, actorId = null }) {
   }
 
   const entries = await restoreEntries(trx, merge, journal);
+  // A home goes back only while it is still linked the way the merge left it:
+  // an office pick (even of the same entry) or a county re-link since stays.
   const homesBack = propertyIds.length
-    ? await trx('customer_properties').whereIn('id', propertyIds).where({ neighborhood_id: target.id })
-      .update({ neighborhood_id: source.id, updated_at: trx.fn.now() }, ['id', 'active'])
+    ? (await trx.raw(`UPDATE customer_properties p SET neighborhood_id = ?, updated_at = now()
+      FROM jsonb_to_recordset(?::jsonb) AS j(id uuid, source text, checked_at timestamptz)
+      WHERE p.id = j.id AND p.neighborhood_id = ?
+        AND p.neighborhood_source IS NOT DISTINCT FROM j.source
+        AND p.neighborhood_checked_at IS NOT DISTINCT FROM j.checked_at
+      RETURNING p.id, p.active`, [source.id, JSON.stringify(homes), target.id])).rows
     : [];
   if ((journal.filings || []).length) {
     await trx('neighborhood_access_filings').whereIn('customer_id', journal.filings).where({ neighborhood_id: target.id })
