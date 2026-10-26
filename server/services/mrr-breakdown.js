@@ -1,6 +1,6 @@
 const { etDateString } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
-const { MONTHLY_LANE_SQL } = require('./billing-lane');
+const { MONTHLY_LANE_SQL, MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 
 // An active recurring account is "at risk" — i.e. its next monthly charge is
 // NOT something the business can count on landing — when any of these is
@@ -80,16 +80,49 @@ function mrrPopulationQuery(conn, includeIds = []) {
     .whereNull('c.deleted_at')
     .where('c.monthly_rate', '>', 0)
     .where(function laneOrPendingPrepay() { this.whereRaw(MONTHLY_LANE_SQL); if (includeIds.length) this.orWhereIn('c.id', includeIds); })
-    // Exclude internal/test accounts so they never inflate MRR — the same
-    // population the live trend (excludeInternalCustomers) and the snapshot use.
-    .modify((qb) => {
-      if (INTERNAL_TEST_CUSTOMERS.length) {
-        qb.whereNotIn(
-          conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
-          INTERNAL_TEST_CUSTOMERS,
-        );
-      }
-    });
+    .modify(excludeInternalTestCustomers(conn));
+}
+
+// Exclude internal/test accounts so they never inflate a recurring figure (MRR
+// or recurring plans) — the same population the live trend
+// (excludeInternalCustomers) and the snapshot use.
+function excludeInternalTestCustomers(conn) {
+  return (qb) => {
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      qb.whereNotIn(
+        conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+        INTERNAL_TEST_CUSTOMERS,
+      );
+    }
+  };
+}
+
+/**
+ * Every active WaveGuard plan member, whatever the billing lane
+ * (per-application, annual prepay, per-visit, monthly dues), with the sum of
+ * their monthly_rate — the plan's monthly average. This is NOT MRR: the
+ * headline MRR above is the monthly-dues lane only (#3669), which leaves out
+ * the per-application and prepay members who make up most of the recurring
+ * base (Oct 2026: 9 of ~237 rate-bearing accounts). MEMBERSHIP_TIER_SQL is
+ * billing-lane's membership audience, so sentinel tiers (Commercial,
+ * One-Time, None…) never count.
+ *
+ * @param {import('knex')} [dbConn]
+ * @returns {Promise<{customers:number, monthly:number}>}
+ */
+async function computeRecurringPlans(dbConn) {
+  const conn = dbConn || require('../models/db');
+  const [row] = await conn('customers as c')
+    .where('c.active', true)
+    .whereNull('c.deleted_at')
+    .where('c.monthly_rate', '>', 0)
+    .whereRaw(MEMBERSHIP_TIER_SQL)
+    .modify(excludeInternalTestCustomers(conn))
+    .select(conn.raw('COUNT(*) as customers'), conn.raw('COALESCE(SUM(c.monthly_rate), 0) as monthly'));
+  return {
+    customers: parseInt(row?.customers || 0, 10),
+    monthly: Math.round(parseFloat(row?.monthly || 0) * 100) / 100,
+  };
 }
 
 /**
@@ -237,4 +270,6 @@ async function listAtRiskMrrAccounts(dbConn, asOf = etDateString()) {
   return accounts;
 }
 
-module.exports = { computeMrrBreakdown, listAtRiskMrrAccounts, mrrPopulationQuery, AT_RISK_PREDICATE };
+module.exports = {
+  computeMrrBreakdown, computeRecurringPlans, listAtRiskMrrAccounts, mrrPopulationQuery, AT_RISK_PREDICATE,
+};

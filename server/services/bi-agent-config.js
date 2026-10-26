@@ -17,6 +17,7 @@ const BI_AGENT_CONFIG = {
 SMS FORMAT (under 480 chars — 3 SMS segments max):
 "Mon briefing 📊
 MRR: $X (+Y%)
+Plans: X members, $X/mo
 Revenue MTD: $X
 Active: X customers (+X this mo)
 At-risk: X (name highest-value critical)
@@ -32,13 +33,16 @@ OPS 7D LINE (required, every briefing):
 - get_operations_snapshot returns kpis: an array of { metric, label, last7, last30, target, lowerIsBetter, tone, window } — window is 'rolling' (last7 is the rolling 7-day value vs a rolling last30 30-day baseline — kpiWindow explains the exact wording; this is NOT "last week vs the week before", never describe it that way) or 'current' (last7 is a live snapshot as of today, e.g. AR days; last30 is null — there is no 30-day baseline for it, so never present it as a 7-day value compared to a 30-day baseline) or 'cohort' (retention: last7/last30 are the share of customers who joined before each window began that are still active TODAY — use kpiWindow.cohort's wording, never call it a period ending yesterday).
 - collection_rate also carries "n" (issued invoices in the 7-day window) and "lowSample" (true when n < 5 — the SAME threshold the dashboard's Collection Rate tile uses to fade itself). When lowSample is true, tone is null and it never appears in opsLine (not even in the "n/a" list) — 1-4 issued invoices is noise, not a target miss or an outage. Report it in operations_section as "too few invoices to grade" — never "unavailable" (that's for a real computation failure) and never "on target".
 - get_operations_snapshot ALSO returns "opsLine": the exact, already-composed "Ops 7d: ..." string. Copy it into the SMS VERBATIM as the Ops 7d line — do NOT recompute, rephrase, reorder, round differently, or re-derive it from the kpis array yourself. It already ranks off-target metrics worst-first (capped at 4) and marks any targeted metric with no usable value as unavailable (an "; n/a: ..." suffix, or the whole line reading "Ops 7d: KPIs unavailable") rather than ever reporting missing/failed data as "all on target" (with an unavailable metric the line reads "rest on target; n/a: ...").
-- This line is never dropped. If the SMS is running long, trim the content/SEO line(s) first, then the ads line — never drop MRR, revenue MTD, active customers, at-risk, reviews, or the Ops 7d line.
+- This line is never dropped. If the SMS is running long, trim the content/SEO line(s) first, then the ads line — never drop MRR, plans, revenue MTD, active customers, at-risk, reviews, or the Ops 7d line.
+
+PLANS LINE (required, every briefing):
+- MRR counts monthly-dues accounts only. get_revenue_snapshot's recurringPlans { customers, monthly } counts every WaveGuard plan member whatever the billing type (per-application, annual prepay, per-visit, monthly dues), at the plan's monthly average — that is the recurring base. Report both, each under its own name: never call recurringPlans "MRR", and never describe the recurring base from MRR alone.
 
 ANALYSIS RULES:
 - Compare every metric to last week AND last month
 - Flag anything >15% change as noteworthy
 - SMS: only 6-8 most actionable numbers + anomalies + the required Ops 7d line
-- Always include: MRR, revenue MTD, active customers, at-risk, reviews, Ops 7d
+- Always include: MRR, plans, revenue MTD, active customers, at-risk, reviews, Ops 7d
 - Use ↑↓ arrows, not words
 - Name specific customers for critical issues
 - Running experiments (get_experiment_results): one line each at the end of the content & SEO section; "too early" until the readiness note says otherwise
@@ -57,7 +61,7 @@ Save a detailed report to the dashboard after sending the SMS.`,
     {
       type: 'custom',
       name: 'get_revenue_snapshot',
-      description: `Get the full revenue picture: MRR, ARR, revenue MTD, revenue last month, month-over-month change %, one-time revenue this month, outstanding AR (overdue balances), revenue by WaveGuard tier, and 30/60/90 day forecast. This is the most important tool — run it first.`,
+      description: `Get the full revenue picture: MRR, ARR, revenue MTD, revenue last month, month-over-month change %, one-time revenue this month, outstanding AR (overdue balances), revenue by WaveGuard tier, and 30/60/90 day forecast. MRR and byTier count the monthly-dues lane only; recurringPlans { customers, monthly } counts every WaveGuard plan member whatever the billing type, at the plan's monthly average (the recurring base). This is the most important tool — run it first.`,
       input_schema: { type: 'object', properties: {} },
     },
 
