@@ -133,31 +133,44 @@ const DELIVERED_LINE_STATUSES = [
 
 const normalizeTitle = (title) => String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-// Shipment ids that OTHER Shipped emails of the same order carry. A split
-// order's other package is not proof that this one arrived.
-async function siblingShipmentIds(conn, orderNumber, shipmentId) {
+// The OTHER shipments of the same order, from their Shipped emails, oldest
+// first (ties by shipment id): { shipmentId, receivedAt, items }. A split
+// order's other package is not proof that this one arrived, and it competes
+// for the same Delivered lines.
+async function siblingShipments(conn, orderNumber, shipmentId) {
   const like = `%${likeLiteral(orderNumber)}%`;
   const emails = await conn('emails')
-    .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html')
+    .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at')
     .whereRaw('LOWER(from_address) = ?', [AMAZON_SHIPPED_FROM]).whereRaw('subject ILIKE ?', ['Shipped:%'])
     .where((named) => named.whereRaw('body_text LIKE ?', [like]).orWhereRaw('body_html LIKE ?', [like]));
-  return new Set(emails
-    .map((email) => parseAmazonShippedEmail(email))
-    .filter((parsed) => parsed?.orderNumber === orderNumber && parsed.shipmentId && parsed.shipmentId !== shipmentId)
-    .map((parsed) => parsed.shipmentId));
+  const byId = new Map();
+  for (const email of emails) {
+    const parsed = parseAmazonShippedEmail(email);
+    if (parsed?.orderNumber !== orderNumber || !parsed.shipmentId || parsed.shipmentId === shipmentId) continue;
+    const receivedAt = new Date(email.received_at).getTime();
+    const known = byId.get(parsed.shipmentId);
+    if (!known || receivedAt < known.receivedAt) byId.set(parsed.shipmentId, { shipmentId: parsed.shipmentId, receivedAt, items: parsed.items });
+  }
+  return [...byId.values()].sort((x, y) => x.receivedAt - y.receivedAt || (x.shipmentId < y.shipmentId ? -1 : 1));
 }
 
 /**
  * How much of each shipped item a Delivered email under a DIFFERENT shipment
- * id has not covered. wanted: [{ productId, title, quantity }]; returns the
- * missing quantity per index, 0 when covered. A Delivered line counts when
- * it shares the order number, sits under a shipment id no sibling Shipped
- * email owns, carries a Delivered-line status, and names the same product
- * (or, for a line with no product, the same normalized title). Quantities
- * add up across lines; a shipped quantity nobody could read is covered by
- * any matching line. With nothing to match on, the whole item is missing.
+ * id has not covered. wanted: [{ productId, title, quantity }]; shippedAt:
+ * when this shipment's Shipped email came. Returns the missing quantity per
+ * index, 0 when covered.
+ *
+ * The pool for an item is the Delivered lines (same order, a Delivered-line
+ * status, the same product, or for a line with no product the same
+ * normalized title) under a shipment id that no Shipped email of the order
+ * owns. Sibling shipments of the same order that want the same item draw on
+ * that pool first when their Shipped email is older (ties by shipment id),
+ * after the Delivered lines under their own id; one delivered unit is never
+ * counted for two shipments. A shipped quantity nobody could read is covered
+ * by any pool quantity left. With nothing to match on, the whole item is
+ * missing.
  */
-async function deliveredElsewhere(conn, { orderNumber, shipmentId, wanted }) {
+async function deliveredElsewhere(conn, { orderNumber, shipmentId, shippedAt, wanted }) {
   const missing = wanted.map((item) => item.quantity || 1);
   if (!orderNumber || orderNumber === UNKNOWN_ORDER || !wanted.length) return missing;
   const lines = await conn('purchase_receipt_lines')
@@ -165,14 +178,27 @@ async function deliveredElsewhere(conn, { orderNumber, shipmentId, wanted }) {
     .whereIn('status', DELIVERED_LINE_STATUSES)
     .select('shipment_key', 'product_id', 'raw_title', 'quantity');
   if (!lines.length) return missing;
-  const owned = await siblingShipmentIds(conn, orderNumber, shipmentId);
-  const usable = lines.filter((line) => !owned.has(line.shipment_key));
+  const siblings = await siblingShipments(conn, orderNumber, shipmentId);
+  const owned = new Set(siblings.map((sibling) => sibling.shipmentId));
+  const mine = shippedAt ? new Date(shippedAt).getTime() : Infinity;
+  const earlier = siblings.filter((sibling) => sibling.receivedAt < mine || (sibling.receivedAt === mine && sibling.shipmentId < shipmentId));
+  const qty = (rows) => rows.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
   return wanted.map((item, index) => {
     const title = normalizeTitle(item.title);
-    const same = usable.filter((line) => (line.product_id ? line.product_id === item.productId : normalizeTitle(line.raw_title) === title));
-    if (!same.length) return missing[index];
-    const got = same.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
-    return Math.max(0, (item.quantity || 0) - got);
+    const sameItem = (line) => (line.product_id ? line.product_id === item.productId : normalizeTitle(line.raw_title) === title);
+    const pool = lines.filter((line) => !owned.has(line.shipment_key) && sameItem(line));
+    if (!pool.length) return missing[index];
+    let left = qty(pool);
+    for (const sibling of earlier) {
+      const wants = sibling.items.filter((other) => normalizeTitle(other.title) === title);
+      if (!wants.length) continue;
+      const own = qty(lines.filter((line) => line.shipment_key === sibling.shipmentId && sameItem(line)));
+      const need = Math.max(0, wants.reduce((sum, other) => sum + (other.quantity || 1), 0) - own);
+      left -= Math.min(need, left);
+    }
+    // No readable shipped quantity: any quantity left in the pool covers it.
+    if (!item.quantity) return left > 0 ? 0 : 1;
+    return Math.max(0, item.quantity - left);
   });
 }
 
@@ -221,7 +247,7 @@ async function alertIfUndelivered(email, { notifyAdmin, now, since }, conn) {
     // Its Delivered email may carry another shipment id: items that email
     // already covers are not undelivered.
     const missing = await deliveredElsewhere(trx, {
-      orderNumber: parsed.orderNumber, shipmentId: parsed.shipmentId,
+      orderNumber: parsed.orderNumber, shipmentId: parsed.shipmentId, shippedAt: email.received_at,
       wanted: stocked.map(({ item, product }) => ({ productId: product.id, title: item.title, quantity: item.quantity })),
     });
     const owed = stocked.map((row, index) => ({ ...row, missing: missing[index], remaining: row.item.quantity ? missing[index] : undefined }))
@@ -281,10 +307,11 @@ async function closeDeliveredUndeliveredBells(conn = db) {
     if (!bell.shipment_id) continue;
     const held = await conn('purchase_receipt_lines')
       .where({ vendor: VENDOR, shipment_key: bell.shipment_id, status: 'no_delivery_email' })
-      .select('order_number', 'product_id', 'raw_title', 'quantity');
+      .select('order_number', 'email_id', 'product_id', 'raw_title', 'quantity');
     if (!held.length) continue;
+    const shippedEmail = await conn('emails').where({ id: held[0].email_id }).first('received_at');
     const missing = await deliveredElsewhere(conn, {
-      orderNumber: held[0].order_number, shipmentId: bell.shipment_id,
+      orderNumber: held[0].order_number, shipmentId: bell.shipment_id, shippedAt: shippedEmail?.received_at,
       wanted: held.map((row) => ({ productId: row.product_id, title: row.raw_title, quantity: Number(row.quantity) || null })),
     });
     if (missing.every((left) => left <= 0)) closable.push(bell.id);

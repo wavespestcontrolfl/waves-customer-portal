@@ -322,6 +322,45 @@ jest.setTimeout(30000);
         expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['shipped-a']);
       });
 
+      // One order, the same product in two packages (A older, B newer), and a
+      // Delivered email under a third id: its units are allocated once.
+      const twoPackages = async (quantityEach) => {
+        await shippedItems('ship-a', quantityEach, { received_at: new Date(NOW - 5 * DAY) });
+        await shippedItems('ship-b', quantityEach, { received_at: new Date(NOW - 4 * DAY) });
+      };
+      const bellBody = async (shipmentId) => {
+        const [bell] = await alertBells(shipmentId);
+        return bell.detail || bell.body;
+      };
+
+      test('A and B want 1 each, 1 unit delivered under a third id: exactly one package is still missing', async () => {
+        await twoPackages(1);
+        await delivered(1);
+        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['ship-b']);
+        expect(await alertBells('ship-a')).toHaveLength(0);
+        expect(await bellBody('ship-b')).toContain('Taurus SC ×1 on');
+      });
+
+      test('a 2 + 2 split with 2 delivered under a third id rings for the 2 still missing', async () => {
+        await twoPackages(2);
+        await delivered(2);
+        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['ship-b']);
+        expect(await bellBody('ship-b')).toContain('Taurus SC ×2 on');
+      });
+
+      test('the closer uses the same allocation: the one delivered unit closes A\'s bell and leaves B\'s open', async () => {
+        await twoPackages(1);
+        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['ship-a', 'ship-b']);
+        await delivered(1);
+        expect(await closeDeliveredUndeliveredBells()).toBe(1);
+        expect((await alertBells('ship-a'))[0].done_at).not.toBeNull();
+        expect((await alertBells('ship-b'))[0].done_at).toBeNull();
+        expect(await closeDeliveredUndeliveredBells()).toBe(0);
+        await delivered(1, { lineNo: 2 });
+        expect(await closeDeliveredUndeliveredBells()).toBe(1);
+        expect((await alertBells('ship-b'))[0].done_at).not.toBeNull();
+      });
+
       test('a bell already rung closes once the shipment proves delivered, and one with items still missing stays', async () => {
         await shippedItems('shipped-key', 2);
         await run();
