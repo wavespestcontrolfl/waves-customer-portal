@@ -1487,10 +1487,7 @@ function CustomerDirectoryView({
             pageSize={pageSize}
             disabled={loading}
             itemLabel={searchActive ? "exact matches" : "customers"}
-            onPageChange={(nextPage) => {
-              setPage(nextPage);
-              loadCustomers(nextPage);
-            }}
+            onPageChange={setPage}
             onPageSizeChange={setPageSize}
           />
         ) : totalPages > 1 && (
@@ -1503,7 +1500,6 @@ function CustomerDirectoryView({
               onClick={() => {
                 const p = Math.max(1, page - 1);
                 setPage(p);
-                loadCustomers(p);
               }}
             >
               ← Previous
@@ -1518,7 +1514,6 @@ function CustomerDirectoryView({
               onClick={() => {
                 const p = Math.min(totalPages, page + 1);
                 setPage(p);
-                loadCustomers(p);
               }}
             >
               Next →
@@ -2357,7 +2352,6 @@ export default function CustomersPageV2() {
         const responseTotalPages = Math.max(1, Number(data?.totalPages) || 1);
         if (pg > responseTotalPages) {
           setPage(responseTotalPages);
-          loadCustomers(responseTotalPages);
           return;
         }
         hasLoadedRef.current = true;
@@ -2440,26 +2434,37 @@ export default function CustomersPageV2() {
     sortBy,
     sortDir,
     pageSize,
+    page,
     tableControlsEnabled,
     view,
     savedViewController.storageKey,
     savedViewApplication,
   ]);
 
-  // Single debounced effect — one fetch per filter/search/view change.
+  const previousCustomerViewRef = useRef(view);
+
+  // Single debounced effect — one fetch per page/filter/search/view change.
   // StrictMode's mount→cleanup→mount double-fire is absorbed by the
   // setTimeout cleanup, so dev-mode mount no longer stacks duplicate
   // `/admin/customers` requests.
   useEffect(() => {
+    const previousView = previousCustomerViewRef.current;
+    previousCustomerViewRef.current = view;
     if (view === "pipeline") {
       loadPipeline();
+      return undefined;
+    }
+    // Legacy and overlay Directory reset to page one after a non-directory
+    // view. Do the state transition first so the effect owns the one request.
+    if (view === "directory" && previousView !== "directory"
+      && !tableControlsEnabled && page !== 1) {
+      setPage(1);
       return undefined;
     }
     const t = setTimeout(() => {
       // Restored Directory state owns its first requested page. Non-directory
       // views keep their existing single-batch page-one contract.
-      if (view === "directory" && !tableControlsEnabled) setPage(1);
-      loadCustomers(tableControlsEnabled ? page : 1);
+      loadCustomers(view === "directory" ? page : 1);
     }, 300);
     return () => clearTimeout(t);
   }, [customerQueryKey]);

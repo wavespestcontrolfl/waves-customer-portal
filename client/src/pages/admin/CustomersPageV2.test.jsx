@@ -405,6 +405,45 @@ describe('CustomersPageV2 workflow state', () => {
     expect(requests.at(-1).has('retention')).toBe(false);
   });
 
+  it('refetches page one when an unchanged filter or clear-all only resets pagination', async () => {
+    const requestedPages = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      const requestedPage = Number(parsed.searchParams.get('page'));
+      requestedPages.push(requestedPage);
+      return response({
+        customers: [{
+          ...list.customers[0],
+          id: `page-${requestedPage}`,
+          firstName: `Page ${requestedPage}`,
+        }],
+        total: 200,
+        totalPages: 2,
+      });
+    }));
+
+    render(<MemoryRouter initialEntries={['/admin/customers?tableControls=1']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Page 1 Customer customer profile' });
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByRole('button', { name: 'Open Page 2 Customer customer profile' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Filter customers' }));
+    let dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'All', exact: true }));
+    await screen.findByRole('button', { name: 'Open Page 1 Customer customer profile' });
+    expect(requestedPages).toEqual([1, 2, 1]);
+    fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByRole('button', { name: 'Open Page 2 Customer customer profile' });
+    fireEvent.click(screen.getByRole('button', { name: 'Filter customers' }));
+    dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Clear all' }));
+    await screen.findByRole('button', { name: 'Open Page 1 Customer customer profile' });
+    expect(requestedPages).toEqual([1, 2, 1, 2, 1]);
+  });
+
   it('restores legacy controls and the 500-row request with tableControls=0', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {
