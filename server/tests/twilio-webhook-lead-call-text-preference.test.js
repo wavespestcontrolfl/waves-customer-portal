@@ -4,11 +4,11 @@
 // the choice. Without the choice the bell call is exactly as before. Real
 // webhook control flow; the intake machine, bell delivery and persistence are
 // synthetic (the machine itself is covered in lead-intake-call-text-preference).
-// suppression read, legacy drafter and persistence are synthetic.
+// suppression read, and persistence are synthetic.
 const mockState = {};
 function resetState() {
   Object.assign(mockState, {
-    sms: [], drafts: [], sequence: 0, res: null, legacyGate: true, customer: null, techLookupFails: false, visionTaken: false, messageUpdates: [],
+    sms: [], drafts: [], sequence: 0, res: null, customer: null, techLookupFails: false, visionTaken: false, messageUpdates: [],
   });
 }
 resetState();
@@ -46,7 +46,7 @@ mockDb.fn = { now: () => 'NOW' };
 mockDb.transaction = async (fn) => fn(mockDb);
 jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: (key) => key === 'webhooks' || (key === 'legacyAiDrafts' && mockState.legacyGate),
+  isEnabled: (key) => key === 'webhooks',
   gateEnvValue: (gate) => process.env[gate] === 'true',
 }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
@@ -76,7 +76,6 @@ jest.mock('../services/reschedule-sms', () => ({ handleRescheduleReply: async ()
 jest.mock('../services/customer-intelligence/event-rescore', () => ({ rescoreOnInboundMessage: async () => ({}) }));
 jest.mock('../services/recruiting-inbound', () => ({ matchApplicantReply: async () => null }));
 jest.mock('../services/context-aggregator', () => ({ getFullCustomerContext: async () => ({ summary: 'synthetic', flags: [] }), getContextForCustomer: async () => ({ summary: 'synthetic', flags: [] }) }));
-jest.mock('../services/response-drafter', () => ({ draftResponse: jest.fn(async () => ({ draft: 'Legacy synthetic draft' })) }));
 const mockDispatch = jest.fn();
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mockDispatch(...args) }));
 const mockCreate = jest.fn();
@@ -126,7 +125,6 @@ beforeEach(() => {
   process.env = { ...savedEnv };
   delete process.env.ADAM_PHONE;
   mockState.customer = { ...CUSTOMER };
-  mockState.legacyGate = false;
 });
 afterAll(() => { process.env = savedEnv; });
 

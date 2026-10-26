@@ -499,7 +499,6 @@ describe('model-switchboard', () => {
     // LAWN_ASSESSMENT_REFEREE (owner ruling 2026-09-29) sends the visit's photos
     // the same way: a deep-safe vision selector.
     expect(selectors.find((s) => s.key === 'LAWN_ASSESSMENT_REFEREE')).toMatchObject({ env: 'MODEL_LAWN_ASSESSMENT_REFEREE', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } });
-    // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity — two lanes, two backups.
     // Codex #5307 r7 finding 3: LANES had no entry for either the plant
     // engine's own Gemini/Sol ladder or the gated referee, so the Models tab
     // reported zero blast radius for GEMINI_VISION_BEST/OPENAI_PLANT_ID's
@@ -528,8 +527,6 @@ describe('model-switchboard', () => {
     expect(lawnReferee.primary.selector).toBe('LAWN_ASSESSMENT_REFEREE');
     expect(lawnReferee.fallback).toBeNull();
     expect(lawnReferee.inbound).toBe(true);
-    expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
-    expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
     // NEWSLETTER is reached only through the newsletterWriter policy in
     // llm/call.js, whose wire cap gives always-thinking models their floor;

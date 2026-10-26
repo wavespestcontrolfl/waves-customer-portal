@@ -20,12 +20,7 @@ const {
   hasRescheduleOrAwayIntent,
   outboundAsksForReply,
 } = require('../services/sms-intent');
-const { publicPortalUrl } = require('../utils/portal-url');
 const { phoneMatchDigits } = require('../utils/phone');
-
-// Admin alert recipient — must be a real cell, never one of our own Twilio
-// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
-const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
@@ -1496,32 +1491,11 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`Van wrap admin notification failed: ${e.message}`); }
     }
 
-    // WAVES AI ASSISTANT — route through conversational AI engine
-    // Only active on the dedicated AI assistant number
-
-    let aiAutoReplyOn = false;
-    if (isAiNumber) {
-      if (isEnabled('aiAssistantAutoReply')) {
-        aiAutoReplyOn = true;
-      } else {
-        try {
-          const toggle = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
-          if (toggle?.value === 'true') aiAutoReplyOn = true;
-        } catch { /* ignore */ }
-      }
-    }
-    // Scheduling-intent gate — high-stakes scheduling questions must not be
-    // auto-answered. A real failure motivated this: a customer asked "are we
-    // on the schedule for tomorrow?" and the canned AI reply said "fully
-    // booked, call us" while the customer actually had an appointment. Any
-    // scheduling-intent inbound skips the auto-reply entirely and falls
-    // through to Virginia's inbox.
     // PHOTO-TEXT AUTO-TRIAGE (GATE_PHOTO_TRIAGE, default OFF), step 1: is
     // this photo text a lawn/plant/pest "what is this"? Decided ONCE here —
     // the service owns every guard (gate, image media, line type, internal
     // sender, opt-out, pending draft, daily budgets) and runs the paid
-    // classifier at most once — because the legacy draft step's gate reads
-    // it: a triage candidate gets the photo-triage draft, never a legacy one.
+    // classifier at most once.
     const photoTriage = await require('../services/photo-text-triage').assessPhotoTriageCandidacy({
       inboundTouchpoint, smsLogEntry, body: Body, from: From,
       numberType: numberConfig.type, isAiNumber, customer, media: inboundMedia,
@@ -1529,122 +1503,12 @@ router.post('/sms', async (req, res) => {
       logger.error(`[photo-triage] candidacy check failed: ${err.message}`);
       return { candidate: false, reason: 'error' };
     });
-    const legacyAiDraftsEnabled = require('../services/photo-text-triage').legacyAiDraftsAllowed(photoTriage);
-
-    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
-      try {
-        const WavesAssistant = require('../services/ai-assistant/assistant');
-        const aiResult = await WavesAssistant.processMessage({
-          message: Body,
-          channel: 'sms',
-          channelIdentifier: From,
-          customerId: customer?.id || null,
-          customerPhone: From,
-        });
-
-        // If AI generated a reply (not escalated), send it automatically
-        // through the customer-message middleware. The wrapper enforces
-        // suppression (so we don't reply to a STOP'd number), consent,
-        // emoji + price-leak rules, and segment cap. Audit row written
-        // either way.
-        if (aiResult.reply && !aiResult.escalated) {
-          try {
-            const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-            // Inbound texters always reach at least phone_provided_unverified —
-            // they're literally texting from the number, so the channel-level
-            // identity is established by the inbound webhook itself. Without
-            // this hint, audience='lead' for unknown numbers would fall back
-            // to 'anonymous' in the trust resolver and fail the policy
-            // minimum for purpose='conversational' (a regression that would
-            // silently drop every new-lead AI reply).
-            const sendResult = await sendCustomerMessage({
-              to: From,
-              body: aiResult.reply,
-              channel: 'sms',
-              audience: customer ? 'customer' : 'lead',
-              purpose: 'conversational',
-              customerId: customer?.id || null,
-              identityTrustLevel: customer ? 'phone_matches_customer' : 'phone_provided_unverified',
-              entryPoint: 'twilio_inbound_ai_assistant',
-              // Send-window inbound-reply provenance: this reply answers the
-              // SMS the customer sent seconds ago — the one send class the
-              // window deliberately never defers.
-              conversationalContext: true,
-              metadata: { fromNumber: To },
-            });
-            if (!sendResult.sent) {
-              // PII rule: never log full phone in plaintext. Mask to last 4
-              // digits — enough for operator debugging via audit log
-              // cross-reference. Drop sendResult.reason: upstream
-              // provider/guard error strings may include the full
-              // recipient phone or message body. Operators get the full
-              // failure context via messaging_audit_log keyed by code +
-              // to_last4.
-              const last4 = String(From || '').replace(/\D/g, '').slice(-4);
-              logger.warn(`[twilio-webhook] AI reply BLOCKED for ***${last4}: code=${sendResult.code}`);
-
-              // Transient provider failure (Twilio 429/5xx/timeout): don't
-              // silently drop the reply. Re-queue it onto the scheduled-SMS
-              // rail so the every-5-min cron retries it, bounded by
-              // SCHEDULED_SMS_MAX_ATTEMPTS. message_type maps to purpose
-              // 'conversational', matching the inbound send above. (RED R3)
-              if (sendResult.retryable && sendResult.nextAllowedAt) {
-                try {
-                  await db('sms_log').insert({
-                    customer_id: customer?.id || null,
-                    direction: 'outbound',
-                    from_phone: To,
-                    to_phone: From,
-                    message_body: aiResult.reply,
-                    status: 'scheduled',
-                    scheduled_for: new Date(sendResult.nextAllowedAt),
-                    message_type: 'ai_assistant_reply',
-                    metadata: JSON.stringify({
-                      entry_point: 'twilio_inbound_ai_assistant_retry',
-                      provider_retry: true,
-                      original_failure_code: sendResult.code || null,
-                      // The retry is still an answer to the customer's own
-                      // inbound text — the executor restores the send-window
-                      // inbound-reply exemption from this flag.
-                      conversational_context: true,
-                    }),
-                  });
-                  logger.info(`[twilio-webhook] AI reply re-queued (retry at ${sendResult.nextAllowedAt}) for ***${last4}`);
-                } catch (requeueErr) {
-                  logger.error(`[twilio-webhook] AI reply re-queue failed: ${requeueErr.message}`);
-                }
-              }
-            }
-          } catch (e) { logger.error(`AI reply SMS failed: ${e.message}`); }
-        }
-
-        logger.info(`AI Assistant processed: ${From} escalated=${aiResult.escalated} conv=${aiResult.conversationId}`);
-      } catch (e) { logger.error(`AI Assistant failed: ${e.message}`); }
-    } else if ((schedulingIntent || rescheduleAsk) && aiAutoReplyOn) {
-      // Log the intentional skip so we can audit the gate and see volume.
-      logger.info('[sms-intent] scheduling-intent detected; skipping auto-reply, routing to human inbox');
-    } else if (smsReaction && aiAutoReplyOn) {
-      logger.info('[sms-intent] SMS reaction detected; skipping auto-reply');
-    } else if (courtesyOnly && aiAutoReplyOn) {
-      logger.info('[sms-intent] courtesy-only closer; skipping auto-reply');
-    }
-
-    // LEGACY AI DRAFT — still create drafts for admin review alongside the AI
-    // assistant. The same context feeds photo triage's fallback: a triage
-    // candidate skips this step, and gets this draft only if its triage fails.
-    const legacyDraftContext = {
-      customer, numberConfig, Body, From, smsLogEntry, schedulingIntent, rescheduleAsk, smsReaction, courtesyOnly,
-    };
-    await runLegacyAiDraft({ ...legacyDraftContext, enabled: legacyAiDraftsEnabled });
 
     // PHOTO-TEXT AUTO-TRIAGE, step 2: a candidate (step 1 above) runs the
     // admin photo assessment and parks ONE pending draft reply for owner
     // approval — never a send. A non-candidate is a no-op. Detached so the
     // vision call never holds this block.
-    // A triage that fails terminally parks the legacy draft it displaced.
-    void require('../services/photo-text-triage').runPhotoTriage(photoTriage, {
-      legacyFallback: ({ park }) => runLegacyAiDraft({ ...legacyDraftContext, enabled: isEnabled('legacyAiDrafts'), park }),
-    }).catch((err) => logger.error(`[photo-triage] inbound triage failed: ${err.message}`));
+    void require('../services/photo-text-triage').runPhotoTriage(photoTriage).catch((err) => logger.error(`[photo-triage] inbound triage failed: ${err.message}`));
 
     // SMS SHADOW DRAFTER (brand-voice loop, Phase B) — silently record what
     // the house-voice AI would have replied. status='shadow' rows never send
@@ -2207,8 +2071,6 @@ router.post('/status', async (req, res) => {
  * (throws { alreadyRead }), re-check right before the push leaves, and
  * retire the SID-scoped bell if the thread was read while it was written.
  */
-// Why the legacy AI draft does NOT run for an inbound, or null when it does.
-// Skip reasons that were logged before keep their log line.
 // A consumer that took an inbound text retypes its sms_log row: that type is
 // what later readers (the scheduling decide sweep, the response policy) use
 // to leave the text alone. Three tries, since for lead intake it is the only
@@ -2224,121 +2086,6 @@ async function retypeConsumedInbound(smsLogId, messageType, label) {
   }
   logger.warn(`[sms-ingestion] ${label} source classification deferred`);
   return false;
-}
-
-function legacyAiDraftSkip({ customer, numberConfig, Body, enabled, schedulingIntent, rescheduleAsk, smsReaction, courtesyOnly }) {
-  if (!customer || numberConfig.type !== 'location' || !Body) return 'not_applicable';
-  if (!enabled) return 'gate_disabled';
-  if (schedulingIntent || rescheduleAsk) return 'scheduling_intent';
-  if (smsReaction) return 'sms_reaction';
-  if (courtesyOnly) return 'courtesy_only';
-  return null;
-}
-const LEGACY_AI_DRAFT_SKIP_LOGS = {
-  gate_disabled: '[sms-intent] legacy AI draft gate disabled; skipping draft creation',
-  scheduling_intent: '[sms-intent] scheduling-intent detected; skipping legacy AI draft',
-  sms_reaction: '[sms-intent] SMS reaction detected; skipping legacy AI draft',
-};
-
-// The legacy inbound AI draft (message_drafts, status 'pending' — never
-// sent from here). Called by the webhook's post-ack block and, as the
-// fallback, by a photo triage that failed terminally. Fail-soft.
-async function runLegacyAiDraft(ctx) {
-  const skip = legacyAiDraftSkip(ctx);
-  if (skip) {
-    if (LEGACY_AI_DRAFT_SKIP_LOGS[skip]) logger.info(LEGACY_AI_DRAFT_SKIP_LOGS[skip]);
-    return;
-  }
-  const {
-    customer, Body, smsLogEntry, park = async (row) => { await db('message_drafts').insert(row); return true; },
-  } = ctx;
-  try {
-    const ContextAggregator = require('../services/context-aggregator');
-    const ResponseDrafter = require('../services/response-drafter');
-
-    // Context from the customer THIS route resolved (single active match, or
-    // the gated shared-phone mark), never a fresh unordered phone lookup
-    // that could load the other account on a shared number (codex #6268 r10).
-    const context = await ContextAggregator.getContextForCustomer(customer);
-
-    // Simple intent classification
-    const intentMap = [
-      { pattern: /when|next|schedule|appointment/i, intent: 'SCHEDULE_INQUIRY' },
-      { pattern: /cancel|stop|pause|quit/i, intent: 'CANCEL_REQUEST' },
-      { pattern: /bug|ant|roach|spider|pest|rat|mouse|termite|mosquito/i, intent: 'PEST_REPORT' },
-      { pattern: /bill|pay|charge|invoice|balance/i, intent: 'BILLING_INQUIRY' },
-      { pattern: /complain|unhappy|frustrated|not working|still seeing/i, intent: 'COMPLAINT' },
-      { pattern: /thank|great|awesome|perfect|love|excellent/i, intent: 'POSITIVE_FEEDBACK' },
-      { pattern: /yes|confirm|ok|sounds good/i, intent: 'CONFIRMATION' },
-    ];
-    const matched = intentMap.find(m => m.pattern.test(Body));
-    const intent = { intent: matched?.intent || 'GENERAL', confidence: matched ? 0.85 : 0.5 };
-
-    const draft = await ResponseDrafter.draftResponse(Body, context, intent);
-
-    // Store draft for approval — DO NOT send. A photo-triage fallback
-    // passes `park` (the lane's contact-locked pending-draft dedupe), which
-    // returns null when a pending draft already exists for the contact.
-    const parked = await park({
-      sms_log_id: smsLogEntry?.id || null,
-      customer_id: customer.id,
-      inbound_message: Body,
-      draft_response: draft.draft,
-      intent: intent.intent,
-      intent_confidence: intent.confidence,
-      context_summary: context.summary,
-      flags: JSON.stringify(context.flags),
-      status: 'pending',
-    });
-    if (!parked) {
-      logger.info(`[sms-intent] legacy AI draft skipped for customer ${customer.id}: a pending draft already exists`);
-      return;
-    }
-
-    // Auto-suggest appointment for schedule inquiries
-    if (intent.intent === 'SCHEDULE_INQUIRY' && customer) {
-      try {
-        // Find next available slot based on customer location
-        const zone = customer.city ? require('../config/locations').resolveLocation(customer.city) : null;
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        const nextWeek = new Date();
-        nextWeek.setDate(nextWeek.getDate() + 7);
-
-        // Check scheduled service load for next 7 days
-        const dailyLoad = await db('scheduled_services')
-          .whereBetween('scheduled_date', [tomorrow.toISOString().split('T')[0], nextWeek.toISOString().split('T')[0]])
-          .whereNotIn('status', ['cancelled'])
-          .select('scheduled_date')
-          .count('* as count')
-          .groupBy('scheduled_date')
-          .orderBy('count', 'asc');
-
-        // Find the lightest day
-        const lightestDay = dailyLoad[0]?.scheduled_date || tomorrow.toISOString().split('T')[0];
-        const datePretty = new Date(lightestDay + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-
-        // Append suggestion to the draft
-        draft.draft += `\n\nI can get you scheduled for ${datePretty} — morning or afternoon works better for you?`;
-
-        logger.info(`[sms-intent] Schedule inquiry from ${customer.first_name} — suggesting ${datePretty}`);
-      } catch (schedErr) {
-        logger.error(`[sms-intent] Schedule suggestion failed: ${schedErr.message}`);
-      }
-    }
-
-    // Notify Adam for high-urgency
-    if (['COMPLAINT', 'CANCEL_REQUEST', 'SCHEDULE_INQUIRY'].includes(intent.intent)) {
-      try {
-        await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-          `📱 ${customer.first_name}: "${Body.slice(0, 80)}"\n🤖 Draft: "${draft.draft.slice(0, 80)}..."\nApprove: ${publicPortalUrl()}/admin/communications`,
-          { messageType: 'internal_alert' }
-        );
-      } catch (e) { logger.error(`Draft alert failed: ${e.message}`); }
-    }
-
-    logger.info(`AI draft created for ${customer.first_name}: ${intent.intent}`);
-  } catch (e) { logger.error(`AI draft pipeline failed: ${e.message}`); }
 }
 
 async function ringSmsReplyBell(args) {

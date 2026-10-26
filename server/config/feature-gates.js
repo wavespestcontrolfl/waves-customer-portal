@@ -108,8 +108,6 @@
  *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 15s+, no answer, no voicemail — texts them back from the line they called)
  *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 15s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
  *   GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN=true (text-back lane only: no text to a caller who failed the press-1 pre-connect screen, call_log.metadata.preconnect_screen 'failed'; settles skipped:screen_failed; the missed-call bell is unchanged; dark by default)
- *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
- *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
  *   GATE_SMS_UNANSWERED_REPLY=true (a suggested house-voice reply nobody acted on goes out on its own after 2 open hours, ordinary questions only; strict opt-in, read at call time via smsUnansweredReplyLive(), dark by default; customer-facing)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
@@ -1329,14 +1327,11 @@ const gates = {
   // this entry is the status/log listing. Kill switch: unset.
   relayUnbookedHandoff: process.env.GATE_RELAY_UNBOOKED_HANDOFF === 'true',
 
-  // AI Assistant — auto-sends AI replies to customers via SMS
-  aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
-
   // Ask Waves — public conversational intake on the marketing site (hub). The
   // brain answers pest questions and steers visitors to the instant quote; it
   // can NEVER state a price (pricing only comes from the existing contact-gated
   // /api/public/quote/calculate path). Replies only when a visitor asks — not
-  // an auto-send — so dev is open like aiAssistantAutoReply; prod ships dark
+  // an auto-send — so dev is open; prod ships dark
   // until Adam sets GATE_ASK_WAVES=true.
   askWaves: isProd ? process.env.GATE_ASK_WAVES === 'true' : true,
   // Ask Waves topic routing — a safety, re-entry or medical-emergency question
@@ -1349,11 +1344,6 @@ const gates = {
   // a non-emergency answer into the emergency script. Dark everywhere; read at
   // call time through askWavesEmergencyCheckLive() (logGateStatus only here).
   askWavesEmergencyCheck: process.env.GATE_ASK_WAVES_EMERGENCY_CHECK === 'true',
-
-  // Legacy SMS AI Drafts — creates message_drafts rows and owner "Approve"
-  // alerts from inbound customer SMS. Off by default in prod until the
-  // approval workflow is ready.
-  legacyAiDrafts: isProd ? process.env.GATE_LEGACY_AI_DRAFTS === 'true' : true,
 
   // SMS Shadow Drafter (brand-voice loop, Phase B) — silently records what
   // the house-voice AI would have replied to inbound customer SMS as

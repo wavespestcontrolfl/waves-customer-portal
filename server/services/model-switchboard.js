@@ -502,10 +502,6 @@ const LANES = [
   L('sms_tone', 'SMS tone rewrite', 'routes/admin-communications.js', 'voice', R('smsToneRewrite'), P('customerCopy', 'fallback'), { inbound: true }),
   L('sms_translation', 'SMS test answers in the customer\'s language', 'sms-translation.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true, note: 'GATE_SMS_ANY_LANGUAGE_TRIAL only; never sends' }),
   L('sms_suggest', 'SMS draft suggestion (comms panel)', 'routes/admin-communications.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
-  // response-drafter.js picks the policy per intent: cancellations, complaints
-  // and high-severity flags ride highStakes; everything else rides customerCopy.
-  L('response_drafter', 'SMS reply drafter · routine', 'response-drafter.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
-  L('response_drafter_high_stakes', 'SMS reply drafter · cancel / complaint / high severity', 'response-drafter.js', 'voice', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('estimate_followup', 'Estimate-conversion follow-up SMS', 'estimate-conversion-agent.js, sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback'), { inbound: true, note: 'delegates to the SMS drafter' }),
   // Health probes: one tiny billed call per SMS draft route at boot and every
   // six hours (scheduler.js). No fallback by design — the canary exists to
@@ -673,8 +669,6 @@ const LANE_AREA = {
   sms_canary_save_sale: 'sms',
   sms_tone: 'sms',
   sms_suggest: 'sms',
-  response_drafter: 'sms',
-  response_drafter_high_stakes: 'sms',
   estimate_followup: 'sms',
   'sms-commitment-fulfillment': 'sms',
   'sms-commitment-thread-close': 'sms',
@@ -847,8 +841,6 @@ const LANE_DESCRIBE = {
   sms_canary_save_sale: 'Checks every six hours that the save-the-sale SMS drafting route still answers',
   sms_tone: 'Rewrites a staff text in the Waves voice',
   sms_suggest: 'Suggests a reply inside the comms panel',
-  response_drafter: 'Drafts replies to routine texts',
-  response_drafter_high_stakes: 'Drafts replies to cancellations, complaints and high-severity texts',
   estimate_followup: 'Follows up on a quote by text',
   'sms-commitment-fulfillment': 'Checks whether recorded SMS requests were completed',
   'sms-commitment-thread-close': 'Closes an open SMS follow-up when a later text in the same thread says it was done',
@@ -1017,7 +1009,7 @@ const LANE_DESCRIBE = {
 //   verified  a deterministic checker gates the output (report safe-copy gate,
 //             estimator floors, transcription validation)
 //   unchecked nothing but the owner notices
-const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "response_drafter_high_stakes", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
+const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
 // fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
 // and treats a missing findings array as "no findings", so `{}` passes.
 const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fast_complete_voice_fill", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);

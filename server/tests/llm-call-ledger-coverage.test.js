@@ -56,7 +56,7 @@ function read(file) {
 
 // '<id>' as the argument of runInLane( or the value of laneId:
 // The lane literal may sit inside the expression a site labels with (a
-// route- or flag-chosen ternary — response-drafter, the shadow drafter) as
+// route- or flag-chosen ternary — the shadow drafter) as
 // long as it is the runInLane argument or the `laneId:` payload value on
 // that line — and only that expression: the scan stops at a comma or
 // semicolon, so a literal in the NEXT argument or property (`runInLane(x,

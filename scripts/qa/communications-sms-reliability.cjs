@@ -46,7 +46,6 @@ async function main() {
           status = failLog ? 503 : 200;
         } else if (api === '/admin/communications/stats') body = { totalSent: 8, totalReceived: 12, channelStats: [] };
         else if (api === '/admin/communications/blocked-numbers') body = { numbers: [] };
-        else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
         else if (api === '/admin/communications/agent-draft') body = { draft: null };
         else if (api === '/admin/communications/messages/read') body = { success: true };
         else { report.unmatched.push(api); status = 404; body = { error: 'No fixture' }; }

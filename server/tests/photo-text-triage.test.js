@@ -118,11 +118,9 @@ const { countSegments } = require('../services/messaging/segment-counter');
 const { CONDITION_LABEL_VALUES } = require('../services/lawn-diagnostic-report');
 const triage = require('../services/photo-text-triage');
 
-// The webhook's two steps, in order (candidacy is awaited before the legacy
-// draft step; the run is detached after it).
-const mockLegacyFallback = jest.fn(async () => {});
+// The webhook's two steps, in order (candidacy is awaited; the run is detached after it).
 async function triageInboundPhotoText(args) {
-  return triage.runPhotoTriage(await triage.assessPhotoTriageCandidacy(args), { legacyFallback: mockLegacyFallback });
+  return triage.runPhotoTriage(await triage.assessPhotoTriageCandidacy(args));
 }
 const AMBIGUOUS = 'Look at this by the driveway';
 const { dailyCap, imageMedia, teaserOutcome } = triage._test;
@@ -447,7 +445,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
     expect(mockState.inserts.lawn_diagnostics).toHaveLength(1);
   });
 
-  test('the vision slot is reserved at candidacy: losing it means not a candidate (legacy path runs)', async () => {
+  test('the vision slot is reserved at candidacy: losing it means not a candidate', async () => {
     mockState.alreadyTriaged = true; // the conditional stamp matches no row
     const candidacy = await triage.assessPhotoTriageCandidacy(input());
     expect(candidacy).toEqual({ candidate: false, reason: 'already_triaged' });
@@ -462,24 +460,20 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
     expect(mockState.updates.map((u) => u.patch)).toEqual([{ photo_triage_at: 'NOW' }]);
   });
 
-  test('terminal failures hand the text back to the legacy draft; success and pending-draft skips do not', async () => {
+  test('terminal failures skip with their reason; success and pending-draft skips are reported too', async () => {
     mockIdentifyPest.mockResolvedValueOnce({ ok: false, reason: 'vision_unavailable' });
-    await triageInboundPhotoText(input({ body: 'bugs everywhere' }));
-    expect(mockLegacyFallback).toHaveBeenCalledTimes(1);
+    await expect(triageInboundPhotoText(input({ body: 'bugs everywhere' }))).resolves.toEqual({ status: 'skipped', reason: 'assessment_failed' });
 
     mockGetPhotoBuffer.mockRejectedValueOnce(new Error('S3 timeout'));
-    await triageInboundPhotoText(input());
-    expect(mockLegacyFallback).toHaveBeenCalledTimes(2);
+    await expect(triageInboundPhotoText(input())).resolves.toEqual({ status: 'skipped', reason: 'assessment_failed' });
 
     mockState.draftInsertFails = true;
-    await triageInboundPhotoText(input());
-    expect(mockLegacyFallback).toHaveBeenCalledTimes(3);
+    await expect(triageInboundPhotoText(input())).resolves.toEqual({ status: 'skipped', reason: 'draft_failed' });
     mockState.draftInsertFails = false;
 
     await expect(triageInboundPhotoText(input())).resolves.toMatchObject({ status: 'drafted' });
     mockState.pendingDraft = [null, { id: 'raced' }];
     await expect(triageInboundPhotoText(input())).resolves.toMatchObject({ reason: 'pending_draft' });
-    expect(mockLegacyFallback).toHaveBeenCalledTimes(3);
   });
 
   test('an unlinked sender locks on the phone', async () => {
