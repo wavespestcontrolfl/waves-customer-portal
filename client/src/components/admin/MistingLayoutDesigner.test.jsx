@@ -314,7 +314,7 @@ describe('MistingLayoutDesigner', () => {
     }
 
     it('keeps the edits when the lines do not change, and the counts reflect them', async () => {
-      const { frame, base, afterEdits } = await drawAndEdit();
+      const { base, afterEdits } = await drawAndEdit();
       // switching tools and finishing nothing leaves the geometry, so the overlay stays
       fireEvent.click(screen.getByRole('button', { name: 'Fence line' }));
       fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
