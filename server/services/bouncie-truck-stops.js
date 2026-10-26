@@ -23,6 +23,10 @@ const MIN_STOP_MINUTES = 5;
 const PAGE_SIZE = 500;
 // A trip-data event can reach us hours late; events are read up to this long after the window closes.
 const LATE_ARRIVAL_MS = 12 * 60 * 60 * 1000;
+// A trip that began before a window opened has batches received before it. The trips reads (trip link) start this
+// long earlier so a trip's first point is its true start: a trip across midnight belongs to the day it began, never to
+// both. loadTruckStops keeps its own read (the pin check is unchanged); its stops inside the window are the same.
+const EARLY_READ_MS = 12 * 60 * 60 * 1000;
 
 function parsePayload(payload) {
   if (payload && typeof payload === 'object') return payload;
@@ -79,17 +83,17 @@ function stopsFromTrips(trips, { maxGapMeters, minMinutes = MIN_STOP_MINUTES }) 
 }
 
 /**
- * Every trip of one vehicle read from its trip-data events received from fromMs to toMs + 12 hours (never later
- * than now): a Map of trip id -> first and last timestamped point. The ONE read behind loadTruckStops and
- * loadTruckTrips, so both see the same trips under the same paging, late-arrival and dedupe rules.
+ * Every trip of one vehicle read from its trip-data events received from readFromMs (default fromMs) to toMs + 12
+ * hours (never later than now): a Map of trip id -> first and last timestamped point. The ONE read behind
+ * loadTruckStops and loadTruckTrips, so both see the same trips under the same paging, late-arrival and dedupe rules.
  */
-async function readTripMap(conn, imei, { fromMs, toMs, now = Date.now() }) {
+async function readTripMap(conn, imei, { fromMs, toMs, now = Date.now(), readFromMs = fromMs }) {
   const until = new Date(Math.min(now, toMs + LATE_ARRIVAL_MS));
   const trips = new Map();
   for (let afterId = 0; ;) {
     const rows = await conn('bouncie_webhook_log')
       .where({ vehicle_imei: String(imei), event_type: 'trip-data' })
-      .where('received_at', '>=', new Date(fromMs))
+      .where('received_at', '>=', new Date(readFromMs))
       .where('received_at', '<', until)
       .where('id', '>', afterId)
       .orderBy('id').limit(PAGE_SIZE).select('id', 'payload');
@@ -128,23 +132,23 @@ async function loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters, now = Da
 }
 
 /**
- * The trips of one vehicle that START inside [fromMs, toMs), in time order, from the same read as loadTruckStops.
- * A trip whose events were received before fromMs is not seen; its later batches would look like a late start.
+ * The trips of one vehicle that START inside [fromMs, toMs), in time order. The read starts EARLY_READ_MS before the
+ * window, so a trip that began before it is read whole and left out, never cut to a late start.
  */
 async function loadTruckTrips(conn, imei, { fromMs, toMs, now = Date.now() }) {
   if (!imei) return [];
-  return tripList(await readTripMap(conn, imei, { fromMs, toMs, now }))
+  return tripList(await readTripMap(conn, imei, { fromMs, toMs, now, readFromMs: fromMs - EARLY_READ_MS }))
     .filter((trip) => trip.startMs >= fromMs && trip.startMs < toMs);
 }
 
 /**
- * A vehicle's trips AND stops that start inside [fromMs, toMs), from ONE read. The stops are derived over every trip
- * the read saw, exactly as loadTruckStops does, so a stop at the end of the window's last trip (its next trip begins
- * after toMs) is kept.
+ * A vehicle's trips AND stops that start inside [fromMs, toMs), from ONE read (starting EARLY_READ_MS before the
+ * window, as loadTruckTrips). The stops are derived over every trip the read saw, as loadTruckStops does, so a stop at
+ * the end of the window's last trip (its next trip begins after toMs) is kept.
  */
 async function loadTruckDay(conn, imei, { fromMs, toMs, maxGapMeters, now = Date.now() }) {
   if (!imei) return { trips: [], stops: [] };
-  const trips = await readTripMap(conn, imei, { fromMs, toMs, now });
+  const trips = await readTripMap(conn, imei, { fromMs, toMs, now, readFromMs: fromMs - EARLY_READ_MS });
   const inWindow = (startMs) => startMs >= fromMs && startMs < toMs;
   return {
     trips: tripList(trips).filter((trip) => inWindow(trip.startMs)),
@@ -154,4 +158,5 @@ async function loadTruckDay(conn, imei, { fromMs, toMs, maxGapMeters, now = Date
 
 module.exports = {
   loadTruckStops, loadTruckTrips, loadTruckDay, stopsFromTrips, tripList, tripPointsFromPayload, addToTrips, MIN_STOP_MINUTES,
+  EARLY_READ_MS,
 };

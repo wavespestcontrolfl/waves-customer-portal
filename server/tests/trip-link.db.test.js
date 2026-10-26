@@ -26,6 +26,7 @@ const migration = require('../models/migrations/20261026210000_trip_link');
 const tripLink = require('../services/trip-link');
 const backfill = require('../scripts/trip-link-backfill');
 const gps = require('../services/gps-arrival-detector');
+const truckStops = require('../services/bouncie-truck-stops');
 
 const describeDb = SKIP ? describe.skip : describe;
 jest.setTimeout(60000);
@@ -94,11 +95,11 @@ describeDb('trip link (PostgreSQL)', () => {
     return id;
   }
   let seq = 0;
-  async function tripData(tripId, points, imei = IMEI) {
+  async function tripData(tripId, points, imei = IMEI, receivedAt = new Date(iso('18:00'))) {
     seq += 1;
     await mockPg('bouncie_webhook_log').insert({
       event_type: 'trip-data', vehicle_imei: imei, dedupe_key: `trip-link-${randomUUID()}-${seq}`, processed: true,
-      received_at: new Date(iso('18:00')),
+      received_at: receivedAt,
       payload: JSON.stringify({
         eventType: 'tripData', transactionId: tripId, imei,
         data: points.map(([time, spot]) => ({ timestamp: iso(time), gps: { lat: spot.lat, lon: spot.lng }, speed: 0 })),
@@ -362,6 +363,28 @@ describeDb('trip link (PostgreSQL)', () => {
     await mockPg('technicians').where({ id: f.tech }).update({ bouncie_imei: '' });
     await link();
     expect(Number((await mockPg('trip_links').where({ technician_id: f.tech }).count({ n: '*' }).first()).n)).toBe(0);
+  });
+
+  test('a trip across midnight belongs to the day it began, read whole, and never to both days', async () => {
+    await technician();
+    // 23:55 ET on Oct 7 (03:55Z) to 00:05 ET on Oct 8 (04:05Z); its two batches were received either side of midnight.
+    await tripData('trip-x', [['03:55', HOME]], IMEI, new Date(iso('03:56')));
+    await tripData('trip-x', [['04:05', north(-5500)]], IMEI, new Date(iso('04:06')));
+    await mileage('trip-x', 1.5, { date: '2026-10-07' });
+    const now = new Date('2026-10-10T00:00:00Z');
+    const window = (day) => ({ fromMs: Date.parse(`${day}T04:00:00Z`), toMs: Date.parse(`${day}T04:00:00Z`) + 86400000 });
+    const oct8 = await truckStops.loadTruckDay(mockPg, IMEI, { ...window('2026-10-08'), maxGapMeters: 175, now: now.getTime() });
+    expect(oct8.trips.map((t) => t.tripId)).not.toContain('trip-x');
+    const oct7 = await truckStops.loadTruckTrips(mockPg, IMEI, { ...window('2026-10-07'), now: now.getTime() });
+    expect(oct7.map((t) => [t.tripId, t.startMs, t.endMs])).toEqual([['trip-x', Date.parse(iso('03:55')), Date.parse(iso('04:05'))]]);
+    await tripLink.linkDay(mockPg, DAY, { now });
+    expect(await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first()).toBeUndefined();
+    await tripLink.linkDay(mockPg, '2026-10-07', { now });
+    const linked = await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first();
+    expect(new Date(linked.trip_start).toISOString()).toBe(new Date(iso('03:55')).toISOString());
+    await tripLink.linkDay(mockPg, DAY, { now }); // the next day's re-run leaves it alone
+    expect(new Date((await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first()).trip_start).toISOString())
+      .toBe(new Date(iso('03:55')).toISOString());
   });
 
   test('it never writes mileage_log, scheduled_services, pins or alerts', async () => {

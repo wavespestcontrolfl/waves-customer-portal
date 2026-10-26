@@ -289,6 +289,15 @@ describe('the trips read agrees with the stops read', () => {
     await truckStops.loadTruckTrips(conn, 'imei-1', { fromMs: FROM, toMs: TO, now: NOW });
     expect(conn.calls[0].wheres[0][0]).toEqual({ vehicle_imei: 'imei-1', event_type: 'trip-data' });
     expect(conn.calls[0].wheres.find((w) => w[0] === 'received_at' && w[1] === '<')[2].getTime()).toBe(Math.min(NOW, TO + 12 * 3600000));
+    // The trips reads start 12 hours early (a trip that began before the window is read whole); the stops read does not.
+    expect(truckStops.EARLY_READ_MS).toBe(12 * 3600000);
+    expect(conn.calls[0].wheres.find((w) => w[0] === 'received_at' && w[1] === '>=')[2].getTime()).toBe(FROM - 12 * 3600000);
+    const dayConn = fakeConn(rows);
+    await truckStops.loadTruckDay(dayConn, 'imei-1', { fromMs: FROM, toMs: TO, maxGapMeters: GAP, now: NOW });
+    expect(dayConn.calls[0].wheres.find((w) => w[0] === 'received_at' && w[1] === '>=')[2].getTime()).toBe(FROM - 12 * 3600000);
+    const stopsConn = fakeConn(rows);
+    await truckStops.loadTruckStops(stopsConn, 'imei-1', { fromMs: FROM, toMs: TO, maxGapMeters: GAP, now: NOW });
+    expect(stopsConn.calls[0].wheres.find((w) => w[0] === 'received_at' && w[1] === '>=')[2].getTime()).toBe(FROM);
     const none = fakeConn(rows);
     expect(await truckStops.loadTruckTrips(none, '', { fromMs: FROM, toMs: TO })).toEqual([]);
     expect(await truckStops.loadTruckDay(none, '', { fromMs: FROM, toMs: TO, maxGapMeters: GAP })).toEqual({ trips: [], stops: [] });
