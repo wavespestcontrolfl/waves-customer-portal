@@ -306,17 +306,20 @@ const TIPS = Object.freeze([
     id: 'light_warm_bulbs', group: 'lighting', label: 'LED porch bulbs',
     pests: ['Spiders', 'Crickets'], keywords: ['porch', 'light', 'bulb', 'led', 'spiders', 'moths'], lines: ['pest', 'mosquito'], season: 'all',
     sources: [{ fact: 'fact-tip-led-bulbs-insect-attraction', label: 'Ecology and Evolution, 2016', url: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/' }],
+    blog: { path: '/pest-control/why-spiders-come-back-after-treatment/' },
     copy: "Go LED on the porch. In a 2016 field study, LED bulbs drew about four times fewer insects than incandescent bulbs and about half as many as compact fluorescents, and warm versus cool white made no difference. Fewer insects at the door means fewer spiders and geckos following them.",
   },
   {
     id: 'light_motion_sensor', group: 'lighting', label: 'Lights on a motion sensor',
     pests: ['Spiders', 'Crickets'], keywords: ['porch', 'light', 'sensor', 'timer'], lines: ['pest', 'mosquito'], season: 'all',
+    blog: { path: '/pest-control/why-spiders-come-back-after-treatment/' },
     copy: "Every hour the porch light runs is another hour insects collect at the door. A motion sensor gives you light when you walk up and dark the rest of the night — by morning the difference at the threshold is obvious.",
   },
   {
     id: 'light_aim_away', group: 'lighting', label: 'Aim landscape lights away',
     pests: ['Spiders'], keywords: ['landscape', 'uplight', 'spotlight', 'entry'], lines: ['pest'], season: 'all',
     sources: [{ fact: 'fact-tip-led-bulbs-insect-attraction', label: 'Ecology and Evolution, 2016', url: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC5108255/' }],
+    blog: { path: '/pest-control/why-spiders-come-back-after-treatment/' },
     copy: "Uplights pointed back at the walls gather insects at the entries every night. Turning them out toward the yard moves that crowd away from the door, and LED bulbs draw fewer insects to begin with.",
   },
 
@@ -1831,6 +1834,13 @@ const TIPS = Object.freeze([
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-palmetto-bugs-weather', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN298' }],
     copy: "The big palmetto bugs live outdoors. UF/IFAS says American cockroaches wander inside looking for food and water or to get away from extreme weather, so you may see more around extreme weather.",
+  },
+  {
+    id: 'fa_flood_rafts', group: 'fire_ants', label: 'Fire ants float in a flood',
+    keywords: ['flood', 'floodwater', 'storm', 'hurricane', 'fire ants', 'float'], lines: ['pest'], season: 'wet',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-fa-flood-rafts', label: 'CDC', url: 'https://www.cdc.gov/niosh/docs/2025-106/pdfs/2025-106.pdf' }],
+    copy: "After a flood, watch for floating clumps of fire ants. The CDC says fire ants are often disturbed during hurricanes and floods and can cling together and float along in floodwaters, and that things lifted off the ground may be covered in ants, so look before you pick up debris.",
   },
 ]);
 

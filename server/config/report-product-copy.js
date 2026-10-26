@@ -114,7 +114,7 @@ const REPORT_PRODUCT_COPY = [
     epaReg: '53883-279',
     names: ['taurus sc'],
     mainPests: ['ants'],
-    howItWorks: 'Pests can’t detect it, so they walk right through the treated band along your foundation and carry it back to the nest — reaching ants you never see.',
+    howItWorks: 'Ants can’t detect it, so they walk right through the treated band along your foundation and carry it back to the nest — reaching ants you never see.',
     // 35 distinct pests — Control Solutions Inc. current specimen label,
     // cross-checked against the EPA PPLS supplemental label accepted
     // 11/04/2015 (EPA Reg. No. 53883-279). -> floors to 25+.
