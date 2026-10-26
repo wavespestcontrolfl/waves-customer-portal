@@ -154,6 +154,23 @@ describe('diffNozzleEdits and the line a nozzle belongs to', () => {
     expect(edits.added[0]).toMatchObject({ x: 105, y: 5, lineIndex: 1, manual: true });
   });
 
+  it('keeps a nozzle moved onto another line\'s deleted spot on its own line, so its automatic aim does not change on reopen', () => {
+    const auto = [
+      { key: 'a', x: 0, y: 0, kind: 'eave', lineIndex: 0 },
+      { key: 'b', x: 100, y: 0, kind: 'eave', lineIndex: 0 },
+      { key: 'c', x: 100, y: 80, kind: 'eave', lineIndex: 1 },
+    ];
+    // b (line 0) was deleted, and c (line 1) was dragged onto b's exact spot.
+    const edits = diffNozzleEdits(auto, [
+      { x: 0, y: 0, kind: 'eave', lineIndex: 0 },
+      { x: 100, y: 0, kind: 'eave', lineIndex: 1 },
+    ], [], () => 'm1');
+    // Not "a on b's spot": c is moved to it, and stays c, on line 1; b is removed from line 0.
+    expect(edits.removed).toEqual(['b']);
+    expect(edits.moved).toEqual({ c: { x: 100, y: 0 } });
+    expect(edits.added).toEqual([]);
+  });
+
   it('still pairs a moved nozzle with its own line\'s, and a saved nozzle that names no line with the nearest', () => {
     const auto = [{ key: 'a', x: 0, y: 0, kind: 'eave', lineIndex: 0 }, { key: 'b', x: 100, y: 0, kind: 'eave', lineIndex: 1 }];
     expect(diffNozzleEdits(auto, [{ x: 0, y: 0, kind: 'eave', lineIndex: 0 }, { x: 110, y: 4, kind: 'eave', lineIndex: 1 }], [], () => 'm').moved)

@@ -64,7 +64,7 @@ const sameLine = (auto, saved) => !Number.isInteger(saved.lineIndex) || saved.li
 
 /**
  * Express `saved` nozzles as an edit overlay on the automatic placement `auto`.
- * Pass 1 keeps every saved nozzle that sits on an automatic one (same kind, same spot). Pass 2 pairs
+ * Pass 1 keeps every saved nozzle that sits on an automatic one (same kind, same spot, same line when the saved nozzle names one). Pass 2 pairs
  * what is left, nearest first, as MOVED nozzles. Whatever is still unpaired is removed (automatic) or
  * added (saved). Whatever the pairing, applyNozzleEdits(auto, overlay) has exactly the saved positions.
  * A saved manual `aim` goes with its nozzle: into `aimed` for a kept or moved automatic one, onto the
@@ -86,7 +86,7 @@ export function diffNozzleEdits(auto, saved, lines, nextKey) {
     let bestD = Infinity;
     freeAuto.forEach((ai) => {
       const d = distance(auto[ai], s);
-      if (auto[ai].kind === s.kind && d <= MATCH_TOLERANCE_PX && d < bestD) { best = ai; bestD = d; }
+      if (auto[ai].kind === s.kind && sameLine(auto[ai], s) && d <= MATCH_TOLERANCE_PX && d < bestD) { best = ai; bestD = d; }
     });
     if (best >= 0) take(best, si);
   });
