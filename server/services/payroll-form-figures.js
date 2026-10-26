@@ -33,6 +33,8 @@ const db = require('../models/db');
 const { TAX_YEARS, RATES } = require('./payroll-calc');
 const { PayrollError } = require('./payroll-w4');
 const { rollIrs } = require('./payroll-tax-calendar');
+// The pay week's last day, as payroll-runs.js works it out (Codex #6770 r1).
+const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
 
 const FROM_RECORDS = 'Enter from your records';
@@ -50,19 +52,13 @@ const pct = (cents, bp) => Math.floor((cents * bp + 5000) / 10000);
 const pctText = (bp) => `${(bp / 100).toFixed(bp % 10 === 0 ? 1 : 2)}%`;
 const centsText = (cents) => `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`;
 
-function addDays(date, days) {
-  const d = new Date(`${date}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-}
-
 const monthOf = (check) => Number(check.payDate.slice(5, 7));
 const quarterOfMonth = (month) => Math.ceil(month / 3);
 
 // The 12th rule: the pay week holds the 12th of (year, month).
 function weekHoldsTwelfth(check, year, month) {
   const twelfth = `${year}-${pad(month)}-12`;
-  return check.weekStart <= twelfth && twelfth <= addDays(check.weekStart, 6);
+  return check.weekStart <= twelfth && twelfth <= addStaffWorkDays(check.weekStart, 6);
 }
 
 function employeesOnTwelfth(checks, year, month) {
