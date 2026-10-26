@@ -78,6 +78,7 @@ jest.mock('../config/feature-gates', () => ({
   estimateConsultationOfferLive: () => process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
   leadInspectionLinkLive: () => process.env.GATE_LEAD_INSPECTION_LINK === 'true',
   commercialProposalSignLive: () => false,
+  commercialFirstVisitLive: () => false,
   // The PDF render pass reads both misting layout gates (GATE_MISTING_LAYOUT_DESIGNER); off here.
   mosquitoMistingLive: () => false,
   mistingLayoutDesignerLive: () => false,

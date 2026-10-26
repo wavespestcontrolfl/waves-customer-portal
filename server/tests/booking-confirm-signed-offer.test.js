@@ -638,6 +638,102 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     return capturedScheduledInsert;
   }
 
+  // The commercial first visit (GATE_COMMERCIAL_FIRST_VISIT, services/commercial-first-visit.js): the one PAID internal
+  // booking. billing prices the visit only when it is not a callback; estimateGuard refuses inside the transaction,
+  // under its own lock, before the insert.
+  describe('paid internal visit + estimate guard (commercial first visit)', () => {
+    const firstVisitPayload = (visit = {}) => callbackPayload({
+      source: 'commercial_proposal_first_visit',
+      callbackVisit: {
+        serviceKey: 'pest_control', serviceId: null, serviceType: 'Commercial Pest Control', durationMinutes: 60,
+        isCallback: false, dedupeLane: false, billing: { estimatedPrice: 81.67 }, ...visit,
+      },
+    });
+    function captureRaws() {
+      const raws = [];
+      const runTransaction = db.transaction.getMockImplementation();
+      db.transaction.mockImplementation((fn) => runTransaction((trx) => {
+        const raw = trx.raw;
+        trx.raw = jest.fn((...args) => { raws.push(args); return raw(...args); });
+        return fn(trx);
+      }));
+      return raws;
+    }
+
+    test('billing on a non-callback internal visit stamps the per-visit price and invoices on completion', async () => {
+      await expect(createSelfBooking(firstVisitPayload())).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toMatchObject({
+        is_callback: false, estimated_price: 81.67, create_invoice_on_complete: true, service_id: null, service_type: 'Commercial Pest Control',
+      });
+    });
+
+    test('without billing an internal visit stays free (the assessment shape)', async () => {
+      await expect(createSelfBooking(firstVisitPayload({ billing: undefined }))).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toMatchObject({ is_callback: false, create_invoice_on_complete: false });
+      expect(capturedScheduledInsert.estimated_price).not.toBe(81.67);
+    });
+
+    test('billing never prices a callback: a re-service stays free whatever it carries', async () => {
+      const laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+      try {
+        const row = await runCallbackToScheduledInsert({
+          callbackVisit: { ...callbackPayload().callbackVisit, billing: { estimatedPrice: 81.67 } },
+        });
+        expect(row).toMatchObject({ is_callback: true, create_invoice_on_complete: false });
+        expect(row.estimated_price).not.toBe(81.67);
+      } finally { laneSpy.mockRestore(); }
+    });
+
+    test.each([
+      ['booked', 'ALREADY_BOOKED'],
+      ['ineligible', 'ESTIMATE_CHANGED'],
+    ])('a %s verdict refuses with %s before the insert', async (verdict, code) => {
+      const revalidate = jest.fn().mockResolvedValue(verdict);
+      await expect(createSelfBooking(firstVisitPayload({ estimateGuard: { estimateId: EST_ID, revalidate } })))
+        .resolves.toMatchObject({ ok: false, status: 409, code });
+      expect(revalidate).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('an ok verdict books, under the per-estimate lock, re-checked on the booking transaction itself', async () => {
+      const raws = captureRaws();
+      const revalidate = jest.fn().mockResolvedValue('ok');
+      await expect(createSelfBooking(firstVisitPayload({ estimateGuard: { estimateId: EST_ID, revalidate } }))).rejects.toThrow(SENTINEL);
+      expect(capturedScheduledInsert).toMatchObject({ estimated_price: 81.67 });
+      expect(raws.some(([sql, bindings]) => /pg_advisory_xact_lock/.test(sql) && bindings?.[0] === 'estimate-booking-guard' && bindings?.[1] === EST_ID)).toBe(true);
+      expect(typeof revalidate.mock.calls[0][0]).toBe('function');
+    });
+
+    // Codex #6869 P1: the offer was built at customerBookingLocation's fallback for a customer with no saved pin, so
+    // the commit re-derives that fallback (and stamps it on the visit) instead of failing its own location fence.
+    test('a customer with no saved pin books at the canonical fallback its offer used, stamped on the visit', async () => {
+      loadedCustomer = { ...CUST, latitude: null, longitude: null };
+      fencedCustomer = { ...loadedCustomer };
+      const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
+      try {
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG } }))).rejects.toThrow(SENTINEL);
+        expect(capturedScheduledInsert).toMatchObject({ lat: LAT, lng: LNG, estimated_price: 81.67, service_address_line1: CUST.address_line1 });
+      } finally { geocodeSpy.mockRestore(); }
+    });
+
+    test('the fence still holds: a fallback that moved since the offer refuses', async () => {
+      loadedCustomer = { ...CUST, latitude: null, longitude: null };
+      fencedCustomer = { ...loadedCustomer };
+      const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: 27.5, lng: -82.4 });
+      try {
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG } })))
+          .resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+        expect(capturedScheduledInsert).toBeUndefined();
+      } finally { geocodeSpy.mockRestore(); }
+    });
+
+    test('a guard with no re-check function fails closed', async () => {
+      await expect(createSelfBooking(firstVisitPayload({ estimateGuard: { estimateId: EST_ID } })))
+        .resolves.toMatchObject({ ok: false, status: 409, code: 'ESTIMATE_CHANGED' });
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+  });
+
   test("someone ELSE's estimate UUID books UNLINKED (no source_estimate_id stamp) with a warn", async () => {
     const row = await runToScheduledInsert({ source_estimate_id: OTHER_EST });
     expect(row.source_estimate_id).toBeNull();

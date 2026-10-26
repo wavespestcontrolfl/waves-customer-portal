@@ -533,6 +533,13 @@ function manualAcceptLockedRowRefusal(estimate) {
 // refuses before a write. The estimate page sends none.
 const versionText = (v) => (v == null ? null : (v instanceof Date ? v.toISOString() : String(v)));
 
+// The `expected` pin that accepts exactly this estimate row version (its updated_at, status and owner): a caller that
+// checked the row in its own transaction passes it, so an edit since then refuses the accept (preview_changed)
+// instead of accepting terms the caller never checked (commercial-first-visit.js).
+function estimateRowPin(row) {
+  return { estimateVersion: versionText(row.updated_at), estimateStatus: row.status, customerId: row.customer_id };
+}
+
 function cardChanged() {
   const err = httpError('The estimate, the customer or the bill changed after the card was shown. Nothing was changed.', 409);
   err.code = 'preview_changed';
@@ -1431,5 +1438,6 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
   isCommercialProposalEstimate,
+  estimateRowPin,
   _private: { manualPrepayBlockingOneTimeCharge },
 };

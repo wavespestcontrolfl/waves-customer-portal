@@ -80,6 +80,7 @@ import MistingLayoutCard from '../components/estimate/MistingLayoutCard';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
+import { firstVisitLabel } from '../components/estimate/CommercialFirstVisitPicker';
 import ConsumerNoticeSign, { ConsumerNoticeHint, CONSUMER_NOTICE_HINT } from '../components/estimate/ConsumerNoticeSign';
 import ServiceAgreementSign from '../components/estimate/ServiceAgreementSign';
 import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
@@ -6660,9 +6661,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   );
 
   // Back from the signing page (a bfcache restore or a tab switch), a customer waiting on the Florida consumer notice
-  // sees it signed without a manual reload. Listens only while the notice blocks the accept.
+  // sees it signed without a manual reload; so does the signer of an eligible commercial proposal, whose first-visit
+  // picker shows once the agreement is signed (GATE_COMMERCIAL_FIRST_VISIT). Listens only while one of them waits.
+  const awaitingSignature = consumerNoticeBlocked || data?.cta?.commercialFirstVisit?.state === 'after_signing';
   useEffect(() => {
-    if (!consumerNoticeBlocked) return undefined;
+    if (!awaitingSignature) return undefined;
     const refresh = () => {
       if (ctaPhaseRef.current === 'submitting') return;
       loadEstimate({ preserveSelection: true }).catch(() => {});
@@ -6675,7 +6678,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       window.removeEventListener('pageshow', onPageShow);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [consumerNoticeBlocked, loadEstimate]);
+  }, [awaitingSignature, loadEstimate]);
 
 
   // A different estimate token is a fresh session — let its first load count.
@@ -9823,8 +9826,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             state="accepted"
             customerFirstName={estimate.customerFirstName}
             address={estimate.address}
-            // Booked + upcoming visit → show the date, not "we'll follow up".
-            appointmentLabel={existingAppointment ? formatAppointmentLabel(existingAppointment) : null}
+            // Booked + upcoming visit → show the date, not "we'll follow up". A commercial proposal's
+            // self-booked first visit (GATE_COMMERCIAL_FIRST_VISIT) rides cta.commercialFirstVisit.
+            appointmentLabel={existingAppointment
+              ? formatAppointmentLabel(existingAppointment)
+              : (cta?.commercialFirstVisit?.state === 'booked' ? firstVisitLabel(cta.commercialFirstVisit.visit) : null)}
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
@@ -9892,7 +9898,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ) : null}
         {/* "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): only when /data carries
             cta.commercialAgreement — absent with the gate off, so the page is unchanged. */}
-        <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} />
+        <CommercialAgreementSign
+          token={token}
+          commercialAgreement={cta?.commercialAgreement}
+          firstVisit={cta?.commercialFirstVisit}
+          // Booking the first visit accepts the proposal: reload, so the page shows the accepted card with the visit.
+          onFirstVisitBooked={() => { loadEstimate({ preserveSelection: true }).catch(() => {}); }}
+        />
         {/* Residential Waves AI property card (HOME sq ft / POOL-LANAI / COMPLEXITY):
             not for an authored commercial proposal — the PDF document drops
             `intelligence` for it the same way. */}

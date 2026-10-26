@@ -4,7 +4,7 @@
 // section rides the glass card treatment. A residential estimate keeps all of those sections.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
 
@@ -148,6 +148,64 @@ describe('authored commercial proposal page', () => {
     cleanup();
     await renderProposal({ canSign: false, state: 'none' });
     expect(screen.getByTestId('commercial-agreement-call')).toHaveAttribute('data-glass', 'card');
+  });
+});
+
+// GATE_COMMERCIAL_FIRST_VISIT: /data's cta.commercialFirstVisit. Signed, the agreement card becomes the first-visit
+// picker and What happens next points at it; once booked (the proposal is then accepted), the accepted card shows the
+// visit date.
+describe('commercial first visit on the proposal page', () => {
+  it('signed + pick: the picker replaces the signed card and What happens next points below', async () => {
+    const payload = proposalPayload({ canSign: false, state: 'signed' });
+    payload.cta.commercialFirstVisit = { state: 'pick', durationMinutes: 30 };
+    vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/first-visit/availability')
+      ? json({ ok: true, days: [], slots: [] })
+      : json(payload))));
+    render(<EstimateViewPage />);
+    await screen.findByText('Commercial Service Proposal');
+    const picker = await screen.findByTestId('commercial-first-visit-picker');
+    expect(picker).toHaveAttribute('data-glass', 'card');
+    expect(within(picker).getByRole('heading', { level: 2, name: 'Pick your first visit' })).toBeInTheDocument();
+    expect(screen.queryByTestId('commercial-agreement-signed')).not.toBeInTheDocument();
+    expect(screen.getByTestId('proposal-next-steps')).toHaveTextContent('Pick the day and time of your first visit below');
+  });
+
+  // Codex #6869 r2 P2: the signing page's "Back to your estimate" is a history step, so a bfcache restore must refetch
+  // /data, or the page keeps its unsigned card and never shows the picker.
+  it('back from signing (a bfcache restore): /data is read again and the picker shows', async () => {
+    const before = proposalPayload({ canSign: true, state: 'none' });
+    before.cta.commercialFirstVisit = { state: 'after_signing' };
+    const after = proposalPayload({ canSign: false, state: 'signed' });
+    after.cta.commercialFirstVisit = { state: 'pick', durationMinutes: 30 };
+    const queue = [before, after];
+    const fetchMock = vi.fn(async (url) => {
+      if (String(url).includes('/first-visit/availability')) return json({ ok: true, days: [], slots: [] });
+      return json(queue.length > 1 ? queue.shift() : queue[0]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+    await screen.findByRole('button', { name: 'Accept & sign agreement' });
+    await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+    expect(await screen.findByTestId('commercial-first-visit-picker')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(2);
+  });
+
+  it('a commercial proposal with nothing waiting on a signature never refetches on return', async () => {
+    const fetchMock = vi.fn(async () => json(proposalPayload({ canSign: true, state: 'none' })));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+    await screen.findByRole('button', { name: 'Accept & sign agreement' });
+    await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(1);
+  });
+
+  it('accepted with a booked first visit: the accepted card shows the visit date', async () => {
+    const payload = proposalPayload();
+    payload.cta = { ...payload.cta, terminalState: 'accepted', commercialFirstVisit: { state: 'booked', visit: { date: '2026-11-03', windowStart: '09:00', windowEnd: '10:00' } } };
+    vi.stubGlobal('fetch', vi.fn(async () => json(payload)));
+    render(<EstimateViewPage />);
+    expect(await screen.findByText('Tuesday, November 3 at 9 AM')).toBeInTheDocument();
+    expect(screen.getByText('Your visit')).toBeInTheDocument();
   });
 });
 

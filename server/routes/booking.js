@@ -2504,6 +2504,18 @@ async function createSelfBooking(payload = {}) {
     // authedCustomer/payAtVisit, callbackVisit must be set AFTER the body
     // spread at every public call site (/confirm nulls it) — a crafted body
     // must never mint itself a free callback or skip the offer sig.
+    //
+    // callbackVisit.billing ({ estimatedPrice }, commercial-first-visit.js
+    // only, GATE_COMMERCIAL_FIRST_VISIT): a PAID internal booking, never a
+    // callback — the visit carries the server-resolved per-visit price and
+    // invoices on completion. callbackVisit.estimateGuard ({ estimateId,
+    // revalidate(trx) }): a booking made from an estimate's page
+    // (commercial-first-visit.js) re-checks that estimate inside the booking
+    // transaction (see the lock below).
+    const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
+      && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
+      ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
+      : null;
 
     if (!slot_date || !slot_start) {
       return { ok: false, status: 400, error: 'slot_date and slot_start required' };
@@ -3563,8 +3575,12 @@ async function createSelfBooking(payload = {}) {
       // that same fallback when the legacy profile has no saved pin. The
       // assessment caller already supplies expectedLocation from its own
       // resolved/fenced property flow, so it must not trigger a second,
-      // potentially divergent geocode here.
-      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false;
+      // potentially divergent geocode here. A paid internal visit
+      // (commercial-first-visit.js) offers its times at
+      // customerBookingLocation, which is this same fallback, so it resolves
+      // here too and its expectedLocation fence checks the re-derived pin
+      // (Codex #6869 P1).
+      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false || !!paidInternalVisit;
       const preloadedBookingLocation = shouldResolveMissingBookingLocation
         ? await preloadBookingLocation(preFenceCustomer)
         : null;
@@ -4020,6 +4036,36 @@ async function createSelfBooking(payload = {}) {
           });
         }
       }
+      // callbackVisit.estimateGuard (a booking from an estimate's page,
+      // commercial-first-visit.js): a per-estimate
+      // lock taken after every shared rung and the lane/lead locks (only these
+      // callers take the namespace, and it is the terminal lock, so no cycle),
+      // then the caller's re-check on THIS transaction: 'booked' when the one
+      // visit the caller allows landed since its read (the first visit), any
+      // other verdict but 'ok' when the estimate no longer qualifies (no longer
+      // open, signed, or clear on the call side) refuses before the insert.
+      if (callbackVisit?.estimateGuard?.estimateId) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['estimate-booking-guard', String(callbackVisit.estimateGuard.estimateId)],
+        );
+        const { revalidate } = callbackVisit.estimateGuard;
+        const verdict = typeof revalidate === 'function' ? await revalidate(trx) : 'ineligible';
+        if (verdict === 'booked') {
+          throw Object.assign(new Error('Your first visit is already booked.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'ALREADY_BOOKED',
+          });
+        }
+        if (verdict !== 'ok') {
+          throw Object.assign(new Error('This estimate just changed — please refresh the page.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'ESTIMATE_CHANGED',
+          });
+        }
+      }
 
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate. A
@@ -4374,11 +4420,14 @@ async function createSelfBooking(payload = {}) {
         // assessment. service_id still links the catalog row either way
         // (completion-profile resolution + isAssessmentServiceRow also match
         // on it), and no-invoice-on-complete is correct for both: neither
-        // visit ever bills.
+        // visit ever bills. The one billed internal visit (paidInternalVisit,
+        // a commercial first visit) carries its per-visit price and invoices
+        // on completion like a priced /book visit.
         ...(callbackVisit ? {
           is_callback: callbackVisit.isCallback !== false,
           service_id: callbackVisit.serviceId || null,
-          create_invoice_on_complete: false,
+          create_invoice_on_complete: !!paidInternalVisit,
+          ...(paidInternalVisit ? { estimated_price: paidInternalVisit.estimatedPrice } : {}),
         } : {}),
         // Clean re-service request storage (customer_request/_source/_pests,
         // migration 20260927100000) — internal callers only (reservice-public
@@ -4504,7 +4553,7 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN' || txErr.code === 'ESTIMATE_CHANGED') {
         if (txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
           // No message may follow this refusal: retire the recovery intent the
           // wizard's capture-intent staged for this contact.

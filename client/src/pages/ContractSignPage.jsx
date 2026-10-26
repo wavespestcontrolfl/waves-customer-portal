@@ -84,11 +84,13 @@ function ContractBodyText({ text }) {
 }
 
 // A Florida consumer notice or a residential service agreement opened from the estimate page (the server marks it
-// fromEstimate) offers the way back, when this tab has a page to go back to.
+// fromEstimate) offers the way back, when this tab has a page to go back to. The commercial agreement is marked only
+// while GATE_COMMERCIAL_FIRST_VISIT is on: the first visit is picked back on the proposal page.
 const FROM_ESTIMATE_TEMPLATE_KEYS = new Set([
   'consumer_notice.fdacs_13692',
   'service_agreement.residential_pest',
   'service_agreement.lawn_ornamental',
+  'service_agreement.commercial_pest',
 ]);
 function BackToEstimateButton({ contract }) {
   if (contract.fromEstimate !== true || !FROM_ESTIMATE_TEMPLATE_KEYS.has(contract.documentTemplateKey)) return null;

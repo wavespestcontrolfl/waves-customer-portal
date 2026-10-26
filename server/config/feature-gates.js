@@ -6100,6 +6100,18 @@ function commercialAutopayLive() {
   return process.env.GATE_COMMERCIAL_AUTOPAY === 'true';
 }
 
+// GATE_COMMERCIAL_FIRST_VISIT read at CALL time, strict `=== 'true'`, dark by default in every environment (owner
+// 2026-10-26, "OK GO" on decision page choice 1B). The one reader for "Pick your first visit" after a commercial agreement
+// is signed (services/commercial-first-visit.js): `cta.commercialFirstVisit` on GET /api/estimates/:token/data, the
+// first-visit availability and booking routes in routes/estimate-public.js, the signing page's way back to the estimate
+// (routes/contracts-public.js) and the signed-agreement alert's copy. Off: the routes answer the generic 404, /data
+// carries nothing new, and the office books the first visit as before. On, the signer of an eligible proposal books the
+// first visit from open slots; it books, marks the proposal won, seeds the series and texts the booking confirmation.
+// Kill: unset.
+function commercialFirstVisitLive() {
+  return process.env.GATE_COMMERCIAL_FIRST_VISIT === 'true';
+}
+
 // GATE_TAX_SHARED_BILLS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
 function taxSharedBillsLive() {
   return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_SHARED_BILLS');
@@ -8648,6 +8660,8 @@ module.exports.annualPlanDocumentsLive = annualPlanDocumentsLive;
 // GATE_COMMERCIAL_PROPOSAL_SIGN reader, on its own line so gate PRs never conflict.
 module.exports.commercialProposalSignLive = commercialProposalSignLive;
 module.exports.commercialAutopayLive = commercialAutopayLive;
+// GATE_COMMERCIAL_FIRST_VISIT reader, on its own line so gate PRs never conflict.
+module.exports.commercialFirstVisitLive = commercialFirstVisitLive;
 // GATE_TAX_SHARED_BILLS reader, on its own line so gate PRs never conflict.
 module.exports.taxSharedBillsLive = taxSharedBillsLive;
 // GATE_TAX_RETURN_ENGINE reader, on its own line so gate PRs never conflict.

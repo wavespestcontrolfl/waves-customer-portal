@@ -61,7 +61,11 @@ export function resolveDocNextSteps({ cta = {}, authoredProposal = false, accept
   if (TERMINAL_VARIANTS[terminal]) return { variant: TERMINAL_VARIANTS[terminal], primaryLabel: null };
   // GATE_COMMERCIAL_PROPOSAL_SIGN: the server offers online signing (cta.commercialAgreement). The document is a
   // PDF, so the button is a link to the estimate page, where the sign tap lives.
-  if (authoredProposal && cta.commercialAgreement?.canSign === true) return { variant: 'authored_sign', primaryLabel: SIGN_BUTTON_LABEL };
+  // GATE_COMMERCIAL_FIRST_VISIT (cta.commercialFirstVisit): the customer picks the first visit right after signing.
+  if (authoredProposal && cta.commercialAgreement?.canSign === true) {
+    return { variant: cta.commercialFirstVisit?.state === 'after_signing' ? 'authored_sign_book' : 'authored_sign', primaryLabel: SIGN_BUTTON_LABEL };
+  }
+  if (authoredProposal && cta.commercialFirstVisit?.state === 'pick') return { variant: 'authored_pick', primaryLabel: null };
   if (authoredProposal) return { variant: 'authored', primaryLabel: 'View estimate online' };
   if (cta.quoteRequired === true || cta.reviewBeforeBooking === true) return { variant: 'team_confirms', primaryLabel: 'View estimate online' };
   if (acceptanceMode === 'contact_office') return { variant: 'contact_office', primaryLabel: null };
@@ -110,6 +114,18 @@ const VARIANT_TEXT = {
       {' '}or call {WAVES_SUPPORT_PHONE_DISPLAY}. Signing does not start service or bill you; {WAVES_ACCOUNT_MANAGER_FIRST_NAME},
       {' '}your Waves account manager, follows up to schedule.
       {onPage ? null : <>{' '}Your live estimate stays available at {link(estimateUrl, estimateUrl)}.</>}</>
+  ),
+  authored_sign_book: ({ estimateUrl, primaryLabel, onPage }) => (
+    <>To go ahead, tap <strong>{primaryLabel}</strong> {onPage ? 'below' : 'above'} to review and sign your service agreement online,
+      {' '}or call {WAVES_SUPPORT_PHONE_DISPLAY}. Signing does not bill you, and right after you sign you pick the day and time
+      {' '}of your first visit.
+      {onPage ? null : <>{' '}Your live estimate stays available at {link(estimateUrl, estimateUrl)}.</>}</>
+  ),
+  // Signed, first visit not booked yet: only the page offers the picker (the document render never reaches this).
+  authored_pick: ({ estimateUrl, onPage }) => (
+    <>Your service agreement is signed. Pick the day and time of your first visit {onPage ? 'below' : 'on your live estimate'},
+      {' '}or call {WAVES_SUPPORT_PHONE_DISPLAY} and we will book it with you.
+      {onPage ? null : <>{' '}Your live estimate is at {link(estimateUrl, estimateUrl)}.</>}</>
   ),
   team_confirms: ({ estimateUrl }) => (
     <>Our team will confirm the final details and scheduling with you — call {WAVES_SUPPORT_PHONE_DISPLAY} any
