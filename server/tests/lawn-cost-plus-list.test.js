@@ -675,6 +675,50 @@ describe('db-bridge rebases the knobs every sync', () => {
   });
 });
 
+describe('db-bridge loads the lawn size table in the shape the cost basis reads', () => {
+  const { syncConstantsFromDB } = require('../services/pricing-engine/db-bridge');
+  const { resolveLawnCostPlusBasis } = require('../services/pricing-engine/lawn-cost-plus-knobs');
+  const { LAWN_BRACKETS } = constants;
+  const TIERS = ['standard', 'enhanced', 'premium'];
+
+  let liveBrackets;
+  beforeEach(() => { liveBrackets = JSON.parse(JSON.stringify(LAWN_BRACKETS)); });
+  afterEach(() => { Object.assign(LAWN_BRACKETS, liveBrackets); });
+
+  // lawn_pricing_brackets as stored: one row per track, size and tier, plus a
+  // sqft 0 seed row and a row left from the retired basic tier.
+  function storedRows() {
+    return Object.entries(liveBrackets).flatMap(([track, rows]) => [
+      { grass_track: track, sqft_bracket: 0, tier: 'enhanced', monthly_price: 0 },
+      ...rows.flatMap(([sqft, ...monthly]) => [
+        { grass_track: track, sqft_bracket: sqft, tier: 'basic', monthly_price: 25 },
+        ...TIERS.map((tier, i) => ({ grass_track: track, sqft_bracket: sqft, tier, monthly_price: monthly[i] })),
+      ]),
+    ]);
+  }
+
+  function fakeDb(lawnRows) {
+    const db = (table) => {
+      const query = {
+        select: async () => (table === 'pricing_config' ? [{ config_key: 'global_labor_rate', data: { value: 35 } }] : []),
+        orderBy: () => query,
+        then: (resolve, reject) => Promise.resolve(table === 'lawn_pricing_brackets' ? lawnRows : []).then(resolve, reject),
+      };
+      return query;
+    };
+    db.schema = { hasTable: async (table) => table === 'pricing_config' || table === 'lawn_pricing_brackets' };
+    return db;
+  }
+
+  test('a synced table keeps one column per cadence, so the switch still prices a lawn', async () => {
+    expect(await syncConstantsFromDB(fakeDb(storedRows()))).toBe(true);
+    expect(LAWN_BRACKETS).toEqual(liveBrackets);
+    expect(resolveLawnCostPlusBasis().error).toBeNull();
+    process.env[GATE] = 'true';
+    expect(lawnLine(generateEstimate(estimateInput({ lawn: lawnService() }))).annual).toBe(693);
+  });
+});
+
 describe('the list price never sits under the collected-margin floor', () => {
   let liveCostPlus;
   beforeEach(() => { liveCostPlus = JSON.parse(JSON.stringify(LAWN_PRICING_V2.costPlusList)); });

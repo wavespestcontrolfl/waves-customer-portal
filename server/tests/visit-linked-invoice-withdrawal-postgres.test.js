@@ -981,6 +981,37 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(() => assertInvoiceCollectible(after)).toThrow(/third-party payer/);
   });
 
+  // One visit, one live bill (Billing Recovery audit, owner 2026-10-25): a voided
+  // invoice does not come back beside a live or refunded replacement on the
+  // same visit, nor while a "Billed elsewhere" record names a live invoice.
+  test('unvoid refuses while another invoice bills the same visit, and restores once nothing does', async () => {
+    const InvoiceService = require('../services/invoice');
+    const { customerId, visitId, invoiceId } = await fixture({ link: 'record', status: 'void' });
+    const otherInvoice = async (fields) => {
+      const id = randomUUID();
+      await mockPg('invoices').insert({
+        id, customer_id: customerId, invoice_number: `FIX-${id.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''),
+        total: 120, subtotal: 120, ...fields,
+      });
+      return id;
+    };
+    const replacement = await otherInvoice({ status: 'sent', scheduled_service_id: visitId });
+    await expect(InvoiceService.unvoidInvoice(invoiceId)).rejects.toThrow(/already has live invoice FIX-/);
+    await mockPg('invoices').where({ id: replacement }).update({ status: 'refunded' });
+    await expect(InvoiceService.unvoidInvoice(invoiceId)).rejects.toThrow(/already has refunded invoice FIX-/);
+    await mockPg('invoices').where({ id: replacement }).update({ status: 'void' });
+    const covering = await otherInvoice({ status: 'sent' });
+    await mockPg('visit_billing_dispositions').insert({ scheduled_service_id: visitId, disposition: 'billed_elsewhere', invoice_id: covering });
+    await expect(InvoiceService.unvoidInvoice(invoiceId)).rejects.toThrow(/already has live invoice FIX-/);
+    // A refunded covering invoice still refuses: a failed refund brings it back.
+    await mockPg('invoices').where({ id: covering }).update({ status: 'refunded' });
+    await expect(InvoiceService.unvoidInvoice(invoiceId)).rejects.toThrow(/already has refunded invoice FIX-/);
+    expect((await invoiceRow(invoiceId)).status).toBe('void');
+    await mockPg('invoices').where({ id: covering }).update({ status: 'void' });
+    await InvoiceService.unvoidInvoice(invoiceId);
+    expect((await invoiceRow(invoiceId)).status).not.toBe('void');
+  });
+
   test('unvoid builds its ownership lock chain from the invoice as it is INSIDE the transaction: an invoice a merge moved after the outer read locks the NEW customer', async () => {
     const InvoiceService = require('../services/invoice');
     const Linked = require('../services/visit-linked-invoice-withdrawal');

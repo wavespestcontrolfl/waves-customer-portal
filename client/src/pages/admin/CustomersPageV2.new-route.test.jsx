@@ -40,7 +40,7 @@ describe("CustomersPageV2 new-customer route", () => {
   it("opens the mobile form with call details and closes back to Customers", async () => {
     render(
       <MemoryRouter initialEntries={[
-        "/admin/customers/new?phone=%2B19415550123&city=Lakewood+Ranch&state=FL",
+        "/admin/customers/new?phone=%2B19415550123&city=Lakewood+Ranch&state=FL&tableControls=1",
       ]}>
         <Routes>
           <Route path="/admin/customers/new" element={<CustomersPageV2 />} />
@@ -55,7 +55,7 @@ describe("CustomersPageV2 new-customer route", () => {
     expect(screen.getByPlaceholderText("State")).toHaveValue("FL");
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(screen.getByTestId("location")).toHaveTextContent("/admin/customers");
+    expect(screen.getByTestId("location")).toHaveTextContent("/admin/customers?tableControls=1");
   });
 
   it("keeps the explicit overlay fallback selection and close state in the URL", async () => {
@@ -80,7 +80,7 @@ describe("CustomersPageV2 new-customer route", () => {
     }));
 
     render(
-      <MemoryRouter initialEntries={["/admin/customers?customer360=overlay"]}>
+      <MemoryRouter initialEntries={["/admin/customers?customer360=overlay&tableControls=1"]}>
         <Routes>
           <Route
             path="/admin/customers"
@@ -107,13 +107,15 @@ describe("CustomersPageV2 new-customer route", () => {
     fireEvent.click(profileButton);
     await waitFor(() => {
       expect(screen.getByTestId("location")).toHaveTextContent(
-        "/admin/customers?customer360=overlay&customerId=cust-1",
+        "/admin/customers?customer360=overlay&tableControls=1&customerId=cust-1",
       );
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Close profile" }));
     await waitFor(() => {
-      expect(screen.getByTestId("location")).toHaveTextContent("/admin/customers");
+      expect(screen.getByTestId("location")).toHaveTextContent(
+        "/admin/customers?customer360=overlay&tableControls=1",
+      );
     });
   });
 
