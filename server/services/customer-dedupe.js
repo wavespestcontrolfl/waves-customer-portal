@@ -13,6 +13,10 @@
  *   red    — different last names AND different addresses on a shared line:
  *            almost certainly two people. Report-only; never one-click merged.
  *
+ * Two profiles of one multi-property account (same customers.account_id) at
+ * two different house numbers share the phone by design and are never listed
+ * (separateAccountProperties; owner rulings 2026-08-15 and 2026-10-26).
+ *
  * A second, review-only group kind sits beside the phone groups (owner ruling
  * 2026-10-03, GATE_DUPLICATES_SAME_ADDRESS): "same address, different phone" —
  * two live residential customers at the same premise (customer-address-match's
@@ -329,12 +333,29 @@ function classifyPair(winner, loser, blockers) {
   return { loser, tier, reasons, namesOk, addrStatus: addr.status };
 }
 
+// Two profiles of ONE multi-property account (customers.account_id: the
+// property switcher's rows, one per home) at two different house numbers are
+// that account's separate properties, not a duplicate — the phone is shared by
+// design. Owner verdict 2026-08-15 ("not duplicates — separate records kept
+// intentionally") on every such pair, and 2026-10-26: stop listing them. The
+// queue hides the pair like a dismissed one (after tiering and demotion, so no
+// other pair's tier moves); such a pair is never green, so the auto sweep is
+// unchanged. Narrower than the same-name queue's whole-account skip on purpose:
+// one premise entered twice on an account (same house number, the street
+// spelled another way, or no parsable address) still lists.
+function separateAccountProperties(winner, loser) {
+  if (!winner.account_id || winner.account_id !== loser.account_id) return false;
+  const w = normalizeStreetKey(winner.address_line1);
+  const l = normalizeStreetKey(loser.address_line1);
+  return Boolean(w && l && w.key.split(' ')[0] !== l.key.split(' ')[0]);
+}
+
 // Every column the group build + blocker probes + winner pick read — ONE
 // list so the queue read and the sweep's under-lock group re-read can't
 // drift apart in what they see.
 const DUPLICATE_GROUP_COLUMNS = ['id', 'first_name', 'last_name', 'email', 'phone', 'address_line1',
   'address_line2', 'city', 'zip', 'stripe_customer_id', 'password_hash',
-  'pipeline_stage', 'lead_source', 'created_at', 'payer_id', 'billing_mode', 'monthly_rate'];
+  'pipeline_stage', 'lead_source', 'created_at', 'payer_id', 'billing_mode', 'monthly_rate', 'account_id'];
 
 // ONE phone group → its identity clusters, each with a picked winner and the
 // classified (tier + reasons) candidates under it — group-level demotion
@@ -488,10 +509,11 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
     if (members.length < 2) continue;
     for (const { winner, candidates } of buildPhoneGroupCandidates(members, blockersById)) {
       // Dismissals filter the VISIBLE queue only — after demotion, so
-      // adjudicating one pair never re-greens the rest of the group.
+      // adjudicating one pair never re-greens the rest of the group. Two
+      // properties of one account leave it the same way.
       const visible = candidates.filter((c) => {
         const [a, b] = pairKey(winner.id, c.loser.id);
-        return !dismissed.has(`${a}:${b}`);
+        return !dismissed.has(`${a}:${b}`) && !separateAccountProperties(winner, c.loser);
       });
       if (visible.length) {
         groups.push({
@@ -953,8 +975,8 @@ function sameNameLeadReason({ phonesMissing, phonesShared }) {
 }
 
 // Pure, two stages (buildSameNameGroups runs both). Stage 1 — sameNameEdges:
-// customers = live rows (the same columns the same-address read carries, plus
-// account_id); properties = active customer_properties rows; dismissed = Set
+// customers = live rows (the same columns the same-address read carries,
+// account_id included); properties = active customer_properties rows; dismissed = Set
 // of pairKey strings. Customers are BUCKETED by the name key, so only pairs
 // inside one bucket are ever looked at (no all-pairs scan). A pair is an edge
 // unless it is dismissed, two profiles of one account, a pair the phone queue
@@ -1078,7 +1100,7 @@ function buildSameNameGroups(input) {
 // like the same-address read: without it only customer-row addresses count as
 // "same address", which can only list MORE same-name pairs, never merge one.
 async function readSameNameRows(database, ids = null, group = null) {
-  const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'account_id', 'active', 'deleted_at', 'property_type', 'waveguard_tier', ...SAME_ADDRESS_SLOT_COLUMNS].map((c) => `c.${c}`);
+  const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'active', 'deleted_at', 'property_type', 'waveguard_tier', ...SAME_ADDRESS_SLOT_COLUMNS].map((c) => `c.${c}`);
   const customerQuery = whereSameNameLive(database('customers as c'))
     .whereRaw("COALESCE(TRIM(c.first_name), '') <> ''")
     .whereRaw("COALESCE(TRIM(c.last_name), '') <> ''");

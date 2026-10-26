@@ -358,6 +358,60 @@ describe('findDuplicateGroups', () => {
     expect(groups).toHaveLength(0);
   });
 
+  describe('two profiles of one multi-property account (owner 2026-08-15 + 2026-10-26)', () => {
+    const ACCOUNT = 'aaaaaaaa-0000-0000-0000-0000000000a0';
+    const primary = {
+      id: ACCOUNT, account_id: ACCOUNT,
+      first_name: 'Robin', last_name: 'Sample', phone: '+19995550061',
+      address_line1: '100 Gulf Ave', zip: '34205',
+      pipeline_stage: 'active_customer', created_at: '2026-04-01',
+    };
+    const rental = {
+      id: 'aaaaaaaa-0000-0000-0000-0000000000a1', account_id: ACCOUNT,
+      first_name: 'Robin', last_name: 'Sample', phone: '9995550061',
+      address_line1: '2200 Bay Street', zip: '34208',
+      pipeline_stage: 'new_lead', created_at: '2026-05-06',
+    };
+
+    it('does not list them when the house numbers differ: the phone is shared by design', async () => {
+      installDb(router({ customers: [primary, rental] }));
+      const groups = await dedupe.findDuplicateGroups();
+      expect(groups).toHaveLength(0);
+    });
+
+    it('still lists one premise entered twice on the account, and a pair across two accounts', async () => {
+      // Same house number, the street spelled without its suffix: one home.
+      const twice = { ...rental, address_line1: '100 Gulf', zip: '34205' };
+      installDb(router({ customers: [primary, twice] }));
+      let groups = await dedupe.findDuplicateGroups();
+      expect(groups).toHaveLength(1);
+      expect(groups[0].candidates[0].loser.id).toBe(twice.id);
+      expect(groups[0].candidates[0].reasons).toContain('address_conflict');
+
+      const otherAccount = { ...rental, account_id: 'aaaaaaaa-0000-0000-0000-0000000000b0' };
+      installDb(router({ customers: [primary, otherAccount] }));
+      groups = await dedupe.findDuplicateGroups();
+      expect(groups).toHaveLength(1);
+      expect(groups[0].candidates[0].tier).toBe('yellow');
+      expect(groups[0].candidates[0].reasons).toContain('address_conflict');
+    });
+
+    it('keeps a real duplicate on the same phone listed, with its tier unchanged', async () => {
+      const shell = {
+        id: 'aaaaaaaa-0000-0000-0000-0000000000a2', account_id: null,
+        first_name: 'Robin', last_name: null, phone: '(999) 555-0061',
+        address_line1: null, zip: null,
+        pipeline_stage: 'new_lead', created_at: '2026-07-01',
+      };
+      installDb(router({ customers: [primary, rental, shell] }));
+      const groups = await dedupe.findDuplicateGroups();
+      expect(groups).toHaveLength(1);
+      expect(groups[0].winner.id).toBe(primary.id);
+      expect(groups[0].candidates.map((c) => c.loser.id)).toEqual([shell.id]);
+      expect(groups[0].candidates[0].tier).toBe('green');
+    });
+  });
+
   it('keeps shells demoted after the conflicting pair is dismissed', async () => {
     // Dismissing the red Diana↔Nicole pair hides it from the queue, but
     // Nicole still exists on the phone — the shell must NOT re-green.
