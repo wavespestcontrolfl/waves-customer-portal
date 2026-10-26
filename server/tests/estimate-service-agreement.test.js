@@ -73,9 +73,9 @@ describe('estimateServiceAgreementLanes', () => {
 });
 
 describe('laneServiceName', () => {
-  test('names the lane\'s recurring lines and the accepted frequency', () => {
-    expect(laneServiceName(estimate([LAWN, PEST, MOSQUITO, TREE]), 'pest')).toBe('Pest Control + Mosquito Control, quarterly');
-    expect(laneServiceName(estimate([LAWN, PEST, TREE], [], { accepted_frequency_key: 'bi_monthly' }), 'lawn')).toBe('Lawn Care + Tree & Shrub Care, every other month');
+  test('names the lane\'s recurring lines and never a cadence (a bundle\'s accepted frequency is the pest cadence, not the lawn program\'s)', () => {
+    expect(laneServiceName(estimate([LAWN, PEST, MOSQUITO, TREE]), 'pest')).toBe('Pest Control + Mosquito Control');
+    expect(laneServiceName(estimate([LAWN, PEST, TREE], [], { accepted_frequency_key: 'quarterly' }), 'lawn')).toBe('Lawn Care + Tree & Shrub Care');
     expect(laneServiceName(estimate([PEST], [], { accepted_frequency_key: null }), 'pest')).toBe('Pest Control');
   });
 });
@@ -213,11 +213,11 @@ describe('ensureEstimateServiceAgreement', () => {
     const [row] = state.contracts;
     expect(row).toMatchObject({
       customer_id: 'cust-1', contract_type: 'document_template', document_template_key: PEST_KEY, document_template_version_id: 'ver-pest',
-      status: 'sent', title: 'Residential Pest Service Agreement', service_name: 'Pest Control, quarterly',
+      status: 'sent', title: 'Residential Pest Service Agreement', service_name: 'Pest Control',
     });
     expect(row.contract_text_snapshot).toContain('Customer: Pat Owner');
     expect(row.contract_text_snapshot).toContain('Service address: 12 Test Lane, Bradenton FL 34205');
-    expect(row.contract_text_snapshot).toContain('Service plan: Pest Control, quarterly');
+    expect(row.contract_text_snapshot).toContain('Service plan: Pest Control\n');
     expect(row.contract_text_snapshot).toMatch(/Start date: November 3, 2026/);
     expect(row.document_variables_snapshot.estimate).toEqual({ id: 'est-1', source: SNAPSHOT_SOURCE, lane: 'pest' });
     expect(state.events.map((e) => e.event_type)).toEqual(['created_from_document_template', 'share_link_created']);
@@ -231,7 +231,7 @@ describe('ensureEstimateServiceAgreement', () => {
     const { database, state } = makeDb();
     const result = await ensureEstimateServiceAgreement({ estimate: bundle, lane: 'lawn', req, conn: database });
     expect(result).toMatchObject({ ok: true, status: 201 });
-    expect(state.contracts[0]).toMatchObject({ document_template_key: LAWN_KEY, title: 'Lawn & Ornamental Service Agreement', service_name: 'Lawn Care, quarterly' });
+    expect(state.contracts[0]).toMatchObject({ document_template_key: LAWN_KEY, title: 'Lawn & Ornamental Service Agreement', service_name: 'Lawn Care' });
     expect(state.contracts[0].contract_text_snapshot).toContain(`Start: ${START_DATE_TEXT}`);
   });
 

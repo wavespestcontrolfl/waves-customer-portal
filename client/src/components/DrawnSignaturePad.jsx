@@ -80,8 +80,10 @@ export default function DrawnSignaturePad({ onChange, disabled = false, resetKey
     img.onload = () => {
       const cur = canvasRef.current;
       if (!cur || initGen.current !== gen) return;
-      const scale = cur.height / (img.height || 1);
-      cur.getContext('2d').drawImage(img, 0, 0, img.width * scale, cur.height);
+      // Fit inside BOTH dimensions: a rotation to portrait narrows the box while its height stays fixed, so scaling by
+      // height alone would crop the signature's right side (and the next stroke would export that crop). Never enlarged.
+      const scale = Math.min(1, cur.width / (img.width || 1), cur.height / (img.height || 1));
+      cur.getContext('2d').drawImage(img, 0, 0, img.width * scale, img.height * scale);
       hasDrawn.current = true;
       setDrawn(true);
     };

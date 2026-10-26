@@ -64,6 +64,26 @@ describe('DrawnSignaturePad', () => {
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
 
+  it('a narrower pad (a rotation to portrait) restores the whole signature scaled to fit, never cropped', async () => {
+    let resize = null;
+    vi.stubGlobal('ResizeObserver', class { constructor(cb) { resize = cb; } observe() {} disconnect() {} });
+    // The snapshot taken on the 600px-wide pad comes back as a 600×150 image.
+    vi.stubGlobal('Image', class { set src(_value) { this.width = 600; this.height = 150; Promise.resolve().then(() => this.onload?.()); } });
+    vi.stubGlobal('devicePixelRatio', 1);
+    let boxWidth = 600;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 0, width: boxWidth, height: 150 }));
+    const { getByTestId } = render(<DrawnSignaturePad onChange={vi.fn()} resetKey="a" />);
+    stroke(getByTestId('drawn-signature-canvas'));
+
+    boxWidth = 300;
+    resize([{ contentRect: { width: 300 } }]);
+    await Promise.resolve();
+    await Promise.resolve();
+    // min(300 / 600, 150 / 150) = 0.5: the full signature at half size, inside the 300×150 box.
+    expect(ctx.drawImage).toHaveBeenLastCalledWith(expect.anything(), 0, 0, 300, 75);
+    vi.unstubAllGlobals();
+  });
+
   it('renders nothing where the canvas has no 2D context (the typed signature still signs)', () => {
     HTMLCanvasElement.prototype.getContext.mockImplementation(() => null);
     const { queryByTestId } = render(<DrawnSignaturePad onChange={vi.fn()} resetKey="a" />);

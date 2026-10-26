@@ -79,7 +79,7 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
   };
   const read = (id) => trx('customer_contracts').where({ id })
     .first(trx.raw("to_char(renewal_date, 'YYYY-MM-DD') as day"), 'auto_renewal_notice_required', 'auto_renewal_notice_sent_at');
-  const commercial = async (customerId, { status = 'signed', signedAt = '2027-01-15T15:00:00Z', renewalDate = null, sentAt = null } = {}) => {
+  const commercial = async (customerId, { status = 'signed', signedAt = '2027-01-15T15:00:00Z', startDate = 'Set when we schedule your first visit', renewalDate = null, sentAt = null } = {}) => {
     const [row] = await trx('customer_contracts').insert({
       customer_id: customerId,
       contract_type: 'document_template',
@@ -87,7 +87,7 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
       status,
       signed_at: status === 'signed' ? signedAt : null,
       document_template_key: COMMERCIAL_AGREEMENT_KEY,
-      document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-1', source: 'commercial_proposal_sign' } }),
+      document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-1', source: 'commercial_proposal_sign' }, agreement: { start_date: startDate } }),
       renewal_date: renewalDate,
       auto_renewal_notice_required: Boolean(renewalDate),
       auto_renewal_notice_sent_at: sentAt,
@@ -179,7 +179,7 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('gate on: the term anchors on the first visit on or after signing (else the signing day) + 12 months, and reminds 45 days out', async () => {
+  test('gate on: the term anchors on the first visit on or after signing + 12 months (180 days with no visit: the signing day), and reminds 45 days out', async () => {
     process.env.GATE_AGREEMENT_RENEWAL_REMINDER = 'true';
     const withVisit = await customer();
     await visit(withVisit, '2027-01-10', 'completed'); // before signing: not the anchor
@@ -191,11 +191,17 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
     const bySigning = await commercial(noVisit, { signedAt: '2027-01-31T20:00:00Z' });
     const open = await commercial(await customer(), { status: 'viewed' });
 
+    // No visit yet 121 days after signing: the date waits (the first visit may still be booked), quietly.
     const early = await runWarrantyRenewalReminder({ conn: trx, today: '2027-06-01' });
-    expect(early).toMatchObject({ filled: 2, raised: 0 });
+    expect(early).toMatchObject({ filled: 1, raised: 0 });
     expect(await read(anchored)).toMatchObject({ day: '2028-02-20', auto_renewal_notice_required: true });
-    expect(await read(bySigning)).toMatchObject({ day: '2028-01-31', auto_renewal_notice_required: true });
+    expect((await read(bySigning)).day).toBeNull();
     expect((await read(open)).day).toBeNull();
+
+    // 182 days after signing with still no visit, the signing day anchors.
+    const later = await runWarrantyRenewalReminder({ conn: trx, today: '2027-08-01' });
+    expect(later).toMatchObject({ filled: 1, raised: 0 });
+    expect(await read(bySigning)).toMatchObject({ day: '2028-01-31', auto_renewal_notice_required: true });
 
     const due = await runWarrantyRenewalReminder({ conn: trx, today: '2028-01-08' });
     expect(due).toMatchObject({ filled: 0, raised: 2 });
@@ -207,6 +213,21 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
       alertKey(anchored, '2028-02-20', COMMERCIAL_AGREEMENT_KEY), alertKey(bySigning, '2028-01-31', COMMERCIAL_AGREEMENT_KEY),
     ]));
     expect(calls.every(([, , why]) => /Commercial agreement renews .*30 days before\.$/.test(why))).toBe(true);
+  });
+
+  test('gate on: a start date staff typed at issue anchors the term ahead of any visit; the proposal placeholder waits for the visit', async () => {
+    process.env.GATE_AGREEMENT_RENEWAL_REMINDER = 'true';
+    const owner = await customer();
+    await visit(owner, '2027-02-20');
+    const isoTyped = await commercial(owner, { startDate: '2027-03-01' });
+    const usTyped = await commercial(await customer(), { startDate: '03/15/2027' });
+    const notADate = await commercial(await customer(), { startDate: '2027-02-30' });
+    const result = await runWarrantyRenewalReminder({ conn: trx, today: '2027-06-01' });
+    expect(result).toMatchObject({ filled: 2, raised: 0 });
+    expect((await read(isoTyped)).day).toBe('2028-03-01');
+    expect((await read(usTyped)).day).toBe('2028-03-15');
+    // Not a real date: read like the placeholder, so it waits for a first visit.
+    expect((await read(notADate)).day).toBeNull();
   });
 
   test('gate on: a notice marked sent or a cancelled agreement closes its reminder, and a passed term rolls a year', async () => {

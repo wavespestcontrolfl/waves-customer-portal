@@ -48,12 +48,6 @@ const LANES = Object.freeze({
 const LANE_ORDER = Object.freeze(['pest', 'lawn']);
 const TEMPLATE_KEYS = Object.freeze(LANE_ORDER.map((lane) => LANES[lane].templateKey));
 
-const FREQUENCY_LABELS = Object.freeze({
-  weekly: 'weekly', biweekly: 'every two weeks', bi_weekly: 'every two weeks', monthly: 'monthly',
-  bi_monthly: 'every other month', bimonthly: 'every other month', every_other_month: 'every other month',
-  quarterly: 'quarterly', semi_annual: 'twice a year', semiannual: 'twice a year', annual: 'once a year',
-});
-
 const estimateRoute = () => require('../routes/estimate-public');
 const refusal = (status, code, error) => ({ ok: false, status, code, error });
 
@@ -94,13 +88,10 @@ function estimateServiceAgreementLanes(estimate, estData = estimateRoute().parse
   return LANE_ORDER.filter((lane) => [...keys].some((key) => LANES[lane].keys.has(key)));
 }
 
-function frequencyLabel(estimate) {
-  const key = String(estimate.accepted_frequency_key || '').trim().toLowerCase();
-  if (!key) return '';
-  return FREQUENCY_LABELS[key] || key.replace(/[_-]+/g, ' ');
-}
-
-// "Pest Control + Mosquito, quarterly" — the plan lines this lane's agreement covers, as the estimate names them.
+// "Pest Control + Mosquito" — the plan lines this lane's agreement covers, as the estimate names them. No cadence: the
+// estimate-wide accepted_frequency_key is the primary (pest) cadence in a bundle while lawn keeps its own program
+// (estimateDataIsLawnOnlyRecurring in estimate-public.js), and both templates confirm service frequency before service
+// begins, so a printed cadence could only be wrong for some lane.
 function laneServiceName(estimate, lane, estData = estimateRoute().parseEstimateDataSafe(estimate)) {
   const route = estimateRoute();
   const names = [];
@@ -109,9 +100,7 @@ function laneServiceName(estimate, lane, estData = estimateRoute().parseEstimate
     const name = String(svc.name || svc.label || svc.displayName || svc.service || '').trim();
     if (name && !names.includes(name)) names.push(name);
   }
-  const base = names.join(' + ') || LANES[lane].title.replace(/ Agreement$/, '');
-  const freq = frequencyLabel(estimate);
-  return `${base}${freq ? `, ${freq}` : ''}`.slice(0, SERVICE_NAME_MAX);
+  return (names.join(' + ') || LANES[lane].title.replace(/ Agreement$/, '')).slice(0, SERVICE_NAME_MAX);
 }
 
 function contractsForEstimate(estimateId, templateKey, conn) {
