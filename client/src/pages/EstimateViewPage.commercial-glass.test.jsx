@@ -90,13 +90,14 @@ describe('authored commercial proposal page', () => {
     expect(card).not.toHaveTextContent(/no online checkout/i);
   });
 
-  it('hides the residential Waves AI property card, app pitch and reviews, and keeps Ask Waves', async () => {
+  it('hides the residential Waves AI property card and app pitch, shows business reviews, and keeps Ask Waves', async () => {
     await renderProposal({ canSign: true, state: 'none' });
     expect(screen.queryByText('Sample property review title')).not.toBeInTheDocument();
     expect(screen.queryByText(/2,500 sq ft/)).not.toBeInTheDocument();
     expect(screen.queryByText('The Waves app')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Download on the App Store')).not.toBeInTheDocument();
-    expect(screen.queryByText('Reviews')).not.toBeInTheDocument();
+    // Reviews (owner 2026-10-26, choice 2A): the business heading, never the neighbors pitch.
+    expect(await screen.findByRole('heading', { name: 'What our customers say' })).toBeInTheDocument();
     expect(screen.queryByText(/neighbors switched/i)).not.toBeInTheDocument();
     expect(screen.getByLabelText('Ask Waves about this estimate')).toBeInTheDocument();
   });

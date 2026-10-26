@@ -9912,9 +9912,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             isProposal={isCommercialProposal}
           />
         )}
-        {/* The Waves app pitch ("the whole household") and the neighbor / pool-cage
-            reviews are residential: hidden on an authored commercial proposal. */}
-        {authoredProposalOnPage ? null : (
+        {/* The Waves app pitch ("the whole household") is residential: hidden on an
+            authored commercial proposal. Its reviews show only the ones that fit a
+            business, under a business heading (owner 2026-10-26, choice 2A). */}
+        {authoredProposalOnPage ? <CustomerReviews commercial /> : (
           <>
             <AppShowcaseCard />
             <CustomerReviews />

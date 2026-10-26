@@ -40,6 +40,14 @@ const REVIEW_FALLBACKS = [
   fallback: true,
 }));
 
+// A commercial proposal shows only the reviews that fit a business (owner 2026-10-26, choice 2A): of the 181 Google
+// reviews none comes from a commercial customer, and the ones about a home, family, pets or a yard read wrong on a
+// business proposal. Visual selection only: the reviews themselves are shown word for word.
+const HOME_LIFE_RE = /\b(home|homes|house|pool|lanai|yard|lawn|kids|children|family|dog|dogs|cat|cats|pets?|garage|attic|bedroom|kitchen|neighbou?rs?|grass|shrubs?|garden|patio|driveway)\b/i;
+export function businessFitReviews(list) {
+  return (Array.isArray(list) ? list : []).filter((review) => !HOME_LIFE_RE.test(String(review?.text || '')));
+}
+
 function Stars({ rating }) {
   const filled = Math.max(1, Math.min(5, Math.round(Number(rating || 5))));
   return (
@@ -77,7 +85,7 @@ function ReviewCard({ review }) {
   );
 }
 
-export default function CustomerReviews({ onJoinNeighbors = null }) {
+export default function CustomerReviews({ onJoinNeighbors = null, commercial = false }) {
   const [reviews, setReviews] = useState(null);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(pageSizeForViewport);
@@ -97,16 +105,18 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE}/reviews/featured?limit=8`)
+    // A commercial proposal reads a wider page of the pool, then keeps the first 8 that fit a business.
+    fetch(`${API_BASE}/reviews/featured?limit=${commercial ? 40 : 8}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('reviews fetch failed'))))
       .then((body) => {
         if (cancelled) return;
-        const list = (body?.reviews || []).filter((x) => x?.text && x.text.length > 40);
+        const usable = (body?.reviews || []).filter((x) => x?.text && x.text.length > 40);
+        const list = commercial ? businessFitReviews(usable).slice(0, 8) : usable;
         setReviews(list.length ? list : REVIEW_FALLBACKS);
       })
       .catch(() => { if (!cancelled) setReviews(REVIEW_FALLBACKS); });
     return () => { cancelled = true; };
-  }, []);
+  }, [commercial]);
 
   const pageCount = reviews ? Math.max(1, Math.ceil(reviews.length / pageSize)) : 1;
 
@@ -144,7 +154,7 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
   const visible = Array.from({ length: visibleCount }, (_, offset) => reviews[(start + offset) % reviews.length]);
 
   return (
-    <section style={estimateCard()}>
+    <section {...(commercial ? { 'data-glass': 'card', 'data-testid': 'commercial-reviews' } : {})} style={estimateCard()}>
       <div style={{
         fontSize: 14, fontWeight: 700, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
@@ -155,12 +165,14 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,
         color: W.blueDeeper, margin: '0 0 8px',
       }}>
-        {glassCopyActive() ? GLASS_COPY.reviewsTitle : 'Customer reviews'}
+        {commercial ? 'What our customers say' : glassCopyActive() ? GLASS_COPY.reviewsTitle : 'Customer reviews'}
       </h2>
       <p style={{ fontSize: 14, color: W.textCaption, margin: '0 0 16px', lineHeight: 1.5 }}>
-        {glassCopyActive()
-          ? GLASS_COPY.reviewsExcerpt
-          : 'Real Google reviews from homeowners across our service area.'}
+        {commercial
+          ? 'Real Google reviews from Waves customers across our service area.'
+          : glassCopyActive()
+            ? GLASS_COPY.reviewsExcerpt
+            : 'Real Google reviews from homeowners across our service area.'}
       </p>
       {glassMarquee || (
         <div style={{
