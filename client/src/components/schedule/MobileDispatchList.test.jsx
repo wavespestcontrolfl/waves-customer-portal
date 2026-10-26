@@ -574,3 +574,22 @@ describe('MobileDispatchList completed visits', () => {
     expect(screen.getByText('~12 min drive from Sample Done')).toBeInTheDocument();
   });
 });
+
+// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26).
+describe('MobileDispatchList gate codes', () => {
+  it("shows the stop's codes in the row, and a tap on the line opens the stop", () => {
+    const onEdit = vi.fn();
+    const service = { ...SERVICE, scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }] };
+    render(<MobileDispatchList mode="day" date="2026-07-15" services={[service]} technicians={[]} onEdit={onEdit} />);
+    const line = screen.getByTestId('schedule-access-line');
+    expect(line.textContent).toContain('#4821');
+    fireEvent.click(line);
+    expect(onEdit).toHaveBeenCalledWith(service);
+  });
+
+  it('shows no code line while the gate is off', () => {
+    const service = { ...SERVICE, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }] };
+    render(<MobileDispatchList mode="day" date="2026-07-15" services={[service]} technicians={[]} />);
+    expect(screen.queryByTestId('schedule-access-line')).toBeNull();
+  });
+});

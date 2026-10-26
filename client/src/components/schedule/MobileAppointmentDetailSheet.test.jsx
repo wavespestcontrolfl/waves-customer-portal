@@ -274,3 +274,29 @@ describe('MobileAppointmentDetailSheet consultation outcome', () => {
     cleanup();
   });
 });
+
+// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): Access under Location.
+describe('MobileAppointmentDetailSheet Access section', () => {
+  const gateService = { ...baseService, status: 'confirmed', scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }] };
+
+  it("shows the stop's codes between Location and the appointment note", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}), clone() { return this; }, text: async () => '', headers: { get: () => null } })));
+    try {
+      render(<MobileAppointmentDetailSheet service={gateService} onClose={() => {}} />);
+      const access = screen.getByRole('region', { name: 'Access' });
+      expect(access.textContent).toContain('#4821');
+      expect(screen.getByText('Location').compareDocumentPosition(access) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(access.compareDocumentPosition(screen.getByLabelText('Appointment note')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/access-codes/visits/55', expect.anything()));
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('has no Access section while the gate is off', () => {
+    renderSheet('confirmed');
+    expect(screen.queryByRole('region', { name: 'Access' })).toBeNull();
+    cleanup();
+  });
+});
