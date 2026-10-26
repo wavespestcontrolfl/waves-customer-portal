@@ -395,7 +395,20 @@ async function resolveRingOnRefresh(ringOnRefresh, existing, existingMeta) {
 //     value) — never forced.
 function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
   const merged = mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing);
-  if (!metadata.claudeQueue) return merged;
+  if (!metadata.claudeQueue) {
+    if (!existingMeta.claudeQueue) return merged;
+    // The standing row was routed to Claude's queue, and this emission is not (a reminder that became an owner
+    // ask, or GATE_ALERT_CLAUDE_QUEUE turned off): drop the fields routing set, so the row returns to the bell.
+    // Whatever this emission itself carries stands (its own feed / who / severity); a feed the emitter wrote
+    // itself on a row that was never routed is not touched, because this branch needs claudeQueue.
+    const { claudeQueue: _gone, who, severity, feed, ...rest } = merged;
+    return {
+      ...rest,
+      ...('who' in metadata ? { who } : {}),
+      ...('severity' in metadata ? { severity } : {}),
+      ...('feed' in metadata && metadata.feed != null ? { feed: metadata.feed } : {}),
+    };
+  }
   // A row routed to Claude's queue (admin-alert-routing.js) is Activity-only whether or not this refresh
   // rings: never let a stale quiet flag or the owner-bell correction above put it back in the bell, and
   // move a row first written into the bell off it. Moving off the bell is not a ring.
@@ -684,8 +697,11 @@ const NotificationService = {
           // text must still merge the new feed/kind/audience, or the owner's
           // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
           // #5236). Only keys this emission actually carries are compared.
+          // The Claude-queue class is routing too, whether or not this emission carries it: a routed row refreshed
+          // by an emission that no longer routes (a Claude-to-person transition) is a change, never an identical repeat.
           const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
-            && (existingMeta[k] ?? null) !== (useMeta[k] ?? null));
+            && (existingMeta[k] ?? null) !== (useMeta[k] ?? null))
+            || (existingMeta.claudeQueue ?? null) !== (useMeta.claudeQueue ?? null);
           // Ring-only-on-change stamps are content too (admin-alerts-ring-v2
           // follow-up): count/newCount growing, or itemKeys naming a
           // different item, must trigger the refresh (and ringOnRefresh's
@@ -698,7 +714,10 @@ const NotificationService = {
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
             const enteredOwner = useMeta.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
-            const shouldRing = adjusted?.quiet ? false : (enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
+            // Likewise a row that leaves Claude's queue for the bell is news to the owner: it rings back in,
+            // unless the emission itself asked for a quiet refresh.
+            const leftClaudeQueue = Boolean(existingMeta.claudeQueue) && !useMeta.claudeQueue;
+            const shouldRing = adjusted?.quiet ? false : (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
             const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
             const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,

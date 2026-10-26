@@ -154,6 +154,28 @@ describe('refresh merge', () => {
     expect(out).not.toHaveProperty('rungAt');
   });
 
+  test('a routed row refreshed by an emission that no longer routes returns to the bell: routing fields cleared', () => {
+    const existing = { dedupeKey: 'k', feed: 'activity', who: 'claude', severity: 'needs-you', claudeQueue: 'ops-job', opsJob: 'j', quiet: true };
+    const next = { dedupeKey: 'k', opsJob: 'j', opsWho: 'person' };
+    for (const ring of [true, false]) {
+      const out = mergeRefreshMetadata(existing, next, ring);
+      expect(out).toMatchObject({ opsWho: 'person', opsJob: 'j' });
+      for (const gone of ['claudeQueue', 'who', 'severity', 'feed']) expect(out).not.toHaveProperty(gone);
+    }
+  });
+
+  test('on that transition, what the new emission itself carries stands (its own who, severity, feed)', () => {
+    const existing = { dedupeKey: 'k', feed: 'activity', who: 'claude', severity: 'broken', claudeQueue: 'sms-draft-canary' };
+    const out = mergeRefreshMetadata(existing, { dedupeKey: 'k', who: 'person', severity: 'needs-you', feed: 'activity' }, false);
+    expect(out).toMatchObject({ who: 'person', severity: 'needs-you', feed: 'activity' });
+    expect(out).not.toHaveProperty('claudeQueue');
+  });
+
+  test('a feed the emitter wrote itself on a never-routed row is left alone', () => {
+    const out = mergeRefreshMetadata({ dedupeKey: 'k', feed: 'activity', who: 'person' }, { dedupeKey: 'k', note: 'x' }, false);
+    expect(out).toMatchObject({ feed: 'activity', who: 'person', note: 'x' });
+  });
+
   test('an unrouted refresh is unchanged: quiet refresh keeps the existing visibility', () => {
     const out = mergeRefreshMetadata({ dedupeKey: 'k' }, { dedupeKey: 'k', feed: 'activity', quiet: true, note: 'x' }, false);
     expect(out).toEqual({ dedupeKey: 'k', note: 'x' });

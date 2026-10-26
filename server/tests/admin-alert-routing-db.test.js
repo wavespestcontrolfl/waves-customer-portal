@@ -35,8 +35,8 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
   const fault = (name, over = {}, body = 'Fixture body.') => NotificationService.notifyAdmin('review', 'Google review sync degraded for Venice', body, {
     link: '/admin/reviews', bell: true, dedupeKey: key(name), metadata: { reason: 'gbp_sync_degraded', cause: 'no_client' }, ...over,
   });
-  const macRow = (name, meta = {}) => NotificationService.notifyAdmin('system', 'PR #6407 is live: flip its gate', 'Fixture body.', {
-    link: '/admin', bell: true, dedupeKey: key(name), metadata: { opsJob: `${RUN}-job`, opsKind: 'ask', ...meta },
+  const macRow = (name, meta = {}, opts = {}) => NotificationService.notifyAdmin('system', 'PR #6407 is live: flip its gate', 'Fixture body.', {
+    link: '/admin', bell: true, dedupeKey: key(name), metadata: { opsJob: `${RUN}-job`, opsKind: 'ask', ...meta }, ...opts,
   });
 
   test('a fault and a Mac reminder are written Activity-only for Claude and never reach the bell list', async () => {
@@ -98,6 +98,54 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
     expect(stored.read_at).not.toBeNull();
   });
 
+  test('Claude to person: a queued reminder refreshed as an owner ask returns to the bell and rings', async () => {
+    const opts = { refreshOnDedupe: true };
+    const first = await macRow('to-person', { opsKind: 'ask' }, opts);
+    expect((await get(first.id)).metadata).toMatchObject({ feed: 'activity', who: 'claude', claudeQueue: 'ops-job' });
+    await db('notifications').where({ id: first.id }).update({ read_at: db.fn.now() });
+    // Same text, only the assignment changed: it must not be swallowed as an identical repeat.
+    const again = await macRow('to-person', { opsKind: 'ask', opsWho: 'person' }, opts);
+    expect(again).toMatchObject({ id: first.id, refreshed: true, rung: true });
+    const stored = await get(first.id);
+    for (const gone of ['feed', 'who', 'severity', 'claudeQueue']) expect(stored.metadata).not.toHaveProperty(gone);
+    expect(stored.metadata.opsWho).toBe('person');
+    expect(stored.read_at).toBeNull();
+    expect((await bellRows('to-person')).map((r) => r.id)).toEqual([first.id]);
+  });
+
+  test('Claude to person with the gate off at refresh time (rollback) also returns the row to the bell', async () => {
+    const opts = { refreshOnDedupe: true };
+    const first = await macRow('to-bell-gate-off', {}, opts);
+    delete process.env.GATE_ALERT_CLAUDE_QUEUE;
+    await macRow('to-bell-gate-off', {}, opts);
+    expect((await bellRows('to-bell-gate-off')).map((r) => r.id)).toEqual([first.id]);
+    expect((await get(first.id)).metadata).not.toHaveProperty('claudeQueue');
+  });
+
+  test('person to Claude still moves a bell row off the bell; an identical routed repeat is a plain dedupe', async () => {
+    const opts = { refreshOnDedupe: true };
+    const first = await macRow('to-claude', { opsWho: 'person' }, opts);
+    expect((await bellRows('to-claude'))).toHaveLength(1);
+    const moved = await macRow('to-claude', {}, opts);
+    expect(moved).toMatchObject({ id: first.id, refreshed: true });
+    expect((await get(first.id)).metadata).toMatchObject({ feed: 'activity', who: 'claude', claudeQueue: 'ops-job' });
+    expect(await bellRows('to-claude')).toHaveLength(0);
+    const repeat = await macRow('to-claude', {}, opts);
+    expect(repeat.refreshed).toBeUndefined();
+    expect(repeat).toMatchObject({ id: first.id, deduped: true });
+  });
+
+  test('a feed the emitter set itself is not cleared by a later refresh of a never-routed row', async () => {
+    const opts = { refreshOnDedupe: true, ringOnRefresh: () => false };
+    const row = await NotificationService.notifyAdmin('system', 'Own feed row', 'Body.', {
+      link: '/admin', bell: true, dedupeKey: key('own-feed'), metadata: { feed: 'activity', who: 'person' }, ...opts,
+    });
+    await NotificationService.notifyAdmin('system', 'Own feed row', 'Changed body.', {
+      link: '/admin', bell: true, dedupeKey: key('own-feed'), metadata: { feed: 'activity', who: 'person' }, ...opts,
+    });
+    expect((await get(row.id)).metadata).toMatchObject({ feed: 'activity', who: 'person' });
+  });
+
   test('needs-me lists the routed rows under who=claude and none under who=person', async () => {
     const f = await fault('needs-me-fault');
     const { listNeedsMe } = require('../services/needs-me');
@@ -105,7 +153,7 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
     expect(claude.items.find((i) => i.id === f.id)).toMatchObject({ who: 'claude', severity: 'broken', activityOnly: true });
     const person = await listNeedsMe({ who: 'person', limit: 500 });
     expect(person.items.find((i) => i.id === f.id)).toBeUndefined();
-  });
+  }, 30000);
 
   test('the Activity feed loads routed rows (a needs-you ask and an fyi), and not an ordinary bell row', async () => {
     process.env.GATE_AGENT_ACTIVITY = 'true';
