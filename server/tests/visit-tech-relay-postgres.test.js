@@ -161,6 +161,24 @@ postgres('visit tech relay (real Postgres)', () => {
     expect(await relay.visitTechniciansFor(formersCustomer.id)).toEqual([]);
   });
 
+  test('a saved service-contact number held by ONE customer resolves to that customer; a shared one resolves to nobody (Codex #6760 r1)', async () => {
+    const hire = await makeTech('Synthetic Hire');
+    const customer = await makeCustomer('Household');
+    const contactPhone = `+1202555${String(Math.floor(1000 + Math.random() * 8999))}`;
+    await db('customers').where({ id: customer.id }).update({ service_contact_phone: contactPhone });
+    await visit(customer, hire, 'en_route', '09:00');
+
+    expect((await relay.customerForPhone(db, contactPhone))?.id).toBe(customer.id);
+    const sent = await relay.relayCustomerTextToVisitTech({ customer: null, from: contactPhone, body: 'The gate is open' });
+    expect(sent).toBe(1);
+    expect(await db('tech_notifications').where({ technician_id: hire.id })).toHaveLength(1);
+
+    const neighbor = await makeCustomer('Neighbor');
+    await db('customers').where({ id: neighbor.id }).update({ secondary_phone: contactPhone });
+    expect(await relay.customerForPhone(db, contactPhone)).toBeNull();
+    expect(await relay.relayCustomerTextToVisitTech({ customer: null, from: contactPhone, body: 'Hello' })).toBe(0);
+  });
+
   test('the relay writes one tech-home text card and one push for the visit\'s technician', async () => {
     const hire = await makeTech('Synthetic Hire');
     const customer = await makeCustomer('Gate');

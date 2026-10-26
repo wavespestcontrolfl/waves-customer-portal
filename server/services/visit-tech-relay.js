@@ -10,7 +10,9 @@
  * way never sees it unless someone relays it.
  *
  * On: a known customer's text to an office line (not a technician line:
- * tech-line.js handles those) writes the tech-home text card
+ * tech-line.js handles those), from the customer's own phone or a saved
+ * service-contact or second phone that only ONE customer holds, writes the
+ * tech-home text card
  * (tech-line.js TEXT_CARD_TYPE, headline "Text from your customer") and one
  * push to the technician of each of the customer's visits TODAY (Eastern)
  * that is en route or on site, or is that technician's next open stop. The
@@ -38,6 +40,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { NOT_A_STOP_STATUSES } = require('./stops-ahead');
+const { KNOWN_CALLER_PHONE_COLS, customerPhoneLookupKey } = require('../utils/known-caller-phone');
 
 const ACTIVE_STATUSES = ['en_route', 'on_site'];
 const ACTIVE_TRACK_STATES = ['en_route', 'on_property'];
@@ -108,7 +111,29 @@ async function visitTechniciansFor(customerId, { conn = db, today = etDateString
   return out;
 }
 
-async function relayCustomerTextToVisitTech({ customer, from, body, mediaCount = 0, conn = db } = {}) {
+// A text from a saved service contact (spouse, tenant) or a second phone: the
+// webhook's customer lookup matches the primary phone only. The ONE live
+// customer holding this number in any identity slot (known-caller-phone.js
+// column set) is the sender's customer; none, or more than one, = no relay,
+// so a shared number is never guessed.
+async function customerForPhone(conn, phone) {
+  const key = customerPhoneLookupKey(phone);
+  if (!key) return null;
+  const keys = key.length === 10 ? [key, `1${key}`] : [key];
+  const placeholder = keys.map(() => '?').join(', ');
+  const frag = KNOWN_CALLER_PHONE_COLS
+    .map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') IN (${placeholder})`)
+    .join(' OR ');
+  const rows = await conn('customers')
+    .whereNull('deleted_at')
+    .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys))
+    .limit(2)
+    .select('id', 'first_name', 'last_name');
+  return rows.length === 1 ? rows[0] : null;
+}
+
+async function relayCustomerTextToVisitTech({ customer: knownCustomer = null, from, body, mediaCount = 0, conn = db } = {}) {
+  const customer = knownCustomer?.id ? knownCustomer : await customerForPhone(conn, from);
   if (!customer?.id) return 0;
   const techs = await visitTechniciansFor(customer.id, { conn });
   if (!techs.length) return 0;
@@ -153,4 +178,4 @@ async function relayCustomerTextToVisitTech({ customer, from, body, mediaCount =
   return sent;
 }
 
-module.exports = { relayCustomerTextToVisitTech, visitTechniciansFor, errorTag };
+module.exports = { relayCustomerTextToVisitTech, visitTechniciansFor, customerForPhone, errorTag };

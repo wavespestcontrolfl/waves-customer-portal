@@ -83,7 +83,8 @@ jest.mock('../config/feature-gates', () => ({
   smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
   customerTextToVisitTechLive: () => process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH === 'true',
 }));
-jest.mock('../services/visit-tech-relay', () => ({ relayCustomerTextToVisitTech: jest.fn(async () => 1) }));
+jest.mock('../services/visit-tech-relay', () => ({ relayCustomerTextToVisitTech: jest.fn(async () => 1), errorTag: (e) => String((e && (e.code || e.name)) || 'error') }));
+jest.mock('../services/reschedule-sms', () => ({ handleRescheduleReply: jest.fn(async () => ({ handled: false })) }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'test-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -149,7 +150,7 @@ async function receive(body, { from = TECH_CELL, to = OFFICE_LINE, sid = 'SM-syn
   res.statusCode = 200;
   res.status = (code) => { res.statusCode = code; return res; };
   res.type = () => res;
-  res.send = (value) => { res.body = value; return res; };
+  res.send = (value) => { res.body = value; res.emit('finish'); return res; };
   await handler({ body: { From: from, To: to, Body: body, MessageSid: sid } }, res);
   await new Promise(setImmediate);
   return res;
@@ -192,6 +193,30 @@ describe('a known customer\'s text to an office line (GATE_CUSTOMER_TEXT_TO_VISI
     }));
     // The office path is unchanged: the inbox row is still written.
     expect(recordTouchpoint).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on: a reply a reschedule offer consumes still reaches the relay (Codex #6760 r1)', async () => {
+    process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH = 'true';
+    mockCustomersRows = [KNOWN];
+    const { handleRescheduleReply } = require('../services/reschedule-sms');
+    handleRescheduleReply.mockResolvedValueOnce({ handled: true, action: 'call_requested' });
+
+    const res = await receive('Please call before entering, the dog is outside', { from: CUSTOMER_CELL });
+
+    expect(res.statusCode).toBe(200);
+    expect(handleRescheduleReply).toHaveBeenCalledTimes(1);
+    expect(relayCustomerTextToVisitTech).toHaveBeenCalledTimes(1);
+    expect(relayCustomerTextToVisitTech).toHaveBeenCalledWith(expect.objectContaining({ body: 'Please call before entering, the dog is outside' }));
+  });
+
+  test('gate on: a saved service contact (no primary-phone match) goes to the relay, which resolves the customer (Codex #6760 r1)', async () => {
+    process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH = 'true';
+    findKnownCallerCustomer.mockResolvedValue({ id: 'customer-1', first_name: 'Synthetic', last_name: 'Customer' });
+
+    await receive('The gate is open', { from: '+12025550133' });
+
+    expect(relayCustomerTextToVisitTech).toHaveBeenCalledTimes(1);
+    expect(relayCustomerTextToVisitTech).toHaveBeenCalledWith(expect.objectContaining({ customer: null, from: '+12025550133' }));
   });
 
   test('gate off: no relay', async () => {
