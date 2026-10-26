@@ -120,7 +120,7 @@ const INPUT = {
   },
   protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
   inventoryReview: [
-    { serviceKey: 'pest', productName: 'Demand CS', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Talstar P', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Alpine WSG', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Cockroach Gel Bait', status: 'in_stock', onHand: 8 },

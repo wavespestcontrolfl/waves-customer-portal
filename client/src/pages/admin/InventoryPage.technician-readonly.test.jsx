@@ -46,7 +46,7 @@ const OPEN_REQUEST = {
 function installFetch() {
   vi.stubGlobal('fetch', vi.fn((url) => {
     const path = String(url);
-    if (path.includes('/waveguard-forecast?')) return Promise.resolve(reply({ forecast: { products: [FORECAST_ROW], days: 14 } }));
+    if (path.includes('/waveguard-forecast?')) return Promise.resolve(reply({ forecast: { products: [FORECAST_ROW], days: 7 } }));
     if (path.includes('/restock-requests?')) return Promise.resolve(reply({ requests: [OPEN_REQUEST] }));
     if (path.includes('/movements')) return Promise.resolve(reply({ movements: [] }));
     if (path.includes('/inventory/vendors')) return Promise.resolve(reply({ vendors: [{ id: 'v1', name: 'Synthetic Vendor', active: true }] }));
@@ -118,6 +118,13 @@ describe('inventory forecast and restock queue', () => {
   it('offers an admin the restock-request button', async () => {
     mount('tab=forecast', 'admin');
     expect(await screen.findByRole('button', { name: /^Request / })).toBeInTheDocument();
+  });
+
+  it('asks for a one-week forecast by default (owner 2026-10-26)', async () => {
+    mount('tab=forecast', 'admin');
+    await screen.findByText('Synthetic stock product');
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/waveguard-forecast?days=7'))).toBe(true);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/waveguard-forecast?days=14'))).toBe(false);
   });
 
   it('shows a technician the restock queue without Mark Ordered, Receive or Cancel', async () => {
