@@ -225,6 +225,33 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
       });
     });
 
+    test('gate on: a technician opening the feed prepares only its own customers\' undated callbacks', async () => {
+      process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
+      process.env.GATE_CALLBACK_CARD = 'true';
+      try {
+        const mkCallback = async (callId, key) => {
+          const [row] = await db('call_commitments').insert({
+            call_log_id: callId, commitment_key: `${RUN}:${key}`, party: 'waves', kind: 'callback',
+            description: `${RUN} ${key}`, status: 'open', source: 'human',
+          }).returning('id');
+          made.commitments.push(row.id || row);
+          return row.id || row;
+        };
+        const cbOwn = await mkCallback(ctx.callA, 'callback-own');
+        const cbOther = await mkCallback(ctx.callB, 'callback-other');
+        await withServer(async (base) => {
+          as(ids.techA, 'technician');
+          expect((await req(base, 'GET', '/commitments/open?limit=200')).status).toBe(200);
+        });
+        const due = async (id) => (await db('call_commitments').where({ id }).first('callback_due_at')).callback_due_at;
+        // The technician's read prepared its own customer's callback and never touched another customer's.
+        expect(await due(cbOwn)).not.toBeNull();
+        expect(await due(cbOther)).toBeNull();
+      } finally {
+        delete process.env.GATE_CALLBACK_CARD;
+      }
+    });
+
     test('gate on: the proposals feed lists only the technician\'s own customers', async () => {
       process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
       await withServer(async (base) => {

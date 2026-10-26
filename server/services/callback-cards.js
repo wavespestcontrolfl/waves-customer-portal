@@ -43,14 +43,20 @@ function staffedDeadline(from, calendar, minutes = 240) {
 // call scope prepares every undated callback in that scope, so a filtered
 // queue never waits behind an unrelated backlog. An unscoped read walks the
 // backlog oldest-first in batches.
-async function prepareCallbackCards(conn, { callId = null, customerId = null, leadId = null, leadSid = null } = {}) {
+// customerScope (GATE_TECH_LOGIN_PRIVACY): a subquery of customer ids. A technician
+// login's feed prepares only its own customers' callbacks, never another customer's.
+async function prepareCallbackCards(conn, { callId = null, customerId = null, leadId = null, leadSid = null, customerScope = null } = {}) {
   if (!enabled()) return 0;
   const { staleAiRowSql, callEndedAt, scopeCommitmentRows } = require('./call-commitments');
-  const scoped = !!(callId || customerId || leadId);
+  const scoped = !!(callId || customerId || leadId || customerScope);
   const rows = await conn('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' })
     .whereNull('cc.callback_due_at').whereRaw(`NOT ${staleAiRowSql('cc')}`)
-    .modify((q) => { if (callId) q.where('cc.call_log_id', callId); scopeCommitmentRows(q, { customerId, leadId, leadSid }); })
+    .modify((q) => {
+      if (callId) q.where('cc.call_log_id', callId);
+      scopeCommitmentRows(q, { customerId, leadId, leadSid });
+      if (customerScope) q.whereIn('cl.customer_id', customerScope);
+    })
     .orderBy('cc.created_at', 'asc').modify((q) => { if (!scoped) q.limit(200); })
     .select('cc.id', 'cc.source', 'cc.created_at', 'cc.updated_at', 'cc.due_at', 'cc.assigned_to', 'cl.created_at as call_started_at',
       'cl.bridged_at', 'cl.duration_seconds', 'cl.direction');

@@ -3578,7 +3578,7 @@ async function listOpenCommitments(conn, { party = null, kind = null, kinds = nu
   // the watchdog scan) and would skip rows or repeat them. Later pages read
   // the snapshot the first page established; the next first-page read
   // prepares whatever arrived meanwhile.
-  if (prepare && !(Number(offset) > 0)) await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid });
+  if (prepare && !(Number(offset) > 0)) await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid, customerScope });
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .leftJoin('customers as cu', 'cu.id', 'cl.customer_id')
