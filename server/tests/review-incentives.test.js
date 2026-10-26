@@ -1192,6 +1192,16 @@ describe('review bonus attribution: the ask the customer acted on (GATE_REVIEW_B
     requireCustomerMatchForGoogle: true,
   };
   const REVIEW_AT = '2026-05-29T16:00:00.000Z';
+  const at = (iso) => new Date(iso);
+
+  // An ask row as review-request.js writes it: an email ask stamps sent_at, a
+  // text ask (completion SMS, composer) stamps only sms_sent_at.
+  function ask(id, technicianId, serviceRecordId, { createdAt, sentAt = null, smsSentAt = null, redirectedAt = null }) {
+    return {
+      id, customer_id: 'customer-1', technician_id: technicianId, service_record_id: serviceRecordId,
+      created_at: at(createdAt), sent_at: sentAt && at(sentAt), sms_sent_at: smsSentAt && at(smsSentAt), redirected_at: redirectedAt && at(redirectedAt),
+    };
+  }
 
   // A pest + lawn customer: the hire's Monday pest visit sent the ask, the
   // owner's Wednesday lawn visit is the latest record before Friday's review.
@@ -1214,37 +1224,30 @@ describe('review bonus attribution: the ask the customer acted on (GATE_REVIEW_B
     });
   }
 
+  const payout = async (conn) => {
+    const result = await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn, policy });
+    expect(result.created).toBe(true);
+    return conn.__state.rows.review_incentive_payouts[0];
+  };
+
   afterEach(() => { delete process.env.GATE_REVIEW_BONUS_ASK_FIRST; });
 
   test('gate off: today\'s order, the latest record before the review wins', async () => {
-    const conn = week({ requests: [{
-      id: 'ask-pest', customer_id: 'customer-1', technician_id: 'tech-hire', service_record_id: 'pest-monday',
-      sent_at: new Date('2026-05-25T20:00:00.000Z'), redirected_at: new Date('2026-05-29T15:50:00.000Z'),
-    }] });
+    const conn = week({ requests: [
+      ask('ask-pest', 'tech-hire', 'pest-monday', { createdAt: '2026-05-25T18:00:00Z', smsSentAt: '2026-05-25T20:00:00Z', redirectedAt: '2026-05-29T15:50:00Z' }),
+    ] });
 
-    const result = await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn, policy });
-
-    expect(result.created).toBe(true);
-    expect(conn.__state.rows.review_incentive_payouts[0]).toMatchObject({ technician_id: 'tech-owner', service_record_id: 'lawn-wednesday' });
+    expect(await payout(conn)).toMatchObject({ technician_id: 'tech-owner', service_record_id: 'lawn-wednesday' });
   });
 
   test('gate on: the ask the customer clicked through to Google before the review wins, even over a later ask', async () => {
     process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
     const conn = week({ requests: [
-      {
-        id: 'ask-pest', customer_id: 'customer-1', technician_id: 'tech-hire', service_record_id: 'pest-monday',
-        sent_at: new Date('2026-05-25T20:00:00.000Z'), redirected_at: new Date('2026-05-29T15:50:00.000Z'),
-      },
-      {
-        id: 'ask-lawn', customer_id: 'customer-1', technician_id: 'tech-owner', service_record_id: 'lawn-wednesday',
-        sent_at: new Date('2026-05-27T20:00:00.000Z'), redirected_at: null,
-      },
+      ask('ask-pest', 'tech-hire', 'pest-monday', { createdAt: '2026-05-25T18:00:00Z', sentAt: '2026-05-25T20:00:00Z', redirectedAt: '2026-05-29T15:50:00Z' }),
+      ask('ask-lawn', 'tech-owner', 'lawn-wednesday', { createdAt: '2026-05-27T18:00:00Z', sentAt: '2026-05-27T20:00:00Z' }),
     ] });
 
-    const result = await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn, policy });
-
-    expect(result.created).toBe(true);
-    expect(conn.__state.rows.review_incentive_payouts[0]).toMatchObject({
+    expect(await payout(conn)).toMatchObject({
       technician_id: 'tech-hire',
       service_record_id: 'pest-monday',
       review_request_id: 'ask-pest',
@@ -1252,46 +1255,41 @@ describe('review bonus attribution: the ask the customer acted on (GATE_REVIEW_B
     });
   });
 
-  test('gate on: no click, the latest ask SENT before the review wins', async () => {
-    process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
-    const conn = week({ requests: [{
-      id: 'ask-pest', customer_id: 'customer-1', technician_id: 'tech-hire', service_record_id: 'pest-monday',
-      sent_at: new Date('2026-05-25T20:00:00.000Z'), redirected_at: null,
-    }] });
-
-    const result = await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn, policy });
-
-    expect(conn.__state.rows.review_incentive_payouts[0]).toMatchObject({ technician_id: 'tech-hire', review_request_id: 'ask-pest' });
-    expect(result.created).toBe(true);
-  });
-
-  test('gate on: a click or a send AFTER the review, or an unsent ask, does not count; today\'s order decides', async () => {
+  test('gate on: no click, a TEXT-only ask (sms_sent_at, no sent_at) delivered before the review wins', async () => {
     process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
     const conn = week({ requests: [
-      {
-        id: 'ask-late-click', customer_id: 'customer-1', technician_id: 'tech-hire', service_record_id: 'pest-monday',
-        sent_at: new Date('2026-05-29T18:00:00.000Z'), redirected_at: new Date('2026-05-29T19:00:00.000Z'),
-      },
-      {
-        id: 'ask-never-sent', customer_id: 'customer-1', technician_id: 'tech-hire', service_record_id: 'pest-monday',
-        sent_at: null, redirected_at: null,
-      },
+      ask('ask-email-older', 'tech-owner', null, { createdAt: '2026-05-10T18:00:00Z', sentAt: '2026-05-10T20:00:00Z' }),
+      ask('ask-pest-text', 'tech-hire', 'pest-monday', { createdAt: '2026-05-25T18:00:00Z', smsSentAt: '2026-05-25T20:00:00Z' }),
     ] });
 
-    await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn, policy });
+    expect(await payout(conn)).toMatchObject({ technician_id: 'tech-hire', review_request_id: 'ask-pest-text' });
+  });
 
-    expect(conn.__state.rows.review_incentive_payouts[0]).toMatchObject({ technician_id: 'tech-owner', service_record_id: 'lawn-wednesday' });
+  test('gate on: an ask texted before the review counts even when its email leg went out after it', async () => {
+    process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
+    const conn = week({ requests: [
+      ask('ask-pest', 'tech-hire', 'pest-monday', { createdAt: '2026-05-25T18:00:00Z', smsSentAt: '2026-05-25T20:00:00Z', sentAt: '2026-05-30T20:00:00Z' }),
+    ] });
+
+    expect(await payout(conn)).toMatchObject({ technician_id: 'tech-hire', review_request_id: 'ask-pest' });
+  });
+
+  test('gate on: a click or a delivery AFTER the review, or an undelivered ask, does not count; today\'s order decides', async () => {
+    process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
+    const conn = week({ requests: [
+      ask('ask-late', 'tech-hire', 'pest-monday', { createdAt: '2026-05-29T17:00:00Z', smsSentAt: '2026-05-29T18:00:00Z', redirectedAt: '2026-05-29T19:00:00Z' }),
+      ask('ask-never-sent', 'tech-hire', 'pest-monday', { createdAt: '2026-05-25T18:00:00Z' }),
+    ] });
+
+    expect(await payout(conn)).toMatchObject({ technician_id: 'tech-owner', service_record_id: 'lawn-wednesday' });
   });
 
   test('gate on: an ask older than 45 days does not count', async () => {
     process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
-    const conn = week({ requests: [{
-      id: 'ask-old', customer_id: 'customer-1', technician_id: 'tech-hire', service_record_id: null,
-      sent_at: new Date('2026-04-01T20:00:00.000Z'), redirected_at: new Date('2026-04-02T20:00:00.000Z'),
-    }] });
+    const conn = week({ requests: [
+      ask('ask-old', 'tech-hire', null, { createdAt: '2026-04-01T18:00:00Z', smsSentAt: '2026-04-01T20:00:00Z', redirectedAt: '2026-04-02T20:00:00Z' }),
+    ] });
 
-    await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn, policy });
-
-    expect(conn.__state.rows.review_incentive_payouts[0]).toMatchObject({ technician_id: 'tech-owner' });
+    expect(await payout(conn)).toMatchObject({ technician_id: 'tech-owner' });
   });
 });

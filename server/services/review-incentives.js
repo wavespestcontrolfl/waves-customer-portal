@@ -235,32 +235,36 @@ async function resolveTechnicianForReviewRequest(request, conn = db) {
 // customer can see both technicians in one week, and two visits on one date tie.
 // The review ask the customer acted on names the visit: the latest ask clicked
 // through to Google before the review (redirected_at, the immutable first-click
-// claim), else the latest ask sent before it. Same 45 days as the rest of the
-// resolver. Nothing found: the caller falls through to today's order.
+// claim), else the latest ask delivered before it. An ask is delivered by email
+// (sent_at) or by text (sms_sent_at; the completion-SMS and composer asks stamp
+// only that one). Same 45 days as the rest of the resolver. Nothing found: the
+// caller falls through to today's order.
 async function reviewAskTechnician(review, conn, reviewDate) {
   const reviewAt = asDate(reviewDate);
   const since = new Date(reviewAt.getTime() - 45 * DAY_MS);
-  const asks = () => conn('review_requests')
+  const inSpan = (value) => {
+    const at = validDate(value);
+    return at && at <= reviewAt && at >= since ? at : null;
+  };
+  const asks = await conn('review_requests')
     .where({ customer_id: review.customer_id })
-    .whereNotNull('technician_id');
-  const clicked = await asks()
-    .whereNotNull('redirected_at')
-    .where('redirected_at', '<=', reviewAt)
-    .where('redirected_at', '>=', since)
-    .orderBy('redirected_at', 'desc')
-    .first();
-  const request = clicked || await asks()
-    .whereNotNull('sent_at')
-    .where('sent_at', '<=', reviewAt)
-    .where('sent_at', '>=', since)
-    .orderBy('sent_at', 'desc')
-    .first();
-  if (!request?.technician_id) return null;
+    .whereNotNull('technician_id')
+    .where('created_at', '<=', reviewAt);
+  let best = null;
+  for (const ask of asks) {
+    const clickedAt = inSpan(ask.redirected_at);
+    const deliveredAt = [inSpan(ask.sent_at), inSpan(ask.sms_sent_at)].filter(Boolean).sort((a, b) => b - a)[0];
+    const clicked = !!clickedAt;
+    const at = clickedAt || deliveredAt;
+    if (!at) continue;
+    if (!best || (clicked && !best.clicked) || (clicked === best.clicked && at > best.at)) best = { ask, clicked, at };
+  }
+  if (!best) return null;
   return {
-    technicianId: request.technician_id,
-    serviceRecordId: request.service_record_id || null,
-    reviewRequestId: request.id,
-    method: clicked ? 'clicked_review_request' : 'sent_review_request',
+    technicianId: best.ask.technician_id,
+    serviceRecordId: best.ask.service_record_id || null,
+    reviewRequestId: best.ask.id,
+    method: best.clicked ? 'clicked_review_request' : 'sent_review_request',
   };
 }
 
