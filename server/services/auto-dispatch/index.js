@@ -1487,6 +1487,17 @@ async function runPassTwo(run) {
   }
 }
 
+// The run log's day-move rule, worded for the guard mode that is really in
+// force. Legacy keeps the flat lock boundary; tiers and flex do not use it.
+function describeGuardRule(guardMode, lockBoundary, today) {
+  if (guardMode === 'flex') {
+    const floor = shiftDateStr(today, routeTiers.MIN_DESTINATION_DAYS_OUT);
+    return `flex: frozen under ${flexTier.FLEX_TIER_FREEZE_HOURS}h, day moves on or after ${floor}`;
+  }
+  if (guardMode === 'tiers') return `tiers: day moves from ${routeTiers.TIER2_MIN_DAYS_OUT} days out`;
+  return `lock>${lockBoundary}`;
+}
+
 async function runAutoDispatch(opts = {}) {
   const config = await withDayRules(getAutoDispatchConfig(opts));
   const triggeredBy = opts.triggeredBy || 'cron';
@@ -1500,7 +1511,7 @@ async function runAutoDispatch(opts = {}) {
   // Cards an earlier run held but never summarized get their own push; this
   // run's cards are held under its id for its summary push.
   await require('../tech-visit-notifications').beginAutoDispatchRun(runId);
-  logger.info(`[auto-dispatch] run ${runId} mode=${config.mode} lock>${lockBoundary} lookahead<=${lookaheadEnd}`);
+  logger.info(`[auto-dispatch] run ${runId} mode=${config.mode} ${describeGuardRule(config.guardMode, lockBoundary, today)} lookahead<=${lookaheadEnd}`);
 
   let runStatus = 'completed';
   let runError = null;
@@ -1627,4 +1638,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule } };

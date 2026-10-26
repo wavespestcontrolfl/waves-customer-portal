@@ -1788,6 +1788,46 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 5:00AM — Auto-Dispatch CATCH-UP (GATE_AUTO_DISPATCH_CATCH_UP, dark;
+  // owner 2026-10-26). A deploy that restarts the server during the 4:10 run
+  // cuts it off: it moves nothing and nothing re-runs it (2026-09-03,
+  // 2026-10-26). If today has no finished night run, this job settles the
+  // dead cron run row and runs the night tool once more (triggered_by
+  // 'catch_up', at most one a day). It holds the same writer lock as 4:10.
+  // Gate off: returns before any database read.
+  // =========================================================================
+  cron.schedule('0 5 * * *', async () => {
+    // Call-time read so a Railway var flip takes effect on the next tick.
+    if (!require('../config/feature-gates').autoDispatchCatchUpLive()) return;
+    if (!isEnabled('cronJobs') || !isEnabled('autoDispatch')) return;
+    try {
+      await runExclusive('auto-dispatch-catch-up', async () => {
+        const { runCatchUp } = require('./auto-dispatch/catch-up');
+        // recordHealth:false — this only BORROWS the 4:10 writer lock; the
+        // outer 'auto-dispatch-catch-up' job records the health.
+        const inner = await runExclusive('auto-dispatch-recurring', () => runCatchUp({ nowDate: new Date() }), { recordHealth: false });
+        if (inner && inner.skipped === true) {
+          logger.warn(`[auto-dispatch] catch-up skipped (${inner.reason}) - another auto-dispatch run holds the writer lock`);
+          throw new Error(`auto-dispatch catch-up skipped (${inner.reason}) - the run lock was held`);
+        }
+        if (!inner.ran) {
+          logger.info(`[auto-dispatch] catch-up not needed: ${inner.reason}`);
+          return;
+        }
+        const result = inner.result;
+        logger.info(`[auto-dispatch] catch-up running now (${inner.reason}); settled=${inner.settled}`);
+        logger.info(`[auto-dispatch] catch-up run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
+        // Same health rule as the 4:10 run: anything but 'completed' fails job health.
+        if (result.status !== 'completed') {
+          throw new Error(`auto-dispatch catch-up run ${result.runId} unhealthy: status=${result.status} failed=${result.failed}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Auto-Dispatch catch-up failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Customer duplicate auto-merge — 4:40 AM daily. Green-tier only (shell
   // rows: same phone, compatible identity, zero billing/portal artifacts);
   // everything ambiguous stays in the /admin/customers/duplicates review
