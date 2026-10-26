@@ -18,6 +18,23 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 const MODEL = require('../config/models').ROUTINE;
 const { createDeepMessage } = require('./llm/deep');
 
+// 32000 (was 16000, 2026-10-26): the St. Augustine track page (56 records,
+// ~36K input tokens) needed 9.7K, then 12.3K, then 15.5K output tokens as it
+// grew, and hit 16000 on 2026-10-23 and 10-25 — a discarded page withholds the
+// weekly marker, so wiki-weekly-refresh failed on every daily retry. Billing
+// is per generated token, so the higher cap costs nothing unless used;
+// PAGE_WORD_BUDGET below is what keeps pages from growing into it again.
+const PAGE_MAX_TOKENS = 32000;
+// Above ~21K max_tokens the SDK refuses a non-streaming request unless the
+// client sets an explicit timeout (it assumes 128K tokens an hour). 10 min is
+// the SDK's own default; the largest page took ~2 min at 16000 (~135 tok/s).
+const PAGE_TIMEOUT_MS = 10 * 60 * 1000;
+// Every update rewrote the whole page and kept "existing content that is still
+// supported", so each revision appended reconciliation notes and the largest
+// pages reached ~25K characters (~3,800 words). A budget makes an update fold
+// superseded detail into the current numbers instead of accreting it.
+const PAGE_WORD_BUDGET = 2000;
+
 // ══════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════
@@ -348,7 +365,7 @@ async function callClaude(systemPrompt, userPrompt) {
     return null;
   }
   try {
-    const client = new Anthropic();
+    const client = new Anthropic({ timeout: PAGE_TIMEOUT_MS });
     const response = await createDeepMessage(client, {
       laneId: 'wiki_compiler',
       model: MODEL,
@@ -361,8 +378,8 @@ async function callClaude(systemPrompt, userPrompt) {
       // 16000 (was 8192, 2026-09-26): 5 of 6 prod calls were hitting 8192
       // exactly (avg output 7515) with thinking eating the whole cap —
       // paid-for output was being discarded as anthropic_incomplete.
-      // knowledge/wiki-compiler.js uses the same effort + 16000.
-      max_tokens: 16000,
+      // 32000 (2026-10-26): see PAGE_MAX_TOKENS.
+      max_tokens: PAGE_MAX_TOKENS,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
@@ -1208,7 +1225,9 @@ ${JSON.stringify((data.outcomes || []).map((o) => ({
   photo_verified_visual_change: o.vision_delta_score ?? null,
 })), null, 2)}
 
-Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve existing content that is still supported. Update statistics. Flag any contradictions.' : 'Generate a new wiki page from this data.'} Return the complete markdown page content.`;
+Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve existing findings that are still supported. Update statistics. Flag any contradictions.' : 'Generate a new wiki page from this data.'} Return the complete markdown page content.
+
+Length: keep the whole page under ${PAGE_WORD_BUDGET} words. Rewrite the page as it stands now rather than appending to it: fold superseded detail into the current statistics, and keep at most one short note on what changed in this revision, replacing any earlier revision, reconciliation or change notes. Never drop a contradiction flag or an open review item to fit the budget — shorten the supporting prose instead.`;
 
       const result = await callClaude(systemPrompt, userPrompt);
 
