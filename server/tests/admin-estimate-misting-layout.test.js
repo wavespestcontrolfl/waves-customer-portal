@@ -340,8 +340,17 @@ describe('document block (the estimate PDF section)', () => {
         revision: expect.stringMatching(/^[0-9a-f]{16}$/),
         address: '500 Example Court, Venice, FL',
         counts: { nozzles: 2, eave: 2, fence: 0, risers: 1, linearFt: expect.any(Number), zones: 1, pump: true },
+        geometry: expect.objectContaining({
+          zoom: expect.any(Number),
+          mapWidth: 1280,
+          mapHeight: 960,
+          center: { lat: expect.any(Number), lng: expect.any(Number) },
+          nozzles: expect.arrayContaining([expect.objectContaining({ kind: expect.any(String), x: expect.any(Number), y: expect.any(Number) })]),
+          pump: { x: expect.any(Number), y: expect.any(Number) },
+        }),
       },
     });
+    expect(JSON.stringify(block)).not.toContain('service-photos');
     expect(mockSign.mock.calls[0][2]).toEqual({ expiresIn: 20 * 60 });
   });
 
