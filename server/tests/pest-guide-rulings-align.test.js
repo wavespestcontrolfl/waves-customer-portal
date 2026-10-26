@@ -21,10 +21,14 @@ const text = JSON.stringify(pest);
 
 describe('pest guide follows the owner rulings', () => {
   test('inside service: the first visit, then whenever the customer asks', () => {
-    expect(row('Interior service')).toBe('Your first visit includes an inside spray; after that, inside whenever you ask. Someone home or access needed.');
+    expect(row('Interior service')).toBe('Your first visit includes an inside spray; after that, inside whenever you ask. Someone home or access needed. Exterior-only plans: ask the office to add it.');
     expect(pest.included).toContain('Interior treatment on the first visit, then whenever you ask');
     expect(faq(/interior included/)).toMatch(/^Included for the pests your recurring plan covers — your first visit includes an inside spray, and on later visits we treat inside whenever you ask/);
     expect(faq(/need to be home/)).toContain('For the inside, someone needs to be home or you leave us access; with nobody home, we treat the outside and note it.');
+    // A recurring customer can turn interior spraying off on the estimate (estimate-public.js SERVICE_PREFS): the
+    // inside promise keeps the exterior-only exception, as sms-company-facts.js does (Codex #6447 r4).
+    expect(faq(/interior included/)).toContain('If you chose exterior-only service, you can ask the office to add inside service back.');
+    expect(pest.process.find((line) => line.startsWith('Interior service is included'))).toContain('If you chose exterior-only service, ask the office to add inside service.');
     expect(text).not.toMatch(/whenever you report activity|when activity is reported|part of your pest visits/);
   });
 
@@ -37,13 +41,18 @@ describe('pest guide follows the owner rulings', () => {
   test('rain: effectiveness only, no re-service and no prompt to contact us', () => {
     const rain = faq(/rains/);
     expect(rain).toContain('No application is weatherproof: a treatment needs to dry and bond to surfaces, and after that it holds up to weather.');
-    expect(rain).not.toMatch(/re-service|contact us|text us|call us|microencapsulated/i);
+    // What the technician does at a rainy stop is not decided (walkthrough 2026-10-03 "left open"), so no line says.
+    expect(rain).not.toMatch(/re-service|contact us|text us|call us|microencapsulated|dry window|come back/i);
   });
 
   test('ants: no re-service timing; a photo between visits', () => {
     const ants = faq(/still see ants/);
     expect(ants).toContain('If you still see activity between visits, text us a photo — a re-service between visits is free and doesn’t move your next visit.');
     expect(ants).not.toMatch(/\d\s*(–|-|to)\s*\d+\s*days|several days/);
+  });
+
+  test('no die, dead, dying or kill words (owner 2026-10-01)', () => {
+    expect(text).not.toMatch(/\b(kill|kills|killed|killing|die|dies|dead|dying)\b/i);
   });
 
   test('the bifenthrin is Atticus Talak 7.9 F, and the images are Taurus only', () => {

@@ -116,7 +116,7 @@ const SERVICE_DETAILS_COPY = {
         ['Covered pests', 'Ants (incl. ghost, big-headed, carpenter & fire-ant mounds near the structure), large roaches (American, Australian, smokybrown \u2014 \u201cpalmetto bugs\u201d), spiders (incl. widow & recluse), crickets, earwigs, silverfish, millipedes, centipedes, pillbugs, scorpions, wasps, stink & boxelder bugs'],
         // Owner 2026-10-22: the first visit includes an inside spray; after that the inside is up to the customer
         // (services/sms-company-facts.js, the same rule for Waves AI).
-        ['Interior service', 'Your first visit includes an inside spray; after that, inside whenever you ask. Someone home or access needed.'],
+        ['Interior service', 'Your first visit includes an inside spray; after that, inside whenever you ask. Someone home or access needed. Exterior-only plans: ask the office to add it.'],
         ['Re-service', 'Unlimited, no charge, for covered pests between visits'],
         ['Guarantee', 'Money-back guarantee on recurring plans'],
         ['Separate services', 'German-roach cleanouts, fleas, bed bugs, rodents, wildlife, turf insect programs'],
@@ -135,7 +135,7 @@ const SERVICE_DETAILS_COPY = {
       'Product selection follows the inspection, not a script. Depending on the findings, the technician may place non-repellent products where pests actively enter, travel, and harbor, and residual contact or repellent treatments in appropriate labeled exterior zones \u2014 when both are used, placement is planned around the labels and the target pest.',
       'Some non-repellent products can extend control beyond the first insect that contacts or consumes them: for certain ants and cockroaches, exposed insects can pass the effect through contact, feeding, and grooming. That transfer is product- and pest-specific \u2014 we use it where it genuinely applies and never present it as a universal effect or a colony-elimination guarantee.',
       'On a normal visit, where the label allows, the technician treats a residual band around the house and on the covered eaves, the garage and the lanai or pool cage, placed from the inspection \u2014 never an automatic pass over every wall, plant, and surface.',
-      'Interior service is included on your first visit and whenever you ask for it on later visits: an interior spray plus baits, gels, monitors, crack-and-crevice, and void placements at travel and harborage areas \u2014 plumbing penetrations, under sinks, behind appliances. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are separate services unless your estimate expressly includes them.',
+      'Interior service is included on your first visit and whenever you ask for it on later visits: an interior spray plus baits, gels, monitors, crack-and-crevice, and void placements at travel and harborage areas \u2014 plumbing penetrations, under sinks, behind appliances. If you chose exterior-only service, ask the office to add inside service. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are separate services unless your estimate expressly includes them.',
       'Routine exterior visits include removal of accessible spider webs, egg sacs, and inactive nest material from designated service areas \u2014 wherever they can be safely reached from the ground with standard service equipment. Active stinging-insect nests and work needing specialized access are handled under the applicable service terms.',
     ],
     faq: [
@@ -149,7 +149,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'Is the interior included, or is that extra?',
-        a: 'Included for the pests your recurring plan covers \u2014 your first visit includes an inside spray, and on later visits we treat inside whenever you ask, with baits, gels, and crack-and-crevice work wherever you see covered activity. Someone needs to be home, or leave us access. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are their own services and are included only when your estimate says so.',
+        a: 'Included for the pests your recurring plan covers \u2014 your first visit includes an inside spray, and on later visits we treat inside whenever you ask, with baits, gels, and crack-and-crevice work wherever you see covered activity. Someone needs to be home, or leave us access. If you chose exterior-only service, you can ask the office to add inside service back. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are their own services and are included only when your estimate says so.',
       },
       {
         q: 'Is it safe for my kids and pets?',
@@ -157,11 +157,11 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What if it rains after my treatment?',
-        a: 'Before treating, the technician weighs current and forecast weather, wind, surface moisture, and the product label \u2014 we do not apply when conditions would violate the label or waste the treatment. No application is weatherproof: a treatment needs to dry and bond to surfaces, and after that it holds up to weather. The technician waits for a dry window rather than spray into rain.',
+        a: 'Before treating, the technician weighs current and forecast weather, wind, surface moisture, and the product label \u2014 we do not apply when conditions would violate the label or waste the treatment. No application is weatherproof: a treatment needs to dry and bond to surfaces, and after that it holds up to weather.',
       },
       {
         q: 'I still see ants a few days after treatment — is it working?',
-        a: 'Often, yes \u2014 non-repellent and bait treatments are intentionally slower than contact-kill sprays because foragers have to contact or consume them, so continued activity is normal. If you still see activity between visits, text us a photo \u2014 a re-service between visits is free and doesn\u2019t move your next visit.',
+        a: 'Often, yes \u2014 non-repellent and bait treatments are intentionally slower than contact sprays because foragers have to contact or consume them, so continued activity is normal. If you still see activity between visits, text us a photo \u2014 a re-service between visits is free and doesn\u2019t move your next visit.',
       },
       {
         q: 'Do I need to be home?',
