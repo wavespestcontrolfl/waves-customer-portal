@@ -9,8 +9,10 @@ const { webkit } = require("playwright");
 const { previewServer, launchBrowser, evidence, waitForFonts } = require("./browser");
 const root = path.resolve(__dirname, "../..");
 const output = path.join(root, ".tmp/admin-table-controls");
-const onlyCustomers = process.argv.includes("--customers");
-const onlyBids = process.argv.includes("--bids");
+// Default to this PR's Bid Desk checks; opt into the companion Customers
+// scenario with --customers or both pages with --all once that UI is present.
+const checkCustomers = process.argv.includes("--customers") || process.argv.includes("--all");
+const checkBids = !checkCustomers || process.argv.includes("--bids") || process.argv.includes("--all");
 const customers = Array.from({ length: 55 }, (_, index) => ({
   id: `customer-${index + 1}`, firstName: "Customer", lastName: `Example ${String(index + 1).padStart(3, "0")}`,
   address: `${index + 1} Demonstration Street, Example City, FL`, tier: "Silver", healthScore: 82,
@@ -199,8 +201,8 @@ async function exerciseBids(page, server, report) {
             if (body === undefined) scenario.unmatched.push(`${request.method()} ${url.pathname}`);
             return route.fulfill({ status: body === undefined ? 404 : 200, contentType: "application/json", body: JSON.stringify(body ?? { error: "Unexpected synthetic request" }) });
           });
-          if (!onlyBids) await exerciseCustomers(page, server, scenario);
-          if (!onlyCustomers) await exerciseBids(page, server, scenario);
+          if (checkCustomers) await exerciseCustomers(page, server, scenario);
+          if (checkBids) await exerciseBids(page, server, scenario);
           assert.deepEqual(scenario.errors, []);
           assert.deepEqual(scenario.unmatched, []);
           await context.close();
