@@ -895,14 +895,13 @@ describe('the picker shows the sources and names the post (GATE_TECH_TIP_SOURCES
       expect(tip.lines.some((line) => line !== 'tree_shrub')).toBe(true);
     }
     for (const tip of named) expect(tip.blog.path).toMatch(/^\/[a-z0-9-]+\/[a-z0-9-]+\/$/);
-    // The six posts titled for one town (2026-10-24), and the porch-light post
-    // that still says warm bulbs draw fewer insects (held until the blog is
-    // corrected), are named by no tip.
+    // The six posts titled for one town (2026-10-24) are named by no tip. The
+    // porch-light post is named by the three lighting tips once its warm-bulb
+    // claim follows the 2016 LED study (astro #731).
     const NEVER = [
       '/pest-control/get-rid-of-roof-rats-lakewood-ranch/', '/termite/termite-infestation-in-venice/',
       '/mosquito/professional-mosquito-treatment/', '/pest-control/get-rid-of-ghost-ants-in-sarasota/',
       '/pest-control/get-rid-of-cockroaches/', '/pest-control/get-rid-of-fleas/',
-      '/pest-control/why-spiders-come-back-after-treatment/',
     ];
     expect(named.filter((tip) => NEVER.includes(tip.blog.path)).map((tip) => tip.id)).toEqual([]);
   });
