@@ -475,6 +475,24 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(runner).not.toHaveBeenCalled();
     });
 
+    test('a baseline paid for before a skipped candidate sitting is reused next time, and the candidate is not held back by it', async () => {
+      const items = await seedItems();
+      const patch = await insertPatch();
+      const { runner, calls } = stubRunner({ items });
+      // The baseline sitting runs; the candidate sitting finds the exam lock busy.
+      const lock = jest.fn()
+        .mockImplementationOnce(async (_name, fn) => fn())
+        .mockImplementationOnce(async () => ({ skipped: true, reason: 'lock_busy' }));
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock })).toEqual({ skipped: 'lock_busy' });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].promptPatch).toBeUndefined();
+      expect((await rowOf(patch.id)).exam_attempts).toBe(0);
+      const out = await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + DAY), runner, lock: lockThrough });
+      expect(out).toEqual({ decided: 'would_promote', patchId: patch.id });
+      expect(calls).toHaveLength(2);
+      expect(calls[1].promptPatch.id).toBe(patch.id);
+    });
+
     test('a pool over the nightly spend cap, or under the promotion minimum, starts no new sitting', async () => {
       const patch = await insertPatch();
       const runner = jest.fn();
