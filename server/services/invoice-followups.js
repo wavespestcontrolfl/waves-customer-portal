@@ -2848,6 +2848,88 @@ async function releaseFromAutopayHold(invoiceId) {
   });
 }
 
+// GATE_AUTOPAY_HOLD_TIMEOUT. A hold is released only by an Auto Pay failure, and Auto Pay never
+// charges some invoices (an annual-prepay invoice staff created after a visit), so such a hold
+// never ends. A hold older than this with no charge activity since it began is released.
+const AUTOPAY_HOLD_TIMEOUT_DAYS = 3;
+const AUTOPAY_HOLD_SWEEP_LIMIT = 500;
+const AUTOPAY_HOLD_SHADOW_ACTION = 'invoice_followup.autopay_hold_timeout_shadow';
+
+/**
+ * Release Auto Pay holds that Auto Pay never acted on. Selects `autopay_hold` sequences whose hold
+ * began (updated_at: every hold writer, and handleAutopayFailure's counter bump, stamps it) more
+ * than AUTOPAY_HOLD_TIMEOUT_DAYS ago with no stripe_invoice_charge_attempts row for the invoice and
+ * no payments row (any status) for the customer created since. Terminal, non-schedulable,
+ * payer-billed and payment-plan invoices are skipped. 'true' releases through the existing
+ * releaseFromAutopayHold; 'shadow' writes at most one audit_log row per invoice per ET day and
+ * changes nothing; off returns before any query.
+ */
+async function releaseStaleAutopayHolds({ now = new Date() } = {}) {
+  const mode = require('../config/feature-gates').autopayHoldTimeoutMode();
+  if (mode !== 'shadow' && mode !== 'true') return { mode: 'off', candidates: 0, released: 0, recorded: 0 };
+
+  const cutoff = new Date(now.getTime() - AUTOPAY_HOLD_TIMEOUT_DAYS * 86400000);
+  const rows = await db('invoice_followup_sequences as s')
+    .where('s.status', 'autopay_hold')
+    .where('s.updated_at', '<', cutoff)
+    .whereNotExists(function noChargeAttempt() {
+      this.select(db.raw('1')).from('stripe_invoice_charge_attempts as a')
+        .whereRaw('a.invoice_id = s.invoice_id')
+        .whereRaw('a.created_at >= s.updated_at');
+    })
+    .whereNotExists(function noPayment() {
+      this.select(db.raw('1')).from('payments as p')
+        .whereRaw('p.customer_id = s.customer_id')
+        .whereRaw('p.created_at >= s.updated_at');
+    })
+    .orderBy('s.updated_at', 'asc')
+    .limit(AUTOPAY_HOLD_SWEEP_LIMIT)
+    .select('s.id', 's.invoice_id', 's.updated_at');
+
+  const due = [];
+  for (const row of rows) {
+    const invoice = await db('invoices').where({ id: row.invoice_id }).first();
+    if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) continue;
+    if (await activePaymentPlan(db, row.invoice_id)) continue;
+    due.push(row);
+  }
+
+  let released = 0;
+  let recorded = 0;
+  if (mode === 'true') {
+    for (const row of due) {
+      await releaseFromAutopayHold(row.invoice_id);
+      released += 1;
+    }
+    logger.info(`[invoice-followups] autopay hold timeout: released ${released} stale hold(s)`);
+  } else {
+    const { recordAuditEvent } = require('./audit-log');
+    const etDay = etDateString(now);
+    for (const row of due) {
+      const already = await db('audit_log')
+        .where({ action: AUTOPAY_HOLD_SHADOW_ACTION, resource_type: 'invoice', resource_id: row.invoice_id })
+        .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date = ?::date", [etDay])
+        .first('id');
+      if (already) continue;
+      const heldSince = new Date(row.updated_at);
+      await recordAuditEvent({
+        actor_type: 'system',
+        action: AUTOPAY_HOLD_SHADOW_ACTION,
+        resource_type: 'invoice',
+        resource_id: row.invoice_id,
+        metadata: {
+          sequence_id: row.id,
+          held_since: heldSince.toISOString(),
+          days_held: Math.floor((now.getTime() - heldSince.getTime()) / 86400000),
+        },
+      });
+      recorded += 1;
+    }
+    logger.info(`[invoice-followups] autopay hold timeout (shadow): ${due.length} would release, ${recorded} newly recorded`);
+  }
+  return { mode, candidates: due.length, released, recorded };
+}
+
 /**
  * Called per-customer when autopay fails — bumps the counter on every
  * active autopay-held sequence for that customer, and releases any whose
@@ -3633,6 +3715,8 @@ module.exports = {
   isTerminalInvoice,
   stopOnPayment,
   releaseFromAutopayHold,
+  releaseStaleAutopayHolds,
+  AUTOPAY_HOLD_TIMEOUT_DAYS,
   handleAutopayFailure,
   pauseSequence,
   resumeSequence,
