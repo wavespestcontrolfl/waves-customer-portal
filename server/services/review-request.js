@@ -8327,7 +8327,9 @@ async function firstAskLockVisit(serviceId, database = db) {
 // "no ask" stays an ask. Returns null when the lock does not apply (gate off, or the customer
 // was asked before, is marked reviewed or cannot be read): the caller's choice stands as it was.
 // Otherwise { requestReview, forcedOn, optOutReason }. The one place the rule lives: the
-// completion, the status route and the visit-closeout packet all call it.
+// completion calls it, and the visit-closeout packet reads the marker it leaves on the record.
+// PUT /admin/schedule/:id/status keeps the posted choice: no UI completes through it, and it
+// carries no reason and saves no review decision.
 const FIRST_ASK_OPT_OUT_REASON = "complaint_on_site";
 async function firstAskLockChoice({ customerId, requestReview, optOutReason }, database = db) {
   if (!require("../config/feature-gates").reviewFirstAskLockLive()) return null;

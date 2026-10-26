@@ -23008,17 +23008,7 @@ router.put('/:id/status', async (req, res, next) => {
       // Honor the "Send review request" toggle if the caller passed it.
       // Default to true so older callers (that don't send the flag) keep
       // the existing auto-ask behavior.
-      // First review ask (GATE_REVIEW_FIRST_ASK_LOCK): a never-asked customer's "no ask" stays an ask
-      // unless the body carries the "Complaint on site" reason (re-services stay off). Gate off: skipped.
-      let askForReview = requestReview !== false;
-      const reviewRequest = require('../services/review-request');
-      if (!askForReview && require('../config/feature-gates').reviewFirstAskLockLive() && await reviewRequest.firstAskLockVisit(svc.id)) {
-        const firstAsk = await reviewRequest.firstAskLockChoice({
-          customerId: svc.customer_id, requestReview, optOutReason: req.body.reviewOptOutReason,
-        });
-        if (firstAsk) askForReview = firstAsk.requestReview;
-      }
-      if (askForReview) {
+      if (requestReview !== false) {
         await scheduleReviewRequest(svc);
       }
 
