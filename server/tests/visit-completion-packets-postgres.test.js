@@ -5293,8 +5293,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
-  // The grouped stop's Wrap-up (owner 2026-10-12; client-only, FastCompleteComboSheet): the container lays the stop's text,
-  // review and timing choices onto BOTH item bodies. What the packet does with them, per server rules the container relies on:
+  // A stop's text, review and timing choices laid onto BOTH item bodies (owner 2026-10-12). What the packet does with them:
   // one stop text goes if ANY item asks for it, one review ask goes only if EVERY item allows it, and its delay comes from the
   // FIRST member (window_start order). Free services, so no invoice holds the ask.
   describe('the stop-level Wrap-up fields (the packet reads them from the item bodies)', () => {

@@ -112,8 +112,8 @@ function lawnNewSodPayload({ serviceLine, structuredNotes } = {}) {
 // What a sheet showed of the sod record, as one comparable value: the laid day, the coverage and the planned classes it held.
 const sodShownKey = ({ laidOn, covers, held } = {}) => JSON.stringify([laidOn, covers, held]);
 
-async function decideFrozen(knex, { svc, lawnFast, appliedProducts, allowGrouped }) {
-  const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex, sodAware: true, allowGrouped });
+async function decideFrozen(knex, { svc, lawnFast, appliedProducts }) {
+  const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex, sodAware: true });
   const sod = ctx?.ok && ctx.eligible ? ctx.newSod : null;
   if (!sod) return null;
   if (sod.unavailable || !Array.isArray(sod.plannedHeld)) throw new Error('new sod record unavailable');
@@ -154,11 +154,11 @@ async function decideFrozen(knex, { svc, lawnFast, appliedProducts, allowGrouped
  * the later whole-object writes carry it. The work runs in a savepoint: a failed read rolls back to it and the visit
  * completes without the card. Never throws. Returns the frozen block or null.
  */
-async function freezeNewSodCard(trx, { svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts, allowGrouped } = {}) {
+async function freezeNewSodCard(trx, { svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts } = {}) {
   if (lawnFast == null || isIncompleteVisit || resumingCommittedCompletion || !featureGates.lawnNewSodReportCardLive()) return null;
   try {
     const frozen = await trx.transaction(async (sp) => {
-      const block = await decideFrozen(sp, { svc, lawnFast, appliedProducts, allowGrouped });
+      const block = await decideFrozen(sp, { svc, lawnFast, appliedProducts });
       if (!block) return null;
       const written = await sp('service_records')
         .where({ id: record.id })

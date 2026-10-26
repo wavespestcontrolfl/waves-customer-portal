@@ -118,6 +118,22 @@ describe('authored commercial proposal page', () => {
     });
   });
 
+  it('puts only the authored proposal inside Field presentation', async () => {
+    await renderProposal({ canSign: true, state: 'none' });
+    const documentBody = document.querySelector('.estimate-proposal-document-body');
+    expect(documentBody).not.toBeNull();
+    const masthead = documentBody.querySelector('.field-document-masthead');
+    expect(masthead).not.toBeNull();
+    expect(masthead).not.toHaveAttribute('data-g-nav');
+    expect(masthead).not.toHaveAttribute('data-glass');
+    expect(masthead).not.toHaveStyle({ position: 'sticky' });
+    expect(masthead).not.toHaveStyle({ borderRadius: '999px' });
+    expect(documentBody).toContainElement(screen.getByTestId('proposal-detail-card'));
+    expect(documentBody).not.toContainElement(screen.getByTestId('proposal-next-steps'));
+    expect(documentBody).not.toContainElement(screen.getByTestId('commercial-agreement-sign'));
+    expect(documentBody).not.toContainElement(screen.getByLabelText('Ask Waves about this estimate'));
+  });
+
   it('the signed and call-us agreement cards are glass too', async () => {
     await renderProposal({ canSign: false, state: 'signed' });
     expect(screen.getByTestId('commercial-agreement-signed')).toHaveAttribute('data-glass', 'card');

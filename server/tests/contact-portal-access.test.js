@@ -159,7 +159,7 @@ beforeAll((done) => {
   app.use('/api/billing/autopay', standIn([['GET', '/'], ['PUT', '/']]));
   app.use('/api/schedule', standIn([['GET', '/'], ['GET', '/next'], ['GET', '/account-next'], ['GET', '/properties-next'], ['POST', '/:id/confirm'], ['POST', '/:id/reschedule']]));
   app.use('/api/services', standIn([['GET', '/'], ['GET', '/stats/summary'], ['GET', '/:id']]));
-  app.use('/api/documents', standIn([['GET', '/'], ['GET', '/service-report/:id'], ['GET', '/:id/download'], ['POST', '/share/:id']]));
+  app.use('/api/documents', standIn([['GET', '/'], ['GET', '/service-report/:id'], ['GET', '/annual-plan/:id'], ['GET', '/:id/download'], ['POST', '/share/:id']]));
   app.use('/api/tracking', standIn([['GET', '/active'], ['GET', '/today'], ['GET', '/maps-key'], ['POST', '/:id/note']]));
   app.use('/api/property', standIn([['GET', '/termite-bond'], ['GET', '/preferences']]));
   app.use('/api/notifications', standIn([['GET', '/preferences'], ['PUT', '/preferences'], ['GET', '/property-preferences'], ['PUT', '/property-preferences/:id'], ['GET', '/contact-preferences'], ['PUT', '/contact-preferences']]));
@@ -212,6 +212,7 @@ const CONTACT_READS = [
   ['POST', '/api/customer/activity/page-view'], ['POST', '/api/customer/activity/heartbeat'], ['POST', '/api/customer/activity/push-open'],
 ];
 const HOLDER_ONLY = [
+  ['GET', '/api/documents/annual-plan/annual_plan_22222222-2222-4222-8222-222222222222'],
   ['GET', '/api/billing'], ['GET', '/api/billing/balance'], ['GET', '/api/billing/cards'], ['POST', '/api/billing/cards'],
   ['GET', '/api/billing/autopay'], ['PUT', '/api/billing/autopay'],
   ['POST', '/api/schedule/svc-1/confirm'], ['POST', '/api/schedule/svc-1/reschedule'],

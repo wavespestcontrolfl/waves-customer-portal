@@ -12,7 +12,8 @@ import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-se
 import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
-import { ACCEPT_MODE_LABELS, NextSteps, WAVES_EMAIL, acceptanceModeOf, mailtoHref, resolveDocNextSteps } from './estimateDocumentNextSteps';
+import { FieldDocument, FieldMasthead, FieldTitle } from '../components/FieldDocument';
+import { ACCEPT_MODE_LABELS, NextSteps, acceptanceModeOf, mailtoHref, resolveDocNextSteps } from './estimateDocumentNextSteps';
 
 // Work-order style estimate document (owner direction 2026-08-07, modeled on
 // ServiceReportDocument): this is what renders whenever the estimate is
@@ -39,10 +40,7 @@ const NAVY = '#04395E';
 const INK = '#04395E'; // sheet ink (theme-doc DOC.ink)
 const MUTED = '#3F4A65'; // DOC.muted
 const LINE = '#D8D0C0'; // DOC.borderStrong
-const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-serif";
 const PORTAL_FALLBACK = 'https://portal.wavespestcontrol.com';
-const WAVES_SITE_URL = 'https://www.wavespestcontrol.com';
-const HEADER_LINK = { color: 'inherit', textDecoration: 'none' };
 
 // Tappable actions (owner 2026-10-19: the emailed PDF must be clickable for a
 // customer who cannot open the estimate link). Plain anchors: Chromium's
@@ -154,16 +152,16 @@ const FREQUENCY_VISITS = {
 function InfoRow({ label, children }) {
   if (children == null || children === '') return null;
   return (
-    <div style={{ display: 'flex', gap: 8, padding: '2px 0', fontSize: 11.5, lineHeight: 1.45 }}>
-      <span style={{ color: MUTED, minWidth: 78 }}>{label}</span>
-      <span style={{ color: INK, minWidth: 0, overflowWrap: 'anywhere' }}>{children}</span>
+    <div className="field-info-row" style={{ display: 'flex', gap: 8 }}>
+      <span className="field-info-label">{label}</span>
+      <span className="field-info-value">{children}</span>
     </div>
   );
 }
 
 function SectionHeader({ children }) {
   return (
-    <div className="doc-keep-with-next" style={{
+    <div className="doc-keep-with-next field-section-heading" style={{
       borderBottom: `1.5px solid ${NAVY}`, margin: '14px 0 6px', paddingBottom: 3,
       color: NAVY, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{children}</div>
@@ -172,7 +170,7 @@ function SectionHeader({ children }) {
 
 function Bullet({ children }) {
   return (
-    <div style={{ display: 'flex', gap: 7, padding: '1.5px 0', fontSize: 11.5, lineHeight: 1.45, color: INK }}>
+    <div className="field-document-bullet" style={{ display: 'flex', gap: 7, padding: '1.5px 0', color: INK }}>
       <span aria-hidden="true" style={{ color: MUTED }}>&bull;</span>
       <span>{children}</span>
     </div>
@@ -429,13 +427,8 @@ export default function EstimateProposalDocument({ data, token }) {
     || '';
 
   return (
-    <div
-      className="estimate-document-v1"
-      style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}
-    >
+    <FieldDocument className="estimate-document-v1" sheetClassName="doc-page">
       <style>{`
-        .estimate-document-v1 { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-        .estimate-document-v1 .doc-page { max-width: 760px; margin: 0 auto; padding: 20px 16px 28px; }
         @media screen and (max-width: 600px) {
           .estimate-document-v1 .doc-title-row { flex-direction: column; gap: 4px !important; }
           .estimate-document-v1 .doc-info-grid { grid-template-columns: 1fr !important; gap: 0 !important; }
@@ -447,47 +440,27 @@ export default function EstimateProposalDocument({ data, token }) {
           .waves-skip-link { display: none !important; }
           html[data-glass-theme] .glass-scene-orbs,
           html[data-glass-theme] .glass-scene-grain { display: none !important; }
-          .estimate-document-v1 .doc-page { padding: 0; max-width: none; }
           .estimate-document-v1 .doc-keep { break-inside: avoid; page-break-inside: avoid; }
           .estimate-document-v1 .doc-keep-with-next { break-after: avoid-page; page-break-after: avoid; }
           .estimate-document-v1 .doc-byb { break-before: page; page-break-before: always; }
         }
       `}</style>
-      <div className="doc-page">
-
-        {/* Letterhead — navy band (owner 2026-10-19 "navy header"), the same
-            brand band the invoice PDFs carry. White type on NAVY; the print
-            color-adjust rule above keeps the fill in the PDF. */}
-        <div className="doc-keep" data-testid="doc-letterhead" style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16,
-          background: NAVY, color: '#fff', borderRadius: 10, padding: '12px 18px',
-        }}>
-          <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
-          <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: '#E6EEF5' }}>
-            <div style={{ color: '#fff', fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
-            <div>
-              <a href={WAVES_SUPPORT_PHONE_TEL} style={HEADER_LINK}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
-              {' '}&middot;{' '}
-              <a href={WAVES_SITE_URL} style={HEADER_LINK}>wavespestcontrol.com</a>
-            </div>
-            <div><a href={`mailto:${WAVES_EMAIL}`} style={HEADER_LINK}>{WAVES_EMAIL}</a></div>
-            <div>Licensed &amp; insured &middot; {WAVES_FL_LICENSE_LINE}</div>
-          </div>
-        </div>
-
-        {/* Title row */}
-        <div className="doc-keep doc-title-row" style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-          marginTop: 14, gap: 12,
-        }}>
-          <div style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em', textTransform: 'uppercase' }}>{docTitle}</div>
-          <div className="doc-number" style={{ fontSize: 11, color: MUTED, whiteSpace: 'nowrap' }}>
-            {estimateNumber ? `Estimate ${estimateNumber} · ` : ''}{fmtInstant(estimate.createdAt)}
-          </div>
-        </div>
+      <div className="doc-keep" data-testid="doc-letterhead"><FieldMasthead /></div>
+      <FieldTitle
+        eyebrow={authoredProposal ? 'Service proposal' : 'Service estimate'}
+        title={docTitle}
+        subtitle={proposal?.propertyAddress || estimate.address || null}
+        reference={(
+          <>
+            <div>{fmtInstant(estimate.createdAt)}</div>
+            {validThroughText ? <strong>Valid through {validThroughText}</strong> : null}
+            {estimateNumber ? <div>Estimate {estimateNumber}</div> : null}
+          </>
+        )}
+      />
 
         {/* Info grid */}
-        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '4px 22px', marginTop: 10 }}>
+        <div className="doc-keep doc-info-grid field-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr' }}>
           <div style={{ minWidth: 0 }}>
             <SectionHeader>Prepared for</SectionHeader>
             <InfoRow label="Name">{proposal?.preparedFor || estimate.customerName}</InfoRow>
@@ -864,7 +837,6 @@ export default function EstimateProposalDocument({ data, token }) {
         <div style={{ marginTop: 16, paddingTop: 6, borderTop: `1px solid ${LINE}`, fontSize: 9.5, color: MUTED, lineHeight: 1.5 }}>
           Thank you for considering Waves Pest Control &middot; {WAVES_FL_LICENSE_LINE}
         </div>
-      </div>
-    </div>
+    </FieldDocument>
   );
 }

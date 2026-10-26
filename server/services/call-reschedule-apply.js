@@ -820,8 +820,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
 // the move already stands, so each effect is best-effort: a socket or
 // snapshot hiccup must not undo or refuse it. The /book snapshot first, for
 // both shapes (the anchor moved either way; reschedule-public.js syncs it
-// ahead of the same split): the public availability builder counts
-// self_booked_appointments for the day cap, and GET /api/booking/status/:code
+// ahead of the same split): GET /api/booking/status/:code
 // reads the date and times back to the customer (GH codex #4204 r8 P2). A
 // series move then runs the shared durable pass, whose reconciler retries a
 // failure. A SINGLE move re-syncs the reminder and broadcasts the board. The

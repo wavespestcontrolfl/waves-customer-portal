@@ -717,8 +717,7 @@ describe('intelligence bar set_railway_gate', () => {
     ['a lowercase name', 'gate_stamped_zero_free'],
     ['a name without the GATE_ prefix', 'STRIPE_SECRET_KEY'],
     ['a name with injection characters', 'GATE_X"; DROP'],
-    ['a retired gate', 'GATE_ONE_TIME_WELCOME_EMAIL'],
-    ['the retired self-book day cap', 'GATE_SELF_BOOK_DAY_CAP'],
+    ['a retired gate', 'GATE_ESTIMATE_GLASS'],
     ['a retired glass theme gate', 'GATE_PORTAL_GLASS'],
   ])('refuses %s without any network call and without echoing it', async (_label, name) => {
     configure();

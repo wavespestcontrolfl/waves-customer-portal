@@ -51,7 +51,7 @@
  *   carries the re-service catalog service_id, and skips the funnel-only
  *   card-capture step and ad attribution. All of createSelfBooking's
  *   transactional guarantees (advisory locks, blackout dates, global
- *   occupancy, self-book day caps, idempotent replay) apply unchanged.
+ *   occupancy, idempotent replay) apply unchanged.
  *
  * Post-commit (inside createSelfBooking, best-effort): the standard
  * appointment confirmation SMS/email — which carries the NEW visit's
@@ -562,7 +562,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
     // Anti-forgery: the customer can only commit a slot the availability
     // engine still offers for that day AT THIS LANE's duration (route
-    // feasibility, lunch reserve, day caps, whole-hour grid). Replaces the
+    // feasibility, lunch reserve, whole-hour grid). Replaces the
     // funnel's signed-offer HMAC for this surface — same model as
     // reschedule-public. createSelfBooking's transactional conflict checks
     // below still own the race.
@@ -672,7 +672,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         });
       }
       // Any other 409 out of the transaction is a slot-level race
-      // (SLOT_TAKEN / DAY_FULL) — refresh the list so the page recovers in
+      // (SLOT_TAKEN) — refresh the list so the page recovers in
       // one step, the same shape the pre-check above answers with.
       if (result.status === 409) {
         let refreshed = null;

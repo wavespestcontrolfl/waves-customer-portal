@@ -84,15 +84,15 @@ async function areaAddOnVisitIdsForFeed(serviceRows) {
 // and the marker the completion form reads. It does NOT claim an add-on row is attached.
 const AREA_ADDON_LOOKUP_FAILED = Object.freeze({
   ...LIGHT_COMPLETION_FLOWS_OFF,
-  // The two routing shortcuts Tech Home reads directly (the bait-station sheet and the grouped-stop sheet): off as well.
-  stationFastCompleteEnabled: false, comboFastCompleteEnabled: false,
+  // The routing shortcut Tech Home reads directly (the bait-station sheet): off as well.
+  stationFastCompleteEnabled: false,
   areaAddOnRowsAttached: false, areaAddOnsLookupFailed: true,
 });
 // The report flow needs a plain untyped, uncombined profile (the typed forms and
 // companion sections are required at completion and the flow has none).
 function fastCompleteReportOffered(completionProfile) {
   return require('../config/feature-gates').fastCompleteReportLive()
-    && require('../services/combo-fast-complete').reportFlowShape(completionProfile)
+    && !(completionProfile?.companions || []).length && !completionProfile?.findingsType
     && !isAreaAddOnCatalogKey(completionProfile?.serviceKey);
 }
 const trackTransitions = require('../services/track-transitions');
@@ -2470,6 +2470,9 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
   }
 
   const assignmentWarnings = new Set();
+  // Job-type lines for the OTHER visits a series scope reassigns. The edit
+  // handler warns for the edited visit itself, from the values it is saving.
+  const siblingCapabilityWarnings = new Set();
   for (const targetId of targetIds) {
     const assignment = await assignDispatchJob({
       jobId: targetId,
@@ -2484,6 +2487,9 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     if (assignment.technicianName) technicianName = assignment.technicianName;
     if (assignment.changed) changedJobIds.push(targetId);
     for (const line of assignment.warnings || []) assignmentWarnings.add(line);
+    if (String(targetId) !== String(jobId)) {
+      for (const line of assignment.capabilityWarnings || []) siblingCapabilityWarnings.add(line);
+    }
   }
 
   if (scope !== 'this_only' && parentId) {
@@ -2512,6 +2518,7 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     changed: changedJobIds.length > 0 || templateChanged,
     technicianName,
     ...(assignmentWarnings.size ? { warnings: [...assignmentWarnings] } : {}),
+    ...(siblingCapabilityWarnings.size ? { siblingCapabilityWarnings: [...siblingCapabilityWarnings] } : {}),
   };
 }
 
@@ -5569,9 +5576,6 @@ async function loadProjectCompletionContextByServiceId(services) {
       // combined visit. The client also needs the map known on
       // (pest-fast-complete.js isTypedReportEligible).
       stationFastCompleteEnabled: require('../services/visit-station-facts').stationFastCompleteEnabled(completionProfile),
-      // GATE_COMBO_FAST_COMPLETE: the pest and lawn Fast Complete sheets may be parts of one grouped stop.
-      // True only for a member of a grouped stop; the container (PR 2) and the server decide the rest.
-      comboFastCompleteEnabled: require('../services/combo-fast-complete').comboRowFlag(service),
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -6942,7 +6946,6 @@ router.get('/', async (req, res, next) => {
         typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
         // GATE_STATION_FAST_COMPLETE — see loadProjectCompletionContextByServiceId.
         stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
-        comboFastCompleteEnabled: projectCompletionContext.comboFastCompleteEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -7599,7 +7602,6 @@ router.get('/week', async (req, res, next) => {
           typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
           typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
           stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
-          comboFastCompleteEnabled: projectCompletionContext.comboFastCompleteEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -9441,6 +9443,15 @@ async function scheduleCreateHandler(req, res, next) {
         const { offDayWarningsFor } = require('../services/technician-eligibility');
         const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
         bookingWarnings.push(...await offDayWarningsFor(resolvedTechId, offDayDates, { conn: trx }));
+      }
+      // Job type (GATE_TECH_JOB_TYPE_CHECKS): the chosen technician is set to Off for this
+      // service's category - the same advisory path, never a block ([] with the gate off).
+      if (resolvedTechId) {
+        bookingWarnings.push(...await require('../services/technician-eligibility').capabilityOffWarningsFor(
+          resolvedTechId,
+          [{ service_type: serviceType, service_id: serviceId || null, service_key: pricing.primaryServiceKey || null }],
+          { conn: trx },
+        ));
       }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
@@ -14911,7 +14922,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // as the create-appointment path.
       if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
         const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
-          .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
         const finalTechnicianId = hasTechnicianIdUpdate
           ? requestedTechnicianId
           : (eligibilityRow?.technician_id || null);
@@ -14932,6 +14943,16 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             const { offDayWarningFor } = require('../services/technician-eligibility');
             const offDayLine = await offDayWarningFor(finalTechnicianId, finalDate, { conn: trx });
             if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
+          }
+          // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
+          // category. Advisory, never a block ([] with the gate off).
+          if (finalTechChanging) {
+            const capabilityLines = await require('../services/technician-eligibility').capabilityOffWarningsFor(finalTechnicianId, [{
+              service_type: updates.service_type !== undefined ? updates.service_type : eligibilityRow?.service_type,
+              service_id: updates.service_id !== undefined ? updates.service_id : eligibilityRow?.service_id,
+              service_key: updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : eligibilityRow?.service_key_snapshot,
+            }], { conn: trx });
+            for (const line of capabilityLines) if (!editWarnings.includes(line)) editWarnings.push(line);
           }
         }
       }
@@ -15342,6 +15363,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         });
         assignmentChanged = !!assignment.changed;
         assignmentUpdatedJobIds = assignment.changedJobIds || [];
+        // Job type (GATE_TECH_JOB_TYPE_CHECKS): a following or whole-series scope
+        // can move the other visits to a technician who is Off for their job type
+        // even when this visit keeps its technician (Codex #6740 r2).
+        for (const line of assignment.siblingCapabilityWarnings || []) {
+          if (!editWarnings.includes(line)) editWarnings.push(line);
+        }
       }
 
       // Shared occupancy probe for window, duration, and route edits — the

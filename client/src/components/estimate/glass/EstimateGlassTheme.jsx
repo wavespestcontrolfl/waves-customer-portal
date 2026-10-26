@@ -45,6 +45,7 @@ const PAGE_BG = ['rgb(250, 248, 243)', 'rgb(250, 250, 250)', 'rgb(248, 250, 251)
 // theme normalizes them onto the heading scale (visual only; text untouched).
 const DIV_H2 = new Set(['Search by date or time — no calling, no hold music, no back-and-forth', "Skip parts you don't need", 'Skip parts you don’t need']);
 const DIV_H3 = new Set(['It’s all in the Waves app', "It's all in the Waves app", 'Add Lawn Care and save more']);
+const FIELD_DOCUMENT_BOUNDARY = '.waves-field-document, .waves-field-document-body';
 
 const ownText = (el) => {
   let s = '';
@@ -54,7 +55,9 @@ const ownText = (el) => {
 
 function classify(statIO) {
   for (const el of document.querySelectorAll('#root *')) {
-    if (el.closest('svg')) continue;
+    // Field owns its authored document body. The legacy adapter must not
+    // turn its paper sections into glass cards or its masthead into nav.
+    if (el.closest('svg') || el.closest(FIELD_DOCUMENT_BOUNDARY)) continue;
     const cs = getComputedStyle(el);
     const bg = cs.backgroundColor;
     const rad = parseFloat(cs.borderTopLeftRadius) || 0;
@@ -154,6 +157,7 @@ function classify(statIO) {
   // hero contact block: bolder tier
   let contact = null;
   for (const el of document.querySelectorAll('#root *')) {
+    if (el.closest(FIELD_DOCUMENT_BOUNDARY)) continue;
     const t = el.textContent;
     if (t.includes('@') && t.includes('USA') && t.length < 170 && (!contact || el.contains(contact))) contact = el;
   }
@@ -188,7 +192,8 @@ function classify(statIO) {
   // floating pill nav (estimate page only — financial pages keep their
   // headers; the standard WavesShell bar keeps its full-width layout, the
   // pill compaction hides its icon row behind the centered logo)
-  const header = document.querySelector('header:not([data-waves-shell-header]), [role="banner"]');
+  const header = Array.from(document.querySelectorAll('header:not([data-waves-shell-header]), [role="banner"]'))
+    .find((candidate) => !candidate.closest(FIELD_DOCUMENT_BOUNDARY));
   if (header && !header.hasAttribute('data-g-nav')) {
     header.setAttribute('data-g-nav', '');
     Object.assign(header.style, { position: 'sticky', top: '10px', zIndex: '60', margin: '10px auto 0', maxWidth: '780px', borderRadius: '999px', padding: '8px 26px' });

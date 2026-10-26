@@ -21,23 +21,13 @@
 const defaultDb = require('../../models/db');
 const logger = require('../logger');
 const featureGates = require('../../config/feature-gates');
-const { classifyServiceCategory, CAPABILITY_CATEGORIES } = require('../auto-dispatch/service-category');
+const {
+  classifyServiceCategory, categoryForCatalogCategory, CATALOG_CATEGORY_LINES, CAPABILITY_CATEGORIES,
+} = require('../auto-dispatch/service-category');
 const { isAssignable, isOffDay, absentTechDays } = require('../technician-eligibility');
 const { stateOf } = require('../technician-capabilities');
 const { dateOnlyString } = require('../../utils/datetime-et');
 const { commitPromiseOf } = require('../../utils/trx-commit-promise');
-
-// services.category (service library) -> service line. inspection / specialty /
-// other / anything unknown has no line of its own: it falls through to the NAME.
-const CATALOG_CATEGORY_LINES = Object.freeze({
-  pest_control: 'general',
-  mosquito: 'mosquito',
-  lawn_care: 'lawn',
-  tree_shrub: 'lawn',
-  rodent: 'rodent',
-  termite: 'termite',
-  wdo: 'termite',
-});
 
 const SOURCES = Object.freeze(['book', 'phone_live', 'after_call', 'estimate_accept', 'office_auto', 'night_run']);
 const LINES = CAPABILITY_CATEGORIES;
@@ -76,9 +66,8 @@ async function serviceLineFor(conn, { serviceId = null, serviceKey = null, servi
     // An unreadable catalog is not "no catalog": fall to the name, never throw.
     logger.warn(`[line-technician] catalog category lookup failed: ${err.message}`);
   }
-  if (category && Object.prototype.hasOwnProperty.call(CATALOG_CATEGORY_LINES, category)) {
-    return { line: CATALOG_CATEGORY_LINES[category], lineFrom: 'catalog' };
-  }
+  const catalogLine = categoryForCatalogCategory(category);
+  if (catalogLine) return { line: catalogLine, lineFrom: 'catalog' };
   const name = clean(serviceType, 300);
   if (name) return { line: classifyServiceCategory(name), lineFrom: 'name' };
   return { line: null, lineFrom: null };

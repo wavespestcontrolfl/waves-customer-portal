@@ -3,13 +3,11 @@
 // behind a data-URL prefix: the adapter checks shape, count and total size.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockRecordCall = jest.fn(() => 77);
-const mockRecordTrace = jest.fn();
 jest.mock('../services/llm-dispatch-metrics', () => {
   const actual = jest.requireActual('../services/llm-dispatch-metrics');
-  return { ...actual, recordCall: (...a) => mockRecordCall(...a), recordTrace: (...a) => mockRecordTrace(...a), recordDispatch: jest.fn() };
+  return { ...actual, recordCall: (...a) => mockRecordCall(...a), recordDispatch: jest.fn() };
 });
 
-const crypto = require('crypto');
 const { callWorkersAIDecision, dispatch, CLEF_MAX_IMAGES, CLEF_IMAGES_BUDGET_BYTES } = require('../services/llm/call');
 const { ROUTES } = require('../config/models');
 
@@ -22,7 +20,6 @@ const okResponse = () => ({ ok: true, status: 200, json: async () => ENVELOPE })
 // the format's magic bytes, not the full image.
 const rawBytes = (n, fill) => { const b = Buffer.alloc(n, fill); b[0] = 0xff; b[1] = 0xd8; b[2] = 0xff; return b; };
 const urlOf = (bytes) => `data:image/jpeg;base64,${bytes.toString('base64')}`;
-const sha = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 
 describe('callWorkersAIDecision images', () => {
   const originalFetch = global.fetch;
@@ -32,7 +29,6 @@ describe('callWorkersAIDecision images', () => {
     process.env.CF_ACCOUNT_ID = 'acct123';
     global.fetch = jest.fn().mockResolvedValue(okResponse());
     mockRecordCall.mockClear();
-    mockRecordTrace.mockClear();
   });
   afterAll(() => {
     global.fetch = originalFetch;
@@ -51,8 +47,6 @@ describe('callWorkersAIDecision images', () => {
     const body = global.fetch.mock.calls[0][1].body;
     expect(JSON.parse(body)).toEqual({ state: STATE, questions: QUESTIONS });
     expect(Object.keys(JSON.parse(body))).toEqual(['state', 'questions']);
-    // ledger text is the state alone, as before
-    expect(mockRecordTrace).toHaveBeenCalledWith(77, expect.objectContaining({ prompt: JSON.stringify(STATE) }));
   });
 
   test('with images the body carries them beside state and questions', async () => {
@@ -65,15 +59,11 @@ describe('callWorkersAIDecision images', () => {
     expect(JSON.parse(global.fetch.mock.calls[0][1].body)).toEqual({ images, state: STATE, questions: QUESTIONS });
   });
 
-  test('the ledger text never holds image bytes: a count and the sha256 of each image stand in', async () => {
+  test('the ledger never holds image bytes', async () => {
     const a = rawBytes(2000, 7);
     const b = rawBytes(2500, 9);
     const images = [urlOf(a), urlOf(b)];
     await callWorkersAIDecision({ model: 'clef-flash', state: STATE, questions: QUESTIONS, images, laneId: 'typed_decisions_clef' });
-    const trace = mockRecordTrace.mock.calls[0][1];
-    expect(trace.prompt).toBe(`${JSON.stringify(STATE)}\n[images: 2, sha256 ${sha(a)},${sha(b)}]`);
-    expect(trace.prompt).not.toContain(a.toString('base64').slice(0, 40));
-    // nothing else handed to the ledger carries the payload either
     expect(JSON.stringify(mockRecordCall.mock.calls)).not.toContain(a.toString('base64').slice(0, 40));
   });
 
@@ -83,8 +73,7 @@ describe('callWorkersAIDecision images', () => {
     expect(result).toEqual({ ok: false, reason: 'cloudflare_images_too_large' });
     expect(global.fetch).not.toHaveBeenCalled();
     expect(mockRecordCall.mock.calls[0][0]).toMatchObject({ ok: false, errorCode: 'cloudflare_images_too_large', provider: 'cloudflare' });
-    expect(mockRecordTrace.mock.calls[0][1].prompt).toContain('[images: 5,');
-    expect(mockRecordTrace.mock.calls[0][1].prompt).not.toContain(one.slice(23, 60));
+    expect(JSON.stringify(mockRecordCall.mock.calls)).not.toContain(one.slice(23, 60));
   });
 
   test('a total over 150 KB fails the leg before any network call; exactly at the limit is sent', async () => {

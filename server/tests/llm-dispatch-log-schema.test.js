@@ -1,8 +1,8 @@
 /**
  * DB-backed schema checks for the call-ledger migrations
- * (20260904000010_llm_dispatch_log_call_ledger + 20260904000020_llm_call_traces):
- * the per-call columns on llm_dispatch_log, its new indexes, the heartbeat
- * row_kind backfill semantics, and the llm_call_traces table.
+ * (20260904000010_llm_dispatch_log_call_ledger):
+ * the per-call columns on llm_dispatch_log, its new indexes and the heartbeat
+ * row_kind backfill semantics.
  *
  * Self-skips without DATABASE_URL (run after `knex migrate:latest`) — the
  * same convention as auto-dispatch-schema.test.js.
@@ -50,27 +50,6 @@ describeOrSkip('llm call ledger schema', () => {
     const { rows } = await knex.raw("SELECT indexname FROM pg_indexes WHERE tablename = 'llm_dispatch_log'");
     const names = rows.map((r) => r.indexname);
     INDEXES.forEach((i) => expect(names).toContain(i));
-  });
-
-  test('llm_call_traces exists, cascades from its call row, and is indexed on created_at + run_id', async () => {
-    const cols = await knex('llm_call_traces').columnInfo();
-    ['id', 'call_id', 'lane_id', 'run_id', 'system_redacted', 'prompt_redacted', 'response_redacted', 'redaction_confidence', 'created_at']
-      .forEach((c) => expect(cols).toHaveProperty(c));
-    const { rows } = await knex.raw("SELECT indexname FROM pg_indexes WHERE tablename = 'llm_call_traces'");
-    const names = rows.map((r) => r.indexname);
-    expect(names).toContain('llm_call_traces_created_at_idx');
-    expect(names).toContain('llm_call_traces_run_id_idx');
-    expect(names).toContain('llm_call_traces_call_id_idx');
-
-    const [call] = await knex('llm_dispatch_log')
-      .insert({ policy: '__schema_test__', ok: true, row_kind: 'call', provider: 'openai', input_tokens: 1, output_tokens: 1 })
-      .returning('id');
-    const callId = typeof call === 'object' ? call.id : call;
-    await knex('llm_call_traces').insert({ call_id: callId, lane_id: 'schema_test', prompt_redacted: 'p', redaction_confidence: 'high' });
-    expect(await knex('llm_call_traces').where({ call_id: callId }).count({ n: '*' }).first()).toMatchObject({ n: expect.anything() });
-    await knex('llm_dispatch_log').where({ id: callId }).del();
-    const left = await knex('llm_call_traces').where({ call_id: callId }).count({ n: '*' }).first();
-    expect(Number(left.n)).toBe(0);
   });
 
   test('session rows are unique per session id and the recorder upserts them atomically — monotone counters, sticky terminal status', async () => {

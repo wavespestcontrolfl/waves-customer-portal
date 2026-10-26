@@ -16,8 +16,8 @@
  * OPENAI_API_KEY gives the judge its fallback leg. The scenarios themselves
  * read and write no database (the harness refuses DB access while a
  * conversation runs). The judge is a ledgered lane: with the LLM ledger /
- * trace / dispatch-metrics gates on, its verdict calls write their usual
- * llm_dispatch_log / llm_call_traces rows, labelled as replay workload.
+ * dispatch-metrics gates on, its verdict calls write their usual
+ * llm_dispatch_log rows, labelled as replay workload.
  * --notify adds the one regression notification.
  *
  * Exit codes: 0 = verified clean; 1 = repeated scenario failure;

@@ -411,7 +411,7 @@ async function assertStillApproved(trx, service, config, refuse, row = service) 
   }
   if (config.prefs) {
     const { getCustomerSchedulingPreferences } = require('../preferences');
-    const now = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, trx, { lock: true });
+    const now = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, trx, { lock: true, serviceId: service.service_id, serviceKey: service.service_key_snapshot });
     if (preferencesPrint(now) !== preferencesPrint(config.prefs)) {
       throw superseded('has new customer scheduling preferences since the move was checked', 'The customer\'s scheduling preferences changed while the move was checked');
     }

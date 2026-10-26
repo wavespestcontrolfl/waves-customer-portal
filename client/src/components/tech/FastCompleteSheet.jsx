@@ -78,7 +78,7 @@ import {
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
 import { pestSweepActions, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
-import useFastCompleteSubmit, { PREPARE_REFUSAL } from '../../hooks/useFastCompleteSubmit';
+import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import { isReserviceVisit } from '../../lib/pest-fast-complete';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import FastCompleteWrapUp, { WrapUpClock, useWrapUp } from './FastCompleteWrapUp';
@@ -102,9 +102,9 @@ import {
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from '../../lib/typed-findings-rules';
 import {
-  AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
+  AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
   SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
-  useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock, detailsHandler,
+  useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock, detailsHandler,
 } from './FastCompleteParts';
 
 // Kept importable from here (FastCompleteLawnReserviceSheet and the products suite read it from this path).
@@ -461,8 +461,8 @@ const oneTapGateOf = (data) => data?.oneTap === true;
 const stockAdvisoryOf = (data) => data?.stockAdvisory === true;
 // It runs on the plain pest report (a visit of a recurring series or a re-service: the server sends `oneTap` for no
 // other) that opens with the house mix on the sheet. A visit that starts with no products (an initial cleanout) keeps
-// the note's products read, and a lane or typed record and a stop's part (prepare mode) keep the sheet as it was.
-const oneTapOf = ({ ctx, mode, sharedNote }) => ctx.oneTap === true && ctx.houseMix === true && !mode && sharedNote == null;
+// the note's products read, and a lane or typed record keeps the sheet as it was.
+const oneTapOf = ({ ctx, mode }) => ctx.oneTap === true && ctx.houseMix === true && !mode;
 // Typed feet count only as a whole number above 0.
 const wholeFeetOf = (text) => (/^\d+$/.test(String(text).trim()) && Number(text) > 0 ? Number(text) : null);
 
@@ -582,25 +582,11 @@ function fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow = fa
   return !!(ctx.loadError || ctx.blockedReason);
 }
 
-// Prepare mode (GATE_COMBO_FAST_COMPLETE; a part of a grouped stop): the final action hands the body to
-// `onPrepared(serviceId, body)` instead of posting /complete, and `sharedNote` is the stop's one note,
-// which drives this sheet's note. Only the plain pest report flow can be a part: a lane, typed or
-// re-service sheet refuses to prepare, so it can never post a completion for a stop member.
-function prepareFor(service, onPrepared) {
-  if (typeof onPrepared !== 'function') return null;
-  const plain = service?.reportFlow === true && !routedLaneOf(service) && !routedTypedOf(service);
-  return plain ? onPrepared : () => { throw new Error(PREPARE_REFUSAL); };
-}
-
-export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended, voiceFillEnabled, onPrepared, sharedNote, embedded, onWrapUpGate }) {
+export default function FastCompleteSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended, voiceFillEnabled }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
-  // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
-  const dialogRef = useModalFocus(![embedded, suspended].some(Boolean), () => closeRef.current?.());
-  useLockBodyScroll(!embedded);
-  const Frame = embedded ? EmbeddedPartFrame : FastCompleteFrame;
-  // As a part of a stop, every write the sheet sends is counted as work in flight (see useWriteTracking).
-  const request = useWriteTracking(plainRequest, embedded === true);
+  const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
+  useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const reportFlow = service?.reportFlow === true;
@@ -618,11 +604,9 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
     laneKey: routedLaneOf(service),
     typedType: routedTypedOf(service),
   });
-  // The stop's container learns from this read whether the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) is on; the part itself shows none.
-  useEffect(() => { onWrapUpGate?.(ctx.wrapUp === true); return () => onWrapUpGate?.(null); }, [onWrapUpGate, ctx.wrapUp]);
   // Only the report flow renders the confirmable prompts (the edited-report
   // heads-up, a promise changed since the report was written).
-  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, confirmable: reportFlow, invoiceFields: completionInvoiceFields(service), onPrepared: prepareFor(service, onPrepared) });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, confirmable: reportFlow, invoiceFields: completionInvoiceFields(service) });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
   // Another dialog a sheet opens over itself (the report flow's spray
@@ -646,7 +630,6 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
   // Details and Close wait for it, so its points and a save in flight are never dropped.
   const [tracing, setTracing] = useState(false);
   // The form's own word that this visit needs the full form (see the header).
-  usePartBusy('pest', [submitting, voiceBusy, wrapChecking, dictationPending, photoBusy, tracing].some(Boolean));
   const [fullFormNeeded, setFullFormNeeded] = useState(false);
   const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow: routedStationsOf(service) });
 
@@ -673,7 +656,7 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
   const locked = [submissionHolds(submission), submission.prompt, wrapChecking].some(Boolean);
 
   return (
-    <Frame
+    <FastCompleteFrame
       suspended={suspended}
       isMobile={isMobile}
       dialogRef={dialogRef}
@@ -685,12 +668,12 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
       )) || sheetOverlay}
     >
       <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} contact={ctx.contact} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy || tracing} submitting={[submitting, voiceBusy, wrapChecking, tracing].some(Boolean)} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} fullFormOffered={fullFormOffered} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} sharedNote={sharedNote} onWrapChecking={setWrapChecking} onTracing={setTracing} />
-    </Frame>
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} onWrapChecking={setWrapChecking} onTracing={setTracing} />
+    </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onVoiceBusy, sharedNote, onWrapChecking, onTracing }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onVoiceBusy, onWrapChecking, onTracing }) {
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
@@ -712,7 +695,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
   if (reportFlow) {
-    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} sharedNote={sharedNote} onWrapChecking={onWrapChecking} onTracing={onTracing} />;
+    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onWrapChecking={onWrapChecking} onTracing={onTracing} />;
   }
   return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} onWrapChecking={onWrapChecking} />;
 }
@@ -1866,7 +1849,7 @@ function productLaneOf(service) {
 
 function ReportFlowForm({
   service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
-  onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, sharedNote, onWrapChecking, onTracing,
+  onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onWrapChecking, onTracing,
 }) {
   // Only opened for a visit in the report flow (service.reportFlow), so the
   // service is always there.
@@ -1875,7 +1858,7 @@ function ReportFlowForm({
   const { rows, addProduct } = products;
   const active = rows.filter((row) => row.active);
   const isReservice = isReserviceVisit(ctx.visit);
-  const [ownForm, setForm] = useState(() => ({
+  const [form, setForm] = useState(() => ({
     note: '',
     customerHome: DEFAULT_CUSTOMER_HOME,
     rating: ctx.rating.firstVisit ? FIRST_VISIT_RATING : null,
@@ -1885,9 +1868,6 @@ function ReportFlowForm({
     promiseMarks: {},
     blogPost: null,
   }));
-  // A stop's one note (sharedNote, prepare mode) stands in for this sheet's own: every read of the
-  // note below (voice fill, typed facts, Generate, the body) sees it, and the sheet's note box hides.
-  const form = useSharedNoteForm(ownForm, sharedNote);
   const tips = useTipLibrary({ base, request });
   const tipsAvailable = !!tips;
   const visitPromises = useVisitPromises({ base, request });
@@ -1907,18 +1887,17 @@ function ReportFlowForm({
   const recordState = useVisitRecord(service, request, form.note);
   const { lane, mode, record } = recordState;
   // The one-tap report (GATE_ONE_TAP_REPORT, owner 2026-10-17).
-  const oneTap = oneTapOf({ ctx, mode, sharedNote });
+  const oneTap = oneTapOf({ ctx, mode });
   // The server refused the completion because the property's stations changed
   // since they were read: the sheet loads them again and reads the note again.
   const { errorCode: submitCode } = submission;
   useEffect(() => { if (submitCode === 'station_roster_changed') recordState.stationsChanged(); }, [submitCode]);
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
-  usePartBusy('pest-report', !!writing);
   // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section, on the visit step and the report step (one state). The report flow posted no
-  // `reviewTiming` before, so the key stays absent while the timing is Automatic. A part of a grouped stop
-  // (prepare mode) and a re-service (not in ctx.wrapUp) keep their fixed text.
-  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, reviewMarker: isReservice, onChecking: onWrapChecking });
+  // `reviewTiming` before, so the key stays absent while the timing is Automatic. A re-service
+  // (not in ctx.wrapUp) keeps its fixed text.
+  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, reviewMarker: isReservice, onChecking: onWrapChecking });
   const [step, setStep] = useState('visit');
   // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL): the products the note names are
   // read when the report is written and land as rows the tech confirms. On a
@@ -2072,19 +2051,12 @@ function ReportFlowForm({
     traceOnReport: ctx.traceOnReport,
     visitPhotos,
   });
-  // Prepare mode: a part is prepared only while it could be prepared right now. Exactly when the Complete button is
-  // there and enabled: the report is fresh for the current note and inputs (no write action), nothing is waiting on
-  // a prompt or a hold, and the visit is the plain pest report flow (no re-service, callback, lane or typed record).
-  const canPrepare = [!action, !submission.prompt, !completeMissing.reason, !mode, !isReserviceVisit(ctx.visit)].every(Boolean);
   const submit = async () => {
     if (completeMissing.reason && !submission.hasPendingBody()) return;
     // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
     if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
-    submission.submit(buildBody, summary(), { valid: canPrepare });
+    submission.submit(buildBody, summary());
   };
-  // A part of a stop (prepare mode): a change behind the handed-over body, or a part that can no longer be prepared
-  // (a stale report, a hold), revokes it.
-  useEffect(() => { submission.revokeIfChanged(buildBody, { valid: canPrepare }); });
   // The tracer opens in the page, under the trace section (owner 2026-10-22, "should be on the same page"): no
   // cover over the sheet, and Done or × folds it away.
   const openTracer = () => setTracerOpen(true);
@@ -2190,7 +2162,6 @@ function ReportFlowForm({
   return (
     <VisitStep
       wrapUp={wrapUp}
-      sharedNote={sharedNote}
       service={service}
       ctx={ctx}
       form={form}
@@ -2342,7 +2313,7 @@ function VisitStep({
   wrapUp, service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
   noteBoxPhotos, photosReadFailed, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
-  productVoice, noteClipEnabled = false, sharedNote, onRate, stockNotices, trace, tracer, onTrace,
+  productVoice, noteClipEnabled = false, onRate, stockNotices, trace, tracer, onTrace,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
@@ -2386,7 +2357,7 @@ function VisitStep({
           {/* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the note's mic
               waits while a photo's description is open or a change is
               saving, so one microphone records at a time. */}
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked || !!photoHold} onClip={noteClip.onClip} micInside shared={sharedNote != null}>
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked || !!photoHold} onClip={noteClip.onClip} micInside>
             {noteBoxPhotos ? (
               <TechNoteBoxPhotos
                 serviceId={service.id}

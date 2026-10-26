@@ -70,7 +70,11 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // the photo review." line under the service photos (photoSummary is null for
 // that placeholder). Cached p12 objects still carry it, so they re-render on
 // next open. Supersedes p12, whose bust it subsumes.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p13-lawn-dead-fields-20261001';
+// p14: every unsigned service report adopts the owner-approved Field document
+// shell (white masthead, ruled sections, blue page accent and quiet footer).
+// Stored unsigned PDFs must re-render; signed/executed files remain pinned by
+// their separate immutable document lifecycles.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p14-field-document-20261025';
 
 const s3 = new S3Client({
   region: config.s3?.region,

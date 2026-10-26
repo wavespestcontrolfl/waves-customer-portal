@@ -73,16 +73,7 @@ describe('closeHoldCardForEndedVisit', () => {
   });
 });
 
-describe('self-book daily cap', () => {
-  test('both voice-agent counts exclude an unconfirmed street-level hold (one query each)', () => {
-    const avail = fs.readFileSync(require.resolve('../services/availability.js'), 'utf8');
-    const booking = fs.readFileSync(require.resolve('../routes/booking.js'), 'utf8');
-    const a = avail.slice(avail.indexOf('const voiceRow = await trx'), avail.indexOf('return parseInt(row?.count || 0, 10) + parseInt(voiceRow?.count'));
-    expect(a).toContain("heldVisitSubquery(this, 'scheduled_services')");
-    expect(a.match(/await trx\(/g)).toHaveLength(1);
-    const b = booking.slice(booking.indexOf('const voiceCountQuery = db('), booking.indexOf('const voiceCounts = await voiceCountQuery;'));
-    expect(b).toContain("heldVisitSubquery(this, 'scheduled_services')");
-  });
+describe('street-level hold subquery', () => {
   test('the exclusion is the hold subquery correlated to the outer visit: unconfirmed and not cancelled / skipped / rescheduled', () => {
     const raws = [];
     const q = { select() { return q; }, from() { return q; }, where() { return q; }, whereRaw(s) { raws.push(s); return q; } };

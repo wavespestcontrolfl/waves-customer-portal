@@ -16,24 +16,19 @@ const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap
 const { ensureCatalogLoaded, expectedMinutesSync, expectedServiceMinutes } = require('./scheduling/expected-service-minutes');
 const { loadPackingAnchors, packedBounds } = require('./scheduling/packing-geometry');
 const { lunchBlockEnabled, pastCustomerLastStart } = require('./scheduling/customer-windows');
-const { selfBookDayCapEnabled } = require('../config/feature-gates');
 const { violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
 }
 
-// ---- global self-booking day cap (shared by EVERY writer) -----------------
+// ---- global self-booking day lock (shared by the phone-booking ladder) -----
 //
-// max_self_books_per_day is GLOBAL by calendar date, but the writers'
-// narrower locks (customer/tech/zone) don't serialize two confirms in
-// DIFFERENT zones — both could observe a cap-1 count and insert, exceeding
-// the cap. These two primitives centralize the fix: one date-scoped advisory
-// lock + one global count, required by BOTH self_booked_appointments writers
-// (routes/booking.js createSelfBooking and confirmBooking below) so neither
-// can bypass the other. Lock-ordering contract: every writer takes its
-// narrower locks FIRST (createSelfBooking: customer → tech → zone;
-// confirmBooking: zone) and this date lock LAST — same relative order
+// The per-day self-booking COUNT cap was retired 2026-09-23 in favor of the
+// self-serve notice window (scheduling/self-serve-notice.js). This date-scoped
+// advisory lock stays: rung 5 of the phone-booking lock ladder
+// (voice-agent/relay-booking.js) takes it. Lock-ordering contract: a writer
+// takes its narrower locks FIRST and this date lock LAST — same relative order
 // everywhere, so concurrent confirms can never deadlock.
 const SELF_BOOKING_DAY_CAP_LOCK_NS = 'self-booking-day-cap';
 
@@ -42,70 +37,6 @@ async function acquireSelfBookingDayCapLock(trx, dateStr) {
     'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     [SELF_BOOKING_DAY_CAP_LOCK_NS, String(dateStr)],
   );
-}
-
-// A self_booked_appointments row is the booking's ORIGINAL slot copy; the
-// linked scheduled_services row (self_booking_id) is the LIVE visit. The
-// public reschedule path syncs the copy when the visit moves, but admin
-// moves don't — a visit moved off its booked day left the copy holding a
-// phantom max_self_books_per_day slot on the old date and NO slot on the new
-// one (2026-08-14 field find: a re-service moved-and-completed days earlier
-// still counted against its original day). So the day a self-booking
-// occupies for the cap is its EFFECTIVE date: the linked live visit's
-// scheduled_date while that visit is active; nothing once every linked
-// visit went inactive (same released set the voice-row counter uses); the
-// copy's own date only when no live row was ever linked (legacy bookings,
-// pre-visit-creation). Both counters — the offer builder's fullDays sweep
-// (routes/booking.js) and the commit gate below — key on this one
-// expression so offer and commit stay in lockstep. Bindings = the inactive
-// statuses (SELF_BOOKING_INACTIVE_STATUSES), in order.
-const SELF_BOOKING_INACTIVE_STATUSES = ['cancelled', 'rescheduled', 'skipped'];
-const SELF_BOOKING_EFFECTIVE_DATE_SQL = `(CASE WHEN EXISTS (
-    SELECT 1 FROM scheduled_services AS linked_visit
-     WHERE linked_visit.self_booking_id = self_booked_appointments.id
-  ) THEN (
-    SELECT live_visit.scheduled_date FROM scheduled_services AS live_visit
-     WHERE live_visit.self_booking_id = self_booked_appointments.id
-       AND live_visit.status NOT IN (?, ?, ?)
-     ORDER BY live_visit.scheduled_date ASC
-     LIMIT 1
-  ) ELSE self_booked_appointments.date END)`;
-
-// Same non-cancelled predicate the availability builder counts full days
-// with. excludeSelfBookingId: a same-day reschedule replaces its own row —
-// counting the row being moved would reject the move on a full day even
-// though the final count is unchanged.
-async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingId = null } = {}) {
-  const row = await trx('self_booked_appointments')
-    .whereRaw(`${SELF_BOOKING_EFFECTIVE_DATE_SQL} = ?::date`, [...SELF_BOOKING_INACTIVE_STATUSES, String(dateStr)])
-    .whereNot('status', 'cancelled')
-    .modify((q) => {
-      if (excludeSelfBookingId) q.whereNot('id', excludeSelfBookingId);
-    })
-    .count('* as count')
-    .first();
-  // ⭐ THE VOICE AGENT IS A SELF-BOOKING PRODUCER TOO, AND IT WRITES NO ROW
-  // HERE. Its bookings land straight in `scheduled_services` (the outbound-
-  // review pending lifecycle), so a cap that counted only
-  // `self_booked_appointments` let each voice call re-read the same day as
-  // having room: the cap was checked and never consumed, and the availability
-  // builder kept offering a day that was already full. Counted on the OTHER
-  // table and scoped to the voice source_action, so a portal booking — which
-  // writes both rows — is still counted exactly once.
-  const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
-  const voiceRow = await trx('scheduled_services')
-    .where({ scheduled_date: String(dateStr), source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION })
-    // 'skipped' is a REJECTION — the office declining an AI request — and a
-    // rejected request must give its capacity back, exactly as a cancellation
-    // does. Same inactive set the activation helper and the dedupe use.
-    .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
-    // Owner ruling 2026-09-30: a street-level address hold (a call-booked visit
-    // still awaiting the office's address confirmation) is not a self-book and
-    // takes no daily-cap capacity until it is confirmed. One query still.
-    .whereNotExists(function () { require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services'); })
-    .count('* as count')
-    .first();
-  return parseInt(row?.count || 0, 10) + parseInt(voiceRow?.count || 0, 10);
 }
 
 class AvailabilityEngine {
@@ -272,20 +203,6 @@ class AvailabilityEngine {
 
       // If no tech blocks AND no existing services in zone, skip this day
       if (techBlocks.length === 0 && scheduledInZone.length === 0) continue;
-
-      // Day-cap filter: max_self_books_per_day is GLOBAL by calendar date
-      // (the shared helper confirmBooking enforces under the day-cap lock).
-      // Counting only this zone's bookings here let the engine keep OFFERING
-      // a day that another zone had already filled — every confirm on those
-      // offers then failed with SLOT_TAKEN. Same count, same predicate, so
-      // the builder never offers a day the confirm path would reject on cap.
-      // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): retired in favor
-      // of the self-serve notice window below — unset (default) skips the
-      // count entirely (no per-day cap anywhere).
-      if (selfBookDayCapEnabled()) {
-        const existingBookingsCount = await countActiveSelfBookingsForDay(db, dateStr);
-        if (existingBookingsCount >= (config.max_self_books_per_day || 3)) continue;
-      }
 
       // Build occupied slots from scheduled_services
       const occupied = scheduledInZone.map(s => ({
@@ -646,7 +563,6 @@ class AvailabilityEngine {
     const zone = await this.resolveZone(customer.city);
     const config = await db('booking_config').first();
     const slotDuration = config?.slot_duration_minutes || 60;
-    const maxPerDay = config?.max_self_books_per_day || 3;
 
     const endTime = this.addMinutes(startTime, slotDuration);
 
@@ -736,7 +652,7 @@ class AvailabilityEngine {
       // too — that branch validates against a zone-scoped occupied set, so it
       // is precisely the writer whose insert a global checker would miss. The
       // zone-null branch below additionally relies on it to guard its own
-      // findConflictingVisits call. Hoisted above the zone + day-cap locks so
+      // findConflictingVisits call. Hoisted above the zone lock so
       // every writer in the family acquires the shared rungs in one order.
       await acquireOccupancyLock(trx, dateStr);
       // slot-reserve namespace + zone-key shape match routes/booking.js
@@ -749,18 +665,6 @@ class AvailabilityEngine {
         ['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],
       );
 
-      // Global day cap — the shared lock + count every
-      // self_booked_appointments writer takes (see the helpers above). The
-      // zone lock only serializes same-zone writers; the cap is global by
-      // date, so a per-zone count here let cross-zone confirms (this engine
-      // vs the public /book confirm) exceed max_self_books_per_day. Lock
-      // order stays fixed — date → zone → day-cap, the same relative order
-      // as createSelfBooking's date → customer → tech → zone → day-cap — so
-      // concurrent confirms across both writers can never deadlock.
-      // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): retired in favor of
-      // the self-serve notice window — unset (default) skips the lock AND the
-      // count below, matching getAvailableSlots (offer/commit parity).
-      if (selfBookDayCapEnabled()) await acquireSelfBookingDayCapLock(trx, dateStr);
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the
       // scheduled_services insert below serializes against a concurrent
       // merge-undo of this customer — after the scheduling rungs, before
@@ -801,14 +705,6 @@ class AvailabilityEngine {
             || (freshAvailEstimate.customer_id && String(freshAvailEstimate.customer_id) !== String(customerId))) {
             throw bookingError('That quote was just updated — please refresh and book again.', 'CUSTOMER_CHANGED_RETRY');
           }
-        }
-      }
-      if (selfBookDayCapEnabled()) {
-        const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
-          excludeSelfBookingId: options.excludeSelfBookingId || null,
-        });
-        if (dayCount >= maxPerDay) {
-          throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
         }
       }
       // Self-serve notice window, re-read UNDER the scheduling locks (Codex
@@ -1074,9 +970,6 @@ class AvailabilityEngine {
 }
 
 module.exports = new AvailabilityEngine();
-// Shared global day-cap primitives — required by routes/booking.js's
-// createSelfBooking (lazily, so the route ↔ service load order can't cycle).
+// Day lock primitive — required (lazily, so the load order can't cycle) by
+// voice-agent/relay-booking.js, rung 5 of the phone-booking lock ladder.
 module.exports.acquireSelfBookingDayCapLock = acquireSelfBookingDayCapLock;
-module.exports.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;
-module.exports.SELF_BOOKING_EFFECTIVE_DATE_SQL = SELF_BOOKING_EFFECTIVE_DATE_SQL;
-module.exports.SELF_BOOKING_INACTIVE_STATUSES = SELF_BOOKING_INACTIVE_STATUSES;

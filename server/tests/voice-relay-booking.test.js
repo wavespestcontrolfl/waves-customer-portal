@@ -33,8 +33,6 @@ jest.mock('../services/scheduling/line-technician', () => {
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
   serviceLineMapMode: () => (process.env.GATE_SERVICE_LINE_MAP === 'shadow' ? 'shadow' : 'off'),
-  // Read at call time from the real env so the day-cap tests can flip it.
-  selfBookDayCapEnabled: () => jest.requireActual('../config/feature-gates').selfBookDayCapEnabled(),
 }));
 // ⭐ THE MOCK BELOW IS NOT EVIDENCE THE REAL MODULE EXPORTS ANY OF THIS. It
 // once hid exactly that: `resolveCallBookingPropertyLinkage` lived only under
@@ -67,7 +65,6 @@ jest.mock('../routes/booking', () => ({
     buildBookingAvailability: jest.fn(),
     // Commit-time gates the web path enforces and the voice path did not.
     validateBookingSlotDate: jest.fn(() => null),
-    bookingSlotWindow: jest.fn(() => ({ maxPerDay: 3 })),
     MAX_BOOKING_HORIZON_DAYS: 90,
   },
 }));
@@ -79,7 +76,6 @@ jest.mock('../services/scheduling/occupancy', () => ({
 }));
 jest.mock('../services/availability', () => ({
   acquireSelfBookingDayCapLock: jest.fn(() => Promise.resolve()),
-  countActiveSelfBookingsForDay: jest.fn(() => Promise.resolve(0)),
 }));
 jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/call-booking-catalog', () => ({
@@ -280,7 +276,6 @@ beforeEach(() => {
   });
   booking.buildBookingAvailability.mockResolvedValue(AVAILABILITY);
   booking.validateBookingSlotDate.mockReturnValue(null);
-  booking.bookingSlotWindow.mockReturnValue({ maxPerDay: 3 });
   catalog.loadBookableCallServices.mockResolvedValue([PEST_ROW, ASSESSMENT_ROW]);
   catalog.resolveCallBookingCatalogService.mockReturnValue(PEST_ROW);
   catalog.resolveCallBookingPrice.mockReturnValue({ price: 150, source: 'catalog' });
@@ -289,7 +284,6 @@ beforeEach(() => {
   // set by one test would otherwise leak into every later one.
   occupancy.findConflictingVisits.mockResolvedValue([]);
   occupancy.acquireOccupancyLock.mockResolvedValue(undefined);
-  availability.countActiveSelfBookingsForDay.mockResolvedValue(0);
   availability.acquireSelfBookingDayCapLock.mockResolvedValue(undefined);
   lockCustomerComms.mockResolvedValue(undefined);
   CTX = slotCtx();
@@ -1004,35 +998,6 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(out).toMatch(/NOTHING was booked/);
     expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
     assertNoComms();
-  });
-
-  test('max_self_books_per_day is re-checked at COMMIT, not just by the builder (GATE_SELF_BOOK_DAY_CAP=true)', async () => {
-    const prev = process.env.GATE_SELF_BOOK_DAY_CAP;
-    process.env.GATE_SELF_BOOK_DAY_CAP = 'true';
-    try {
-      availability.countActiveSelfBookingsForDay.mockResolvedValue(3);
-      const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
-      expect(out).toMatch(/just filled up/i);
-      expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
-    } finally {
-      if (prev === undefined) delete process.env.GATE_SELF_BOOK_DAY_CAP;
-      else process.env.GATE_SELF_BOOK_DAY_CAP = prev;
-    }
-  });
-
-  test('GATE_SELF_BOOK_DAY_CAP unset (owner ruling 2026-09-23): the cap is retired — a 3-booking day still commits, matching what the builder offers', async () => {
-    const prev = process.env.GATE_SELF_BOOK_DAY_CAP;
-    delete process.env.GATE_SELF_BOOK_DAY_CAP;
-    try {
-      availability.countActiveSelfBookingsForDay.mockResolvedValue(3);
-      const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
-      expect(out).not.toMatch(/just filled up/i);
-      expect(availability.countActiveSelfBookingsForDay).not.toHaveBeenCalled();
-      expect(trxBuilders.scheduled_services.insert).toHaveBeenCalled();
-    } finally {
-      if (prev === undefined) delete process.env.GATE_SELF_BOOK_DAY_CAP;
-      else process.env.GATE_SELF_BOOK_DAY_CAP = prev;
-    }
   });
 
   test('validateBookingSlotDate runs BEFORE the engine (advance_days_min floor, 90-day horizon)', async () => {

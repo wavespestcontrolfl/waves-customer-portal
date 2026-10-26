@@ -130,7 +130,6 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
             lawnPestControl: { type: 'object' },
             oneTimeMosquito: { type: 'object' },
             germanRoach: { type: 'object' },
-            germanRoachInitial: { type: 'object' },
             pestInitialRoach: { type: 'object' },
             flea: { type: 'object' },
             bedBug: { type: 'object' },
@@ -1122,8 +1121,6 @@ const APPROVED_REACT_SERVICE_TEMPLATES = Object.freeze({
   one_time_mosquito: 'one_time_mosquito',
   germanRoach: 'german_roach_cleanout',
   german_roach: 'german_roach_cleanout',
-  germanRoachInitial: 'german_roach_initial',
-  german_roach_initial: 'german_roach_initial',
   pestInitialRoach: 'cockroach_control',
   pest_initial_roach: 'cockroach_control',
   flea: 'flea_control',
@@ -1149,7 +1146,7 @@ const APPROVED_REACT_SERVICE_TEMPLATES = Object.freeze({
 
 const ONE_TIME_REACT_TEMPLATES = new Set([
   'one_time_pest', 'one_time_lawn', 'lawn_pest_knockdown', 'one_time_mosquito',
-  'german_roach_cleanout', 'german_roach_initial', 'cockroach_control',
+  'german_roach_cleanout', 'cockroach_control',
   'flea_control', 'bed_bug', 'stinging_insect', 'rodent', 'palm_injection',
   'termite_trenching', 'bora_care', 'pre_slab_termiticide',
 ]);
@@ -1311,30 +1308,16 @@ function duplicateCurrentServices(services = {}, activeServices = [], quoteAddre
 }
 
 // Transient input for generateEstimate only. The forbidden-input guard rejects
-// model-supplied recurring-customer flags, so the germanRoachInitial discount
-// flag is re-derived here from the server-loaded account (the engine's own
-// definition: prior qualifying services make a recurring customer). Never
-// merge this into the echoed/stored engineInputs — a persisted copy would be
-// rejected by the guard on the next revision round-trip.
+// model-supplied recurring-customer flags, so recurring status comes from the
+// server-loaded account (the engine's own definition: prior qualifying
+// services make a recurring customer). Never merge this into the
+// echoed/stored engineInputs — a persisted copy would be rejected by the
+// guard on the next revision round-trip.
 function buildAgentPricingInput(engineInput, accountPricing) {
   const priorQualifyingServices = accountPricing.priorQualifyingServices || [];
-  let pricingInput = priorQualifyingServices.length
+  return priorQualifyingServices.length
     ? { ...engineInput, priorQualifyingServices }
     : engineInput;
-  const roachInitial = pricingInput.services?.germanRoachInitial;
-  if (roachInitial) {
-    pricingInput = {
-      ...pricingInput,
-      services: {
-        ...pricingInput.services,
-        germanRoachInitial: {
-          ...(typeof roachInitial === 'object' ? roachInitial : {}),
-          isRecurringCustomer: priorQualifyingServices.length > 0,
-        },
-      },
-    };
-  }
-  return pricingInput;
 }
 
 // Every service key generateEstimate actually consumes. The engine silently
@@ -1345,11 +1328,16 @@ const AGENT_ALLOWED_SERVICE_KEYS = new Set([
   'pest', 'lawn', 'mosquito', 'treeShrub', 'termite', 'termiteBait', 'trenching',
   'boraCare', 'preSlabTermiticide', 'preSlabTermidor', 'rodentBait', 'oneTimePest',
   'oneTimeLawn', 'lawnPestControl', 'oneTimeMosquito', 'germanRoach',
-  'germanRoachInitial', 'pestInitialRoach', 'flea', 'bedBug', 'stinging',
+  'pestInitialRoach', 'flea', 'bedBug', 'stinging',
   'rodentTrapping', 'palm',
 ]);
 
 function unknownServiceKeysError(services = {}) {
+  // Retired (owner 2026-10-25): the legacy $100 three-visit German roach
+  // initial series. Name the live program so the model re-quotes.
+  if (Object.keys(services).includes('germanRoachInitial')) {
+    return 'germanRoachInitial is retired and cannot be quoted. Quote germanRoach (the German roach cleanout, priced by severity) instead.';
+  }
   const unknown = Object.keys(services).filter((key) => !AGENT_ALLOWED_SERVICE_KEYS.has(key));
   if (!unknown.length) return null;
   return `Unknown service key(s): ${unknown.join(', ')}. The pricing engine ignores unrecognized services, which would list a service the customer is never charged for. Use the documented service keys only (rodent control is rodentBait or rodentTrapping).`;
