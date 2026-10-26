@@ -32,6 +32,7 @@ import {
 } from './seriesMove';
 import { useBulkSlotConflicts } from './useSlotConflicts';
 import { openHoursForDay, formatOpenHour, hourToHHMM, useHourClock } from './openHours';
+import { useBoardOpenTimes, LitHours } from './BoardOpenTimes';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -617,7 +618,7 @@ function SlotDroppable({ techId, slotIdx, onCreateStart }) {
   );
 }
 
-function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine, openHours = [], routeStale = false }) {
+function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, onCreateSlot, onResize, selection, onToggleSelect, accent, showNowLine, openHours = [], routeStale = false, fits = null, best = null }) {
   const gridRef = useRef(null);
   const [sel, setSel] = useState(null); // { startIdx, endIdx }
   const selRef = useRef(sel);
@@ -703,6 +704,8 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             onCreateStart={onCreateSlot ? handleCreateStart : undefined}
           />
         ))}
+        {/* GATE_BOARD_OPEN_TIMES: while a visit is dragged, the hours that fit it on this route. */}
+        {fits && <LitHours fits={fits} best={best} minutesToTopPx={minutesToTopPx} hourHeight={(60 / SLOT_MIN) * SLOT_HEIGHT} />}
         {sel && (
           <div
             className="absolute left-0 right-0 bg-zinc-900/10 border border-zinc-900 rounded-sm pointer-events-none z-20"
@@ -1173,6 +1176,9 @@ export default function TimeGridDay({
   showOpenHours = true,
   // The server's enforced booking hours (day feed `bookingHours`), if any.
   bookingHours = null,
+  // GATE_BOARD_OPEN_TIMES (day feed `boardOpenTimes`): a drag lights the
+  // hours that fit the visit in every technician's column.
+  openTimesOnDrag,
 }) {
   const todayIso = toISODate(new Date());
   const hourClock = useHourClock();
@@ -1208,6 +1214,15 @@ export default function TimeGridDay({
   }, [allServices]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+
+  // The visit in flight, and the hours that fit it on every route this day.
+  const [dragging, setDragging] = useState(null);
+  const { fits: dragFits, best: bestFit } = useBoardOpenTimes({
+    enabled: openTimesOnDrag,
+    service: dragging,
+    durationOf: effectiveDuration,
+    dates: [date],
+  });
 
   const techList = useMemo(() => {
     const seen = new Set();
@@ -1250,6 +1265,7 @@ export default function TimeGridDay({
   );
 
   const onDragEnd = useCallback((event) => {
+    setDragging(null);
     const { active, over } = event;
     if (!over) return;
     const svc = active.data.current?.service;
@@ -1603,7 +1619,13 @@ export default function TimeGridDay({
           onClear={clearSelection}
         />
       )}
-      <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={pointerWithin}
+        onDragStart={(event) => setDragging(event.active?.data?.current?.service || null)}
+        onDragCancel={() => setDragging(null)}
+        onDragEnd={onDragEnd}
+      >
         <div className="flex" style={{ maxHeight: '70vh' }}>
           {!hideUnassignedRail && (
             <UnassignedRail
@@ -1647,10 +1669,13 @@ export default function TimeGridDay({
                     // would be refused).
                     // Only rostered (assignable) techs: a column kept for a
                     // deactivated tech's leftover visits takes no booking.
-                    openHours={onCreateSlot && showOpenHours && !tech.outToday && tech.rostered
+                    // While lit hours show, they replace the Open blocks.
+                    openHours={onCreateSlot && showOpenHours && !tech.outToday && tech.rostered && !dragFits
                       ? openHoursForDay(date, [...(byTech[tech.id] || []), ...unassignedInRail], { now: hourClock, bookingHours })
                       : []}
                     routeStale={Boolean(optimistic)}
+                    fits={dragFits && dragFits.filter((fit) => String(fit.techId) === String(tech.id))}
+                    best={bestFit}
                   />
                 ))}
               </div>

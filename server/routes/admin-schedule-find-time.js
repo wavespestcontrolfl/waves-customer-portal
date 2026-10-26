@@ -25,9 +25,10 @@
  *                             // (same order, '' when none), for the rain ranking
  *     serviceTypes?,          // compareTechs: every service in the booking; a tech that
  *                             // cannot perform one is left out of `pickedByTech`
- *     openTimes?,             // summary mode, GATE_OPEN_TIMES_BOX on: the open-times box's
- *                             // list instead (up to 28 days, every technician's hours, no
- *                             // picked verdict, no best-times rows); answers `summary.open_times`
+ *     openTimes?,             // summary mode, GATE_OPEN_TIMES_BOX or GATE_BOARD_OPEN_TIMES on: the open-times
+ *                             // list (the box; the Dispatch grid's lit hours) instead (up to 28 days,
+ *                             // every technician's hours, no picked verdict, no best-times rows);
+ *                             // answers `summary.open_times`
  *   }
  *
  * GET /api/admin/schedule/find-time/ui
@@ -332,8 +333,11 @@ router.post('/', async (req, res) => {
     // handler's catch reports like every other.
     const startedAt = Date.now();
     // The open-times box (owner 2026-10-25, layout A): only open times, over
-    // four weeks, on every technician's route. Off = the strip's summary.
-    const openTimes = hint && summary === true && req.body?.openTimes === true && gateEnvValue('GATE_OPEN_TIMES_BOX');
+    // four weeks, on every technician's route. The Dispatch grid's lit hours
+    // (GATE_BOARD_OPEN_TIMES) ask the same search for the board's own days.
+    // Off = the strip's summary.
+    const openTimes = hint && summary === true && req.body?.openTimes === true
+      && (gateEnvValue('GATE_OPEN_TIMES_BOX') || gateEnvValue('GATE_BOARD_OPEN_TIMES'));
     const plan = hintSearchPlan({
       hint, summary, openTimes,
       from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes,

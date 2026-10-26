@@ -3871,6 +3871,17 @@ const gates = {
   // strip as before. This entry is for logGateStatus only.
   openTimesBox: gateEnvValue('GATE_OPEN_TIMES_BOX'),
 
+  // Board open times (owner 2026-10-26, "start step 4"): while a visit is
+  // dragged on the Dispatch day or week grid, the hours that fit it light up
+  // with what each adds to the day's driving, amber over 30 min, the best one
+  // tagged. The open-times search for the board's own days (the day grid:
+  // every technician; the week grid: the visit's own technician). Display
+  // only: the drop saves as before. The admin schedule day view carries it to
+  // Dispatch as boardOpenTimes; the find-time route allows the open-times
+  // search under it too. Needs GATE_BEST_TIME_HINTS. Dark in every
+  // environment. Kill switch: unset, and a drag lights nothing.
+  boardOpenTimes: gateEnvValue('GATE_BOARD_OPEN_TIMES'),
+
   // New Appointment address-first best times (owner 2026-10-24, replacing the
   // 2026-10-21 Dispatch "Find a time" drawer): office staff on a call with a
   // NEW caller open New Appointment, pick the address in its New customer
