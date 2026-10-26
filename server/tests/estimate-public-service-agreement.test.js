@@ -84,6 +84,7 @@ const PEST_DATA = { result: { recurring: { services: [{ service: 'pest_control',
 const BUNDLE_DATA = { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', monthly: 50 }, { service: 'lawn_care', name: 'Lawn Care', monthly: 90 }] }, oneTime: { items: [] } } };
 const COMMERCIAL_DATA = { result: { recurring: { services: [{ service: 'commercial_pest', name: 'Commercial Pest Control', monthly: 150 }] }, oneTime: { items: [] } } };
 const ONE_TIME_DATA = { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'pest_cleanout', name: 'One-Time Cleanout', price: 250 }] } } };
+const MIXED_DATA = { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', monthly: 50 }] }, oneTime: { items: [{ service: 'pest_cleanout', name: 'One-Time Cleanout', price: 250 }] } } };
 let seq = 0;
 function makeEstimate(overrides = {}) {
   seq += 1;
@@ -183,6 +184,7 @@ describe('POST /:token/service-agreement', () => {
     ['no lane', makeEstimate(), {}],
     ['a commercial estimate', makeEstimate({ estimate_data: COMMERCIAL_DATA }), { lane: 'pest' }],
     ['a one-time-only estimate', makeEstimate({ estimate_data: ONE_TIME_DATA }), { lane: 'pest' }],
+    ['a mixed estimate accepted as one-time service', makeEstimate({ estimate_data: MIXED_DATA, accepted_service_mode: 'one_time' }), { lane: 'pest' }],
   ])('%s is the generic 404 and never reaches the service', async (_label, estimate, body) => {
     gateOn();
     const res = await post(estimate, body);
@@ -213,6 +215,13 @@ describe('POST /:token/service-agreement', () => {
     expect(await blockedFor(db, makeEstimate({ status: 'sent' }))).toBe(true);
     expect(await blockedFor(db, makeEstimate({ status: 'declined' }))).toBe(true);
     expect(await blockedFor(db, makeEstimate({ archived_at: '2026-10-01T00:00:00.000Z' }))).toBe(true);
+  });
+
+  test('a mixed estimate accepted as the recurring plan reaches the issuer', async () => {
+    gateOn();
+    const res = await post(makeEstimate({ estimate_data: MIXED_DATA, accepted_service_mode: 'recurring' }));
+    expect(res.status).toBe(201);
+    expect(mockEnsure).toHaveBeenCalledTimes(1);
   });
 
   test('the issuer\'s re-check also re-runs the call-side verdict and live linkage on the locked row', async () => {

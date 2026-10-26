@@ -82,8 +82,11 @@ function isCommercialEstimate(estimate, estData, rows) {
 }
 
 // The lanes an estimate's recurring plan covers, in LANE_ORDER. Empty for a one-time-only, termite-only or
-// commercial estimate. No writes.
+// commercial estimate, and for one ACCEPTED as one-time service: a mixed estimate keeps its quoted recurring rows
+// after a one-time accept, so the persisted accepted_service_mode decides (an accept that predates the column
+// counts as the plan, as termite-program-agreement.js and combined-booking-check.js read it). No writes.
 function estimateServiceAgreementLanes(estimate, estData = estimateRoute().parseEstimateDataSafe(estimate)) {
+  if (String(estimate?.accepted_service_mode || '').trim().toLowerCase() === 'one_time') return [];
   const rows = recurringRows(estimate, estData);
   if (!rows.length || isCommercialEstimate(estimate, estData, rows)) return [];
   const route = estimateRoute();

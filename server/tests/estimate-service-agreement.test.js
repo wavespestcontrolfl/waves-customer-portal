@@ -53,6 +53,8 @@ describe('estimateServiceAgreementLanes', () => {
     ['a pest + lawn bundle, pest first', estimate([LAWN, PEST, TREE]), ['pest', 'lawn']],
     ['an engine-invocation pest result', { estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest Control', annual: 480 }] } } }, ['pest']],
     ['estimate data stored as a JSON string', { estimate_data: JSON.stringify({ result: { recurring: { services: [LAWN] } } }) }, ['lawn']],
+    ['a mixed estimate accepted as the recurring plan', estimate([PEST], [{ service: 'pest_cleanout', name: 'One-Time Cleanout', price: 250 }], { accepted_service_mode: 'recurring' }), ['pest']],
+    ['an accept that predates accepted_service_mode', estimate([PEST], [], { accepted_service_mode: null }), ['pest']],
   ])('%s', (_label, row, lanes) => {
     expect(estimateServiceAgreementLanes(row)).toEqual(lanes);
   });
@@ -64,6 +66,7 @@ describe('estimateServiceAgreementLanes', () => {
     ['an auto-priced commercial estimate', estimate([{ service: 'commercial_pest', name: 'Commercial Pest Control' }])],
     ['a commercial lawn line beside a residential one', estimate([LAWN, { service: 'commercial_lawn', name: 'Commercial Turf' }])],
     ['an estimate with no data', { estimate_data: {} }],
+    ['a mixed estimate accepted as one-time service (its quoted plan was not bought)', estimate([PEST, LAWN], [{ service: 'pest_cleanout', name: 'One-Time Cleanout', price: 250 }], { accepted_service_mode: 'one_time' })],
   ])('%s gets no agreement', (_label, row) => {
     expect(estimateServiceAgreementLanes(row)).toEqual([]);
   });
@@ -155,6 +158,8 @@ describe('laneState and serviceAgreementCtaFor', () => {
   test('nothing on the payload for an estimate without a lane', async () => {
     const { database } = makeDb();
     expect(await serviceAgreementCtaFor(estimate([{ service: 'termite_bait', name: 'Termite Bait Stations' }]), database)).toBeNull();
+    // A mixed estimate accepted as one-time service: its quoted plan was never bought, so nothing is offered.
+    expect(await serviceAgreementCtaFor(estimate([PEST], [{ service: 'pest_cleanout', name: 'One-Time Cleanout', price: 250 }], { accepted_service_mode: 'one_time' }), database)).toBeNull();
   });
 
   test('one entry per lane with its state; signed wins over awaiting and cannot be signed again', async () => {
