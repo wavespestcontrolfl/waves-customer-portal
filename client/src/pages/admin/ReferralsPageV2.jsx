@@ -303,8 +303,8 @@ function inboundConfirmedMessage(result) {
   if (result.error === "credit_failed")
     return "Referral confirmed, but the $25 credits did not post. They post at the next plan visit.";
   if (result.credited) return "Referral confirmed. $25 credited to both accounts.";
-  if (!result.firstVisitDone)
-    return "Referral confirmed. The $25 credits post after the first plan visit.";
+  if (!result.creditsNow)
+    return "Referral confirmed. The $25 credits post at the next completed plan visit.";
   return "Referral confirmed. The credit step posted nothing; check the referral in the queue below.";
 }
 
@@ -420,9 +420,9 @@ function InboundReferralCard({ item, onDone, flash }) {
         <span style={{ color: D.muted, fontWeight: 400 }}>
           {item.city ? ` · ${item.city}` : ""}
           {` · ${item.plan.tier} ${fd(item.plan.monthlyRate)}/mo · `}
-          {item.firstVisitDone
-            ? "first plan visit done"
-            : "first plan visit not done yet"}
+          {item.creditsNow
+            ? "plan visit done"
+            : "no completed plan visit yet"}
         </span>
       </div>
       <div style={{ fontSize: 14, color: D.text }}>
@@ -446,9 +446,9 @@ function InboundReferralCard({ item, onDone, flash }) {
         >
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
-            {item.firstVisitDone
+            {item.creditsNow
               ? "Both accounts get the $25 credit now. No text or email goes out."
-              : `Both accounts get the $25 credit after ${firstName}'s first plan visit. The referrer gets the usual reward text then.`}
+              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer gets the usual reward text then.`}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={confirm} disabled={busy} style={btnPrimary}>
@@ -494,7 +494,7 @@ function InboundReferralCard({ item, onDone, flash }) {
           {results.map((c) =>
             pickRow({
               customerId: c.id,
-              name: `${c.first_name || ""} ${c.last_name || ""}`.trim(),
+              name: `${c.firstName || ""} ${c.lastName || ""}`.trim(),
               city: c.city,
               phone: c.phone,
             }),

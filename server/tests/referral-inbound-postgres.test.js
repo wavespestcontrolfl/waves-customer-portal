@@ -60,10 +60,14 @@ jest.mock('../services/customer-credit', () => ({
     ...fields,
   });
 
-  async function recurringVisit(customerId, status = 'completed', date = '2026-10-15') {
+  // A recurring visit; a completed one gets its closeout record (`notes` = structured_notes).
+  async function recurringVisit(customerId, status = 'completed', date = '2026-10-15', notes = {}) {
     const [row] = await db('scheduled_services').insert({
       customer_id: customerId, status, is_recurring: true, scheduled_date: date,
     }).returning('*');
+    if (status === 'completed') {
+      await db('service_records').insert({ scheduled_service_id: row.id, customer_id: customerId, status: 'completed', structured_notes: notes });
+    }
     return row;
   }
 
@@ -162,6 +166,14 @@ jest.mock('../services/customer-credit', () => ({
       t.string('recurring_pattern', 30);
       t.date('scheduled_date');
     });
+    await db.schema.withSchema(mockSchema).createTable('service_records', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('scheduled_service_id');
+      t.uuid('customer_id');
+      t.string('status');
+      t.jsonb('structured_notes');
+      t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
+    });
     await require('../models/migrations/20261026150000_referral_inbound_reviews').up(db);
 
     inbound = require('../services/referral-inbound');
@@ -180,6 +192,7 @@ jest.mock('../services/customer-credit', () => ({
     jest.clearAllMocks();
     await db('referral_inbound_reviews').del();
     await db('referrals').del();
+    await db('service_records').del();
     await db('scheduled_services').del();
     await db('referral_promoters').del();
     await db('customers').del();
@@ -218,12 +231,12 @@ jest.mock('../services/customer-credit', () => ({
     expect(byId[typedIn.id]).toBeUndefined();
 
     expect(byId[linked.id]).toMatchObject({
-      firstVisitDone: true,
+      creditsNow: true,
       selfReferral: false,
       evidence: { source: 'link', code: 'WAVES-JANE', spokenName: null },
       suggestions: [{ customerId: referrer.id, name: 'Jane Smith', city: 'Parrish', viaCode: true }],
     });
-    expect(byId[named.id].firstVisitDone).toBe(false);
+    expect(byId[named.id].creditsNow).toBe(false);
     expect(byId[named.id].evidence).toEqual({ source: 'call', code: null, spokenName: 'Jane Smith' });
     expect(byId[named.id].suggestions[0]).toMatchObject({ customerId: referrer.id, exact: true, viaCode: false });
     expect(byId[unnamed.id].evidence).toEqual({ source: 'call', code: null, spokenName: null });
@@ -264,7 +277,7 @@ jest.mock('../services/customer-credit', () => ({
     const reviewer = randomUUID();
 
     const result = await inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id, reviewedBy: reviewer });
-    expect(result).toMatchObject({ converted: true, firstVisitDone: true, credited: { referrerDollars: 25, refereeDollars: 25 }, error: null });
+    expect(result).toMatchObject({ converted: true, creditsNow: true, credited: { referrerDollars: 25, refereeDollars: 25 }, error: null });
 
     const referral = await db('referrals').where({ id: result.referralId }).first();
     expect(referral).toMatchObject({
@@ -302,7 +315,7 @@ jest.mock('../services/customer-credit', () => ({
     await db('scheduled_services').insert({ customer_id: caller.id, status: 'completed', is_recurring: false, scheduled_date: '2026-10-01' });
 
     const result = await inbound.confirmInboundReferral({ customerId: caller.id, referrerCustomerId: referrer.id });
-    expect(result).toMatchObject({ converted: true, firstVisitDone: false, credited: null, error: null });
+    expect(result).toMatchObject({ converted: true, creditsNow: false, credited: null, error: null });
     expect(await db('referrals').where({ id: result.referralId }).first()).toMatchObject({
       source: 'inbound_call',
       status: 'signed_up',
@@ -313,6 +326,33 @@ jest.mock('../services/customer-credit', () => ({
     // The referrer had no promoter row; confirm enrolled one.
     expect(await db('referral_promoters').where({ customer_id: referrer.id }).first())
       .toMatchObject({ total_referrals_sent: 1, total_referrals_converted: 1, pending_earnings_cents: 2500 });
+  });
+
+  test.each([
+    ['inspection only', { visitOutcome: 'inspection_only' }],
+    ['customer declined', { visitOutcome: 'customer_declined' }],
+    ['incomplete', { visitOutcome: 'incomplete' }],
+    ['a quiet backfill', { backfill: true }],
+  ])('a visit closed as %s does not pay at confirm; the next performed visit will', async (_label, notes) => {
+    const referrer = await customer({ referral_code: 'WAVES-JANE' });
+    const friend = await linkCustomer('WAVES-JANE');
+    await recurringVisit(friend.id, 'completed', '2026-10-15', notes);
+    const [item] = await inbound.listInboundReferrals();
+    expect(item).toMatchObject({ customerId: friend.id, creditsNow: false });
+    const result = await inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id });
+    expect(result).toMatchObject({ converted: true, creditsNow: false, credited: null });
+    expect(postCreditMovement).not.toHaveBeenCalled();
+    expect(await db('referrals').where({ id: result.referralId }).first())
+      .toMatchObject({ status: 'signed_up', referrer_reward_status: 'pending_service', first_service_completed: false });
+  });
+
+  test('an issued-invoice closeout pays even though it was closed quietly', async () => {
+    const referrer = await customer({ referral_code: 'WAVES-JANE' });
+    const friend = await linkCustomer('WAVES-JANE');
+    await recurringVisit(friend.id, 'completed', '2026-10-15', { backfill: true, issuedInvoiceCloseout: { invoiceId: randomUUID(), trigger: 'paid' } });
+    const result = await inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id });
+    expect(result).toMatchObject({ creditsNow: true, credited: { referrerDollars: 25, refereeDollars: 25 } });
+    expect(postCreditMovement).toHaveBeenCalledTimes(2);
   });
 
   test('one answer per customer: a second confirm or a later dismissal is refused', async () => {

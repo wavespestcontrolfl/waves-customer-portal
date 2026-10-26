@@ -7,6 +7,7 @@ import ReferralsPageV2 from "./ReferralsPageV2";
 
 const FRIEND = "00000000-0000-4000-8000-000000000021";
 const REFERRER = "00000000-0000-4000-8000-000000000022";
+const OTHER = "00000000-0000-4000-8000-000000000023";
 const item = {
   customerId: FRIEND,
   name: "Fixture Friend",
@@ -14,7 +15,7 @@ const item = {
   city: "Parrish",
   createdAt: "2026-10-09T12:00:00Z",
   plan: { tier: "Silver", monthlyRate: 119.1 },
-  firstVisitDone: true,
+  creditsNow: true,
   evidence: { source: "link", code: "WAVES-FIXT", spokenName: null },
   selfReferral: false,
   suggestions: [
@@ -27,7 +28,7 @@ let inboundBody;
 let confirmResponse;
 beforeEach(() => {
   inboundBody = { enabled: true, items: [item] };
-  confirmResponse = () => response({ success: true, converted: true, firstVisitDone: true, credited: { referrerDollars: 25, refereeDollars: 25 }, error: null });
+  confirmResponse = () => response({ success: true, converted: true, creditsNow: true, credited: { referrerDollars: 25, refereeDollars: 25 }, error: null });
   localStorage.setItem("waves_admin_token", "fixture-token");
   vi.stubGlobal("fetch", vi.fn(async (url) => {
     if (url === "/api/admin/referrals/stats") return response({}, 500);
@@ -36,6 +37,10 @@ beforeEach(() => {
     if (url === "/api/admin/referrals/payouts") return response({ payouts: [] });
     if (url === "/api/admin/referrals/inbound") return response(inboundBody);
     if (url === `/api/admin/referrals/inbound/${FRIEND}/confirm`) return confirmResponse();
+    // The customer list API answers camelCase names (mapCustomerListRow).
+    if (url.startsWith("/api/admin/customers?search=")) {
+      return response({ customers: [{ id: OTHER, firstName: "Searched", lastName: "Neighbor", phone: "+19415550123", city: "Venice" }] });
+    }
     throw new Error(`Unexpected fixture request: ${url}`);
   }));
 });
@@ -52,7 +57,7 @@ describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", (
     await openQueue(/Queue \(1\)/);
     expect(screen.getByText("Needs confirmation (1)")).toBeInTheDocument();
     expect(screen.getByText("Came in through referral link WAVES-FIXT")).toBeInTheDocument();
-    expect(screen.getByText(/first plan visit done/)).toBeInTheDocument();
+    expect(screen.getByText(/plan visit done/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Choose" }));
     expect(confirms()).toHaveLength(0);
@@ -66,11 +71,24 @@ describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", (
     expect(confirms()[0][1].headers.Authorization).toBe("Bearer fixture-token");
   });
 
-  it("before the first plan visit, says the credits wait for that visit", async () => {
-    inboundBody = { enabled: true, items: [{ ...item, firstVisitDone: false }] };
+  it("with no completed plan visit, says the credits wait for the next one", async () => {
+    inboundBody = { enabled: true, items: [{ ...item, creditsNow: false }] };
     await openQueue(/Queue \(1\)/);
+    expect(screen.getByText(/no completed plan visit yet/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Choose" }));
-    expect(screen.getByText(/Both accounts get the \$25 credit after Fixture's first plan visit\./)).toBeInTheDocument();
+    expect(screen.getByText(/Both accounts get the \$25 credit at Fixture's next completed plan visit\./)).toBeInTheDocument();
+  });
+
+  it("a referrer found by search is named in the confirm line and posted by id", async () => {
+    await openQueue(/Queue \(1\)/);
+    fireEvent.change(screen.getByPlaceholderText("Find the referrer by name or phone"), { target: { value: "Neigh" } });
+    expect(await screen.findByText("Searched Neighbor")).toBeInTheDocument();
+    const chooseButtons = screen.getAllByRole("button", { name: "Choose" });
+    fireEvent.click(chooseButtons[chooseButtons.length - 1]);
+    expect(screen.getByText(/Confirm Searched Neighbor as the referrer\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await screen.findByText("Referral confirmed. $25 credited to both accounts.");
+    expect(JSON.parse(confirms()[0][1].body)).toEqual({ referrerCustomerId: OTHER });
   });
 
   it("shows the server's reason when a confirm is refused", async () => {

@@ -19,10 +19,10 @@
  *    first recurring service). That step keeps its own messages: the
  *    milestone text at 3, 5 and 10 conversions, and the reward text and email
  *    only when require_service_completion is off (it is on);
- *  - when a recurring visit is already complete, the existing first-service
- *    credit runs at once with notify:false, so both $25 credits post with no
- *    text or email; otherwise the completion flow credits at that first
- *    visit, as today.
+ *  - when a performed recurring visit is already on record, the existing
+ *    first-service credit runs at once with notify:false, so both $25 credits
+ *    post with no text or email; otherwise the completion flow credits at the
+ *    next performed recurring visit, as today.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -32,6 +32,9 @@ const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { isPromoterPhoneCollision } = require('./referral-errors');
 const { toE164, isLikelyE164, phoneMatchDigits } = require('../utils/phone');
 
+// A completed visit whose closeout performed no service (complete-scheduled-service.js
+// referralVisitPerformed; the same list paf-prepay-release.js reads back).
+const NOT_PERFORMED_OUTCOMES = ['inspection_only', 'customer_declined', 'incomplete'];
 const LIST_LIMIT = 50;
 const SUGGESTION_LIMIT = 5;
 // Same shape the /r/:code route accepts (routes/referral-links.js CODE_RE).
@@ -157,6 +160,28 @@ async function customersForSpokenName(spokenName, referee, conn = db) {
     .map((m) => ({ match: m, exact: words.length >= 2 && String(m.first_name || '').toLowerCase() === first }));
 }
 
+// Recurring visits that earn the reward, read from the visit's current closeout record: completed
+// and performed, and not a quiet backfill, except an issued-invoice closeout (its invoice proves
+// the service). The completion flow's own rule before it calls creditReferralOnFirstService, which
+// checks only that the visit recurs.
+function performedRecurringVisits(conn) {
+  return conn('scheduled_services as ss')
+    .where('ss.status', 'completed')
+    .where(function recurring() { this.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_pattern'); })
+    .whereRaw(`EXISTS (
+      SELECT 1 FROM service_records r
+      WHERE r.id = (
+        SELECT r2.id FROM service_records r2
+        WHERE r2.scheduled_service_id = ss.id
+        ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1
+      )
+        AND r.status = 'completed'
+        AND COALESCE(r.structured_notes ->> 'visitOutcome', '') <> ALL(?::text[])
+        AND (COALESCE(r.structured_notes ->> 'backfill', '') <> 'true'
+          OR (r.structured_notes -> 'issuedInvoiceCloseout') IS NOT NULL)
+    )`, [NOT_PERFORMED_OUTCOMES]);
+}
+
 function suggestionView(c, extra = {}) {
   return {
     customerId: c.id,
@@ -208,11 +233,9 @@ async function listInboundReferrals(conn = db) {
     .slice(0, LIST_LIMIT);
   if (!open.length) return [];
 
-  const served = new Set((await conn('scheduled_services')
-    .whereIn('customer_id', open.map((x) => x.customer.id))
-    .where('status', 'completed')
-    .where(function recurring() { this.where('is_recurring', true).orWhereNotNull('recurring_pattern'); })
-    .distinct('customer_id'))
+  const served = new Set((await performedRecurringVisits(conn)
+    .whereIn('ss.customer_id', open.map((x) => x.customer.id))
+    .distinct('ss.customer_id'))
     .map((r) => r.customer_id));
 
   const items = [];
@@ -234,7 +257,7 @@ async function listInboundReferrals(conn = db) {
       city: customer.city || null,
       createdAt: customer.created_at,
       plan: { tier: customer.waveguard_tier, monthlyRate: Number(customer.monthly_rate) },
-      firstVisitDone: served.has(customer.id),
+      creditsNow: served.has(customer.id),
       evidence,
       selfReferral,
       suggestions,
@@ -246,7 +269,7 @@ async function listInboundReferrals(conn = db) {
 /**
  * The office confirms `referrerCustomerId` as the person who referred
  * `customerId`. Makes the referral row, converts it, and posts both credits
- * now (quietly) when a recurring visit is already complete.
+ * now (quietly) when a performed recurring visit is on record.
  */
 async function confirmInboundReferral({ customerId, referrerCustomerId, reviewedBy = null }) {
   const referee = await db('customers').where({ id: customerId }).whereNull('deleted_at').first(CUSTOMER_COLUMNS);
@@ -315,7 +338,7 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
   // Post-commit, the existing steps. Each is idempotent and re-checks its own
   // guards under a row lock, so a failure here leaves a pending referral the
   // queue's Convert button can finish.
-  const result = { referralId: referral.id, converted: false, firstVisitDone: false, credited: null, error: null };
+  const result = { referralId: referral.id, converted: false, creditsNow: false, credited: null, error: null };
   try {
     const conversion = await engine.convertReferral(referral.id, {
       customerId: referee.id,
@@ -329,13 +352,12 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
     return result;
   }
 
-  const firstVisit = await db('scheduled_services')
-    .where({ customer_id: referee.id, status: 'completed' })
-    .where(function recurring() { this.where('is_recurring', true).orWhereNotNull('recurring_pattern'); })
-    .orderBy('scheduled_date', 'asc')
-    .orderBy('id', 'asc')
-    .first('id');
-  result.firstVisitDone = Boolean(firstVisit);
+  const firstVisit = await performedRecurringVisits(db)
+    .where('ss.customer_id', referee.id)
+    .orderBy('ss.scheduled_date', 'asc')
+    .orderBy('ss.id', 'asc')
+    .first('ss.id');
+  result.creditsNow = Boolean(firstVisit);
   if (firstVisit && settings.require_service_completion) {
     try {
       const credit = await engine.creditReferralOnFirstService({ customerId: referee.id, serviceId: firstVisit.id, notify: false });
