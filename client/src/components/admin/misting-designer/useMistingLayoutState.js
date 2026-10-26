@@ -46,14 +46,16 @@ function moveIn(edits, n, to) {
   return { ...edits, added: [...edits.added.filter((a) => a.key !== n.key), { ...current, ...to }] };
 }
 
-export default function useMistingLayoutState(mapState) {
-  const [lines, setLines] = useState([]);
+// `initial` is a reopened saved layout (lib/mistingLayoutPersist restoreLayout): its lines, the edit overlay
+// that reproduces the saved nozzles, the risers, pump and zones, and the id counters to continue from.
+export default function useMistingLayoutState(mapState, initial = null) {
+  const [lines, setLines] = useState(initial ? initial.lines : []);
   const [draft, setDraft] = useState(null); // { id, kind, points }
   const [mode, setMode] = useState('eave');
-  const [edits, setEdits] = useState(NO_EDITS);
+  const [edits, setEdits] = useState(initial ? initial.edits : NO_EDITS);
   const [addMiss, setAddMiss] = useState(false); // last Add nozzle tap was off every line
   const [notice, setNotice] = useState(null); // { count, snapshot: { lines, draft, edits } }
-  const idRef = useRef(0);
+  const idRef = useRef(initial ? initial.idCounter : 0);
   const nextId = (prefix) => {
     idRef.current += 1;
     return `${prefix}${idRef.current}`;
@@ -68,7 +70,7 @@ export default function useMistingLayoutState(mapState) {
   );
   const nozzles = useMemo(() => (placed ? applyNozzleEdits(placed.nozzles, edits) : []), [placed, edits]);
   const totals = useMemo(() => computeTotals(placed ? placed.lines : [], nozzles), [placed, nozzles]);
-  const extras = useMistingLayoutExtras(mapState, nozzles);
+  const extras = useMistingLayoutExtras(mapState, nozzles, initial ? initial.extras : null);
 
   // ── Changes to the lines ───────────────────────────────────────────────────
   // The one door for them. A change that alters the geometry re-places the nozzles, so it clears

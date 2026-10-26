@@ -9,7 +9,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(), autoDispatchCatchUpLive: jest.fn(() => false) }));
+jest.mock('../services/auto-dispatch/catch-up', () => ({ runCatchUp: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({ flagUnplacedVisits: jest.fn(), maintainMissingGeoNotices: jest.fn() }));
@@ -24,7 +25,8 @@ jest.mock('../services/auto-dispatch/proofreader/nightly', () => ({ closeNotices
 jest.mock('../services/auto-dispatch/check-down-notice', () => ({ noteRun: jest.fn(async () => ({ action: 'none' })) }));
 
 const cron = require('../utils/scheduled-cron');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, autoDispatchCatchUpLive } = require('../config/feature-gates');
+const { runCatchUp } = require('../services/auto-dispatch/catch-up');
 const { runExclusive } = require('../utils/cron-lock');
 const { runAutoDispatch } = require('../services/auto-dispatch');
 const { flagUnplacedVisits, maintainMissingGeoNotices } = require('../services/auto-dispatch/audit');
@@ -110,4 +112,79 @@ test('a gate-off pin-notice upkeep failure reaches the job failure path after th
   await tick();
   expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
   expect(logger.error).toHaveBeenCalledWith('Auto-Dispatch run failed: pin read failed');
+});
+
+// 5:00 AM catch-up (GATE_AUTO_DISPATCH_CATCH_UP, owner 2026-10-26).
+function catchUpTick() {
+  initScheduledJobs();
+  // Other jobs also run at 0 5 * * *; the catch-up is the one that reads its gate.
+  const registrations = cron.schedule.mock.calls.filter(([expression, fn]) => expression === '0 5 * * *' && String(fn).includes('autoDispatchCatchUpLive'));
+  expect(registrations).toHaveLength(1);
+  expect(registrations[0][2]).toEqual({ timezone: 'America/New_York' });
+  // Registration reads the database for boundary upkeep; only the tick's own reads matter below.
+  require('../models/db').mockClear();
+  return registrations[0][1]();
+}
+
+describe('5 AM auto-dispatch catch-up', () => {
+  beforeEach(() => {
+    isEnabled.mockImplementation((name) => ['cronJobs', 'autoDispatch'].includes(name));
+    autoDispatchCatchUpLive.mockReturnValue(true);
+    runCatchUp.mockResolvedValue({ ran: true, reason: 'no night run started on 2026-10-26', settled: 0, result: { runId: 'run-9', status: 'completed', evaluated: 3, recommended: 1, changed: 1, skipped: 1, failed: 0 } });
+  });
+
+  test('gate off: returns at once, no lock, no read, no run', async () => {
+    autoDispatchCatchUpLive.mockReturnValue(false);
+    await catchUpTick();
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(runCatchUp).not.toHaveBeenCalled();
+    expect(runAutoDispatch).not.toHaveBeenCalled();
+    // (Registration-time upkeep may still touch other tables; the catch-up itself reads auto_dispatch_runs.)
+    expect(require('../models/db').mock.calls.map(([table]) => table)).not.toContain('auto_dispatch_runs');
+  });
+
+  test('cron jobs or auto-dispatch off: returns at once', async () => {
+    isEnabled.mockImplementation((name) => name === 'cronJobs');
+    await catchUpTick();
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(runCatchUp).not.toHaveBeenCalled();
+  });
+
+  test('cron jobs off: the catch-up is not registered', () => {
+    isEnabled.mockImplementation(() => false);
+    initScheduledJobs();
+    expect(cron.schedule.mock.calls.filter(([, fn]) => String(fn).includes('autoDispatchCatchUpLive'))).toHaveLength(0);
+  });
+
+  test('gate on: borrows the 4:10 writer lock inside its own job and runs the catch-up', async () => {
+    await catchUpTick();
+    expect(runExclusive).toHaveBeenCalledWith('auto-dispatch-catch-up', expect.any(Function));
+    expect(runExclusive).toHaveBeenCalledWith('auto-dispatch-recurring', expect.any(Function), { recordHealth: false });
+    expect(runCatchUp).toHaveBeenCalledWith({ nowDate: expect.any(Date) });
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('catch-up running now'));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('catch-up run run-9 completed: evaluated=3 recommended=1 changed=1 skipped=1 failed=0'));
+  });
+
+  test('not needed: logs the reason and does not fail job health', async () => {
+    runCatchUp.mockResolvedValue({ ran: false, reason: 'the night run on 2026-10-26 already finished (completed)', settled: 0 });
+    await catchUpTick();
+    expect(logger.info).toHaveBeenCalledWith('[auto-dispatch] catch-up not needed: the night run on 2026-10-26 already finished (completed)');
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  test('writer lock held elsewhere: warns and fails job health', async () => {
+    runExclusive.mockImplementation(async (key, task, opts) => (key === 'auto-dispatch-recurring' ? { skipped: true, reason: 'lease_held' } : task()));
+    await catchUpTick();
+    expect(runCatchUp).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('catch-up skipped (lease_held)'));
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('auto-dispatch catch-up skipped (lease_held)'));
+    runExclusive.mockImplementation(async (_key, task) => task());
+  });
+
+  test('a run that is not completed fails job health', async () => {
+    runCatchUp.mockResolvedValue({ ran: true, reason: 'x', settled: 1, result: { runId: 'run-10', status: 'completed_with_errors', failed: 2 } });
+    await catchUpTick();
+    expect(logger.error).toHaveBeenCalledWith('Auto-Dispatch catch-up failed: auto-dispatch catch-up run run-10 unhealthy: status=completed_with_errors failed=2');
+  });
 });

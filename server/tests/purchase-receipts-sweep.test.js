@@ -44,6 +44,7 @@ jest.mock('../services/purchase-receipts/siteone-invoices', () => ({
 // its place in the sweep.
 jest.mock('../services/purchase-receipts/undelivered-shipments', () => ({
   alertUndeliveredShipments: jest.fn(async () => ({ undelivered: [], errors: [] })),
+  closeDeliveredUndeliveredBells: jest.fn(async () => 0),
 }));
 jest.mock('../models/db', () => {
   // Only runPurchaseReceiptRestockSweep's own emails query touches db in

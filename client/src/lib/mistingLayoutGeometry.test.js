@@ -249,6 +249,124 @@ describe('placement invariants (seeded random lines)', () => {
   });
 });
 
+// Arc length (ft) of a nozzle along its own line: walked length to the start of its segment plus the
+// distance from that vertex. Valid for any nozzle that sits on the line itself.
+function arcFt(linePoints, nozzle) {
+  let walked = 0;
+  for (let i = 0; i < nozzle.segmentIndex; i += 1) walked += ftBetween(linePoints[i], linePoints[i + 1]);
+  return walked + ftBetween(linePoints[nozzle.segmentIndex], nozzle);
+}
+
+describe('corner clusters (short jogs get one nozzle)', () => {
+  // A roofline stepping 4 ft out and 4 ft over, as at a garage or an entry.
+  const stepped = [[0, 0], [30, 0], [30, 4], [34, 4], [34, 8], [38, 8], [38, 12], [70, 12]];
+
+  it('drops corners within half the spacing along the line of the previous kept nozzle', () => {
+    const ln = line('eave', stepped, 'st');
+    const r = placeNozzles([ln], opts);
+    assertInvariants([ln], r);
+    const arcs = r.lines[0].keys.map((k) => arcFt(ln.points, r.nozzles.find((n) => n.key === k)));
+    for (let i = 1; i < arcs.length; i += 1) {
+      expect(arcs[i] - arcs[i - 1]).toBeGreaterThanOrEqual(NOMINAL_SPACING_FT / 2 - 1e-6);
+      expect(arcs[i] - arcs[i - 1]).toBeLessThanOrEqual(NOMINAL_SPACING_FT + 1e-6);
+    }
+    // a nozzle on every corner (cornerMergeFt: 0) would put one on all 8; the 4 ft steps now share
+    const corners = r.nozzles.filter((n) => n.corner);
+    expect(corners.length).toBeLessThan(placeNozzles([ln], { ...opts, cornerMergeFt: 0 }).nozzles.filter((n) => n.corner).length);
+    expect(corners[0].vertexIndex).toBe(0);
+    expect(corners[corners.length - 1].vertexIndex).toBe(stepped.length - 1);
+    // the nozzle count stays the length-driven one: nothing is lost from the line
+    expect(r.totals.linearFt).toBeCloseTo(30 + 4 * 5 + 32, 1);
+  });
+
+  it('keeps the first and last point of an open line even when they sit 4 ft from a jog', () => {
+    const ln = line('eave', [[0, 0], [3, 0], [3, 3], [20, 3], [24, 3], [24, 6]], 'e');
+    const r = placeNozzles([ln], opts);
+    assertInvariants([ln], r);
+    expect(r.nozzles.find((n) => n.vertexIndex === 0)).toBeTruthy();
+    expect(r.nozzles.find((n) => n.vertexIndex === 5)).toBeTruthy();
+    // the corner 4 ft before the end is dropped, not kept beside the end nozzle
+    expect(r.nozzles.find((n) => n.vertexIndex === 4)).toBeUndefined();
+  });
+
+  it('puts one nozzle where a closed loop has a 4 ft jog', () => {
+    const loop = [[0, 0], [30, 0], [30, 4], [34, 4], [34, 0], [60, 0], [60, 40], [0, 40], [0, 0]];
+    const ln = line('eave', loop, 'lp');
+    const r = placeNozzles([ln], opts);
+    assertInvariants([ln], r);
+    expect(r.lines[0].closed).toBe(true);
+    // the notch (30..34, 0..4) has four corners; they now share two nozzles 8 ft apart along the line
+    const inNotch = (res) => res.nozzles.filter((n) => {
+      const x = (n.x - 100) / FT;
+      const y = (n.y - 100) / FT;
+      return x >= 29 && x <= 35 && y >= -1 && y <= 5;
+    });
+    expect(inNotch(placeNozzles([ln], { ...opts, cornerMergeFt: 0 }))).toHaveLength(4);
+    const kept = inNotch(r);
+    expect(kept).toHaveLength(2);
+    expect(arcFt(ln.points, kept[1]) - arcFt(ln.points, kept[0])).toBeGreaterThanOrEqual(NOMINAL_SPACING_FT / 2 - 1e-6);
+    expect(r.nozzles.find((n) => n.vertexIndex === 0)).toBeTruthy();
+  });
+
+  it('keeps every gap along the line within the spacing and none under half of it on random stepped lines', () => {
+    for (let seed = 1; seed <= 300; seed += 1) {
+      const rand = mulberry32(seed);
+      const pts = [[0, 0]];
+      const steps = 3 + Math.floor(rand() * 14);
+      for (let i = 0; i < steps; i += 1) {
+        const [x, y] = pts[pts.length - 1];
+        const len = 2 + rand() * 12; // jogs and runs; monotone in x and y so the line never crosses itself
+        if (rand() < 0.15) pts.push([x + len * 0.7, y + len * 0.7]);
+        else pts.push(i % 2 === 0 ? [x + len, y] : [x, y + len]);
+      }
+      const ln = line('eave', pts, 's');
+      const r = placeNozzles([ln], opts);
+      try {
+        assertInvariants([ln], r);
+        const arcs = r.lines[0].keys.map((k) => arcFt(ln.points, r.nozzles.find((n) => n.key === k)));
+        const total = r.lines[0].lengthFt;
+        for (let i = 1; i < arcs.length; i += 1) {
+          expect(arcs[i] - arcs[i - 1]).toBeLessThanOrEqual(NOMINAL_SPACING_FT + 1e-6);
+          // the only gap allowed under 5 ft is a whole line shorter than that
+          if (total >= NOMINAL_SPACING_FT / 2) {
+            expect(arcs[i] - arcs[i - 1]).toBeGreaterThanOrEqual(NOMINAL_SPACING_FT / 2 - 1e-6);
+          }
+        }
+        expect(arcs[0]).toBeCloseTo(0, 5);
+        expect(arcs[arcs.length - 1]).toBeCloseTo(total, 4);
+      } catch (err) {
+        err.message = `seed ${seed}: ${err.message}`;
+        throw err;
+      }
+    }
+  });
+
+  it('keeps the invariants on jagged lines that double back (corners are kept where a clean fill is impossible)', () => {
+    for (let seed = 1; seed <= 300; seed += 1) {
+      const rand = mulberry32(seed + 5000);
+      const lines = [0, 1].map((l) => {
+        const pts = [[rand() * 14, rand() * 14]];
+        const steps = 4 + Math.floor(rand() * 10);
+        for (let i = 0; i < steps; i += 1) {
+          const [x, y] = pts[pts.length - 1];
+          const a = rand() * Math.PI * 2;
+          const len = 1 + rand() * 8;
+          pts.push([x + Math.cos(a) * len, y + Math.sin(a) * len]);
+        }
+        if (rand() < 0.3) pts.push(pts[0]);
+        return line(l ? 'fence' : 'eave', pts, `j${l}`);
+      });
+      const result = placeNozzles(lines, opts);
+      try {
+        assertInvariants(lines, result);
+      } catch (err) {
+        err.message = `seed ${seed}: ${err.message}`;
+        throw err;
+      }
+    }
+  });
+});
+
 describe('polylineFeet', () => {
   it('measures a cleaned polyline in feet', () => {
     expect(polylineFeet(line('eave', [[0, 0], [10, 0], [10, 5]]).points, LAT, ZOOM)).toBeCloseTo(15, 1);

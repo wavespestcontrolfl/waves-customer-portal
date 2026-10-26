@@ -1139,7 +1139,17 @@ function AnalyzePhotosAction({ active, isAdmin, activeThread, customerMessages, 
 // With a customer, render the same composer used by Messages, locked to that
 // profile. The caller keys it by customer id/phone to discard another person's
 // draft, attachments, and minted links when the selected record changes.
-export function SmsTab({ active, customer = null, customerMessages = [], customerReadScope = null, onSent, linkRequest = 0 }) {
+export function SmsTab({
+  active,
+  customer = null,
+  customerMessages = [],
+  customerReadScope = null,
+  customerHistoryError = "",
+  feedbackEnabled = false,
+  onRetryCustomerHistory,
+  onSent,
+  linkRequest = 0,
+}) {
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
   // /revise 403 for technicians). A tech following a draftId deep link
   // still gets the prefilled text/recipient, but sends as a plain manual
@@ -3155,6 +3165,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
 
   return (
     <div>
+      {customer && feedbackEnabled && customerHistoryError && (
+        <ActionFeedback error onRetry={onRetryCustomerHistory} className="mb-3">
+          {customerHistoryError}
+        </ActionFeedback>
+      )}
       {!customer && <div className="mb-3 flex flex-wrap items-center gap-3">
         <Button variant="secondary" disabled={smsRefreshing} onClick={() => loadData(smsSearchRef.current, { refresh: true })}>
           {smsRefreshing ? "Refreshing…" : "Refresh messages"}
@@ -4126,6 +4141,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       {active && selected360Id && (
         <Customer360ProfileV2
           customerId={selected360Id}
+          feedbackEnabled={feedbackEnabled}
           onClose={() => setSelected360Id(null)}
         />
       )}
@@ -4171,6 +4187,7 @@ export default function CommunicationsPageV2() {
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
   const smsParams = new URLSearchParams(location.search);
+  const feedbackEnabled = smsParams.get("feedback") === "1";
   const smsTarget = ["thread", "message", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
   const smsTargetKey = smsTarget.some(Boolean) ? JSON.stringify(smsTarget) : "";
   const [openedSmsTarget, setOpenedSmsTarget] = useState(smsTargetKey);
@@ -4244,7 +4261,7 @@ export default function CommunicationsPageV2() {
         secondaryNavGridClassName="grid-cols-2"
       />}
       {activeTab === "events" && <NotificationEventsTabV2 isAdminRole={isAdminRole} />}
-      {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} /></div>}
+      {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} feedbackEnabled={feedbackEnabled} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 isAdmin={isAdminRole} />}
       {activeTab === "owed" && <OwedTabV2 />}

@@ -35,12 +35,19 @@ function ErrorNotice({ children }) {
   return <div role="alert" style={{ background: "#FEE2E2", color: D.red, padding: 12, borderRadius: 8, margin: "12px 0" }}>{children}</div>;
 }
 
+// The day-move rule in force for a run. Runs recorded before guardMode existed
+// carry only routeTiersEnabled, so that is the fallback.
+function policyText(config) {
+  const mode = config.guardMode || (config.routeTiersEnabled ? "tiers" : "legacy");
+  if (mode === "flex") return "Flexible rule: checks plan visits from tomorrow. A visit is frozen 73 hours before it, or once its 72-hour reminder is sent. A move to another day lands at least 5 days out, within 5 days of the visit's date.";
+  if (mode === "tiers") return "Tiered routing: evaluates visits from 7 days out, with reminder freezes and a five-day destination floor.";
+  return `Evaluates visits more than ${config.lockWindowDays} days out.`;
+}
+
 function Policy({ config }) {
   if (!config) return <p>Operating policy unavailable.</p>;
   return <div style={{ display: "grid", gap: 6 }}>
-    <span>{config.routeTiersEnabled
-      ? "Tiered routing: evaluates visits from 7 days out, with reminder freezes and a five-day destination floor."
-      : `Evaluates visits more than ${config.lockWindowDays} days out.`}</span>
+    <span>{policyText(config)}</span>
     <span>Looks ahead {config.lookaheadDays} days · Up to {config.maxChangesPerRun} appointment changes per run.</span>
     <span>Apply permission: {config.applyAllowed ? "enabled" : "disabled"}{config.applyBlocked ? " — requested apply mode was reduced to dry-run" : ""}.</span>
   </div>;
@@ -142,7 +149,7 @@ function RunDetails({ selected, state, onRefresh, onSavingChange }) {
     {state.error && <div style={sectionStyle}><ErrorNotice>{state.error}</ErrorNotice><HeaderButton onClick={onRefresh}>Retry decisions</HeaderButton></div>}
     <div style={sectionStyle}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}><Chip alert={ATTENTION.has(run.status)}>{label(run.status)}</Chip><Chip>{label(run.mode)}</Chip></div>
-      <p>{fmt(run.started_at)} ET · {run.triggered_by || "Unknown trigger"} · Run {shortId(run.id)}</p>
+      <p>{fmt(run.started_at)} ET · {run.triggered_by === "catch_up" ? "catch-up" : (run.triggered_by || "Unknown trigger")} · Run {shortId(run.id)}</p>
       {run.status === "running" && <p>This run is in progress. Its decisions update automatically.</p>}
       {ATTENTION.has(run.status) && <ErrorNotice>{run.error_message || "This run needs attention. Review the failed decisions below."}</ErrorNotice>}
       <details><summary style={{ cursor: "pointer" }}>Policy recorded for this run</summary><div style={{ marginTop: 10 }}><Policy config={run.config_snapshot} /></div></details>

@@ -134,6 +134,66 @@ describe('Veseris (B2B login)', () => {
       .rejects.toThrow(/veseris login failed/);
     expect(page.calls.goto).toBe(3);
   });
+
+  // A page double with a moving URL. `routes` maps each goto target to the URL (and title) the
+  // site lands on; `afterSubmit` is the URL after the form posts. Records every fill and goto.
+  const LOGIN = 'https://veseris.com/default/customer/account/login/';
+  const ACCOUNT = 'https://veseris.com/default/customer/account/';
+  const CODE_LANDING = `${ACCOUNT}?code=abc&iss=https%3A%2F%2Fid.example&locale=en&userState=AuthenticatedNotRegistered`;
+  function sessionPage({ routes, afterSubmit, titles = {} }) {
+    let url = 'about:blank';
+    const calls = { goto: [], evaluate: 0, clicks: 0 };
+    const el = {
+      first() { return el; },
+      waitFor: async () => {},
+      press: async () => {},
+      click: async () => { calls.clicks += 1; url = afterSubmit; },
+      count: async () => (/customer\/account\/login/.test(url) ? 1 : 0),
+      textContent: async () => '',
+    };
+    return {
+      calls,
+      goto: async (target) => { calls.goto.push(target); url = routes[target]; },
+      url: () => url,
+      title: async () => titles[url.split('?')[0]] || 'My Dashboard',
+      locator: () => el,
+      evaluate: async () => { calls.evaluate += 1; return 'ok'; },
+      waitForFunction: async () => ({ jsonValue: async () => 'ok' }),
+      waitForTimeout: async () => {},
+    };
+  }
+  const CREDS = { username: 'u', password: 'p' };
+
+  test('the ?code= AuthenticatedNotRegistered landing counts as signed in once the account page confirms it', async () => {
+    const page = sessionPage({ routes: { [LOGIN]: LOGIN, [ACCOUNT]: ACCOUNT }, afterSubmit: CODE_LANDING });
+    await expect(veseris.config.authenticate(page, CREDS)).resolves.toBeUndefined();
+    expect(page.calls.goto).toEqual([LOGIN, ACCOUNT]);
+    expect(page.calls.evaluate).toBe(1);
+  });
+
+  test('a login URL that redirects to the account page (already signed in) types nothing', async () => {
+    const page = sessionPage({ routes: { [LOGIN]: ACCOUNT, [ACCOUNT]: ACCOUNT }, afterSubmit: ACCOUNT });
+    await expect(veseris.config.authenticate(page, CREDS)).resolves.toBeUndefined();
+    expect(page.calls.goto).toEqual([LOGIN, ACCOUNT]);
+    expect(page.calls.evaluate).toBe(0);
+    expect(page.calls.clicks).toBe(0);
+  });
+
+  test('a ?code= landing that the account page sends back to the login page is stalled and retried three times', async () => {
+    const page = sessionPage({ routes: { [LOGIN]: LOGIN, [ACCOUNT]: LOGIN }, afterSubmit: CODE_LANDING });
+    await expect(veseris.config.authenticate(page, CREDS)).rejects.toThrow(/veseris login failed/);
+    expect(page.calls.goto.filter((t) => t === LOGIN)).toHaveLength(3);
+    expect(page.calls.goto.filter((t) => t === ACCOUNT)).toHaveLength(3);
+  });
+
+  test('an account page titled Customer Login does not confirm the session', async () => {
+    const page = sessionPage({
+      routes: { [LOGIN]: LOGIN, [ACCOUNT]: ACCOUNT },
+      afterSubmit: CODE_LANDING,
+      titles: { [ACCOUNT]: 'Customer Login' },
+    });
+    await expect(veseris.config.authenticate(page, CREDS)).rejects.toThrow(/veseris login failed/);
+  });
 });
 
 describe('verifyMatch product identity (2026-10-05 false positives)', () => {
