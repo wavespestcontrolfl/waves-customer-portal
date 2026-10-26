@@ -580,8 +580,8 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // visit, or the save writer's own placement (`place`), tries every place. A
   // whole shared stop (`unit`) and a route number the office typed keep
   // today's rule: their save keeps that place.
-  const staffInsert = !capacity && staffRouteInsertionLive() && !target.memberIds && !context.routeOrderPinned
-    && (place || movesVisit(context, date, target.technician_id, windowStart));
+  const staffRoute = !capacity && staffRouteInsertionLive() && !target.memberIds && !context.routeOrderPinned;
+  const staffInsert = staffRoute && (place || movesVisit(context, date, target.technician_id, windowStart));
   const own = rows.filter(row => row.technician_id === target.technician_id && (capacity || row.reservation_expires_at == null));
   const resolvedOrigin = resolvePlacementOrigin(context, capacity, departureMin, target, own);
   if (!resolvedOrigin) return unverified(target, date);
@@ -592,9 +592,11 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // duplicates or an afternoon stop ahead of a morning one is leftover
   // numbering, not a plan. Simulate the day in promised-window order too and
   // certify whichever fits better; commit persists the certified order. A
-  // complete, window-ordered dispatch order stays the only baseline. A staff
-  // move under GATE_STAFF_ROUTE_INSERTION follows the same rule.
-  const sequencers = (capacity || staffInsert) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
+  // complete, window-ordered dispatch order stays the only baseline. Under
+  // GATE_STAFF_ROUTE_INSERTION a staff move follows the same rule, and so does
+  // a visit that stays put, so its own hour reads like every other hour
+  // (nothing is written for it: only a move's result carries an order).
+  const sequencers = (capacity || staffRoute) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
   const simulate = (order, usedLegs) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
