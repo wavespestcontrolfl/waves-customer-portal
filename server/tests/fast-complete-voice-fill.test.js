@@ -498,6 +498,26 @@ describe('the selected product must be named in its heard words', () => {
     expect(wsg.products).toEqual([]);
   });
 
+  test('after the catalog row became Atticus Antapex WSG (2026-10-26), a tech who still says "Alpine WSG" or "Antapex" lands on it', () => {
+    // The old name is a product alias of the row (migration 20261026190000), so the spoken word keeps resolving.
+    const renamed = {
+      ...ctx,
+      products: [
+        ...ctx.products,
+        { id: 'p-antapex', name: 'Atticus Antapex WSG', fullName: 'Atticus Antapex WSG', aliases: ['Alpine WSG'], measure: 'weight', units: ['g', 'oz', 'lb'] },
+        { id: 'p-alpine-dust', name: 'Alpine Dust', fullName: 'Alpine Dust', aliases: ['Alpine dust'], measure: 'weight', units: ['g', 'oz', 'lb'] },
+      ],
+    };
+    for (const heard of ['Alpine WSG, five grams', 'Antapex, five grams', 'Atticus Antapex WSG, five grams']) {
+      const out = validateFill(answer({ products: [product({ productId: 'p-antapex', amount: 5, unit: 'g', heard })] }), renamed, heard);
+      expect(out.products.map((p) => p.productId)).toEqual(['p-antapex']);
+    }
+    // "Alpine dust" is still Alpine Dust only.
+    const dustHeard = 'Alpine dust, two ounces';
+    const wsg = validateFill(answer({ products: [product({ productId: 'p-antapex', amount: 2, unit: 'oz', heard: dustHeard })] }), renamed, dustHeard);
+    expect(wsg.products).toEqual([]);
+  });
+
   test('one quote naming several products backs each of them', () => {
     const heard = 'Same mix as last time, Taurus, Talstar and the surfactant';
     const out = validateFill(answer({ products: ['p-taurus', 'p-talak', 'p-surf'].map((productId) => product({ productId, sameAsLast: true, heard })) }), ctx, heard);

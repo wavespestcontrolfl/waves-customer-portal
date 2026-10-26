@@ -58,6 +58,8 @@ describe('readVisitProducts wording comes from the product\'s own data, never a 
     // colony-transfer description.
     ['Topchoice Granular Insecticide', 'Fipronil 0.0143%', 'an insecticide'],
     ['Alpine WSG', 'dinotefuran', 'an insecticide'],
+    // The catalog row since 2026-10-26: same dinotefuran, same neutral phrase, no label claim of its own.
+    ['Atticus Antapex WSG', 'Dinotefuran 40.0%', 'an insecticide'],
     ['Delta Dust', 'deltamethrin', 'an insecticide'],
     // Distance IGR is a Tree & Shrub whitefly/scale product — never "immature roaches".
     ['Distance IGR', 'Pyriproxyfen', 'an insect growth regulator'],
@@ -103,6 +105,8 @@ describe('classifyProduct', () => {
   test.each([
     ['Taurus SC', 'fipronil', 'non_repellent'],
     ['Alpine WSG', 'dinotefuran', 'non_repellent'],
+    ['Atticus Antapex WSG', 'Dinotefuran 40.0%', 'non_repellent'],
+    ['Atticus Antapex WSG', '', 'non_repellent'], // name only: the family name list reaches it
     ['Talstar P', 'bifenthrin', 'contact_residual'],
     ['Bifen I/T', 'bifenthrin', 'contact_residual'],
     ['Talak', 'bifenthrin', 'contact_residual'],
