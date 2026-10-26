@@ -221,6 +221,50 @@ describe('Action Inbox generators', () => {
       && String(c.args[0]).includes("e.estimate_data #>> '{deliveryState,firstDeliveredAt}'") && String(c.args[0]).includes('IS NOT NULL'))).toBe(true);
   });
 
+  test('estimate_drafts_unsent: one warn action for sendable estimator drafts, linking the one that expires first', async () => {
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    // Rows arrive in expires_at order (the query sorts); membership is sorted.
+    const capture = primeDb({ 'estimates as d': [{ id: 'draft-b' }, { id: 'draft-a' }] });
+    const { alerts } = await computeDashboardAlertsUncached();
+
+    expect(alerts.find((a) => a.id === 'estimate_drafts_unsent')).toEqual({
+      id: 'estimate_drafts_unsent',
+      kind: 'action',
+      severity: 'warn',
+      count: 2,
+      members: ['draft-a', 'draft-b'],
+      label: '2 estimate drafts waiting to be sent',
+      href: '/admin/estimates?estimateId=draft-b',
+    });
+
+    const drafts = capture.filter((c) => c.table === 'estimates as d');
+    const has = (method, ...args) => drafts.some((c) => c.method === method
+      && args.every((a, i) => c.args[i] === a));
+    // Only the estimator's own, unarchived, still-draft rows...
+    expect(has('where', 'd.status', 'draft')).toBe(true);
+    expect(has('where', 'd.source', 'estimator_engine')).toBe(true);
+    expect(has('whereNull', 'd.archived_at')).toBe(true);
+    // ...that can still be sent (an expired draft cannot), soonest deadline first.
+    expect(drafts.some((c) => c.method === 'whereRaw' && String(c.args[0]).includes('d.expires_at > NOW()'))).toBe(true);
+    expect(has('orderBy', 'd.expires_at', 'asc')).toBe(true);
+    // Same internal-test exclusions as estimates_expiring: estimate name + joined customer name.
+    expect(drafts.filter((c) => c.method === 'whereNotIn' && c.args[1] === INTERNAL_TEST_CUSTOMERS)).toHaveLength(2);
+  });
+
+  test('estimate_drafts_unsent: singular label for one draft; absent when none can be sent', async () => {
+    primeDb({ 'estimates as d': [{ id: 'draft-1' }] });
+    let { alerts } = await computeDashboardAlertsUncached();
+    expect(alerts.find((a) => a.id === 'estimate_drafts_unsent')).toMatchObject({
+      count: 1,
+      label: '1 estimate draft waiting to be sent',
+      href: '/admin/estimates?estimateId=draft-1',
+    });
+
+    primeDb({ 'estimates as d': [] });
+    ({ alerts } = await computeDashboardAlertsUncached());
+    expect(alerts.find((a) => a.id === 'estimate_drafts_unsent')).toBeUndefined();
+  });
+
   test('builder_warranty_expiring: warn action on open leads inside the ET window; absent when empty', async () => {
     const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
     const capture = primeDb({

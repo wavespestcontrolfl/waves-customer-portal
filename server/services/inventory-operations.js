@@ -359,10 +359,17 @@ async function createProductAlias(fields, options = {}) {
   return options.trx ? run(options.trx) : db.transaction(run);
 }
 
+// A new product's EPA column: the given number, else "N/A", except leaveEpaBlank (the inventory agent, a pesticide with no proven
+// EPA number) stores NULL so a real number is never mistaken for a settled "none".
+function catalogEpaNumber(epaRegNumber, leaveEpaBlank) {
+  return epaRegNumber || (leaveEpaBlank ? null : 'N/A');
+}
+
 async function createCatalogProduct(fields, options = {}) {
   const {
     name, category, subcategory, activeIngredient, epaRegNumber, formulation, moaGroup,
     defaultUnit, unitSize, inventoryOnHand, inventoryUnit, lowStockThreshold, bestVendor, autoReorderEnabled,
+    labelUrl, leaveEpaBlank,
   } = fields;
   const initialStock = numberOrNull(inventoryOnHand);
   const run = async (trx) => {
@@ -377,7 +384,8 @@ async function createCatalogProduct(fields, options = {}) {
     const [inserted] = await trx('products_catalog').insert({
       name, category: category || null, subcategory: subcategory || null,
       active_ingredient: activeIngredient || 'Unknown - pending SDS',
-      epa_reg_number: epaRegNumber || 'N/A',
+      epa_reg_number: catalogEpaNumber(epaRegNumber, leaveEpaBlank),
+      ...(labelUrl ? { label_url: labelUrl } : {}),
       moa_group: moaGroup || null,
       default_unit: defaultUnit || 'oz',
       container_size: unitSize || null,

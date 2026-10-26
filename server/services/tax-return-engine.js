@@ -20,6 +20,11 @@
  *                    and line 30 are left out: depreciation and the home office
  *                    are computed below, and counting both would double up.
  *                    A category with no known line lands on line 27a and warns.
+ *                    GATE_PNL_PAY_RUN_WAGES on: W-2 wages (line 26) and employer payroll
+ *                    taxes (line 23) come from FINALIZED pay runs by pay date
+ *                    (pay-run-books.js), and rows in the "Payroll (counted from pay
+ *                    runs)" category (the bank payroll payments) are left out so
+ *                    nothing counts twice. Off = expense rows only, as before.
  *   Depreciation     the equipment register, through the P&L's own proration
  *                    (prorateAssetDepreciation). Section 179 amounts are split
  *                    out because the business-income limit applies to them.
@@ -65,6 +70,8 @@ const {
 const { getYearConstants, FILING_STATUSES } = require('./tax-year-constants');
 const sharedBills = require('./tax-shared-bills');
 const taxYears = require('./tax-years');
+const { pnlPayRunWagesLive } = require('../config/feature-gates');
+const { payRunTotals, leaveOutPayRunCategory } = require('./pay-run-books');
 
 const STRIPE_FEES_CATEGORY = 'Stripe Processing Fees (synced)'; // name in pnl-report.js assemblePnl
 
@@ -489,12 +496,16 @@ async function gatherInputs(year) {
   getYearConstants(y); // 400 before any query for a year that is not loaded
   const start = `${y}-01-01`;
   const end = `${y}-12-31`;
+  // GATE_PNL_PAY_RUN_WAGES, read at call time (guarded for suites that mock feature-gates).
+  const payRunWages = typeof pnlPayRunWagesLive === 'function' && pnlPayRunWagesLive();
   const [detail, pnl, expenseRows, assetRows, homeRow] = await Promise.all([
     taxYears.getYearDetail(y),
     buildPnlReport(db, start, end),
-    db('expenses')
-      .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
-      .whereBetween('expenses.expense_date', [start, end])
+    (payRunWages ? leaveOutPayRunCategory : (q) => q)(
+      db('expenses')
+        .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
+        .whereBetween('expenses.expense_date', [start, end]),
+    )
       .groupBy('expense_categories.irs_line')
       .select(
         'expense_categories.irs_line as line',
@@ -518,6 +529,11 @@ async function gatherInputs(year) {
     }
     if (!line && amount) warnings.push(warn('uncategorized', `${r.n} expense row(s) with no category (${fmt(amount)}) are shown on line 27a.`));
     expense_lines.push({ line: line || FALLBACK_LINE, amount });
+  }
+  if (payRunWages) {
+    const payRun = await payRunTotals(db, start, end);
+    if (payRun.wages) expense_lines.push({ line: '26', amount: round2(payRun.wages) });
+    if (payRun.employerTaxes) expense_lines.push({ line: '23', amount: round2(payRun.employerTaxes) });
   }
   const fees = (pnl.operatingExpenses?.categories || []).find((c) => c.name === STRIPE_FEES_CATEGORY);
   if (fees && num(fees.amount)) expense_lines.push({ line: '10', amount: round2(fees.amount) });

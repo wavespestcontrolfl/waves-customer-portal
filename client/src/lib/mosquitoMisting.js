@@ -12,7 +12,7 @@
 // engine refuses a fractional or out-of-range count with a reason and never
 // rounds it into a different quote, so this file does not round either.
 
-export const NO_MISTING = Object.freeze({ available: false, tiers: [], solutions: [], limits: {} });
+export const NO_MISTING = Object.freeze({ available: false, layoutDesigner: false, tiers: [], solutions: [], limits: {} });
 
 // Only the form defaults that are not blank. Refills per year starts at the
 // engine's standard of four; the server rejects anything outside its limits.
@@ -39,7 +39,8 @@ export function readMistingAvailability(row) {
   const solutions = labelled(block?.solutions);
   const available = row?.featureAvailable === true && block?.enabled === true && tiers.length > 0 && solutions.length > 0;
   if (!available) return NO_MISTING;
-  return { available, tiers, solutions, limits: block.limits && typeof block.limits === "object" ? block.limits : {} };
+  // GATE_MISTING_LAYOUT_DESIGNER: explicit true only; an older server leaves the key out.
+  return { available, layoutDesigner: block.layoutDesigner === true, tiers, solutions, limits: block.limits && typeof block.limits === "object" ? block.limits : {} };
 }
 
 // `options.mosquitoMisting` for the calculate and save requests. Empty when the

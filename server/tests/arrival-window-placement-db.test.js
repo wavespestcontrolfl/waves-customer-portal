@@ -259,6 +259,13 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
         .toEqual({ window_start: '10:00:00', window_end: '11:00:00' });
     });
 
+    test('a New Appointment booking (GATE_NEW_APPT_STOP_ORDER) is numbered the same way, and its audit row names the source', async () => {
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+      await expect(placeMovedVisit(mockConn, { serviceId: TARGET, source: 'new_appointment' })).resolves.toEqual([NORTH, TARGET, SOUTH]);
+      expect(await mockConn('audit_log').where({ action: 'schedule.route_order_placed', resource_id: TARGET }).first('metadata'))
+        .toEqual({ metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: [NORTH, TARGET, SOUTH], source: 'new_appointment' } });
+    });
+
     test('gate off: the visit stays after the last numbered stop and the save writes nothing', async () => {
       delete process.env.GATE_STAFF_ROUTE_INSERTION;
       expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(false);

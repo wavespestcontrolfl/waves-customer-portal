@@ -56,6 +56,10 @@ jest.mock('../services/scheduling/line-technician', () => {
   return { ...actual, recordLinePickShadow: jest.fn(actual.recordLinePickShadow) };
 });
 jest.mock('../services/scheduling/office-auto-technician', () => ({ resolveOfficeAutoTechnician: jest.fn() }));
+jest.mock('../services/scheduling/arrival-route', () => ({
+  ...jest.requireActual('../services/scheduling/arrival-route'),
+  placeMovedVisit: jest.fn().mockResolvedValue(null),
+}));
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),
 }));
@@ -484,5 +488,44 @@ describe('POST / — admin create — Auto technician choice (GATE_UNASSIGNED_VI
     expect(inserts).toHaveLength(4);
     expect(inserts.every((d) => d.technician_id === null)).toBe(true);
     expect(res.autoAssign).toEqual({ result: 'unassigned', reason: 'absent_on_series_date' });
+  });
+});
+
+// GATE_NEW_APPT_STOP_ORDER (owner 2026-10-26, "OK GO"): the save numbers the
+// booked visit's technician day through the staff writer, on the booking's own
+// transaction, so the board and the tech app list it in its place, not last.
+describe('POST / — admin create — New Appointment stop order', () => {
+  const { placeMovedVisit } = require('../services/scheduling/arrival-route');
+  const body = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    technicianId: 'tech-no-absence',
+    estimatedPrice: 89,
+  };
+  afterEach(() => { delete process.env.GATE_NEW_APPT_STOP_ORDER; });
+
+  test('gate on: the booked visit goes to the staff writer, on the booking transaction', async () => {
+    process.env.GATE_NEW_APPT_STOP_ORDER = 'true';
+    const { status } = await post(body);
+    expect(status).toBe(201);
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'new-1', source: 'new_appointment' });
+  });
+
+  test('gate on, a recurring create: the parent visit only (the night pass orders the children)', async () => {
+    process.env.GATE_NEW_APPT_STOP_ORDER = 'true';
+    const { status } = await post({ ...body, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, createInvoice: true });
+    expect(status).toBe(201);
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    expect(placeMovedVisit.mock.calls[0][1]).toEqual({ serviceId: 'new-1', source: 'new_appointment' });
+  });
+
+  test('gate off (default): the save writes no stop order', async () => {
+    const { status } = await post(body);
+    expect(status).toBe(201);
+    expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 });
