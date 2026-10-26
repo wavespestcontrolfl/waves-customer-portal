@@ -32,7 +32,7 @@ describe('Documents API service report PDF footer (documents.js)', () => {
   it('prints the Products & Safety URL with a link annotation in the footer band', () => {
     expect(src.indexOf('function generateServiceReportPDF(')).toBeGreaterThan(-1);
     expect(fn).toMatch(/Every product we use and our safety protocol: \$\{WAVES_PRODUCTS_SAFETY_URL\}/);
-    expect(fn).toMatch(/link: `\$\{WAVES_PRODUCTS_SAFETY_URL\}#safety-protocol`/);
+    expect(fn).toMatch(/detailLink: `\$\{WAVES_PRODUCTS_SAFETY_URL\}#safety-protocol`/);
   });
 
   it('imports the constant from the business constants module', () => {

@@ -16,10 +16,15 @@
 const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
-const { getLogoBuffer } = require('./brand-logo');
-const { PDF_COLORS, PDF_TYPE } = require('./pdf-tokens');
+const { PDF_COLORS } = require('./pdf-tokens');
 const {
-  WAVES_ADDRESS_LINE,
+  FIELD_PDF_LAYOUT,
+  drawFieldContinuationMasthead,
+  drawFieldFooter,
+  drawFieldMasthead,
+  drawFieldSectionHeading,
+} = require('./field-pdf');
+const {
   WAVES_WEBSITE_HOST,
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
@@ -31,15 +36,12 @@ const BODY = PDF_COLORS.body;
 const MUTED = PDF_COLORS.muted;
 const RULE = PDF_COLORS.rule;
 const SOFT = PDF_COLORS.soft;
-const HEADER_SUB = PDF_COLORS.headerSub;
-const WHITE = PDF_COLORS.white;
-const GOLD_PILL = '#FFD700';           // estimate CTA pill fill (theme-brand)
+const GOLD_PILL = PDF_COLORS.gold;
 
 const PAGE_W = 612;
 const L = 40;
 const W = PAGE_W - 80;
-const FOOTER_TOP = 742;
-const CONTENT_BOTTOM = FOOTER_TOP - 24;
+const CONTENT_BOTTOM = FIELD_PDF_LAYOUT.contentBottom;
 
 // Guides are GLOBAL customer documents, so they carry the headquarters
 // contact (Town Center Pkwy + main line) per the 2026-07-11 publishing rule;
@@ -117,22 +119,17 @@ function footer(doc) {
   // auto-paginates any text below (pageHeight − bottomMargin), which turned
   // the two footer lines into two phantom pages (same fix as
   // estimate-pdf.js footerBar).
-  const previousBottomMargin = doc.page.margins.bottom;
-  doc.save();
-  doc.page.margins.bottom = 0;
-  doc.moveTo(L, FOOTER_TOP).lineTo(L + W, FOOTER_TOP).lineWidth(0.5).strokeColor(RULE).stroke();
-  doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
-  doc.text(`Waves Pest Control, LLC · ${GUIDE_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY} · ${WAVES_WEBSITE_HOST}`, L, FOOTER_TOP + 6, { width: W, align: 'center' });
-  doc.text(WAVES_FL_LICENSE_LINE, L, FOOTER_TOP + 17, { width: W, align: 'center' });
-  doc.page.margins.bottom = previousBottomMargin;
-  doc.restore();
+  drawFieldFooter(doc, {
+    tagline: 'Service details and preparation',
+    detail: `${GUIDE_ADDRESS_LINE} · ${WAVES_FL_LICENSE_LINE}`,
+  });
 }
 
 function ensureRoom(doc, needed) {
   if (doc.y + needed > CONTENT_BOTTOM) {
     footer(doc);
     doc.addPage();
-    doc.y = 48;
+    drawFieldContinuationMasthead(doc, { title: 'Service details · continued' });
   }
 }
 
@@ -140,37 +137,18 @@ function ensureRoom(doc, needed) {
 // same construction as invoice-pdf's headerBar so every Waves document a
 // customer downloads reads as one family.
 function headerBar(doc, title) {
-  doc.save();
-  doc.rect(0, 0, PAGE_W, 92).fill(NAVY);
-  const logoBuf = getLogoBuffer();
-  if (logoBuf) {
-    doc.image(logoBuf, 24, 10, { width: 72, height: 72 });
-  } else {
-    doc.fontSize(PDF_TYPE.display).font('Helvetica-Bold').fillColor(WHITE).text('WAVES', 40, 22);
-    doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(HEADER_SUB).text('PEST CONTROL & LAWN CARE', 40, 52);
-  }
-  doc.fontSize(PDF_TYPE.micro).font('Helvetica').fillColor(HEADER_SUB).text(WAVES_FL_LICENSE_LINE, 108, 70);
-
-  doc.fontSize(PDF_TYPE.body).font('Helvetica-Bold').fillColor(WHITE).text(WAVES_SUPPORT_PHONE_DISPLAY, 430, 22, { width: 142, align: 'right' });
-  doc.fontSize(PDF_TYPE.micro).font('Helvetica').fillColor(HEADER_SUB).text(WAVES_WEBSITE_HOST, 430, 38, { width: 142, align: 'right' });
-  doc.text('9040 Town Center Pkwy', 430, 52, { width: 142, align: 'right' });
-  doc.text('Lakewood Ranch, FL 34202', 430, 64, { width: 142, align: 'right' });
-  doc.restore();
-
-  doc.save();
-  doc.rect(0, 92, PAGE_W, 44).fill(SOFT);
-  doc.fontSize(PDF_TYPE.h1).font('Helvetica').fillColor(NAVY).text(title, L, 104);
-  doc.restore();
-  doc.y = 152;
+  drawFieldMasthead(doc, {
+    title,
+    eyebrow: 'Service guide',
+    addressLine: GUIDE_ADDRESS_LINE,
+  });
+  doc.y = Math.max(152, doc.y);
 }
 
 function sectionHeading(doc, text) {
   ensureRoom(doc, 46);
   doc.moveDown(0.8);
-  doc.font('Helvetica-Bold').fontSize(12).fillColor(NAVY).text(text, L, doc.y, { width: W });
-  doc.moveDown(0.35);
-  doc.moveTo(L, doc.y).lineTo(L + W, doc.y).lineWidth(0.75).strokeColor(RULE).stroke();
-  doc.moveDown(0.5);
+  doc.y = drawFieldSectionHeading(doc, text, L, doc.y, W);
 }
 
 // Room a wrapped 10pt list item / paragraph needs (measured, min 30) so a long

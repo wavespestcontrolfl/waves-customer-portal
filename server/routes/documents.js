@@ -30,37 +30,36 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { applyReportIdentitySnapshotToLegacyPdf, readReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 const { applyCustomerVisibleServiceRecordFilter } = require('../services/pest-pressure/history-filter');
 const {
-  WAVES_ADDRESS_LINE,
-  WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 const PhotoService = require('../services/photos');
+const { PDF_COLORS } = require('../services/pdf/pdf-tokens');
+const {
+  drawFieldContinuationMasthead,
+  drawFieldFooter,
+  drawFieldMasthead,
+  drawFieldSectionHeading,
+} = require('../services/pdf/field-pdf');
 
 // =========================================================================
 // PDF GENERATION — builds a branded service report
 // =========================================================================
-// Waves brand colors
-const NAVY = '#1B2C5B';
-const TEAL = '#009CDE';
+// Approved Field document palette. Semantic success/alert colors stay local.
+const NAVY = PDF_COLORS.navy;
+const TEAL = PDF_COLORS.blue;
 const GREEN = '#10b981';
 const RED = '#A83B34';
-const LIGHT_BG = '#F8FCFE';
-const BODY = '#3F4A65';
-const MUTED_ON_DARK = '#B8D4EA';
-const MUTED = '#6B7280';
+const LIGHT_BG = PDF_COLORS.soft;
+const BODY = PDF_COLORS.body;
+const MUTED = PDF_COLORS.muted;
 
 function sectionHeader(doc, title, x, y, w) {
-  const width = w || 512;
-  doc.save();
-  doc.roundedRect(x, y, width, 22, 3).fill(NAVY);
-  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(title.toUpperCase(), x + 10, y + 6, { width: width - 20 });
-  doc.restore();
-  return y + 28;
+  return drawFieldSectionHeading(doc, title, x, y, w || 512);
 }
 
 function infoRow(doc, label, value, x, y, labelW, valW) {
-  doc.fontSize(9).font('Helvetica-Bold').fillColor('#555').text(label, x, y, { width: labelW });
-  doc.font('Helvetica').fillColor('#222').text(value || '—', x + labelW, y, { width: valW });
+  doc.fontSize(9).font('Helvetica-Bold').fillColor(MUTED).text(label, x, y, { width: labelW });
+  doc.font('Helvetica').fillColor(BODY).text(value || '—', x + labelW, y, { width: valW });
   return y + 14;
 }
 
@@ -133,6 +132,19 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // a WaveGuard membership (owner ruling 2026-09-26: $350 trapping covers
   // setup + 1 check; the paid $95 check is never a callback).
   const isIncludedTrapCheck = isCallback && /\btrap/i.test(String(service.service_type || ''));
+  const techLine = service.technician_name && service.technician_name !== 'Waves Team'
+    ? `Your technician: ${service.technician_name}${service.technician_license ? ` (FL #${service.technician_license})` : ''}`
+    : 'View this report in your Waves portal';
+  const drawReportFooter = (tagline = techLine) => drawFieldFooter(doc, {
+    tagline,
+    detail: `Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`,
+    detailLink: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`,
+  });
+  const addContinuationPage = () => {
+    drawReportFooter('Service report · continued');
+    doc.addPage();
+    return drawFieldContinuationMasthead(doc, { title: 'Service Report · continued' });
+  };
 
   // Parse weather data
   let weather = null;
@@ -169,44 +181,17 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
     if (c.product_id) complianceByProduct[c.product_id] = c;
   });
 
-  // ══════════════════════════════════════════════════════
-  // HEADER BAR
-  // ══════════════════════════════════════════════════════
-  doc.save();
-  doc.rect(0, 0, 612, 80).fill(NAVY);
-
-  // Logo (left). Header bar is 80px tall; render at 64px with ~8px
-  // padding top/bottom. Fall back to the wordmark if the asset is
-  // missing so the PDF never breaks in production.
-  const { getLogoBuffer } = require('../services/pdf/brand-logo');
-  const logoBuf = getLogoBuffer();
-  if (logoBuf) {
-    doc.image(logoBuf, L + 2, 8, { width: 64, height: 64 });
-    doc.fontSize(8).font('Helvetica').fillColor(MUTED_ON_DARK).text(credentialText, L + 72, 60);
-  } else {
-    doc.fontSize(22).font('Helvetica-Bold').fillColor('#fff').text('WAVES', L + 10, 18);
-    doc.fontSize(9).font('Helvetica').fillColor(TEAL).text('LAWN & PEST CONTROL', L + 10, 42);
-    doc.fontSize(8).fillColor(MUTED_ON_DARK).text(credentialText, L + 10, 56);
-  }
-
-  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(WAVES_SUPPORT_PHONE_DISPLAY, R - 150, 22, { width: 150, align: 'right' });
-  doc.fontSize(8).font('Helvetica').fillColor(MUTED_ON_DARK).text('wavespestcontrol.com', R - 150, 36, { width: 150, align: 'right' });
-  doc.text('Bradenton, FL 34211', R - 150, 48, { width: 150, align: 'right' });
-  doc.restore();
-
-  // ══════════════════════════════════════════════════════
-  // TITLE BAR
-  // ══════════════════════════════════════════════════════
-  doc.save();
-  doc.rect(L, 90, W, 28).fill(TEAL);
-  doc.fontSize(13).font('Helvetica-Bold').fillColor('#fff').text('SERVICE REPORT', L + 12, 96);
-  doc.fontSize(9).font('Helvetica').fillColor('#ffffffcc').text(formatDate(service.service_date), R - 200, 98, { width: 188, align: 'right' });
-  doc.restore();
+  drawFieldMasthead(doc, {
+    title: 'Service Report',
+    eyebrow: service.service_type || 'Visit documentation',
+    reference: formatDate(service.service_date),
+    legalLine: credentialText,
+  });
 
   // ══════════════════════════════════════════════════════
   // CUSTOMER & SERVICE INFO — two-column grid
   // ══════════════════════════════════════════════════════
-  let y = 130;
+  let y = 150;
   const colMid = L + W / 2 + 10;
 
   // Left column — Customer
@@ -218,7 +203,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   if (customer.email) y = infoRow(doc, 'Email:', customer.email, L + 8, y, 70, 180);
 
   // Right column — Service
-  let y2 = 130;
+  let y2 = 150;
   y2 = sectionHeader(doc, 'Service Information', colMid, y2);
   y2 = infoRow(doc, 'Date:', formatDate(service.service_date), colMid + 8, y2, 80, 170);
   y2 = infoRow(doc, 'Service:', service.service_type, colMid + 8, y2, 80, 170);
@@ -299,7 +284,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // WAVEGUARD CALLBACK CALLOUT
   // ══════════════════════════════════════════════════════
   if (isCallback && !withholdPlan) {
-    if (y > 680) { doc.addPage(); y = 50; }
+    if (y > 680) y = addContinuationPage();
     doc.save();
     doc.roundedRect(L, y, W, 30, 4).fill('#E8F5E9');
     doc.roundedRect(L, y, 4, 30, 2).fill(GREEN);
@@ -341,7 +326,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
     y = sectionHeader(doc, 'Products Applied', L, y);
 
     products.forEach((p, i) => {
-      if (y > 650) { doc.addPage(); y = 50; }
+      if (y > 650) y = addContinuationPage();
 
       // Find matching compliance record for this product
       const comp = compliance.find(c => c.product_id === p.product_id) || {};
@@ -406,7 +391,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // codex #2817).
   const notes = (customerSafeVisitNotes(service, { projectLine: true }) || '').trim();
   if (notes) {
-    if (y > 620) { doc.addPage(); y = 50; }
+    if (y > 620) y = addContinuationPage();
     y = sectionHeader(doc, 'What We Did', L, y);
     doc.fontSize(9).font('Helvetica').fillColor(BODY).text(notes, L + 8, y, { width: W - 16, lineGap: 3 });
     y = doc.y + 12;
@@ -429,10 +414,10 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   }
 
   if (observations.length) {
-    if (y > 620) { doc.addPage(); y = 50; }
+    if (y > 620) y = addContinuationPage();
     y = sectionHeader(doc, 'What I Noticed', L, y);
     observations.forEach(obs => {
-      if (y > 700) { doc.addPage(); y = 50; }
+      if (y > 700) y = addContinuationPage();
       doc.fontSize(8.5).font('Helvetica').fillColor(BODY);
       doc.text(`  \u2022  ${obs}`, L + 8, y, { width: W - 24, lineGap: 2 });
       y = doc.y + 4;
@@ -460,7 +445,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   }
 
   if (recommendations.length) {
-    if (y > 620) { doc.addPage(); y = 50; }
+    if (y > 620) y = addContinuationPage();
     y = sectionHeader(doc, 'What We Recommend', L, y);
     doc.save();
     doc.roundedRect(L, y, W, 4 + recommendations.length * 16, 3).fill(LIGHT_BG);
@@ -476,7 +461,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WHAT'S NEXT — aftercare tips
   // ══════════════════════════════════════════════════════
-  if (y > 640) { doc.addPage(); y = 50; }
+  if (y > 640) y = addContinuationPage();
   y = sectionHeader(doc, "What's Next", L, y);
   doc.save();
   doc.roundedRect(L, y, W, 36, 3).fill('#F0FAF0');
@@ -492,7 +477,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // SERVICE VALUE (if invoice exists)
   // ══════════════════════════════════════════════════════
   if (invoice && invoice.total_amount) {
-    if (y > 690) { doc.addPage(); y = 50; }
+    if (y > 690) y = addContinuationPage();
     doc.save();
     doc.roundedRect(L, y, W, 22, 3).fill(LIGHT_BG);
     doc.fontSize(8).font('Helvetica').fillColor('#555').text('Service Value:', L + 10, y + 6);
@@ -509,7 +494,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // SAFETY NOTICE
   // ══════════════════════════════════════════════════════
-  if (y > 680) { doc.addPage(); y = 50; }
+  if (y > 680) y = addContinuationPage();
   doc.save();
   doc.roundedRect(L, y, W, 28, 3).fill('#FFF8E1');
   doc.fontSize(8).font('Helvetica-Bold').fillColor('#B8860B').text(
@@ -523,38 +508,9 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   doc.restore();
   y += 36;
 
-  // ══════════════════════════════════════════════════════
-  // FOOTER
-  // ══════════════════════════════════════════════════════
-  const previousBottomMargin = doc.page.margins.bottom;
-  doc.save();
-  doc.page.margins.bottom = 0;
-  doc.rect(0, 730, 612, 62).fill(NAVY);
-  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(
-    `Waves Pest Control, LLC · ${credentialText}`,
-    0, 738, { width: 612, align: 'center' }
-  );
-  doc.fontSize(7).font('Helvetica').fillColor(MUTED_ON_DARK).text(
-    `${WAVES_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY}`,
-    0, 750, { width: 612, align: 'center' }
-  );
-  const techLine = service.technician_name && service.technician_name !== 'Waves Team'
-    ? `Your technician: ${service.technician_name}${service.technician_license ? ` (FL #${service.technician_license})` : ''}`
-    : 'wavespestcontrol.com';
-  doc.text(techLine, 0, 760, { width: 612, align: 'center' });
-  doc.fillColor(MUTED).text(
-    'View this report in your Waves portal · National Poison Control: (800) 222-1222',
-    0, 770, { width: 612, align: 'center' }
-  );
-  // Owner ask 2026-09-28: every report links to the public Products & Safety
-  // page, this Documents-API PDF (visits with no report token) included. The
-  // URL prints in full for paper copies; it fits the band above the page edge.
-  doc.fillColor(MUTED_ON_DARK).text(
-    `Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`,
-    0, 780, { width: 612, align: 'center', link: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol` }
-  );
-  doc.page.margins.bottom = previousBottomMargin;
-  doc.restore();
+  // Owner ask 2026-09-28: every report keeps the public Products & Safety
+  // link. Poison Control remains in the safety notice directly above.
+  drawReportFooter();
 
   doc.end();
 }
