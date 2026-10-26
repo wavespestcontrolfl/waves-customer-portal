@@ -84,7 +84,7 @@ import { ProjectDetail } from "./ProjectsPage";
 import { getAdminUser } from "../../lib/adminAuth";
 import HorizontalScroll from "../../components/HorizontalScroll";
 import useIsMobile from "../../hooks/useIsMobile";
-import { Button, cn } from "../../components/ui";
+import { ActionFeedback, Button, cn } from "../../components/ui";
 import {
   etDateString,
   etStartOfWeek,
@@ -439,6 +439,7 @@ export default function DispatchPageV2({
 } = {}) {
   const isMobile = useIsMobile();
   const [searchParams, setSearchParams] = useSearchParams();
+  const feedbackRetryEnabled = searchParams.get("feedback") === "1";
   // Controlled mode: when AdminDispatchPage drives the active sub-tab via
   // the top-level pill, the internal tab strip + mobile pills + More sheet
   // are hidden and `setActiveTab` becomes a no-op.
@@ -1290,6 +1291,17 @@ export default function DispatchPageV2({
           </button>
           .
         </div>
+      );
+    }
+    if (feedbackRetryEnabled) {
+      return (
+        <ActionFeedback
+          error
+          onRetry={() => fetchSchedule(date)}
+          className="justify-center py-16 text-center"
+        >
+          Failed to load schedule: {error?.message || String(error)}
+        </ActionFeedback>
       );
     }
     return (

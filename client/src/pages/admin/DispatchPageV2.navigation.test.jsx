@@ -65,6 +65,52 @@ function schedulePayload(date, customerName) {
   };
 }
 
+it('retries a generic schedule load failure when feedback=1 and recovers', async () => {
+  let scheduleLoads = 0;
+  let finishRetry;
+  vi.mocked(adminFetch).mockImplementation((url) => {
+    if (url === '/admin/dispatch/products/catalog') return Promise.resolve({ products: [] });
+    if (url === '/admin/schedule?date=2026-09-30') {
+      scheduleLoads += 1;
+      if (scheduleLoads === 1) return Promise.reject(new Error('Network unavailable'));
+      return new Promise((resolve) => { finishRetry = resolve; });
+    }
+    return Promise.resolve({});
+  });
+  render(
+    <MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-30&feedback=1']}>
+      <DispatchPageV2 activeTab="board" />
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Failed to load schedule: Network unavailable');
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  expect(await screen.findByText('Loading schedule…')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+
+  await act(async () => finishRetry(schedulePayload('2026-09-30', 'Recovered visit')));
+  expect(await screen.findByText(/Recovered visit/)).toBeInTheDocument();
+});
+
+it.each(['', '&feedback=0'])(
+  'preserves the static generic schedule error when feedback is not exactly 1: %s',
+  async (feedbackQuery) => {
+    vi.mocked(adminFetch).mockImplementation((url) => (
+      url === '/admin/schedule?date=2026-09-30'
+        ? Promise.reject(new Error('Network unavailable'))
+        : Promise.resolve({ products: [] })
+    ));
+    render(
+      <MemoryRouter initialEntries={[`/admin/dispatch?date=2026-09-30${feedbackQuery}`]}>
+        <DispatchPageV2 activeTab="board" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Failed to load schedule: Network unavailable')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  },
+);
+
 
 vi.mock('../../components/schedule/TimeGridDays', () => ({ default: ({ date, dayCount, onEdit }) => <div>Grid date: {date}<button onClick={() => onEdit(enabledVisit)}>Open {dayCount}-day visit</button></div> }));
 vi.mock('../../components/schedule/CalendarViewsV2', async importOriginal => ({
