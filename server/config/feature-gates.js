@@ -3897,6 +3897,17 @@ const gates = {
   // environment. Kill switch: unset, and a drag lights nothing.
   boardOpenTimes: gateEnvValue('GATE_BOARD_OPEN_TIMES'),
 
+  // New Appointment route times (owner 2026-10-26, "fix both"): the open-times
+  // box on New Appointment runs the same route check as Edit and the board, on
+  // a new stop at the searched address, instead of the older gap check (which
+  // offers no start after 4 PM). The find-time route reads it through
+  // gateEnvValue() at call time. Needs GATE_BEST_TIME_HINTS, GATE_OPEN_TIMES_BOX
+  // and GATE_ADMIN_ARRIVAL_WINDOWS. Suggestions only: the New Appointment save
+  // is unchanged. Dark in every environment. Kill switch: unset, and New
+  // Appointment searches the gaps as before. This entry is for logGateStatus
+  // only.
+  newApptRouteTimes: gateEnvValue('GATE_NEW_APPT_ROUTE_TIMES'),
+
   // New Appointment address-first best times (owner 2026-10-24, replacing the
   // 2026-10-21 Dispatch "Find a time" drawer): office staff on a call with a
   // NEW caller open New Appointment, pick the address in its New customer

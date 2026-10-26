@@ -1844,7 +1844,6 @@
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Demand CS",
               "Talstar P"
             ]
           },
@@ -1852,8 +1851,7 @@
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Talstar P",
-              "Demand CS"
+              "Talstar P"
             ]
           },
           "Applied non-repellent solution to perimeter (6-ft band + crack & crevice)": {
@@ -2328,7 +2326,6 @@
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Demand CS",
               "Talstar P",
               "Alpine WSG"
             ]
