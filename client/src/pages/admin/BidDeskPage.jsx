@@ -3,8 +3,11 @@ import { Gavel } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
-  ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Table, TableColumnPicker, TablePagination, TableToolbar, TBody, TD, TH, THead, Textarea, TR, UiSurface,
+  ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Table, TableColumnPicker, TablePagination, TableSavedViews, TableToolbar, TBody, TD, TH, THead, Textarea, TR, UiSurface,
 } from "../../components/ui";
+import { useAdminTableScroll } from "../../hooks/useAdminTableScroll";
+import { useAdminTableViews } from "../../hooks/useAdminTableViews";
+import { normalizeTableColumns } from "../../lib/adminTableViewStorage";
 import { adminFetch } from "../../lib/adminFetch";
 import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
 import BidChecklistPanel from "./BidChecklistPanel";
@@ -63,6 +66,33 @@ const SORTS = [
   { value: "buyer", label: "Buyer A–Z" },
 ];
 const DEFAULT_PAGE_SIZE = 100;
+const PAGE_SIZES = [25, 50, 100, 500];
+const BID_TABLE_VIEW_DEFAULTS = {
+  filter: "open",
+  showEarlier: true,
+  search: "",
+  sort: "workflow",
+  visibleColumns: ALL_BID_COLUMNS,
+  page: 1,
+  pageSize: DEFAULT_PAGE_SIZE,
+  scrollTop: 0,
+};
+
+// Saved records are browser-owned input. Keep only this table's settings and
+// restore columns in their canonical order, including the required project action.
+function normalizeBidTableState(value) {
+  const state = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    filter: FILTERS.some(({ key }) => key === state.filter) ? state.filter : BID_TABLE_VIEW_DEFAULTS.filter,
+    showEarlier: typeof state.showEarlier === "boolean" ? state.showEarlier : BID_TABLE_VIEW_DEFAULTS.showEarlier,
+    search: typeof state.search === "string" ? state.search.slice(0, 160) : BID_TABLE_VIEW_DEFAULTS.search,
+    sort: SORTS.some(({ value: option }) => option === state.sort) ? state.sort : BID_TABLE_VIEW_DEFAULTS.sort,
+    visibleColumns: normalizeTableColumns(state.visibleColumns, BID_COLUMNS),
+    page: Number.isInteger(state.page) && state.page > 0 ? state.page : BID_TABLE_VIEW_DEFAULTS.page,
+    pageSize: PAGE_SIZES.includes(state.pageSize) ? state.pageSize : BID_TABLE_VIEW_DEFAULTS.pageSize,
+    scrollTop: Number.isFinite(state.scrollTop) && state.scrollTop >= 0 ? state.scrollTop : BID_TABLE_VIEW_DEFAULTS.scrollTop,
+  };
+}
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -374,7 +404,7 @@ function MarkEmail({ onMarked }) {
 
 function BidDeskControls({
   enhanced, search, onSearchChange, filter, onFilterChange, showEarlier, onEarlierChange,
-  sort, onSortChange, visibleColumns, onColumnsChange, onReset, canReset, loadedCount,
+  sort, onSortChange, visibleColumns, onColumnsChange, onReset, canReset, loadedCount, savedViewsControl,
 }) {
   if (!enhanced) {
     return (
@@ -417,6 +447,7 @@ function BidDeskControls({
           </Select>
         </Field>
         <TableColumnPicker label="Bid Desk" columns={BID_COLUMNS} visibleColumns={visibleColumns} onChange={onColumnsChange} />
+        {savedViewsControl}
       </TableToolbar>
       <p className="text-ui-caption text-ink-secondary">Search, filters, sorting, and page counts apply to the loaded bids.</p>
       {loadedCount >= 500 && (
@@ -457,7 +488,7 @@ function BidDeskResults({
           onPageChange={onPageChange}
           onPageSizeChange={onPageSizeChange}
           itemLabel="loaded bids"
-          pageSizeOptions={[25, 50, 100, 500]}
+          pageSizeOptions={PAGE_SIZES}
         />
       )}
     </>
@@ -470,15 +501,17 @@ export default function BidDeskPage({ embedded = false }) {
   const [checklistLive, setChecklistLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState({ text: "", off: false });
-  const [filter, setFilter] = useState("open");
-  const [showEarlier, setShowEarlier] = useState(true);
-  const [search, setSearch] = useState("");
-  const [sort, setSort] = useState("workflow");
-  const [visibleColumns, setVisibleColumns] = useState(ALL_BID_COLUMNS);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const enhancedControls = params.get("tableControls") !== "0";
+  const savedViewsEnabled = enhancedControls && params.get("savedViews") === "1";
   const selectedId = params.get("bid") || "";
+  const tableViews = useAdminTableViews({
+    tableId: "bids",
+    enabled: savedViewsEnabled,
+    defaults: BID_TABLE_VIEW_DEFAULTS,
+    normalize: normalizeBidTableState,
+  });
+  const { state: tableState, setState: setTableState } = tableViews;
+  const { filter, showEarlier, search, sort, visibleColumns, page, pageSize, scrollTop } = tableState;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -515,17 +548,40 @@ export default function BidDeskPage({ embedded = false }) {
   }, [bids, enhancedControls, filter, search, showEarlier, sort]);
   const totalPages = Math.max(1, Math.ceil(shown.length / pageSize));
   useEffect(() => {
-    if (!enhancedControls) return;
-    setPage((current) => Math.min(Math.max(1, current), totalPages));
-  }, [enhancedControls, totalPages]);
+    if (!enhancedControls || loading || error.text) return;
+    const nextPage = Math.min(Math.max(1, page), totalPages);
+    if (nextPage !== page) {
+      setTableState((current) => ({ ...current, page: nextPage, scrollTop: 0 }));
+    }
+  }, [enhancedControls, error.text, loading, page, setTableState, totalPages]);
   const displayed = enhancedControls
     ? shown.slice((page - 1) * pageSize, page * pageSize)
     : shown;
+  const scrollResetKey = useMemo(
+    () => JSON.stringify([filter, showEarlier, search, sort, page, pageSize]),
+    [filter, page, pageSize, search, showEarlier, sort],
+  );
+  const rememberScroll = useCallback((value) => {
+    setTableState((current) => ({ ...current, scrollTop: value }));
+  }, [setTableState]);
+  useAdminTableScroll({
+    enabled: savedViewsEnabled && tableViews.available,
+    active: !selectedId,
+    ready: !loading && !error.text,
+    scope: tableViews.storageKey,
+    scrollTop,
+    onScroll: rememberScroll,
+    resetKey: scrollResetKey,
+  });
   const resetEnhancedControls = () => {
-    setSearch("");
-    setFilter("open");
-    setShowEarlier(true);
-    setPage(1);
+    setTableState((current) => ({
+      ...current,
+      search: BID_TABLE_VIEW_DEFAULTS.search,
+      filter: BID_TABLE_VIEW_DEFAULTS.filter,
+      showEarlier: BID_TABLE_VIEW_DEFAULTS.showEarlier,
+      page: 1,
+      scrollTop: 0,
+    }));
   };
   const enhancedControlsChanged = Boolean(search) || filter !== "open" || !showEarlier;
 
@@ -550,18 +606,19 @@ export default function BidDeskPage({ embedded = false }) {
           <BidDeskControls
             enhanced={enhancedControls}
             search={search}
-            onSearchChange={(value) => { setSearch(value); setPage(1); }}
+            onSearchChange={(value) => setTableState((current) => ({ ...current, search: value, page: 1, scrollTop: 0 }))}
             filter={filter}
-            onFilterChange={(value) => { setFilter(value); setPage(1); }}
+            onFilterChange={(value) => setTableState((current) => ({ ...current, filter: value, page: 1, scrollTop: 0 }))}
             showEarlier={showEarlier}
-            onEarlierChange={(value) => { setShowEarlier(value); setPage(1); }}
+            onEarlierChange={(value) => setTableState((current) => ({ ...current, showEarlier: value, page: 1, scrollTop: 0 }))}
             sort={sort}
-            onSortChange={(value) => { setSort(value); setPage(1); }}
+            onSortChange={(value) => setTableState((current) => ({ ...current, sort: value, page: 1, scrollTop: 0 }))}
             visibleColumns={visibleColumns}
-            onColumnsChange={setVisibleColumns}
+            onColumnsChange={(value) => setTableState((current) => ({ ...current, visibleColumns: value }))}
             onReset={resetEnhancedControls}
             canReset={enhancedControlsChanged}
             loadedCount={bids.length}
+            savedViewsControl={savedViewsEnabled ? <TableSavedViews label="Bid Desk" controller={tableViews} /> : null}
           />
 
           <BidDeskResults
@@ -578,8 +635,8 @@ export default function BidDeskPage({ embedded = false }) {
             page={page}
             totalPages={totalPages}
             pageSize={pageSize}
-            onPageChange={setPage}
-            onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
+            onPageChange={(value) => setTableState((current) => ({ ...current, page: value, scrollTop: 0 }))}
+            onPageSizeChange={(size) => setTableState((current) => ({ ...current, pageSize: size, page: 1, scrollTop: 0 }))}
           />
 
           {selectedId && (

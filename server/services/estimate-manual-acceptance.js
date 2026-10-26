@@ -1214,8 +1214,13 @@ async function planPostCommitSteps(trx, ctx, outcome) {
       termiteProgram = require('./termite-program-agreement').collectTermiteFacts(parseEstimateData(acceptedEstimate.estimate_data))?.hasProgram === true;
     } catch { termiteProgram = null; }
   }
+  const consumerNoticeLive = require('../config/feature-gates').manualAcceptConsumerNoticeSendLive();
+  const noticeCustomerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
+  const { sends: consumerNoticeSends, recipients: consumerNoticeRecipients } = collecting && consumerNoticeLive && noticeCustomerId
+    ? await require('./estimate-consumer-notice').consumerNoticeCardFacts(trx, acceptedEstimate, noticeCustomerId)
+    : { sends: null, recipients: null };
   const plan = AcceptEffects.planPostCommit({
-    billingTerm: ctx.billingTerm, acceptedEstimate, conversion, proposalCustomer, emailInputs, termiteProgram,
+    billingTerm: ctx.billingTerm, acceptedEstimate, conversion, proposalCustomer, emailInputs, termiteProgram, consumerNoticeLive, consumerNoticeSends, consumerNoticeRecipients,
   });
   // A carded accept pins each step's concrete target (resolved here, under the
   // locks); the page's own accept has no card and keeps the unpinned plan.

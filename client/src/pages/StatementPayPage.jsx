@@ -28,7 +28,6 @@ import { DOC, DOC_FONT, FS, FW, LH, SP, RADIUS, SHADOW } from "../theme-doc";
 import { WavesShell, CustomerColumn, BrandCard, BrandButton, SerifHeading, HelpPhoneLink, PublicStateCard } from "../components/brand";
 import PublicLoadError from '../components/PublicLoadError';
 import DocumentActionBar from "../components/DocumentActionBar";
-import { FieldDocumentBody, FieldMasthead, FieldTitle, FieldFooter } from "../components/FieldDocument";
 import { getStripe } from "../lib/stripeLoader";
 import { microdepositDetailFromNextAction, microdepositGuidance } from "../lib/microdeposit";
 
@@ -590,16 +589,16 @@ export default function StatementPayPage() {
     <>
       {/* No server-side statement PDF render — Share + Print only. */}
       <DocumentActionBar shareTitle={`Waves statement ${statement.number || ''}`.trim()} />
-      <FieldDocumentBody>
-      <FieldMasthead />
-      <FieldTitle eyebrow="Account statement" title={`Pay statement ${statement.number}`} reference={dueLabel ? `Due ${dueLabel}` : undefined} />
+      {/* Print keeps the statement and drops the payment controls (the Print button prints this page). */}
+      <style>{'@media print { .waves-no-print { display: none !important; } }'}</style>
+      <BrandCard padding={24}>
+      <SerifHeading style={{ marginBottom: 6 }}>Pay statement {statement.number}</SerifHeading>
       <p style={{ margin: "0 0 20px", fontSize: FS.body, color: DOC.muted }}>
         {billTo?.company ? `Billed to ${billTo.company}. ` : ""}
         {statement.terms ? `${termLabel(statement.terms)}. ` : ""}
         {dueLabel ? `Due ${dueLabel}.` : ""}
       </p>
 
-      <div className="field-section-heading">Account activity</div>
       <div style={{ marginBottom: SP.lg }}>
         {(lines || []).map((l, i) => (
           <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: SP.sm, padding: "6px 0", borderBottom: `1px solid ${DOC.border}`, fontSize: FS.body, color: DOC.ink }}>
@@ -620,10 +619,7 @@ export default function StatementPayPage() {
         </div>
       </div>
 
-      <FieldFooter label="Account statement" reference={statement.number} />
-      </FieldDocumentBody>
-      <BrandCard className="waves-field-no-print" padding={24} style={{ marginTop: SP.lg }}>
-
+      <div className="waves-no-print">
       {payNotice && (
         <p style={{ fontSize: FS.body, color: DOC.danger, marginBottom: SP.sm, lineHeight: LH.body }}>{payNotice}</p>
       )}
@@ -680,6 +676,8 @@ export default function StatementPayPage() {
           onFinalizeFailed={resetPaymentIntent}
         />
       )}
+
+      </div>
 
       <p style={{ marginTop: SP.lg, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
         Questions about this statement? <HelpPhoneLink tone="dark" inline /> or reply to the email it came from.

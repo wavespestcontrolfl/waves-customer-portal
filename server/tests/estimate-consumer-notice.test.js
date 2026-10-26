@@ -15,12 +15,20 @@ jest.mock('../services/consumer-notices', () => ({
   ...jest.requireActual('../services/consumer-notices'),
   findConsumerNotice: jest.fn(),
 }));
+jest.mock('../services/document-contract-delivery', () => ({ deliverDocumentRequestChannels: jest.fn() }));
+jest.mock('../services/admin-alert-compose', () => ({
+  ...jest.requireActual('../services/admin-alert-compose'),
+  raiseAdminAlert: jest.fn().mockResolvedValue({ id: 'alert-1' }),
+}));
 
 const { findConsumerNotice, CONSUMER_NOTICE_TEMPLATE_KEY } = require('../services/consumer-notices');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { deliverDocumentRequestChannels } = require('../services/document-contract-delivery');
+const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { TEMPLATE: SEED } = require('../models/migrations/20261024140000_seed_fdacs_13692_consumer_notice');
 const {
-  SNAPSHOT_SOURCE, estimateNeedsConsumerNotice, consumerNoticeState, consumerNoticeCtaFor, consumerNoticeBlocksAccept, ensureEstimateConsumerNotice,
+  SNAPSHOT_SOURCE, MANUAL_ACCEPT_SOURCE, estimateNeedsConsumerNotice, consumerNoticeState, consumerNoticeCtaFor, consumerNoticeBlocksAccept,
+  ensureEstimateConsumerNotice, sendManualAcceptConsumerNotice, consumerNoticeRecipients, consumerNoticeTarget, alertManualAcceptConsumerNoticeSkipped,
 } = require('../services/estimate-consumer-notice');
 
 const req = { ip: '203.0.113.9', get: () => 'jest-agent' };
@@ -91,6 +99,7 @@ function makeDb({ contracts = [], technicians = [], customer = CUSTOMER, templat
       whereIn(col, vals) { if (col === 'status') q.statusIn = vals; return api; },
       whereRaw(_sql, binds) { q.source = binds[0]; return api; },
       orderByRaw() { return api; },
+      orderBy() { return api; },
       forUpdate() { state.locks.push(table); return api; },
       limit() { return api; },
       async select() {
@@ -376,5 +385,194 @@ describe('ensureEstimateConsumerNotice', () => {
     const result = await ensureEstimateConsumerNotice({ estimate: termite, req, conn: database });
     expect(result).toMatchObject({ ok: false, status: 409, code: 'template_unavailable' });
     expect(state.writes).toEqual([]);
+  });
+});
+
+// GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND (owner 2026-10-26): after the office's Mark accepted, a termite estimate
+// whose customer has no signed notice gets it by email and text; anything the office must finish rings the bell.
+describe('sendManualAcceptConsumerNotice', () => {
+  const accepted = estimate([{ service: 'termite_bait', name: 'Termite Bait Stations' }], [], { status: 'accepted' });
+  const delivered = (contractId) => ({ ok: true, deliveries: [{ channel: 'email', ok: true }, { channel: 'sms', ok: true }], contractId });
+
+  beforeEach(() => {
+    process.env.GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND = 'true';
+    deliverDocumentRequestChannels.mockImplementation(async (contractId) => delivered(contractId));
+  });
+  afterAll(() => { delete process.env.GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND; });
+
+  test('gate off: nothing is read or sent', async () => {
+    delete process.env.GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND;
+    const { database, state } = makeDb({ estimateRow: accepted });
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database })).toEqual({ skipped: 'gate_off' });
+    expect(state.writes).toEqual([]);
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['an estimate with no termite line', estimate([PEST], [], { status: 'accepted' }), 'no_termite_line'],
+    ['an estimate that is not accepted', estimate([{ service: 'termite_bait', name: 'Termite Bait Stations' }]), 'not_applicable'],
+    ['an estimate with no customer', estimate([{ service: 'termite_bait', name: 'Termite Bait Stations' }], [], { status: 'accepted', customer_id: null }), 'not_applicable'],
+  ])('%s sends nothing', async (_label, row, skipped) => {
+    const { database, state } = makeDb({ estimateRow: row, technicians: [TECH] });
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database })).toEqual({ skipped });
+    expect(state.writes).toEqual([]);
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a notice already signed sends nothing', async () => {
+    findConsumerNotice.mockResolvedValue({ source: 'paper' });
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH] });
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database })).toEqual({ skipped: 'already_signed' });
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+  });
+
+  test('no notice yet: issues one marked as a Mark accepted notice and sends it by email and text', async () => {
+    const { database, state } = makeDb({ estimateRow: accepted, technicians: [TECH] });
+    const result = await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database });
+    expect(state.contracts).toHaveLength(1);
+    const [row] = state.contracts;
+    // Not the estimate page's marker: a link opened from a text offers no "Back to your estimate".
+    expect(row.document_variables_snapshot.estimate).toEqual({ id: 'est-1', source: MANUAL_ACCEPT_SOURCE });
+    expect(state.events.every((e) => e.actor_type === 'system')).toBe(true);
+    expect(deliverDocumentRequestChannels).toHaveBeenCalledWith(row.id, { actorType: 'system' }, expect.objectContaining({ channels: ['email', 'sms'] }));
+    expect(result).toEqual({ sent: true, contractId: row.id, channels: ['email', 'sms'] });
+    expect(state.writes.filter((w) => w.table === 'estimates')).toEqual([]);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('the gate turned off while the reads were pending: nothing is sent', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    findConsumerNotice.mockImplementation(async () => { delete process.env.GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND; return null; });
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database })).toEqual({ skipped: 'gate_off', contractId: 'contract-open' });
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('an open notice from any source is resent, not issued again', async () => {
+    const { database, state } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const result = await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database });
+    expect(state.writes).toEqual([]);
+    expect(deliverDocumentRequestChannels).toHaveBeenCalledWith('contract-open', { actorType: 'system' }, expect.objectContaining({ channels: ['email', 'sms'] }));
+    expect(result).toMatchObject({ sent: true, contractId: 'contract-open' });
+  });
+
+  test('neither channel delivered: the office bell rings with the customer name', async () => {
+    deliverDocumentRequestChannels.mockResolvedValue({ ok: false, deliveries: [{ channel: 'email', ok: false }, { channel: 'sms', ok: false }] });
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database })).toMatchObject({ sent: false, reason: 'not_delivered' });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [, spec, opts] = raiseAdminAlert.mock.calls[0];
+    expect(spec).toMatchObject({ area: 'Estimates', severity: 'needs-you', subject: { type: 'estimate', id: 'est-1' }, why: 'Neither the email nor the text went out.' });
+    expect(spec.action).toContain('Pat Owner');
+    expect(opts).toMatchObject({ bell: true, dedupeKey: 'manual-accept-consumer-notice:est-1' });
+    // The real composer accepts it (docs/admin-notifications.md: headline length, one-sentence why, no codes).
+    expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('no name to print as the representative: nothing is sent and the office bell rings', async () => {
+    const { database, state } = makeDb({ estimateRow: accepted, technicians: [] });
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database })).toEqual({ sent: false, reason: 'no_representative' });
+    expect(state.contracts).toEqual([]);
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(raiseAdminAlert.mock.calls[0][1])).not.toThrow();
+  });
+
+  test('the card\'s pinned recipients unchanged: it sends', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = await consumerNoticeTarget(database, 'est-1', 'cust-1');
+    expect(expected).toMatchObject({ estimate_id: 'est-1', customer_id: 'cust-1', contract_id: 'contract-open' });
+    expect(expected.email_key).toMatch(/^[a-f0-9]{24}$/);
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: true });
+  });
+
+  test('a new notice issued after the card compares only its recipients', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH] });
+    const expected = await consumerNoticeTarget(database, 'est-1', 'cust-1');
+    expect(expected.contract_id).toBeNull();
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: true });
+  });
+
+  test('a carded send hands delivery the confirmed recipient keys and only the channels the card named', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = { ...(await consumerNoticeTarget(database, 'est-1', 'cust-1')), phone_key: null };
+    await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database });
+    expect(deliverDocumentRequestChannels).toHaveBeenCalledWith('contract-open', { actorType: 'system' }, expect.objectContaining({
+      channels: ['email'], expectedRecipientKeys: { email: expected.email_key, sms: null },
+    }));
+  });
+
+  test('delivery refused a changed recipient: the bell says so, even when the other channel went out', async () => {
+    deliverDocumentRequestChannels.mockResolvedValue({ ok: true, deliveries: [{ channel: 'email', ok: false, code: 'RECIPIENT_CHANGED' }, { channel: 'sms', ok: true }] });
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = await consumerNoticeTarget(database, 'est-1', 'cust-1');
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: true, reason: 'recipient_changed' });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(raiseAdminAlert.mock.calls[0][1])).not.toThrow();
+  });
+
+  test('a different open notice than the card saw: nothing is sent and the bell rings', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = { ...(await consumerNoticeTarget(database, 'est-1', 'cust-1')), contract_id: 'contract-other' };
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: false, reason: 'recipient_changed' });
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('a card that showed no email and no phone sends nothing and rings the bell', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = { ...(await consumerNoticeTarget(database, 'est-1', 'cust-1')), email_key: null, phone_key: null };
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: false, reason: 'not_delivered' });
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+  });
+
+  test('a skipped carded send rings the bell naming the customer, and never throws', async () => {
+    const { database } = makeDb({});
+    await alertManualAcceptConsumerNoticeSkipped({ estimateId: 'est-1', customerId: 'cust-1', conn: database });
+    expect(raiseAdminAlert.mock.calls[0][1]).toMatchObject({ subject: { type: 'estimate', id: 'est-1' } });
+    expect(raiseAdminAlert.mock.calls[0][1].action).toContain('Pat Owner');
+    raiseAdminAlert.mockRejectedValueOnce(new Error('bell down'));
+    await expect(alertManualAcceptConsumerNoticeSkipped({ estimateId: 'est-1', customerId: 'cust-1', conn: database })).resolves.toBeUndefined();
+  });
+
+  test('the first read failing still rings the bell for the accepted estimate', async () => {
+    const database = jest.fn((table) => {
+      if (table === 'estimates') return { where: () => ({ first: async () => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); } }) };
+      return makeDb().database(table);
+    });
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', conn: database })).toEqual({ sent: false, reason: 'error' });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert.mock.calls[0][1]).toMatchObject({ subject: { type: 'estimate', id: 'est-1' } });
+    expect(raiseAdminAlert.mock.calls[0][1].action).toContain('Pat Owner');
+  });
+
+  test('a read error never throws: it rings the bell', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH] });
+    findConsumerNotice.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database })).toEqual({ sent: false, reason: 'error' });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Where a send would go: the Document Requests delivery's own rules (open notice's recipient, else the customer's).
+describe('consumerNoticeRecipients', () => {
+  const withPrefs = (prefs, opts) => {
+    const { database } = makeDb(opts);
+    return (table) => (table === 'notification_prefs' ? { where: () => ({ first: async () => prefs }) } : database(table));
+  };
+
+  test('the customer\'s email and phone when no notice is open', async () => {
+    expect(await consumerNoticeRecipients(withPrefs(null, {}), 'cust-1')).toEqual({ contractId: null, email: 'pat@example.com', phone: '+19415550100' });
+  });
+
+  test('the open notice\'s own recipient email wins, as delivery reads it', async () => {
+    const conn = withPrefs(null, { contracts: [openNotice({ recipient_email: 'Other@Example.com' })] });
+    expect(await consumerNoticeRecipients(conn, 'cust-1')).toEqual({ contractId: 'contract-open', email: 'other@example.com', phone: '+19415550100' });
+  });
+
+  test('email turned off: no email; a phone that is not the one on file: no text', async () => {
+    const conn = withPrefs({ email_enabled: false }, { contracts: [openNotice({ recipient_phone: '+19415550199' })] });
+    expect(await consumerNoticeRecipients(conn, 'cust-1')).toEqual({ contractId: 'contract-open', email: '', phone: '' });
   });
 });

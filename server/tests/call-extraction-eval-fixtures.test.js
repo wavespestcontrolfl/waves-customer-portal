@@ -18,6 +18,7 @@ const ALLOWED_EXPECTATION_KEYS = new Set([
   'current_flags_exclude',
   'current_call_nature_in',
   'current_recommended_disposition_in',
+  'current_callback_asked',
   'legacy_schedule_variance_fields',
 ]);
 

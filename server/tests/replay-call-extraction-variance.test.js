@@ -425,6 +425,27 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 
+  test('checks the production callback verdict instead of the disposition label', () => {
+    const asked = validResult({ current: { status: 'valid', wouldAutoRoute: false, flags: [], schedulingStatus: 'none', callbackAsked: true } });
+    const notAsked = validResult({ current: { status: 'valid', wouldAutoRoute: false, flags: [], schedulingStatus: 'none', callbackAsked: false } });
+
+    expect(evaluateFixtureExpectation(asked, { expect: { current_callback_asked: true } }))
+      .toMatchObject({ status: 'pass', checked: 1, failures: [] });
+
+    const miss = evaluateFixtureExpectation(notAsked, { expect: { current_callback_asked: true } });
+    expect(miss.status).toBe('fail');
+    expect(miss.failures[0]).toMatchObject({ name: 'current_callback_asked', actual: false, expected: true });
+
+    // A replay error or missing extraction carries null, which never matches a boolean.
+    const nullAsked = evaluateFixtureExpectation(validResult(), { expect: { current_callback_asked: true } });
+    expect(nullAsked.failures[0]).toMatchObject({ name: 'current_callback_asked' });
+
+    expect(evaluateFixtureExpectation(asked, { expect: { current_callback_asked: 'yes' } })).toMatchObject({
+      status: 'fail',
+      failures: expect.arrayContaining([expect.objectContaining({ name: 'fixture_error:invalid_current_callback_asked' })]),
+    });
+  });
+
   test('fails fixture expectations with empty, unknown, or invalid checks', () => {
     expect(evaluateFixtureExpectation(validResult(), { expect: {} })).toMatchObject({
       status: 'fail',
