@@ -345,7 +345,7 @@ function buildDetail({ diff, partners, offers, warnings, today }) {
     if (partners.available != null) bits.push(`${partners.available.toLocaleString('en-US')} points available${partners.dollarValue != null ? ` ($${partners.dollarValue.toFixed(2)})` : ''}`);
     if (partners.expiringPoints > 0) bits.push(`${partners.expiringPoints.toLocaleString('en-US')} expire ${partners.expiresOn ? shortDate(partners.expiresOn) : '(date not read)'}`);
     if (partners.status) bits.push(`status ${partners.status}`);
-    if (bits.length) out.push('PARTNERS PROGRAM', `- ${bits.join('; ')}`, '');
+    if (bits.length) out.push(partners.carriedForward ? 'PARTNERS PROGRAM (last reading; the page was not read this run)' : 'PARTNERS PROGRAM', `- ${bits.join('; ')}`, '');
   }
   if (!diff.baseline) section(`ALL CURRENT (${diff.live.length})`, diff.live);
   if (offers && (offers.turf || offers.pest)) {
@@ -362,7 +362,11 @@ function buildDetail({ diff, partners, offers, warnings, today }) {
 // ---- reading the site -------------------------------------------------------------
 
 async function readPageText(page, url) {
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+  const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+  // page.goto() resolves, it does not throw, on an HTTP 404/500 (Codex #6800 r1 P2). An error page
+  // must fail this read, so the caller's warning / carry-forward branch runs instead of parsing it.
+  const status = response && typeof response.status === 'function' ? Number(response.status()) : null;
+  if (status != null && status >= 400) throw new Error(`SiteOne answered HTTP ${status}`);
   if (typeof page.waitForLoadState === 'function') await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   const landed = String(typeof page.url === 'function' ? page.url() : url);
   if (!/^https:\/\/([a-z0-9-]+\.)*siteone\.com\//i.test(landed)) throw new Error(`redirected off siteone.com (${landed.slice(0, 60)})`);
@@ -389,7 +393,10 @@ async function readAll(page, prev) {
   const turfText = await safe('Florida turf offer', URLS.turf);
   const pestText = await safe('Pest management offer', URLS.pest);
   const partnersText = await safe('Partners page', URLS.partners);
-  const partners = partnersText != null ? parsePartnersPage(partnersText) : null;
+  let partners = partnersText != null ? parsePartnersPage(partnersText) : null;
+  // Unread is not "no points": keep last month's reading, marked, so an expiring-points alert
+  // cannot drop out for a month and the snapshot never records empty points (Codex #6800 r1 P2).
+  if (partners == null && prev && prev.points) partners = { ...prev.points, carriedForward: true };
   return {
     programs: dedupe(programs),
     partners,

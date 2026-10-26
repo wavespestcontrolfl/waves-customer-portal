@@ -88,9 +88,16 @@ function fakePage(pages = {}) {
   const st = { url: 'https://www.siteone.com/', visited: [] };
   return {
     st,
-    goto: async (u) => { st.visited.push(u); st.url = u; if (pages[u] instanceof Error) throw pages[u]; },
+    // A page value may be text, an Error (goto throws), or { status, text } (an HTTP error page:
+    // goto resolves with that status, as Playwright does for a 404/500).
+    goto: async (u) => {
+      st.visited.push(u); st.url = u;
+      const p = pages[u];
+      if (p instanceof Error) throw p;
+      return { status: () => (p && typeof p === 'object' && p.status ? p.status : 200) };
+    },
     url: () => st.url,
-    evaluate: async () => { const t = pages[st.url]; return typeof t === 'string' ? t : ''; },
+    evaluate: async () => { const t = pages[st.url]; return typeof t === 'string' ? t : (t && typeof t.text === 'string' ? t.text : ''); },
     waitForLoadState: async () => {},
   };
 }
@@ -448,6 +455,41 @@ describe('runSiteOneProgramsCheck', () => {
       const saved = JSON.parse(h.conn.state.snapshot);
       expect(saved.programs.filter((p) => p.source === 'promo')).toHaveLength(2);
       expect(h.alerts[0].opts.detail).toContain('NOT READ THIS RUN');
+    });
+
+    test('an HTTP error page is not read as the page: Promotions 500 → carried, not new, warning names the status (Codex #6800 r1 P2)', async () => {
+      const first = harness();
+      await runSiteOneProgramsCheck(first.deps);
+      const pages = { ...PAGES, 'https://www.siteone.com/en/Promotions': { status: 500, text: 'Order Like a Pro\nSeptember 1 - October 31, 2026\nService unavailable' } };
+      const h = harness({ snapshot: first.conn.state.snapshot, pages });
+      const r = await runSiteOneProgramsCheck(h.deps);
+      expect(r.added).toBe(0);
+      expect(r.warnings.join(' ')).toMatch(/Promotions page: SiteOne answered HTTP 500/);
+      const saved = JSON.parse(h.conn.state.snapshot);
+      expect(saved.programs.filter((p) => p.source === 'promo')).toHaveLength(2);
+    });
+
+    test('Partners page HTTP 500 → last reading kept and marked, never empty points; the points window still uses it (Codex #6800 r1 P2)', async () => {
+      const prevPoints = { available: 4321, dollarValue: 23.45, expiringPoints: 1234, expiresOn: '2026-12-01', status: 'ENROLLED' };
+      const first = harness();
+      await runSiteOneProgramsCheck(first.deps);
+      const snap = JSON.parse(first.conn.state.snapshot);
+      snap.points = prevPoints;
+      const pages = { ...PAGES, 'https://www.siteone.com/en/my-account/accountPartnerProgram': { status: 500, text: 'Error' } };
+      const h = harness({ snapshot: JSON.stringify(snap), pages });
+      const r = await runSiteOneProgramsCheck(h.deps);
+      expect(r.warnings.join(' ')).toMatch(/Partners page: SiteOne answered HTTP 500/);
+      expect(r.pointsSoon).toBe(true);
+      expect(JSON.parse(h.conn.state.snapshot).points).toEqual({ ...prevPoints, carriedForward: true });
+      expect(h.alerts[0].opts.detail).toContain('PARTNERS PROGRAM (last reading; the page was not read this run)');
+    });
+
+    test('/eop HTTP 404 → throws, one failure alert, no snapshot write', async () => {
+      const h = harness({ pages: { ...PAGES, 'https://www.siteone.com/eop': { status: 404, text: EOP_TEXT } } });
+      await expect(runSiteOneProgramsCheck(h.deps)).rejects.toThrow(/HTTP 404/);
+      expect(h.alerts).toHaveLength(1);
+      expect(h.alerts[0].spec.action).toBe('SiteOne programs check failed');
+      expect(h.conn.state.writes).toHaveLength(0);
     });
 
     test('failure: /eop shows 0 programs → throws, one failure alert, no snapshot write', async () => {
