@@ -266,24 +266,38 @@ async function listInboundReferrals(conn = db) {
   return items;
 }
 
+// The referred customer, checked: listed evidence, a plan, and a phone the
+// credit can match (creditReferralOnFirstService finds the referral by phone).
+async function eligibleReferee(conn, customerId, { lock = false } = {}) {
+  let query = conn('customers').where({ id: customerId }).whereNull('deleted_at');
+  if (lock) query = query.forUpdate();
+  const referee = await query.first(CUSTOMER_COLUMNS);
+  if (!referee) throw inboundError(404, 'NOT_FOUND', 'Customer not found');
+  const evidence = evidenceFor(referee);
+  if (!evidence) throw inboundError(409, 'NO_REFERRAL_EVIDENCE', 'This customer did not come in through a referral link or name a referrer');
+  if (!onPlan(referee)) throw inboundError(409, 'NOT_ON_PLAN', 'This customer is not on a WaveGuard plan');
+  const phone = normalizePhone(referee.phone);
+  const variants = phoneMatchDigits(phone || '');
+  if (!variants.length) throw inboundError(409, 'NO_PHONE', 'This customer has no valid phone number, so the referral cannot pay');
+  return { referee, evidence, phone, variants };
+}
+
+async function checkedReferrer(conn, referrerCustomerId, referee) {
+  const referrer = await conn('customers').where({ id: referrerCustomerId }).whereNull('deleted_at').first(CUSTOMER_COLUMNS);
+  if (!referrer) throw inboundError(404, 'REFERRER_NOT_FOUND', 'Referrer not found');
+  if (sameHousehold(referrer, referee)) throw inboundError(400, 'SELF_REFERRAL', 'A customer cannot refer their own household');
+  return referrer;
+}
+
 /**
  * The office confirms `referrerCustomerId` as the person who referred
  * `customerId`. Makes the referral row, converts it, and posts both credits
  * now (quietly) when a performed recurring visit is on record.
  */
 async function confirmInboundReferral({ customerId, referrerCustomerId, reviewedBy = null }) {
-  const referee = await db('customers').where({ id: customerId }).whereNull('deleted_at').first(CUSTOMER_COLUMNS);
-  if (!referee) throw inboundError(404, 'NOT_FOUND', 'Customer not found');
-  const evidence = evidenceFor(referee);
-  if (!evidence) throw inboundError(409, 'NO_REFERRAL_EVIDENCE', 'This customer did not come in through a referral link or name a referrer');
-  if (!onPlan(referee)) throw inboundError(409, 'NOT_ON_PLAN', 'This customer is not on a WaveGuard plan');
-  const refereePhone = normalizePhone(referee.phone);
-  const variants = phoneMatchDigits(refereePhone || '');
-  if (!variants.length) throw inboundError(409, 'NO_PHONE', 'This customer has no valid phone number, so the referral cannot pay');
-
-  const referrer = await db('customers').where({ id: referrerCustomerId }).whereNull('deleted_at').first(CUSTOMER_COLUMNS);
-  if (!referrer) throw inboundError(404, 'REFERRER_NOT_FOUND', 'Referrer not found');
-  if (sameHousehold(referrer, referee)) throw inboundError(400, 'SELF_REFERRAL', 'A customer cannot refer their own household');
+  // Unlocked first pass: refuse early, before the referrer is enrolled.
+  const { referee } = await eligibleReferee(db, customerId);
+  const referrer = await checkedReferrer(db, referrerCustomerId, referee);
 
   // Enroll (or resolve the household promoter of) the referrer. Idempotent,
   // sends nothing; a confirm refused below leaves only a normal enrollment.
@@ -300,25 +314,28 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
   }
   const settings = await engine.getSettings();
 
-  const referral = await db.transaction(async (trx) => {
+  const { referral, current } = await db.transaction(async (trx) => {
     // One answer per customer: the row lock serializes a double tap and a
-    // confirm racing a dismissal.
-    await trx('customers').where({ id: referee.id }).forUpdate().first('id');
-    if (await trx('referral_inbound_reviews').where({ customer_id: referee.id }).first('id')) {
+    // confirm racing a dismissal. Everything is checked again on the locked
+    // row: a phone, plan or household change that committed while this
+    // waited decides, never the first pass.
+    const locked = await eligibleReferee(trx, customerId, { lock: true });
+    await checkedReferrer(trx, referrerCustomerId, locked.referee);
+    if (await trx('referral_inbound_reviews').where({ customer_id: customerId }).first('id')) {
       throw inboundError(409, 'ALREADY_REVIEWED', 'This customer was already confirmed or dismissed');
     }
-    const [sql, bindings] = digitsInSql('referee_phone', variants);
+    const [sql, bindings] = digitsInSql('referee_phone', locked.variants);
     if (await trx('referrals').whereRaw(sql, bindings).first('id')) {
       throw inboundError(409, 'ALREADY_REFERRED', 'A referral already names this customer');
     }
     const [row] = await trx('referrals').insert({
       referrer_customer_id: promoter.customer_id,
-      referee_name: (fullName(referee) || 'Friend').slice(0, 100),
-      referee_phone: refereePhone,
-      referee_email: referee.email ? String(referee.email).trim().slice(0, 150) : null,
+      referee_name: (fullName(locked.referee) || 'Friend').slice(0, 100),
+      referee_phone: locked.phone,
+      referee_email: locked.referee.email ? String(locked.referee.email).trim().slice(0, 150) : null,
       referral_code: promoter.referral_code,
       status: 'pending',
-      source: evidence.source === 'link' ? 'inbound_link' : 'inbound_call',
+      source: locked.evidence.source === 'link' ? 'inbound_link' : 'inbound_call',
       promoter_id: promoter.id,
       referrer_reward_amount: settings.referrer_reward_cents / 100,
       referrer_reward_status: 'pending',
@@ -327,12 +344,12 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
       .increment({ total_referrals_sent: 1 })
       .update({ last_referral_at: new Date(), updated_at: new Date() });
     await trx('referral_inbound_reviews').insert({
-      customer_id: referee.id,
+      customer_id: customerId,
       outcome: 'confirmed',
       referral_id: row.id,
       reviewed_by: reviewedBy,
     });
-    return row;
+    return { referral: row, current: locked };
   });
 
   // Post-commit, the existing steps. Each is idempotent and re-checks its own
@@ -341,9 +358,9 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
   const result = { referralId: referral.id, converted: false, creditsNow: false, credited: null, error: null };
   try {
     const conversion = await engine.convertReferral(referral.id, {
-      customerId: referee.id,
-      tier: referee.waveguard_tier,
-      monthlyValue: Number(referee.monthly_rate) || null,
+      customerId,
+      tier: current.referee.waveguard_tier,
+      monthlyValue: Number(current.referee.monthly_rate) || null,
     });
     result.converted = !conversion.alreadyConverted;
   } catch (err) {
@@ -353,21 +370,21 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
   }
 
   const firstVisit = await performedRecurringVisits(db)
-    .where('ss.customer_id', referee.id)
+    .where('ss.customer_id', customerId)
     .orderBy('ss.scheduled_date', 'asc')
     .orderBy('ss.id', 'asc')
     .first('ss.id');
   result.creditsNow = Boolean(firstVisit);
   if (firstVisit && settings.require_service_completion) {
     try {
-      const credit = await engine.creditReferralOnFirstService({ customerId: referee.id, serviceId: firstVisit.id, notify: false });
+      const credit = await engine.creditReferralOnFirstService({ customerId, serviceId: firstVisit.id, notify: false });
       result.credited = credit ? { referrerDollars: credit.referrerDollars, refereeDollars: credit.refereeDollars } : null;
     } catch (err) {
       logger.warn(`[referral-inbound] credit failed for referral ${referral.id}: ${err.code || err.message}`);
       result.error = 'credit_failed';
     }
   }
-  logger.info(`[referral-inbound] referral ${referral.id} confirmed (${evidence.source}); converted=${result.converted} credited=${Boolean(result.credited)}`);
+  logger.info(`[referral-inbound] referral ${referral.id} confirmed (${current.evidence.source}); converted=${result.converted} credited=${Boolean(result.credited)}`);
   return result;
 }
 

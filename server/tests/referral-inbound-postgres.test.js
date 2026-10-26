@@ -369,6 +369,25 @@ jest.mock('../services/customer-credit', () => ({
     expect(await db('referrals').count('* as n').first()).toEqual({ n: '1' });
   });
 
+  test('a phone change that commits while the confirm waits on the row lock decides the referral', async () => {
+    const referrer = await customer({ referral_code: 'WAVES-JANE' });
+    const friend = await linkCustomer('WAVES-JANE');
+    const newPhone = '+19415550177';
+    const holder = await db.transaction();
+    let pending;
+    try {
+      await holder('customers').where({ id: friend.id }).update({ phone: newPhone });
+      pending = inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id });
+      await new Promise((resolve) => { setTimeout(resolve, 300); });
+      await holder.commit();
+    } catch (err) {
+      await holder.rollback().catch(() => {});
+      throw err;
+    }
+    const result = await pending;
+    expect((await db('referrals').where({ id: result.referralId }).first()).referee_phone).toBe(newPhone);
+  });
+
   test('dismiss removes the customer from the list and blocks a later confirm', async () => {
     const referrer = await customer({ referral_code: 'WAVES-JANE' });
     const friend = await linkCustomer('WAVES-JANE');
