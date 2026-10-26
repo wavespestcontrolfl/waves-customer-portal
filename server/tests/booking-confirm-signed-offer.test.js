@@ -706,13 +706,20 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
 
     // Codex #6869 P1: the offer was built at customerBookingLocation's fallback for a customer with no saved pin, so
     // the commit re-derives that fallback (and stamps it on the visit) instead of failing its own location fence.
-    test('a customer with no saved pin books at the canonical fallback its offer used, stamped on the visit', async () => {
+    // Both estimate-page bookings (an estimateGuard) offer at customerBookingLocation: the paid first visit and the free
+    // estimate assessment (no billing).
+    const okGuard = () => ({ estimateId: EST_ID, revalidate: jest.fn().mockResolvedValue('ok') });
+    test.each([
+      ['the paid first visit', {}],
+      ['the free estimate assessment', { billing: undefined, serviceKey: 'lawn_inspection', serviceType: 'Waves Assessment', dedupeLane: false }],
+    ])('%s: a customer with no saved pin books at the canonical fallback its offer used, stamped on the visit', async (_label, visit) => {
       loadedCustomer = { ...CUST, latitude: null, longitude: null };
       fencedCustomer = { ...loadedCustomer };
       const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
       try {
-        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG } }))).rejects.toThrow(SENTINEL);
-        expect(capturedScheduledInsert).toMatchObject({ lat: LAT, lng: LNG, estimated_price: 81.67, service_address_line1: CUST.address_line1 });
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG }, estimateGuard: okGuard(), ...visit })))
+          .rejects.toThrow(SENTINEL);
+        expect(capturedScheduledInsert).toMatchObject({ lat: LAT, lng: LNG, service_address_line1: CUST.address_line1 });
       } finally { geocodeSpy.mockRestore(); }
     });
 
@@ -721,7 +728,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       fencedCustomer = { ...loadedCustomer };
       const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: 27.5, lng: -82.4 });
       try {
-        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG } })))
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG }, estimateGuard: okGuard() })))
           .resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
         expect(capturedScheduledInsert).toBeUndefined();
       } finally { geocodeSpy.mockRestore(); }
