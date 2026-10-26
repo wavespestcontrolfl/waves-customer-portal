@@ -11,6 +11,7 @@ export { Textarea } from './Textarea';
 export { Badge } from './Badge';
 export { Card, CardHeader, CardTitle, CardBody, CardFooter } from './Card';
 export { Table, THead, TBody, TR, TH, TD } from './Table';
+export { TableToolbar, TablePagination, TableColumnPicker } from './TableControls';
 export { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from './Dialog';
 export { Sheet, SheetHeader, SheetBody, SheetFooter } from './Sheet';
 export { Tabs, TabList, Tab, TabPanel } from './Tabs';
