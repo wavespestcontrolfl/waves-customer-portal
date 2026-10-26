@@ -179,6 +179,9 @@ describe('the detailed outline', () => {
       expect(open.sort((a, b) => a - b)).toEqual([month, (month % 12) + 1, ((month + 1) % 12) + 1].sort((a, b) => a - b));
       expect(year.bullets).toHaveLength(12);
       expect(year.bullets.every((line) => line.includes(' At home: '))).toBe(true);
+      // A 9-visit plan skips some months: the list never says every month has a visit.
+      expect(year.body).toMatch(/^Each visit follows the step for the month it falls in\./);
+      expect(year.body).not.toMatch(/what that visit does/);
     });
   });
 

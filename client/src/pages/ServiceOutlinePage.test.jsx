@@ -179,7 +179,7 @@ describe('ServiceOutlinePage drawn sections', () => {
   it('draws the detailed month list: open months show the visit text and the at-home line, the rest open on a tap', async () => {
     const content = v13Content();
     const year = content.sections.find((s) => s.key === 'program_year');
-    year.body = 'This month and the next two are open. Tap any month to see what that visit does and one thing to do at home.';
+    year.body = 'Each visit follows the step for the month it falls in. This month and the next two are open. Tap any month to see what a visit then does and one thing to do at home.';
     year.visual = {
       ...year.visual,
       type: 'months',
