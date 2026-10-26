@@ -2,7 +2,7 @@
 //
 // Opens over the property's Google satellite photo (the Treatment Zone Mapper's
 // loader and px-to-feet math). Staff draw eave lines and fence lines; nozzles are
-// placed live (a corner at every vertex, then about every 10 ft) by
+// placed live (a corner nozzle at each vertex but a short jog, then about every 10 ft) by
 // lib/mistingLayoutGeometry. Staff can delete a nozzle (Edit nozzles: tap it), move it (drag)
 // and add one (Add nozzle: tap a line). Step 2 adds three tools that do not use the lines: Riser
 // (tap adds, tap on a riser deletes, drag moves), Pump (one point) and No-mist zone (a circle the
