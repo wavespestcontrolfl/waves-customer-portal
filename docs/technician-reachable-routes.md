@@ -244,6 +244,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/schedule/card-request-availability` | admin-schedule |
 | GET | `/api/admin/schedule/eta/:serviceId` | admin-schedule |
 | POST | `/api/admin/schedule/find-time` | admin-schedule-find-time |
+| GET | `/api/admin/schedule/find-time/ui` | admin-schedule-find-time |
 | POST | `/api/admin/schedule/generate-report` | admin-schedule |
 | GET | `/api/admin/schedule/list` | admin-schedule |
 | GET | `/api/admin/schedule/month` | admin-schedule |

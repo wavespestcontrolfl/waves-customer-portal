@@ -101,7 +101,7 @@ function markUnknownDetours(slots) {
  * 09:00–12:00 gap lists 09:00, 10:00 and 11:00 for a one-hour visit. The
  * ranked answer is unchanged by it: one start per gap, deduped, sliced.
  */
-async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, excluded, topN, every = false }) {
+async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, excluded, topN, every = false, perTech = false }) {
   const floorFor = (date) => (date === today && Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : 0);
   const restart = (s, m) => (m === toMin(s.start_time) ? s : { ...s, start_time: toHHMM(m), end_time: toHHMM(m + spanMin) });
   // A gap's starts at the request's step, from the picker's floor through
@@ -148,10 +148,12 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
       return (toMin(s.start_time) ?? 0) >= floorFor(s.date) ? [s] : [];
     });
   }
-  const dedupe = (list) => {
+  // `byTech` (the open-times list, GATE_OPEN_TIMES_BOX): one start per
+  // technician, so the box can list the same hour on two routes.
+  const dedupe = (list, byTech = false) => {
     const seenStarts = new Set();
     return list.filter((s) => {
-      const key = `${s.date}|${s.start_time}`;
+      const key = byTech ? `${s.date}|${s.start_time}|${s.technician?.id ?? ''}` : `${s.date}|${s.start_time}`;
       if (seenStarts.has(key)) return false;
       seenStarts.add(key);
       return true;
@@ -159,7 +161,7 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
   };
   return {
     ranked: dedupe(keptPerGap.flatMap((kept) => kept.slice(0, 1))).slice(0, topN),
-    every: every ? dedupe(keptPerGap.flat()) : null,
+    every: every ? dedupe(keptPerGap.flat(), perTech) : null,
   };
 }
 
@@ -357,6 +359,9 @@ async function scorePickedHourByTech({
 // a run of days around the picked one, so the search is bounded here rather
 // than by the 90-day ceiling the ranged Find-a-Time button gets.
 const SUMMARY_MAX_DAYS = 14;
+// The open-times box (GATE_OPEN_TIMES_BOX, owner 2026-10-25 "start"): 15
+// dates out of the next four weeks.
+const OPEN_TIMES_MAX_DAYS = 28;
 
 function nextYmd(ymd) {
   const d = new Date(`${ymd}T12:00:00Z`);
@@ -371,8 +376,9 @@ function nextYmd(ymd) {
  * request (hint + summary:true) is narrowed three ways:
  *   - it starts today at the earliest — the gap engine still walks past
  *     dates, and a past hour must not be ranked, listed or called a fit;
- *   - it covers at most SUMMARY_MAX_DAYS, so a debounced picker hint cannot
- *     become a 90-day full enumeration;
+ *   - it covers at most SUMMARY_MAX_DAYS (OPEN_TIMES_MAX_DAYS for the
+ *     open-times box), so a debounced picker hint cannot become a 90-day
+ *     full enumeration;
  *   - it is hourly whatever step was sent: the summary lists EVERY start in
  *     a gap, and the save refuses a window that does not start on the hour.
  * Throws a 400 for a range or picked date a summary cannot answer.
@@ -385,7 +391,7 @@ function summaryRequestError(message) {
   return err;
 }
 
-function hintSearchPlan({ hint, summary, from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes }) {
+function hintSearchPlan({ hint, summary, openTimes = false, from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes }) {
   const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined;
   if (!(hint && summary === true)) {
     return { summary: false, from, to: maxTo && to > maxTo ? maxTo : to, verdictDate: from, step };
@@ -395,7 +401,9 @@ function hintSearchPlan({ hint, summary, from, to, maxTo, today, pickedStart, pi
   // overdue dateFrom still searches the days ahead.
   const start = from < today ? today : from;
   if (to < start) throw summaryRequestError('a summary search cannot end before today');
-  const end = summaryRangeEnd(start, to);
+  const end = summaryRangeEnd(start, to, openTimes ? OPEN_TIMES_MAX_DAYS : SUMMARY_MAX_DAYS);
+  // The open-times box lists open hours only: no picked hour to score.
+  if (openTimes) return { summary: true, openTimes: true, from: start, to: end, verdictDate: start, step: 60 };
   // A summary search starts days before the pick, so the pick names its date
   // (documented default: dateFrom, not the clamped start — a past pick is
   // out of range, never scored against today's route). With no picked hour
@@ -406,10 +414,10 @@ function hintSearchPlan({ hint, summary, from, to, maxTo, today, pickedStart, pi
   return { summary: true, from: start, to: end, verdictDate, step: 60 };
 }
 
-/** Last date a summary search may cover: `from` + SUMMARY_MAX_DAYS - 1. */
-function summaryRangeEnd(from, to) {
+/** Last date a summary search may cover: `from` + maxDays - 1. */
+function summaryRangeEnd(from, to, maxDays = SUMMARY_MAX_DAYS) {
   let last = from;
-  for (let i = 1; i < SUMMARY_MAX_DAYS && last < to; i++) last = nextYmd(last);
+  for (let i = 1; i < maxDays && last < to; i++) last = nextYmd(last);
   return last;
 }
 
@@ -661,6 +669,26 @@ function withChipValues(days, rows, hourly) {
   }));
 }
 
+// The open-times box's day rows: every hour that fits, each with its
+// technician. For a booking the rain ranking reads (GATE_BOOKING_RAIN_RANK),
+// each hour also carries its rain tier (rain-fit.js rainTier: 0 sorts
+// first), so the box's Best order puts an outdoor job's wet hours after its
+// dry ones, as the best-times rows do. The forecast lookup fails open: no
+// tiers, drive order only.
+async function buildOpenTimes(days, { today, lat, lng, serviceTypes = [], rainSpan = null, deps = {} }) {
+  const fit = bookingRainFit(serviceTypes);
+  const hourly = rankingNeedsForecast(fit, days, today, null)
+    ? await (deps.hourlyRain || boundedHourlyRain)(lat, lng, true).catch(() => null) : null;
+  const tierOf = rainTierOf(fit, hourly, today, rainSpan);
+  return days.map((day) => ({
+    ...day,
+    hours: day.hours.map((h) => ({ ...h, rain_tier: tierOf ? tierOf({ ...h, date: day.date }) : null })),
+  }));
+}
+
+// A four-week list does more work than the strip's eleven days.
+const OPEN_TIMES_SLOW_MS = 3000;
+
 // Returns { summary, picked }: the summary (undefined for any other plan)
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
@@ -669,6 +697,12 @@ async function buildHintSummary(plan, everyStart, {
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates, lastResortDates });
+  if (plan.openTimes) {
+    const listed = await buildOpenTimes(days, { today, lat: target?.lat, lng: target?.lng, serviceTypes, rainSpan });
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs > OPEN_TIMES_SLOW_MS) logger.warn(`[find-time] open times search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
+    return { summary: { days: listed, open_times: { from: plan.from, to: plan.to }, elapsed_ms: elapsedMs }, picked: undefined };
+  }
   // Only a strip that shows the best-times rows asks for them; any other skips the
   // rain and road-time work (Codex #6045 r2).
   const best = bestRows ? await buildBestRows(days, {
@@ -684,6 +718,6 @@ async function buildHintSummary(plan, everyStart, {
 
 module.exports = {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech,
-  hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, loadSummaryDayFacts,
-  pickBestRows, buildBestRows, rainForWindow,
+  hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, OPEN_TIMES_MAX_DAYS, loadSummaryDayFacts,
+  pickBestRows, buildBestRows, buildOpenTimes, rainForWindow,
 };

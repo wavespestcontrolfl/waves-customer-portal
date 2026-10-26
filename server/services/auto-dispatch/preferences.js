@@ -76,7 +76,11 @@ function normalizePreferences(prefs, serviceType) {
 
 // `lock`: read the row FOR SHARE on `conn` (a transaction), so it cannot
 // change before that transaction ends (apply.js move guard).
-async function getCustomerSchedulingPreferences(customerId, serviceType, conn = db, { lock = false } = {}) {
+// `serviceId` / `serviceKey`: the visit's catalog identity (scheduled_services.service_id /
+// service_key_snapshot). With GATE_TECH_JOB_TYPE_CHECKS on they set service_category from
+// the service library first (technician-capabilities.categoriesForServices); without them,
+// or with the gate off, the category is read from the name as before.
+async function getCustomerSchedulingPreferences(customerId, serviceType, conn = db, { lock = false, serviceId = null, serviceKey = null } = {}) {
   // No try/catch: a real read error must propagate so the orchestrator skips this
   // service (fail closed) rather than silently dropping the customer's HARD
   // blackout constraint. A missing ROW is not an error — .first() returns
@@ -88,7 +92,14 @@ async function getCustomerSchedulingPreferences(customerId, serviceType, conn = 
       'preferred_day', 'preferred_time', 'contact_preference',
       'blackout_start', 'blackout_end', 'access_notes', 'special_instructions',
     );
-  return normalizePreferences(prefs, serviceType);
+  const normalized = normalizePreferences(prefs, serviceType);
+  if (serviceId || serviceKey) {
+    const [category] = await require('../technician-capabilities').categoriesForServices(
+      conn, [{ service_type: serviceType, service_id: serviceId, service_key: serviceKey }],
+    );
+    normalized.service_category = category;
+  }
+  return normalized;
 }
 
 module.exports = { getCustomerSchedulingPreferences, normalizePreferences, DAY_NAME_TO_INDEX };

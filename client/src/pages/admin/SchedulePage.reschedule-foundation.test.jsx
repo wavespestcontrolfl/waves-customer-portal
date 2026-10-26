@@ -6,7 +6,10 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { RescheduleModal } from './SchedulePage';
 
 vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
-vi.mock('../../components/schedule/useBestTimes', () => ({ useBestTimes: () => ({ pickedByTech: [], availability: undefined }) }));
+const bestTimes = vi.hoisted(() => ({ args: null }));
+vi.mock('../../components/schedule/useBestTimes', () => ({
+  useBestTimes: (args) => { bestTimes.args = args; return { pickedByTech: [], availability: undefined }; },
+}));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const service = { id: 'fixture-visit', customerName: 'Fixture customer', serviceType: 'Pest service', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:30' };
 
@@ -38,4 +41,13 @@ it('cancels without requesting a reschedule', () => {
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   expect(onClose).toHaveBeenCalledOnce();
   expect(fetchMock.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false);
+});
+
+it('the custom picker asks for the open-times box on the visit\'s own route (GATE_OPEN_TIMES_BOX)', () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ options: [] }) })));
+  render(<RescheduleModal service={{ ...service, technicianId: 'fixture-tech' }} onClose={vi.fn()} onRescheduled={vi.fn()} />);
+  fireEvent.click(screen.getByRole('button', { name: /Pick Custom Date/ }));
+  expect(bestTimes.args).toMatchObject({ openTimes: true, technicianId: 'fixture-tech' });
+  // The reschedule cannot change the technician: no tech pick.
+  expect(bestTimes.args.techPick).toBeFalsy();
 });

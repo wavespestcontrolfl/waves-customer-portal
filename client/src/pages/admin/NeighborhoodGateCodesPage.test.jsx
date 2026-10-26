@@ -587,3 +587,63 @@ it("Not the same posts the pair, and the list reloads without it", async () => {
   expect(JSON.parse(post[1].body)).toEqual({ sourceId: "n7", targetId: "n1" });
   await waitFor(() => expect(screen.queryByText("Possible duplicates (1)")).toBeNull());
 });
+
+// Homes not placed + Add as unconfirmed (GATE_NEIGHBORHOOD_UNPLACED, owner 2026-10-26).
+const UNPLACED_LIST = { ...ALL, unplacedEnabled: true };
+const UNPLACED = {
+  homes: [
+    { propertyId: "p1", customerId: "c1", customerName: "Sample Owner", address: "100 Synthetic Way, Lakewood Ranch", zip: "34211", savedCode: true,
+      countyLot: { zip: "34201", county: "Manatee", community: "Heron Pointe at Sample Place" } },
+    { propertyId: "p2", customerId: "c2", customerName: "Other Owner", address: "200 Synthetic Way, Lakewood Ranch", zip: "34211", savedCode: true, countyLot: null },
+  ],
+};
+
+it("Homes not placed lists each home with why; Link asks first, then links it to the county's community", async () => {
+  rawAdminFetch.mockImplementation((path, options) => {
+    if (path.endsWith("/unplaced")) return response(UNPLACED);
+    if (options?.method === "PUT") return response({ id: "p1" });
+    return response(UNPLACED_LIST);
+  });
+  renderPage();
+  expect(await screen.findByText("Homes not placed (2)")).toBeInTheDocument();
+  expect(screen.getByText(
+    "ZIP 34211 here, 34201 on the county's lot; the county puts it in Heron Pointe at Sample Place. Its saved gate code reaches only this customer's stops.",
+  )).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Other Owner" })).toHaveAttribute("href", "/admin/customers?customerId=c2");
+  expect(screen.getAllByRole("button", { name: /^Link to / })).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Link to Heron Pointe at Sample Place" }));
+  expect(window.confirm).toHaveBeenCalledWith(
+    "Link 100 Synthetic Way, Lakewood Ranch to Heron Pointe at Sample Place? That neighborhood's gate codes will show at this home.",
+  );
+  expect(await screen.findByText("Linked 100 Synthetic Way, Lakewood Ranch to Heron Pointe at Sample Place")).toBeInTheDocument();
+  const put = rawAdminFetch.mock.calls.find(([, o]) => o?.method === "PUT");
+  expect(put[0]).toBe("/admin/neighborhood-access/properties/p1/neighborhood");
+  expect(JSON.parse(put[1].body)).toEqual({ create: { name: "Heron Pointe at Sample Place", county: "Manatee" } });
+});
+
+it("Add entry offers 'I have not seen this work' only with the switch on, and sends it as unconfirmed", async () => {
+  rawAdminFetch.mockImplementation((path, options) => {
+    if (path.endsWith("/unplaced")) return response({ homes: [] });
+    if (options?.method === "POST") return response({ id: "e9", status: "needs_confirm" });
+    return response(UNPLACED_LIST);
+  });
+  renderPage();
+  await screen.findByText("Synthetic Oaks");
+  expect(screen.queryByText(/^Homes not placed/)).toBeNull();
+  fireEvent.click(screen.getAllByRole("button", { name: "Add entry" })[0]);
+  fireEvent.change(screen.getByLabelText("Code"), { target: { value: "6413" } });
+  fireEvent.click(screen.getByLabelText("I have not seen this work (file it as Needs confirm)"));
+  fireEvent.click(screen.getByRole("button", { name: "Save entry" }));
+  await screen.findByText("Entry added");
+  const post = rawAdminFetch.mock.calls.find(([, o]) => o?.method === "POST");
+  expect(JSON.parse(post[1].body)).toEqual({ gate_label: "Main gate", access_type: "keypad", code: "6413", gate_location: null, unconfirmed: true });
+});
+
+it("with the switch off there is no unconfirmed box and no list request", async () => {
+  rawAdminFetch.mockImplementation(() => response(ALL));
+  renderPage();
+  await screen.findByText("Synthetic Oaks");
+  fireEvent.click(screen.getAllByRole("button", { name: "Add entry" })[0]);
+  expect(screen.queryByLabelText("I have not seen this work (file it as Needs confirm)")).toBeNull();
+  expect(rawAdminFetch.mock.calls.some(([p]) => p.endsWith("/unplaced"))).toBe(false);
+});

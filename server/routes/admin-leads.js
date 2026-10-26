@@ -2150,6 +2150,13 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (technicianId && require('../config/feature-gates').techWorkDaysLive()) {
         bookingWarnings.push(...await require('../services/technician-eligibility').offDayWarningsFor(technicianId, [String(date).slice(0, 10)], { conn: trx }));
       }
+      // Job type (GATE_TECH_JOB_TYPE_CHECKS): the technician is set to Off for this service's
+      // category. Advisory, never a block ([] with the gate off).
+      if (technicianId) {
+        bookingWarnings.push(...await require('../services/technician-eligibility').capabilityOffWarningsFor(
+          technicianId, [{ service_type: svcType, service_id: serviceId || null, service_key: catalogService?.service_key || null }], { conn: trx },
+        ));
+      }
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,

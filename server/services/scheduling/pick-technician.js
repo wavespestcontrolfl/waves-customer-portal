@@ -143,7 +143,7 @@ function rankCandidates(candidates, lastTechnicianId) {
  */
 async function pickTechnicianForVisit({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = DEFAULT_DURATION_MINUTES,
-  lat = null, lng = null, serviceType = null, customerId = null, excludeServiceIds = [],
+  lat = null, lng = null, serviceType = null, serviceId = null, serviceKey = null, customerId = null, excludeServiceIds = [],
   // Whose rows the availability probe skips. Default: the customer's own (a
   // fresh booking, where the caller's same-day guard owns same-customer
   // overlaps — parity with its save probe). A caller assigning an EXISTING
@@ -160,7 +160,7 @@ async function pickTechnicianForVisit({
   techs = techs.filter((t) => !absent.has(`${t.id}:${date}`));
   if (serviceType && techs.length) {
     const off = await require('../technician-capabilities')
-      .inactiveCapabilitiesForServices(conn, techs.map((t) => t.id), [{ service_type: serviceType }]);
+      .inactiveCapabilitiesForServices(conn, techs.map((t) => t.id), [{ service_type: serviceType, service_id: serviceId, service_key: serviceKey }]);
     const offIds = new Set(off.map((row) => row.technician_id));
     techs = techs.filter((t) => !offIds.has(t.id));
   }
