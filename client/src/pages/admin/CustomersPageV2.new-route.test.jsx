@@ -41,6 +41,8 @@ describe("CustomersPageV2 new-customer route", () => {
     ["default controls", "", "/admin/customers"],
     ["explicit controls", "&tableControls=1", "/admin/customers?tableControls=1"],
     ["fallback controls", "&tableControls=0", "/admin/customers?tableControls=0"],
+    ["saved views", "&savedViews=1", "/admin/customers?savedViews=1"],
+    ["disabled saved views", "&savedViews=0", "/admin/customers?savedViews=0"],
   ])("opens the mobile form with call details and returns with %s", async (_label, controlsQuery, expectedPath) => {
     render(
       <MemoryRouter initialEntries={[
