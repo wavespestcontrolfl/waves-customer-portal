@@ -15,8 +15,10 @@
 // and product_type stays as is: protocol matching and the visit email read the category.
 // The one other thing keyed by this row's NAME is services.default_products (a JSON list of
 // catalog names, looked up by exact name): the old name there would no longer resolve, so the
-// same entry is renamed in the same change. service_products (the past visit lines),
-// vendor_pricing, product_aliases, stock and movements are NOT touched.
+// same entry is renamed in the same change, and the old name is added as a product alias
+// (see addOldNameAlias) so exact-name lookups of "Gentrol IGR" still find the row.
+// service_products (the past visit lines), vendor_pricing, existing aliases, stock and
+// movements are NOT touched.
 
 // Production id of the row: f5646e16-cf4a-4a0e-880c-e8ea0a706c19. Matched by name + EPA number
 // instead, so a dev or preview database seeded with a different id follows the same rule.
@@ -28,6 +30,11 @@ const NEW_EPA = '89459-119';
 const NEW_LABEL_URL = 'https://www3.epa.gov/pesticides/chem_search/ppls/089459-00119-20260204.pdf';
 const NEW_SDS_URL = 'https://www.zoecon.com/-/media/project/oneweb/zoecon/files/product-labels/sds/gentrol-complete-ec3-sds.pdf';
 const NEW_VERIFIED_BY = 'owner-confirmed-gentrol-complete-ec3-2026-10-25';
+
+const OLD_LABEL_SOURCE_NOTE = 'Manufacturer label page lists Gentrol IGR Concentrate as EPA Reg. 2724-351 with 9% (S)-hydroprene.'
+  + ' | manufacturer: https://www.zoecon.com/-/media/project/oneweb/zoecon/files/product-labels/specimen/gentrol-igr-concentrate-specimen-label.pdf'
+  + ' \u2014 "DILUTION PREPARATION FOR SURFACE SPRAY/PAINT BRUSH, SPOT AND CRACK AND CREVICE PREPARATIONS: Use 1 ounce of GENTROL to 1 gallon of diluent.'
+  + ' Partially fill the mixing container with diluent, add the GENTROL, shake or stir"';
 
 // The values the row holds before this migration (batch 1 seed 20260528000002 and the
 // 20260712100000 label-rate backfill), written back by down().
@@ -42,7 +49,9 @@ const OLD = Object.freeze({
   sds_url: 'https://www.zoecon.com/-/media/project/oneweb/zoecon/files/product-labels/sds/gentrol-igr-concentrate-sds.pdf',
   label_verified_at: '2026-05-28T00:00:00Z',
   label_verified_by: 'inventory-data-completion-batch-1',
-  label_source_note: 'Manufacturer label page lists Gentrol IGR Concentrate as EPA Reg. 2724-351 with 9% (S)-hydroprene.',
+  // The exact production value read 2026-10-26: the batch 1 note, then the note the
+  // 20260712100000 label-rate backfill appended with " | ".
+  label_source_note: OLD_LABEL_SOURCE_NOTE,
   service_report_summary: 'An insect growth regulator: rather than a quick knockdown, it prevents immature insects from developing into breeding adults, breaking the life cycle over the following weeks.',
   customer_precaution_summary: 'Per the product label: keep people and pets off treated areas until sprays have dried.',
   reentry_summary: 'Do not allow people or pets to enter the treated area until sprays have dried.',
@@ -83,6 +92,28 @@ async function renameDefaultProduct(knex, from, to) {
   return result.rowCount || 0;
 }
 
+const normalizeAlias = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+
+// The old name keeps resolving. Two lookups read product_aliases for an exact name:
+// resolveCatalogProductForName in services/completion-product-defaults.js (the protocol
+// and default-product lists; its token-subset step cannot reach "Gentrol Complete EC3"
+// from "Gentrol IGR") and activeProductsForAlias in services/purchase-receipts/product-matcher.js
+// (receipt titles and the tech Intelligence Bar lookup). Added only when no alias with
+// the same normalized name exists, whatever vendor or product it points at.
+async function addOldNameAlias(knex, productId) {
+  if (!productId || !(await knex.schema.hasTable('product_aliases'))) return false;
+  const existing = await knex('product_aliases').select('alias_name');
+  if (existing.some((row) => normalizeAlias(row.alias_name) === normalizeAlias(OLD_NAME))) return false;
+  await knex('product_aliases').insert({ product_id: productId, alias_name: OLD_NAME, vendor_id: null });
+  return true;
+}
+
+// Removes only the alias up() adds: this name, no vendor, still pointing at this product.
+async function removeOldNameAlias(knex, productId) {
+  if (!productId || !(await knex.schema.hasTable('product_aliases'))) return;
+  await knex('product_aliases').where({ product_id: productId, alias_name: OLD_NAME }).whereNull('vendor_id').del();
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
@@ -100,12 +131,17 @@ exports.up = async function up(knex) {
   }
 
   const renamed = await renameDefaultProduct(knex, OLD_NAME, NEW_NAME);
-  console.log(`[20261026060000] Gentrol IGR is now Gentrol Complete EC3 (EPA 89459-119); ${renamed} service library row(s) renamed in default_products.`);
+  const row = await knex('products_catalog').where({ name: NEW_NAME, epa_reg_number: NEW_EPA }).first('id');
+  const aliased = await addOldNameAlias(knex, row && row.id);
+  console.log(`[20261026060000] Gentrol IGR is now Gentrol Complete EC3 (EPA 89459-119); ${renamed} service library row(s) renamed in default_products; old-name alias ${aliased ? 'added' : 'not added (one already exists)'}.`);
 };
 
 // Restores every column up() changed, only while the row still holds the new identity.
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
+
+  const current = await knex('products_catalog').where({ name: NEW_NAME, epa_reg_number: NEW_EPA }).first('id');
+  await removeOldNameAlias(knex, current && current.id);
 
   const reverted = await knex('products_catalog')
     .where({ name: NEW_NAME, epa_reg_number: NEW_EPA })

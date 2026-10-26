@@ -5,24 +5,34 @@ const migration = require('../models/migrations/20261026060000_gentrol_is_comple
 
 const MIGRATIONS = path.join(__dirname, '../models/migrations');
 
-// A knex stand-in that records the guarded UPDATE on products_catalog and the raw
-// services rename, and reports a configurable affected-row count.
-function fakeKnex({ updated = 1 } = {}) {
-  const calls = { where: [], update: [], raw: [], tables: [] };
+// A small in-memory knex stand-in: products_catalog and product_aliases are arrays of rows;
+// where / whereNull filter them; update, insert, del, first and select act on the matches.
+// Every call is also recorded, and the services rename is a recorded raw statement.
+function fakeKnex({ product = true, aliases = [] } = {}) {
+  const calls = { where: [], update: [], insert: [], del: [], raw: [], tables: [] };
+  const db = {
+    products_catalog: product ? [{ id: 'p-1', name: 'Gentrol IGR', epa_reg_number: '2724-351' }] : [],
+    product_aliases: aliases.map((alias, i) => ({ id: `a-${i}`, vendor_id: null, ...alias })),
+  };
   const knex = (table) => {
     calls.tables.push(table);
-    return {
-      where(cond) { calls.where.push(cond); return this; },
-      update(values) { calls.update.push(values); return Promise.resolve(updated); },
+    const rows = db[table];
+    let matched = rows.slice();
+    const builder = {
+      where(cond) { calls.where.push({ table, cond }); matched = matched.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return builder; },
+      whereNull(col) { matched = matched.filter((r) => r[col] == null); return builder; },
+      select() { return Promise.resolve(matched.map((r) => ({ ...r }))); },
+      first() { return Promise.resolve(matched[0] ? { ...matched[0] } : undefined); },
+      update(values) { calls.update.push({ table, values }); matched.forEach((r) => Object.assign(r, values)); return Promise.resolve(matched.length); },
+      insert(values) { calls.insert.push({ table, values }); rows.push({ id: `new-${rows.length}`, ...values }); return Promise.resolve([1]); },
+      del() { calls.del.push({ table, ids: matched.map((r) => r.id) }); db[table] = rows.filter((r) => !matched.includes(r)); return Promise.resolve(matched.length); },
     };
+    return builder;
   };
   knex.fn = { now: () => 'NOW()' };
-  knex.schema = {
-    hasTable: async () => true,
-    hasColumn: async () => true,
-  };
+  knex.schema = { hasTable: async () => true, hasColumn: async () => true };
   knex.raw = jest.fn(async (sql, bindings) => { calls.raw.push({ sql, bindings }); return { rowCount: 2 }; });
-  return { knex, calls };
+  return { knex, calls, db };
 }
 
 describe('20261026060000 Gentrol is Complete EC3', () => {
@@ -32,7 +42,12 @@ describe('20261026060000 Gentrol is Complete EC3', () => {
 
   test('the old values it restores are what the seeding migrations wrote', () => {
     const batch1 = fs.readFileSync(path.join(MIGRATIONS, '20260528000002_inventory_product_data_completion_batch1.js'), 'utf8');
-    expect(batch1).toContain(migration.OLD.label_source_note);
+    const backfill = fs.readFileSync(path.join(MIGRATIONS, '20260712100000_catalog_label_rate_backfill.js'), 'utf8');
+    // The live note is the batch 1 note, then the backfill's note appended with " | " (production value read 2026-10-26).
+    const [batchNote, backfillNote] = migration.OLD.label_source_note.split(' | ');
+    expect(batch1).toContain(batchNote);
+    // The backfill source holds the second note JSON-escaped inside a JS string.
+    expect(backfill).toContain(JSON.stringify(backfillNote).slice(1, -1));
     expect(batch1).toContain("epa_reg_number: '2724-351'");
     expect(batch1).toContain(`active_ingredient: '${migration.OLD.active_ingredient}'`);
     const display = fs.readFileSync(path.join(MIGRATIONS, '20260712000050_product_display_names_report_label_data.js'), 'utf8');
@@ -42,9 +57,10 @@ describe('20261026060000 Gentrol is Complete EC3', () => {
   test('up changes only the row that still reads Gentrol IGR with EPA 2724-351', async () => {
     const { knex, calls } = fakeKnex();
     await migration.up(knex);
-    expect(calls.tables).toEqual(['products_catalog']);
-    expect(calls.where).toEqual([{ name: 'Gentrol IGR', epa_reg_number: '2724-351' }]);
-    expect(calls.update[0]).toMatchObject({
+    expect(calls.where[0]).toEqual({ table: 'products_catalog', cond: { name: 'Gentrol IGR', epa_reg_number: '2724-351' } });
+    const catalogUpdates = calls.update.filter((u) => u.table === 'products_catalog');
+    expect(catalogUpdates).toHaveLength(1);
+    expect(catalogUpdates[0].values).toMatchObject({
       name: 'Gentrol Complete EC3',
       active_ingredient: 'Lambda-cyhalothrin 1.5% + (S)-Hydroprene 1.5%',
       moa_group: 'Group 3A + 7A',
@@ -53,26 +69,57 @@ describe('20261026060000 Gentrol is Complete EC3', () => {
       epa_reg_number: '89459-119',
     });
     // category and product_type are not touched: protocol matching and the visit email read the category.
-    expect(calls.update[0]).not.toHaveProperty('category');
-    expect(calls.update[0]).not.toHaveProperty('product_type');
-    expect(calls.update[0]).not.toHaveProperty('target_pests');
-    expect(calls.update[0]).not.toHaveProperty('rei_hours');
+    for (const column of ['category', 'product_type', 'target_pests', 'rei_hours']) {
+      expect(catalogUpdates[0].values).not.toHaveProperty(column);
+    }
     expect(calls.raw).toHaveLength(1);
     expect(calls.raw[0].bindings).toEqual(['Gentrol IGR', 'Gentrol Complete EC3', 'Gentrol IGR']);
   });
 
-  test('up is a no-op when the row was already corrected or edited (nothing renamed in the service library)', async () => {
-    const { knex, calls } = fakeKnex({ updated: 0 });
+  test('up is a no-op when the row was already corrected or edited (no rename, no alias)', async () => {
+    const { knex, calls } = fakeKnex({ product: false });
     await migration.up(knex);
     expect(calls.raw).toEqual([]);
+    expect(calls.insert).toEqual([]);
+  });
+
+  test('up adds the old name as a vendor-less alias of the row, so exact-name lookups still find it', async () => {
+    const { knex, calls, db } = fakeKnex();
+    await migration.up(knex);
+    expect(calls.insert).toEqual([{ table: 'product_aliases', values: { product_id: 'p-1', alias_name: 'Gentrol IGR', vendor_id: null } }]);
+    // The alias is found by both exact-name lookups: the receipt matcher and the protocol default-product resolver.
+    const { activeProductsForAlias } = require('../services/purchase-receipts/product-matcher');
+    const aliasRows = db.product_aliases.map((a) => ({ ...a, id: a.product_id }));
+    expect(activeProductsForAlias('gentrol  IGR', aliasRows).map((r) => r.id)).toEqual(['p-1']);
+    const { resolveCatalogProductForName } = require('../services/completion-product-defaults');
+    const catalog = [
+      { id: 'p-1', name: 'Gentrol Complete EC3', aliases: db.product_aliases.map((a) => a.alias_name) },
+      { id: 'p-2', name: 'Tekko Pro IGR', aliases: [] },
+    ];
+    expect(resolveCatalogProductForName('Gentrol IGR', catalog).id).toBe('p-1');
+    // Without the alias the token-subset step cannot reach it ("IGR" is not a token of the new name).
+    expect(resolveCatalogProductForName('Gentrol IGR', catalog.map((c) => ({ ...c, aliases: [] })))).toBeNull();
+  });
+
+  test('up adds no alias when one with the same normalized name already exists (any vendor, any product)', async () => {
+    for (const existing of [
+      { product_id: 'p-1', alias_name: 'gentrol igr' },
+      { product_id: 'p-9', alias_name: 'GENTROL-IGR', vendor_id: 'v-1' },
+    ]) {
+      const { knex, calls } = fakeKnex({ aliases: [existing] });
+      await migration.up(knex);
+      expect(calls.insert).toEqual([]);
+    }
   });
 
   test('down restores every changed column, only while the row holds the new identity', async () => {
-    const { knex, calls } = fakeKnex();
+    const { knex, calls, db } = fakeKnex();
+    Object.assign(db.products_catalog[0], { name: 'Gentrol Complete EC3', epa_reg_number: '89459-119' });
     await migration.down(knex);
-    expect(calls.where).toEqual([{ name: 'Gentrol Complete EC3', epa_reg_number: '89459-119' }]);
-    expect(calls.update[0]).toMatchObject({
+    const catalogUpdate = calls.update.find((u) => u.table === 'products_catalog');
+    expect(catalogUpdate.values).toMatchObject({
       name: 'Gentrol IGR', epa_reg_number: '2724-351', default_rate: '1', moa_group: 'Group 7A', formulation: 'concentrate',
+      label_source_note: migration.OLD.label_source_note,
     });
     expect(Object.keys(migration.OLD).sort()).toEqual(
       [...Object.keys(migration.NEW), 'label_verified_at'].sort(),
@@ -80,18 +127,41 @@ describe('20261026060000 Gentrol is Complete EC3', () => {
     expect(calls.raw[0].bindings).toEqual(['Gentrol Complete EC3', 'Gentrol IGR', 'Gentrol Complete EC3']);
   });
 
-  test('the SQL carries no literal ? (a raw ? is a knex binding) and never touches past visit lines', () => {
+  test('down deletes only the vendor-less old-name alias that points at this product', async () => {
+    const { knex, calls, db } = fakeKnex({
+      aliases: [
+        { product_id: 'p-1', alias_name: 'Gentrol IGR' },
+        { product_id: 'p-1', alias_name: 'Gentrol IGR', vendor_id: 'v-1' },
+        { product_id: 'p-9', alias_name: 'Gentrol IGR' },
+        { product_id: 'p-1', alias_name: 'Zoecon 10578' },
+      ],
+    });
+    Object.assign(db.products_catalog[0], { name: 'Gentrol Complete EC3', epa_reg_number: '89459-119' });
+    await migration.down(knex);
+    expect(calls.del).toEqual([{ table: 'product_aliases', ids: ['a-0'] }]);
+    expect(db.product_aliases.map((a) => a.id)).toEqual(['a-1', 'a-2', 'a-3']);
+  });
+
+  test('down is a no-op (rows and aliases) when the row no longer holds the new identity', async () => {
+    const { knex, calls, db } = fakeKnex({ aliases: [{ product_id: 'p-1', alias_name: 'Gentrol IGR' }] });
+    await migration.down(knex);
+    expect(calls.del).toEqual([]);
+    expect(calls.raw).toEqual([]);
+    expect(db.products_catalog[0]).toEqual({ id: 'p-1', name: 'Gentrol IGR', epa_reg_number: '2724-351' });
+    expect(db.product_aliases).toHaveLength(1);
+  });
+
+  test('the SQL carries no literal ? (a raw ? is a knex binding) and never touches past visit lines', async () => {
     const source = fs.readFileSync(path.join(MIGRATIONS, '20261026060000_gentrol_is_complete_ec3.js'), 'utf8');
-    for (const forbidden of ['service_products', 'vendor_pricing', 'product_aliases', 'inventory']) {
+    for (const forbidden of ['service_products', 'vendor_pricing', 'inventory']) {
       expect(source).not.toMatch(new RegExp(`(?:knex\\(|FROM|UPDATE|INTO)\\s*['"\`]?${forbidden}`, 'i'));
     }
     const { knex, calls } = fakeKnex();
-    return migration.up(knex).then(() => {
-      const sql = calls.raw[0].sql;
-      // Three placeholders for three bindings, all followed by a cast, none a jsonb operator.
-      expect((sql.match(/\?/g) || [])).toHaveLength(3);
-      expect(sql.match(/\?(?!::text)/g)).toBeNull();
-    });
+    await migration.up(knex);
+    const sql = calls.raw[0].sql;
+    // Three placeholders for three bindings, all followed by a cast, none a jsonb operator.
+    expect((sql.match(/\?/g) || [])).toHaveLength(3);
+    expect(sql.match(/\?(?!::text)/g)).toBeNull();
   });
 
   test('the new customer copy states only what the label says', () => {
