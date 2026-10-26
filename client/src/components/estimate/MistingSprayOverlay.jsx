@@ -97,7 +97,8 @@ export default function MistingSprayOverlay({ geometry, ready = true }) {
     }
     window.addEventListener('resize', fit);
 
-    const engine = createSprayEngine(ctx, () => model);
+    // The picture under this canvas already has the numbered dots; keep the mist off them (dot radius 17 + ring).
+    const engine = createSprayEngine(ctx, () => model, { keepClearRadius: 21 });
     let frame = 0;
     const tick = (now) => {
       frame = requestAnimationFrame(tick);

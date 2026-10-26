@@ -53,4 +53,19 @@ describe('createSprayEngine', () => {
     engine.tick(1200);
     expect(ctx.arc).not.toHaveBeenCalled();
   });
+
+  it('erases the mist around every nozzle when keepClearRadius is set, and not otherwise', () => {
+    const model = buildSprayModel(GEOMETRY);
+    const withClear = { ...recording(), save: vi.fn(), restore: vi.fn(), globalCompositeOperation: 'source-over' };
+    const ops = [];
+    Object.defineProperty(withClear, 'globalCompositeOperation', { set: (v) => ops.push(v), get: () => ops[ops.length - 1] });
+    createSprayEngine(withClear, () => model, { keepClearRadius: 21 }).tick(1000);
+    expect(ops).toContain('destination-out');
+    model.nozzles.forEach((n) => expect(withClear.arc).toHaveBeenCalledWith(n.x, n.y, 21, 0, Math.PI * 2));
+
+    const plain = recording();
+    createSprayEngine(plain, () => model).tick(1000);
+    expect(plain.arc.mock.calls.some((c) => c[2] === 21)).toBe(false);
+  });
 });
+

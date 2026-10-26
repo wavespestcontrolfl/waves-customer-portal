@@ -39,9 +39,12 @@ function spawn(parts, nozzles, aims, lat, zoom) {
  * @param {CanvasRenderingContext2D} ctx drawn in map pixels (the caller scales the canvas or the context)
  * @param {() => {nozzles: Array<{key:string,x:number,y:number}>, aims: Map<string, object>, lat: number, zoom: number}} getLive
  *   read on every spawn, so an edit does not restart the loop
+ * @param {{keepClearRadius?: number}} [options] keepClearRadius: erase the mist inside this radius around every
+ *   nozzle after each frame. For a canvas drawn OVER a picture of the numbered dots (the customer page), so the mist never
+ *   hides a number. The designer draws its dots above the canvas and passes nothing.
  * @returns {{tick:(now:number)=>void, resume:()=>void, clear:()=>void}}
  */
-export function createSprayEngine(ctx, getLive) {
+export function createSprayEngine(ctx, getLive, { keepClearRadius = 0 } = {}) {
   const parts = [];
   let last = 0;
   let sinceSpawn = 0;
@@ -70,6 +73,17 @@ export function createSprayEngine(ctx, getLive) {
         p.r += 0.12 * k;
         // The Treatment Zone Mapper's blue puff: a white-mixed core fading to clear, so it reads on lawn and roof alike.
         drawMistPuff(ctx, p.x, p.y, p.r, Math.sin((Math.PI * p.life) / p.max) * 0.6);
+      }
+      if (keepClearRadius > 0) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.fillStyle = '#000';
+        getLive().nozzles.forEach((n) => {
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, keepClearRadius, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.restore();
       }
     },
     /** After a pause: the next tick takes one frame of time, not the whole pause. */
