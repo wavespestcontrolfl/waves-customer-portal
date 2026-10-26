@@ -78,6 +78,7 @@ const CANCELLED_READ_ROUTES = [
   ['GET', '/api/services/stats/summary'],
   ['GET', '/api/documents'],
   ['GET', /^\/api\/documents\/service-report\/[^/]+$/],
+  ['GET', /^\/api\/documents\/annual-plan\/annual_plan_[0-9a-f-]+$/i],
   ['GET', /^\/api\/documents\/[^/]+\/download$/],
   ['GET', '/api/property/termite-bond'],
   // NOT the notification-preference reads: the cancelled Visits tab hides

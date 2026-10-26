@@ -3,6 +3,13 @@ const router = express.Router();
 const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const { noStore } = require('../middleware/no-store');
+const { annualPlanDocumentsLive } = require('../config/feature-gates');
+const {
+  AnnualPlanLabelsUnavailableError,
+  getAnnualPlanDocumentForCustomer,
+  listAnnualPlanDocumentsForCustomer,
+} = require('../services/annual-plan-documents');
+const { renderAnnualPlanPdf } = require('../services/pdf/annual-plan-pdf');
 
 // Customer documents + the public /shared/:token surface: personal and
 // financial paperwork — never cacheable, never indexable.
@@ -904,11 +911,40 @@ router.get('/', authenticate, async (req, res, next) => {
     const [{ count: serviceReportCount }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols)
       .count('service_records.id as count');
 
-    const allDocs = [...formattedDocs, ...autoGenDocs, ...projectDocs];
-    const totalOnFile = parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length;
+    const annualPlanDocs = annualPlanDocumentsLive()
+      ? await listAnnualPlanDocumentsForCustomer(req.customerId)
+      : [];
+    const allDocs = [...formattedDocs, ...autoGenDocs, ...projectDocs, ...annualPlanDocs];
+    const totalOnFile = parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length + annualPlanDocs.length;
 
     res.json({ documents: groupDocumentsByType(allDocs), total: totalOnFile });
   } catch (err) {
+    if (err instanceof AnnualPlanLabelsUnavailableError) {
+      return res.status(503).json({ error: 'Documents are temporarily unavailable. Please try again.' });
+    }
+    next(err);
+  }
+});
+
+// An annual-plan summary is a customer-owned read of the current recorded
+// term. It never creates a notice, changes a renewal decision, or mints a
+// public bearer link. Existing signed-plan reads do not depend on this gate.
+router.get('/annual-plan/:id', authenticate, async (req, res, next) => {
+  if (!annualPlanDocumentsLive() || req.contactSession
+    || !/^annual_plan_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    return res.status(404).json({ error: 'Document not found' });
+  }
+  try {
+    const document = await getAnnualPlanDocumentForCustomer(req.customerId, req.params.id);
+    if (!document) return res.status(404).json({ error: 'Document not found' });
+    const pdf = await renderAnnualPlanPdf(document);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${document.fileName}"`);
+    return res.send(pdf);
+  } catch (err) {
+    if (err instanceof AnnualPlanLabelsUnavailableError) {
+      return res.status(503).json({ error: 'Document is temporarily unavailable. Please try again.' });
+    }
     next(err);
   }
 });
@@ -1043,6 +1079,9 @@ router.get('/:id/download', authenticate, async (req, res, next) => {
 router.post('/share/:id', authenticate, async (req, res, next) => {
   try {
     const docId = req.params.id;
+    if (typeof docId === 'string' && docId.startsWith('annual_plan_')) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
     const isAutoGen = typeof docId === 'string' && docId.startsWith('auto_report_');
 
     let storedDocId = null;
