@@ -494,17 +494,37 @@ describe('sendManualAcceptConsumerNotice', () => {
     expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: true });
   });
 
-  test.each([
-    ['the email changed', (t) => ({ ...t, email_key: 'something-else' })],
-    ['the phone changed', (t) => ({ ...t, phone_key: null })],
-    ['a different open notice', (t) => ({ ...t, contract_id: 'contract-other' })],
-  ])('%s after the card: nothing is sent and the bell rings', async (_label, change) => {
+  test('a carded send hands delivery the confirmed recipient keys and only the channels the card named', async () => {
     const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
-    const expected = change(await consumerNoticeTarget(database, 'est-1', 'cust-1'));
+    const expected = { ...(await consumerNoticeTarget(database, 'est-1', 'cust-1')), phone_key: null };
+    await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database });
+    expect(deliverDocumentRequestChannels).toHaveBeenCalledWith('contract-open', { actorType: 'system' }, expect.objectContaining({
+      channels: ['email'], expectedRecipientKeys: { email: expected.email_key, sms: null },
+    }));
+  });
+
+  test('delivery refused a changed recipient: the bell says so, even when the other channel went out', async () => {
+    deliverDocumentRequestChannels.mockResolvedValue({ ok: true, deliveries: [{ channel: 'email', ok: false, code: 'RECIPIENT_CHANGED' }, { channel: 'sms', ok: true }] });
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = await consumerNoticeTarget(database, 'est-1', 'cust-1');
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: true, reason: 'recipient_changed' });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(raiseAdminAlert.mock.calls[0][1])).not.toThrow();
+  });
+
+  test('a different open notice than the card saw: nothing is sent and the bell rings', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = { ...(await consumerNoticeTarget(database, 'est-1', 'cust-1')), contract_id: 'contract-other' };
     expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: false, reason: 'recipient_changed' });
     expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
-    expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(raiseAdminAlert.mock.calls[0][1])).not.toThrow();
+  });
+
+  test('a card that showed no email and no phone sends nothing and rings the bell', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = { ...(await consumerNoticeTarget(database, 'est-1', 'cust-1')), email_key: null, phone_key: null };
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: false, reason: 'not_delivered' });
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
   });
 
   test('the first read failing still rings the bell for the accepted estimate', async () => {

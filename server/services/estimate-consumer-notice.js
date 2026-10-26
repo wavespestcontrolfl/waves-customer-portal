@@ -321,24 +321,31 @@ async function sendManualAcceptConsumerNotice({ estimateId, customerId = null, e
     // The kill switch is read once more right before anything goes out: a send that waited on reads while the gate
     // was turned off sends nothing (a notice issued in between stays open, unsent, as one issued from the page).
     if (!manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off', contractId };
-    if (expected) {
-      const now = await consumerNoticeTarget(conn, estimate.id, estimate.customer_id);
-      // A notice found open must be the one the card saw; a notice issued here is new, so only its recipients compare.
-      const sameNotice = now.contract_id === String(contractId) && (expected.contract_id === null || expected.contract_id === now.contract_id);
-      if (!sameNotice || now.email_key !== expected.email_key || now.phone_key !== expected.phone_key) {
-        await alertNoticeNotSent(estimate, 'recipient_changed', conn);
-        return { sent: false, reason: 'recipient_changed', contractId };
-      }
+    // A notice found open must be the one the card saw (a notice issued here is new). The recipients themselves are
+    // compared inside delivery, against the very addresses it is about to use.
+    if (expected && expected.contract_id !== null && expected.contract_id !== String(contractId)) {
+      await alertNoticeNotSent(estimate, 'recipient_changed', conn);
+      return { sent: false, reason: 'recipient_changed', contractId };
     }
     const { deliverDocumentRequestChannels } = require('./document-contract-delivery');
     // 'system': the send window holds a late text until 8 AM instead of sending it at night.
-    const delivery = await deliverDocumentRequestChannels(contractId, { actorType: 'system' }, {
-      channels: ['email', 'sms'],
-      smsEntryPoint: 'manual_accept_consumer_notice',
-    });
-    if (!delivery.ok) {
+    // A carded accept sends only the channels the card named (a channel it showed as not going out stays off).
+    const channels = expected ? ['email', 'sms'].filter((c) => (c === 'email' ? expected.email_key : expected.phone_key)) : ['email', 'sms'];
+    if (!channels.length) {
       await alertNoticeNotSent(estimate, 'not_delivered', conn);
       return { sent: false, reason: 'not_delivered', contractId };
+    }
+    const delivery = await deliverDocumentRequestChannels(contractId, { actorType: 'system' }, {
+      channels,
+      smsEntryPoint: 'manual_accept_consumer_notice',
+      ...(expected ? { expectedRecipientKeys: { email: expected.email_key, sms: expected.phone_key } } : {}),
+    });
+    const changed = (delivery.deliveries || []).some((d) => d.code === 'RECIPIENT_CHANGED');
+    if (!delivery.ok || changed) {
+      // A changed recipient is said even when the other channel went out: the office confirms who has the link.
+      const reason = changed ? 'recipient_changed' : 'not_delivered';
+      await alertNoticeNotSent(estimate, reason, conn);
+      return { sent: delivery.ok, reason, contractId };
     }
     return { sent: true, contractId, channels: delivery.deliveries.filter((d) => d.ok).map((d) => d.channel) };
   } catch (err) {

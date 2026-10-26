@@ -869,6 +869,9 @@ async function deliverDocumentRequest(contractId, req = {}, {
   }
 }
 
+// `expectedRecipientKeys` ({ email, sms }: recipientKey hashes, or null for a channel that must not go out) is for a
+// caller that confirmed the recipients earlier (the Mark accepted consumer notice card): a channel whose prepared
+// recipient no longer matches is refused as RECIPIENT_CHANGED before the link is activated or sent.
 async function deliverDocumentRequestChannels(contractId, req = {}, {
   channels = ['email'],
   action = 'send',
@@ -876,6 +879,7 @@ async function deliverDocumentRequestChannels(contractId, req = {}, {
   smsConsentBasis,
   smsEntryPoint,
   smsMetadata,
+  expectedRecipientKeys = null,
 } = {}) {
   const safeChannels = [...new Set(channels)].filter(channel => ['email', 'sms'].includes(channel));
   if (!safeChannels.length) throw deliveryError('channels must include email or sms', 400, 'INVALID_CHANNEL');
@@ -893,6 +897,13 @@ async function deliverDocumentRequestChannels(contractId, req = {}, {
         smsMetadata,
       });
       const recipient = await validatePreparedChannel(prepared, channel);
+      if (expectedRecipientKeys) {
+        const { recipientKey } = require('./estimate-accept-effects');
+        const expectedKey = expectedRecipientKeys[channel] ?? null;
+        if (!expectedKey || recipientKey(recipient) !== expectedKey) {
+          throw deliveryError('The recipient changed after it was confirmed.', 409, 'RECIPIENT_CHANGED');
+        }
+      }
       deliveries.push({ channel, recipient, valid: true, effectiveOptions });
     } catch (err) {
       await safeRecordDeliveryFailure(prepared.contract, req, { channel, action, err });
