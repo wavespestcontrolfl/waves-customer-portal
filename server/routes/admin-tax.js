@@ -1764,7 +1764,8 @@ router.get('/export/tax-package', async (req, res, next) => {
     // keyed), not a cost column — the old query filtered a nonexistent
     // `date` column, so this export had been empty since the feature
     // shipped.
-    const w2Labor = taxPackageW2LaborLive();
+    // Guarded: a suite that mocks feature-gates without this reader keeps today's package.
+    const w2Labor = typeof taxPackageW2LaborLive === 'function' && taxPackageW2LaborLive();
     let laborSummaries = [];
     try {
       // Effective-dated rates: each day costs at the rate in force that day
