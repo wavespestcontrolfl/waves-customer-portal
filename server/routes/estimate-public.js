@@ -1400,6 +1400,11 @@ function classifyServiceFamilyText(text) {
   // sanitation from bait — sold exclusion or trapping work must never adopt
   // (and restamp) a bait-station monitoring visit. Same regexes as
   // slot-reservation.
+  // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL) is its own
+  // identity: left to the seeder's generic rodent bucket it would read as
+  // rodent_bait, and a sold removal would adopt (and restamp) a bait-station
+  // monitoring visit. Same regex as slot-reservation.
+  if (/dead\s*(?:rodent|animal)|rodent\s*dead\s*animal/.test(raw)) return 'rodent_dead_animal_removal';
   if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
   // Wire-mesh/seal wording is exclusion work (codex r19: the supported
   // rodent_wire_mesh catalog key carries no "exclusion" token).
@@ -1525,7 +1530,8 @@ function oneTimeItemFamilyKeys(item = {}) {
   // and a bait-station monitoring visit stayed adoptable.
   const hasSpecificRodent = [...keys].some(
     (k) => k === 'rodent_trapping' || k === 'rodent_exclusion'
-      || k === 'rodent_sanitation' || k === 'rodent_inspection',
+      || k === 'rodent_sanitation' || k === 'rodent_inspection'
+      || k === 'rodent_dead_animal_removal',
   );
   if (hasSpecificRodent) {
     keys.delete('rodent_bait');
@@ -21159,6 +21165,10 @@ function normalizeOneTimeBreakdown(estData) {
           includedCallbacks: item.includedCallbacks ?? null,
           unlimitedCallbacks: typeof item.unlimitedCallbacks === 'boolean' ? item.unlimitedCallbacks : null,
         } : {}),
+        ...(service === 'rodent_dead_animal_removal' ? {
+          deadAnimalTier: item.deadAnimalTier || null,
+          onSiteMinutes: Number(item.onSiteMinutes) > 0 ? Number(item.onSiteMinutes) : null,
+        } : {}),
         includedScope: item.includedScope || null,
         retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
         atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
@@ -24006,7 +24016,7 @@ const SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS = [
   ['rodentGuaranteeCombo', 'rodent'], ['rodentInspection', 'rodent'],
   ['rodentWireMesh', 'rodent'], ['rodentBirdBoxes', 'rodent'], ['rodentPlugging', 'rodent'],
   ['trapOnlyRetainer', 'rodent'], ['exclusion', 'rodent'], ['exclusionV2', 'rodent'],
-  ['sanitation', 'rodent'],
+  ['sanitation', 'rodent'], ['deadAnimalRemoval', 'rodent'],
   ['foam', 'foam_recurring'], ['foam_recurring', 'foam_recurring'],
   ['termiteFoam', 'termite_foam'],
   ['termite_bait', 'termite_bait'],
@@ -24032,7 +24042,7 @@ const SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS = [
   ['svcWasp', 'stinging'],
   ['svcTs', 'tree_shrub'], ['svcInjection', 'tree_shrub'],
   ['svcRodentBait', 'rodent'], ['svcRodentTrap', 'rodent'],
-  ['svcRodentSanitation', 'rodent'], ['svcRodentGuarantee', 'rodent'],
+  ['svcRodentSanitation', 'rodent'], ['svcRodentDeadAnimal', 'rodent'], ['svcRodentGuarantee', 'rodent'],
   ['svcRodentWireMesh', 'rodent'], ['svcRodentBirdBox', 'rodent'],
   ['svcTrapOnlyRetainer', 'rodent'], ['svcExclusion', 'rodent'],
   ['svcFoam', 'termite_foam'],

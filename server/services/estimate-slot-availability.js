@@ -563,6 +563,15 @@ function areaAddOnProfileFields(service, item, amount) {
   };
 }
 
+// Dead Rodent Removal & Odor Treatment: the engine's on-site minutes for the chosen access tier
+// (45 easy reach, 90 attic) are a duration floor for the booking, like an area add-on's minutes.
+// A row without them (an older save) keeps the catalog default.
+function deadAnimalProfileFields(service, item) {
+  if (service !== 'rodent_dead_animal_removal') return {};
+  const minutes = Math.ceil(Number(item.onSiteMinutes));
+  return minutes > 0 ? { durationMinutes: minutes } : {};
+}
+
 // Billable one-time services for a one-time accept, so the reserved appointment's
 // service label + notes show the actual mix (e.g. a pest visit plus a separately
 // billed Bora-Care wood treatment) instead of a generic "One-time service" that
@@ -709,7 +718,8 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     }
     // Third arg is the RAW engine key off the breakdown item — the catalog's
     // identity, distinct from the display category passed first.
-    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null, areaAddOnProfileFields(service, item, amount));
+    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null,
+      { ...areaAddOnProfileFields(service, item, amount), ...deadAnimalProfileFields(service, item) });
   }
   return rows;
 }
