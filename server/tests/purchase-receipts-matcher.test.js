@@ -124,6 +124,7 @@ describe('GATE_PRODUCT_INTAKE_GUARD — near-name guard on the containment step'
     ['Dismiss NXT Turf Herbicide 1 gal', 'Dismiss', ['nxt']],
     ['Zoecon Gentrol Complete EC3 Insecticide 16 fl oz', 'Gentrol', ['complete', 'ec3']],
     ['Maxforce FC Magnum Roach Bait Gel 4 x 30 g', 'Maxforce FC', ['magnum']],
+    ['PGF Complete 16-4-8 Plus Fertilizer 50 lb', 'PGF Complete 16-4-8', ['plus']],
   ];
   test.each(MUST_NOT_MATCH)('gate on: "%s" no longer matches catalog "%s"', async (title, name, variantWords) => {
     gateOn();
@@ -159,9 +160,15 @@ describe('variantWordsMissingFromName', () => {
   test('words the name already has do not count', () => {
     expect(variantWordsMissingFromName('syngenta heritage g fungicide', ['heritage', 'g'])).toEqual([]);
   });
-  test('a word right after a number is a unit or size, never a variant', () => {
+  test('a unit word right after a number is a size, never a variant', () => {
     expect(variantWordsMissingFromName('roach gel 4 x 30 g tube', ['roach', 'gel'])).toEqual([]);
     expect(variantWordsMissingFromName('roach gel 30 g magnum', ['roach', 'gel'])).toEqual(['magnum']);
+    expect(variantWordsMissingFromName('ima jet 10 1 pt bottle', ['ima', 'jet', '10'])).toEqual([]);
+  });
+  test('a product-line word right after a number still counts (a catalog name can end in a number)', () => {
+    expect(variantWordsMissingFromName('pgf complete 16 4 8 plus 25 lb', ['pgf', 'complete', '16', '4', '8'])).toEqual(['plus']);
+    expect(variantWordsMissingFromName('arborjet ima jet 10 pro 1 l', ['arborjet', 'ima', 'jet', '10'])).toEqual(['pro']);
+    expect(variantWordsMissingFromName('merit 75 wp insecticide', ['merit', '75'])).toEqual(['wp']);
   });
   test('generic descriptors are never variant words', () => {
     for (const word of ['liquid', 'concentrate', 'granular', 'granules', 'broad', 'spectrum', 'bait', 'spray', 'insecticide']) {
