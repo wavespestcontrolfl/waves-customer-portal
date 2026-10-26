@@ -134,6 +134,21 @@ postgres('visit tech relay (real Postgres)', () => {
     expect(idsOf(await relay.visitTechniciansFor(nextCustomer.id))).toEqual([String(hire.id)]);
   });
 
+  test('a dead sibling with a stale tracker state does not hide a real next stop (pre-push audit P1)', async () => {
+    const hire = await makeTech('Synthetic Hire');
+    const customer = await makeCustomer('Stalesibling');
+    const later = await makeCustomer('Laterone');
+    const cancelledId = await visit(customer, hire, 'cancelled', '08:00');
+    await db('scheduled_services').where({ id: cancelledId }).update({ track_state: 'en_route' });
+    const expiredId = await visit(customer, hire, 'confirmed', '08:00');
+    await db('scheduled_services').where({ id: expiredId }).update({ track_state: 'en_route', reservation_expires_at: new Date(Date.now() - 60 * 60 * 1000) });
+    await visit(customer, hire, 'confirmed', '08:00');
+    await visit(later, hire, 'confirmed', '11:00');
+
+    expect(idsOf(await relay.visitTechniciansFor(customer.id))).toEqual([String(hire.id)]);
+    expect(await relay.visitTechniciansFor(later.id)).toEqual([]);
+  });
+
   test('an admin technician (the owner) and an inactive technician get no copy', async () => {
     const owner = await makeTech('Synthetic Owner', { role: 'admin' });
     const former = await makeTech('Synthetic Former', { status: 'inactive' });

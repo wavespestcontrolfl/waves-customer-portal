@@ -53,12 +53,13 @@ function errorTag(err) {
   return String((err && (err.code || err.name)) || 'error');
 }
 
-// The stops-ahead.js live-stop predicates (see the header).
-function liveStops(query, conn) {
+// The stops-ahead.js live-stop predicates (see the header). `p` qualifies the
+// columns for an aliased table ('sib.').
+function liveStops(query, conn, p = '') {
   return query
-    .whereNotIn('status', NOT_A_STOP_STATUSES)
-    .where((q) => q.whereNull('track_state').orWhereNotIn('track_state', TRACKER_DONE_STATES))
-    .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', conn.fn.now()));
+    .whereNotIn(`${p}status`, NOT_A_STOP_STATUSES)
+    .where((q) => q.whereNull(`${p}track_state`).orWhereNotIn(`${p}track_state`, TRACKER_DONE_STATES))
+    .where((q) => q.whereNull(`${p}reservation_expires_at`).orWhere(`${p}reservation_expires_at`, '>', conn.fn.now()));
 }
 
 const isUnderway = (visit) => ACTIVE_STATUSES.includes(visit.status) || ACTIVE_TRACK_STATES.includes(visit.track_state);
@@ -90,7 +91,9 @@ async function visitTechniciansFor(customerId, { conn = db, today = etDateString
         .where({ technician_id: tech.id, scheduled_date: today })
         .whereNotIn('status', ACTIVE_STATUSES)
         .where((q) => q.whereNull('track_state').orWhereNotIn('track_state', ACTIVE_TRACK_STATES))
-        .whereNotExists((sib) => sib.select(conn.raw('1')).from('scheduled_services as sib')
+        // A LIVE sibling that is underway: a cancelled, done or dead-hold row
+        // with a stale tracker state is not.
+        .whereNotExists((sib) => liveStops(sib.select(conn.raw('1')).from('scheduled_services as sib'), conn, 'sib.')
           .whereRaw('sib.technician_id = scheduled_services.technician_id')
           .whereRaw('sib.scheduled_date = scheduled_services.scheduled_date')
           .whereRaw('sib.customer_id = scheduled_services.customer_id')
