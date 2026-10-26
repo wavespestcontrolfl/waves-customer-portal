@@ -323,12 +323,33 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
   // apart by their where shape: { job_id } = direct job entries, { technician_id }
   // = the clock-in-window fallback, whose use is tracked so tests can pin that
   // an untrusted span never even consults it.
+  // Applies a getFinancials query to in-memory rows: `effective_date <= x`
+  // filters, then the orderBy spec sorts (strings compare as dates, ISO form).
+  function pickFinancialRow(rows, whereArgs, orderSpec) {
+    let list = rows.slice();
+    for (const [col, op, val] of whereArgs) {
+      if (op === '<=') list = list.filter((r) => r[col] <= val);
+    }
+    list.sort((a, b) => {
+      for (const { column, order } of orderSpec) {
+        if (a[column] === b[column]) continue;
+        const cmp = a[column] < b[column] ? -1 : 1;
+        return order === 'desc' ? -cmp : cmp;
+      }
+      return 0;
+    });
+    return list[0] || null;
+  }
+
   function fakeCostingDb({
     svc,
     record,
     jobEntries = [],
     windowEntries = [],
     financials = null,
+    // Several effective-dated rows: the fake then honors the where/orderBy that
+    // getFinancials sends. Without it, `financials` is returned for any query.
+    financialRows = null,
     existingJobCost = null,
     transactionHook = null,
   } = {}) {
@@ -353,11 +374,13 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
       serviceRecordUpdates: [],
       plucks: [],
       windowQueried: false,
+      financialQueries: [],
       get currentJobCost() { return currentJobCost; },
     };
     const db = (table) => {
       const wheres = [];
       const whereArgs = [];
+      let orderSpec = [];
       const chain = {
         where: (...args) => { wheres.push(args[0]); whereArgs.push(args); return chain; },
         whereNot: () => chain,
@@ -370,7 +393,10 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
         },
         whereBetween: () => chain,
         leftJoin: () => chain,
-        orderBy: () => chain,
+        orderBy: (spec, dir) => {
+          orderSpec = Array.isArray(spec) ? spec : [{ column: spec, order: dir || 'asc' }];
+          return chain;
+        },
         limit: () => Promise.resolve(currentRecord ? [currentRecord] : []),
         columnInfo: () => Promise.resolve(SR_COLS),
         select: () => {
@@ -384,7 +410,11 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
         first: () => {
           if (table === 'scheduled_services') return Promise.resolve(svc);
           if (table === 'service_records') return Promise.resolve(currentRecord);
-          if (table === 'company_financials') return Promise.resolve(financials);
+          if (table === 'company_financials') {
+            if (!financialRows) return Promise.resolve(financials);
+            writes.financialQueries.push({ wheres: whereArgs, orderSpec });
+            return Promise.resolve(pickFinancialRow(financialRows, whereArgs, orderSpec));
+          }
           if (table === 'job_costs') return Promise.resolve(currentJobCost);
           return Promise.resolve(null); // customers / dispositions
         },
@@ -742,6 +772,49 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
       }),
     ]));
   });
+
+  describe('cost settings in effect on the visit date', () => {
+    const ROWS = [
+      { id: 'fin-a', effective_date: '2026-01-01', created_at: '2026-01-01T05:00:00Z', loaded_labor_rate: '35.00', drive_cost_per_stop: '6.00' },
+      { id: 'fin-b', effective_date: '2026-11-01', created_at: '2026-11-01T15:00:00Z', loaded_labor_rate: '30.00', drive_cost_per_stop: '12.00' },
+    ];
+
+    test.each([
+      { label: 'before the new row', date: '2026-10-31', labor: 52.5, drive: 6 },
+      { label: 'on the new row date', date: '2026-11-01', labor: 45, drive: 12 },
+      { label: 'before every row (oldest row)', date: '2025-12-15', labor: 52.5, drive: 6 },
+    ])('a visit $label ($date) is costed at the row in effect that day', async ({ date, labor, drive }) => {
+      const db = fakeCostingDb({
+        svc: { ...NORMAL_SVC, scheduled_date: date },
+        record: NORMAL_RECORD,
+        financialRows: ROWS,
+      });
+      const res = await calculateJobCost('svc-1', db);
+      expect(res.labor_cost).toBe(labor); // 90 on-site minutes
+      expect(res.drive_cost).toBe(drive);
+      expect(db.writes.currentJobCost).toMatchObject({ labor_cost: labor, drive_cost: drive });
+      expect(db.writes.serviceRecordUpdates[0]).toMatchObject({ labor_cost: labor, drive_cost: drive });
+    });
+
+    test('a node-postgres local-midnight Date reads the same row as the string', async () => {
+      const asDate = fakeCostingDb({
+        svc: { ...NORMAL_SVC, scheduled_date: new Date(2026, 9, 31) },
+        record: NORMAL_RECORD,
+        financialRows: ROWS,
+      });
+      const asString = fakeCostingDb({
+        svc: { ...NORMAL_SVC, scheduled_date: '2026-10-31' },
+        record: NORMAL_RECORD,
+        financialRows: ROWS,
+      });
+      const fromDate = await calculateJobCost('svc-1', asDate);
+      const fromString = await calculateJobCost('svc-1', asString);
+      expect(fromDate.labor_cost).toBe(52.5);
+      expect(fromString.labor_cost).toBe(52.5);
+      expect(asDate.writes.financialQueries[0].wheres).toEqual([['effective_date', '<=', '2026-10-31']]);
+    });
+  });
+
 });
 
 describe('calcProductsCost — an application amount is priced per unit, never per package', () => {
@@ -823,5 +896,102 @@ describe('calcProductsCost — an application amount is priced per unit, never p
     const { productsCost, breakdown } = await calcProductsCost(db, 'rec-1');
     expect(productsCost).toBe(3.83);
     expect(breakdown).toHaveLength(1);
+  });
+});
+
+describe('getFinancials — the company_financials row in effect on a date', () => {
+  const { getFinancials } = require('../services/job-costing');
+
+  const ROWS = [
+    { id: 'fin-a', effective_date: '2026-01-01', created_at: '2026-01-01T05:00:00Z', loaded_labor_rate: '35.00', drive_cost_per_stop: '6.00' },
+    { id: 'fin-b', effective_date: '2026-11-01', created_at: '2026-11-01T15:00:00Z', loaded_labor_rate: '30.00', drive_cost_per_stop: '12.00' },
+  ];
+
+  // Applies exactly what getFinancials sends: where(col, '<=', x), orderBy([...]).
+  function fakeFinancialsDb(rows, { fail = false } = {}) {
+    const queries = [];
+    const db = (table) => {
+      if (table !== 'company_financials') throw new Error(`unexpected table ${table}`);
+      const q = { wheres: [], orderSpec: [] };
+      queries.push(q);
+      const chain = {
+        where: (...args) => { q.wheres.push(args); return chain; },
+        orderBy: (spec, dir) => {
+          q.orderSpec = Array.isArray(spec) ? spec : [{ column: spec, order: dir || 'asc' }];
+          return chain;
+        },
+        first: () => {
+          if (fail) return Promise.reject(new Error('relation does not exist'));
+          let list = rows.slice();
+          for (const [col, op, val] of q.wheres) {
+            if (op === '<=') list = list.filter((r) => r[col] <= val);
+          }
+          list.sort((a, b) => {
+            for (const { column, order } of q.orderSpec) {
+              if (a[column] === b[column]) continue;
+              const cmp = a[column] < b[column] ? -1 : 1;
+              return order === 'desc' ? -cmp : cmp;
+            }
+            return 0;
+          });
+          return Promise.resolve(list[0]);
+        },
+      };
+      return chain;
+    };
+    db.queries = queries;
+    return db;
+  }
+
+  test('reads the row with the greatest effective_date on or before the visit', async () => {
+    const db = fakeFinancialsDb(ROWS);
+    expect(await getFinancials(db, '2026-10-31')).toEqual({ laborRate: 35, driveCostPerStop: 6 });
+    expect(await getFinancials(db, '2026-11-01')).toEqual({ laborRate: 30, driveCostPerStop: 12 });
+    expect(await getFinancials(db, '2027-03-15')).toEqual({ laborRate: 30, driveCostPerStop: 12 });
+  });
+
+  test('a visit older than every row reads the oldest row', async () => {
+    const db = fakeFinancialsDb(ROWS);
+    expect(await getFinancials(db, '2025-12-15')).toEqual({ laborRate: 35, driveCostPerStop: 6 });
+  });
+
+  test('two rows on one effective_date: the newer created_at wins (and id breaks a created_at tie)', async () => {
+    const sameDay = [
+      { id: 'fin-1', effective_date: '2026-05-01', created_at: '2026-05-01T09:00:00Z', loaded_labor_rate: '31', drive_cost_per_stop: '7' },
+      { id: 'fin-2', effective_date: '2026-05-01', created_at: '2026-05-01T17:00:00Z', loaded_labor_rate: '33', drive_cost_per_stop: '8' },
+    ];
+    expect(await getFinancials(fakeFinancialsDb(sameDay), '2026-05-02')).toEqual({ laborRate: 33, driveCostPerStop: 8 });
+    // Visit older than both: oldest date, same tiebreak.
+    expect(await getFinancials(fakeFinancialsDb(sameDay), '2026-04-01')).toEqual({ laborRate: 33, driveCostPerStop: 8 });
+    const tied = [
+      { id: 'fin-1', effective_date: '2026-05-01', created_at: '2026-05-01T09:00:00Z', loaded_labor_rate: '31', drive_cost_per_stop: '7' },
+      { id: 'fin-9', effective_date: '2026-05-01', created_at: '2026-05-01T09:00:00Z', loaded_labor_rate: '34', drive_cost_per_stop: '9' },
+    ];
+    expect(await getFinancials(fakeFinancialsDb(tied), '2026-05-02')).toEqual({ laborRate: 34, driveCostPerStop: 9 });
+  });
+
+  test('no rows: the defaults', async () => {
+    expect(await getFinancials(fakeFinancialsDb([]), '2026-10-31')).toEqual({ laborRate: 35, driveCostPerStop: 6 });
+    expect(await getFinancials(fakeFinancialsDb([]))).toEqual({ laborRate: 35, driveCostPerStop: 6 });
+  });
+
+  test('a read error: the defaults', async () => {
+    expect(await getFinancials(fakeFinancialsDb(ROWS, { fail: true }), '2026-10-31'))
+      .toEqual({ laborRate: 35, driveCostPerStop: 6 });
+  });
+
+  test('a local-midnight Date and a string read the same row, in any process time zone', async () => {
+    const db = fakeFinancialsDb(ROWS);
+    // new Date(y, m, d) is what node-postgres builds for a DATE cell.
+    expect(await getFinancials(db, new Date(2026, 9, 31))).toEqual({ laborRate: 35, driveCostPerStop: 6 });
+    expect(await getFinancials(db, new Date(2026, 10, 1))).toEqual({ laborRate: 30, driveCostPerStop: 12 });
+    expect(db.queries[0].wheres).toEqual([['effective_date', '<=', '2026-10-31']]);
+    expect(db.queries[1].wheres).toEqual([['effective_date', '<=', '2026-11-01']]);
+  });
+
+  test.each([undefined, null, '', 'not-a-date', new Date('nope')])('missing or unparseable date %p: the newest row, no date filter', async (bad) => {
+    const db = fakeFinancialsDb(ROWS);
+    expect(await getFinancials(db, bad)).toEqual({ laborRate: 30, driveCostPerStop: 12 });
+    expect(db.queries[0].wheres).toEqual([]);
   });
 });

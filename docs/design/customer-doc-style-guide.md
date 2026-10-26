@@ -35,6 +35,17 @@ The following shared customer-page rules continue to govern the surrounding
 application and transaction controls. Field overrides glass-card treatment
 inside the authored document body only.
 
+### Staff document extension (owner approved 2026-10-26)
+
+Employee policies, procedures, forms and acknowledgments use Field for their
+reading body and generated PDF. The staff masthead is text-only: company name
+and controlled-document identity, with no customer contact or license block.
+The surrounding staff/admin library, editor, version selectors and action
+controls retain their neutral styling. This document-body boundary also applies
+when the reader is embedded in the admin Staff page. Issued wording, version
+hashes, review dates, citations, acknowledgments and completed-record evidence
+remain unchanged; uploaded originals retain their existing format.
+
 The tokened document surfaces — `/estimate/:token`, `/report/*`, `/prep`,
 `/receipt`, `/pay`, `/pay/statement/:token`, `/contract`, `/service-outlines`,
 `/lawn-care/what-is-included` — share one design system with a single source

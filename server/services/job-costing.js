@@ -17,12 +17,14 @@
  *   labor_cost    — time_entries.duration_minutes (else actual_start/end span,
  *                   else, for a completed visit nothing measured, its scheduled
  *                   estimated_duration_minutes)
- *                   × company_financials.loaded_labor_rate
+ *                   × loaded_labor_rate of the company_financials row in
+ *                   effect on the visit's scheduled date
  *   material_cost — product_inventory_movements.cost_used, plus
  *                   property_application_history fallback costs priced by the
  *                   same per-unit rule as the inventory deduction
  *                   (inventory-cost.js)
- *   drive_cost    — company_financials.drive_cost_per_stop (once per physical
+ *   drive_cost    — drive_cost_per_stop of the company_financials row in
+ *                   effect on the visit's scheduled date (once per physical
  *                   stop when a combined-closeout allocation marker is present)
  *   expenses      — expenses WHERE scheduled_service_id=?
  *
@@ -75,9 +77,50 @@ function parseJsonObject(value) {
   return {};
 }
 
-async function getFinancials(db) {
+// DATE cell or 'YYYY-MM-DD' string → 'YYYY-MM-DD', or null when unparseable.
+// node-postgres parses a DATE column to a LOCAL-midnight Date (no type parser
+// is registered in this app), so a Date is read with LOCAL getters: UTC getters
+// or toISOString() would drift a day in any zone east of UTC. Same rule as
+// admin-revenue.js effectiveDateStr.
+function visitDateString(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'string') {
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(value.trim());
+    return m ? m[1] : null;
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return [
+      value.getFullYear(),
+      String(value.getMonth() + 1).padStart(2, '0'),
+      String(value.getDate()).padStart(2, '0'),
+    ].join('-');
+  }
+  return null;
+}
+
+// Cost settings in effect on a visit's date: the company_financials row with
+// the greatest effective_date <= onDate (same date: newest created_at, then id).
+// A visit older than every row reads the OLDEST row. No usable onDate reads the
+// newest row. Re-costing an old visit therefore never picks up a rate saved
+// later. Table empty or unreadable: the defaults.
+async function getFinancials(db, onDate) {
   try {
-    const row = await db('company_financials').orderBy('effective_date', 'desc').first();
+    const dateStr = visitDateString(onDate);
+    const order = (dir) => [
+      { column: 'effective_date', order: dir },
+      { column: 'created_at', order: 'desc', nulls: 'last' },
+      { column: 'id', order: 'desc' },
+    ];
+    let row = null;
+    if (dateStr) {
+      row = await db('company_financials')
+        .where('effective_date', '<=', dateStr)
+        .orderBy(order('desc'))
+        .first();
+      if (!row) row = await db('company_financials').orderBy(order('asc')).first();
+    } else {
+      row = await db('company_financials').orderBy(order('desc')).first();
+    }
     return {
       laborRate: Number(row?.loaded_labor_rate) || DEFAULT_LABOR_RATE,
       driveCostPerStop: row?.drive_cost_per_stop != null
@@ -567,7 +610,7 @@ async function calculateJobCost(scheduledServiceId, db, {
     intentionallyFree = disposition?.disposition === 'intentionally_free';
   } catch { /* table may be absent before 20260619000001 */ }
 
-  const { laborRate, driveCostPerStop } = await getFinancials(db);
+  const { laborRate, driveCostPerStop } = await getFinancials(db, svc.scheduled_date);
   const revenue = intentionallyFree ? 0 : deriveRevenue({
     serviceRecord: record, scheduledService: svc, customer, ignoreExistingRevenue: recomputeRevenue, keepRecordedRevenue,
   });
@@ -805,6 +848,7 @@ async function backfillServiceRecordFinancials(db, { onError, since = null, keep
 module.exports = {
   calculateJobCost,
   calcLaborCost,
+  getFinancials,
   calcProductsCost,
   resolveServiceRecord,
   parseJsonObject,
