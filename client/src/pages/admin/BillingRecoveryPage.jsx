@@ -21,6 +21,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Banknote } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   Button, Badge, Card, CardHeader, CardTitle, CardBody,
@@ -198,16 +199,158 @@ function VisitRow({ visit, busy, billing, onBill, onFree, onElsewhere }) {
   );
 }
 
+function VisitTable({ visits, busyId, freeFor, elsewhereFor, confirmBill, onBill, onFree, onElsewhere }) {
+  return (
+    <Table layout="records">
+      <THead><TR><TH>Customer</TH><TH>Visit</TH><TH>Service</TH><TH align="right">Price</TH><TH align="right">Action</TH></TR></THead>
+      <TBody>{visits.map((visit) => (
+        <VisitRow key={visit.scheduled_service_id} visit={visit} busy={!!busyId}
+          billing={busyId === visit.scheduled_service_id && !freeFor && !elsewhereFor}
+          onBill={(selected) => onBill(selected, confirmBill ? { confirm: true } : undefined)}
+          onFree={onFree} onElsewhere={onElsewhere} />
+      ))}</TBody>
+    </Table>
+  );
+}
+
+function EmptyFeedback({ feedbackEnabled, children, className }) {
+  return feedbackEnabled
+    ? <ActionFeedback className={className}>{children}</ActionFeedback>
+    : <div className={cn("text-ui-body text-ink-secondary", className)}>{children}</div>;
+}
+
+function VisitQueues({ feedbackEnabled, loading, error, onRetry, data, busyId, freeFor, elsewhereFor, onBill, onFree, onElsewhere }) {
+  return (
+    <>
+      {feedbackEnabled && loading && <ActionFeedback className="mb-5 min-h-20">Loading uninvoiced visits and review queue…</ActionFeedback>}
+      {feedbackEnabled && error && (
+        <ActionFeedback error onRetry={onRetry} className="mb-5">
+          Uninvoiced visits and Needs review couldn't be loaded. Other billing recovery sections are still available.
+        </ActionFeedback>
+      )}
+      {data && (
+        <>
+          <Card className="mb-6">
+            <CardHeader><CardTitle>Uninvoiced completed visits</CardTitle></CardHeader>
+            <CardBody>
+              {data.leaks?.length ? (
+                <VisitTable visits={data.leaks}
+                  busyId={busyId} freeFor={freeFor} elsewhereFor={elsewhereFor}
+                  onBill={onBill} onFree={onFree} onElsewhere={onElsewhere} />
+              ) : (
+                <EmptyFeedback feedbackEnabled={feedbackEnabled} className="justify-center py-6 text-center">No uninvoiced visits in this window.</EmptyFeedback>
+              )}
+            </CardBody>
+          </Card>
+          {data.needs_review?.length > 0 && (
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle>Needs review — recurring or partially prepaid</CardTitle>
+                <p className="text-ui-caption text-ink-secondary mt-1">These have a monthly rate, a partial prepayment, or bill per application — confirm they aren't already billed (cadence or completion auto-charge), and bill partial-prepay visits manually so the credit is applied.</p>
+              </CardHeader>
+              <CardBody>
+                <VisitTable visits={data.needs_review}
+                  busyId={busyId} freeFor={freeFor} elsewhereFor={elsewhereFor} confirmBill
+                  onBill={onBill} onFree={onFree} onElsewhere={onElsewhere} />
+              </CardBody>
+            </Card>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+function AgingSection({ feedbackEnabled, loading, error, onRetry, aging }) {
+  const buckets = aging?.aging || {};
+  let body;
+  if (feedbackEnabled && loading) body = <ActionFeedback className="min-h-20">Loading accounts receivable aging…</ActionFeedback>;
+  else if (feedbackEnabled && error) body = (
+    <ActionFeedback error onRetry={onRetry}>Accounts receivable aging couldn't be loaded. Visit recovery and at-risk MRR are still available.</ActionFeedback>
+  );
+  else body = (
+    <>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        <StatCard label="Current" value={buckets.current} />
+        <StatCard label="1–30 days" value={buckets.days_30} />
+        <StatCard label="31–60 days" value={buckets.days_60} />
+        <StatCard label="61–90+ days" value={buckets.days_90_plus} alert={buckets.days_90_plus > 0} />
+      </div>
+      {aging?.top_balances?.length ? (
+        <Table layout="records">
+          <THead><TR><TH>Customer</TH><TH>Status</TH><TH>Due</TH><TH align="right">Amount</TH></TR></THead>
+          <TBody>{aging.top_balances.map((balance) => (
+            <TR key={balance.invoice_id}>
+              <TD>{balance.customer}</TD>
+              <TD data-label="Status"><span><Badge tone={String(balance.status).toLowerCase() === "overdue" ? "alert" : "neutral"}>{balance.status}</Badge></span></TD>
+              <TD data-label="Due" className="text-ink-secondary u-nums">{formatDateOnly(balance.due_date)}</TD>
+              <TD data-label="Amount" nums>{balance.amount == null ? "—" : formatMoney(balance.amount)}</TD>
+            </TR>
+          ))}</TBody>
+        </Table>
+      ) : <EmptyFeedback feedbackEnabled={feedbackEnabled} className="justify-center py-4 text-center">No outstanding balances.</EmptyFeedback>}
+    </>
+  );
+  return <Card><CardHeader><CardTitle>Accounts receivable aging</CardTitle></CardHeader><CardBody>{body}</CardBody></Card>;
+}
+
+function AtRiskSection({ feedbackEnabled, loading, error, onRetry, atRiskMrr }) {
+  let body;
+  if (feedbackEnabled && loading) body = <ActionFeedback className="min-h-20">Loading at-risk MRR accounts…</ActionFeedback>;
+  else if (feedbackEnabled && error) body = (
+    <ActionFeedback error onRetry={onRetry}>At-risk MRR accounts couldn't be loaded. Visit recovery and AR aging are still available.</ActionFeedback>
+  );
+  else if (atRiskMrr?.accounts?.length) body = (
+    <Table layout="records">
+      <THead><TR><TH>Customer</TH><TH>Why at risk</TH><TH align="right">Monthly</TH></TR></THead>
+      <TBody>{atRiskMrr.accounts.map((account) => (
+        <TR key={account.id}>
+          <TD><a href={`/admin/customers?customerId=${account.id}`} className="inline-flex items-center text-zinc-900 underline-offset-2 hover:underline u-focus-ring" data-ui-text-action>
+            {`${account.firstName || ""} ${account.lastName || ""}`.trim() || "Unnamed account"}
+          </a></TD>
+          <TD data-label="Why at risk"><span className="inline-flex flex-wrap gap-1">
+            {account.causes.map((cause) => <Badge key={cause} tone="neutral">{AT_RISK_CAUSE_LABELS[cause] || cause}</Badge>)}
+          </span></TD>
+          <TD data-label="Monthly" nums>{account.monthlyRate == null ? "—" : formatMoney(account.monthlyRate)}</TD>
+        </TR>
+      ))}</TBody>
+    </Table>
+  );
+  else if (atRiskMrr) body = <EmptyFeedback feedbackEnabled={feedbackEnabled} className="justify-center py-4 text-center">Every recurring account is clear to bill.</EmptyFeedback>;
+  else body = <ActionFeedback error onRetry={onRetry}>At-risk accounts couldn't be loaded — refresh to retry.</ActionFeedback>;
+
+  return (
+    <Card className="mt-6">
+      <CardHeader>
+        <CardTitle>At-risk MRR</CardTitle>
+        <p className="text-ui-caption text-ink-secondary mt-1">
+          Recurring accounts whose next monthly charge isn't expected to land. Same definition as the dashboard's MRR tile and its "MRR at risk" action item{atRiskMrr ? ` — ${formatMoney(atRiskMrr.atRisk)} across ${atRiskMrr.count} account${atRiskMrr.count === 1 ? "" : "s"}` : ""}.
+        </p>
+      </CardHeader>
+      <CardBody>{body}</CardBody>
+    </Card>
+  );
+}
+
 export default function BillingRecoveryPage() {
+  const [searchParams] = useSearchParams();
+  const feedbackEnabled = searchParams.get("feedback") === "1";
   const [days, setDays] = useState(90);
   const [data, setData] = useState(null);
   const [aging, setAging] = useState(null);
   const [atRiskMrr, setAtRiskMrr] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [leaksLoading, setLeaksLoading] = useState(true);
+  const [agingLoading, setAgingLoading] = useState(true);
+  const [atRiskLoading, setAtRiskLoading] = useState(true);
+  const [leaksError, setLeaksError] = useState(null);
+  const [agingError, setAgingError] = useState(null);
+  const [atRiskError, setAtRiskError] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const busyRef = useRef(false);
   const [actionError, setActionError] = useState(null);
+  const [actionNotice, setActionNotice] = useState(null);
   const [freeError, setFreeError] = useState(null);
   const [freeFor, setFreeFor] = useState(null); // visit pending "mark free"
   const [freeReason, setFreeReason] = useState(FREE_REASONS[0]);
@@ -216,30 +359,106 @@ export default function BillingRecoveryPage() {
   const [elsewhereInvoice, setElsewhereInvoice] = useState("");
   const [elsewhereNote, setElsewhereNote] = useState("");
   const [elsewhereError, setElsewhereError] = useState(null);
+  const readScopeRef = useRef({ days, feedbackEnabled, version: 0 });
+  const priorScope = readScopeRef.current;
+  if (priorScope.days !== days || priorScope.feedbackEnabled !== feedbackEnabled) {
+    readScopeRef.current = { days, feedbackEnabled, version: priorScope.version + 1 };
+  }
+  const readRequestsRef = useRef({ legacy: 0, leaks: 0, aging: 0, atRisk: 0 });
+  const isCurrentRead = useCallback((source, requestId, scopeVersion) => (
+    readRequestsRef.current[source] === requestId && readScopeRef.current.version === scopeVersion
+  ), []);
 
-  const load = useCallback(async () => {
+  const loadLegacy = useCallback(async () => {
+    const scope = readScopeRef.current;
+    if (scope.feedbackEnabled) return;
+    const requestId = ++readRequestsRef.current.legacy;
     setActionError(null);
     setLoading(true);
     setError(null);
     try {
       const [leaks, ar, riskMrr] = await Promise.all([
-        adminFetch(`/admin/billing-recovery/leaks?days=${days}`),
+        adminFetch(`/admin/billing-recovery/leaks?days=${scope.days}`),
         adminFetch(`/admin/billing-recovery/aging`),
-        // Fail-soft: the at-risk list renders its own unavailable state
-        // rather than blanking the leak queue + AR aging with it.
         adminFetch(`/admin/billing-recovery/at-risk-mrr`).catch(() => null),
       ]);
+      if (!isCurrentRead("legacy", requestId, scope.version)) return;
       setData(leaks);
       setAging(ar);
       setAtRiskMrr(riskMrr);
     } catch (e) {
+      if (!isCurrentRead("legacy", requestId, scope.version)) return;
       setError(e.message || "Failed to load");
     } finally {
-      setLoading(false);
+      if (isCurrentRead("legacy", requestId, scope.version)) setLoading(false);
     }
-  }, [days]);
+  }, [isCurrentRead]);
 
-  useEffect(() => { load(); }, [load]);
+  const loadLeaks = useCallback(async () => {
+    const scope = readScopeRef.current;
+    if (!scope.feedbackEnabled) return;
+    const requestId = ++readRequestsRef.current.leaks;
+    setLeaksLoading(true);
+    setLeaksError(null);
+    setData(null);
+    try {
+      const result = await adminFetch(`/admin/billing-recovery/leaks?days=${scope.days}`);
+      if (isCurrentRead("leaks", requestId, scope.version)) setData(result);
+    } catch (e) {
+      if (isCurrentRead("leaks", requestId, scope.version)) setLeaksError(e.message || "Failed to load uninvoiced visits");
+    } finally {
+      if (isCurrentRead("leaks", requestId, scope.version)) setLeaksLoading(false);
+    }
+  }, [isCurrentRead]);
+
+  const loadAging = useCallback(async () => {
+    const scope = readScopeRef.current;
+    if (!scope.feedbackEnabled) return;
+    const requestId = ++readRequestsRef.current.aging;
+    setAgingLoading(true);
+    setAgingError(null);
+    setAging(null);
+    try {
+      const result = await adminFetch(`/admin/billing-recovery/aging`);
+      if (isCurrentRead("aging", requestId, scope.version)) setAging(result);
+    } catch (e) {
+      if (isCurrentRead("aging", requestId, scope.version)) setAgingError(e.message || "Failed to load AR aging");
+    } finally {
+      if (isCurrentRead("aging", requestId, scope.version)) setAgingLoading(false);
+    }
+  }, [isCurrentRead]);
+
+  const loadAtRisk = useCallback(async () => {
+    const scope = readScopeRef.current;
+    if (!scope.feedbackEnabled) return;
+    const requestId = ++readRequestsRef.current.atRisk;
+    setAtRiskLoading(true);
+    setAtRiskError(null);
+    setAtRiskMrr(null);
+    try {
+      const result = await adminFetch(`/admin/billing-recovery/at-risk-mrr`);
+      if (isCurrentRead("atRisk", requestId, scope.version)) setAtRiskMrr(result);
+    } catch (e) {
+      if (isCurrentRead("atRisk", requestId, scope.version)) setAtRiskError(e.message || "Failed to load at-risk MRR accounts");
+    } finally {
+      if (isCurrentRead("atRisk", requestId, scope.version)) setAtRiskLoading(false);
+    }
+  }, [isCurrentRead]);
+
+  const refreshAll = useCallback(async () => {
+    if (!readScopeRef.current.feedbackEnabled) return loadLegacy();
+    await Promise.all([loadLeaks(), loadAging(), loadAtRisk()]);
+  }, [loadAging, loadAtRisk, loadLeaks, loadLegacy]);
+
+  useEffect(() => {
+    if (feedbackEnabled) {
+      void loadLeaks();
+      void loadAging();
+      void loadAtRisk();
+    } else {
+      void loadLegacy();
+    }
+  }, [days, feedbackEnabled, loadAging, loadAtRisk, loadLeaks, loadLegacy]);
 
   const bill = useCallback(async (visit, { confirm } = {}) => {
     if (busyRef.current) return;
@@ -252,21 +471,24 @@ export default function BillingRecoveryPage() {
     busyRef.current = true;
     setBusyId(visit.scheduled_service_id);
     setActionError(null);
+    setActionNotice(null);
     try {
       await adminFetch(`/admin/billing-recovery/${visit.scheduled_service_id}/bill`, { method: "POST", body: "{}" });
-      await load();
+      if (readScopeRef.current.feedbackEnabled) setActionNotice("Draft invoice created. Review and send it from Invoices.");
+      await refreshAll();
     } catch (e) {
       setActionError(e.message || "Could not create invoice");
     } finally {
       busyRef.current = false;
       setBusyId(null);
     }
-  }, [load]);
+  }, [refreshAll]);
 
   const submitFree = useCallback(async () => {
     if (!freeFor || busyRef.current) return;
     busyRef.current = true;
     setFreeError(null);
+    setActionNotice(null);
     const reason = freeReason === "Other (see note)" ? (freeNote.trim() || "Other") : `${freeReason}${freeNote.trim() ? ` — ${freeNote.trim()}` : ""}`;
     setBusyId(freeFor.scheduled_service_id);
     try {
@@ -276,14 +498,15 @@ export default function BillingRecoveryPage() {
       setFreeFor(null);
       setFreeNote("");
       setFreeReason(FREE_REASONS[0]);
-      await load();
+      if (readScopeRef.current.feedbackEnabled) setActionNotice("Visit marked intentionally free. No invoice was created.");
+      await refreshAll();
     } catch (e) {
       setFreeError(e.message || "Could not record disposition");
     } finally {
       busyRef.current = false;
       setBusyId(null);
     }
-  }, [freeFor, freeReason, freeNote, load]);
+  }, [freeFor, freeReason, freeNote, refreshAll]);
 
   const submitElsewhere = useCallback(async () => {
     if (!elsewhereFor || busyRef.current) return;
@@ -291,6 +514,7 @@ export default function BillingRecoveryPage() {
     if (!invoiceNumber) { setElsewhereError("Enter the invoice number that bills this visit."); return; }
     busyRef.current = true;
     setElsewhereError(null);
+    setActionNotice(null);
     setBusyId(elsewhereFor.scheduled_service_id);
     try {
       await adminFetch(`/admin/billing-recovery/${elsewhereFor.scheduled_service_id}/billed-elsewhere`, {
@@ -299,20 +523,21 @@ export default function BillingRecoveryPage() {
       setElsewhereFor(null);
       setElsewhereInvoice("");
       setElsewhereNote("");
-      await load();
+      if (readScopeRef.current.feedbackEnabled) setActionNotice("Covering invoice recorded. The visit was removed from recovery.");
+      await refreshAll();
     } catch (e) {
       setElsewhereError(e.message || "Could not record the covering invoice");
     } finally {
       busyRef.current = false;
       setBusyId(null);
     }
-  }, [elsewhereFor, elsewhereInvoice, elsewhereNote, load]);
+  }, [elsewhereFor, elsewhereInvoice, elsewhereNote, refreshAll]);
 
-  const summary = !loading && !error ? data?.summary : null;
-  const visibleAging = !loading && !error ? aging : null;
-  const agingBuckets = aging?.aging || {};
+  const summary = feedbackEnabled || (!loading && !error) ? data?.summary : null;
+  const visibleAging = feedbackEnabled || (!loading && !error) ? aging : null;
   const showFree = (visit) => {
     setActionError(null);
+    setActionNotice(null);
     setFreeFor(visit);
     setFreeReason(FREE_REASONS[0]);
     setFreeNote("");
@@ -321,6 +546,7 @@ export default function BillingRecoveryPage() {
   const closeFree = () => { if (!busyRef.current) setFreeFor(null); };
   const showElsewhere = (visit) => {
     setActionError(null);
+    setActionNotice(null);
     setElsewhereFor(visit);
     setElsewhereInvoice("");
     setElsewhereNote("");
@@ -347,10 +573,11 @@ export default function BillingRecoveryPage() {
         </Field>
       </div>
 
-      {error && (
-        <ActionFeedback error onRetry={load} className="mb-5">{error}</ActionFeedback>
+      {!feedbackEnabled && error && (
+        <ActionFeedback error onRetry={loadLegacy} className="mb-5">{error}</ActionFeedback>
       )}
       {actionError && <ActionFeedback error className="mb-5">{actionError}</ActionFeedback>}
+      {feedbackEnabled && actionNotice && <ActionFeedback className="mb-5">{actionNotice}</ActionFeedback>}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         <StatCard label="Uninvoiced (leak)" value={summary?.leak_dollars} sub={`${summary?.leak_visits ?? "—"} visits · ${summary?.leak_customers ?? "—"} customers`} />
@@ -359,117 +586,17 @@ export default function BillingRecoveryPage() {
         <StatCard label="AR overdue" value={visibleAging?.total_overdue} alert={visibleAging?.total_overdue > 0} />
       </div>
 
-      {loading ? (
+      {!feedbackEnabled && loading ? (
         <div role="status" className="text-ui-body text-ink-secondary min-h-[240px] py-10 text-center">Loading…</div>
-      ) : !error && (
+      ) : !feedbackEnabled && error ? null : (
         <>
-          <Card className="mb-6">
-            <CardHeader><CardTitle>Uninvoiced completed visits</CardTitle></CardHeader>
-            <CardBody>
-              {data?.leaks?.length ? (
-                <Table layout="records">
-                  <THead><TR><TH>Customer</TH><TH>Visit</TH><TH>Service</TH><TH align="right">Price</TH><TH align="right">Action</TH></TR></THead>
-                  <TBody>
-                    {data.leaks.map((v) => (
-                      <VisitRow key={v.scheduled_service_id} visit={v} busy={!!busyId} billing={busyId === v.scheduled_service_id && !freeFor && !elsewhereFor} onBill={(x) => bill(x)} onFree={showFree} onElsewhere={showElsewhere} />
-                    ))}
-                  </TBody>
-                </Table>
-              ) : (
-                <div className="text-ui-body text-ink-secondary py-6 text-center">No uninvoiced visits in this window.</div>
-              )}
-            </CardBody>
-          </Card>
-
-          {data?.needs_review?.length > 0 && (
-            <Card className="mb-6">
-              <CardHeader>
-                <CardTitle>Needs review — recurring or partially prepaid</CardTitle>
-                <p className="text-ui-caption text-ink-secondary mt-1">These have a monthly rate, a partial prepayment, or bill per application — confirm they aren't already billed (cadence or completion auto-charge), and bill partial-prepay visits manually so the credit is applied.</p>
-              </CardHeader>
-              <CardBody>
-                <Table layout="records">
-                  <THead><TR><TH>Customer</TH><TH>Visit</TH><TH>Service</TH><TH align="right">Price</TH><TH align="right">Action</TH></TR></THead>
-                  <TBody>
-                    {data.needs_review.map((v) => (
-                      <VisitRow key={v.scheduled_service_id} visit={v} busy={!!busyId} billing={busyId === v.scheduled_service_id && !freeFor && !elsewhereFor} onBill={(x) => bill(x, { confirm: true })} onFree={showFree} onElsewhere={showElsewhere} />
-                    ))}
-                  </TBody>
-                </Table>
-              </CardBody>
-            </Card>
-          )}
-
-          <Card>
-            <CardHeader><CardTitle>Accounts receivable aging</CardTitle></CardHeader>
-            <CardBody>
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
-                <StatCard label="Current" value={agingBuckets.current} />
-                <StatCard label="1–30 days" value={agingBuckets.days_30} />
-                <StatCard label="31–60 days" value={agingBuckets.days_60} />
-                <StatCard label="61–90+ days" value={agingBuckets.days_90_plus} alert={agingBuckets.days_90_plus > 0} />
-              </div>
-              {aging?.top_balances?.length ? (
-                <Table layout="records">
-                  <THead><TR><TH>Customer</TH><TH>Status</TH><TH>Due</TH><TH align="right">Amount</TH></TR></THead>
-                  <TBody>
-                    {aging.top_balances.map((b) => (
-                      <TR key={b.invoice_id}>
-                        <TD>{b.customer}</TD>
-                        <TD data-label="Status"><span><Badge tone={String(b.status).toLowerCase() === "overdue" ? "alert" : "neutral"}>{b.status}</Badge></span></TD>
-                        <TD data-label="Due" className="text-ink-secondary u-nums">{formatDateOnly(b.due_date)}</TD>
-                        <TD data-label="Amount" nums>{b.amount == null ? "—" : formatMoney(b.amount)}</TD>
-                      </TR>
-                    ))}
-                  </TBody>
-                </Table>
-              ) : (
-                <div className="text-ui-body text-ink-secondary py-4 text-center">No outstanding balances.</div>
-              )}
-            </CardBody>
-          </Card>
-
-          <Card className="mt-6">
-            <CardHeader>
-              <CardTitle>At-risk MRR</CardTitle>
-              <p className="text-ui-caption text-ink-secondary mt-1">
-                Recurring accounts whose next monthly charge isn't expected to land. Same definition as the dashboard's MRR tile and its "MRR at risk" action item{atRiskMrr ? ` — ${formatMoney(atRiskMrr.atRisk)} across ${atRiskMrr.count} account${atRiskMrr.count === 1 ? "" : "s"}` : ""}.
-              </p>
-            </CardHeader>
-            <CardBody>
-              {atRiskMrr?.accounts?.length ? (
-                <Table layout="records">
-                  <THead><TR><TH>Customer</TH><TH>Why at risk</TH><TH align="right">Monthly</TH></TR></THead>
-                  <TBody>
-                    {atRiskMrr.accounts.map((a) => (
-                      <TR key={a.id}>
-                        <TD>
-                          <a
-                            href={`/admin/customers?customerId=${a.id}`}
-                            className="inline-flex items-center text-zinc-900 underline-offset-2 hover:underline u-focus-ring"
-                            data-ui-text-action
-                          >
-                            {`${a.firstName || ""} ${a.lastName || ""}`.trim() || "Unnamed account"}
-                          </a>
-                        </TD>
-                        <TD data-label="Why at risk">
-                          <span className="inline-flex flex-wrap gap-1">
-                            {a.causes.map((c) => (
-                              <Badge key={c} tone="neutral">{AT_RISK_CAUSE_LABELS[c] || c}</Badge>
-                            ))}
-                          </span>
-                        </TD>
-                        <TD data-label="Monthly" nums>{a.monthlyRate == null ? "—" : formatMoney(a.monthlyRate)}</TD>
-                      </TR>
-                    ))}
-                  </TBody>
-                </Table>
-              ) : (
-                atRiskMrr ? <div className="text-ui-body text-ink-secondary py-4 text-center">Every recurring account is clear to bill.</div>
-                  : <ActionFeedback error onRetry={load}>At-risk accounts couldn't be loaded — refresh to retry.</ActionFeedback>
-              )}
-            </CardBody>
-          </Card>
+          <VisitQueues feedbackEnabled={feedbackEnabled} loading={leaksLoading} error={leaksError}
+            onRetry={loadLeaks} data={data} busyId={busyId} freeFor={freeFor} elsewhereFor={elsewhereFor}
+            onBill={bill} onFree={showFree} onElsewhere={showElsewhere} />
+          <AgingSection feedbackEnabled={feedbackEnabled} loading={agingLoading} error={agingError}
+            onRetry={loadAging} aging={aging} />
+          <AtRiskSection feedbackEnabled={feedbackEnabled} loading={atRiskLoading} error={atRiskError}
+            onRetry={feedbackEnabled ? loadAtRisk : loadLegacy} atRiskMrr={atRiskMrr} />
         </>
       )}
 

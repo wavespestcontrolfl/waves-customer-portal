@@ -2,6 +2,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { UiSurface } from "../../components/ui";
 import BillingRecoveryPage from "./BillingRecoveryPage";
@@ -14,6 +15,9 @@ const response = (body, status = 200) => new Response(JSON.stringify(body), { st
 const payer = { id: 42, display_name: "Example payer", payment_terms: "net30", active: true };
 const statement = { id: 71, status: "sent", total: 240, invoice_count: 1 };
 const ar = { summary: { statement_count: 0 } };
+const renderRecovery = () => render(
+  <MemoryRouter initialEntries={["/admin/billing-recovery"]}><BillingRecoveryPage /></MemoryRouter>,
+);
 
 describe("Admin billing failure and draft boundaries", () => {
   it("does not turn a failed recovery read into zero balances or empty queues; safe retry restores data", async () => {
@@ -25,7 +29,7 @@ describe("Admin billing failure and draft boundaries", () => {
       return response({ accounts: [], count: 0, atRisk: 0 });
     });
     vi.stubGlobal("fetch", fetch);
-    render(<BillingRecoveryPage />);
+    renderRecovery();
     await screen.findByText("Recovery unavailable");
     expect(screen.queryByText("$0.00")).not.toBeInTheDocument();
     expect(screen.queryByText("No outstanding balances.")).not.toBeInTheDocument();
@@ -71,7 +75,7 @@ describe("Admin billing failure and draft boundaries", () => {
       return response({ accounts: [], count: 0, atRisk: 0 });
     });
     vi.stubGlobal("fetch", fetch);
-    render(<BillingRecoveryPage />);
+    renderRecovery();
     fireEvent.click(await screen.findByRole("button", { name: "Bill", exact: true }));
     await screen.findByText("Invoice failed");
     if (nextAction === "change window") {
@@ -94,7 +98,7 @@ describe("Admin billing failure and draft boundaries", () => {
       if (url.endsWith("/aging")) return response({ aging: {}, top_balances: [] });
       return response({ accounts: [], count: 0, atRisk: 0 });
     }));
-    render(<BillingRecoveryPage />);
+    renderRecovery();
     const actions = await screen.findAllByRole("button", { name: "Mark free", exact: true });
     fireEvent.click(actions[0]);
     fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Other (see note)" } });
@@ -123,7 +127,7 @@ describe("Admin billing failure and draft boundaries", () => {
       return response({ accounts: [], count: 0, atRisk: 0 });
     });
     vi.stubGlobal("fetch", fetch);
-    render(<BillingRecoveryPage />);
+    renderRecovery();
     await screen.findByText("Marked as billed on WPC-2026-0601, which is now void — bill this visit or mark it free");
     // A status-only visit finishes its closeout first: no Billed elsewhere button.
     const elsewhereButtons = await screen.findAllByRole("button", { name: "Billed elsewhere" });
@@ -278,7 +282,7 @@ describe("Billing recovery visit rows", () => {
       if (url.endsWith("/aging")) return response({ aging: {}, top_balances: [] });
       return response({ accounts: [], count: 0, atRisk: 0 });
     }));
-    render(<BillingRecoveryPage />);
+    renderRecovery();
     await screen.findByText("Avery Example");
     expect(screen.getByText(/Invoice WPC-2026-0598 was voided/)).toBeInTheDocument();
     expect(screen.getAllByText(/was voided/)).toHaveLength(1);
