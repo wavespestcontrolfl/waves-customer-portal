@@ -8,6 +8,9 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  // The page load reads both misting layout gates (GATE_MISTING_LAYOUT_DESIGNER); off here.
+  mosquitoMistingLive: () => false,
+  mistingLayoutDesignerLive: () => false,
   gateEnvValue: jest.fn(() => false),
   gates: {},
   payAfterFirstVisitLive: () => false,
