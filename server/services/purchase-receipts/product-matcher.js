@@ -87,15 +87,20 @@ const VARIANT_WORDS = new Set([
   'wdg', 'wsg', 'wp', 'sl', 'ew', 'me', 'fc', 'pt', 'df', 'dg', 'rtu', 'aerosol', 'dust', 'foam',
 ]);
 
-// The title words (normalized) that are variant words, are not among the product's own name words, and do not directly
-// follow a number token (a word right after a number is a unit or a size: "30 g", "4 x 30 g"). Unique, in title order. Pure.
+// The variant words that are also units of measure: right after a number they are a size ("30 g", "4 x 30 g", "1 pt"), not a
+// product line. Any other variant word right after a number still counts: a catalog name can end in a number ("PGF Complete
+// 16-4-8", "Arborjet Ima-Jet 10"), so "PGF Complete 16-4-8 Plus" is not that product.
+const UNIT_VARIANT_WORDS = new Set(['g', 'gr', 'pt']);
+
+// The title words (normalized) that are variant words, are not among the product's own name words, and are not a unit right
+// after a number. Unique, in title order. Pure.
 function variantWordsMissingFromName(titleNorm, nameWords) {
   const own = new Set(nameWords || []);
   const words = String(titleNorm || '').split(' ').filter(Boolean);
   const found = [];
   words.forEach((word, index) => {
     if (!VARIANT_WORDS.has(word) || own.has(word) || found.includes(word)) return;
-    if (index > 0 && /^\d+$/.test(words[index - 1])) return;
+    if (UNIT_VARIANT_WORDS.has(word) && index > 0 && /^\d+$/.test(words[index - 1])) return;
     found.push(word);
   });
   return found;
