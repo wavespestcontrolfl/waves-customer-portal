@@ -1459,6 +1459,16 @@ const FACTS = [
     verifiedOn: '2026-10-24',
     newsletter: false,
   },
+  {
+    slug: 'fact-tip-fa-flood-rafts',
+    title: 'Service-report tip source: Fire ants float in a flood',
+    tags: ['tech-tips', 'pest'],
+    sourceUrls: ['https://www.cdc.gov/niosh/docs/2025-106/pdfs/2025-106.pdf'],
+    quote: '"Fire ants are often disturbed during hurricanes and floods. They can cling together and float along in floodwaters." "Be careful when lifting items (including animal carcasses) off the ground, as they may be covered in ants"',
+    content: 'What the technician tip "Fire ants float in a flood" on service reports relies on, quoted above from CDC/NIOSH, Hurricane and Flood Key Messages, 3rd ed. (2025-106), page 13. Nothing beyond the quoted words is claimed.',
+    verifiedOn: '2026-10-26',
+    newsletter: false,
+  },
 ];
 
 module.exports = { FACTS, SOURCE, VERIFIED_ON };

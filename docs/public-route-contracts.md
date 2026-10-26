@@ -4033,7 +4033,19 @@ place of the grass) and `turfType: null`; the gate-off packet keeps
 (`server/services/lawn-service-outline.js` `V13_COPY` / `V13_STEP_LABELS`) that
 `client/src/pages/ServiceOutlinePage.jsx` maps to icons; an unknown `type` or key
 renders as text. No PII is added. Unsetting the gate changes only packets built
-after it: a stored packet keeps its content until staff regenerate it),
+after it: a stored packet keeps its content until staff regenerate it. A packet
+built while `GATE_LAWN_OUTLINE_DETAIL` was also live (stamped
+`lawn-v13-detail-1`) has no `season_focus` section; its `program_year` section
+draws `{ type: 'months', months: [{ month, label, name, main: [key],
+asNeeded: [key], limited, visit, atHome, open }], labels: { key: label },
+limitLabel }` (`visit` is the month's report text, `atHome` one thing to do at
+home, `open` true for the build month and the next two), and it adds `tiles`
+and `categories` sections whose keys are `problems`, `products`,
+`after_treatment`, `your_watering`, `your_mowing`, `what_to_expect` and
+`common_questions`. A `tiles` item may carry `until` (`YYYY-MM-DD`): the page
+hides that tile after that ET day (the watering-order tile, which a stored
+packet keeps after the order ends). Product names in `products` are public
+label names with an active ingredient; no rate, price or PII),
 `/api/public/estimates/:token/deposit-intent` (RETIRED VERDICT STUB —
 owner ruling 2026-08-10: acceptance deposits are permanently
 not-enforced. Token format gate + deposit rate limit, then an

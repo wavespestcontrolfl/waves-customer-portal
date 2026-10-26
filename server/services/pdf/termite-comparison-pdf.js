@@ -252,7 +252,7 @@ function renderTermiteComparisonPdf(content) {
       doc.moveDown(0.4);
       bullets(doc, [
         ...bondOptions.map((opt) => `${opt.label} term — adds ${money(opt.perApp)} per application`),
-        'Repair coverage up to $1,000,000 for new covered WDO damage.',
+        'Repair of new damage from covered termites, up to the coverage terms written in your signed bond.',
         'Transferable to a new homeowner ($250 + transfer inspection) — the buyer inherits active termite protection with its documented history.',
       ]);
       noteParagraph(doc, 'Your signed termite agreement controls the covered structures, covered organisms, warranty type, renewal, limitations, and exclusions.');
