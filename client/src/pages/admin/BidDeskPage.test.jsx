@@ -158,6 +158,10 @@ it("resets paging when search or page size changes", async () => {
   fireEvent.change(screen.getByLabelText("Bid Desk rows per page"), { target: { value: "500" } });
   expect(screen.getByText("Page 1 of 1")).toBeInTheDocument();
   expect(screen.getByText("Project 001")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Reset filters" }));
+  expect(screen.getByLabelText("Status")).toHaveValue("open");
+  expect(screen.getByLabelText("Sort")).toHaveValue("project");
+  expect(screen.getByLabelText("Bid Desk rows per page")).toHaveValue("500");
 });
 
 it("clamps the page after a reload returns fewer loaded bids", async () => {

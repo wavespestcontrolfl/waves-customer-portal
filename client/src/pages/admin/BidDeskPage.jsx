@@ -525,10 +525,9 @@ export default function BidDeskPage({ embedded = false }) {
     setSearch("");
     setFilter("open");
     setShowEarlier(true);
-    setSort("workflow");
     setPage(1);
   };
-  const enhancedControlsChanged = Boolean(search) || filter !== "open" || !showEarlier || sort !== "workflow";
+  const enhancedControlsChanged = Boolean(search) || filter !== "open" || !showEarlier;
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
