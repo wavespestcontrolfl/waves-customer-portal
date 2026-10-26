@@ -9,8 +9,9 @@ const db = require('../models/db');
 
 const RANK_SQL = (table) => `CASE ${table}.shadow_status WHEN 'hold' THEN 3 WHEN 'caution' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END`;
 const RANK = { ok: 0, unknown: 1, caution: 2, hold: 3 };
-// Columns that describe the worst read; they move only when a read is worse than the stored one.
-const PEAK_COLUMNS = ['shadow_status', 'shadow_label', 'live_label', 'start_pop', 'max_pop_4h', 'dose_hidden', 'products'];
+// Columns that describe the worst read, its start time and service included (the start moves with the clock once
+// the window opens); they move only when a read is worse than the stored one.
+const PEAK_COLUMNS = ['start_at', 'service_type', 'shadow_status', 'shadow_label', 'live_label', 'start_pop', 'max_pop_4h', 'dose_hidden', 'products'];
 
 function maxOrNull(values) {
   const known = values.filter((v) => v != null && Number.isFinite(Number(v))).map(Number);
@@ -58,8 +59,6 @@ async function recordSprayRainShadow({ dbh = db, ...input }) {
       ${peakSet},
       peak_at = CASE WHEN ${worse} THEN now() ELSE spray_rain_rule_shadow.peak_at END,
       live_hold = spray_rain_rule_shadow.live_hold OR EXCLUDED.live_hold,
-      start_at = EXCLUDED.start_at,
-      service_type = EXCLUDED.service_type,
       reads = spray_rain_rule_shadow.reads + 1,
       last_seen_at = now()
     WHERE ${worse}

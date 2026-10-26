@@ -1,8 +1,8 @@
 /**
  * GATE_SPRAY_RAIN_RULES (owner 2026-10-26, plan page "Visit-Day Rain Rule", D1 = A, D2 = A): the
- * visit-day spray check judges each product's label rain rule, else the Waves rule of the visit's
- * service for a tank spray, on one odds table (caution above 60%, hold above 80%). Without rainRules
- * the check is today's (job-card-service.test.js covers that path).
+ * visit-day spray check judges each product's label rain rule, else the Waves rule of the services
+ * whose lines name it for a tank spray, on one odds table (caution above 60%, hold above 80%). Without
+ * rainRules the check is today's (job-card-service.test.js covers that path).
  */
 const jobCard = require('../services/job-card');
 const { LABEL_RAIN_RULES, labelRainRuleFor } = require('../config/label-rain-rules');
@@ -21,9 +21,11 @@ const sedgehammer = { id: 's', name: 'Sedgehammer Plus', category: 'herbicide', 
 const heritage = { id: 'h', name: 'Heritage G', category: 'fungicide', epa_reg_number: '100-1323', application_method: 'granular' };
 const alpine = { id: 'a', name: 'Alpine WSG', category: 'insecticide', epa_reg_number: '499-561' };
 const celsius = { id: 'c', name: 'Celsius WG', category: 'herbicide', epa_reg_number: '101563-141', rainfast_minutes: 180, label_verified_at: '2026-05-28' };
-const pest = { waves: wavesRainRule('Quarterly Pest Control Service') };
-const check = (products, pops, rainRules = pest) => buildSprayCheck({ products, hourly: hours(pops), now: NOW, rainRules });
-const verdict = (product, pops, rainRules) => check([product], pops, rainRules).verdicts[0];
+const PEST = 'Quarterly Pest Control Service';
+// The rain rules as the card builds them: each product's Waves rule from the services whose lines name it.
+const rulesOn = (products, ...services) => ({ waves: Object.fromEntries(products.map((p) => [p.id, wavesRainRule(services)])) });
+const check = (products, pops, services = [PEST]) => buildSprayCheck({ products, hourly: hours(pops), now: NOW, rainRules: rulesOn(products, ...services) });
+const verdict = (product, pops, services) => check([product], pops, services).verdicts[0];
 
 describe('label rain rules config', () => {
   test('every rule carries its label file and page, and quotes the label', () => {
@@ -49,12 +51,18 @@ describe('label rain rules config', () => {
 
 describe('the Waves rule of a service (reschedule-rules.js)', () => {
   test('pest outside 2 h, lawn spray 4 h, tree & shrub 3 h, mosquito 2 h; none for granular lawn or interior pest', () => {
-    expect(wavesRainRule('Quarterly Pest Control Service')).toEqual({ key: 'pest_exterior', hours: 2 });
-    expect(wavesRainRule('Monthly Lawn Care Service')).toEqual({ key: 'lawn_spray', hours: 4 });
-    expect(wavesRainRule('Bi-Monthly Tree & Shrub Care Service')).toEqual({ key: 'tree_shrub_spray', hours: 3 });
-    expect(wavesRainRule('Seasonal Mosquito Control Service')).toEqual({ key: 'mosquito', hours: 2 });
-    expect(wavesRainRule('Lawn Granular Fertilizer')).toBeNull();
-    expect(wavesRainRule('Interior Pest Treatment')).toBeNull();
+    expect(wavesRainRule([PEST])).toEqual({ key: 'pest_exterior', hours: 2 });
+    expect(wavesRainRule(['Monthly Lawn Care Service'])).toEqual({ key: 'lawn_spray', hours: 4 });
+    expect(wavesRainRule(['Bi-Monthly Tree & Shrub Care Service'])).toEqual({ key: 'tree_shrub_spray', hours: 3 });
+    expect(wavesRainRule(['Seasonal Mosquito Control Service'])).toEqual({ key: 'mosquito', hours: 2 });
+    expect(wavesRainRule(['Lawn Granular Fertilizer'])).toBeNull();
+    expect(wavesRainRule(['Interior Pest Treatment'])).toBeNull();
+  });
+
+  test('a product named by two services takes the stricter rule (Codex P2: an add-on\'s own rule)', () => {
+    expect(wavesRainRule([PEST, 'Tree & Shrub Care'])).toEqual({ key: 'tree_shrub_spray', hours: 3 });
+    expect(wavesRainRule(['Interior Pest Treatment', PEST])).toEqual({ key: 'pest_exterior', hours: 2 });
+    expect(wavesRainRule([])).toBeNull();
   });
 });
 
@@ -87,7 +95,7 @@ describe('buildSprayCheck with rain rules', () => {
     // Outside the service's 2 dry hours.
     expect(verdict(alpine, [0, 0, 95]).verdict).toBe('ok');
     // A service with no rain-free need judges nothing.
-    expect(verdict(alpine, [100, 100], { waves: null }).verdict).toBe('ok');
+    expect(verdict(alpine, [100, 100], ['Interior Pest Treatment']).verdict).toBe('ok');
   });
 
   test('a catalog rain number uses the same tiers (it held at 50% before)', () => {
@@ -100,15 +108,16 @@ describe('buildSprayCheck with rain rules', () => {
 
   test('unverified catalog values are skipped and the Waves rule judges rain instead', () => {
     const unverified = { ...celsius, label_verified_at: null, max_wind_mph: 15 };
-    expect(verdict(unverified, [0, 0, 0, 0], { waves: wavesRainRule('Monthly Lawn Care Service') })).toEqual({ productId: 'c', verdict: 'ok', reason: null });
+    const lawn = ['Monthly Lawn Care Service'];
+    expect(verdict(unverified, [0, 0, 0, 0], lawn)).toEqual({ productId: 'c', verdict: 'ok', reason: null });
     // The lawn rule needs 4 hours of forecast: a gap is unknown, never a pass.
-    expect(verdict(unverified, [0, 0, 0], { waves: wavesRainRule('Monthly Lawn Care Service') })).toEqual({ productId: 'c', verdict: 'unknown', reason: 'No rain 4 h forecast' });
-    expect(verdict(unverified, [0, 0, 0, 65], { waves: wavesRainRule('Monthly Lawn Care Service') })).toMatchObject({ verdict: 'caution', source: 'Waves rule' });
+    expect(verdict(unverified, [0, 0, 0], lawn)).toEqual({ productId: 'c', verdict: 'unknown', reason: 'No rain 4 h forecast' });
+    expect(verdict(unverified, [0, 0, 0, 65], lawn)).toMatchObject({ verdict: 'caution', source: 'Waves rule' });
   });
 
   test('temperature and wind limits still hold, named as weather', () => {
     const windy = { ...celsius, max_wind_mph: 10 };
-    const out = buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW, rainRules: pest }).verdicts[0];
+    const out = buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW, rainRules: rulesOn([windy], PEST) }).verdicts[0];
     expect(out).toMatchObject({ verdict: 'hold', kind: 'wind', source: 'product limit', reason: 'wind over 10 mph' });
   });
 
@@ -122,13 +131,13 @@ describe('buildSprayCheck with rain rules', () => {
       facts: { minTempF: conditional, maxTempF: conditional, maxWindMph: conditional, rainFreeHours: conditional } } } };
     process.env.GATE_LABEL_PIPELINE = 'true';
     try {
-      const out = buildSprayCheck({ products: [reviewed], hourly: hours([0, 0, 0, 0]), now: NOW, rainRules: pest, labelSources: { r: 'current' } }).verdicts[0];
+      const out = buildSprayCheck({ products: [reviewed], hourly: hours([0, 0, 0, 0]), now: NOW, rainRules: rulesOn([reviewed], PEST), labelSources: { r: 'current' } }).verdicts[0];
       expect(out).toEqual({ productId: 'r', verdict: 'unknown', reason: 'Conditional label restrictions need review' });
     } finally { delete process.env.GATE_LABEL_PIPELINE; }
   });
 
   test('no forecast at all is unknown for a product with a rule, and nothing to judge stays ok', () => {
-    expect(buildSprayCheck({ products: [talak, heritage], hourly: null, now: NOW, rainRules: pest }).verdicts)
+    expect(buildSprayCheck({ products: [talak, heritage], hourly: null, now: NOW, rainRules: rulesOn([talak, heritage], PEST) }).verdicts)
       .toEqual([{ productId: 't', verdict: 'unknown', reason: 'No forecast' }, { productId: 'h', verdict: 'ok', reason: null }]);
   });
 
@@ -170,8 +179,10 @@ describe('the tank search follows the same rule', () => {
   afterEach(() => { delete process.env.GATE_SPRAY_RAIN_RULES; });
   const product = { ...talak, id: 'p1', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
   const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', window_start: '14:00', latitude: 27.4, longitude: -82.5 };
+  let tables;
+  beforeEach(() => { tables = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [], scheduled_service_addons: [] }; });
   const dbh = (table) => {
-    const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [] }[String(table).split(' as ')[0]] ?? [];
+    const rows = tables[String(table).split(' as ')[0]] ?? [];
     const chain = {};
     for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
     chain.first = async () => rows[0] ?? null;
@@ -195,6 +206,28 @@ describe('the tank search follows the same rule', () => {
     const legacy = await mix(85);
     expect(legacy.sprayCheck).toEqual({ verdict: 'unknown', reason: 'No limit on file' });
     expect(legacy.amount).not.toBeNull();
+  });
+
+  test('a product an add-on\'s line names takes the add-on\'s Waves rule, as on the card (Codex P2)', async () => {
+    process.env.GATE_SPRAY_RAIN_RULES = 'true';
+    const talus = { id: 'p2', name: 'Talus IGR', category: 'insecticide', default_rate: '0.5', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal' }] },
+      tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Talus IGR 0.5 fl oz/gal for whitefly/scale nymphs' }] },
+    };
+    tables.products_catalog = [talus];
+    // Rain at 4 pm: inside the Tree & Shrub 3 h from a 2 pm start, outside the pest visit's 2 h.
+    const search = () => jobCard.mixForProduct('p2', 2, { serviceId: 'svc1', dbh, deps: { protocols, getHourly: async () => hours([0, 0, 95, 0]) }, now: NOW });
+    const onPest = await search();
+    expect(onPest.sprayCheck).toEqual({ verdict: 'ok', reason: null });
+    tables.scheduled_service_addons = [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }];
+    protocols.pest.visits[0] = { visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal' };
+    const viaAddon = await search();
+    expect(viaAddon.sprayCheck).toEqual({ verdict: 'hold', reason: 'rain 95% inside 3 h — Waves rule' });
+    expect(viaAddon.amount).toBeNull();
+    // Named by both, the stricter rule judges it.
+    protocols.pest.visits[0] = { visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal' };
+    expect((await search()).sprayCheck.verdict).toBe('hold');
   });
 });
 
@@ -230,6 +263,10 @@ describe('the shadow record (GATE_SPRAY_RAIN_RULES=shadow)', () => {
     const [sql, bindings] = raw.mock.calls[0];
     expect(sql).toMatch(/ON CONFLICT \(scheduled_service_id, visit_date\) DO UPDATE SET/);
     expect(sql).toMatch(/shadow_status = CASE WHEN .* THEN EXCLUDED\.shadow_status ELSE spray_rain_rule_shadow\.shadow_status END/);
+    // The start time and service are the peak read's: they move only with it (Codex P2).
+    expect(sql).toMatch(/start_at = CASE WHEN .* THEN EXCLUDED\.start_at ELSE spray_rain_rule_shadow\.start_at END/);
+    expect(sql).toMatch(/service_type = CASE WHEN .* THEN EXCLUDED\.service_type ELSE spray_rain_rule_shadow\.service_type END/);
+    expect(sql).not.toMatch(/start_at = EXCLUDED\.start_at/);
     expect(sql).toMatch(/OR \(EXCLUDED\.live_hold AND NOT spray_rain_rule_shadow\.live_hold\)/);
     expect(sql).toMatch(/OR spray_rain_rule_shadow\.last_seen_at < now\(\) - interval '10 minutes'/);
     expect(bindings).toEqual(['svc1', '2026-09-04', NOW.toISOString(), 'Quarterly Pest Control', 'Weather unknown', false, 'ok', null, 70, 85, false,

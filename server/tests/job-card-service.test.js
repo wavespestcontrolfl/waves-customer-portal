@@ -1469,6 +1469,24 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(weather(await poll(85))).toEqual({ kind: 'weather', status: 'hold', label: 'Rain hold · label' });
       expect(weather(await poll(60))).toBeNull();
     });
+
+    test('an add-on\'s product takes its add-on\'s Waves rule, not the visit\'s (Codex P2)', async () => {
+      process.env.GATE_SPRAY_RAIN_RULES = 'true';
+      const talus = { id: 'u', name: 'Talus IGR', category: 'insecticide', default_rate: '0.5', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12', active: true };
+      // Rain at noon: inside the Tree & Shrub 3 h from a 10:00 start, outside the pest visit's 2 h.
+      const getHourly = async () => [0, 0, 95, 0, 0].map((rainChance, i) => ({ startTime: `2026-09-04T${14 + i}:00:00Z`, temperatureF: 85, windMph: 5, rainChance }));
+      const card = (rows, cardProtocols) => jobCard.buildJobCard('svc1', {
+        dbh: factsDb({ 'scheduled_services as ss': { ...visit(false), window_start: '10:00', latitude: 27.4, longitude: -82.5 }, property_preferences: prefs, products_catalog: [talstar, talus], product_aliases: [], ...rows }),
+        readinessOnly: true,
+        deps: { getRecentCalls: async () => [], getHourly, protocols: cardProtocols },
+        now: new Date('2026-09-04T12:00:00Z'),
+      });
+      const onHost = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal\nTalus IGR 0.5 fl oz/gal' }] } };
+      expect(weather(await card({}, onHost))).toBeNull();
+      const viaAddon = { ...protocols, tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Talus IGR 0.5 fl oz/gal for whitefly/scale nymphs' }] } };
+      expect(weather(await card({ 'scheduled_service_addons as a': [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }] }, viaAddon)))
+        .toEqual({ kind: 'weather', status: 'hold', label: 'Rain hold · Waves rule' });
+    });
   });
 
   test('the rain window ends on the viewed visit date, today at the latest (Codex r14 P2)', async () => {
