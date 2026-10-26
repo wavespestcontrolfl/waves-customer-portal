@@ -4405,7 +4405,7 @@ router.get('/', async (req, res, next) => {
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
           // Each program whose gate is on: whether the estimate offers its outline, and its newest outline; off = neither key.
           ...Object.fromEntries(livePrograms.flatMap(([line, program]) => [
-            [program.listKeys.available, serviceLines.some((line) => program.offeredOn(line, { monthlyTotal, estimateData: estData }))],
+            [program.listKeys.available, serviceLines.some((line) => program.offeredOn(line, { monthlyTotal, estimateData: estData, pricingAuthority: e.pricing_authority || null }))],
             [program.listKeys.outline, programOutlines.get(line).get(e.id) || null],
           ])),
         };

@@ -497,6 +497,8 @@ describe('GET /admin/estimates Mosquito outline (GATE_MOSQUITO_OUTLINE)', () => 
         base('e-misting', { service_interest: 'Mosquito misting', monthly_total: '90.00', estimate_data: withRows([{ service: 'mosquito_misting' }]) }),
         base('e-commercial', { service_interest: 'Commercial Mosquito', monthly_total: '300.00', estimate_data: withRows([{ service: 'commercial_mosquito' }]) }),
         base('e-pest-beside-one-time', { service_interest: 'Pest Control, Mosquito', monthly_total: '45.00', estimate_data: withRows([{ service: 'pest_control' }], [{ service: 'one_time_mosquito', price: 149 }]) }),
+        // A server reprice removed every service: the empty result wins over the older priced engine result.
+        base('e-server-repriced', { service_interest: 'Mosquito', monthly_total: '55.00', pricing_authority: 'SERVER', estimate_data: { result: { recurring: { services: [] } }, engineResult: { recurring: { services: [{ service: 'mosquito' }] } } } }),
       ],
       outlines: [
         { id: 'mosquito-packet', estimate_id: 'e-program', service_line: 'mosquito', status: 'sent', validation_status: 'passed', created_at: '2026-10-26T12:00:00Z', summary_json: {}, content_json: {}, content_library_version: 'mosquito-v1-copy-1', template_version: 'mvp-1', product_registry_version: 'public-facts-v1', protocol_version: null },
@@ -508,7 +510,7 @@ describe('GET /admin/estimates Mosquito outline (GATE_MOSQUITO_OUTLINE)', () => 
       expect(byId['e-program'].mosquitoOutlineAvailable).toBe(true);
       expect(byId['e-program'].mosquitoServiceOutline).toEqual(expect.objectContaining({ id: 'mosquito-packet', stale: false, staleReasons: [] }));
       expect(byId['e-program'].lawnServiceOutline).toBeNull();
-      for (const id of ['e-one-time', 'e-misting', 'e-commercial', 'e-pest-beside-one-time']) expect({ id, offered: byId[id].mosquitoOutlineAvailable }).toEqual({ id, offered: false });
+      for (const id of ['e-one-time', 'e-misting', 'e-commercial', 'e-pest-beside-one-time', 'e-server-repriced']) expect({ id, offered: byId[id].mosquitoOutlineAvailable }).toEqual({ id, offered: false });
     });
   });
 

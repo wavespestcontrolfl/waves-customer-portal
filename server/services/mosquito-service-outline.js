@@ -53,9 +53,10 @@ function mosquitoProtocolVersion() {
 // container's recurring services (estimate-result-container.js, as the misting rows are read). The misting plan row
 // ('mosquito_misting'), a one-time mosquito item ('one_time_mosquito') and a commercial row ('commercial_mosquito') are
 // other keys and never match. The estimate's service-line text cannot tell these apart (estimate-service-lines.js), so
-// both the Estimates list and the builder use this rule.
-function mosquitoProgramRow(estimateData) {
-  const container = storedEstimateContainer(estimateData);
+// both the Estimates list and the builder use this rule. The estimate's pricing authority picks the container, so a
+// server reprice that removed the program never falls back to the older priced engine result.
+function mosquitoProgramRow(estimateData, { pricingAuthority = null } = {}) {
+  const container = storedEstimateContainer(estimateData, { pricingAuthority });
   if (!container) return null;
   const recurring = [container.recurring?.services, container.results?.recurring?.services];
   return recurring.filter(Array.isArray).flat().find((row) => row && typeof row === 'object' && row.service === 'mosquito') || null;
@@ -270,7 +271,7 @@ async function buildMosquitoOutline({ db, estimate, input = {}, now = new Date()
   const estimateData = parseJsonMaybe(estimate.estimate_data || estimate.estimateData) || {};
   // The builder holds the program rule: the outline route picks the program by service line and does not re-run the
   // Estimates list's offer check.
-  const programRow = mosquitoProgramRow(estimateData);
+  const programRow = mosquitoProgramRow(estimateData, { pricingAuthority: estimate.pricing_authority || null });
   if (!programRow) throw noProgramRowError();
   const addOns = addOnCounts(programRow);
   const month = Number(input.month || currentMonthNumber(now));

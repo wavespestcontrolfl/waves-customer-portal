@@ -35,8 +35,9 @@ const OUTLINE_PROGRAMS = Object.freeze({
     live: () => mosquito.mosquitoOutlineLive(),
     // A recurring mosquito program: the stored estimate holds an exact `mosquito` recurring row (one-time, misting and
     // commercial mosquito rows are other keys). The estimate's service-line text cannot tell them apart, so the stored
-    // rows decide (mosquito-service-outline.js); the Estimates list passes the estimate's data.
-    offeredOn: (line, { estimateData } = {}) => line.key === 'mosquito' && !!mosquito.mosquitoProgramRow(estimateData),
+    // rows decide (mosquito-service-outline.js); the Estimates list passes the estimate's data and pricing authority.
+    offeredOn: (line, { estimateData, pricingAuthority } = {}) => line.key === 'mosquito'
+      && !!mosquito.mosquitoProgramRow(estimateData, { pricingAuthority }),
     contentLibraryVersion: () => mosquito.MOSQUITO_CONTENT_LIBRARY_VERSION,
     protocolVersion: () => mosquito.mosquitoProtocolVersion(),
     listKeys: Object.freeze({ available: 'mosquitoOutlineAvailable', outline: 'mosquitoServiceOutline' }),

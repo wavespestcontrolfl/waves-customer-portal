@@ -304,6 +304,21 @@ describe('who gets the page: an exact recurring mosquito row', () => {
     await expect(build({ estimateData: estimateData || {} })).rejects.toMatchObject({ isOperational: true, statusCode: 422, code: 'mosquito_program_row_missing' });
   });
 
+  // Pre-push audit P1: a server reprice that removed every service leaves an empty `result` beside the older priced
+  // `engineResult`. Under the estimate's SERVER authority the empty result is the answer, so the removed program is
+  // neither offered nor built; without it the container pick falls back to the engine result.
+  test('a server reprice that removed the program never falls back to the old priced engine result', async () => {
+    const stale = { result: { recurring: { services: [] } }, engineResult: { recurring: { services: [programRow({ dunkCount: 2, stationCount: 1 })] } } };
+    expect(mosquito.mosquitoProgramRow(stale)).not.toBeNull();
+    expect(mosquito.mosquitoProgramRow(stale, { pricingAuthority: 'SERVER' })).toBeNull();
+    expect(OUTLINE_PROGRAMS.mosquito.offeredOn({ key: 'mosquito' }, { estimateData: stale, pricingAuthority: 'server' })).toBe(false);
+    await expect(mosquito.buildMosquitoOutline({
+      db: makeDb({}),
+      estimate: { id: 'est-1', address: '1 Palm Way, Sarasota, FL', pricing_authority: 'SERVER', estimate_data: stale },
+      now: OCT_26,
+    })).rejects.toMatchObject({ statusCode: 422, code: 'mosquito_program_row_missing' });
+  });
+
   test('the Estimates list offers it only on a mosquito line with a program row', () => {
     const { offeredOn } = OUTLINE_PROGRAMS.mosquito;
     const data = estimateDataWith([programRow()]);
