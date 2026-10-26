@@ -387,6 +387,25 @@ describeDb('trip link (PostgreSQL)', () => {
       .toBe(new Date(iso('03:55')).toISOString());
   });
 
+  test('a visit just after midnight: the drive that began before midnight starts its leg, and that trip stays on its own day', async () => {
+    const tech = await technician();
+    await homeHistory();
+    // Home at 23:55 ET on Oct 7 (03:55Z) to the customer at 00:05 ET on Oct 8; on site until 00:35; then home.
+    await tripData('trip-x', [['03:55', HOME]], IMEI, new Date(iso('03:56')));
+    await tripData('trip-x', [['04:05', PIN]], IMEI, new Date(iso('04:06')));
+    await tripData('trip-y', [['04:35', PIN], ['04:50', HOME]], IMEI, new Date(iso('04:51')));
+    await mileage('trip-x', 4.4, { date: '2026-10-07', start: HOME });
+    await mileage('trip-y', 4.4);
+    const c = await customer(PIN);
+    const id = await visit(c, tech, '04:34', '04:06');
+    await tripLink.linkDay(mockPg, DAY, { now: new Date('2026-10-09T06:00:00Z') });
+    const leg = await legOf(id);
+    expect(leg).toMatchObject({ status: 'matched', drive_from_kind: 'home', drive_trip_ids: ['trip-x'] });
+    expect(Number(leg.drive_minutes)).toBe(10);
+    expect(Number(leg.drive_miles)).toBe(4.4);
+    expect((await links()).map((r) => r.bouncie_trip_id)).toEqual(['trip-y']);
+  });
+
   test('it never writes mileage_log, scheduled_services, pins or alerts', async () => {
     await fixture();
     const snapshot = async () => ({

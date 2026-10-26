@@ -282,6 +282,10 @@ describe('the trips read agrees with the stops read', () => {
     expect(late.trips.map((t) => t.tripId)).toEqual(['t2']);
     // The stop at the end of t2 starts at minute 55 and ends when t3 starts at minute 80, after the window closes.
     expect(late.stops.map((s) => s.startMs)).toEqual([min(55)]);
+    // t2 began before this window (minute 40) and ended inside it (minute 55): carried in, never one of its trips.
+    const after = await truckStops.loadTruckDay(fakeConn(rows), 'imei-1', { fromMs: min(45), toMs: min(90), maxGapMeters: GAP, now: NOW });
+    expect(after.carriedIn.map((t) => t.tripId)).toEqual(['t2']);
+    expect(after.trips.map((t) => t.tripId)).toEqual(['t3']);
   });
 
   test('both reads use the same bounded query as the stops read, and no vehicle reads nothing', async () => {
@@ -300,7 +304,7 @@ describe('the trips read agrees with the stops read', () => {
     expect(stopsConn.calls[0].wheres.find((w) => w[0] === 'received_at' && w[1] === '>=')[2].getTime()).toBe(FROM);
     const none = fakeConn(rows);
     expect(await truckStops.loadTruckTrips(none, '', { fromMs: FROM, toMs: TO })).toEqual([]);
-    expect(await truckStops.loadTruckDay(none, '', { fromMs: FROM, toMs: TO, maxGapMeters: GAP })).toEqual({ trips: [], stops: [] });
+    expect(await truckStops.loadTruckDay(none, '', { fromMs: FROM, toMs: TO, maxGapMeters: GAP })).toEqual({ trips: [], stops: [], carriedIn: [] });
     expect(none.calls).toHaveLength(0);
   });
 });

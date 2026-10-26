@@ -141,10 +141,12 @@ const purposeFor = (kind) => {
 
 /**
  * One technician-day, pure. `groups` are the physical visits ({ key, members, destination }); `trips` the day's
- * trips in time order; `stops` the day's stops in time order; `mileageByTrip` a Map tripId -> { id, miles }.
- * @returns {{legs:object[], links:object[]}} legs: one per member service; links: one per trip
+ * trips in time order; `stops` the day's stops in time order; `carriedIn` trips that began the day before and ended
+ * this day (a drive across midnight: it can start the day's first drive leg, but its link belongs to the day it
+ * began); `mileageByTrip` a Map tripId -> { id, miles }.
+ * @returns {{legs:object[], links:object[]}} legs: one per member service; links: one per trip of the day
  */
-function computeDay({ groups, trips, stops, mileageByTrip = new Map(), radius, fences = [], home = null }) {
+function computeDay({ groups, trips, stops, carriedIn = [], mileageByTrip = new Map(), radius, fences = [], home = null }) {
   const matches = groups.map((group) => ({
     group,
     ...matchVisit({ destination: group.destination, window: visitWindow(group.members), stops, radius }),
@@ -164,7 +166,7 @@ function computeDay({ groups, trips, stops, mileageByTrip = new Map(), radius, f
     }
     const stop = stops[m.index];
     const sharers = usersOfStop.get(m.index).length;
-    const leg = driveLeg({ index: m.index, stops, trips, kinds, mileageByTrip, radius, home });
+    const leg = driveLeg({ index: m.index, stops, trips: [...carriedIn, ...trips], kinds, mileageByTrip, radius, home });
     for (const member of m.group.members) {
       legs.push({
         scheduled_service_id: member.id,
@@ -256,12 +258,12 @@ async function writeTechnicianDay(conn, { day, bounds, technicianId, imei, legRo
 
 /** One vehicle's day: its trips, stops, the mileage rows of those trips and its home base. */
 async function readVehicleDay(conn, technician, bounds, etDay, radius, now) {
-  const { trips, stops } = await truckStops.loadTruckDay(conn, technician.imei, {
+  const { trips, stops, carriedIn } = await truckStops.loadTruckDay(conn, technician.imei, {
     fromMs: bounds.startMs, toMs: bounds.endMs, maxGapMeters: radius, now: now.getTime(),
   });
-  const mileageByTrip = await loadMileage(conn, trips.map((trip) => trip.tripId));
+  const mileageByTrip = await loadMileage(conn, [...carriedIn, ...trips].map((trip) => trip.tripId));
   const home = await ctx.loadHomeBase(conn, technician.imei, new Date(bounds.endMs - 1), technician.changedAt, etDay);
-  return { trips, stops, mileageByTrip, home };
+  return { trips, stops, carriedIn, mileageByTrip, home };
 }
 
 const emptyTally = () => ({ matched: 0, no_vehicle: 0, no_destination: 0, no_stop: 0, ambiguous: 0 });
