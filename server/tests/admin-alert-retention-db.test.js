@@ -25,7 +25,10 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     retention = require('../services/admin-alert-retention');
     NotificationService = require('../services/notification-service');
   });
+  const clearCursors = () => db('system_settings').whereIn('key', ['admin_alert_retention_cursor_shadow', 'admin_alert_retention_cursor_true']).del();
+  beforeEach(clearCursors);
   afterAll(async () => {
+    await clearCursors();
     if (made.length) await db('notifications').whereIn('id', made).del();
     if (runs.length) await db('audit_log').whereRaw("metadata->>'runId' = ANY(?::text[])", [runs]).del();
     await db.destroy();
@@ -133,6 +136,43 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     // A second run finds nothing more.
     const again = await retention.runAdminAlertRetention({ now: runNow, mode: 'true', scope: onlyMine });
     expect(again.written).toBe(0);
+  });
+
+  test('old non-FYI Activity rows never reach the scan, so they cannot starve an eligible alert', async () => {
+    const activity = [];
+    for (let i = 0; i < 3; i += 1) activity.push(await bell({ created_at: ago(200 - i), metadata: { feed: 'activity' } }));
+    const eligible = await bell({ created_at: ago(100) });
+    const activityFyi = await bell({ created_at: ago(20), metadata: { feed: 'activity', severity: 'fyi' } });
+    const mine = [...activity, eligible, activityFyi].map((r) => r.id);
+    const page = await retention.loadPage(db, { now, cursor: null, limit: 10, scope: (q) => q.whereIn('id', mine) });
+    expect(page.map((r) => r.id)).toEqual([eligible.id, activityFyi.id]);
+
+    // One row of budget a run, three Activity rows ahead: the first run already expires the eligible alert.
+    const out = await retention.runAdminAlertRetention({ now, mode: 'true', batchSize: 1, maxBatches: 1, scope: (q) => q.whereIn('id', mine) });
+    expect(out.written).toBe(1);
+    expect((await get(eligible.id)).done_at).not.toBeNull();
+    for (const r of activity) expect((await get(r.id)).done_at).toBeNull();
+  });
+
+  test('capped runs keep their place in system_settings and reach an eligible alert behind rows kept for now', async () => {
+    // Four old rows its emitter refreshed yesterday (kept for now), then one eligible alert.
+    const kept = [];
+    for (let i = 0; i < 4; i += 1) kept.push(await bell({ created_at: ago(300 - i), metadata: { rungAt: ago(1).toISOString() } }));
+    const eligible = await bell({ created_at: ago(120) });
+    const ids = [...kept, eligible].map((r) => r.id);
+    const run = (extra = {}) => retention.runAdminAlertRetention({ now, mode: 'true', batchSize: 2, maxBatches: 1, scope: (q) => q.whereIn('id', ids), ...extra });
+    const saved = async () => (await db('system_settings').where({ key: 'admin_alert_retention_cursor_true' }).first('value'))?.value;
+
+    expect(await run()).toMatchObject({ scanned: 2, written: 0, cursor: 'saved' });
+    expect(JSON.parse(await saved()).id).toBe(kept[1].id);
+    expect(await run()).toMatchObject({ scanned: 2, written: 0, cursor: 'saved', resumedFrom: kept[1].id });
+    const third = await run();
+    expect(third).toMatchObject({ scanned: 1, written: 1, cursor: 'reset', resumedFrom: kept[3].id });
+    expect((await get(eligible.id)).done_at).not.toBeNull();
+    expect(await saved()).toBeNull();
+    // Shadow keeps its own place.
+    await run({ mode: 'shadow' });
+    expect(await db('system_settings').where({ key: 'admin_alert_retention_cursor_shadow' }).first('value')).toBeTruthy();
   });
 
   test('gate off writes nothing and records nothing', async () => {

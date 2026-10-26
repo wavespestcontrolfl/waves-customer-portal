@@ -133,12 +133,16 @@ describe('re-ring list', () => {
 });
 
 // A fake database edge: pages by cursor over the given rows (oldest first).
-function fakeIo(rows, { live = {}, backlog = 0 } = {}) {
+function fakeIo(rows, { live = {}, backlog = 0, cursors = {} } = {}) {
   const sorted = [...rows].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-  const calls = { expire: [], record: [], live: [] };
+  const calls = { expire: [], record: [], live: [], pageCursors: [] };
   return {
     calls,
+    cursors,
+    loadCursor: async (mode) => cursors[mode] || null,
+    saveCursor: async (mode, cursor) => { cursors[mode] = cursor; },
     page: async ({ cursor, limit }) => {
+      calls.pageCursors.push(cursor ? cursor.id : null);
       const start = cursor ? sorted.findIndex((r) => r.id === cursor.id) + 1 : 0;
       return sorted.slice(start, start + limit);
     },
@@ -250,6 +254,63 @@ describe('runAdminAlertRetention: re-ring accounting', () => {
     expect(summary.held.livePromise).toBe(1);
     expect(io.calls.expire[0].ids).toEqual([closed.id]);
     expect(summary.ringRisk.emitters['promise-overdue']).toMatchObject({ held: 1, expire: 1 });
+  });
+});
+
+describe('scan budget and the continuation cursor', () => {
+  // 25 old promise rows whose promise is still open (kept for now), then one eligible alert behind them.
+  const setup = () => {
+    const held = Array.from({ length: 25 }, (_, i) => row({ created_at: ago(200 - i), metadata: { dedupeKey: `sms-commitment-source:${i}` } }));
+    const eligible = row({ created_at: ago(100), metadata: { dedupeKey: 'plain:eligible' } });
+    const live = Object.fromEntries(held.map((r) => [r.id, true]));
+    return { held, eligible, cursors: {}, live };
+  };
+  const nightly = (ctx, extra = {}) => {
+    const io = fakeIo([...ctx.held, ctx.eligible], { live: ctx.live, cursors: ctx.cursors });
+    return retention.runAdminAlertRetention({ now: NOW, mode: 'true', io, batchSize: 10, maxBatches: 1, ...extra }).then((summary) => ({ summary, io }));
+  };
+
+  test('repeated capped runs walk past rows that are kept for now and reach the eligible alert', async () => {
+    const ctx = setup();
+    const first = await nightly(ctx);
+    expect(first.summary).toMatchObject({ scanned: 10, written: 0, cursor: 'saved', resumedFrom: null });
+    expect(first.summary.held.livePromise).toBe(10);
+    expect(ctx.cursors.true.id).toBe(ctx.held[9].id);
+
+    const second = await nightly(ctx);
+    expect(second.io.calls.pageCursors).toEqual([ctx.held[9].id]);
+    expect(second.summary).toMatchObject({ scanned: 10, written: 0, cursor: 'saved', resumedFrom: ctx.held[9].id });
+
+    const third = await nightly(ctx);
+    expect(third.summary).toMatchObject({ scanned: 6, written: 1, cursor: 'reset' });
+    expect(third.io.calls.expire[0].ids).toEqual([ctx.eligible.id]);
+  });
+
+  test('a run that reaches the end clears the cursor, and the next run starts at the oldest row', async () => {
+    const ctx = setup();
+    ctx.cursors.true = { at: ctx.held[19].created_at_cursor, id: ctx.held[19].id };
+    const finishing = await nightly(ctx);
+    expect(finishing.summary.cursor).toBe('reset');
+    expect(ctx.cursors.true).toBeNull();
+    const next = await nightly(ctx);
+    expect(next.io.calls.pageCursors).toEqual([null]);
+    expect(next.summary.resumedFrom).toBeNull();
+  });
+
+  test('a run that ends exactly on a full last page still resets on the next empty read', async () => {
+    const ctx = { held: [], eligible: row({ created_at: ago(100) }), cursors: {}, live: {} };
+    const first = await nightly(ctx, { batchSize: 1, maxBatches: 1 });
+    expect(first.summary.cursor).toBe('saved');
+    const second = await nightly(ctx, { batchSize: 1, maxBatches: 1 });
+    expect(second.summary.cursor).toBe('reset');
+  });
+
+  test('shadow and live keep separate places', async () => {
+    const ctx = setup();
+    const io = fakeIo([...ctx.held, ctx.eligible], { live: ctx.live, cursors: ctx.cursors });
+    await retention.runAdminAlertRetention({ now: NOW, mode: 'shadow', io, batchSize: 10, maxBatches: 1 });
+    expect(ctx.cursors.shadow.id).toBe(ctx.held[9].id);
+    expect(ctx.cursors.true).toBeUndefined();
   });
 });
 

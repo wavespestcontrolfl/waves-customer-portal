@@ -57,6 +57,13 @@
  * RING_RISK_CAP per run (the doc's 10 rings a day), oldest first, so the first
  * run cannot burst.
  *
+ * SCAN BUDGET. A run reads at most MAX_BATCHES x BATCH_SIZE candidates. The query
+ * never returns a row that can never expire (a non-FYI Activity-feed row). A row kept
+ * only for now (a recent activity stamp, a held promise, a periodic row past the cap, a
+ * fence miss) is returned, so a run that stops on its budget saves a continuation
+ * cursor (system_settings admin_alert_retention_cursor_<mode>) and the next run resumes
+ * behind it; a run that reaches the end clears it and the next starts at the oldest row.
+ *
  * Writes: batches of BATCH_SIZE, one short UPDATE each, fenced on the content
  * version the row was judged at (a refresh that landed since is left alone) and
  * on done_at IS NULL. No FOR UPDATE / FOR SHARE: the sweep is advisory and must
@@ -197,19 +204,27 @@ const LIVE_CHECKS = {
   },
 };
 
+// judgeRow's isActivityOnly in SQL. A non-FYI Activity-feed row can never expire
+// (it is not in the bell), so the query never returns it and it cannot eat the scan
+// budget. Every other row the query returns can expire once its stamps age.
+const NOT_ACTIVITY_SQL = "COALESCE(metadata->>'feed', '') <> 'activity'";
 const FYI_SQL = "(metadata->>'severity' = 'fyi' OR (category = 'ops_digest' AND metadata->>'audience' = 'fyi'))";
 
 // One page of candidates, oldest first, keyset on (created_at, id) over the open
 // admin rows (notifications_admin_open_keyset_idx order). A row is only a
-// candidate when created_at alone is past a cutoff: last activity is never
-// earlier than created_at.
+// candidate when created_at alone is past a cutoff (last activity is never
+// earlier than created_at) and it is not a permanently ineligible row (a
+// non-FYI Activity-feed row). Rows kept only for now (a recent stamp, a held
+// promise, a capped periodic row) are returned; the continuation cursor
+// (below) keeps them from starving the rows behind them.
 async function loadPage(conn, { now, cursor, limit, scope = null }) {
   const { NOTIFICATION_VERSION_SQL } = require('./notification-service')._private;
   const ageCutoff = new Date(now.getTime() - AGE_DAYS * DAY_MS);
   const fyiCutoff = new Date(now.getTime() - FYI_DAYS * DAY_MS);
   const query = conn('notifications')
     .where({ recipient_type: 'admin' }).whereNull('done_at')
-    .where((q) => q.where('created_at', '<', ageCutoff).orWhere((f) => f.where('created_at', '<', fyiCutoff).whereRaw(FYI_SQL)));
+    .where((q) => q.where((a) => a.where('created_at', '<', ageCutoff).whereRaw(NOT_ACTIVITY_SQL))
+      .orWhere((f) => f.where('created_at', '<', fyiCutoff).whereRaw(FYI_SQL)));
   if (cursor) query.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]);
   if (scope) scope(query);
   return query
@@ -217,6 +232,42 @@ async function loadPage(conn, { now, cursor, limit, scope = null }) {
       conn.raw(`${NOTIFICATION_VERSION_SQL} AS version`), conn.raw('created_at::text AS created_at_cursor'))
     .orderByRaw('created_at ASC, id ASC')
     .limit(limit);
+}
+
+// Continuation cursor (the payment_failed_alert_sweep_cursor pattern): a run that
+// stops on its scan budget saves where it stopped, so the next run resumes there
+// instead of re-reading the same oldest rows; a run that reaches the end clears it,
+// so the next one starts from the oldest row again. One key per mode: a shadow run
+// never moves a live run's place.
+const CURSOR_KEY = (mode) => `admin_alert_retention_cursor_${mode}`;
+const CURSOR_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function parseCursor(value) {
+  try {
+    const c = JSON.parse(value);
+    return c && typeof c.at === 'string' && Number.isFinite(Date.parse(c.at)) && CURSOR_ID_RE.test(c.id || '')
+      ? { at: c.at, id: c.id } : null;
+  } catch { return null; }
+}
+
+async function readCursor(conn, mode) {
+  try {
+    const row = await conn('system_settings').where({ key: CURSOR_KEY(mode) }).first('value');
+    return row?.value ? parseCursor(row.value) : null;
+  } catch (err) {
+    logger.warn(`[alert-retention] cursor not read, starting from the oldest row: ${err.message}`);
+    return null;
+  }
+}
+
+async function writeCursor(conn, mode, cursor) {
+  const value = cursor ? JSON.stringify({ at: cursor.at, id: cursor.id }) : null;
+  try {
+    await conn('system_settings').insert({ key: CURSOR_KEY(mode), value, category: 'notifications' })
+      .onConflict('key').merge({ value, updated_at: conn.fn.now() });
+  } catch (err) {
+    logger.warn(`[alert-retention] cursor not saved, the next run starts from the oldest row: ${err.message}`);
+  }
 }
 
 // Bell rows in the Activity feed that are older than 30 days and not FYI: not
@@ -351,8 +402,18 @@ const defaultIo = (conn, scope = null) => ({
   live: (name, rows) => LIVE_CHECKS[name](conn, rows),
   expire: (rows, rule, ctx) => expireBatch(conn, rows, rule, ctx),
   activityBacklog: (now) => countActivityOnlyBacklog(conn, now),
+  loadCursor: (mode) => readCursor(conn, mode),
+  saveCursor: (mode, cursor) => writeCursor(conn, mode, cursor),
   record: recordSummary,
 });
+
+async function writePage(io, toWrite, ctx) {
+  let written = 0;
+  for (const rule of Object.keys(toWrite)) {
+    if (toWrite[rule].length) written += await io.expire(toWrite[rule], rule, ctx);
+  }
+  return written;
+}
 
 function logSummary(summary) {
   const { mode, expire, kept, held, deferred } = summary;
@@ -373,26 +434,27 @@ async function runAdminAlertRetention({
   const summary = newSummary({ mode, runId, now });
   summary.ringRisk.cap = ringRiskCap;
   const state = { periodicExpired: 0 };
-  let cursor = null;
+  let cursor = await io.loadCursor(mode);
+  summary.resumedFrom = cursor ? cursor.id : null;
+  let reachedEnd = false;
 
   for (let batch = 0; batch < maxBatches; batch += 1) {
     const rows = await io.page({ now, cursor, limit: batchSize });
-    if (!rows.length) break;
+    if (!rows.length) { reachedEnd = true; break; }
     summary.batches += 1;
     summary.scanned += rows.length;
     const last = rows[rows.length - 1];
     cursor = { at: last.created_at_cursor, id: last.id };
+    reachedEnd = rows.length < batchSize;
 
     const toWrite = await planPage({ rows, now, summary, io, ringRiskCap, state });
 
-    if (mode === 'true') {
-      for (const rule of Object.keys(toWrite)) {
-        if (!toWrite[rule].length) continue;
-        summary.written += await io.expire(toWrite[rule], rule, { runId, now });
-      }
-    }
+    if (mode === 'true') summary.written += await writePage(io, toWrite, { runId, now });
   }
 
+  // Budget used up with rows left: resume there next run. Reached the end: start over.
+  await io.saveCursor(mode, reachedEnd ? null : cursor);
+  summary.cursor = reachedEnd ? 'reset' : 'saved';
   if (mode === 'shadow') summary.activityOnlyOpenOlderThan30 = await io.activityBacklog(now);
   logSummary(summary);
   await io.record(summary);
