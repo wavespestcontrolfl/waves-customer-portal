@@ -201,6 +201,13 @@ describe('the auto sign-off decision table', () => {
   test('a removed-only change signs off', () => {
     expect(run({ after: base(1) })).toMatchObject({ auto: true, reasons: [] });
   });
+  test('a new unmatched visit line asks even when everything else is a SiteOne purchase; none new does not', () => {
+    const after = [...base(2), lib.snapshotOf(product(3))];
+    const fresh = [{ name: 'Taurus SC', norm: 'taurus sc', uses: 1 }];
+    const asked = lib.decideSignOff({ previous: 'ok', wasSignedOff: true, complete: true, diff: lib.diffSnapshots(base(2), after), bought: new Set([ID(3)]), newUnmatched: fresh });
+    expect(asked).toMatchObject({ auto: false, reasons: ['unmatched_new'], newUnmatched: fresh });
+    expect(run({ after, bought: [ID(3)] })).toMatchObject({ auto: true, newUnmatched: [] });
+  });
   test('the first run and a file replaced by hand always ask', () => {
     expect(run({ previous: 'first_run', after: base(2) })).toMatchObject({ auto: false, reasons: ['first_run'] });
     expect(run({ previous: 'file_replaced', after: base(2) })).toMatchObject({ auto: false, reasons: ['file_replaced'] });
@@ -557,15 +564,51 @@ describe('runBidKitProductListSync', () => {
     expect(new Set(episodes.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).size).toBe(1);
     expect(store.replaceFile.mock.calls[0][2]).toEqual(new Date('2026-10-26T12:00:00Z'));
   });
-  test('unmatched visit lines never block the automatic sign-off, and are counted in the result and the log', async () => {
+  // A stored snapshot that already knew these unmatched names (normalized), for the list the test sets next.
+  const knowing = (names, over = {}) => itemRow({ details: { product_list_sync: { ...itemRow().details.product_list_sync, unmatched: names }, ...over } });
+  test('a NEW unmatched visit line is never signed off unseen: the file is replaced, left unsigned, one bell names it', async () => {
+    setList([...rowsBefore, product(3)], [3]); // even with a SiteOne product added and a complete list
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: '5' }, { product_name: 'Bifen I/T', uses: '3' }];
+    const result = await run();
+    expect(result).toEqual({ changed: true, signedOff: false, rang: true, reasons: ['unmatched_new'], unmatched: { lines: 8, names: ['Bifen I/T', 'Taurus SC'] } });
+    expect(store.replaceFile.mock.calls[0][3].attestBySystem).toBe(false);
+    const saved = store.replaceFile.mock.calls[0][3].details.product_list_sync;
+    expect(saved.unmatched).toEqual(['bifen i t', 'taurus sc']);
+    expect(saved.pending_alert.detail).toMatch(/New visit lines recorded without a catalog product \(they cannot be printed or checked\): Bifen I T, Taurus SC\./);
+    const [, , why, opts] = episodes.raiseAdminAlertWithReopen.mock.calls[0];
+    expect(why).toBe('New visit lines recorded without a catalog product: Bifen I T, Taurus SC; 1 other change; check and sign off.');
+    expect(opts.detail).toMatch(/8 visit lines recorded without a catalog product are not on the list: Bifen I T, Taurus SC\./);
+    expect(store.logActivity.mock.calls.some((c) => c[1] === 'bid_kit_attested')).toBe(false);
+    expect(require('../services/logger').info.mock.calls.flat().join(' ')).toMatch(/unmatchedLines=8 unmatchedNames=2/);
+  });
+  test('unmatched names the signed snapshot already had do not block a SiteOne-only sign-off', async () => {
+    store.listItems.mockResolvedValue([knowing(['bifen i t', 'taurus sc'])]);
     setList([...rowsBefore, product(3)], [3]);
     mockTables.service_products = [{ product_name: 'Taurus SC', uses: '5' }, { product_name: 'Bifen I/T', uses: '3' }];
-    mockTables.products_catalog = [];
-    // The stored fingerprint was made without them, so the unmatched set alone already changes the list.
-    const result = await run();
-    expect(result).toEqual({ changed: true, signedOff: true, rang: false, unmatched: { lines: 8, names: ['Bifen I/T', 'Taurus SC'] } });
-    expect(store.logActivity.mock.calls[0][3]).toMatchObject({ unmatched: { lines: 8 } });
-    expect(require('../services/logger').info.mock.calls.flat().join(' ')).toMatch(/unmatchedLines=8 unmatchedNames=2/);
+    expect(await run()).toEqual({ changed: true, signedOff: true, rang: false, unmatched: { lines: 8, names: ['Bifen I/T', 'Taurus SC'] } });
+    expect(store.replaceFile.mock.calls[0][3].details.product_list_sync.unmatched).toEqual(['bifen i t', 'taurus sc']);
+    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+  });
+  test('a name that dropped out never blocks; a snapshot with no unmatched key counts as an empty list', async () => {
+    store.listItems.mockResolvedValue([knowing(['cyzmic cs', 'taurus sc'])]);
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: '5' }];
+    expect(await run()).toMatchObject({ changed: true, signedOff: true });
+    expect(store.replaceFile.mock.calls[0][3].details.product_list_sync.unmatched).toEqual(['taurus sc']);
+    // The earlier snapshot has no key at all (the itemRow default): the same free text is new to it.
+    jest.clearAllMocks();
+    store.listItems.mockResolvedValue([itemRow()]);
+    expect(await run()).toMatchObject({ changed: true, signedOff: false, reasons: ['unmatched_new'] });
+  });
+  test('one new name among known ones asks and names only the new one', async () => {
+    store.listItems.mockResolvedValue([knowing(['taurus sc'])]);
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: '5' }, { product_name: 'Novel Pesticide X', uses: '1' }];
+    expect(await run()).toMatchObject({ signedOff: false, reasons: ['unmatched_new'] });
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toBe('New visit lines recorded without a catalog product: Novel Pesticide X; check and sign off.');
+  });
+  test('a new unmatched name the notification rules refuse falls back to plain words, never loses the bell', async () => {
+    mockTables.service_products = [{ product_name: 'Bad_Name 2026-10-25', uses: '1' }];
+    await run();
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toBe('New visit lines have no catalog product; check and sign off.');
   });
   test('a change in the unmatched set alone rebuilds the list; the same set again does nothing', async () => {
     mockTables.service_products = [{ product_name: 'Taurus SC', uses: 5 }];

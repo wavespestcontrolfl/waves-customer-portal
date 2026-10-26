@@ -274,6 +274,29 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
     expect(await lib.runBidKitProductListSync()).toEqual({ changed: false });
   });
 
+  test('a NEW free-text visit line is never signed off unseen; one the signed snapshot already knew is not a blocker', async () => {
+    const item = await kitItem();
+    await apply(await catalogRow('Alpha'));
+    const freeText = async (name) => mockPg('service_products').insert({ service_record_id: (await visit(10)).id, product_id: null, product_name: name });
+    await lib.runBidKitProductListSync();
+    await signOff(item.id);
+    // A technician's recap carries a pesticide typed as text: nothing prints, so the kit asks instead of signing off.
+    await freeText(`Novel pesticide ${tag}`);
+    expect(await lib.runBidKitProductListSync()).toMatchObject({ changed: true, signedOff: false, reasons: ['unmatched_new'] });
+    let row = await rowOf(item.id);
+    expect(row.attested_at).toBeNull();
+    expect(row.details.product_list_sync.unmatched).toEqual([`novel pesticide ${tag}`]);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls.at(-1)[3].detail).toContain(`Novel pesticide ${tag}`);
+    // The owner checks and signs off; the same free text is now known, so a SiteOne-only addition signs itself off.
+    await signOff(item.id);
+    const bought = await catalogRow('Bought');
+    await apply(bought); await purchase(bought);
+    expect(await lib.runBidKitProductListSync()).toMatchObject({ changed: true, signedOff: true });
+    row = await rowOf(item.id);
+    expect(row.attested_at).not.toBeNull();
+    expect(row.details.product_list_sync.unmatched).toEqual([`novel pesticide ${tag}`]);
+  });
+
   test('a kit with no product list item is left alone', async () => {
     expect(await lib.runBidKitProductListSync()).toEqual({ skipped: 'no_item' });
     expect(puts()).toHaveLength(0);

@@ -153,9 +153,12 @@ const FIELD_WORDS = { name: 'name', cat: 'category', ai: 'active ingredient', ep
 
 // unmatched: the free-text visit lines that match no catalog product. Their distinct normalized names are part of the input, so
 // the list counts as changed when that set changes (and, with none, the fingerprint is the same as without the argument).
+// The sorted distinct normalized names of the unmatched lines: what the snapshot stores and the fingerprint hashes.
+const unmatchedNames = (unmatched = []) => [...new Set(unmatched.map((line) => line.norm))].sort();
+
 function fingerprintOf(snapshots, unmatched = []) {
   const sorted = [...snapshots].sort((a, b) => a.id.localeCompare(b.id));
-  const names = [...new Set(unmatched.map((line) => line.norm))].sort();
+  const names = unmatchedNames(unmatched);
   const input = sorted.map((s) => [s.id, s.name, s.cat, s.ai, s.epa, s.label, s.sds]);
   return crypto.createHash('sha256').update(JSON.stringify(names.length ? [input, names] : input)).digest('hex');
 }
@@ -198,7 +201,10 @@ function listIsComplete(rows) {
 // 'file_replaced' (the file on the row is not the one this job stored). `bought`: a Set of product ids with a logged SiteOne
 // purchase line. Returns { auto, reasons, outside }: reasons is empty exactly when auto is true; outside is the added or
 // changed products with no SiteOne purchase.
-function decideSignOff({ previous, wasSignedOff, complete, diff, bought }) {
+// `newUnmatched`: the free-text visit lines with no catalog product whose name was not already in the previous (signed) snapshot.
+// A pesticide typed as free text produces no row in the PDF, so it must never be signed off unseen: it asks. Names the previous
+// snapshot already had, and names that dropped out, do not block.
+function decideSignOff({ previous, wasSignedOff, complete, diff, bought, newUnmatched = [] }) {
   const reasons = [];
   let outside = [];
   if (previous !== 'ok') reasons.push(previous);
@@ -206,9 +212,10 @@ function decideSignOff({ previous, wasSignedOff, complete, diff, bought }) {
   if (previous === 'ok') {
     outside = [...diff.added, ...diff.changed].filter((product) => !bought.has(product.id));
     if (outside.length) reasons.push('not_siteone');
+    if (newUnmatched.length) reasons.push('unmatched_new');
     if (!wasSignedOff) reasons.push('unsigned_before');
   }
-  return { auto: reasons.length === 0, reasons, outside };
+  return { auto: reasons.length === 0, reasons, outside, newUnmatched: previous === 'ok' ? newUnmatched : [] };
 }
 
 // Products with at least one logged SiteOne purchase line. A product's best_vendor is the cheapest price, not where it was
@@ -235,6 +242,7 @@ function joinNames(products, limit = MAX_NAMED) {
 
 // The segments of the bell's one sentence, most important first.
 function segmentsFor({ diff, decision }) {
+  const fresh = decision.newUnmatched || [];
   const outside = new Set(decision.outside.map((product) => product.id));
   const addedOut = diff.added.filter((product) => outside.has(product.id));
   const changedOut = diff.changed.filter((product) => outside.has(product.id));
@@ -242,6 +250,7 @@ function segmentsFor({ diff, decision }) {
   if (addedOut.length) segments.push(`Added ${joinNames(addedOut)} (not a SiteOne purchase)`);
   if (changedOut.length) segments.push(`${joinNames(changedOut)} changed (not a SiteOne purchase)`);
   if (decision.reasons.includes('incomplete')) segments.push('a pesticide is missing its EPA number, label or SDS');
+  if (fresh.length) segments.push(`New visit lines recorded without a catalog product: ${joinNames(fresh)}`);
   const quiet = diff.added.length - addedOut.length + diff.changed.length - changedOut.length + diff.removed.length;
   if (quiet && segments.length) segments.push(`${quiet} other ${quiet === 1 ? 'change' : 'changes'}`);
   if (!segments.length) {
@@ -278,6 +287,7 @@ function detailFor({ diff, decision, previous, unmatched = [] }) {
     productLine('Changed', mark(changedWords)),
     productLine('Removed', diff.removed),
     decision.reasons.includes('incomplete') ? 'The list is incomplete: a pesticide is missing its EPA number, label or SDS.' : '',
+    (decision.newUnmatched || []).length ? `New visit lines recorded without a catalog product (they cannot be printed or checked): ${decision.newUnmatched.map((line) => tidy(line.name)).join(', ')}.` : '',
     decision.reasons.includes('unsigned_before') ? 'The earlier version is still not signed off.' : '',
     unmatchedLine,
     'Check the product list and sign off.',
@@ -310,7 +320,8 @@ function alertFor(itemId, { diff, decision, previous, unmatched = [] }) {
     return { spec: specFor(itemId, named), detail };
   } catch {
     const n = diff.added.length + diff.changed.length + diff.removed.length;
-    return { spec: specFor(itemId, `${n} ${n === 1 ? 'change' : 'changes'} to the list; check it and sign off.`), detail };
+    const why = n ? `${n} ${n === 1 ? 'change' : 'changes'} to the list; check it and sign off.` : 'New visit lines have no catalog product; check and sign off.';
+    return { spec: specFor(itemId, why), detail };
   }
 }
 
@@ -339,7 +350,9 @@ async function planRebuild(item, rows, snapshots, info, unmatched) {
   if (prior && Array.isArray(prior.rows)) previous = fileIsOurs(prior, info) ? 'ok' : 'file_replaced';
   const diff = previous === 'ok' ? diffSnapshots(prior.rows, snapshots) : { added: [], removed: [], changed: [] };
   const bought = previous === 'ok' ? await siteOnePurchased([...diff.added, ...diff.changed].map((product) => product.id)) : new Set();
-  const decision = decideSignOff({ previous, wasSignedOff: Boolean(item.attested_at), complete: listIsComplete(rows), diff, bought });
+  const known = new Set(Array.isArray(prior && prior.unmatched) ? prior.unmatched : []);
+  const newUnmatched = unmatched.filter((line) => !known.has(line.norm));
+  const decision = decideSignOff({ previous, wasSignedOff: Boolean(item.attested_at), complete: listIsComplete(rows), diff, bought, newUnmatched });
   return { previous, diff, decision, unmatched };
 }
 
@@ -361,7 +374,7 @@ async function storeRebuild(item, { rows, snapshots, fingerprint, plan, now }) {
       attestBySystem: decision.auto,
       details: {
         product_list_sync: {
-          fingerprint, built_at: now.toISOString(), file_ref: refOf(stored.key), rows: snapshots,
+          fingerprint, built_at: now.toISOString(), file_ref: refOf(stored.key), rows: snapshots, unmatched: unmatchedNames(plan.unmatched),
           ...(pending ? { pending_alert: { why: pending.spec.why, detail: pending.detail } } : {}),
         },
       },
@@ -492,6 +505,6 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
 }
 
 module.exports = {
-  runBidKitProductListSync, readProductRows, readProductList, foldUnlinked, unmatchedSentence, sortRows, snapshotOf, fingerprintOf, diffSnapshots, listIsComplete, decideSignOff,
+  unmatchedNames, runBidKitProductListSync, readProductRows, readProductList, foldUnlinked, unmatchedSentence, sortRows, snapshotOf, fingerprintOf, diffSnapshots, listIsComplete, decideSignOff,
   siteOnePurchased, alertFor, detailFor, closeStaleBells, isPesticideCategory, keyFor, KEY_PREFIX, AUTO_SIGN_OFF, PESTICIDE_CATEGORIES,
 };
