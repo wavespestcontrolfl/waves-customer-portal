@@ -140,6 +140,17 @@ describe('diffSnapshots', () => {
   });
 });
 
+describe('isPesticideCategory', () => {
+  test('compound and growth-regulator category names count; monitors, fertilizers and adjuvants do not', () => {
+    for (const cat of ['Insecticide', 'termiticide / insecticide', 'insect growth regulator', 'Plant Growth Regulator', 'pgr', 'igr', 'fire ant bait', 'mosquito']) {
+      expect([cat, lib.isPesticideCategory(cat)]).toEqual([cat, true]);
+    }
+    for (const cat of ['termite monitoring', 'fertilizer', 'micronutrient fertilizer', 'adjuvant', 'soil_surfactant', 'rodent_trap', 'supplies', '', null]) {
+      expect([cat, lib.isPesticideCategory(cat)]).toEqual([cat, false]);
+    }
+  });
+});
+
 describe('listIsComplete', () => {
   test('a registered row counts only with an EPA number in EPA format (a note like TBD is never complete)', () => {
     expect(lib.listIsComplete([product(1, { epa_reg_number: 'TBD' })])).toBe(false);

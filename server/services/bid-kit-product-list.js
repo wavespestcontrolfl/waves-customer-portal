@@ -49,7 +49,13 @@ const PESTICIDE_CATEGORIES = new Set([
   'insecticide', 'herbicide', 'fungicide', 'termiticide', 'rodenticide', 'miticide', 'nematicide', 'pgr', 'igr',
   'bait', 'mole bait', 'termite bait', 'mosquito',
 ]);
-const isPesticideCategory = (category) => PESTICIDE_CATEGORIES.has(String(category || '').trim().toLowerCase());
+// A category NAMING a pesticide class also counts: the catalog has compound names ("termiticide / insecticide") and a growth
+// regulator can be filed as "insect growth regulator" or "plant growth regulator". "termite monitoring" names none of them.
+const PESTICIDE_CATEGORY_WORDS = /\b(insecticide|herbicide|fungicide|termiticide|rodenticide|miticide|nematicide|larvicide|pgr|igr|growth regulator|bait|mosquito)\b/;
+const isPesticideCategory = (category) => {
+  const name = String(category || '').trim().toLowerCase();
+  return PESTICIDE_CATEGORIES.has(name) || PESTICIDE_CATEGORY_WORDS.test(name);
+};
 
 // ---- the list ----
 
