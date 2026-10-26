@@ -232,25 +232,29 @@ function drawScaleBar(ctx, model) {
  */
 export function drawSketch(ctx, model, { map }) {
   ctx.drawImage(map, 0, 0, MAP_WIDTH, MAP_HEIGHT);
-  // Everything we draw stays above the photo's bottom strip (Google's attribution), even an arrow or a mist wedge
-  // that reaches past a nozzle near the bottom edge.
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, MAP_WIDTH, BOTTOM_LIMIT);
-  ctx.clip();
   model.zones.forEach((z) => drawZone(ctx, z));
   model.lines.forEach((l) => drawLine(ctx, l));
   model.risers.forEach((r) => drawRiser(ctx, r));
   if (model.pump) drawPump(ctx, model.pump);
-  model.nozzles.forEach((n) => drawMistWedge(ctx, n, n.aimHeading, n.reachPx));
+  // The aim marks (wedges, arrows) are ours to keep off the photo's bottom strip, where Google's attribution sits:
+  // a nozzle near the bottom edge can aim down past it. The staff's own points (dots, risers, pump) are not clipped,
+  // so a point they placed there is never lost from the picture.
+  const aimMarks = (draw) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, MAP_WIDTH, BOTTOM_LIMIT);
+    ctx.clip();
+    model.nozzles.forEach(draw);
+    ctx.restore();
+  };
+  aimMarks((n) => drawMistWedge(ctx, n, n.aimHeading, n.reachPx));
   model.nozzles.forEach((n) => drawNozzle(ctx, n));
   // Arrows over the dots, so a neighbour's dot never hides one (a nozzle aimed along its line points at the
   // next dot); the digits over the arrows, so an arrow never hides a number.
-  model.nozzles.forEach((n) => drawAimArrow(ctx, n, n.aimHeading, n.nearWater, NOZZLE_R + 3, n.arrowPx));
+  aimMarks((n) => drawAimArrow(ctx, n, n.aimHeading, n.nearWater, NOZZLE_R + 3, n.arrowPx));
   model.nozzles.forEach((n) => drawNozzleNumber(ctx, n));
   drawLabels(ctx, model, [scaleBarRect(model)]);
   drawScaleBar(ctx, model);
-  ctx.restore();
 }
 
 function renderToBlob(model, images) {
