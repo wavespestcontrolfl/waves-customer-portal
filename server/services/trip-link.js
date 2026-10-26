@@ -14,8 +14,9 @@
  *
  * One ET day, one technician at a time:
  *   1. The vehicle's trips of the day, and its stops (a gap of 5+ minutes between two trips, bouncie-truck-stops.js).
- *   2. The technician's COMPLETED visits of the day, one physical visit per visit_id group; destination as the pin
- *      check resolves it (visit-gps-context.js).
+ *   2. The technician's COMPLETED visits WORKED that day (arrival stamp, else completion stamp: a visit closed out on
+ *      a later day belongs to the day the truck was there), one physical visit per visit_id group; destination as the
+ *      pin check resolves it (visit-gps-context.js).
  *   3. Match a visit to the stop inside the GPS arrival radius of its destination that overlaps the visit window
  *      [ (arrived_at or completed_at) - WINDOW_BEFORE_MIN, completed_at + WINDOW_AFTER_MIN ]: greatest overlap,
  *      then the start nearest the arrival stamp; still equal = 'ambiguous'. Several visits on one stop split its minutes.
@@ -39,6 +40,8 @@ const ALGORITHM_VERSION = 1;
 // anchor is the arrival stamp (else the completion stamp).
 const WINDOW_BEFORE_MIN = 120;
 const WINDOW_AFTER_MIN = 30;
+// The nightly run also links again the worked day of a visit closed yesterday, up to this many days back.
+const LATE_CLOSE_DAYS = 7;
 const MS_PER_MIN = 60000;
 const INSERT_CHUNK = 200;
 
@@ -237,14 +240,17 @@ async function writeTechnicianDay(conn, { day, bounds, technicianId, imei, legRo
   await conn.transaction(async (trx) => {
     await insertChunks(trx, 'visit_gps_legs', 'scheduled_service_id', legRows);
     await insertChunks(trx, 'trip_links', 'bouncie_trip_id', linkRows);
-    // A re-run replaces the day: rows for visits no longer completed here, or trips no longer read, go.
+    // A re-run replaces the day: rows for visits no longer worked here, or trips no longer read, go. The day's links
+    // of this technician go too when the technician has no usable tracker any more (imei null: every one of them).
     await trx('visit_gps_legs').where({ technician_id: technicianId, service_date: day })
       .whereNotIn('scheduled_service_id', legRows.map((row) => row.scheduled_service_id)).del();
-    if (imei) {
-      await trx('trip_links').where({ vehicle_imei: imei })
-        .where('trip_start', '>=', new Date(bounds.startMs)).where('trip_start', '<', new Date(bounds.endMs))
-        .whereNotIn('bouncie_trip_id', linkRows.map((row) => row.bouncie_trip_id)).del();
-    }
+    await trx('trip_links')
+      .where('trip_start', '>=', new Date(bounds.startMs)).where('trip_start', '<', new Date(bounds.endMs))
+      .where(function ofThisDay() {
+        this.where({ technician_id: technicianId });
+        if (imei) this.orWhere({ vehicle_imei: imei });
+      })
+      .whereNotIn('bouncie_trip_id', linkRows.map((row) => row.bouncie_trip_id)).del();
   });
 }
 
@@ -267,17 +273,27 @@ async function loadDayInputs(conn, etDay, bounds, only) {
   const technicians = new Map((await techQuery).map((row) => [String(row.id), {
     id: String(row.id), imei: String(row.bouncie_imei || '').trim(), changedAt: row.bouncie_imei_changed_at,
   }]));
-  let visitQuery = ctx.completedVisitQuery(conn, { requireVehicle: false })
-    .where('s.completed_at', '>=', new Date(bounds.startMs)).where('s.completed_at', '<', new Date(bounds.endMs));
+  const start = new Date(bounds.startMs);
+  const end = new Date(bounds.endMs);
+  // The day a visit was worked: its arrival stamp, else its completion stamp.
+  let visitQuery = ctx.completedVisitQuery(conn, { requireVehicle: false }).where(function workedThatDay() {
+    this.where((q) => q.where('s.arrived_at', '>=', start).where('s.arrived_at', '<', end))
+      .orWhere((q) => q.whereNull('s.arrived_at').where('s.completed_at', '>=', start).where('s.completed_at', '<', end));
+  });
   if (only) visitQuery = visitQuery.whereIn('s.technician_id', only);
   const groupsByTech = new Map();
   for (const group of groupVisits(ctx.shapeVisits(await visitQuery))) {
     const id = String(group.technicianId);
     groupsByTech.set(id, [...(groupsByTech.get(id) || []), group]);
   }
-  let staleQuery = conn('visit_gps_legs').where({ service_date: etDay }).distinct('technician_id');
-  if (only) staleQuery = staleQuery.whereIn('technician_id', only);
-  const staleIds = (await staleQuery).map((row) => row.technician_id).filter(Boolean).map(String);
+  // Technicians that hold rows for the day (legs or links) are re-run too, so rows they no longer earn go.
+  let staleLegs = conn('visit_gps_legs').where({ service_date: etDay }).distinct('technician_id');
+  let staleLinks = conn('trip_links').where('trip_start', '>=', start).where('trip_start', '<', end).distinct('technician_id');
+  if (only) {
+    staleLegs = staleLegs.whereIn('technician_id', only);
+    staleLinks = staleLinks.whereIn('technician_id', only);
+  }
+  const staleIds = [...await staleLegs, ...await staleLinks].map((row) => row.technician_id).filter(Boolean).map(String);
   const withVehicle = [...technicians.values()].filter((t) => t.imei).map((t) => t.id);
   return { technicians, groupsByTech, ids: new Set([...withVehicle, ...groupsByTech.keys(), ...staleIds]) };
 }
@@ -335,7 +351,7 @@ async function linkDay(conn, etDay, { technicianIds = null, dryRun = false, now 
 
   for (const technicianId of ids) {
     const technician = technicians.get(technicianId);
-    if (!technician) continue; // technician deleted: its leftover rows go with it
+    if (!technician) continue; // no technician row: nothing to judge
     try {
       const vehicle = technician.imei && !ctx.dayBeforeMapping(etDay, technician.changedAt);
       const read = vehicle ? await readVehicleDay(conn, technician, bounds, etDay, arrivalRadius, now) : null;
@@ -359,26 +375,50 @@ async function linkDay(conn, etDay, { technicianIds = null, dryRun = false, now 
 }
 
 /**
- * The nightly run: yesterday (ET), then the day before again. A trip-data event can reach us up to 12 hours late
- * (bouncie-truck-stops.js), so at 01:40 yesterday may still miss a few; a day later they are all in. A re-run replaces
- * a day, so linking it twice is safe. Gate off = nothing is read and nothing is written.
+ * The ET days the nightly run links, pure: yesterday; the day before again (a trip-data event can reach us up to
+ * 12 hours late, bouncie-truck-stops.js, so at 01:40 yesterday may still miss a few); and the worked day of each visit
+ * closed yesterday but worked earlier, up to LATE_CLOSE_DAYS back. A re-run replaces a day, so linking twice is safe.
+ * @param {Date} now
+ * @param {Array<Date|string>} lateArrivals arrival stamps of the visits completed yesterday
  */
+function nightlyDays(now, lateArrivals = []) {
+  const yesterday = etDateString(addETDays(now, -1));
+  const oldest = etDateString(addETDays(now, -LATE_CLOSE_DAYS));
+  const late = lateArrivals.map((value) => etDateString(new Date(value)))
+    .filter((day) => day >= oldest && day < yesterday);
+  return [...new Set([yesterday, etDateString(addETDays(now, -2)), ...late.sort().reverse()])];
+}
+
+/** Arrival stamps of the visits completed yesterday (ET) that arrived on an earlier day. */
+async function lateArrivals(conn, now) {
+  const { startMs, endMs } = ctx.etDayBounds(etDateString(addETDays(now, -1)));
+  const rows = await conn('scheduled_services').where({ status: 'completed' })
+    .where('completed_at', '>=', new Date(startMs)).where('completed_at', '<', new Date(endMs))
+    .where('arrived_at', '<', new Date(startMs))
+    .select('arrived_at');
+  return rows.map((row) => row.arrived_at);
+}
+
+/** The nightly run (see nightlyDays). Gate off = nothing is read and nothing is written. */
 async function runTripLinkNightly({ now = new Date(), conn = db } = {}) {
   if (!tripLinkLive()) return { skipped: 'gated' };
-  const day = etDateString(addETDays(now, -1));
+  const [day, ...again] = nightlyDays(now, await lateArrivals(conn, now));
   const summary = await linkDay(conn, day, { now });
-  const relinkDay = etDateString(addETDays(now, -2));
-  const relinked = await linkDay(conn, relinkDay, { now });
+  const relinked = [];
+  for (const relinkDay of again) {
+    const result = await linkDay(conn, relinkDay, { now });
+    relinked.push({ day: relinkDay, technicians: result.technicians, legs: result.legs, trips: result.trips, errors: result.errors });
+  }
   logger.info(`${LOG} done`, {
     day, technicians: summary.technicians, legs: summary.legs, trips: summary.trips, errors: summary.errors,
-    relinked: { day: relinkDay, legs: relinked.legs, trips: relinked.trips, errors: relinked.errors },
+    relinked: relinked.map(({ day: d, legs, errors }) => ({ day: d, matched: legs.matched, total: legs.total, errors })),
   });
-  const errors = summary.errors + relinked.errors;
-  if (errors) throw new Error(`${LOG} ${errors} technician-day(s) failed for ${day} and ${relinkDay}`);
-  return { ...summary, relinked: { day: relinkDay, technicians: relinked.technicians, legs: relinked.legs, trips: relinked.trips, errors: relinked.errors } };
+  const errors = summary.errors + relinked.reduce((sum, r) => sum + r.errors, 0);
+  if (errors) throw new Error(`${LOG} ${errors} technician-day(s) failed for ${[day, ...again].join(', ')}`);
+  return { ...summary, relinked };
 }
 
 module.exports = {
-  linkDay, runTripLinkNightly, computeDay, matchVisit, visitWindow, driveLeg, kindOfPoint, purposeFor, groupVisits, tripLinkLive,
-  ALGORITHM_VERSION, WINDOW_BEFORE_MIN, WINDOW_AFTER_MIN,
+  linkDay, runTripLinkNightly, nightlyDays, computeDay, matchVisit, visitWindow, driveLeg, kindOfPoint, purposeFor, groupVisits,
+  tripLinkLive, ALGORITHM_VERSION, WINDOW_BEFORE_MIN, WINDOW_AFTER_MIN, LATE_CLOSE_DAYS,
 };

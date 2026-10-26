@@ -310,14 +310,58 @@ describeDb('trip link (PostgreSQL)', () => {
     expect(await counts()).toEqual({ legs: 0, links: 0 });
     process.env.GATE_TRIP_LINK = 'true';
     const result = await tripLink.runTripLinkNightly({ now, conn: mockPg });
-    expect(result).toMatchObject({ day: DAY, trips: 4, relinked: { day: '2026-10-07', trips: 0, errors: 0 } });
+    expect(result).toMatchObject({ day: DAY, trips: 4, relinked: [{ day: '2026-10-07', trips: 0, errors: 0 }] });
     expect(await counts()).toEqual({ legs: 3, links: 4 });
     // A trip event that reached us late: the next night links the fixture day again, as the day before yesterday.
     await mockPg('visit_gps_legs').del();
     await mockPg('trip_links').del();
     const nextNight = await tripLink.runTripLinkNightly({ now: new Date('2026-10-10T05:40:00Z'), conn: mockPg });
-    expect(nextNight).toMatchObject({ day: '2026-10-09', trips: 0, relinked: { day: DAY, trips: 4, errors: 0 } });
+    expect(nextNight).toMatchObject({ day: '2026-10-09', trips: 0, relinked: [{ day: DAY, trips: 4, errors: 0 }] });
     expect(await counts()).toEqual({ legs: 3, links: 4 });
+  });
+
+  test('a visit closed out on a later day is linked on the day it was worked, and the nightly run re-links that day', async () => {
+    const f = await fixture();
+    // B was worked on the fixture day (arrived 15:32Z) but closed out three days later.
+    await mockPg('scheduled_services').where({ id: f.ids.b }).update({ completed_at: new Date('2026-10-11T13:00:00Z') });
+    await link();
+    expect(await mockPg('visit_gps_legs').where({ scheduled_service_id: f.ids.b, service_date: DAY }).first())
+      .toMatchObject({ status: 'matched' });
+    expect(new Date((await legOf(f.ids.b)).gps_arrived_at).toISOString()).toBe(new Date(iso('15:30')).toISOString());
+    // The close-out day has no truck stop for it and does not take it.
+    await tripLink.linkDay(mockPg, '2026-10-11', { now: new Date('2026-10-12T06:00:00Z') });
+    expect(await legOf(f.ids.b)).toMatchObject({ status: 'matched' });
+    expect(await counts()).toEqual({ legs: 3, links: 4 });
+    // The night after the close-out re-links the worked day (four days back).
+    await mockPg('visit_gps_legs').del();
+    await mockPg('trip_links').del();
+    process.env.GATE_TRIP_LINK = 'true';
+    const night = await tripLink.runTripLinkNightly({ now: new Date('2026-10-12T05:40:00Z'), conn: mockPg });
+    expect(night.relinked.map((r) => r.day)).toEqual(['2026-10-10', DAY]);
+    expect(await legOf(f.ids.b)).toMatchObject({ status: 'matched' });
+    expect(await counts()).toEqual({ legs: 3, links: 4 });
+  });
+
+  test('a tracker cleared after a run: the re-run removes that day\'s trip links and the legs read no_vehicle', async () => {
+    const f = await fixture();
+    await link();
+    expect(await counts()).toEqual({ legs: 3, links: 4 });
+    await mockPg('technicians').where({ id: f.tech }).update({ bouncie_imei: null });
+    await link();
+    expect((await legs()).map((r) => r.status)).toEqual(['no_vehicle', 'no_vehicle', 'no_vehicle']);
+    expect(await counts()).toEqual({ legs: 3, links: 0 });
+  });
+
+  test('a technician that holds only trip links for the day is re-run, so its stale links go', async () => {
+    const f = await fixture();
+    await link();
+    // Its visits move to another technician and its tracker is cleared: only its trip links are left for the day.
+    const other = await technician('TESTIMEI0002');
+    await mockPg('scheduled_services').where({ technician_id: f.tech }).update({ technician_id: other });
+    await mockPg('visit_gps_legs').where({ technician_id: f.tech }).del();
+    await mockPg('technicians').where({ id: f.tech }).update({ bouncie_imei: '' });
+    await link();
+    expect(Number((await mockPg('trip_links').where({ technician_id: f.tech }).count({ n: '*' }).first()).n)).toBe(0);
   });
 
   test('it never writes mileage_log, scheduled_services, pins or alerts', async () => {

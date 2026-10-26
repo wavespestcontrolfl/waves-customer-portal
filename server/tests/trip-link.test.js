@@ -296,6 +296,25 @@ describe('the trips read agrees with the stops read', () => {
   });
 });
 
+describe('the nightly days', () => {
+  const now = new Date('2026-10-12T05:40:00Z'); // 01:40 ET on Oct 12
+
+  test('yesterday, then the day before again', () => {
+    expect(tripLink.nightlyDays(now)).toEqual(['2026-10-11', '2026-10-10']);
+  });
+
+  test('plus the worked day of a visit closed yesterday, up to LATE_CLOSE_DAYS back, each day once', () => {
+    const arrivals = ['2026-10-08T15:32:00Z', '2026-10-08T18:00:00Z', '2026-10-10T14:00:00Z', '2026-10-05T14:00:00Z', '2026-10-04T14:00:00Z'];
+    expect(tripLink.LATE_CLOSE_DAYS).toBe(7);
+    expect(tripLink.nightlyDays(now, arrivals)).toEqual(['2026-10-11', '2026-10-10', '2026-10-08', '2026-10-05']);
+  });
+
+  test('an arrival late in the ET evening counts on its ET day', () => {
+    // 23:30 ET on Oct 7 is 03:30Z on Oct 8.
+    expect(tripLink.nightlyDays(now, ['2026-10-08T03:30:00Z'])).toEqual(['2026-10-11', '2026-10-10', '2026-10-07']);
+  });
+});
+
 describe('the gate', () => {
   beforeEach(() => { mockDb.mockClear(); delete process.env.GATE_TRIP_LINK; });
   afterAll(() => { delete process.env.GATE_TRIP_LINK; });
@@ -424,13 +443,14 @@ describe('wiring and the shadow-only promise', () => {
     expect(block).toMatch(/recordJobStart\('trip-link'\)[\s\S]*recordJobEnd\('trip-link'/);
   });
 
-  test('the service writes only visit_gps_legs and trip_links; mileage_log is read, never written', () => {
+  test('the service writes only visit_gps_legs and trip_links; mileage_log and scheduled_services are read, never written', () => {
     const full = read('services/trip-link.js');
     const source = full.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     const tables = new Set([...source.matchAll(/\b(?:conn|trx)\('([a-z_]+)'\)/g)].map((m) => m[1]));
-    expect([...tables].sort()).toEqual(['mileage_log', 'technicians', 'trip_links', 'visit_gps_legs']);
-    expect(source).not.toMatch(/mileage_log'\)[^;]*\.(insert|update|del)\(/);
-    expect(source).not.toMatch(/scheduled_services|job_costs|raiseAdminAlert|notifyAdmin|sendSMS|customer_pin/);
+    expect([...tables].sort()).toEqual(['mileage_log', 'scheduled_services', 'technicians', 'trip_links', 'visit_gps_legs']);
+    expect(source).not.toMatch(/mileage_log'\)[^;]*\.(insert|update|del|merge)\(/);
+    expect(source).not.toMatch(/scheduled_services'\)[^;]*\.(insert|update|del|merge)\(/);
+    expect(source).not.toMatch(/job_costs|raiseAdminAlert|notifyAdmin|sendSMS|customer_pin/);
     expect(source).not.toMatch(/_private/);
     expect(read('services/visit-gps-context.js')).not.toMatch(/_private/);
   });
