@@ -11,6 +11,7 @@ let nextId = 0;
 const check = (payDate, patch = {}) => ({
   id: `check-${nextId += 1}`,
   pay_date: payDate,
+  gross_cents: 10000,
   federal_income_tax_cents: 10000,
   social_security_cents: 6200,
   medicare_cents: 1450,
@@ -21,7 +22,8 @@ const check = (payDate, patch = {}) => ({
   fl_reemployment_cents: 270,
   ...patch,
 });
-// 10000 + 6200 + 1450 + 0 + 6200 + 1450 = 25300 cents per default check.
+// 10000 + 6200 + 1450 + 0 + 6200 + 1450 = 25300 cents per default check. Florida
+// tax: $100.00 of wages at the 2.7% new-employer rate = $2.70 (RT-6 line 5).
 const byKey = (rows) => Object.fromEntries(rows.map((r) => [r.source_key, r]));
 
 describe('legal holidays', () => {
@@ -334,8 +336,32 @@ describe('source digest and review rows', () => {
     expect(withBalances(now, [marked(key, 'old-digest', { amount_paid: dep.amount_due })]).filter((r) => r.source_key.startsWith(key))).toEqual([]);
   });
 
+  test('the RT-6 row asks for RT-6 line 5, rounded once on the quarter, not the sum of the checks', () => {
+    // Three $100.10 checks at 2.7%: line 5 = $300.30 x 2.7% = $8.11; the checks charged 3 x $2.70 = $8.10.
+    const rows = payrollObligations({
+      checks: [1, 2, 3].map((n) => check(`2027-01-0${n * 2}`, { gross_cents: 10010, fl_reemployment_cents: 270 })),
+      hires: [],
+      today: '2027-02-01',
+    });
+    expect(byKey(rows)['payroll:rt6:2027-Q1'].amount_due).toBe('8.11');
+  });
+
+  test('the RT-6 row uses the rate each check stored, and only wages under the $7,000 base', () => {
+    const stored = { floridaReemploymentRateBp: 100 }; // 1.0%
+    const rows = payrollObligations({
+      checks: [
+        check('2027-01-08', { gross_cents: 500000, calc_snapshot: stored }),
+        // $6,000 before it: only $1,000 of this $3,000 check is under the base.
+        check('2027-01-15', { gross_cents: 300000, ytd_gross_before_cents: 600000, calc_snapshot: JSON.stringify(stored) }),
+      ],
+      hires: [],
+      today: '2027-02-01',
+    });
+    expect(byKey(rows)['payroll:rt6:2027-Q1'].amount_due).toBe('60.00'); // $6,000 x 1.0%
+  });
+
   test('RT-6 and Form 940 can get a balance row and a review row together', () => {
-    const now = payrollObligations({ checks: [check('2027-01-08', { fl_reemployment_cents: 5000 })], hires: [], today: '2027-03-01' });
+    const now = payrollObligations({ checks: [check('2027-01-08', { gross_cents: 185185, fl_reemployment_cents: 5000 })], hires: [], today: '2027-03-01' });
     const rows = withBalances(now, [marked('payroll:rt6:2027-Q1', 'old-digest', { amount_paid: '1.00', amount_due: '1.00' })]);
     const keys = rows.map((r) => r.source_key).filter((k) => k.startsWith('payroll:rt6:2027-Q1'));
     expect(keys.some((k) => k.includes(':review:'))).toBe(true);
@@ -343,7 +369,7 @@ describe('source digest and review rows', () => {
   });
 
   test('a payment on a balance row does not acknowledge a review', () => {
-    const now = payrollObligations({ checks: [check('2027-01-08', { fl_reemployment_cents: 5000 })], hires: [], today: '2027-03-01' });
+    const now = payrollObligations({ checks: [check('2027-01-08', { gross_cents: 185185, fl_reemployment_cents: 5000 })], hires: [], today: '2027-03-01' });
     const current = now.find((r) => r.source_key === 'payroll:rt6:2027-Q1').source_digest;
     const rows = withBalances(now, [
       marked('payroll:rt6:2027-Q1', 'old-digest', { amount_paid: '1.00', amount_due: '1.00' }),

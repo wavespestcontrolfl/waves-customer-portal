@@ -61,7 +61,7 @@ postgres('payroll tax calendar sync', () => {
       gross_cents: 100000, regular_pay_cents: 100000, overtime_pay_cents: 0, overtime_premium_cents: 0,
       federal_income_tax_cents: 10000, social_security_cents: 6200, medicare_cents: 1450, additional_medicare_cents: 0,
       net_cents: 82350, employer_social_security_cents: 6200, employer_medicare_cents: 1450,
-      futa_cents: 600, fl_reemployment_cents: 270, ytd_gross_before_cents: 0,
+      futa_cents: 600, fl_reemployment_cents: 2700, ytd_gross_before_cents: 0,
       w4_election_id: w4Id, calc_snapshot: {}, pay_method: 'check', status: 'draft', ...patch,
     }).returning('id');
     if (status !== 'draft') {
@@ -138,7 +138,8 @@ postgres('payroll tax calendar sync', () => {
     const due = await trx('tax_filing_calendar').where({ source_key: 'payroll:941_deposit:2027-01' })
       .select(trx.raw("to_char(due_date, 'YYYY-MM-DD') AS d")).first();
     expect(due.d).toBe('2027-02-16'); // the 15th is Washington's Birthday
-    expect((await rowFor('payroll:rt6:2027-Q1')).amount_due).toBe('8.10');
+    // RT-6 line 5: three $1,000.00 checks at 2.7%, rounded once.
+    expect((await rowFor('payroll:rt6:2027-Q1')).amount_due).toBe('81.00');
     expect(await rowFor('payroll:941:2027-Q1')).toBeTruthy();
     expect(await rowFor('payroll:940:2027')).toBeTruthy();
     expect(await rowFor('payroll:w2:2027')).toBeTruthy();
@@ -306,16 +307,17 @@ postgres('payroll tax calendar sync', () => {
 
   it('a balance payment does not end a review', async () => {
     const KEY = 'payroll:rt6:2027-Q1';
-    const first = await finalCheck(W1, '2027-01-15'); // RT-6 2.70
+    const first = await finalCheck(W1, '2027-01-15'); // RT-6 27.00
     await sync();
-    await trx('tax_filing_calendar').where({ source_key: KEY }).update({ status: 'paid', amount_paid: '2.70', paid_date: '2027-04-20' });
+    await trx('tax_filing_calendar').where({ source_key: KEY }).update({ status: 'paid', amount_paid: '27.00', paid_date: '2027-04-20' });
     await trx('payroll_checks').where({ id: first.checkId }).update({ status: 'voided' });
     await trx('payroll_runs').where({ id: first.runId }).update({ status: 'voided' });
-    await finalCheck(W1, '2027-01-15', { fl_reemployment_cents: 5000 }); // RT-6 50.00
+    // RT-6 50.00: $1,851.85 of wages at 2.7%, rounded once.
+    await finalCheck(W1, '2027-01-15', { gross_cents: 185185, regular_pay_cents: 185185, fl_reemployment_cents: 5000 });
     await sync();
     const balance = await rowFor(`${KEY}:balance:1`);
-    expect(balance.amount_due).toBe('47.30');
-    await trx('tax_filing_calendar').where({ id: balance.id }).update({ status: 'paid', amount_paid: '47.30', paid_date: '2027-04-21' });
+    expect(balance.amount_due).toBe('23.00');
+    await trx('tax_filing_calendar').where({ id: balance.id }).update({ status: 'paid', amount_paid: '23.00', paid_date: '2027-04-21' });
     await sync();
     const reviews = await trx('tax_filing_calendar').where('source_key', 'like', `${KEY}:review:%`);
     expect(reviews).toHaveLength(1);

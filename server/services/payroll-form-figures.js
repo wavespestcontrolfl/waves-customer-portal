@@ -34,6 +34,7 @@ const db = require('../models/db');
 const { TAX_YEARS, RATES } = require('./payroll-calc');
 const { PayrollError } = require('./payroll-w4');
 const { rollIrs } = require('./payroll-tax-calendar');
+const { rt6CheckInputs, rt6Tax, pct } = require('./payroll-rt6');
 // The pay week's last day, as payroll-runs.js works it out (Codex #6770 r1).
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
@@ -52,7 +53,6 @@ const num = (value) => Number(value) || 0;
 const max0 = (n) => (n > 0 ? n : 0);
 const pad = (n) => String(n).padStart(2, '0');
 // Half-up rounding of cents x basis points / 10,000 (cents are non-negative integers).
-const pct = (cents, bp) => Math.floor((cents * bp + 5000) / 10000);
 const pctText = (bp) => `${(bp / 100).toFixed(bp % 10 === 0 ? 1 : 2)}%`;
 const centsText = (cents) => `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -77,14 +77,9 @@ function socialSecurityWageBaseCents(year) {
 
 // One stored check as plain numbers, with the three wage splits the forms need.
 function normalize(row, wageBaseCents) {
-  const gross = num(row.gross_cents);
+  const { gross, capWages, excessWages, flReemployment, snapshot } = rt6CheckInputs(row);
   const ytd = num(row.ytd_gross_before_cents);
   const threshold = RATES.additionalMedicareThresholdCents;
-  const capWages = Math.min(gross, max0(RATES.futaAndStateWageBaseCents - ytd));
-  let snapshot = row.calc_snapshot;
-  if (typeof snapshot === 'string') {
-    try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
-  }
   return {
     technicianId: row.technician_id,
     name: row.employee_name,
@@ -99,11 +94,11 @@ function normalize(row, wageBaseCents) {
     ssEmployer: num(row.employer_social_security_cents),
     medicareEmployer: num(row.employer_medicare_cents),
     futa: num(row.futa_cents),
-    flReemployment: num(row.fl_reemployment_cents),
+    flReemployment,
     ssWages: Math.min(gross, max0(wageBaseCents - ytd)),
     addlMedicareWages: max0(ytd + gross - threshold) - max0(ytd - threshold),
     capWages,
-    excessWages: gross - capWages,
+    excessWages,
     snapshot,
   };
 }
@@ -288,37 +283,7 @@ function form941(year, quarter, quarterChecks, depositsCents, history, periodChe
   return { form: '941', year, quarter, rows, notes };
 }
 
-// The Florida rate each check used: the stored `floridaReemploymentRateBp`
-// (written since tax forms layer 3a), else the calculator's new-employer rate,
-// which is the only rate pay runs have ever passed (payroll-runs.js passes no
-// reemploymentRateBp). Never rebuilt from a rounded tax: dividing a rounded
-// cent amount by taxable wages can miss the rate (pre-push audit P1).
-function rt6Rate(quarterChecks) {
-  const rates = new Map();
-  for (const c of quarterChecks) {
-    if (!c.capWages) continue;
-    const stored = c.snapshot && Number(c.snapshot.floridaReemploymentRateBp);
-    const bp = Number.isInteger(stored) && stored >= 0 ? stored : RATES.floridaNewEmployerBp;
-    rates.set(bp, (rates.get(bp) || 0) + c.capWages);
-  }
-  if (!rates.size) return { bp: null, distinct: [] };
-  // More than one rate in a quarter (a rate notice mid-quarter): the rate on
-  // the most taxable wages leads, and a note lists them all.
-  const [bp] = [...rates.entries()].sort((a, b) => b[1] - a[1])[0];
-  return { bp, distinct: [...rates.keys()].sort((a, b) => a - b) };
-}
-
-// RT-6 line 5 is line 4 times the rate, rounded once on the quarter's taxable
-// wages (Florida RT-6 instructions), not the sum of per-paycheck rounding.
-function rt6Tax(quarterChecks) {
-  const gross = sum(quarterChecks, 'gross');
-  const excess = sum(quarterChecks, 'excessWages');
-  const checkTax = sum(quarterChecks, 'flReemployment');
-  const { bp, distinct } = rt6Rate(quarterChecks);
-  const tax = bp == null ? 0 : pct(gross - excess, bp);
-  return { gross, excess, checkTax, rateBp: bp, distinct, tax };
-}
-
+// RT-6 line 5 (rt6Tax) lives in payroll-rt6.js, shared with the Tax page calendar.
 function formRt6(year, quarter, quarterChecks, periodChecks) {
   const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
   const { gross, excess, checkTax, rateBp, distinct, tax } = rt6Tax(quarterChecks);
