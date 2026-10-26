@@ -28,6 +28,15 @@
  *                   stop when a combined-closeout allocation marker is present)
  *   expenses      — expenses WHERE scheduled_service_id=?
  *
+ * GATE_TECH_COST_RATES (L11a) on, AND a cost card in effect for the visit's
+ * technician on its scheduled date (tech-cost-rates.js): labor_cost = the
+ * technician's labor cost per worked hour x (on-job minutes + drive minutes),
+ * and drive_cost = per-mile cost x drive miles + the vehicle's fixed cost per
+ * worked hour x (on-job minutes + drive minutes). Drive minutes and miles come
+ * from the visit's matched visit_gps_legs row when that table and row exist,
+ * else the measured per-stop defaults below. Gate off, or no card = the lines
+ * above, unchanged.
+ *
  * Idempotent: re-running replaces the prior job_costs row and re-writes the
  * service_records financials for the same scheduled_service_id.
  *
@@ -47,6 +56,10 @@ const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive(
 
 const DEFAULT_LABOR_RATE = 35; // fallback if company_financials empty
 const DEFAULT_DRIVE_COST_PER_STOP = 6;
+// GATE_TECH_COST_RATES: the drive a visit is charged when no matched GPS leg
+// exists for it. The 10-26 measurement: 11 miles and 24 minutes per stop.
+const DEFAULT_DRIVE_MINUTES_PER_STOP = 24;
+const DEFAULT_DRIVE_MILES_PER_STOP = 11;
 
 // Lazy so importing this module (e.g. from a migration) never opens the app's
 // db pool — the singleton is only resolved when a caller omits the handle.
@@ -129,6 +142,63 @@ async function getFinancials(db, onDate) {
     };
   } catch {
     return { laborRate: DEFAULT_LABOR_RATE, driveCostPerStop: DEFAULT_DRIVE_COST_PER_STOP };
+  }
+}
+
+// GATE_TECH_COST_RATES, read at call time. Lazy and guarded so importing this
+// module (a migration backfill) never loads the gate map, and a suite that mocks
+// feature-gates without this reader reads "off".
+function techCostRatesOn() {
+  try {
+    const gates = require('../config/feature-gates');
+    return typeof gates.techCostRatesLive === 'function' && gates.techCostRatesLive() === true;
+  } catch {
+    return false;
+  }
+}
+
+// visit_gps_legs is created by the trip-link change and may not exist yet. The
+// check is one information_schema read (safe inside a transaction, it never
+// errors on a missing table). "Exists" is cached for the life of the process;
+// "missing" is cached for a minute, so costing does not re-ask for every visit
+// and the first deploy after that migration starts using legs without a restart.
+const GPS_LEGS_MISSING_RECHECK_MS = 60 * 1000;
+let visitGpsLegsTableKnown = false;
+let visitGpsLegsMissingAt = 0;
+async function visitGpsLegsTableExists(db) {
+  if (visitGpsLegsTableKnown) return true;
+  if (visitGpsLegsMissingAt && Date.now() - visitGpsLegsMissingAt < GPS_LEGS_MISSING_RECHECK_MS) return false;
+  try {
+    visitGpsLegsTableKnown = !!(await db.schema.hasTable('visit_gps_legs'));
+  } catch {
+    visitGpsLegsTableKnown = false;
+  }
+  visitGpsLegsMissingAt = visitGpsLegsTableKnown ? 0 : Date.now();
+  return visitGpsLegsTableKnown;
+}
+
+// The drive to a visit: its matched GPS leg when there is one, else the
+// measured per-stop defaults. A matched leg with no miles (a trip without a
+// mileage log) takes the default miles; no minutes takes the default minutes.
+async function loadDriveLeg(db, scheduledServiceId) {
+  const fallback = {
+    minutes: DEFAULT_DRIVE_MINUTES_PER_STOP, miles: DEFAULT_DRIVE_MILES_PER_STOP, source: 'default',
+  };
+  try {
+    if (!(await visitGpsLegsTableExists(db))) return fallback;
+    const leg = await db('visit_gps_legs')
+      .where({ scheduled_service_id: scheduledServiceId, status: 'matched' })
+      .first('drive_minutes', 'drive_miles');
+    if (!leg) return fallback;
+    const minutes = leg.drive_minutes == null ? NaN : Number(leg.drive_minutes);
+    const miles = leg.drive_miles == null ? NaN : Number(leg.drive_miles);
+    return {
+      minutes: Number.isFinite(minutes) && minutes >= 0 ? minutes : DEFAULT_DRIVE_MINUTES_PER_STOP,
+      miles: Number.isFinite(miles) && miles >= 0 ? miles : DEFAULT_DRIVE_MILES_PER_STOP,
+      source: 'gps_leg',
+    };
+  } catch {
+    return fallback;
   }
 }
 
@@ -620,7 +690,14 @@ async function calculateJobCost(scheduledServiceId, db, {
   const estimatedLaborMinutes = svc.status === 'completed'
     ? Number(svc.estimated_duration_minutes) || null
     : null;
-  const { laborCost, laborHours, laborEstimated } = await calcLaborCost(
+  // GATE_TECH_COST_RATES: null unless the gate is on AND the visit's technician
+  // has a cost card in effect on the visit date. Null = today's path below.
+  const costRates = techCostRatesOn() && svc.technician_id
+    ? await require('./tech-cost-rates').loadVisitRates(db, svc.technician_id, visitDateString(svc.scheduled_date))
+    : null;
+  const {
+    laborCost: baseLaborCost, laborHours, laborEstimated, laborMinutes,
+  } = await calcLaborCost(
     db, scheduledServiceId, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
     { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes, estimatedLaborMinutes },
   );
@@ -634,9 +711,38 @@ async function calculateJobCost(scheduledServiceId, db, {
   // Unmarked records outside a new packet retain the legacy one-cost-per-visit
   // behavior; same-stop retained reports receive the packet marker at save.
   const driveAllocation = recordNotes.visitDriveCostAllocation;
-  const driveCost = driveAllocation?.version === 1
-    ? (svc.id === driveAllocation.ownerServiceId ? driveCostPerStop : 0)
-    : driveCostPerStop;
+  const ownsDriveCost = driveAllocation?.version === 1
+    ? svc.id === driveAllocation.ownerServiceId
+    : true;
+  let laborCost = baseLaborCost;
+  let driveCost = ownsDriveCost ? driveCostPerStop : 0;
+  let costRatesApplied = null;
+  if (costRates) {
+    // The drive to the stop (minutes, miles) is charged once per physical stop,
+    // by the same owner rule as drive_cost_per_stop above, and only for a
+    // completed visit: a pending one has driven nowhere. Each visit's own
+    // on-site minutes (its allocated share in a combined closeout) carry the
+    // technician's labor and the vehicle's fixed cost, so a stop's members add
+    // up to the stop's real minutes with nothing counted twice.
+    const driven = ownsDriveCost && svc.status === 'completed'
+      ? await loadDriveLeg(db, scheduledServiceId)
+      : { minutes: 0, miles: 0, source: 'none' };
+    const chargedMinutes = laborMinutes + driven.minutes;
+    const vehicle = costRates.vehicle;
+    laborCost = (costRates.laborPerWorkedHourCents / 100) * (chargedMinutes / 60);
+    driveCost = vehicle
+      ? (vehicle.perMileTenThousandths / 10000) * driven.miles
+        + (vehicle.fixedPerWorkedHourCents / 100) * (chargedMinutes / 60)
+      : 0;
+    costRatesApplied = {
+      technicianCardId: costRates.cardId,
+      vehicleCardId: vehicle ? vehicle.cardId : null,
+      onJobMinutes: laborMinutes,
+      driveMinutes: driven.minutes,
+      driveMiles: driven.miles,
+      driveSource: driven.source,
+    };
+  }
   const recordDriveStamp = serviceRecordDriveAllocationStamp({
     record: resolvedRecord,
     ambiguous,
@@ -757,7 +863,8 @@ async function calculateJobCost(scheduledServiceId, db, {
   logger.info(
     `[job-costing] ${scheduledServiceId} — revenue $${fin.revenue} cost $${fin.total_job_cost} `
     + `profit $${fin.gross_profit} (${fin.gross_margin_pct ?? '—'}%)`
-    + `${laborEstimated ? ' — labor from the scheduled estimate' : ''}`,
+    + `${laborEstimated ? ' — labor from the scheduled estimate' : ''}`
+    + `${costRatesApplied ? ' — costed from the technician cost card' : ''}`,
   );
 
   // Bridge the customer's realized revenue/profit/LTV onto their ad-attribution
@@ -776,7 +883,12 @@ async function calculateJobCost(scheduledServiceId, db, {
     }
   }
 
-  return { ...row, laborHours: fin.labor_hours, serviceRecordId: wroteThrough ? record.id : null };
+  return {
+    ...row,
+    laborHours: fin.labor_hours,
+    serviceRecordId: wroteThrough ? record.id : null,
+    ...(costRatesApplied ? { costRates: costRatesApplied } : {}),
+  };
 }
 
 /**
@@ -855,4 +967,7 @@ module.exports = {
   backfillServiceRecordFinancials,
   deriveRevenue,
   computeServiceRecordFinancials,
+  DEFAULT_DRIVE_MINUTES_PER_STOP,
+  DEFAULT_DRIVE_MILES_PER_STOP,
+  _resetVisitGpsLegsCache: () => { visitGpsLegsTableKnown = false; visitGpsLegsMissingAt = 0; },
 };
