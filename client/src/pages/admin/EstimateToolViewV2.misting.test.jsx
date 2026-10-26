@@ -19,7 +19,8 @@ vi.mock("../../components/admin/EstimateSendDialog", () => ({ useEstimateSend: (
 vi.mock("../../components/admin/MistingLayoutDesigner", () => ({
   default: ({ address, lat, lng, limits, onUseCounts, onClose }) => (
     <div role="dialog" aria-label="Layout designer stub" data-address={address} data-lat={String(lat)} data-lng={String(lng)} data-max={String(limits?.maxNozzles)}>
-      <button type="button" onClick={() => { onUseCounts(17); onClose(); }}>Stub use 17</button>
+      <button type="button" onClick={() => { onUseCounts(17, { risers: 0 }); onClose(); }}>Stub use 17</button>
+      <button type="button" onClick={() => { onUseCounts(17, { risers: 5 }); onClose(); }}>Stub use 17 and 5 risers</button>
       <button type="button" onClick={onClose}>Stub close</button>
     </div>
   ),
@@ -450,6 +451,19 @@ describe("layout designer button (GATE_MISTING_LAYOUT_DESIGNER)", () => {
     expect(screen.getByLabelText("Risers")).toHaveValue(3);
     const body = await generate();
     expect(body.options.mosquitoMisting).toMatchObject({ nozzles: "17", risers: "3" });
+  });
+
+  it("Use counts also fills the Risers input when the designer placed risers", async () => {
+    mistingRead = withDesigner();
+    renderNew();
+    fireEvent.click(await toggle());
+    typeInto("Risers", "3");
+    fireEvent.click(screen.getByRole("button", { name: "Design on map" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stub use 17 and 5 risers" }));
+    expect(screen.getByLabelText("Nozzles")).toHaveValue(17);
+    expect(screen.getByLabelText("Risers")).toHaveValue(5);
+    const body = await generate();
+    expect(body.options.mosquitoMisting).toMatchObject({ nozzles: "17", risers: "5" });
   });
 
   it("leaves the Nozzles input alone when the designer is closed without counts", async () => {

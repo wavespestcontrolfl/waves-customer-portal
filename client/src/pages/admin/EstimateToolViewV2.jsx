@@ -7010,7 +7010,11 @@ export default function EstimateToolViewV2({
                       lat={(pickedPlaceRef.current?.address === form.address ? pickedPlaceRef.current : satelliteData)?.lat}
                       lng={(pickedPlaceRef.current?.address === form.address ? pickedPlaceRef.current : satelliteData)?.lng}
                       limits={mistingAvailability.limits}
-                      onUseCounts={(count) => set("mistingNozzles", String(count))}
+                      onUseCounts={(count, extra) => {
+                        set("mistingNozzles", String(count));
+                        // Risers only when the designer placed some, so a typed count is not wiped by a layout with none.
+                        if (Number(extra?.risers) > 0) set("mistingRisers", String(extra.risers));
+                      }}
                       onClose={() => setMistingDesignerOpen(false)}
                     />
                   )}

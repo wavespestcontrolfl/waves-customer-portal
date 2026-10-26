@@ -4,11 +4,15 @@
 // loader and px-to-feet math). Staff draw eave lines and fence lines; nozzles are
 // placed live (a corner at every vertex, then about every 10 ft) by
 // lib/mistingLayoutGeometry. Staff can delete a nozzle (Edit nozzles: tap it), move it (drag)
-// and add one (Add nozzle: tap a line). "Use counts" hands the nozzle total back to the
-// estimator's Nozzles input. Nothing is saved and there is no export in this step.
+// and add one (Add nozzle: tap a line). Step 2 adds three tools that do not use the lines: Riser
+// (tap adds, tap on a riser deletes, drag moves), Pump (one point) and No-mist zone (a circle the
+// mist must avoid; nozzles and risers inside one are flagged). "Use counts" hands the nozzle total
+// back to the estimator's Nozzles input, and the riser total to its Risers input when there are
+// risers. Nothing is saved and there is no export in this step.
 //
 // The pieces live in ./misting-designer: useMistingMapImage (photo), useMistingLayoutState (lines,
-// edits, notice), useMistingLayoutPointer (taps and drags per tool) and MistingLayoutParts (display).
+// edits, notice), useMistingLayoutExtras (risers, pump, zones, flags), useMistingLayoutPointer (taps
+// and drags per tool) and MistingLayoutParts / MistingLayoutGraphics (display).
 import { Button, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle } from '../ui';
 import useMistingMapImage from './misting-designer/useMistingMapImage';
 import useMistingLayoutState, { editCount } from './misting-designer/useMistingLayoutState';
@@ -17,9 +21,11 @@ import {
   CONCEPT_LABEL,
   CountsPanel,
   EditsClearedNotice,
+  ExtrasClearedNotice,
   MapCanvas,
   Toolbar,
   limitNote,
+  riserLimitNote,
   toolHint,
 } from './misting-designer/MistingLayoutParts';
 
@@ -47,7 +53,8 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
 
   const useCounts = () => {
     if (totals.count <= 0) return;
-    onUseCounts?.(totals.count);
+    // Second argument: the riser count, which the estimator writes only when it is above zero.
+    onUseCounts?.(totals.count, { risers: layout.risers.length });
     onClose?.();
   };
 
@@ -78,7 +85,14 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
             )}
             <MapCanvas frameRef={frameRef} handlers={handlers} layout={layout} mapUrl={mapState.url} address={address} />
             {notice && <EditsClearedNotice notice={notice} onRestore={layout.restoreSnapshot} onDismiss={layout.dismissNotice} />}
-            <CountsPanel totals={totals} note={limitNote(totals.count, limits)} />
+            {layout.clearedExtras && (
+              <ExtrasClearedNotice
+                notice={layout.clearedExtras}
+                onRestore={layout.restoreExtras}
+                onDismiss={layout.dismissClearedExtras}
+              />
+            )}
+            <CountsPanel layout={layout} note={limitNote(totals.count, limits)} riserNote={riserLimitNote(layout.risers.length, limits)} />
           </>
         )}
       </DialogBody>
