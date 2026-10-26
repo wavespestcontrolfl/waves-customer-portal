@@ -11,6 +11,7 @@ import {
 import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
+import { mistingLayoutCountsLine } from '../lib/mistingLayoutCounts';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { FieldDocument, FieldMasthead, FieldTitle } from '../components/FieldDocument';
 import { ACCEPT_MODE_LABELS, NextSteps, acceptanceModeOf, mailtoHref, resolveDocNextSteps } from './estimateDocumentNextSteps';
@@ -237,8 +238,12 @@ export default function EstimateProposalDocument({ data, token }) {
   // if it fails it drops itself and reports through the counter the
   // renderer reads.
   const [satelliteFailed, setSatelliteFailed] = useState(false);
+  // Saved misting layout sketch (GATE_MISTING_LAYOUT_DESIGNER, /data `mistingLayout`): a second remote image,
+  // counted the same way. Absent key = no section and the count stays exactly the satellite's.
+  const [mistingFailed, setMistingFailed] = useState(false);
+  const mistingLayout = data?.mistingLayout?.imageUrl ? data.mistingLayout : null;
   if (typeof window !== 'undefined') {
-    window.__WAVES_PDF_IMAGE_FAILURES = satelliteFailed ? 1 : 0;
+    window.__WAVES_PDF_IMAGE_FAILURES = (satelliteFailed ? 1 : 0) + (mistingLayout && mistingFailed ? 1 : 0);
   }
 
   // Distinct service stacks across the proposal lines. Commercial estimates
@@ -759,6 +764,23 @@ export default function EstimateProposalDocument({ data, token }) {
                 onError={() => setSatelliteFailed(true)}
               />
             ) : null}
+          </div>
+        ) : null}
+
+        {/* GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn concept sketch of the misting system (server /data `mistingLayout`,
+            document render only; absent with the gate off or no saved layout). A sketch that fails to load drops the whole
+            section and counts as a failed image. */}
+        {mistingLayout && !mistingFailed ? (
+          <div className="doc-keep" data-testid="doc-misting-layout">
+            <SectionHeader>Proposed misting layout</SectionHeader>
+            <img
+              src={mistingLayout.imageUrl}
+              alt={`Proposed misting layout for ${mistingLayout.address || estimate.address || 'the property'}`}
+              style={{ marginTop: 6, width: '100%', maxHeight: 640, objectFit: 'contain', borderRadius: 10, border: `1px solid ${LINE}` }}
+              onError={() => setMistingFailed(true)}
+            />
+            <p style={{ margin: '4px 0 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{mistingLayoutCountsLine(mistingLayout.counts)}</p>
+            <p style={{ margin: '2px 0 0', fontSize: 11, lineHeight: 1.5, color: MUTED }}>Concept layout — final placement at the design visit and install.</p>
           </div>
         ) : null}
 

@@ -161,6 +161,7 @@ const {
   lawnLimitsHash, lawnLimitsAttestationStale,
 } = require('../services/estimate-lawn-limits');
 const { beforeYouBookBlock } = require('../services/estimate-before-you-book');
+const { mistingLayoutDocBlock } = require('../services/misting-layouts');
 
 function lawnCalendarBlock(services) {
   if (!featureGates.isEnabled('estimateLawnCalendar')) return {};
@@ -31186,6 +31187,10 @@ async function composeEstimateDataPayload(estimate, {
       // render (EstimateProposalDocument) prints it. The key is absent on an accepted, declined or
       // expired estimate. Copy only: no prices.
       ...beforeYouBookBlock(estimate, { open: terminalState === null }),
+      // "Proposed misting layout" (GATE_MISTING_LAYOUT_DESIGNER): the saved concept sketch and its counts, for the
+      // document render only. The key is absent with the gates off, with no saved layout, for an estimate with no
+      // misting system, and on every normal page load, so those responses stay byte-identical.
+      ...(isPdfRenderPass ? await mistingLayoutDocBlock(estimate) : {}),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.

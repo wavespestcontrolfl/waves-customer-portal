@@ -223,6 +223,19 @@ describe('the document input hash covers the lawn limits block', () => {
     expect(emailPdf.documentInputProjection({}).lawnLimits).toBeNull();
   });
 
+  test('the projection carries the misting layout revision but never its expiring signed link', () => {
+    const block = (revision, imageUrl) => ({
+      imageUrl, revision, address: '1 Sample St', counts: { nozzles: 12, eave: 8, fence: 4, risers: 1, linearFt: 120, zones: 0, pump: true },
+    });
+    const a = emailPdf.documentInputProjection({ mistingLayout: block('aaaaaaaaaaaaaaaa', 'https://signed/1') });
+    expect(a.mistingLayout).toEqual({ revision: 'aaaaaaaaaaaaaaaa', address: '1 Sample St', counts: block().counts });
+    // A fresh signed link for the same saved layout projects the same.
+    expect(emailPdf.documentInputProjection({ mistingLayout: block('aaaaaaaaaaaaaaaa', 'https://signed/2') })).toEqual(a);
+    // A new save (new revision) does not.
+    expect(emailPdf.documentInputProjection({ mistingLayout: block('bbbbbbbbbbbbbbbb', 'https://signed/1') })).not.toEqual(a);
+    expect(emailPdf.documentInputProjection({}).mistingLayout).toBeNull();
+  });
+
   test('a flag edit changes the hash, so a prepared attachment no longer matches', async () => {
     process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
     dbRows = world({ other_grasses: null });
