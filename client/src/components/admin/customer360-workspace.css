@@ -152,12 +152,12 @@
 .c360-details-content { margin-bottom: 28px; }
 .c360-contracts-content { margin-top: 28px; }
 .c360-directory-page { color: #18181b; }
-.customer-directory-table th:nth-child(1) { width: 20%; }
-.customer-directory-table th:nth-child(2) { width: 24%; }
-.customer-directory-table th:nth-child(3) { width: 20%; }
-.customer-directory-table th:nth-child(4) { width: 13%; }
-.customer-directory-table th:nth-child(5) { width: 17%; }
-.customer-directory-table th:last-child { width: 48px; }
+.customer-directory-table th[data-column="customer"] { width: 20%; }
+.customer-directory-table th[data-column="property"] { width: 24%; }
+.customer-directory-table th[data-column="tier"] { width: 20%; }
+.customer-directory-table th[data-column="nextService"] { width: 13%; }
+.customer-directory-table th[data-column="attention"] { width: 17%; }
+.customer-directory-table th[data-column="actions"] { width: 48px; }
 .customer-directory-identity > span { display: block; margin-top: 5px; color: #71717a; }
 .c360-directory-page .customer-directory-table button.customer-directory-name { display: block; padding: 0; border: 0; background: transparent; text-align: left; color: #18181b; font-size: 16px; font-weight: 500; min-height: 24px; line-height: 1.6; }
 .customer-directory-name:hover, .customer-directory-property a:hover { text-decoration: underline; text-underline-offset: 3px; }
