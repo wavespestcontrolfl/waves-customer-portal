@@ -1428,6 +1428,21 @@ booking tools never opt in and are unaffected. Default 0 is byte-identical
 to before this lane. A slotId minted before this v3 bump fails verification
 once (the same accepted trade the v1→v2 canonical-string bump already made)
 — the client's existing "pick another time" 409 recovery re-signs fresh.
+**Estimate picker, one opening per hour (`GATE_ESTIMATE_SLOT_ONE_PER_HOUR`,
+owner 2026-10-25; ships dark).** `GET /api/public/estimates/:token/available-slots`
+and `/find-slots` (and the 409 refresh on `/reserve`) list ONE slot for each
+date and start time instead of one per technician. Of the slots sharing a
+start the list keeps a route-optimal one first, then one with a nearby job,
+then the first in its normal order (the same preference `/book` uses). The
+kept slot is a complete slot with its own `techId`, `techFirstName`, signed
+`slotId` and hold fields; nothing is merged from the dropped slot, and
+`/reserve` still holds that slot's technician. The collapse runs before the
+day funnel, the display cut and `metadata.firstDayAvailability`, so the
+"Only N openings" count follows the collapsed list. Auth, token rules, rate
+limits, the hours offered, signed offers and every commit check are
+unchanged; only which slots the lists hold can differ. With the gate off
+(the default, exactly `true` turns it on, read at call time) the payload is
+byte-identical to today's.
 **Customer rain rank (`GATE_CUSTOMER_RAIN_RANK`, owner 2026-10-08; ships
 dark).** Every caller of `buildBookingAvailability` except the active
 re-service rank profile — `/api/booking/availability`, `/find-slots`, the
