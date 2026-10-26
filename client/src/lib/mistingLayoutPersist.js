@@ -58,6 +58,10 @@ export function buildLayoutPayload({ address, center, zoom, lines, nozzles, rise
   };
 }
 
+// A moved nozzle keeps the line it was placed on, and the line decides which way it aims, so a saved nozzle that
+// names a different line than an automatic one is not that nozzle moved: it is another one (removed + added).
+const sameLine = (auto, saved) => !Number.isInteger(saved.lineIndex) || saved.lineIndex === auto.lineIndex;
+
 /**
  * Express `saved` nozzles as an edit overlay on the automatic placement `auto`.
  * Pass 1 keeps every saved nozzle that sits on an automatic one (same kind, same spot). Pass 2 pairs
@@ -89,7 +93,7 @@ export function diffNozzleEdits(auto, saved, lines, nextKey) {
 
   const pairs = [];
   freeAuto.forEach((ai) => freeSaved.forEach((si) => {
-    if (auto[ai].kind === saved[si].kind) pairs.push({ ai, si, d: distance(auto[ai], saved[si]) });
+    if (auto[ai].kind === saved[si].kind && sameLine(auto[ai], saved[si])) pairs.push({ ai, si, d: distance(auto[ai], saved[si]) });
   }));
   pairs.sort((a, b) => a.d - b.d || a.ai - b.ai || a.si - b.si);
   const moved = {};

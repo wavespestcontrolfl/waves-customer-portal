@@ -138,6 +138,31 @@ describe('manual aim', () => {
   });
 });
 
+describe('diffNozzleEdits and the line a nozzle belongs to', () => {
+  it('does not turn a nozzle added on another line into a move of the nearest automatic one', () => {
+    const auto = [
+      { key: 'a', x: 0, y: 0, kind: 'eave', lineIndex: 0 },
+      { key: 'b', x: 100, y: 0, kind: 'eave', lineIndex: 0 },
+    ];
+    const edits = diffNozzleEdits(auto, [
+      { x: 0, y: 0, kind: 'eave', lineIndex: 0 },
+      { x: 105, y: 5, kind: 'eave', lineIndex: 1 }, // b was deleted, this one was added on the other line, close by
+    ], [{ id: 'L1', points: [{ x: 0, y: 0 }, { x: 100, y: 0 }] }, { id: 'L2', points: [{ x: 105, y: -50 }, { x: 105, y: 50 }] }], () => 'm1');
+    expect(edits.moved).toEqual({});
+    expect(edits.removed).toEqual(['b']);
+    expect(edits.added).toHaveLength(1);
+    expect(edits.added[0]).toMatchObject({ x: 105, y: 5, lineIndex: 1, manual: true });
+  });
+
+  it('still pairs a moved nozzle with its own line\'s, and a saved nozzle that names no line with the nearest', () => {
+    const auto = [{ key: 'a', x: 0, y: 0, kind: 'eave', lineIndex: 0 }, { key: 'b', x: 100, y: 0, kind: 'eave', lineIndex: 1 }];
+    expect(diffNozzleEdits(auto, [{ x: 0, y: 0, kind: 'eave', lineIndex: 0 }, { x: 110, y: 4, kind: 'eave', lineIndex: 1 }], [], () => 'm').moved)
+      .toEqual({ b: { x: 110, y: 4 } });
+    expect(diffNozzleEdits(auto, [{ x: 0, y: 0, kind: 'eave' }, { x: 110, y: 4, kind: 'eave' }], [], () => 'm').moved)
+      .toEqual({ b: { x: 110, y: 4 } });
+  });
+});
+
 describe('diffNozzleEdits', () => {
   const auto = [
     { key: 'a', x: 0, y: 0, kind: 'eave' },

@@ -1,11 +1,14 @@
 // Zoom −/+ for the misting layout designer: load the photo at the new zoom, then swap it in and scale the layout in
 // the same tick, so nothing is ever drawn at the wrong scale (lib/mistingLayoutZoom). Out as far as MIN_TRACE_ZOOM, in
 // as far as the closest photo there is; a zoom in is refused while a point would leave the photo, with the reason shown.
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { MIN_TRACE_ZOOM } from '../../tech/treatmentZoneSpray';
 
 export default function useMistingZoom(mapState, layout) {
   const [failure, setFailure] = useState('');
+  // The layout as of now, for the check after the photo has loaded (an Undo or a restore may have run meanwhile).
+  const latest = useRef(layout);
+  latest.current = layout;
   const ready = mapState.status === 'ready';
   const level = ready ? mapState.zoom : 0;
   const atClosest = ready && level >= mapState.maxZoom;
@@ -24,6 +27,8 @@ export default function useMistingZoom(mapState, layout) {
     setFailure('');
     try {
       const photo = await mapState.loadZoom(target);
+      // Taps are locked while the photo loads, but Undo and the restore buttons are not: look again before scaling.
+      if (delta > 0 && !latest.current.zoomInFits) return; // the note below the buttons says why
       mapState.applyZoom(target, photo);
       layout.rescale(delta);
     } catch {

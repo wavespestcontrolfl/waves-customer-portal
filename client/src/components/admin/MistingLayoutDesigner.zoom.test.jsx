@@ -211,6 +211,30 @@ describe('refusing a zoom in that would push a point off the photo', () => {
     expect(zoomIn()).toBeEnabled();
   });
 
+  it('looks again after the photo has loaded: an Undo during the load that puts a far point back cancels the zoom in', async () => {
+    const frame = await open();
+    await stepped(zoomOut(), 20);
+    fireEvent.click(screen.getByRole('button', { name: 'Pump' }));
+    tap(frame, 600, 240); // far right: a zoom in would push it off the photo
+    expect(zoomIn()).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear risers, zones and pump' })); // now it fits
+    expect(zoomIn()).toBeEnabled();
+
+    let release;
+    loadBestMapImage.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ image: {}, url: 'https://maps.example/z21.png', zoom: 21 }); }));
+    fireEvent.click(zoomIn());
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    // While the photo loads, the restore button puts the pump back where it was.
+    fireEvent.click(screen.getByRole('button', { name: 'Undo and restore the cleared risers, zones and pump' }));
+    release();
+    await waitFor(() => expect(zoomOut()).toBeEnabled()); // the busy state ended
+    expect(level()).toBe('Zoom 20'); // not applied
+    expect(photo()).toBe('https://maps.example/z20.png');
+    expect(screen.getByTestId('layout-pump')).toBeInTheDocument(); // and the pump is not off the photo
+    expect(zoomIn()).toBeDisabled();
+    expect(screen.getByTestId('layout-zoom-note')).toHaveTextContent('Zoom in is off: a point would leave the photo.');
+  });
+
   it('a zoom out is never refused', async () => {
     const frame = await open();
     tap(frame, 5, 5);
