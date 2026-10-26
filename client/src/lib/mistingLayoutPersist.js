@@ -9,6 +9,7 @@ import { adminFetch } from '../utils/admin-fetch';
 import { normalizeAim } from './mistingLayoutAim';
 import { nozzleLines, placeBedRisers } from './mistingLayoutBeds';
 import { nearestPointOnLines, placeNozzles } from './mistingLayoutGeometry';
+import { pumpChecksOf } from './mistingLayoutExtras';
 import { numberNozzles } from './mistingLayoutSketch';
 
 const MATCH_TOLERANCE_PX = 0.25;
@@ -63,7 +64,8 @@ export function buildLayoutPayload({ address, center, zoom, lines, nozzles, rise
     nozzles: exported.nozzles.map(({ x, y, kind, lineIndex, aim }) => ({ x, y, kind, lineIndex, ...(aim === undefined ? {} : { aim }) })),
     // A bed riser also names its bed line, so reopening gives it back to that line (it decides which way the riser aims).
     risers: exported.risers.map(({ x, y, source, lineIndex }) => ({ x, y, source, ...(source === 'bed' && lineIndex !== null ? { lineIndex } : {}) })),
-    pump: pump ? { x: pump.x, y: pump.y } : null,
+    // The pump spot checklist (Pynamite manual) rides inside the pump object: all four keys, true or false.
+    pump: pump ? { x: pump.x, y: pump.y, checks: pumpChecksOf(pump) } : null,
     zones: (zones || []).map(({ kind, x, y, radiusFt }) => ({ kind, x, y, radiusFt })),
   };
 }
@@ -179,7 +181,8 @@ export function restoreLayout(saved) {
     idCounter: counter,
     extras: {
       risers: manualRisers.map((r) => ({ key: key('R'), x: r.x, y: r.y })),
-      pump: saved.pump ? { x: saved.pump.x, y: saved.pump.y } : null,
+      // An older saved pump has no checks: it reopens with the boxes unticked.
+      pump: saved.pump ? { x: saved.pump.x, y: saved.pump.y, checks: pumpChecksOf(saved.pump) } : null,
       zones: (saved.zones || []).map((z) => ({ key: key('Z'), kind: z.kind, x: z.x, y: z.y, radiusFt: z.radiusFt })),
       idCounter: extras,
     },

@@ -1235,7 +1235,7 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
       const { container } = render(<EstimateProposalDocument data={{ ...BASE_DATA, mistingLayout: layout }} token="tok-123" />);
       const legend = container.querySelector('[data-testid="doc-misting-legend"]');
       expect(legend.textContent).toContain('Pump (cabinet)');
-      expect(legend.textContent).toContain('Bed line (risers about every 8 ft)');
+      expect(legend.textContent).toContain('Bed line (risers about every 10 ft)');
       expect(legend.innerHTML).not.toContain('#1d4ed8');
       expect(legend.innerHTML.toLowerCase()).toContain('rgb(216, 197, 155)'); // the cabinet's tan
     });

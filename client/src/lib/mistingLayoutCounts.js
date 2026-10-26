@@ -8,7 +8,7 @@ export const MISTING_LEGEND_KEYS = Object.freeze([
   { key: 'arrow', label: 'Arrow = spray direction' },
   { key: 'riser', label: 'Riser' },
   { key: 'pump', label: 'Pump (cabinet)' },
-  { key: 'bed', label: 'Bed line (risers about every 8 ft)' },
+  { key: 'bed', label: 'Bed line (risers about every 10 ft)' },
   { key: 'zone', label: 'No-mist zone' },
 ]);
 

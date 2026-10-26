@@ -32,7 +32,7 @@ const payload = (over = {}) => ({
   lines: [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 200 }, { x: 700, y: 200 }] }],
   nozzles: [{ x: 100, y: 200, kind: 'eave', lineIndex: 0 }, { x: 400, y: 200, kind: 'fence', lineIndex: 0 }],
   risers: [{ x: 50, y: 60 }],
-  pump: { x: 70, y: 80 },
+  pump: { x: 70, y: 80, checks: { outlet: true, level: true, dry: true, stucco: true } },
   zones: [{ kind: 'ac', x: 300, y: 300, radiusFt: 8 }],
   ...over,
 });
@@ -66,15 +66,15 @@ postgres('misting layout service (PostgreSQL)', () => {
     const first = await saveLayout({ estimateId, payload: payload(), pngBuffer: PNG, actorId: null, knex: app });
     expect(first.counts).toMatchObject({ nozzles: 2, eave: 1, fence: 1, risers: 1 });
     expect(first.nozzles).toHaveLength(2);
-    expect(first.pump).toEqual({ x: 70, y: 80 });
+    expect(first.pump).toEqual({ x: 70, y: 80, checks: { outlet: true, level: true, dry: true, stucco: true } });
     expect(first.zones).toEqual([{ kind: 'ac', x: 300, y: 300, radiusFt: 8 }]);
     expect(first.snapshotUrl).toBe('https://signed.example/x.png');
 
     const second = await saveLayout({
-      estimateId, payload: payload({ nozzles: [{ x: 10, y: 10, kind: 'eave', lineIndex: 0 }], pump: { x: 20, y: 30 }, zones: [] }), pngBuffer: PNG, actorId: actor, knex: app,
+      estimateId, payload: payload({ nozzles: [{ x: 10, y: 10, kind: 'eave', lineIndex: 0 }], pump: { x: 20, y: 30, checks: { outlet: true, level: true, dry: true, stucco: true } }, zones: [] }), pngBuffer: PNG, actorId: actor, knex: app,
     });
     expect(second.counts.nozzles).toBe(1);
-    expect(second.pump).toEqual({ x: 20, y: 30 });
+    expect(second.pump).toEqual({ x: 20, y: 30, checks: { outlet: true, level: true, dry: true, stucco: true } });
     // The pump is required: a layout without one is refused before anything is written.
     await expect(saveLayout({ estimateId, payload: payload({ pump: null }), pngBuffer: PNG, actorId: actor, knex: app })).rejects.toThrow(/pump/);
     const rows = await app('misting_layouts').where({ estimate_id: estimateId });

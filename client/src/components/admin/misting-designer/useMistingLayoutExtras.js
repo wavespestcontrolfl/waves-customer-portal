@@ -24,6 +24,7 @@ import {
   hitZoneIndex,
   moveRiser,
   setPump,
+  setPumpCheck,
 } from '../../../lib/mistingLayoutExtras';
 import { scaleExtras } from '../../../lib/mistingLayoutZoom';
 
@@ -75,6 +76,9 @@ export default function useMistingLayoutExtras(mapState, nozzles, bedRisers, ini
   const moveRiserTo = (riser, p) => update((prev) => moveRiser(prev, riser.key, point(p)));
   const deleteRiserOf = (riser) => update((prev) => deleteRiser(prev, riser.key));
   const placePump = (p) => update((prev) => setPump(prev, point(p)));
+  // Ticking a box is an edit like any other (it drops an old restore point). Moving or clearing the pump clears the ticks;
+  // Undo of "Clear risers, zones and pump" restores the whole pump object, ticks included.
+  const checkPump = (key, value) => update((prev) => setPumpCheck(prev, key, value));
 
   // Zone tool: inside an existing zone deletes it, anywhere else adds one of the picked kind.
   const tapZone = (p) => {
@@ -120,6 +124,7 @@ export default function useMistingLayoutExtras(mapState, nozzles, bedRisers, ini
     moveRiserTo,
     deleteRiserOf,
     placePump,
+    checkPump,
     tapZone,
     clearExtras,
     restoreExtras,

@@ -113,7 +113,7 @@ const getData = (baseUrl, query = '') => fetch(`${baseUrl}/estimates/mistinglayo
 const LAYOUT_ROW = {
   estimate_id: 'est-misting-layout', snapshot_s3_key: 'service-photos/misting-layouts/est-misting-layout/1-aa-layout.png',
   address: '123 Trust Ln, Bradenton, FL 34203', nozzle_count: 14, eave_count: 10, fence_count: 4, riser_count: 2, linear_ft: 131.5,
-  zones: [{ kind: 'pool', x: 600, y: 480, radiusFt: 6.5, label: 'staff note' }], pump: { x: 1, y: 2 },
+  zones: [{ kind: 'pool', x: 600, y: 480, radiusFt: 6.5, label: 'staff note' }], pump: { x: 1, y: 2, checks: { outlet: true, level: true, dry: true, stucco: true } },
   center_lat: 27.4989, center_lng: -82.5748, zoom: 20, map_width: 1280, map_height: 960,
   lines: [
     { id: 'staff-line-7', kind: 'eave', points: [{ x: 100, y: 100 }, { x: 300, y: 100 }, { x: 300, y: 250 }] },
@@ -192,6 +192,18 @@ describe('GET /:token/data — misting layout section (GATE_MISTING_LAYOUT_DESIG
       expect(text).not.toContain('staff-');
       expect(text).not.toContain('staff note');
       expect(text).not.toMatch(/price|amount|snapshot_s3_key|createdBy|created_by/i);
+    });
+  });
+
+  test('the pump spot checklist stays staff-only: the public pump is {x, y} and "checks" never appears', async () => {
+    gatesOn();
+    dbRows = rows();
+    await withServer(async (baseUrl) => {
+      const body = await getData(baseUrl);
+      expect(body.mistingLayout.geometry.pump).toEqual({ x: 1, y: 2 });
+      expect(JSON.stringify(body.mistingLayout)).not.toMatch(/checks|outlet|stucco/);
+      const pdf = await getData(baseUrl, '?mode=pdf');
+      expect(JSON.stringify(pdf.mistingLayout)).not.toMatch(/checks|outlet|stucco/);
     });
   });
 

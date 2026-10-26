@@ -7,7 +7,7 @@ describe('pump capacity (Pynamite: Cube Pro 60 nozzles, 120 with the Zone Kit)',
   it('has the published numbers', () => {
     expect(PUMP_NOZZLE_LIMIT).toBe(60);
     expect(ZONE_KIT_NOZZLE_LIMIT).toBe(120);
-    expect(RISER_SPACING_FT).toBe(8);
+    expect(RISER_SPACING_FT).toBe(10);
   });
 
   it('counts a riser as a nozzle: the load is nozzles plus risers', () => {
