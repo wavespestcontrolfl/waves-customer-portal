@@ -37,10 +37,14 @@ describe("CustomersPageV2 new-customer route", () => {
     vi.unstubAllGlobals();
   });
 
-  it("opens the mobile form with call details and closes back to Customers", async () => {
+  it.each([
+    ["default controls", "", "/admin/customers"],
+    ["explicit controls", "&tableControls=1", "/admin/customers?tableControls=1"],
+    ["fallback controls", "&tableControls=0", "/admin/customers?tableControls=0"],
+  ])("opens the mobile form with call details and returns with %s", async (_label, controlsQuery, expectedPath) => {
     render(
       <MemoryRouter initialEntries={[
-        "/admin/customers/new?phone=%2B19415550123&city=Lakewood+Ranch&state=FL&tableControls=1",
+        `/admin/customers/new?phone=%2B19415550123&city=Lakewood+Ranch&state=FL${controlsQuery}`,
       ]}>
         <Routes>
           <Route path="/admin/customers/new" element={<CustomersPageV2 />} />
@@ -55,7 +59,7 @@ describe("CustomersPageV2 new-customer route", () => {
     expect(screen.getByPlaceholderText("State")).toHaveValue("FL");
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(screen.getByTestId("location")).toHaveTextContent("/admin/customers?tableControls=1");
+    expect(screen.getByTestId("location").textContent).toBe(expectedPath);
   });
 
   it("keeps the explicit overlay fallback selection and close state in the URL", async () => {

@@ -328,7 +328,7 @@ describe('CustomersPageV2 workflow state', () => {
     const score = await screen.findByRole('img', { name: 'Health score: 90/100' });
     expect(score.parentElement).toContainElement(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
     expect(screen.queryByRole('button', { name: 'Health', exact: true })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
     await waitFor(() => expect(requests.at(-1).get('page')).toBe('2'));
     fireEvent.change(screen.getByPlaceholderText('Search customers...'), { target: { value: 'Avery' } });
     fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
@@ -349,7 +349,7 @@ describe('CustomersPageV2 workflow state', () => {
     expect(requests.at(-1).has('retention')).toBe(false);
   });
 
-  it('keeps table controls dark by default and uses the legacy 500-row request', async () => {
+  it('restores legacy controls and the 500-row request with tableControls=0', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {
       const parsed = new URL(String(url), 'http://fixture.invalid');
@@ -357,7 +357,7 @@ describe('CustomersPageV2 workflow state', () => {
       return response(list);
     }));
 
-    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={['/admin/customers?tableControls=0']}><CustomersPageV2 /></MemoryRouter>);
     await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
 
     expect(requests.at(-1).get('limit')).toBe('500');
@@ -368,7 +368,7 @@ describe('CustomersPageV2 workflow state', () => {
     expect(screen.queryByRole('navigation', { name: 'Customers pagination' })).not.toBeInTheDocument();
   });
 
-  it('pages and sorts server requests in the table-controls preview', async () => {
+  it('pages and sorts server requests with shared controls by default', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {
       const parsed = new URL(String(url), 'http://fixture.invalid');
@@ -380,7 +380,7 @@ describe('CustomersPageV2 workflow state', () => {
       return response({});
     }));
 
-    render(<MemoryRouter initialEntries={['/admin/customers?tableControls=1']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
     await screen.findByRole('searchbox', { name: 'Customers search' });
     await waitFor(() => expect(Object.fromEntries(requests.at(-1))).toMatchObject({
       page: '1', limit: '100', sort: 'name', order: 'asc',

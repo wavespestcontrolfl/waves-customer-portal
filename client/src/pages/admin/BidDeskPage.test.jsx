@@ -52,9 +52,9 @@ it("lists open bids with the date, an Unconfirmed chip and the line it was read 
   expect(screen.getByText("Earlier")).toBeInTheDocument();
 });
 
-it("filters decided bids and hides earlier mail", async () => {
+it("keeps legacy status and earlier-mail filters with tableControls=0", async () => {
   route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }) });
-  renderPage();
+  renderPage("/?tableControls=0");
   await screen.findByText("Sample Ridge Residences");
   fireEvent.click(screen.getByRole("button", { name: "Hide earlier mail" }));
   expect(screen.queryByText("Earlier Mall")).toBeNull();
@@ -63,9 +63,9 @@ it("filters decided bids and hides earlier mail", async () => {
   expect(screen.queryByText("Sample Ridge Residences")).toBeNull();
 });
 
-it("dark-ships the shared controls and preserves the preview while opening a bid", async () => {
+it("enables shared controls by default and preserves them while opening a bid", async () => {
   route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }) });
-  const legacy = renderPage();
+  const legacy = renderPage("/?tableControls=0");
   await screen.findByText("Sample Ridge Residences");
   expect(screen.queryByRole("searchbox", { name: "Bid Desk search" })).toBeNull();
   expect(screen.queryByLabelText("Bid Desk rows per page")).toBeNull();
@@ -75,7 +75,7 @@ it("dark-ships the shared controls and preserves the preview while opening a bid
     "GET /admin/bid-desk/": () => reply({ bids: LIST }),
     "GET /admin/bid-desk/b1": () => reply({ bid: bid(), emails: [] }),
   });
-  renderPage("/?tableControls=1");
+  renderPage();
   expect(await screen.findByRole("searchbox", { name: "Bid Desk search" })).toBeInTheDocument();
   expect(screen.getByLabelText("Status")).toHaveValue("open");
   expect(screen.getByLabelText("Earlier mail")).toHaveValue("show");

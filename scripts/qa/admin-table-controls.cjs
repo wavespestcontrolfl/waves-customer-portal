@@ -101,7 +101,7 @@ async function columns(page, report, label, optional, selector) {
 }
 
 async function exerciseCustomers(page, server, report) {
-  await page.goto(`${server.baseUrl}/admin/customers?tableControls=1`);
+  await page.goto(`${server.baseUrl}/admin/customers`);
   const customerSearch = page.getByRole("searchbox", { name: "Customers search" });
   await customerSearch.waitFor();
   await page.getByRole("button", { name: "Open Customer Example 001 customer profile", exact: true }).waitFor();
@@ -130,10 +130,15 @@ async function exerciseCustomers(page, server, report) {
   await customerSort.selectOption({ label: "Name Z–A" });
   await page.getByRole("button", { name: "Open Customer Example 055 customer profile", exact: true }).waitFor();
   assert.equal(report.customerQueries.at(-1).order, "desc");
+  await page.goto(`${server.baseUrl}/admin/customers?tableControls=0`);
+  await page.getByRole("searchbox", { name: "Search customers", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Open Customer Example 001 customer profile", exact: true }).waitFor();
+  assert.equal(await customerSearch.count(), 0, "Customer fallback hides shared controls");
+  assert.equal(report.customerQueries.at(-1).limit, "500", "Customer fallback retains its request size");
 }
 
 async function exerciseBids(page, server, report) {
-  await page.goto(`${server.baseUrl}/admin/bids?tableControls=1`);
+  await page.goto(`${server.baseUrl}/admin/bids`);
   const bidSearch = page.getByRole("searchbox", { name: "Bid Desk search" });
   await bidSearch.waitFor();
   await page.getByRole("button", { name: "Open Example project 001", exact: true }).waitFor();
@@ -165,9 +170,9 @@ async function exerciseBids(page, server, report) {
       assert.ok(sizes.table >= 1099 && sizes.project >= 279, "Desktop columns retain their readable widths");
     }
   }
-  await page.goto(`${server.baseUrl}/admin/bids`);
+  await page.goto(`${server.baseUrl}/admin/bids?tableControls=0`);
   await page.getByRole("group", { name: "Filter", exact: true }).waitFor();
-  assert.equal(await page.getByRole("searchbox", { name: "Bid Desk search" }).count(), 0, "Preview remains opt-in");
+  assert.equal(await page.getByRole("searchbox", { name: "Bid Desk search" }).count(), 0, "Bid fallback hides shared controls");
 }
 
 (async () => {

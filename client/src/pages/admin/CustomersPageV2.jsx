@@ -11,8 +11,8 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 // Recorded health and retention segments compose with Directory filters.
 //
 // Daily driver: Virginia (CSR) + the owner. ~700 active customers + ~70
-// new leads. Legacy loads 500 per page; the ?tableControls=1 workspace
-// Directory preview starts at 100 with selectable page sizes. Search + stage + tier + city
+// new leads. The workspace Directory starts at 100 with selectable page sizes;
+// ?tableControls=0 restores the legacy 500-row controls. Search + stage + tier + city
 // filters compose into the query string. Mobile uses a stage-picker UX
 // instead of the desktop Kanban.
 //
@@ -22,7 +22,7 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 // - Filter composability: search + stage + tier + city all hit the
 //   same endpoint. Confirm changing one filter clears stale rows
 //   instead of mixing old + new pages.
-// - Pagination at scale: preview limit=100 with ~700 customers = 7 pages.
+// - Pagination at scale: default limit=100 with ~700 customers = 7 pages.
 //   Verify the page state resets when filters change (otherwise
 //   a filter that returns 50 results but page=4 will show empty).
 // - Customer360 panel open/close: clicking a row opens the V2
@@ -1112,18 +1112,18 @@ const CUSTOMER_TABLE_COLUMNS = [
 ];
 const ALL_CUSTOMER_TABLE_COLUMNS = CUSTOMER_TABLE_COLUMNS.map((column) => column.id);
 
-function customerDirectoryPageSize(tableControlsActive, previewPageSize) {
-  return tableControlsActive ? previewPageSize : 500;
+function customerDirectoryPageSize(tableControlsActive, selectedPageSize) {
+  return tableControlsActive ? selectedPageSize : 500;
 }
 
 function customerTableControlsActive(tableControlsRequested, workspaceMode, view) {
   return tableControlsRequested && workspaceMode && view === "directory";
 }
 
-function customerDirectoryPath(customerId, tableControlsRequested) {
+function customerDirectoryPath(customerId, tableControlsParam) {
   const params = new URLSearchParams();
   if (customerId) params.set("customerId", customerId);
-  if (tableControlsRequested) params.set("tableControls", "1");
+  if (tableControlsParam !== null) params.set("tableControls", tableControlsParam);
   const query = params.toString();
   return `/admin/customers${query ? `?${query}` : ""}`;
 }
@@ -1948,7 +1948,7 @@ export default function CustomersPageV2() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
-  const tableControlsRequested = searchParams.get("tableControls") === "1";
+  const tableControlsRequested = searchParams.get("tableControls") !== "0";
   // Default is Directory on both mobile and desktop (list-first).
   // Explicit ?view=… URLs win — deep-links still work.
   const rawView = searchParams.get("view");
@@ -2009,8 +2009,8 @@ export default function CustomersPageV2() {
   const PagePresentation = CUSTOMER_PAGE_PRESENTATIONS[workspaceMode];
   usePublishIntelligenceBarPageData({ customer_id: selected360Id });
   const [page, setPage] = useState(1);
-  const [previewPageSize, setPreviewPageSize] = useState(100);
-  const pageSize = customerDirectoryPageSize(tableControlsEnabled, previewPageSize);
+  const [selectedPageSize, setSelectedPageSize] = useState(100);
+  const pageSize = customerDirectoryPageSize(tableControlsEnabled, selectedPageSize);
   const [visibleColumns, setVisibleColumns] = useState(ALL_CUSTOMER_TABLE_COLUMNS);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [approximateCount, setApproximateCount] = useState(0);
@@ -2119,7 +2119,7 @@ export default function CustomersPageV2() {
       // bare directory). Cancelling without creating still goes to the
       // directory.
       navigate(
-        customerDirectoryPath(createdId, tableControlsRequested),
+        customerDirectoryPath(createdId, searchParams.get("tableControls")),
         { replace: true },
       );
     }
@@ -2294,7 +2294,7 @@ export default function CustomersPageV2() {
     params.set("order", sortDir);
     params.set("page", String(pg));
     // Legacy, Map and overlay mode keep the single-scroll limit=500 contract.
-    // The workspace Directory preview uses the selected size (server max: 500).
+    // The workspace Directory uses the selected size (server max: 500).
     params.set("limit", String(pageSize));
     // Ask for "Did you mean" rows: this page marks them (server gate decides).
     params.set("suggest", "1");
@@ -2654,7 +2654,7 @@ export default function CustomersPageV2() {
         setPage={setPage}
         pageSize={pageSize}
         setPageSize={(nextPageSize) => {
-          setPreviewPageSize(nextPageSize);
+          setSelectedPageSize(nextPageSize);
           setPage(1);
         }}
         tableControlsEnabled={tableControlsEnabled}

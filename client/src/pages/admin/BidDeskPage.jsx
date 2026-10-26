@@ -477,7 +477,7 @@ export default function BidDeskPage({ embedded = false }) {
   const [visibleColumns, setVisibleColumns] = useState(ALL_BID_COLUMNS);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const enhancedControls = params.get("tableControls") === "1";
+  const enhancedControls = params.get("tableControls") !== "0";
   const selectedId = params.get("bid") || "";
 
   const load = useCallback(async () => {
