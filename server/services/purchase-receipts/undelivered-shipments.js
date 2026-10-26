@@ -136,11 +136,12 @@ const DELIVERED_LINE_STATUSES = [
 
 const normalizeTitle = (title) => String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-// One item identity for both sides: the same product when both name one,
-// else the same normalized title.
+// One item identity for both sides: the same normalized listing title. Never
+// the product alone: the matcher maps a single bottle and a multipack to one
+// catalog product, and a line's quantity counts ordered items, not units.
 function sameItem(a, b) {
-  if (a.productId && b.productId) return a.productId === b.productId;
-  return normalizeTitle(a.title) === normalizeTitle(b.title);
+  const title = normalizeTitle(a.title);
+  return Boolean(title) && title === normalizeTitle(b.title);
 }
 
 // True when the order has exactly one authenticated Shipped email and it
@@ -158,7 +159,7 @@ async function soleShippedShipment(conn, orderNumber, shipmentId) {
 
 /**
  * How much of each shipped item the order's Delivered lines under OTHER
- * shipment ids have not covered. wanted: [{ productId, title, quantity }];
+ * shipment ids have not covered. wanted: [{ title, quantity }];
  * returns the missing quantity per index, 0 when covered.
  *
  * Evidence is used only for an order with exactly one authenticated Shipped
@@ -174,7 +175,7 @@ async function deliveredElsewhere(conn, { orderNumber, shipmentId, wanted }) {
   const lines = await conn('purchase_receipt_lines')
     .where({ vendor: VENDOR, order_number: orderNumber }).whereNot('shipment_key', shipmentId)
     .whereIn('status', DELIVERED_LINE_STATUSES)
-    .select('email_id', 'product_id', 'raw_title', 'quantity');
+    .select('email_id', 'raw_title', 'quantity');
   if (!lines.length) return missing;
   if (!(await soleShippedShipment(conn, orderNumber, shipmentId))) return missing;
   const emails = await conn('emails')
@@ -183,7 +184,7 @@ async function deliveredElsewhere(conn, { orderNumber, shipmentId, wanted }) {
     .whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM]).whereRaw('subject ILIKE ?', ['Delivered:%']);
   const proven = new Set(emails.filter((email) => authenticated(email)).map((email) => String(email.id)));
   const budget = lines.filter((line) => proven.has(String(line.email_id)))
-    .map((line) => ({ productId: line.product_id, title: line.raw_title, left: Number(line.quantity) || 0 }));
+    .map((line) => ({ title: line.raw_title, left: Number(line.quantity) || 0 }));
   return wanted.map((item, index) => {
     for (const line of budget.filter((entry) => entry.left > 0 && sameItem(entry, item))) {
       const take = Math.min(line.left, missing[index]);
@@ -213,7 +214,7 @@ async function evaluateShipment(conn, parsed) {
   const missing = stocked.length
     ? await deliveredElsewhere(conn, {
       orderNumber: parsed.orderNumber, shipmentId: parsed.shipmentId,
-      wanted: stocked.map(({ item, product }) => ({ productId: product.id, title: item.title, quantity: item.quantity })),
+      wanted: stocked.map(({ item }) => ({ title: item.title, quantity: item.quantity })),
     })
     : [];
   return { stocked, missing };

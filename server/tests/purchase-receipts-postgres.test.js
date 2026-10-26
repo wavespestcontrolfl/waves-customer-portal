@@ -355,6 +355,16 @@ jest.setTimeout(30000);
         expect((await alertBells('shipped-key'))[0].done_at).not.toBeNull();
       });
 
+      test('a delivered single bottle does not cover a shipped multipack of the same product', async () => {
+        await delivered(1);
+        await shipped('shipped-key', {
+          body_text: `Order #\n${ORDER}\nTrack package: ${LINK}shipped-key\n\n* ${TITLE}, 2 Pack\n  Quantity: 1\n`,
+        });
+        expect(await alerted()).toEqual(['shipped-key']);
+        expect(await mockConn('purchase_receipt_lines').where({ shipment_key: 'shipped-key', status: 'no_delivery_email', product_id: taurus.id })).toHaveLength(1);
+        expect(await closeDeliveredUndeliveredBells()).toBe(0);
+      });
+
       test('an unauthenticated Delivered email proves nothing', async () => {
         await delivered(2, { auth: 'dkim=pass header.i=@evil.example; spf=fail' });
         await shippedItems('shipped-key', 2);
