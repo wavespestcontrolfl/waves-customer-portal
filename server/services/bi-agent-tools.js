@@ -5,7 +5,7 @@
 
 const db = require('../models/db');
 const { excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
-const { computeMrrBreakdown } = require('./mrr-breakdown');
+const { computeMrrBreakdown, computeRecurringPlans } = require('./mrr-breakdown');
 const { tierBreakdown, pendingPrepayIds } = require('./mrr-snapshot');
 const logger = require('./logger');
 const { scopeToProspects } = require('./lead-statuses');
@@ -253,13 +253,14 @@ async function executeBITool(toolName, input) {
       // tier counts reconcile to recurringCustomers within a single tool
       // result (Codex #3669 r3+r4).
       const pendingIds = await pendingPrepayIds(db);
-      const [revMTD, revLastMonth, mrr, oneTime, overdue, tierRows] = await Promise.all([
+      const [revMTD, revLastMonth, mrr, oneTime, overdue, tierRows, recurringPlans] = await Promise.all([
         db('payments').where({ status: 'paid' }).where('payment_date', '>=', somDate).sum('amount as total').first(),
         db('payments').where({ status: 'paid' }).where('payment_date', '>=', lastMonthStart).where('payment_date', '<=', lastMonthEnd).sum('amount as total').first(),
         computeMrrBreakdown(db, todayDate, pendingIds),
         db('payments').where({ status: 'paid' }).where('payment_date', '>=', somDate).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
         excludeNeverAttemptedHoldDeferrals(db('payments').whereIn('status', ['failed', 'overdue']).whereNull('superseded_by_payment_id')).sum('amount as total').first(),
         tierBreakdown(db, pendingIds),
+        computeRecurringPlans(db),
       ]);
 
       const mrrVal = parseFloat(mrr?.total || 0);
@@ -276,6 +277,10 @@ async function executeBITool(toolName, input) {
         oneTimeRevenueMTD: parseFloat(oneTime?.total || 0),
         outstandingAR: parseFloat(overdue?.total || 0),
         byTier: tierRows.map(t => ({ tier: t.tier, count: t.count, monthly: t.mrr })),
+        // Every WaveGuard plan member whatever the billing type, at the plan's
+        // monthly average — the recurring base. mrr above is the monthly-dues
+        // lane only, so it leaves most plan members out.
+        recurringPlans,
       };
     }
 
