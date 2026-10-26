@@ -549,16 +549,16 @@ function SmsLogItemV2({ msg: m, onReply }) {
           {" "}
           <div className="flex items-center gap-2 flex-wrap mb-0.5">
             {" "}
-            <span className="font-mono text-12 text-ink-secondary u-nums">
+            <span className="font-mono text-ui-body text-ink-secondary u-nums">
               {m.from} → {m.to}
             </span>
             {m.customerName && (
-              <span className="text-11 text-zinc-900">({m.customerName})</span>
+              <span className="text-ui-body text-zinc-900">({m.customerName})</span>
             )}
           </div>{" "}
           <div
             className={cn(
-              "text-13 leading-normal break-words",
+              "text-ui-body leading-normal break-words",
               expanded
                 ? "whitespace-pre-wrap text-zinc-900"
                 : "text-ink-secondary",
@@ -583,7 +583,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
             <StatusBadgeV2 status={m.status} />{" "}
             <TypeBadgeV2 type={m.messageType} />{" "}
           </div>{" "}
-          <span className="font-mono text-11 text-ink-tertiary">
+          <span className="font-mono text-ui-body text-ink-tertiary">
             {timeAgo(m.createdAt)}
           </span>{" "}
         </div>{" "}
@@ -677,7 +677,7 @@ function ConversationViewV2({
                 {contactName}
               </div>
             )}
-            <div className="font-mono text-12 text-ink-secondary truncate">
+            <div className="font-mono text-ui-body text-ink-secondary truncate">
               {contactPhone}
             </div>{" "}
           </div>{" "}
@@ -742,7 +742,7 @@ function ConversationViewV2({
                 )}
               >
                 {" "}
-                <div className="text-13 leading-normal whitespace-pre-wrap break-words">
+                <div className="text-ui-body leading-normal whitespace-pre-wrap break-words">
                   {/* a whitespace-only body (stray newlines) rendered as a
                       giant empty bubble under whitespace-pre-wrap — blank it;
                       bodies with content render verbatim */}
@@ -761,7 +761,7 @@ function ConversationViewV2({
                   {" "}
                   <span
                     className={cn(
-                      "text-11",
+                      "text-ui-body",
                       isOut ? "text-white/70" : "text-ink-tertiary",
                     )}
                   >
@@ -770,7 +770,7 @@ function ConversationViewV2({
                   {m.messageType && (
                     <span
                       className={cn(
-                        "text-11 uppercase tracking-label",
+                        "text-ui-body uppercase tracking-label",
                         isOut ? "text-white/70" : "text-ink-tertiary",
                       )}
                     >
@@ -780,7 +780,7 @@ function ConversationViewV2({
                   {receipt && (
                     <span
                       className={cn(
-                        "text-11",
+                        "text-ui-body",
                         isOut
                           ? m.status === "failed" || m.status === "undelivered"
                             ? "text-red-200"

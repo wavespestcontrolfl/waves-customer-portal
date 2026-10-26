@@ -285,7 +285,7 @@ export default function PayersPage() {
                       )}
                       </span>
                     </TD>
-                    <TD className="text-right">
+                    <TD data-label="Actions" className="text-right">
                       <Button
                         size="sm"
                         variant="ghost"

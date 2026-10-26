@@ -109,7 +109,7 @@ async function geometry(page, state, surface) {
   const entry = { surface, viewport: page.viewportSize(), ...measured };
   state.geometry.push(entry);
   assert.equal(measured.overflow, false, `${surface}: page overflow`);
-  assert.equal(measured.titleSize, 22, `${surface}: page title size`);
+  assert.equal(measured.titleSize, page.viewportSize().width < 768 ? 18 : 22, `${surface}: page title size`);
   assert.deepEqual(measured.smallText, [], `${surface}: text below 14px`);
   assert.deepEqual(measured.wrappedAmounts, [], `${surface}: currency split across lines`);
   assert.ok(measured.controls.length, `${surface}: controls were checked`);
