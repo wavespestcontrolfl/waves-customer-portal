@@ -15,12 +15,13 @@ import { X } from "lucide-react";
 import AddressAutocomplete from "../AddressAutocomplete";
 import useModalFocus from "../../hooks/useModalFocus";
 import { PROPERTY_LABEL_OPTIONS } from "../../lib/customerFormOptions";
+import { Field } from "../ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function ringClass() {
   return (
-    "block box-border w-full bg-white text-zinc-900 border-hairline border-zinc-300 rounded-md px-4 " +
+    "block box-border w-full bg-white text-16 text-zinc-900 border-hairline border-zinc-300 rounded-md px-4 " +
     "focus:outline-none focus:border-zinc-900 focus:ring-1 focus:ring-zinc-900 u-focus-ring"
   );
 }
@@ -179,7 +180,7 @@ export default function MobileNewCustomerSheet({
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring text-zinc-900"
+          className="appearance-none border-0 flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring text-zinc-900"
           style={{ width: 44, height: 44 }}
         >
           {" "}
@@ -190,7 +191,7 @@ export default function MobileNewCustomerSheet({
           type="button"
           onClick={handleSave}
           disabled={!canSave || submitting}
-          className="rounded-full font-medium u-focus-ring"
+          className="appearance-none border-0 rounded-full font-medium u-focus-ring"
           style={{
             padding: "8px 18px",
             minHeight: 44,
@@ -226,55 +227,63 @@ export default function MobileNewCustomerSheet({
         </h1>
         {/* Name + phone + email */}
         <div className="flex flex-col gap-3">
-          {" "}
-          <input
-            className={ringClass()}
-            style={{ height: 56, fontSize: 15 }}
-            placeholder="First name"
-            value={form.firstName}
-            onChange={(e) => set("firstName", e.target.value)}
-            autoComplete="given-name"
-          />{" "}
-          <input
-            className={ringClass()}
-            style={{ height: 56, fontSize: 15 }}
-            placeholder="Last name"
-            value={form.lastName}
-            onChange={(e) => set("lastName", e.target.value)}
-            autoComplete="family-name"
-          />{" "}
-          <div
-            className={ringClass() + " flex items-center gap-2"}
-            style={{ height: 56, paddingLeft: 14, paddingRight: 14 }}
-          >
-            {" "}
-            <span className="text-zinc-500" style={{ fontSize: 15, lineHeight: 1 }}>
-              +1
-            </span>{" "}
-            <span className="text-zinc-400" style={{ fontSize: 15 }}>
-              ▾
-            </span>{" "}
+          <Field id="mobile-new-customer-first-name" label="First name">
             <input
-              type="tel"
-              inputMode="tel"
-              placeholder="Phone number"
-              className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 outline-none shadow-none"
-              style={{ fontSize: 15, border: 0, boxShadow: "none" }}
-              value={form.phone}
-              onChange={(e) => set("phone", e.target.value)}
-              autoComplete="tel"
-            />{" "}
-          </div>{" "}
-          <input
-            className={ringClass()}
-            style={{ height: 56, fontSize: 15 }}
-            type="email"
-            inputMode="email"
-            placeholder="Email address"
-            value={form.email}
-            onChange={(e) => set("email", e.target.value)}
-            autoComplete="email"
-          />{" "}
+              className={ringClass()}
+              style={{ height: 56 }}
+              placeholder="First name"
+              value={form.firstName}
+              onChange={(e) => set("firstName", e.target.value)}
+              autoComplete="given-name"
+            />
+          </Field>
+          <Field id="mobile-new-customer-last-name" label="Last name">
+            <input
+              className={ringClass()}
+              style={{ height: 56 }}
+              placeholder="Last name"
+              value={form.lastName}
+              onChange={(e) => set("lastName", e.target.value)}
+              autoComplete="family-name"
+            />
+          </Field>
+          <div className="ui-field">
+            <label className="ui-label" htmlFor="mobile-new-customer-phone">
+              Phone number
+            </label>
+            <div
+              className={ringClass() + " flex items-center gap-2"}
+              style={{ height: 56, paddingLeft: 14, paddingRight: 14 }}
+            >
+              <span className="text-16 text-zinc-500" style={{ lineHeight: 1 }}>
+                +1
+              </span>
+              <span className="text-16 text-zinc-400">▾</span>
+              <input
+                id="mobile-new-customer-phone"
+                type="tel"
+                inputMode="tel"
+                placeholder="Phone number"
+                className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-16 outline-none shadow-none"
+                style={{ border: 0, boxShadow: "none" }}
+                value={form.phone}
+                onChange={(e) => set("phone", e.target.value)}
+                autoComplete="tel"
+              />
+            </div>
+          </div>
+          <Field id="mobile-new-customer-email" label="Email address">
+            <input
+              className={ringClass()}
+              style={{ height: 56 }}
+              type="email"
+              inputMode="email"
+              placeholder="Email address"
+              value={form.email}
+              onChange={(e) => set("email", e.target.value)}
+              autoComplete="email"
+            />
+          </Field>
         </div>
         {/* Divider */}
         <div className="my-6 h-px bg-zinc-200" />
@@ -295,14 +304,13 @@ export default function MobileNewCustomerSheet({
             <div className="flex-1 min-w-0" style={{ lineHeight: 1.2 }}>
               {" "}
               <div
-                className="text-zinc-900 font-medium"
-                style={{ fontSize: 13 }}
+                className="ui-label text-zinc-900"
               >
                 Country
               </div>{" "}
               <div
-                className="text-zinc-900"
-                style={{ fontSize: 15, marginTop: 1 }}
+                className="text-16 text-zinc-900"
+                style={{ marginTop: 1 }}
               >
                 United States
               </div>{" "}
@@ -311,92 +319,112 @@ export default function MobileNewCustomerSheet({
               ▾
             </span>{" "}
           </div>{" "}
-          <AddressAutocomplete
-            className={ringClass()}
-            style={{ height: 56, fontSize: 15 }}
-            placeholder="Address line 1"
-            value={form.addressLine1}
-            onChange={(value) => set("addressLine1", value)}
-            onSelect={(parts) => {
-              // Autocomplete bypasses `set`, so clear the pending phone-match
-              // confirmation here too — it was shown for the old address.
-              setPhoneMatch(null);
-              setForm((p) => ({
-                ...p,
-                addressLine1: parts.line1 || parts.formatted || p.addressLine1,
-                addressLine2: parts.line2 || "",
-                city: parts.city || p.city,
-                state: parts.state || p.state || "FL",
-                zip: parts.zip || p.zip,
-              }));
-            }}
-          />{" "}
-          <input
-            className={ringClass()}
-            style={{ height: 56, fontSize: 15 }}
-            placeholder="Address line 2"
-            value={form.addressLine2}
-            onChange={(e) => set("addressLine2", e.target.value)}
-            autoComplete="address-line2"
-          />{" "}
-          <select
-            className={ringClass()}
-            style={{ height: 56, fontSize: 15 }}
-            value={form.profileLabel}
-            onChange={(e) => set("profileLabel", e.target.value)}
-          >
-            {PROPERTY_LABEL_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-          {form.profileLabel === "__custom__" && (
+          <Field id="mobile-new-customer-address-line-1" label="Address line 1">
+            <AddressAutocomplete
+              className={ringClass()}
+              style={{ height: 56 }}
+              placeholder="Address line 1"
+              value={form.addressLine1}
+              onChange={(value) => set("addressLine1", value)}
+              onSelect={(parts) => {
+                // Autocomplete bypasses `set`, so clear the pending phone-match
+                // confirmation here too — it was shown for the old address.
+                setPhoneMatch(null);
+                setForm((p) => ({
+                  ...p,
+                  addressLine1: parts.line1 || parts.formatted || p.addressLine1,
+                  addressLine2: parts.line2 || "",
+                  city: parts.city || p.city,
+                  state: parts.state || p.state || "FL",
+                  zip: parts.zip || p.zip,
+                }));
+              }}
+            />
+          </Field>
+          <Field id="mobile-new-customer-address-line-2" label="Address line 2">
             <input
               className={ringClass()}
-              style={{ height: 56, fontSize: 15 }}
-              placeholder="Rental - Cape Coral"
-              value={form.customProfileLabel}
-              onChange={(e) => set("customProfileLabel", e.target.value)}
+              style={{ height: 56 }}
+              placeholder="Address line 2"
+              value={form.addressLine2}
+              onChange={(e) => set("addressLine2", e.target.value)}
+              autoComplete="address-line2"
             />
+          </Field>
+          <Field id="mobile-new-customer-property-label" label="Property label">
+            <select
+              className={ringClass()}
+              style={{ height: 56 }}
+              value={form.profileLabel}
+              onChange={(e) => set("profileLabel", e.target.value)}
+            >
+              {PROPERTY_LABEL_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {form.profileLabel === "__custom__" && (
+            <Field
+              id="mobile-new-customer-custom-property-label"
+              label="Custom property label"
+            >
+              <input
+                className={ringClass()}
+                style={{ height: 56 }}
+                placeholder="Rental - Cape Coral"
+                value={form.customProfileLabel}
+                onChange={(e) => set("customProfileLabel", e.target.value)}
+              />
+            </Field>
           )}
-          <input
-            className={ringClass()}
-            style={{ height: 56, fontSize: 15 }}
-            placeholder="City"
-            value={form.city}
-            onChange={(e) => set("city", e.target.value)}
-            autoComplete="address-level2"
-          />
-          {/* State */}
-          <div
-            className={ringClass() + " flex items-center gap-2"}
-            style={{ height: 56, paddingLeft: 14, paddingRight: 14 }}
-          >
-            {" "}
+          <Field id="mobile-new-customer-city" label="City">
             <input
-              className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 outline-none shadow-none"
-              style={{ fontSize: 15, border: 0, boxShadow: "none" }}
-              placeholder="State"
-              value={form.state}
-              onChange={(e) =>
-                set("state", e.target.value.toUpperCase().slice(0, 2))
-              }
-              autoComplete="address-level1"
-            />{" "}
-            <span className="text-zinc-400" style={{ fontSize: 18 }}>
-              ▾
-            </span>{" "}
-          </div>{" "}
-          <input
-            className={ringClass()}
-            style={{ height: 56, fontSize: 15 }}
-            inputMode="numeric"
-            placeholder="ZIP"
-            value={form.zip}
-            onChange={(e) => set("zip", e.target.value)}
-            autoComplete="postal-code"
-          />{" "}
+              className={ringClass()}
+              style={{ height: 56 }}
+              placeholder="City"
+              value={form.city}
+              onChange={(e) => set("city", e.target.value)}
+              autoComplete="address-level2"
+            />
+          </Field>
+          {/* State */}
+          <div className="ui-field">
+            <label className="ui-label" htmlFor="mobile-new-customer-state">
+              State
+            </label>
+            <div
+              className={ringClass() + " flex items-center gap-2"}
+              style={{ height: 56, paddingLeft: 14, paddingRight: 14 }}
+            >
+              <input
+                id="mobile-new-customer-state"
+                className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-16 outline-none shadow-none"
+                style={{ border: 0, boxShadow: "none" }}
+                placeholder="State"
+                value={form.state}
+                onChange={(e) =>
+                  set("state", e.target.value.toUpperCase().slice(0, 2))
+                }
+                autoComplete="address-level1"
+              />
+              <span className="text-zinc-400" style={{ fontSize: 18 }}>
+                ▾
+              </span>
+            </div>
+          </div>
+          <Field id="mobile-new-customer-zip" label="ZIP">
+            <input
+              className={ringClass()}
+              style={{ height: 56 }}
+              inputMode="numeric"
+              placeholder="ZIP"
+              value={form.zip}
+              onChange={(e) => set("zip", e.target.value)}
+              autoComplete="postal-code"
+            />
+          </Field>
         </div>
         {phoneMatch && (
           <div
@@ -429,7 +457,7 @@ export default function MobileNewCustomerSheet({
                       },
                 )
               }
-              className="w-full rounded-full bg-zinc-900 text-white font-semibold u-focus-ring"
+              className="appearance-none border-0 w-full rounded-full bg-zinc-900 text-white font-semibold u-focus-ring"
               style={{ minHeight: 44, fontSize: 15 }}
             >
               {phoneMatch.code === "DUPLICATE_PROFILE"
@@ -440,7 +468,7 @@ export default function MobileNewCustomerSheet({
               type="button"
               disabled={submitting}
               onClick={() => save({ forceNewAccount: true, ignorePhoneMatch: true })}
-              className="w-full rounded-full bg-zinc-100 text-zinc-900 font-semibold u-focus-ring"
+              className="appearance-none border-0 w-full rounded-full bg-zinc-100 text-zinc-900 font-semibold u-focus-ring"
               style={{ minHeight: 44, fontSize: 15 }}
             >
               Create separate account
@@ -448,7 +476,7 @@ export default function MobileNewCustomerSheet({
             <button
               type="button"
               onClick={() => setPhoneMatch(null)}
-              className="w-full rounded-full bg-white text-zinc-900 border-hairline border-zinc-300 u-focus-ring"
+              className="appearance-none border-solid w-full rounded-full bg-white text-zinc-900 border-hairline border-zinc-300 u-focus-ring"
               style={{ minHeight: 44, fontSize: 15 }}
             >
               Cancel
@@ -458,7 +486,7 @@ export default function MobileNewCustomerSheet({
         {error && (
           <div
             className="mt-5 rounded-md border-hairline border-alert-fg/30 bg-alert-bg p-3 text-alert-fg"
-            style={{ fontSize: 13 }}
+            style={{ fontSize: 14 }}
           >
             {error}
           </div>
@@ -476,7 +504,7 @@ export default function MobileNewCustomerSheet({
           type="button"
           onClick={handleSave}
           disabled={!canSave || submitting}
-          className="w-full rounded-full font-medium u-focus-ring"
+          className="appearance-none border-0 w-full rounded-full font-medium u-focus-ring"
           style={{
             minHeight: 50,
             fontSize: 16,
