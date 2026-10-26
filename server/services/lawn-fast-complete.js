@@ -156,7 +156,7 @@ async function loadBillingMode(svc, knex, readFailures) {
  * only `visitType` (to 'unknown'), never the verdict. `withVisitType: false`
  * skips that read (the submit preflight does not need the type).
  */
-async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses = [], withVisitType = true, allowGrouped } = {}) {
+async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses = [], withVisitType = true } = {}) {
   if (!isUuid(serviceId)) return { ok: false, reason: 'not_found' };
   // STRICT profile read: the non-strict resolver swallows a failed availability probe
   // into a synthesized profile that has lost projectBacked / requiresProject /
@@ -173,12 +173,7 @@ async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses 
     const visit = await knex('service_visits').where({ id: svc.visit_id }).first('status');
     visitGroupStatus = visit ? String(visit.status || '') : null;
   }
-  // GATE_COMBO_FAST_COMPLETE: `allowGrouped` ({ stop: true } for the sheet's reads, { packetContext } for the preflight
-  // inside the visit-closeout packet) only asks. A grouped member counts as ungrouped here when the server
-  // itself confirms a combined stop (services/combo-fast-complete.js groupedStopAllowed).
-  const groupedOk = !!(allowGrouped && svc.visit_id
-    && await require('./combo-fast-complete').groupedStopAllowed(knex, svc, allowGrouped));
-  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id && !groupedOk, visitGroupStatus, allowStatuses });
+  const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, allowStatuses });
   let visitType = null;
   if (profile && withVisitType) {
     const billingMode = reason === 'not_lawn' ? null : await loadBillingMode(svc, knex, readFailures);
@@ -960,8 +955,8 @@ async function fullFormOutcome(knex, svc, reason) {
   return mixOffered ? { reason: 'bermuda_removal', needsFullForm: BERMUDA_FULL_FORM_REASON } : null;
 }
 
-async function buildLawnFastContext(serviceId, { knex = db, technicianId = null, productIds, sodAware, allowGrouped } = {}) {
-  const base = await resolveLawnFastEligibility(serviceId, knex, { allowGrouped });
+async function buildLawnFastContext(serviceId, { knex = db, technicianId = null, productIds, sodAware } = {}) {
+  const base = await resolveLawnFastEligibility(serviceId, knex);
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, profile, reason, visitType, readFailures } = base;
   // The technician rides the identity so a reassignment since the sheet opened is
@@ -1119,10 +1114,10 @@ async function group11PassOver({ svc, knex }) {
  * not_found, not_eligible, not_confirmed, not_usable. A plan or limit read that fails throws (a 500:
  * the sheet then shows no cards and works as before).
  */
-async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, productIds = null, allowGrouped }) {
+async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, productIds = null }) {
   if (!featureGates.lawnTreatmentGuideLive()) return { ok: false, reason: 'disabled' };
   if (!isUuid(assessmentId)) return { ok: false, reason: 'invalid_assessment' };
-  const base = await resolveLawnFastEligibility(serviceId, knex, { allowGrouped });
+  const base = await resolveLawnFastEligibility(serviceId, knex);
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, reason, visitType, readFailures } = base;
   if (reason) return { ok: false, reason: 'not_eligible' };
@@ -1255,7 +1250,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.
  */
-async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes, packetContext, propertyServiceArea = null, actor = null } = {}) {
+async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes, propertyServiceArea = null, actor = null } = {}) {
   // The dark gate comes FIRST: any /complete carrying a lawnFast block is refused while
   // the gate is off, whatever its outcome.
   if (!featureGates.lawnFastCompleteLive()) {
@@ -1288,8 +1283,7 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
-  // A packet member (GATE_COMBO_FAST_COMPLETE): the grouped refusal lifts only inside the stop's own packet.
-  const verdict = await resolveLawnFastEligibility(svc.id, knex, { allowStatuses: ['completed'], allowGrouped: { packetContext } });
+  const verdict = await resolveLawnFastEligibility(svc.id, knex, { allowStatuses: ['completed'] });
   if (!verdict.ok) {
     return { status: 404, payload: { error: 'Service not found', code: 'lawn_fast_not_found' } };
   }

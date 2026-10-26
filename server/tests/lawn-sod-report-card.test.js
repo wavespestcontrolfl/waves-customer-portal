@@ -179,13 +179,6 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
     expect((await run(fakeTrx().trx, { appliedProducts: [] })).out.planRan).toBe(false);
   });
 
-  test('a combined-stop lawn leg: the packet authorization reaches the context rebuild', async () => {
-    buildLawnFastContext.mockResolvedValue(contextOf(newSod()));
-    const allowGrouped = { packetContext: { packetId: 'packet-1' } };
-    await run(fakeTrx().trx, { allowGrouped });
-    expect(buildLawnFastContext).toHaveBeenCalledWith('visit-1', expect.objectContaining({ sodAware: true, allowGrouped }));
-  });
-
   test('first writer wins: a block already on the record is never replaced (the guarded update matches nothing)', async () => {
     buildLawnFastContext.mockResolvedValue(contextOf(newSod()));
     const { trx } = fakeTrx({ updated: 0 });
