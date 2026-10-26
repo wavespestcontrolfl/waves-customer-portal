@@ -11,8 +11,6 @@ import {
   writeAdminTableViewCurrent,
 } from "../lib/adminTableViewStorage";
 
-export { normalizeTableColumns } from "../lib/adminTableViewStorage";
-
 const MAX_VIEWS = 20;
 const MAX_NAME_LENGTH = 64;
 
@@ -59,6 +57,10 @@ function createViewId(views) {
   return `view-${Date.now().toString(36)}-${views.length}`;
 }
 
+function withCatalog(runtime, views, error) {
+  return { ...runtime, record: { ...runtime.record, views }, error };
+}
+
 export function useAdminTableViews({ tableId, enabled, defaults, normalize, initialState }) {
   const user = useOutletContext()?.user;
   const scope = createAdminTableViewScope({ enabled, tableId, user });
@@ -95,58 +97,64 @@ export function useAdminTableViews({ tableId, enabled, defaults, normalize, init
     });
   }, [defaults, normalize, publish, scope.token]);
 
-  const saveView = useCallback((value) => {
-    const current = runtimeRef.current;
-    if (!current?.available || current.token !== scope.token) return false;
-    const loaded = readAdminTableViewCatalog(browserStorage(), current.storageKey, defaults, normalize);
-    if (loaded.error) {
-      publish({ ...current, error: ADMIN_TABLE_VIEW_STORAGE_ERROR });
+  const mutateCatalog = useCallback(async (captured, mutation) => {
+    try {
+      const locks = globalThis.navigator?.locks;
+      if (typeof locks?.request !== "function") throw new Error("Web Locks unavailable");
+      return await locks.request(
+        `waves-admin-table-views:${captured.storageKey}`,
+        { mode: "exclusive" },
+        () => {
+          const active = runtimeRef.current;
+          if (!active || active.token !== captured.token
+            || active.storageKey !== captured.storageKey) return false;
+          const loaded = readAdminTableViewCatalog(browserStorage(), captured.storageKey, defaults, normalize);
+          if (loaded.error) throw new Error(ADMIN_TABLE_VIEW_STORAGE_ERROR);
+          const result = mutation(loaded.views);
+          const error = result.error || (
+            writeAdminTableViewCatalog(browserStorage(), captured.storageKey, result.views)
+              ? null : ADMIN_TABLE_VIEW_STORAGE_ERROR
+          );
+          publish(withCatalog(active, error ? loaded.views : result.views, error));
+          return !error;
+        },
+      );
+    } catch {
+      const active = runtimeRef.current;
+      if (active?.token === captured.token) publish({ ...active, error: ADMIN_TABLE_VIEW_STORAGE_ERROR });
       return false;
     }
-    const name = typeof value === "string" ? value.trim() : "";
-    const reconciled = { ...current.record, views: loaded.views };
-    if (!name || name.length > MAX_NAME_LENGTH) {
-      publish({ ...current, record: reconciled, error: "Enter a view name between 1 and 64 characters." });
-      return false;
-    }
-    if (loaded.views.some((view) => view.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
-      publish({ ...current, record: reconciled, error: "A saved view with this name already exists." });
-      return false;
-    }
-    if (loaded.views.length >= MAX_VIEWS) {
-      publish({ ...current, record: reconciled, error: "You can save up to 20 views." });
-      return false;
-    }
-    const state = normalizeAdminTableViewState({ ...current.record.current, page: 1, scrollTop: 0 }, defaults, normalize);
-    const views = [...loaded.views, { id: createViewId(loaded.views), name, state }];
-    if (!writeAdminTableViewCatalog(browserStorage(), current.storageKey, views)) {
-      publish({ ...current, record: reconciled, error: ADMIN_TABLE_VIEW_STORAGE_ERROR });
-      return false;
-    }
-    publish({ ...current, record: { ...current.record, views }, error: null });
-    return true;
-  }, [defaults, normalize, publish, scope.token]);
+  }, [defaults, normalize, publish]);
 
-  const removeView = useCallback((id) => {
+  const saveView = useCallback(async (value) => {
     const current = runtimeRef.current;
     if (!current?.available || current.token !== scope.token) return false;
-    const loaded = readAdminTableViewCatalog(browserStorage(), current.storageKey, defaults, normalize);
-    if (loaded.error) {
-      publish({ ...current, error: ADMIN_TABLE_VIEW_STORAGE_ERROR });
-      return false;
-    }
-    const views = loaded.views.filter((view) => view.id !== id);
-    if (views.length === loaded.views.length) {
-      publish({ ...current, record: { ...current.record, views: loaded.views }, error: "That saved view is no longer available." });
-      return false;
-    }
-    if (!writeAdminTableViewCatalog(browserStorage(), current.storageKey, views)) {
-      publish({ ...current, record: { ...current.record, views: loaded.views }, error: ADMIN_TABLE_VIEW_STORAGE_ERROR });
-      return false;
-    }
-    publish({ ...current, record: { ...current.record, views }, error: null });
-    return true;
-  }, [defaults, normalize, publish, scope.token]);
+    const name = typeof value === "string" ? value.trim() : "";
+    const state = normalizeAdminTableViewState(
+      { ...current.record.current, page: 1, scrollTop: 0 }, defaults, normalize,
+    );
+    return mutateCatalog(current, (views) => {
+      if (!name || name.length > MAX_NAME_LENGTH) {
+        return { error: "Enter a view name between 1 and 64 characters." };
+      }
+      if (views.some((view) => view.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+        return { error: "A saved view with this name already exists." };
+      }
+      if (views.length >= MAX_VIEWS) return { error: "You can save up to 20 views." };
+      return { views: [...views, { id: createViewId(views), name, state }] };
+    });
+  }, [defaults, mutateCatalog, normalize, scope.token]);
+
+  const removeView = useCallback(async (id) => {
+    const current = runtimeRef.current;
+    if (!current?.available || current.token !== scope.token) return false;
+    return mutateCatalog(current, (views) => {
+      const nextViews = views.filter((view) => view.id !== id);
+      return nextViews.length === views.length
+        ? { error: "That saved view is no longer available." }
+        : { views: nextViews };
+    });
+  }, [mutateCatalog, scope.token]);
 
   const applyView = useCallback((id) => {
     const current = runtimeRef.current;

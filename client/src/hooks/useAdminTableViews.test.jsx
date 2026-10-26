@@ -3,7 +3,8 @@ import React from "react";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import useAdminTableViews, { normalizeTableColumns } from "./useAdminTableViews";
+import useAdminTableViews from "./useAdminTableViews";
+import { normalizeTableColumns } from "../lib/adminTableViewStorage";
 
 const COLUMNS = [
   { id: "name", required: true },
@@ -64,9 +65,41 @@ function mountHook(options = hookOptions()) {
   );
 }
 
+function queuedLocks() {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const tails = new Map();
+  const request = vi.fn((name, options, callback) => {
+    const result = (tails.get(name) || gate).catch(() => {})
+      .then(() => callback({ name, mode: options.mode }));
+    tails.set(name, result);
+    return result;
+  });
+  return { locks: { request }, release };
+}
+
+async function mutate(action) {
+  let result;
+  await act(async () => { result = await action(); });
+  return result;
+}
+
+async function releaseQueued(coordinator, operations) {
+  let outcomes;
+  await act(async () => { coordinator.release(); outcomes = await Promise.all(operations); });
+  return outcomes;
+}
+
+function blockedStorage() {
+  throw new DOMException("Access denied", "SecurityError");
+}
+
 beforeEach(() => {
   shellUser = { id: "staff-1", role: "admin" };
   localStorage.clear();
+  vi.stubGlobal("navigator", { locks: {
+    request: vi.fn((name, options, callback) => Promise.resolve().then(() => callback({ name, mode: options.mode }))),
+  } });
 });
 
 afterEach(() => {
@@ -129,7 +162,7 @@ describe("useAdminTableViews", () => {
     expect(view.result.current.state.query).toBe("");
   });
 
-  it("does no storage work without the gate and verified identity, while state still works", () => {
+  it("does no storage work without the gate and verified identity, while state still works", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ id: "untrusted", role: "admin" }));
     const getItem = vi.spyOn(Storage.prototype, "getItem");
     const setItem = vi.spyOn(Storage.prototype, "setItem");
@@ -137,7 +170,7 @@ describe("useAdminTableViews", () => {
     expect(disabled.result.current).toMatchObject({ available: false, storageKey: null, views: [] });
     act(() => disabled.result.current.setState({ ...DEFAULTS, query: "memory-only", page: 3 }));
     expect(disabled.result.current.state).toMatchObject({ query: "memory-only", page: 3 });
-    expect(disabled.result.current.saveView("Hidden")).toBe(false);
+    expect(await mutate(() => disabled.result.current.saveView("Hidden"))).toBe(false);
     expect(getItem).not.toHaveBeenCalled();
     expect(setItem).not.toHaveBeenCalled();
 
@@ -151,12 +184,10 @@ describe("useAdminTableViews", () => {
     expect(setItem).not.toHaveBeenCalled();
   });
 
-  it("snapshots a position-neutral view without moving, then resets position when applying it", () => {
+  it("snapshots a position-neutral view without moving, then resets position when applying it", async () => {
     const view = mountHook();
     act(() => view.result.current.setState({ ...DEFAULTS, query: "north", status: "closed", page: 9, scrollTop: 640 }));
-    let saved;
-    act(() => { saved = view.result.current.saveView(" North queue "); });
-    expect(saved).toBe(true);
+    expect(await mutate(() => view.result.current.saveView(" North queue "))).toBe(true);
     expect(view.result.current.state).toMatchObject({ query: "north", status: "closed", page: 9, scrollTop: 640 });
     expect(view.result.current.views[0]).toMatchObject({ name: "North queue", state: { query: "north", status: "closed", page: 1, scrollTop: 0 } });
     expect(JSON.parse(localStorage.getItem(view.result.current.storageKey)).current).toMatchObject({ page: 9, scrollTop: 640 });
@@ -169,22 +200,22 @@ describe("useAdminTableViews", () => {
     expect(JSON.parse(localStorage.getItem(view.result.current.storageKey)).current).toEqual(applied);
   });
 
-  it("rejects duplicate names and the 21st view, then durably deletes a view", () => {
+  it("rejects duplicate names and the 21st view, then durably deletes a view", async () => {
     const view = mountHook();
-    act(() => { expect(view.result.current.saveView("Queue 1")).toBe(true); });
-    act(() => { expect(view.result.current.saveView(" queue 1 ")).toBe(false); });
+    expect(await mutate(() => view.result.current.saveView("Queue 1"))).toBe(true);
+    expect(await mutate(() => view.result.current.saveView(" queue 1 "))).toBe(false);
     expect(view.result.current.error).toMatch(/already exists/i);
     act(() => view.result.current.clearError());
 
     for (let index = 2; index <= 20; index += 1) {
-      act(() => { expect(view.result.current.saveView(`Queue ${index}`)).toBe(true); });
+      expect(await mutate(() => view.result.current.saveView(`Queue ${index}`))).toBe(true);
     }
-    act(() => { expect(view.result.current.saveView("Queue 21")).toBe(false); });
+    expect(await mutate(() => view.result.current.saveView("Queue 21"))).toBe(false);
     expect(view.result.current.views).toHaveLength(20);
     expect(view.result.current.error).toMatch(/up to 20/i);
 
     const removedId = view.result.current.views[4].id;
-    act(() => { expect(view.result.current.removeView(removedId)).toBe(true); });
+    expect(await mutate(() => view.result.current.removeView(removedId))).toBe(true);
     expect(view.result.current.views.some(({ id }) => id === removedId)).toBe(false);
     const key = view.result.current.storageKey;
     view.unmount();
@@ -194,43 +225,24 @@ describe("useAdminTableViews", () => {
     expect(reloaded.result.current.views.some(({ id }) => id === removedId)).toBe(false);
   });
 
-  it("keeps controls in memory and never confirms a save when localStorage throws", () => {
-    const storage = {
-      getItem: vi.fn(() => { throw new Error("blocked"); }),
-      setItem: vi.fn(() => { throw new Error("blocked"); }),
-      removeItem: vi.fn(),
-      clear: vi.fn(),
-    };
-    vi.stubGlobal("localStorage", storage);
+  it.each([
+    ["methods", () => vi.stubGlobal("localStorage", { getItem: blockedStorage, setItem: blockedStorage })],
+    ["property getter", () => vi.spyOn(globalThis, "localStorage", "get").mockImplementation(blockedStorage)],
+  ])("keeps controls usable and refuses saves when localStorage %s throw", async (_label, blockStorage) => {
+    blockStorage();
     const view = mountHook();
     expect(view.result.current.error).toBe("Changes could not be saved in this browser.");
     act(() => view.result.current.setState({ ...DEFAULTS, query: "still-works", page: 4, scrollTop: 80 }));
     expect(view.result.current.state).toMatchObject({ query: "still-works", page: 4, scrollTop: 80 });
-    let saved;
-    act(() => { saved = view.result.current.saveView("Not durable"); });
-    expect(saved).toBe(false);
+    expect(await mutate(() => view.result.current.saveView("Not durable"))).toBe(false);
     expect(view.result.current.views).toEqual([]);
     expect(view.result.current.error).toMatch(/could not be saved in this browser/i);
   });
 
-  it("survives a SecurityError from the localStorage property getter", () => {
-    vi.spyOn(globalThis, "localStorage", "get").mockImplementation(() => {
-      throw new DOMException("Access denied", "SecurityError");
-    });
-    const view = mountHook();
-    expect(view.result.current.error).toBe("Changes could not be saved in this browser.");
-    act(() => view.result.current.setState({ ...DEFAULTS, query: "memory-only", page: 5, scrollTop: 60 }));
-    expect(view.result.current.state).toMatchObject({ query: "memory-only", page: 5, scrollTop: 60 });
-    let saved;
-    act(() => { saved = view.result.current.saveView("Cannot persist"); });
-    expect(saved).toBe(false);
-    expect(view.result.current.views).toEqual([]);
-  });
-
-  it("applies a saved view in memory when its persistence write fails", () => {
+  it("applies a saved view in memory when its persistence write fails", async () => {
     const seeded = mountHook();
     act(() => seeded.result.current.setState({ ...DEFAULTS, status: "closed" }));
-    act(() => { expect(seeded.result.current.saveView("Closed")).toBe(true); });
+    expect(await mutate(() => seeded.result.current.saveView("Closed"))).toBe(true);
     const id = seeded.result.current.views[0].id;
     seeded.unmount();
 
@@ -246,51 +258,122 @@ describe("useAdminTableViews", () => {
     expect(setItem).toHaveBeenCalled();
   });
 
-  it("does not let stale settings writes erase or resurrect saved views", () => {
+  it("does not let stale settings writes erase or resurrect saved views", async () => {
     const first = mountHook();
     const stale = mountHook();
     act(() => first.result.current.setState({ ...DEFAULTS, query: "first", page: 6, scrollTop: 90 }));
-    act(() => { expect(first.result.current.saveView("First view")).toBe(true); });
+    expect(await mutate(() => first.result.current.saveView("First view"))).toBe(true);
     const id = first.result.current.views[0].id;
     const catalogKey = `${first.result.current.storageKey}:views`;
 
     act(() => stale.result.current.setState({ ...DEFAULTS, query: "stale tab", page: 3, scrollTop: 40 }));
     expect(JSON.parse(localStorage.getItem(catalogKey)).views.map((view) => view.id)).toEqual([id]);
 
-    act(() => { expect(first.result.current.removeView(id)).toBe(true); });
+    expect(await mutate(() => first.result.current.removeView(id))).toBe(true);
     act(() => stale.result.current.setState((current) => ({ ...current, query: "stale tab again", page: 4 })));
     expect(JSON.parse(localStorage.getItem(catalogKey)).views).toEqual([]);
   });
 
-  it("merges independent saves and treats a delayed storage event as catalog invalidation", () => {
+  it("serializes overlapping stale saves and preserves each queued snapshot", async () => {
+    const coordinator = queuedLocks();
+    vi.stubGlobal("navigator", { locks: coordinator.locks });
     const first = mountHook();
     const second = mountHook();
     act(() => first.result.current.setState({ ...DEFAULTS, query: "alpha", page: 7, scrollTop: 70 }));
     act(() => second.result.current.setState({ ...DEFAULTS, query: "beta", status: "closed", page: 5, scrollTop: 50 }));
-    act(() => { expect(first.result.current.saveView("Alpha")).toBe(true); });
     const key = first.result.current.storageKey;
-    const delayedEventValue = localStorage.getItem(`${key}:views`);
-    act(() => { expect(second.result.current.saveView("Beta")).toBe(true); });
+    let saves;
+    act(() => {
+      saves = [first.result.current.saveView("Alpha"), second.result.current.saveView("Beta")];
+    });
+    expect(coordinator.locks.request).toHaveBeenCalledTimes(2);
+    expect(coordinator.locks.request.mock.calls.map(([name]) => name)).toEqual([
+      `waves-admin-table-views:${key}`,
+      `waves-admin-table-views:${key}`,
+    ]);
+    expect(coordinator.locks.request.mock.calls[0][1]).toEqual({ mode: "exclusive" });
+    expect(localStorage.getItem(`${key}:views`)).toBeNull();
+    act(() => second.result.current.setState({ ...second.result.current.state, query: "newer beta" }));
+    const outcomes = await releaseQueued(coordinator, saves);
+    expect(outcomes).toEqual([true, true]);
 
     const rawCatalog = localStorage.getItem(`${key}:views`);
     expect(JSON.parse(rawCatalog).views.map((view) => view.name)).toEqual(["Alpha", "Beta"]);
+    expect(JSON.parse(rawCatalog).views[1].state.query).toBe("beta");
+    expect(second.result.current.state.query).toBe("newer beta");
     expect(second.result.current.views.map((view) => view.name)).toEqual(["Alpha", "Beta"]);
     expect(first.result.current.views.map((view) => view.name)).toEqual(["Alpha"]);
-
     act(() => window.dispatchEvent(new StorageEvent("storage", {
       key: `${key}:views`,
-      newValue: delayedEventValue,
+      newValue: JSON.stringify({ version: 1, views: [] }),
     })));
     expect(first.result.current.views.map((view) => view.name)).toEqual(["Alpha", "Beta"]);
     expect(first.result.current.state).toMatchObject({ query: "alpha", page: 7, scrollTop: 70 });
   });
 
-  it("refuses to apply a view deleted by another instance", () => {
+  it("does not resurrect a delete when a stale save queues behind it", async () => {
+    const owner = mountHook();
+    expect(await mutate(() => owner.result.current.saveView("Temporary"))).toBe(true);
+    const removedId = owner.result.current.views[0].id;
+    const staleDelete = mountHook();
+    const staleSave = mountHook();
+    act(() => staleSave.result.current.setState({ ...DEFAULTS, query: "retained" }));
+    const coordinator = queuedLocks();
+    vi.stubGlobal("navigator", { locks: coordinator.locks });
+    let operations;
+    act(() => {
+      operations = [
+        staleDelete.result.current.removeView(removedId),
+        staleSave.result.current.saveView("Retained"),
+      ];
+    });
+    const outcomes = await releaseQueued(coordinator, operations);
+    expect(outcomes).toEqual([true, true]);
+    const views = JSON.parse(localStorage.getItem(`${owner.result.current.storageKey}:views`)).views;
+    expect(views.map(({ name }) => name)).toEqual(["Retained"]);
+    expect(views.some(({ id }) => id === removedId)).toBe(false);
+  });
+
+  it.each([
+    ["is missing", () => ({})],
+    ["has a throwing getter", () => Object.defineProperty({}, "locks", { get() { throw new Error("blocked"); } })],
+    ["rejects the request", () => ({ locks: { request: vi.fn(() => Promise.reject(new Error("broken"))) } })],
+  ])("keeps current settings usable when Web Locks %s", async (_label, navigatorValue) => {
+    vi.stubGlobal("navigator", navigatorValue());
+    const view = mountHook();
+    act(() => view.result.current.setState({ ...DEFAULTS, query: "still usable", page: 4 }));
+    expect(await mutate(() => view.result.current.saveView("Unsafe save"))).toBe(false);
+    expect(view.result.current.state).toMatchObject({ query: "still usable", page: 4 });
+    expect(view.result.current.views).toEqual([]);
+    expect(view.result.current.error).toBe("Changes could not be saved in this browser.");
+    expect(localStorage.getItem(`${view.result.current.storageKey}:views`)).toBeNull();
+  });
+
+  it("drops a queued mutation after the verified account scope changes", async () => {
+    const coordinator = queuedLocks();
+    vi.stubGlobal("navigator", { locks: coordinator.locks });
+    const view = mountHook();
+    act(() => view.result.current.setState({ ...DEFAULTS, query: "first account" }));
+    const firstKey = view.result.current.storageKey;
+    let pendingSave;
+    act(() => { pendingSave = view.result.current.saveView("Wrong account"); });
+
+    shellUser = { id: "staff-2", role: "admin" };
+    view.rerender({ hookProps: hookOptions() });
+    const secondKey = view.result.current.storageKey;
+    expect(secondKey).not.toBe(firstKey);
+    expect(await releaseQueued(coordinator, [pendingSave])).toEqual([false]);
+    expect(localStorage.getItem(`${firstKey}:views`)).toBeNull();
+    expect(localStorage.getItem(`${secondKey}:views`)).toBeNull();
+    expect(view.result.current).toMatchObject({ views: [], error: null });
+  });
+
+  it("refuses to apply a view deleted by another instance", async () => {
     const first = mountHook();
     const stale = mountHook();
-    act(() => { expect(first.result.current.saveView("Temporary")).toBe(true); });
+    expect(await mutate(() => first.result.current.saveView("Temporary"))).toBe(true);
     const id = first.result.current.views[0].id;
-    act(() => { expect(first.result.current.removeView(id)).toBe(true); });
+    expect(await mutate(() => first.result.current.removeView(id))).toBe(true);
 
     let applied;
     act(() => { applied = stale.result.current.applyView(id); });
