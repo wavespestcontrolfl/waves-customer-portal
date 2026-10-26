@@ -6411,6 +6411,16 @@ postgres('visit summary recipient recovery', () => {
         await Queue.processDueReceiptDeliveryJobs();
         expect(JSON.stringify(await alertRow(invoiceId))).toMatch(/Neither the visit summary text nor the receipt email/);
       });
+
+      // Production runs the admin bell policy (GATE_ADMIN_BELL_POLICY), which writes no row for an
+      // 'alert' that does not ask to ring.
+      test('the alert reaches the bell under the admin bell policy', async () => {
+        jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(true);
+        const invoiceId = await stop({ status: 'paid' });
+        await coordinate();
+        await exhaustEmail(invoiceId);
+        expect(await alertRow(invoiceId)).toBeTruthy();
+      });
     });
   });
 });

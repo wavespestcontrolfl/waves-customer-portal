@@ -514,6 +514,38 @@ async function auditLawnSqftFromEstimate({ customer_id, estimate_id, sqft, befor
   });
 }
 
+/**
+ * What the relevance sweep WOULD have closed (GATE_ALERT_CONTACT_CLOSE=shadow,
+ * admin-alert-relevance.js). One row per notification per class per Eastern
+ * day, so a sweep every ten minutes records a bell once a day, not 144 times.
+ * Nothing on the bell changes; this row is the only trace. List them with
+ * action = 'notification.alert_relevance.would_close' (metadata: class, reason,
+ * judgedAt, etDay). One read for the day's existing rows, one insert for the
+ * rest; resolves to how many rows it wrote. Advisory: the caller catches.
+ */
+const ALERT_WOULD_CLOSE_ACTION = 'notification.alert_relevance.would_close';
+async function auditAlertWouldClose({ items, et_day, trx = null }) {
+  if (!items.length) return 0;
+  const conn = trx || db;
+  const seen = await conn('audit_log')
+    .where({ action: ALERT_WOULD_CLOSE_ACTION, resource_type: 'notification' })
+    .whereIn('resource_id', items.map((i) => i.notification_id))
+    .whereRaw("metadata->>'etDay' = ?", [et_day])
+    .select('resource_id', conn.raw("metadata->>'class' as alert_class"));
+  const done = new Set(seen.map((r) => `${r.resource_id}:${r.alert_class}`));
+  const rows = items
+    .filter((i) => !done.has(`${i.notification_id}:${i.alert_class}`))
+    .map((i) => ({
+      actor_type: 'system',
+      action: ALERT_WOULD_CLOSE_ACTION,
+      resource_type: 'notification',
+      resource_id: i.notification_id,
+      metadata: JSON.stringify({ class: i.alert_class, reason: i.reason, judgedAt: i.judged_at, etDay: et_day }),
+    }));
+  if (rows.length) await conn('audit_log').insert(rows);
+  return rows.length;
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -560,6 +592,8 @@ module.exports = {
   auditHygieneProposalRevert,
   auditNotificationTemplateIssue,
   auditInternalAdminAlertDeliveryIssue,
+  auditAlertWouldClose,
+  ALERT_WOULD_CLOSE_ACTION,
   ipFromReq,
   uaFromReq,
 };

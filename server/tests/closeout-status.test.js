@@ -872,6 +872,38 @@ describe('closeout-status: Agent D findings', () => {
     expect(deriveCloseoutFacts(closedOutInputs()).facts.license).toMatchObject({ state: 'not_required', reason: 'catalog_no_license_required' });
   });
 
+  test('license fact reads DATE columns the way pg returns them (Date objects), not as weekday text', () => {
+    // pg parses a DATE column to a local-midnight Date. String(date).slice(0, 10)
+    // read "Mon May 31" vs "Sat Oct 24", so a license valid to 2027 failed on
+    // every visit day whose weekday name sorts after the expiry's (10-26 sweep).
+    const req = baseRequirements({ requiresLicense: true, licenseCategory: 'GHP' });
+    const tech = (expiry) => ({ id: 'tech-1', fl_applicator_license: 'JF123456', license_expiry: expiry, license_categories: ['GHP', 'L&O', 'Termite'] });
+    const run = (expiry, serviceDate) => deriveCloseoutFacts(closedOutInputs({
+      requirements: req,
+      visit: { ...closedOutInputs().visit, technician_id: 'tech-1', scheduled_date: serviceDate },
+      record: { ...closedOutInputs().record, service_date: serviceDate },
+      technician: tech(expiry),
+    })).facts.license;
+    // A Saturday visit, a license that runs to a Monday the next spring.
+    expect(run(new Date(2027, 4, 31), new Date(2026, 9, 24)))
+      .toMatchObject({ state: 'done', reason: 'technician_licensed', licenseExpiry: '2027-05-31', judgedAt: '2026-10-24' });
+    // Every weekday of one week reads the same verdict.
+    for (let day = 19; day <= 25; day += 1) {
+      expect(run(new Date(2027, 4, 31), new Date(2026, 9, day)).state).toBe('done');
+    }
+    // A license that really expired before the visit still fails.
+    expect(run(new Date(2026, 7, 31), new Date(2026, 8, 1)))
+      .toMatchObject({ state: 'failed', reason: 'technician_license_expired_at_visit', licenseExpiry: '2026-08-31', judgedAt: '2026-09-01' });
+    // ISO strings keep working.
+    expect(run('2027-05-31', '2026-10-24').state).toBe('done');
+  });
+
+  test('a follow-up child with a pg Date scheduled_date reports an ISO day', () => {
+    const required = { suggestion: { required: true, days: 14 }, frozen: true };
+    expect(deriveCloseoutFacts(closedOutInputs({ followup: required, followupChild: { id: 'svc-2', status: 'confirmed', scheduled_date: new Date(2026, 8, 12) } })).facts.followUp)
+      .toMatchObject({ state: 'done', childScheduledDate: '2026-09-12' });
+  });
+
   test('comms vocabulary: sending → pending, blocked → not_required (consent), skipped_recap → done; immediate-path sentSmsAt is read', () => {
     const rec = (status, extra = {}) => ({ ...closedOutInputs().record, structured_notes: { completionSmsStatus: status, ...extra } });
     expect(deriveCloseoutFacts(closedOutInputs({ record: rec('sending') })).facts.comms).toMatchObject({ state: 'pending', reason: 'completion_sms_sending' });
