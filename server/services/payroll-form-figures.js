@@ -175,37 +175,57 @@ function quarterTaxes(quarterChecks) {
 }
 
 /**
- * Form 941 line 16 (Form 941 instructions; Pub 15 section 11). Inputs come
- * from the stored checks: this quarter's line 12, the prior quarter's line 12,
- * the lookback period's tax (July 1 two years back to June 30 last year: the
- * four quarters' line 12) and each month's tax ('YYYY-MM' => cents) last year
- * and this year through the quarter's end. A month is a monthly depositor's
- * deposit period, so a month reaching $100,000 is a next-day deposit
- * obligation, and the employer is a semiweekly depositor from then on through
- * the next year.
- *   - A next-day obligation in this quarter: semiweekly (Schedule B).
+ * The pay dates on which one deposit period's tax may have reached $100,000
+ * (Pub 15, the next-day deposit rule): a month's running total (a monthly
+ * depositor's period) or any four days in a row (a semiweekly period is Wed
+ * to Fri or Sat to Tue). dayCents: pay date ('YYYY-MM-DD') => that day's tax.
+ */
+function nextDayDays(dayCents) {
+  const days = [...dayCents.keys()].sort();
+  const hits = [];
+  const monthRunning = new Map();
+  for (const day of days) {
+    const month = day.slice(0, 7);
+    const running = (monthRunning.get(month) || 0) + dayCents.get(day);
+    monthRunning.set(month, running);
+    const from = addStaffWorkDays(day, -3);
+    const fourDays = days.filter((d) => d >= from && d <= day).reduce((acc, d) => acc + dayCents.get(d), 0);
+    if (running >= NEXT_DAY_DEPOSIT_CENTS || fourDays >= NEXT_DAY_DEPOSIT_CENTS) hits.push(day);
+  }
+  return hits;
+}
+
+/**
+ * Form 941 line 16 (Form 941 instructions; Pub 15 section 11), from the stored
+ * checks: this quarter's line 12, the prior quarter's line 12, the lookback
+ * period's tax (July 1 two years back to June 30 last year: the four quarters'
+ * line 12) and each pay date's tax from January 1 last year through the
+ * quarter's end.
+ *   - A deposit period that may have reached $100,000 in this quarter: "check".
  *   - Else line 12 under $2,500, or the prior quarter's under $2,500 while this
  *     one is under $100,000: no schedule (box 1).
- *   - Else a lookback over $50,000, or an earlier next-day obligation:
- *     semiweekly (Schedule B). The portal does not fill Schedule B.
- *   - Else monthly (box 2). A new employer's lookback is $0.
+ *   - Else a lookback over $50,000: semiweekly (Schedule B, not filled in).
+ *   - Else a deposit period that may have reached $100,000 earlier: "check".
+ *     Whether it was a next-day obligation depends on the depositor status at
+ *     the time, and the portal reads too little history to know it (pre-push
+ *     audit P1: never claim semiweekly from a month total alone).
+ *   - Else monthly (box 2): no deposit period could have reached $100,000
+ *     under either status. A new employer's lookback is $0.
  */
-function depositSchedule({ year, quarter, line12, priorQuarterLine12, lookbackCents, monthCents }) {
-  const firstMonth = `${year}-${pad((quarter - 1) * 3 + 1)}`;
-  const lastMonth = `${year}-${pad(quarter * 3)}`;
-  const nextDay = [...monthCents.entries()]
-    .filter(([month, value]) => value >= NEXT_DAY_DEPOSIT_CENTS && month <= lastMonth)
-    .map(([month]) => month)
-    .sort();
-  const inQuarter = nextDay.find((month) => month >= firstMonth);
-  if (inQuarter) return { kind: 'semiweekly', reason: `The tax for ${inQuarter} reached $100,000, so a next-day deposit was due.` };
+function depositSchedule({ year, quarter, line12, priorQuarterLine12, lookbackCents, dayCents }) {
+  const quarterStart = `${year}-${pad((quarter - 1) * 3 + 1)}-01`;
+  const quarterLastDay = `${year}-${pad(quarter * 3)}-31`;
+  const hits = nextDayDays(new Map([...dayCents].filter(([day]) => day <= quarterLastDay)));
+  const inQuarter = hits.find((day) => day >= quarterStart);
+  const mayText = (day) => `On ${day} the tax of one deposit period may have reached $100,000 (the next-day deposit rule).`;
+  if (inQuarter) return { kind: 'check', reason: mayText(inQuarter) };
   if (line12 < FORM_941_SCHEDULE_THRESHOLD_CENTS) return { kind: 'none', reason: 'Line 12 is less than $2,500: no schedule is needed' };
   if (priorQuarterLine12 < FORM_941_SCHEDULE_THRESHOLD_CENTS && line12 < NEXT_DAY_DEPOSIT_CENTS) {
     return { kind: 'none', reason: 'Line 12 of the prior quarter was less than $2,500: no schedule is needed' };
   }
-  if (nextDay.length) return { kind: 'semiweekly', reason: `The tax for ${nextDay[0]} reached $100,000, so you have been a semiweekly depositor since then.` };
   if (lookbackCents > LOOKBACK_LIMIT_CENTS) return { kind: 'semiweekly', reason: `The lookback period holds ${centsText(lookbackCents)} of tax, more than $50,000.` };
-  return { kind: 'monthly', reason: `The lookback period holds ${centsText(lookbackCents)} of tax, $50,000 or less, and no month reached $100,000.` };
+  if (hits.length) return { kind: 'check', reason: mayText(hits[0]) };
+  return { kind: 'monthly', reason: `The lookback period holds ${centsText(lookbackCents)} of tax, $50,000 or less, and no month or four days in a row reached $100,000.` };
 }
 
 function form941(year, quarter, quarterChecks, depositsCents, history, periodChecks) {
@@ -241,10 +261,13 @@ function form941(year, quarter, quarterChecks, depositsCents, history, periodChe
   const lookbackText = `The lookback period is July 1, ${year - 2} to June 30, ${year - 1}. These figures come from the portal's pay checks; tax reported outside the portal counts too.`;
   if (schedule.kind === 'none') {
     rows.push(text('16', 'Deposit schedule', schedule.reason));
-  } else if (schedule.kind === 'semiweekly') {
+  } else if (schedule.kind === 'semiweekly' || schedule.kind === 'check') {
     // Pre-push audit P1: never label a semiweekly depositor monthly.
+    const status = schedule.kind === 'semiweekly'
+      ? 'You are a semiweekly schedule depositor.'
+      : 'Whether that made you a semiweekly depositor depends on your status at the time: check Pub 15 section 11.';
     rows.push(text('16', 'Deposit schedule', NEEDS_CHECK, {
-      note: `${schedule.reason} A semiweekly schedule depositor files Schedule B (Form 941) instead of the monthly lines. The portal does not fill it in.`,
+      note: `${schedule.reason} ${status} A semiweekly schedule depositor files Schedule B (Form 941) instead of the monthly lines. The portal does not fill it in.`,
     }));
     notes.push(lookbackText);
   } else {
@@ -491,16 +514,16 @@ function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows
   const periodChecks = (periodRows || [...priorRows, ...rows]).map((r) => ({ technicianId: r.technician_id, weekStart: r.week_start }));
   const line12Of = (y, q) => quarterTaxes(allChecks.filter((c) => c.payDate.startsWith(`${y}-`) && quarterOfMonth(monthOf(c)) === q)).line12;
   const quarterEnd = `${year}-${pad(quarter * 3)}`;
-  const monthCents = new Map();
+  const dayCents = new Map();
   for (const c of allChecks) {
     const month = c.payDate.slice(0, 7);
     if (month < `${year - 1}-01` || month > quarterEnd) continue;
-    monthCents.set(month, (monthCents.get(month) || 0) + liabilityOf(c));
+    dayCents.set(c.payDate, (dayCents.get(c.payDate) || 0) + liabilityOf(c));
   }
   const history = {
     priorQuarterLine12: quarter === 1 ? line12Of(year - 1, 4) : line12Of(year, quarter - 1),
     lookbackCents: line12Of(year - 2, 3) + line12Of(year - 2, 4) + line12Of(year - 1, 1) + line12Of(year - 1, 2),
-    monthCents,
+    dayCents,
   };
   const depositTotal = (list) => list.reduce((acc, d) => acc + Math.round(num(d.amount_paid ?? d.amount_due) * 100), 0);
   const w2 = w2Figures(yearChecks, addresses);

@@ -175,7 +175,7 @@ describe('Form 941', () => {
       check('2026-11-23', '2026-12-04', taxed({ tech: 1, federal_income_tax_cents: 70000 })),
     ]);
     expect(line(out.f941, '16')).toMatchObject({ kind: 'text', value: 'Monthly schedule depositor' });
-    expect(line(out.f941, '16').note).toMatch(/lookback period holds \$0\.00 of tax, \$50,000 or less, and no month reached \$100,000/);
+    expect(line(out.f941, '16').note).toMatch(/lookback period holds \$0\.00 of tax, \$50,000 or less, and no month or four days in a row reached \$100,000/);
     const [m1, m2, m3] = ['16 month 1', '16 month 2', '16 month 3'].map((id) => line(out.f941, id).value);
     expect([m1, m2, m3]).toEqual([115300, 105300, 85300]);
     expect(m1 + m2 + m3).toBe(line(out.f941, '12').value);
@@ -220,16 +220,16 @@ describe('Form 941', () => {
     expect(line(out.f941, '16 month 1')).toBeDefined();
   });
 
-  test('a month whose tax reaches $100,000 in the quarter: semiweekly, "Needs your check", no monthly lines', () => {
+  test('a deposit period whose tax reaches $100,000 in the quarter: "Needs your check", no monthly lines', () => {
     const rows = [q3Over2500(), check('2026-11-02', '2026-11-13', { tech: 1, gross_cents: 30000000, federal_income_tax_cents: 9000000, employer_social_security_cents: 1000000 })];
     const out = build(rows);
     expect(line(out.f941, '16')).toMatchObject({ kind: 'text', value: 'Needs your check' });
-    expect(line(out.f941, '16').note).toMatch(/The tax for 2026-11 reached \$100,000, so a next-day deposit was due\. A semiweekly schedule depositor files Schedule B/);
+    expect(line(out.f941, '16').note).toMatch(/On 2026-11-13 the tax of one deposit period may have reached \$100,000 \(the next-day deposit rule\)\. Whether that made you a semiweekly depositor depends on your status at the time: check Pub 15 section 11\. A semiweekly schedule depositor files Schedule B/);
     expect(line(out.f941, '16 month 1')).toBeUndefined();
     expect(line(out.f941, '16 total')).toBeUndefined();
   });
 
-  test('a $100,000 month earlier in the year keeps later quarters semiweekly', () => {
+  test('a deposit period that may have reached $100,000 earlier: "Needs your check", never a claim of semiweekly (pre-push audit P1)', () => {
     const rows = [
       check('2026-05-04', '2026-05-15', { tech: 1, gross_cents: 30000000, federal_income_tax_cents: 9000000, employer_social_security_cents: 1000000 }),
       q3Over2500(),
@@ -237,23 +237,33 @@ describe('Form 941', () => {
     ];
     const out = build(rows);
     expect(line(out.f941, '16')).toMatchObject({ kind: 'text', value: 'Needs your check' });
-    expect(line(out.f941, '16').note).toMatch(/The tax for 2026-05 reached \$100,000, so you have been a semiweekly depositor since then/);
+    expect(line(out.f941, '16').note).toMatch(/On 2026-05-15 the tax of one deposit period may have reached \$100,000/);
+    expect(line(out.f941, '16').note).not.toMatch(/You are a semiweekly schedule depositor/);
   });
 
   test('the depositor rules, figure by figure', () => {
-    const base = { year: 2027, quarter: 2, line12: 400000, priorQuarterLine12: 400000, lookbackCents: 0, monthCents: new Map() };
+    const base = { year: 2027, quarter: 2, line12: 400000, priorQuarterLine12: 400000, lookbackCents: 0, dayCents: new Map() };
+    const days = (...entries) => ({ ...base, dayCents: new Map(entries) });
     expect(depositSchedule(base).kind).toBe('monthly');
     expect(depositSchedule({ ...base, lookbackCents: 5000000 }).kind).toBe('monthly'); // $50,000 is not more than $50,000
     expect(depositSchedule({ ...base, lookbackCents: 5000001 })).toMatchObject({ kind: 'semiweekly', reason: expect.stringMatching(/\$50,000\.01 of tax, more than \$50,000/) });
-    // Last year's next-day month still counts this year; one after this quarter does not yet.
-    expect(depositSchedule({ ...base, monthCents: new Map([['2026-12', 10000000]]) }).kind).toBe('semiweekly');
-    expect(depositSchedule({ ...base, monthCents: new Map([['2027-07', 10000000]]) }).kind).toBe('monthly');
-    expect(depositSchedule({ ...base, monthCents: new Map([['2026-12', 9999999]]) }).kind).toBe('monthly');
-    // The $2,500 rules come before the lookback.
+    // A $100,000 day last year: the status then is unknown, so "check", not semiweekly.
+    expect(depositSchedule(days(['2026-12-04', 10000000]))).toMatchObject({ kind: 'check', reason: expect.stringMatching(/^On 2026-12-04 /) });
+    expect(depositSchedule(days(['2026-12-04', 9999999])).kind).toBe('monthly');
+    // Four $30,000 paydays in four weeks of one month: the month reached $100,000 (a monthly period), four days in a row did not.
+    expect(depositSchedule(days(['2026-11-06', 3000000], ['2026-11-13', 3000000], ['2026-11-20', 3000000], ['2026-11-27', 3000000])))
+      .toMatchObject({ kind: 'check', reason: expect.stringMatching(/^On 2026-11-27 /) });
+    // $60,000 on Jan 31 and on Feb 2: two months under $100,000 each, but four days in a row over it.
+    expect(depositSchedule(days(['2027-01-31', 6000000], ['2027-02-02', 6000000])).kind).toBe('check');
+    // Five days apart: neither window reaches it.
+    expect(depositSchedule(days(['2027-01-27', 6000000], ['2027-02-01', 6000000])).kind).toBe('monthly');
+    // A day after this quarter does not count yet.
+    expect(depositSchedule(days(['2027-07-02', 10000000])).kind).toBe('monthly');
+    // The $2,500 rules come before the lookback and an earlier period.
     expect(depositSchedule({ ...base, line12: 249999, lookbackCents: 9000000 }).kind).toBe('none');
-    expect(depositSchedule({ ...base, priorQuarterLine12: 249999, lookbackCents: 9000000 }).kind).toBe('none');
-    // A next-day month in this quarter wins over both $2,500 rules.
-    expect(depositSchedule({ ...base, line12: 100, monthCents: new Map([['2027-05', 10000000]]) }).kind).toBe('semiweekly');
+    expect(depositSchedule({ ...base, priorQuarterLine12: 249999, dayCents: new Map([['2026-12-04', 10000000]]) }).kind).toBe('none');
+    // A period in this quarter wins over both $2,500 rules.
+    expect(depositSchedule({ ...base, line12: 100, dayCents: new Map([['2027-05-07', 10000000]]) }).kind).toBe('check');
   });
 
   test('the lookback and last year come from the earlier checks (priorRows), each year with its own wage base', () => {
