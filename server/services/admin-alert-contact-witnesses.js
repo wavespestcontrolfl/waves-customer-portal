@@ -170,7 +170,10 @@ async function sharedPhoneItems(conn, smsIdents, since) {
   const logPeer = (alias) => `(CASE WHEN ${alias}.direction = 'inbound' THEN ${alias}.from_phone ELSE ${alias}.to_phone END)`;
   tie(await conn('customers').whereNull('deleted_at').whereRaw(onPeer('customers.phone'), [peers])
     .select('id as customer_id', conn.raw(`${phoneIdentitySql('customers.phone')} as peer`)));
-  tie(await conn('sms_log as sl').whereNotNull('sl.customer_id').where('sl.created_at', '>', lookback).whereRaw(onPeer(logPeer('sl')), [peers])
+  // Through the shared reservation filter (sms-log-general-reader-source-guard): a synthetic send placeholder
+  // is not evidence that a customer is on the number.
+  tie(await excludeUnresolvedSendReservations(conn('sms_log as sl'), 'sl').whereNotNull('sl.customer_id').where('sl.created_at', '>', lookback)
+    .whereRaw(onPeer(logPeer('sl')), [peers])
     .distinct('sl.customer_id', conn.raw(`${phoneIdentitySql(logPeer('sl'))} as peer`)));
   tie(await conn('call_log as cl').whereNotNull('cl.customer_id').where('cl.created_at', '>', lookback).whereRaw(onPeer(logPeer('cl')), [peers])
     .distinct('cl.customer_id', conn.raw(`${phoneIdentitySql(logPeer('cl'))} as peer`)));
