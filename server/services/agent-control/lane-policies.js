@@ -87,10 +87,6 @@ const LANE_RUNTIME = {
   // closed and asserted exhaustively by agent-control-run-index.test.js).
   'email-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0' },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  // GATE_REVIEW_DAY0_CONTEXT: classifies a Day-0 review-ask topic from a
-  // customer's texts + completion notes and stores it on review_sequences —
-  // no customer-visible output of its own, so internal_write like sms_intent.
-  review_topic: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // test answers to foreign-language texts, stored in sms_translation_trials and never sent
   sms_translation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
   // Its verdict authorizes an automatic customer send (tech-voice review asks).
