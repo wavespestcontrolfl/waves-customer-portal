@@ -1582,6 +1582,24 @@ function InvoiceFilter({ label, value, options, onChange, disabled }) {
 }
 
 // ── Invoice List (mirrors attached UI) ──
+function InvoiceSummaryStats({ stats, isMobile }) {
+  if (!stats || isMobile) return null;
+  return (
+    <span style={{ marginLeft: "auto" }} className="text-ui-body text-ink-secondary">
+      {stats.paid} paid · {stats.outstanding} outstanding · {stats.overdue} overdue
+      {Number(stats.deposits?.onHand) > 0 && (
+        <>
+          {" · "}
+          <span className="text-ink-secondary">
+            ${Number(stats.deposits.onHand).toFixed(2)} deposits on hand
+            {stats.deposits.onHandCount > 1 ? ` (${stats.deposits.onHandCount})` : ""}
+          </span>
+        </>
+      )}
+    </span>
+  );
+}
+
 function InvoiceList({
   showToast,
   onRefresh,
@@ -2311,28 +2329,7 @@ function InvoiceList({
               : `Select sendable (${sendableInvoices.length})`}
           </Button>
         )}
-        {stats && !isMobile && (
-          <span
-            style={{
-              marginLeft: "auto",
-            }}
-            className="text-ui-body text-ink-secondary"
-          >
-            {stats.paid} paid · {stats.outstanding} outstanding ·{" "}
-            {stats.overdue} overdue
-            {Number(stats.deposits?.onHand) > 0 && (
-              <>
-                {" · "}
-                <span className="text-ink-secondary">
-                  ${Number(stats.deposits.onHand).toFixed(2)} deposits on hand
-                  {stats.deposits.onHandCount > 1
-                    ? ` (${stats.deposits.onHandCount})`
-                    : ""}
-                </span>
-              </>
-            )}
-          </span>
-        )}
+        <InvoiceSummaryStats stats={stats} isMobile={isMobile} />
       </div>
       {/* List */}
       {deepLinkError && (
