@@ -19,6 +19,13 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// GATE_PRODUCT_INTAKE_GUARD's EPA lookup is a network call: a fixed answer per test here (its own rules are covered in
+// epa-product-label.test.js); everything from the answer down runs for real.
+jest.mock('../services/epa-product-label', () => ({
+  ...jest.requireActual('../services/epa-product-label'),
+  findEpaRegistrationByName: jest.fn(),
+}));
+const { findEpaRegistrationByName } = require('../services/epa-product-label');
 
 const { runInventoryAgent, drainAgentQueue, productUnchangedSinceAgent, DOWNSTREAM_ADOPTION_TABLES, decideForTitle } = require('../services/purchase-receipts/inventory-agent');
 const inventoryOperations = require('../services/inventory-operations');
@@ -52,6 +59,8 @@ jest.setTimeout(30000);
   beforeEach(() => {
     process.env.GATE_INVENTORY_AGENT = 'true';
     process.env.PURCHASE_RECEIPT_SINCE = '2026-09-01T00:00:00Z';
+    delete process.env.GATE_PRODUCT_INTAKE_GUARD;
+    findEpaRegistrationByName.mockReset();
   });
   afterAll(() => {
     if (GATE_ORIGINAL === undefined) delete process.env.GATE_INVENTORY_AGENT;
@@ -1167,6 +1176,8 @@ jest.setTimeout(30000);
     expect(saved.agent_decision.newProduct).toMatchObject({ listingEpaRegNumber: '279-3206' });
     const [bell] = await bellsFor(line.id);
     expect(bell.detail || bell.body).toMatch(/the listing gives EPA Reg\. No\. 279-3206, so confirm it from the label/);
+    // GATE_PRODUCT_INTAKE_GUARD off: EPA's label system is never asked.
+    expect(findEpaRegistrationByName).not.toHaveBeenCalled();
   });
 
   // 2026-09-27 pre-push audit: validation read a whitespace-only size as
@@ -1723,6 +1734,80 @@ jest.setTimeout(30000);
     const result = await drainAgentQueue({ conn: mockConn, notifyAdmin, limit: 25 });
     expect(result).toMatchObject({ drained: 0, errors: 0 });
     expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
+  });
+
+  // GATE_PRODUCT_INTAKE_GUARD (owner 2026-10-26 "fix a"), through the real apply path.
+  describe('GATE_PRODUCT_INTAKE_GUARD on', () => {
+    const EC3_TITLE = 'Zoecon Gentrol Complete EC3 Insecticide 16 oz';
+    const ec3Decision = {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Gentrol Complete EC3', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '16 oz', size_number: 16, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    const EC3_LABEL = 'https://www3.epa.gov/pesticides/chem_search/ppls/089459-00119-20260204.pdf';
+    beforeEach(() => { process.env.GATE_PRODUCT_INTAKE_GUARD = 'true'; });
+
+    test('a new pesticide EPA proves by name gets its EPA number and label; the bell names what is still missing and opens the product', async () => {
+      findEpaRegistrationByName.mockResolvedValue({
+        status: 'found', registration: '89459-119', labelUrl: EC3_LABEL, matchedName: 'GENTROL® COMPLETE EC3', acceptedDate: 'February 4, 2026', via: 'name_search',
+      });
+      const line = await pendingLine({ raw_title: EC3_TITLE, shipment_key: 'ship-ec3' });
+      expect(await run({ ok: true, json: ec3Decision })).toMatchObject({ logged: 1, held: 0, errors: 0 });
+      expect(findEpaRegistrationByName).toHaveBeenCalledWith('Gentrol Complete EC3', { listingRegistration: null });
+
+      const created = await mockConn('products_catalog').where({ name: 'Gentrol Complete EC3' }).first();
+      expect(created).toMatchObject({ epa_reg_number: '89459-119', label_url: EC3_LABEL, label_verified_by: null, label_verified_at: null, active_ingredient: 'Unknown - pending SDS' });
+      expect(await stockOf(created.id)).toBe(32);
+      const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+      expect(saved.agent_decision.epaLookup).toMatchObject({ status: 'found', registration: '89459-119', labelFile: '089459-00119-20260204.pdf', via: 'name_search' });
+      expect(saved.agent_decision.newProduct).not.toHaveProperty('epaLookup');
+
+      const [bell] = await bellsFor(line.id);
+      expect(bell.detail || bell.body).toMatch(/EPA Reg\. No\. 89459-119 and its EPA label came from EPA's label system\. Still missing: SDS and active ingredient/);
+      expect(bell.link).toBe(`/admin/inventory?tab=products&productId=${created.id}`);
+    });
+
+    test('a new pesticide EPA cannot prove keeps a BLANK EPA number (never "N/A") and the bell lists every gap', async () => {
+      findEpaRegistrationByName.mockResolvedValue({ status: 'not_found', reason: 'no_exact_name' });
+      const line = await pendingLine({ raw_title: EC3_TITLE, shipment_key: 'ship-ec3-none' });
+      await run({ ok: true, json: ec3Decision });
+      const created = await mockConn('products_catalog').where({ name: 'Gentrol Complete EC3' }).first();
+      expect(created.epa_reg_number).toBeNull();
+      expect(created.label_url).toBeNull();
+      const [bell] = await bellsFor(line.id);
+      expect(bell.detail || bell.body).toMatch(/could not prove one EPA number for this name\. Still missing: EPA number, label, SDS and active ingredient/);
+    });
+
+    test('near-name guard: a title with a product-line word the catalog name lacks never lands on that product — no stock, no alias, a "not added" bell', async () => {
+      const [gentrol] = await mockConn('products_catalog').insert({
+        name: 'Gentrol', active: true, category: 'igr', container_size: '16 oz', inventory_unit: 'oz', inventory_on_hand: 4,
+      }).returning('*');
+      const line = await pendingLine({ raw_title: EC3_TITLE, shipment_key: 'ship-ec3-near' });
+      const result = await run({ ok: true, json: {
+        kind: 'existing', reason: 'same product', product_id: gentrol.id,
+        reading: { size_text: '16 oz', size_number: 16, size_unit: 'oz', pack_text: null, pack_count: 1 },
+      } });
+      expect(result).toMatchObject({ logged: 0, held: 1 });
+      expect(await stockOf(gentrol.id)).toBe(4);
+      expect(await mockConn('product_aliases').where({ product_id: gentrol.id })).toHaveLength(0);
+      const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+      expect(saved.status).toBe('agent_unsure');
+      const [bell] = await bellsFor(line.id);
+      expect(bell.title).toBe('Inventory agent: not added');
+      expect(bell.detail || bell.body).toMatch(/the title has a product-line word \("complete"\) that "Gentrol" does not/);
+      expect(bell.detail || bell.body).not.toMatch(/Closest guess/);
+    });
+
+    test('near-name guard off: the same title still lands on the near-name product by name, as before', async () => {
+      delete process.env.GATE_PRODUCT_INTAKE_GUARD;
+      const [gentrol] = await mockConn('products_catalog').insert({
+        name: 'Gentrol', active: true, category: 'igr', container_size: '16 oz', inventory_unit: 'oz', inventory_on_hand: 4,
+      }).returning('*');
+      await pendingLine({ raw_title: EC3_TITLE, shipment_key: 'ship-ec3-off' });
+      await run({ ok: true, json: { kind: 'not_stock', reason: 'never asked: the receipt rules resolve it' } });
+      expect(await stockOf(gentrol.id)).toBe(36);
+      expect(findEpaRegistrationByName).not.toHaveBeenCalled();
+    });
   });
 
   test('gated off: runInventoryAgent does nothing', async () => {

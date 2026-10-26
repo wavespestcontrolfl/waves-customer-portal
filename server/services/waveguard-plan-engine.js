@@ -2711,9 +2711,9 @@ async function buildPlanForService(serviceId, options = {}) {
       service: service.service_type,
       serviceTier: service.waveguard_tier || null,
       // The explicit billing lane (customers.billing_mode): an explicit
-      // per_visit / one_time lane defeats a lingering legacy tier for
-      // protocol attribution, mirroring billing-lane's coverage rule
-      // (Codex #4113 batch 12, follow-up). null = unset / inferred.
+      // one_time lane defeats a lingering legacy tier for protocol
+      // attribution (Codex #4113 batch 12, follow-up); per_visit with a tier
+      // is a program (owner 2026-10-26). null = unset / inferred.
       billingMode: service.billing_mode || null,
       trackKey,
       trackName: track?.name || null,
