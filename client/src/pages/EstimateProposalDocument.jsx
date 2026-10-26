@@ -451,6 +451,19 @@ export default function EstimateProposalDocument({ data, token }) {
         }
       `}</style>
       <div className="doc-keep" data-testid="doc-letterhead"><FieldMasthead /></div>
+      {data?.adminDraftPreview === true ? (
+        <div
+          className="doc-keep estimate-document-draft-mark"
+          data-testid="estimate-document-draft-mark"
+          style={{
+            margin: '0 0 14px', padding: '8px 12px', border: '2px solid var(--field-gold)',
+            background: 'var(--field-soft)', color: 'var(--field-navy)', fontSize: 14, fontWeight: 700,
+            lineHeight: 1.35, letterSpacing: '0.04em', textAlign: 'center',
+          }}
+        >
+          DRAFT — INTERNAL PREVIEW · NOT SENT TO CUSTOMER
+        </div>
+      ) : null}
       <FieldTitle
         eyebrow={authoredProposal ? 'Service proposal' : 'Service estimate'}
         title={docTitle}

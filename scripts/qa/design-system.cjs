@@ -269,6 +269,29 @@ async function main() {
     await page.getByRole("button", { name: "Done", exact: true }).click();
     await screenshot(page, `${name}-table-controls`, tableControls);
 
+    await tableSearch.fill("customer 62");
+    const viewsButton = tableControls.getByRole("button", { name: "Example directory saved views", exact: true });
+    await viewsButton.click();
+    const viewsDialog = page.getByRole("dialog", { name: "Example directory saved views", exact: true });
+    await viewsDialog.getByRole("textbox", { name: "View name" }).fill("One customer");
+    await screenshot(page, `${name}-saved-views`, viewsDialog);
+    await viewsDialog.getByRole("button", { name: "Save current view" }).click();
+    await viewsDialog.waitFor({ state: "hidden" });
+    await tableControls.getByRole("button", { name: "Reset filters", exact: true }).click();
+    await viewsButton.click();
+    await viewsDialog.getByRole("combobox").selectOption({ label: "One customer" });
+    await viewsDialog.getByRole("button", { name: "Use view" }).click();
+    await tableControls.getByText("1–1 of 1 results", { exact: true }).waitFor();
+    assert.equal(await tableSearch.inputValue(), "customer 62");
+    await viewsButton.click();
+    await viewsDialog.getByRole("combobox").selectOption({ label: "One customer" });
+    await viewsDialog.getByRole("button", { name: "Delete view" }).click();
+    await viewsDialog.getByText("No saved views yet.", { exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    await viewsDialog.waitFor({ state: "hidden" });
+    assert.equal(await viewsButton.evaluate((node) => node === document.activeElement), true);
+    await tableControls.getByRole("button", { name: "Reset filters", exact: true }).click();
+
     const draftSection = page.locator("#draft-ownership");
     await page
       .getByRole("textbox", { name: "Draft title" })

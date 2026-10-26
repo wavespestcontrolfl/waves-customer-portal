@@ -381,7 +381,7 @@ export default function DesignSystemPage() {
       <Section id="field-associations" title="Labels, help, validation, and disabled reasons"><FieldExample /></Section>
       <Section id="save-behavior" title="Loading and failed saves"><SaveExample /></Section>
       <Section id="data-states" title="Directory composition and result states"><DataStatesExample /></Section>
-      <Section id="table-controls" title="Search, sorting, columns, and pagination"><TableControlsExample /></Section>
+      <Section id="table-controls" title="Table controls and saved views"><TableControlsExample /></Section>
       <Section id="draft-ownership" title="Record header, mobile sections, and draft ownership"><DraftOwnershipExample /></Section>
       <Section id="nested-overlays" title="Nested overlay interaction"><NestedOverlaysExample /></Section>
       <Section id="workflow-compositions" title="Estimate and technician compositions"><WorkflowDensityExamples /></Section>

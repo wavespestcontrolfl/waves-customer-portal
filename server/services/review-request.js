@@ -8280,6 +8280,70 @@ const ReviewService = {
   },
 };
 
+// "Never asked" (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): the customer has no
+// review_requests row that was texted (sms_sent_at) or emailed (sent_at), and is not
+// marked customers.has_left_google_review. The ONE reader: the completion panel's
+// "First review ask" flag and the completion's saved review choice both call it.
+// A missing customer, a marked-reviewed customer or a read failure is NOT never-asked
+// (false): the lock only ever adds an ask for a customer we can prove was never asked.
+// `database`: a caller inside a transaction (the visit-closeout packet's records phase) passes its
+// trx, so the read never takes a second pool connection; savepointRead keeps a failed read from
+// aborting that transaction.
+async function customerNeverAskedForReview(customerId, database = db) {
+  if (!customerId) return false;
+  try {
+    return await require("../utils/savepoint-read").savepointRead(database, async (conn) => {
+      const customer = await conn("customers").where({ id: customerId }).first("id", "has_left_google_review");
+      if (!customer || customer.has_left_google_review) return false;
+      const asked = await conn("review_requests")
+        .where({ customer_id: customerId })
+        .where((q) => q.whereNotNull("sms_sent_at").orWhereNotNull("sent_at"))
+        .first("id");
+      return !asked;
+    });
+  } catch (err) {
+    logger.warn(`[review-request] never-asked read failed for ${customerId}: ${err.message}`);
+    return false;
+  }
+}
+
+// The visit a first ask would follow (GATE_REVIEW_FIRST_ASK_LOCK), or null when the lock never
+// applies to it. A re-service keeps today's choice whether it carries is_callback or only the
+// re-service key or name (services/re-service.js isReService; 5 of 49 re-service visits from
+// June to October 2026 had is_callback false). A read failure is null too: today's behavior.
+async function firstAskLockVisit(serviceId, database = db) {
+  if (!serviceId) return null;
+  try {
+    const visit = await require("../utils/savepoint-read").savepointRead(database, (conn) => conn("scheduled_services as s")
+      .leftJoin("services as sv", "s.service_id", "sv.id")
+      .where("s.id", serviceId)
+      .first("s.customer_id", "s.is_callback", "s.service_type", "sv.service_key"));
+    if (!visit || visit.is_callback === true) return null;
+    if (require("./re-service").isReService({ serviceKey: visit.service_key, serviceType: visit.service_type })) return null;
+    return visit;
+  } catch (err) {
+    logger.warn(`[review-request] first-ask visit read failed for ${serviceId}: ${err.message}`);
+    return null;
+  }
+}
+
+// GATE_REVIEW_FIRST_ASK_LOCK, the rule for a saved review choice: with the gate on and a
+// never-asked customer, "no ask" is honored ONLY with the "Complaint on site" reason; any other
+// "no ask" stays an ask. Returns null when the lock does not apply (gate off, or the customer
+// was asked before, is marked reviewed or cannot be read): the caller's choice stands as it was.
+// Otherwise { requestReview, forcedOn, optOutReason }. The one place the rule lives: the
+// completion calls it, and the visit-closeout packet reads the marker it leaves on the record.
+// PUT /admin/schedule/:id/status keeps the posted choice: no UI completes through it, and it
+// carries no reason and saves no review decision.
+const FIRST_ASK_OPT_OUT_REASON = "complaint_on_site";
+async function firstAskLockChoice({ customerId, requestReview, optOutReason }, database = db) {
+  if (!require("../config/feature-gates").reviewFirstAskLockLive()) return null;
+  if (!(await customerNeverAskedForReview(customerId, database))) return null;
+  if (requestReview !== false) return { requestReview: true, forcedOn: false, optOutReason: null };
+  const reasoned = optOutReason === FIRST_ASK_OPT_OUT_REASON;
+  return { requestReview: !reasoned, forcedOn: !reasoned, optOutReason: reasoned ? FIRST_ASK_OPT_OUT_REASON : null };
+}
+
 ReviewService.__private = {
   lastDeliveredAskAt,
   retryAtForDeferredSend,
@@ -8307,6 +8371,10 @@ ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES = REVIEW_AFTER_REPORT_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
+ReviewService.customerNeverAskedForReview = customerNeverAskedForReview;
+ReviewService.firstAskLockVisit = firstAskLockVisit;
+ReviewService.firstAskLockChoice = firstAskLockChoice;
+ReviewService.FIRST_ASK_OPT_OUT_REASON = FIRST_ASK_OPT_OUT_REASON;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 
 // The review page reads the same delivered-ask evidence the sender trusts.

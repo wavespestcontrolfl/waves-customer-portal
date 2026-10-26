@@ -77,6 +77,16 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Legacy service-report PDFs (owner 2026-10-26): `GET /api/reports/:token`
+uses the shared Field document layout for records whose template version is
+not `service_report_v1`, including null versions. The PDF retains its existing
+customer/service facts, reviewed technician notes, product fields, conditions,
+dry-time/irrigation guidance and safety link. Long notes and product tables
+continue onto additional pages with repeated headings. The route regenerates
+these PDFs from current approved data and still ignores stale `report_pdf_path`
+binaries. Token eligibility, privacy headers, rate limiting, JSON payloads and
+the separate `service_report_v1` renderer/cache are unchanged.
+
 Ask Waves AI answers (owner 2026-10-05): `POST /api/reports/:token/ask` keeps
 its request (`{ question }`, 500 characters), its reply (`{ answer }`), its
 headers, its limiter and its recorded event (`report_question_asked` with

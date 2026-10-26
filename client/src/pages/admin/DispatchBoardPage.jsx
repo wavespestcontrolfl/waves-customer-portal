@@ -32,6 +32,7 @@ import DispatchMap from "../../components/dispatch/DispatchMap";
 import ActionQueuePane from "../../components/dispatch/ActionQueuePane";
 import JobDrawer from "../../components/dispatch/JobDrawer";
 import TechDrawer from "../../components/dispatch/TechDrawer";
+import { ActionFeedback } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -43,6 +44,9 @@ function adminAuthHeaders() {
 }
 
 export default function DispatchBoardPage() {
+  const feedbackRetryEnabled =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("feedback") === "1";
   const {
     techs,
     jobs,
@@ -84,6 +88,7 @@ export default function DispatchBoardPage() {
   // drop-zone mode. Reset to null on dragend regardless of drop
   // outcome (success refetches via broadcast; miss is a no-op).
   const [draggingJobId, setDraggingJobId] = useState(null);
+  const [boardRetrying, setBoardRetrying] = useState(false);
   const [assignError, setAssignError] = useState(null);
   // Plain notes the server sent with a SAVED drag-reassign (e.g. a tech who does not work that day).
   const [assignNotice, setAssignNotice] = useState(null);
@@ -104,6 +109,16 @@ export default function DispatchBoardPage() {
   const handleJobDragEnd = useCallback(() => {
     setDraggingJobId(null);
   }, []);
+
+  const handleBoardRetry = useCallback(async () => {
+    if (boardRetrying) return;
+    setBoardRetrying(true);
+    try {
+      await refreshTechs();
+    } finally {
+      setBoardRetrying(false);
+    }
+  }, [boardRetrying, refreshTechs]);
 
   // Fire the assignment PUT. The endpoint already enforces the same
   // validations the JobDrawer dropdown uses (404 / 409 / 400) and
@@ -153,6 +168,19 @@ export default function DispatchBoardPage() {
     );
   }
   if (error) {
+    if (feedbackRetryEnabled) {
+      return (
+        <ActionFeedback
+          error
+          onRetry={boardRetrying ? undefined : handleBoardRetry}
+          className="justify-center bg-surface-page p-10 text-center"
+        >
+          {boardRetrying
+            ? "Retrying dispatch board…"
+            : `Failed to load dispatch board: ${error}`}
+        </ActionFeedback>
+      );
+    }
     return (
       <div className="bg-surface-page text-14 text-alert-fg p-10 text-center">
         Failed to load dispatch board: {error}
@@ -204,7 +232,12 @@ export default function DispatchBoardPage() {
             onJobDropOnTech={handleJobDropOnTech}
           />
         }
-        right={<ActionQueuePane onOpenJob={handleSelectJob} />}
+        right={(
+          <ActionQueuePane
+            onOpenJob={handleSelectJob}
+            feedbackRetryEnabled={feedbackRetryEnabled}
+          />
+        )}
       />{" "}
       <JobDrawer
         jobId={selectedJobId}

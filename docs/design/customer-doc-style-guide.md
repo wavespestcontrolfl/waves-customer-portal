@@ -6,7 +6,10 @@ The authored document body uses the approved **Field** design: white paper,
 blue left rail, navy masthead rule, gold reference accent, ruled metadata and
 tables, and quiet continuation/footer treatment. Apply this to service and
 project reports, proposals, invoices/receipts, account statements, agreements,
-prep guides, treatment records, annual-plan summaries and warranties.
+prep guides, treatment records, annual-plan summaries, warranties,
+price-change/rate-review notices and service/program outlines. Invoice browser
+printing uses the same Field document boundary as the other customer exports;
+payment controls stay outside the paper output.
 
 - React: `FIELD_DOCUMENT` in `client/src/theme-doc.js` and the shared
   `components/FieldDocument.jsx` / `field-document.css` boundary. Use
@@ -45,6 +48,14 @@ controls retain their neutral styling. This document-body boundary also applies
 when the reader is embedded in the admin Staff page. Issued wording, version
 hashes, review dates, citations, acknowledgments and completed-record evidence
 remain unchanged; uploaded originals retain their existing format.
+
+Payroll stubs and tank-mix references use the same text-only staff masthead
+inside their printable document bodies. Hours, pay and withholding values,
+product quantities, eligibility rules and safety directions stay authoritative.
+Staff estimate printing uses the canonical customer proposal projection from
+the verified staff preview route; unsent drafts carry an explicit internal
+draft marker. Print controls remain outside the paper, and the staff preview
+stays inert before and after printing.
 
 The tokened document surfaces — `/estimate/:token`, `/report/*`, `/prep`,
 `/receipt`, `/pay`, `/pay/statement/:token`, `/contract`, `/service-outlines`,
@@ -145,11 +156,9 @@ padding, hairline 1–3px offsets) are allowed but must be deliberate.
 `DOC.*` roles are CSS-var references **on purpose**: canonical navy
 `#04395E` everywhere — print, PDF, non-glass and glass renders alike
 (owner rulings 2026-07-05 and 2026-07-12). `#1B2C5B` is reserved for
-marketing-mirror surfaces, not customer docs. Some PDF generators have not
-migrated yet and still hard-code `#1B2C5B`, among them `server/services/pdf/contract-pdf.js`,
-`estimate-pdf.js`, `payer-statement-pdf.js`, and the service-report PDFs in
-`server/routes/documents.js` and `server/routes/reports-public.js`; search the server
-for `1B2C5B` to find the rest. `DOC.navyLiteral` (#04395E)
+marketing-mirror surfaces, not customer docs. Authored PDF renderers use the
+shared `pdf-tokens.js` and `field-pdf.js` palette and document helpers.
+`DOC.navyLiteral` (#04395E)
 pins chrome that must not shift (e.g. DocumentActionBar fills). Semantic roles: `danger`,
 `success` (+ `successBg/successBorder`), `soft/softBorder` washes,
 `border/borderStrong`, `page` (#FAF8F3 warm).

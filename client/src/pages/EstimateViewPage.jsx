@@ -6432,25 +6432,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The priced offer wins the card whenever one exists; the inquiry card is
   // the fallback for mixes with no stamped add.
   const offerCardOffer = pricedAddOffer || addServiceOffer;
-  // Download PDF / Share / Print / Portal Login at the top of every estimate
-  // render (owner ask 2026-07-09, live review screen) — the same shared bar
-  // as the report/pay/receipt/contract pages. The PDF endpoint streams the
-  // same proposal generator as the admin download and the emailed attachment.
-  const estimateActionBar = readOnlyPreview ? (
-    <div style={{ marginBottom: 16 }}>
-      <button type="button" onClick={() => window.print()} style={{ minHeight: 44, padding: "10px 16px", fontSize: 16 }}>Print preview</button>
-    </div>
-  ) : (
-    // /data may serve an expired group anchor for navigation, while /pdf
-    // still withholds its expired offer. Keep the other document tools.
-    <DocumentActionBar
-      pdfUrl={data?.cta?.terminalState === 'expired' ? null : `${API_BASE}/estimates/${token}/pdf`}
-      printFallbackDownload={data?.cta?.terminalState !== 'expired'}
-      pdfFileName="Waves_Estimate.pdf"
-      shareTitle="Your Waves estimate"
-    />
-  );
-
   useEffect(() => {
     selectedFrequencyRef.current = selectedFrequency;
   }, [selectedFrequency]);
@@ -6469,7 +6450,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // COUNT this open — the revived fetch after an expired-screen extension is
   // a real visit, and tagging it refresh=1 would leave the returning-visitor
   // projection one session behind (GH codex P2 on #3708).
-  const loadEstimate = useCallback(async ({ preserveSelection = false, countView = false } = {}) => {
+  const loadEstimate = useCallback(async ({ preserveSelection = false, countView = false, documentMode = pdfDocumentMode } = {}) => {
     const signal = lifetimeAbortRef.current?.signal;
     const isRefresh = initialViewCountedRef.current;
     // Refreshes keep the loaded UI on screen instead of dropping back to the
@@ -6479,7 +6460,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     setLoadError(false);
     const params = [];
     if (isRefresh && !countView) params.push('refresh=1');
-    if (pdfDocumentMode) {
+    if (documentMode) {
       params.push('mode=pdf');
       if (pdfDocPin) params.push(`dpin=${encodeURIComponent(pdfDocPin)}`);
     }
@@ -6561,6 +6542,116 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // read it from the resolved value; every other caller ignores it.
     return body;
   }, [token, adminPreviewRequested, pdfDocumentMode, pdfDocPin]);
+
+  const [staffPrintRequested, setStaffPrintRequested] = useState(false);
+  const [staffPrintError, setStaffPrintError] = useState('');
+  const staffPrintRestoreStartedRef = useRef(false);
+
+  const restoreStaffPrintPreview = useCallback(() => {
+    if (staffPrintRestoreStartedRef.current) return;
+    staffPrintRestoreStartedRef.current = true;
+    setStaffPrintRequested(false);
+    // Put the inert interactive preview back after printing (or from the
+    // screen-only fallback). This is another GET through the same verified
+    // staff route; it does not select, reserve, accept, or record a view.
+    loadEstimate({ preserveSelection: true, documentMode: false }).catch(() => {
+      setStaffPrintError('The print preview closed, but the on-screen estimate could not be refreshed.');
+    });
+  }, [loadEstimate]);
+
+  // A staff preview's ordinary /data payload intentionally does not carry the
+  // normalized proposal for a residential draft. Printing that interactive
+  // tree would both lose the Field document and tempt a second client-side
+  // pricing projection. Re-enter the same server-verified payload route in
+  // document mode instead: the server keeps staff auth/viewability, proposal
+  // normalization, snapshot and render-pin decisions authoritative.
+  const handleStaffPrintPreview = useCallback(async () => {
+    if (!readOnlyPreview || staffPrintRequested) return;
+    staffPrintRestoreStartedRef.current = false;
+    setStaffPrintError('');
+    setStaffPrintRequested(true);
+    try {
+      const body = await loadEstimate({ preserveSelection: true, documentMode: true });
+      const verifiedPreview = body?.adminDraftPreview === true || body?.verifiedStaffPreview === true;
+      if (body?.documentRender !== true || !verifiedPreview) {
+        setStaffPrintRequested(false);
+        setStaffPrintError('Print preview is unavailable right now. Refresh the staff preview and try again.');
+      }
+    } catch {
+      setStaffPrintRequested(false);
+      setStaffPrintError('Print preview is unavailable right now. Refresh the staff preview and try again.');
+    }
+  }, [loadEstimate, readOnlyPreview, staffPrintRequested]);
+
+  // The state above swaps in EstimateProposalDocument only after the server
+  // affirms `documentRender`. Effects run after that document is committed;
+  // additionally wait for its Inter face before asking the browser to capture
+  // pages, otherwise the print dialog can snapshot fallback-font line wraps.
+  useEffect(() => {
+    if (!staffPrintRequested || data?.documentRender !== true || !readOnlyPreview) return undefined;
+    let cancelled = false;
+    // Register before print(): some browsers dispatch afterprint while the
+    // call is still on the stack. Successful return is NOT a completion
+    // signal — Safari and resource-deferred printing may return immediately.
+    const onAfterPrint = () => restoreStaffPrintPreview();
+    window.addEventListener('afterprint', onAfterPrint, { once: true });
+    const printWhenReady = async () => {
+      try {
+        if (document.fonts?.ready) await document.fonts.ready;
+      } catch {
+        // Font loading is best-effort; a browser without FontFaceSet support
+        // still gets the fully committed canonical document.
+      }
+      // Let the font-ready layout reach a paint boundary before print() asks
+      // the browser for pagination. (The fallback covers older WebViews.)
+      await new Promise((resolve) => {
+        if (typeof window.requestAnimationFrame === 'function') {
+          window.requestAnimationFrame(() => resolve());
+        } else {
+          window.setTimeout(resolve, 0);
+        }
+      });
+      if (cancelled) return;
+      try {
+        window.print();
+      } catch {
+        setStaffPrintError('Your browser could not open the print dialog. Please try again.');
+        if (!cancelled) restoreStaffPrintPreview();
+      }
+    };
+    void printWhenReady();
+    return () => {
+      cancelled = true;
+      window.removeEventListener('afterprint', onAfterPrint);
+    };
+  }, [data, readOnlyPreview, restoreStaffPrintPreview, staffPrintRequested]);
+
+  // Download PDF / Share / Print / Portal Login at the top of every estimate
+  // render (owner ask 2026-07-09, live review screen) — the same shared bar
+  // as the report/pay/receipt/contract pages. Staff Print preview uses the
+  // canonical document-mode projection above, never the interactive page.
+  const estimateActionBar = readOnlyPreview ? (
+    <div style={{ marginBottom: 16 }}>
+      <button
+        type="button"
+        onClick={handleStaffPrintPreview}
+        disabled={staffPrintRequested}
+        style={{ minHeight: 44, padding: '10px 16px', fontSize: 16 }}
+      >
+        {staffPrintRequested ? 'Preparing print preview…' : 'Print preview'}
+      </button>
+      {staffPrintError ? <div role="alert" style={{ marginTop: 8, color: ESTIMATE_BODY, fontSize: 14 }}>{staffPrintError}</div> : null}
+    </div>
+  ) : (
+    // /data may serve an expired group anchor for navigation, while /pdf
+    // still withholds its expired offer. Keep the other document tools.
+    <DocumentActionBar
+      pdfUrl={data?.cta?.terminalState === 'expired' ? null : `${API_BASE}/estimates/${token}/pdf`}
+      printFallbackDownload={data?.cta?.terminalState !== 'expired'}
+      pdfFileName="Waves_Estimate.pdf"
+      shareTitle="Your Waves estimate"
+    />
+  );
 
   // Back from the signing page (a bfcache restore or a tab switch), a customer waiting on the Florida consumer notice
   // sees it signed without a manual reload. Listens only while the notice blocks the accept.
@@ -8850,8 +8941,19 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // kill switch also kills this mode (fail-closed — a bare ?mode=pdf with
   // the gate off falls through to the normal page rather than rendering an
   // official-looking document with no pricing).
-  if (pdfDocumentMode && data.documentRender === true) {
-    return <EstimateProposalDocument data={data} token={token} />;
+  if ((pdfDocumentMode || staffPrintRequested) && data.documentRender === true) {
+    return (
+      <>
+        {staffPrintRequested ? (
+          <div className="waves-field-no-print" style={{ maxWidth: 816, margin: '16px auto 0', padding: '0 16px', textAlign: 'right' }}>
+            <button type="button" onClick={restoreStaffPrintPreview} style={{ minHeight: 44, padding: '10px 16px', fontSize: 16 }}>
+              Return to preview
+            </button>
+          </div>
+        ) : null}
+        <EstimateProposalDocument data={data} token={token} />
+      </>
+    );
   }
 
   const { estimate, pricing, cta } = data;
