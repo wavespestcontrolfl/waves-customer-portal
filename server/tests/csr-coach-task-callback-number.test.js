@@ -87,14 +87,14 @@ describe('buildCsrScoringText — caller\'s number in the prompt', () => {
     const text = buildCsrScoringText({ ...base, contactPhone: CALLER });
     expect(text).toContain('Caller ID: 941-555-0142');
     expect(text).toContain('number the caller gave in the call if it differs from the caller ID');
-    expect(text).toContain('Never use a Waves number');
+    expect(text).toContain('Never tell staff to call a Waves number');
   });
 
   test('omits the caller line when contactPhone is unknown or one of our lines', () => {
     for (const contactPhone of [null, undefined, '', '+19413187612']) {
       const text = buildCsrScoringText({ ...base, contactPhone });
       expect(text).not.toContain('Caller ID:');
-      expect(text).toContain('Never put a Waves phone number in the follow-up task');
+      expect(text).toContain('Never tell staff to call a Waves number');
     }
   });
 });
@@ -173,7 +173,100 @@ describe('disclaimed ANI and alternate confirmed callback number', () => {
   });
 });
 
-describe('scoreCall — end to end' , () => {
+describe('near-miss spoken number is never the confirmed callback', () => {
+  // ANI +19415550142; a spoken +19415550143 is one digit off: a mistranscription.
+  const nearMiss = { caller: { caller_id_disclaimed: false, phone_source: 'spoken', phone_e164: '+19415550143' } };
+  const twoOff = { caller: { caller_id_disclaimed: false, phone_source: 'spoken', phone_e164: '+19415550152' } };
+
+  test('guard keeps the verified ANI over a 1-2 digit near miss', () => {
+    expect(replaceOwnedNumbers('Call Pat at 941-318-7612.', CALLER, nearMiss)).toBe('Call Pat at 941-555-0142.');
+    expect(replaceOwnedNumbers('Call Pat at 941-318-7612.', CALLER, twoOff)).toBe('Call Pat at 941-555-0142.');
+  });
+
+  test('prompt shows only the ANI, no confirmed line, for a near miss', () => {
+    const text = buildCsrScoringText({ callDirection: 'inbound', csrName: 'Test CSR', transcript: 'hi', contactPhone: CALLER, v2Extraction: nearMiss });
+    expect(text).toContain('Caller ID: 941-555-0142');
+    expect(text).not.toContain('Confirmed callback number');
+    expect(text).not.toContain('0143');
+  });
+
+  test('a wholly different spoken number is still confirmed', () => {
+    expect(CSRCoach.resolveCallbackNumbers(spokenAltNotDisclaimed, CALLER).confirmed).toBe('941-555-0988');
+  });
+});
+
+describe('only call_back destinations are rewritten, never quoted script text', () => {
+  test('a send_sms or send_estimate script keeps our number', () => {
+    const script = 'Text the caller: "Please call us at 941-318-7612 to book."';
+    expect(replaceOwnedNumbers(script, CALLER, null, 'send_sms')).toBe(script);
+    expect(replaceOwnedNumbers(script, CALLER, null, 'send_estimate')).toBe(script);
+  });
+
+  test('call_back: the unquoted destination is replaced, the quoted customer line keeps our number', () => {
+    const text = 'Call Pat at 941-318-7612 today. Say: "If we miss you, call us back at 941-318-7612."';
+    expect(replaceOwnedNumbers(text, CALLER, null, 'call_back'))
+      .toBe('Call Pat at 941-555-0142 today. Say: "If we miss you, call us back at 941-318-7612."');
+  });
+
+  test('single and curly quotes protect a number too; apostrophes do not open a quote', () => {
+    expect(replaceOwnedNumbers("Call Pat's cell at 941-318-7612. Script: 'Call us back at 941-318-7612.'", CALLER))
+      .toBe("Call Pat's cell at 941-555-0142. Script: 'Call us back at 941-318-7612.'");
+    expect(replaceOwnedNumbers('Call 941-318-7612. Script: “call us at 941-318-7612”', CALLER))
+      .toBe('Call 941-555-0142. Script: “call us at 941-318-7612”');
+    expect(replaceOwnedNumbers('Script: ‘call us at 941-318-7612’ then call 941-318-7612', CALLER))
+      .toBe('Script: ‘call us at 941-318-7612’ then call 941-555-0142');
+  });
+
+  test('an unterminated quote does not shield a number', () => {
+    expect(replaceOwnedNumbers('Call at 941-318-7612 and say "hello', CALLER)).toBe('Call at 941-555-0142 and say "hello');
+  });
+
+  test('scoreCall end to end: send_sms task keeps the number, call_back task is rewritten', async () => {
+    for (const [type, expected] of [
+      ['send_sms', 'Text: "Call us at 941-318-7612."'],
+      ['call_back', 'Text: "Call us at 941-318-7612." Then call 941-555-0142.'],
+    ]) {
+      for (const k of Object.keys(mockInserts)) delete mockInserts[k];
+      dispatchWithFallback.mockReset();
+      const answer = scoreAnswer(type === 'call_back' ? 'Text: "Call us at 941-318-7612." Then call 941-318-7612.' : expected);
+      answer.follow_up_task.type = type;
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: answer });
+      await CSRCoach.scoreCall({
+        csrName: 'Test CSR', customerId: null, callDirection: 'inbound', callSource: 'main',
+        transcript: 'caller asks about ants', metadata: {}, contactPhone: CALLER,
+      });
+      expect(mockInserts.ai_follow_up_tasks.recommended_action).toBe(expected);
+    }
+  });
+});
+
+describe('non-NANP numbers keep their country code', () => {
+  const uk = '+442079460123';
+
+  test('a confirmed international callback is inserted whole, not cut to ten digits', () => {
+    const ext = { caller: { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: uk } };
+    expect(replaceOwnedNumbers('Call Pat at 941-318-7612.', CALLER, ext)).toBe(`Call Pat at ${uk}.`);
+    expect(buildCsrScoringText({ callDirection: 'inbound', csrName: 'Test CSR', transcript: 'hi', contactPhone: CALLER, v2Extraction: ext }))
+      .toContain(`Confirmed callback number: ${uk}`);
+  });
+
+  test('an international ANI reads whole in the prompt and the guard', () => {
+    expect(replaceOwnedNumbers('Call Pat at 941-318-7612.', uk)).toBe(`Call Pat at ${uk}.`);
+    expect(buildCsrScoringText({ callDirection: 'inbound', csrName: 'Test CSR', transcript: 'hi', contactPhone: uk }))
+      .toContain(`Caller ID: ${uk}`);
+  });
+
+  test('NANP shapes still read 941-xxx-xxxx; junk and bare foreign digits are unusable', () => {
+    for (const ani of ['+19415550142', '19415550142', '9415550142', '(941) 555-0142']) {
+      expect(CSRCoach.resolveCallbackNumbers(null, ani).callerId).toBe('941-555-0142');
+    }
+    for (const ani of ['anonymous', '442079460123', '+1941555', '+0123456789012']) {
+      expect(CSRCoach.resolveCallbackNumbers(null, ani).callerId).toBeNull();
+    }
+  });
+});
+
+describe('scoreCall — end to end'  , () => {
   beforeEach(() => {
     for (const k of Object.keys(mockInserts)) delete mockInserts[k];
     dispatchWithFallback.mockReset();

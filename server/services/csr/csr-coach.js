@@ -6,6 +6,7 @@ const { etDateString, etParts, addETDays, parseETDateTime } = require('../../uti
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const { isV2Extraction } = require('../../utils/extraction-compat');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
+const { nanpNationalDigits } = require('../../utils/phone');
 
 
 let TwilioService;
@@ -103,11 +104,19 @@ const CALLER_NUMBER_FALLBACK_WORDS = "the caller's number";
 // +1 941 318 7612. The digit lookarounds keep it off longer digit runs.
 const PHONE_IN_TEXT_RE = /(?<!\d)(?:\+?1[\s.-]?)?(?:\((\d{3})\)|(\d{3}))[\s.-]?(\d{3})[\s.-]?(\d{4})(?!\d)/g;
 
+// A number as it reads in task text. NANP numbers (+1 and ten digits, or a bare
+// ten digits) read 941-xxx-xxxx, and null when the line is one of ours. Any other
+// valid E.164 number (+442079460123) is kept whole: cutting it to ten digits
+// would name a different, wrong NANP number. Anything else is unusable (null).
 function formatTaskNumber(value) {
-  const last10 = String(value == null ? '' : value).replace(/\D/g, '').slice(-10);
-  if (last10.length !== 10) return null;
-  if (TWILIO_NUMBERS.isOwnedNumber(last10)) return null;
-  return `${last10.slice(0, 3)}-${last10.slice(3, 6)}-${last10.slice(6)}`;
+  const text = typeof value === 'string' ? value.trim() : '';
+  const ten = nanpNationalDigits(text);
+  if (ten) {
+    if (TWILIO_NUMBERS.isOwnedNumber(ten)) return null;
+    return `${ten.slice(0, 3)}-${ten.slice(3, 6)}-${ten.slice(6)}`;
+  }
+  const e164 = text.startsWith('+') ? `+${text.slice(1).replace(/\D/g, '')}` : '';
+  return /^\+[2-9]\d{7,14}$/.test(e164) ? e164 : null;
 }
 
 // Which number a callback may use (pre-push review P1: contactPhone is only
@@ -132,7 +141,13 @@ function resolveCallbackNumbers(v2Extraction, contactPhone) {
     const trusted = disclaimed
       ? !callerIdDisclaimedNeedsCallback(caller, { ani: contactPhone })
       : caller.phone_source === 'spoken';
-    if (trusted) confirmed = formatTaskNumber(caller.phone_e164);
+    // A spoken number within a digit or two of the ANI is a mistranscription of
+    // it (resolveCallContactPhone keeps the verified ANI there), never a
+    // confirmed callback. Same helper the call pipeline uses.
+    const { phoneNearMissOfAni } = require('../call-recording-processor');
+    if (trusted && !phoneNearMissOfAni(caller.phone_e164, contactPhone)) {
+      confirmed = formatTaskNumber(caller.phone_e164);
+    }
   }
   return { callerId: disclaimed ? null : formatTaskNumber(contactPhone), confirmed };
 }
@@ -144,12 +159,35 @@ function callbackReplacement(v2Extraction, contactPhone) {
   return confirmed || callerId || CALLER_NUMBER_FALLBACK_WORDS;
 }
 
-function replaceOwnedNumbers(text, contactPhone, v2Extraction = null) {
+// Text a writer set off in quotes: "...", curly double quotes, '...' and curly
+// single quotes. A single quote only opens after a non-word character and only
+// closes before one, so apostrophes (Shyla's, don't) do not start a quote.
+const QUOTED_TEXT_RE = new RegExp([
+  '"[^"]*"',
+  '\u201C[^\u201D]*\u201D',
+  "(?<![A-Za-z0-9])'(?:[^']|'(?=[A-Za-z]))*'(?![A-Za-z0-9])",
+  '(?<![A-Za-z0-9])\u2018(?:[^\u2018\u2019]|\u2019(?=[A-Za-z]))*\u2019(?![A-Za-z0-9])',
+].join('|'), 'g');
+
+// Rewrites an owned number that a call_back task names as the number to call.
+// Only that: a send_sms / send_estimate script, and any quoted line inside a
+// call_back task, is customer-facing text ("Please call us at 941-318-7612")
+// where our number is correct and stays.
+function replaceOwnedNumbers(text, contactPhone, v2Extraction = null, taskType = 'call_back') {
   if (typeof text !== 'string' || !text) return text;
+  if (taskType !== 'call_back') return text;
   const replacement = callbackReplacement(v2Extraction, contactPhone);
-  return text.replace(PHONE_IN_TEXT_RE, (match, paren, bare, b, c) => (
+  const rewrite = (part) => part.replace(PHONE_IN_TEXT_RE, (match, paren, bare, b, c) => (
     TWILIO_NUMBERS.isOwnedNumber(`${paren || bare}${b}${c}`) ? replacement : match
   ));
+  let out = '';
+  let last = 0;
+  QUOTED_TEXT_RE.lastIndex = 0;
+  for (let m = QUOTED_TEXT_RE.exec(text); m; m = QUOTED_TEXT_RE.exec(text)) {
+    out += rewrite(text.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + rewrite(text.slice(last));
 }
 
 // The scoring request's user text. The ANI is presented as caller ID, not as
@@ -163,12 +201,12 @@ function buildCsrScoringText({ callDirection, csrName, callSource, metadata, tra
   let numberRule;
   if (disclaimed) {
     numberRule = confirmed
-      ? "The caller said the number they called from is not theirs. Any callback in the follow-up task must use the confirmed callback number above, never a Waves number."
-      : "The caller said the number they called from is not theirs. Any callback in the follow-up task must use the number the caller gave in the call, or the words \"the caller's number\" if none was given. Never use a Waves number.";
+      ? "The caller said the number they called from is not theirs. Any callback in the follow-up task must use the confirmed callback number above. Never tell staff to call a Waves number."
+      : "The caller said the number they called from is not theirs. Any callback in the follow-up task must use the number the caller gave in the call, or the words \"the caller's number\" if none was given. Never tell staff to call a Waves number.";
   } else if (callerId || confirmed) {
-    numberRule = "Any callback in the follow-up task must use the number the caller gave in the call if it differs from the caller ID, otherwise the caller ID. Never use a Waves number.";
+    numberRule = "Any callback in the follow-up task must use the number the caller gave in the call if it differs from the caller ID, otherwise the caller ID. Never tell staff to call a Waves number.";
   } else {
-    numberRule = "Never put a Waves phone number in the follow-up task; if you need a callback number, use the number the caller gave in the call, or the words \"the caller's number\".";
+    numberRule = "Never tell staff to call a Waves number; if you need a callback number, use the number the caller gave in the call, or the words \"the caller's number\".";
   }
   return `Score this ${callDirection} call:
 
@@ -625,7 +663,7 @@ Return JSON:
         assigned_to: csrName || 'Adam',
         task_type: score.follow_up_task.type,
         // Never leave one of our own lines as the callback number.
-        recommended_action: replaceOwnedNumbers(score.follow_up_task.recommended_action, contactPhone, v2Extraction),
+        recommended_action: replaceOwnedNumbers(score.follow_up_task.recommended_action, contactPhone, v2Extraction, score.follow_up_task.type),
         context_summary: score.call_summary,
         deadline: new Date(Date.now() + score.follow_up_task.deadline_hours * 3600000),
         status: 'pending',
