@@ -903,7 +903,7 @@ router.delete('/account', authenticate, async (req, res, next) => {
         title: 'Customer deleted their account',
         body: `An account self-deleted ${deletedProfiles} profile(s) from the app. Review billing/offboarding.`,
         url: '/admin/customers',
-      });
+      }, ...(require('../config/feature-gates').techLoginPrivacyLive?.() ? [{ adminOnly: true }] : []));
     } catch (notifyErr) {
       logger.warn(`[auth] admin notify (account deletion) failed: ${notifyErr.message}`);
     }

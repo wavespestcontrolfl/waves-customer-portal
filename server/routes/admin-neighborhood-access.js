@@ -29,6 +29,9 @@
  *                                     same county ({ into, dryRun? }); dryRun answers
  *                                     the same counts and writes nothing
  * POST   /merges/:mergeId/undo      — undo a merge (what nobody changed since)
+ * GET    /merge-suggestions         — entries whose names read as one community
+ * POST   /merge-suggestions/dismiss — "not the same" ({ sourceId, targetId }): never
+ *                                     suggested again
  *                                     Both merge routes are GATE_NEIGHBORHOOD_MERGE
  *                                     (owner ruling 2026-10-25); off = 404.
  *
@@ -54,7 +57,9 @@ const {
 } = require('../services/neighborhood-access');
 const { isTechnicianRequest, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { mergeNeighborhood, undoMerge, mergesInto } = require('../services/neighborhood-merge');
+const {
+  mergeNeighborhood, undoMerge, mergesInto, suggestMerges, dismissSuggestion,
+} = require('../services/neighborhood-merge');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -875,6 +880,33 @@ router.post('/merges/:mergeId/undo', mergeLive, async (req, res) => {
     if (err && err.code === '23505') return res.status(409).json({ error: 'A code changed since the merge. Fix it on the page, then undo.' });
     logFailure('undo merge', err);
     return res.status(500).json({ error: 'Could not undo the merge' });
+  }
+});
+
+// Suggested merges (owner ruling 2026-10-25): a list for the office; a person
+// always taps Merge, nothing here merges.
+router.get('/merge-suggestions', mergeLive, async (req, res) => {
+  try {
+    return res.json({ suggestions: await suggestMerges(db) });
+  } catch (err) {
+    logFailure('merge suggestions', err);
+    return res.status(500).json({ error: 'Could not load suggested merges' });
+  }
+});
+
+router.post('/merge-suggestions/dismiss', mergeLive, async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const { sourceId, targetId } = body;
+  if (typeof sourceId !== 'string' || !UUID_RE.test(sourceId) || typeof targetId !== 'string' || !UUID_RE.test(targetId)) {
+    return res.status(400).json({ error: 'sourceId and targetId must be neighborhood ids' });
+  }
+  try {
+    const ok = await db.transaction((trx) => dismissSuggestion(trx, { sourceId, targetId, actorId: req.technicianId || null }));
+    if (!ok) return res.status(404).json({ error: 'Neighborhood not found' });
+    return res.json({ dismissed: true });
+  } catch (err) {
+    logFailure('dismiss suggestion', err);
+    return res.status(500).json({ error: 'Could not save that answer' });
   }
 });
 

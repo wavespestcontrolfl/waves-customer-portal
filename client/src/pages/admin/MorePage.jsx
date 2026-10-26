@@ -11,7 +11,7 @@ import { refetchFlags, useFeatureFlag } from "../../hooks/useFeatureFlag";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
 import { markUsageSource } from "../../lib/adminUsage";
-import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS } from "../../config/adminNavigation";
+import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS, isAdminNavItemEnabled } from "../../config/adminNavigation";
 import { MOBILE_SETTINGS_SECTIONS } from "../../config/mobileSettingsSections";
 import { clearEmailDrafts } from "../../lib/emailDrafts";
 import { clearScheduleSaveNotices } from "../../components/schedule/ScheduleSaveNotice";
@@ -85,10 +85,7 @@ export default function MorePage() {
       </UiSurface> : ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => {
         const visibleItems = items
           .filter((item) => !item.adminOnly || currentRole === "admin")
-          .filter((item) => !item.flag
-            || (item.flag === "agent_estimate" && agentEstimateEnabled)
-            || (item.flag === "bid_desk" && bidDeskEnabled)
-            || (item.flag === "bid_kit" && bidKitEnabled));
+          .filter((item) => isAdminNavItemEnabled(item, { agent_estimate: agentEstimateEnabled, bid_desk: bidDeskEnabled, bid_kit: bidKitEnabled }));
         // Role/flag filtering can empty a whole section (e.g. Marketing for
         // a technician) — skip the orphaned heading.
         if (visibleItems.length === 0) return null;

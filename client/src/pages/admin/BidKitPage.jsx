@@ -626,7 +626,7 @@ function useKitActions(load, closeEditors) {
   return { busy, message, save, archive, signOff, upload, openFile };
 }
 
-export default function BidKitPage() {
+export default function BidKitPage({ embedded = false }) {
   const [params] = useSearchParams();
   const focusId = params.get("item") || "";
   const { data, loading, error, load } = useKit();
@@ -650,7 +650,7 @@ export default function BidKitPage() {
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1100px]">
-      <AdminCommandHeader variant="workspace" title="Bid kit" icon={ClipboardCheck} />
+      {!embedded && <AdminCommandHeader variant="workspace" title="Bid kit" icon={ClipboardCheck} />}
 
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
         The papers and facts every government bid asks for. Files are private and open only through a short link. Nothing here is public or sent to

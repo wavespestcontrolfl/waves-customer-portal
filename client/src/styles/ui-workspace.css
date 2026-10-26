@@ -86,7 +86,9 @@
 .ui-action-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 14px; line-height: 1.55; }
 .ui-table { font-size: var(--ui-body-size, 13px); }
 .ui-table-heading { box-sizing: border-box; height: 48px; padding: 8px 12px; font-size: 14px; font-weight: 500; text-transform: none; letter-spacing: 0; }
-.ui-table-cell { padding: 20px 12px; vertical-align: top; line-height: 1.6; overflow-wrap: anywhere; }
+/* Preserve a word's intrinsic width in scrolling tables. `anywhere` lets the
+   table squeeze dates, money and status chips into single-character columns. */
+.ui-table-cell { padding: 20px 12px; vertical-align: top; line-height: 1.6; overflow-wrap: break-word; }
 [data-ui-density="compact"] .ui-table-cell { padding-top: 12px; padding-bottom: 12px; }
 .ui-tab-navigation { display: flex; min-width: 0; width: 100%; }
 .ui-tab-strip { min-width: 0; flex: 1; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
@@ -112,7 +114,7 @@
 }
 @media (max-width: 359px) { .ui-command-title > .ui-command-icon { display: none; } }
 .ui-command-actions { display: contents; }
-.ui-control.ui-command-action { grid-column: 2; justify-self: end; min-width: 0; min-height: 44px; max-width: 100%; gap: 6px; padding: 8px; font-size: 14px; line-height: 1.5; white-space: normal; text-transform: uppercase; letter-spacing: .06em; }
+.ui-control.ui-command-action { grid-column: 2; justify-self: end; min-width: 0; min-height: 44px; max-width: 100%; gap: 6px; padding: 8px; font-size: 14px; line-height: 1.5; white-space: normal; text-transform: none; letter-spacing: 0; }
 .ui-command-action > svg { flex-shrink: 0; }
 @media (min-width: 1024px) {
   .ui-command-heading { display: flex; flex-wrap: wrap; justify-content: space-between; }
@@ -128,12 +130,40 @@
 .ui-control.ui-menu-action { box-sizing: border-box; display: flex; justify-content: flex-start; align-items: center; gap: 9px; width: 100%; min-height: 44px; padding: 8px 10px; border: 0; border-radius: 4px; text-align: left; text-decoration: none; font-size: 14px; }
 .ui-menu-action:hover { background: #f4f4f5; }
 @media (max-width: 1100px) {
-  .ui-records-table :is(table, tbody) { display: block; width: 100%; }
-  .ui-records-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  .ui-records-table .ui-table-row { display: grid; grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 10px; }
-  .ui-records-table .ui-table-cell { display: block; padding: 0; }
-  .ui-records-table .ui-table-cell[data-label] { display: grid; grid-template-columns: 116px minmax(0, 1fr); column-gap: 12px; }
-  .ui-records-table .ui-table-cell[data-label]::before { content: attr(data-label); color: #71717a; }
+  /* A nested table chooses its own layout, independent of the parent record. */
+  .ui-records-table > table,
+  .ui-records-table > :where(table) > tbody { display: block; width: 100%; }
+  .ui-records-table > :where(table) > thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .ui-records-table > :where(table) > :where(tbody) > .ui-table-row { display: grid; grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 10px; }
+  .ui-records-table > :where(table) > :where(tbody) > :where(.ui-table-row) > .ui-table-cell { display: block; min-width: 0; padding: 0; }
+  .ui-records-table > :where(table) > :where(tbody) > :where(.ui-table-row) > .ui-table-cell[data-label] { display: grid; grid-template-columns: 116px minmax(0, 1fr); column-gap: 12px; }
+  .ui-records-table > :where(table) > :where(tbody) > :where(.ui-table-row) > .ui-table-cell[data-label]::before { content: attr(data-label); color: #71717a; text-align: left; }
+  .bid-desk-table > table > tbody > .ui-table-row > .ui-table-cell[data-label] { grid-template-columns: 88px minmax(0, 1fr); }
+  .bid-desk-table > table > tbody > .ui-table-row > .bid-desk-project-cell[data-label] { display: block; }
+  .bid-desk-project-cell .bid-desk-open-record { width: 100%; justify-content: flex-start; }
+  .banking-payouts-records > table > tbody > .banking-payout-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas: "date amount" "status amount" "transactions fees" "arrival reconciled";
+    gap: 12px 16px;
+  }
+  .banking-payouts-records > table > tbody > .banking-payout-row > .ui-table-cell[data-label] {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left;
+  }
+  .banking-payout-row > .banking-payout-date { grid-area: date; }
+  .banking-payout-row > .banking-payout-amount { grid-area: amount; }
+  .banking-payout-row > .banking-payout-status { grid-area: status; }
+  .banking-payout-row > .banking-payout-transactions { grid-area: transactions; }
+  .banking-payout-row > .banking-payout-fees { grid-area: fees; }
+  .banking-payout-row > .banking-payout-arrival { grid-area: arrival; }
+  .banking-payout-row > .banking-payout-reconciled { grid-area: reconciled; }
+  .banking-payouts-records > table > tbody > .banking-payout-row > :is(.banking-payout-date, .banking-payout-status)::before { content: none; }
+  .banking-payouts-records > table > tbody > .banking-payout-row > .banking-payout-amount { font-size: 22px; font-weight: 500; }
+  .banking-payouts-records > table > tbody > .banking-payout-row > .banking-payout-amount::before { font-size: 14px; font-weight: 400; }
+}
+@media (max-width: 359px) {
+  .banking-payouts-records > table > tbody > .banking-payout-row {
+    grid-template-areas: "amount amount" "date status" "transactions fees" "arrival reconciled";
+  }
 }
 @media (max-width: 767px) {
   .ui-workspace-nav { display: flex; gap: 2px; }

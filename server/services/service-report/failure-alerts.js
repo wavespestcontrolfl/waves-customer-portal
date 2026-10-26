@@ -86,6 +86,9 @@ async function alertServiceReportDeliveryFailed({ delivery, error } = {}, { knex
     logger.warn(`[service-report-alerts] email delivery exhausted for record=${serviceRecordId || 'unknown'} attempts=${delivery?.attempts ?? '?'}`);
 
     return await trigger('service_report_delivery_failed', {
+      // The customer for a technician login's own-customer scope (GATE_TECH_LOGIN_PRIVACY).
+      // Not customerId: that key also switches on the internal-test-account mute, which these two alerts never had.
+      scopeCustomerId: context.customerId,
       customerName: context.customerName,
       serviceLabel: context.serviceLabel,
       attempts: Number(delivery?.attempts) || null,
@@ -110,6 +113,9 @@ async function alertServiceReportPdfFailed({ job, error } = {}, { knex = db, tri
     logger.warn(`[service-report-alerts] pdf render exhausted for record=${serviceRecordId || 'unknown'} attempts=${job?.attempts ?? '?'}`);
 
     return await trigger('service_report_pdf_failed', {
+      // The customer for a technician login's own-customer scope (GATE_TECH_LOGIN_PRIVACY).
+      // Not customerId: that key also switches on the internal-test-account mute, which these two alerts never had.
+      scopeCustomerId: context.customerId,
       customerName: context.customerName,
       serviceLabel: context.serviceLabel,
       attempts: Number(job?.attempts) || null,

@@ -51,22 +51,26 @@ import { assertNoAreaAddOns } from './areaAddOns';
 
 /* ── helpers ────────────────────────────────────────────────── */
 
+// One-time mosquito list minimum after the recurring-customer perk; mirrors
+// server ONE_TIME.mosquito.floor (owner 2026-10-25).
+export const ONE_TIME_MOSQUITO_FLOOR = 199;
+
 // One-time mosquito base price for a treatable area, mirroring the
 // server-authoritative band (server/services/pricing-engine/constants.js
-// ONE_TIME.mosquito, repriced 2026-07 to ~25% under the one-time pest band)
-// and the server's 500-sf-step interpolation between bucket anchors
-// (service-pricing.js ONE_TIME_MOSQUITO_ANCHOR_SQFT + interpolateMosquitoPrice).
-// Anchors and the over-acre increment ($40 / 10k sf over an acre) must stay
-// in sync with the server so previewed prices match what the server actually
-// charges. Also used by the schedule modal to show the auto (lot-based)
-// charge before submission.
+// ONE_TIME.mosquito, repriced 2026-10-25 to a $199 start whose steps shrink
+// as yards grow) and the server's 500-sf-step interpolation between bucket
+// anchors (service-pricing.js ONE_TIME_MOSQUITO_ANCHOR_SQFT +
+// interpolateMosquitoPrice). Anchors and the over-acre increment ($26 / 10k sf
+// over an acre) must stay in sync with the server so previewed prices match
+// what the server actually charges. Also used by the schedule modal to show
+// the auto (lot-based) charge before submission.
 export function oneTimeMosquitoLadderPrice(treatableSqFt) {
   let p;
   if (treatableSqFt > 43560) {
-    // Repriced 2026-08-08 (owner +5% across the board): 282 base + $42/10k.
-    p = 282 + Math.ceil((treatableSqFt - 43560) / 10000) * 42;
+    // Repriced 2026-10-25 (owner): 309 base + $26/10k.
+    p = 309 + Math.ceil((treatableSqFt - 43560) / 10000) * 26;
   } else {
-    const otAnchors = [[7500, 156], [11000, 177], [16000, 198], [24000, 219], [32000, 251], [43560, 282]];
+    const otAnchors = [[7500, 199], [11000, 212], [16000, 230], [24000, 255], [32000, 278], [43560, 309]];
     const stepped = Math.ceil(Math.max(0, treatableSqFt) / 500) * 500;
     p = otAnchors[otAnchors.length - 1][1];
     if (stepped <= otAnchors[0][0]) {
@@ -3001,7 +3005,8 @@ export function calculateEstimate(inputs) {
     const treatableSqFt = Math.max(0, Math.round(lotSqFt - footprint - estimateHardscape()));
     const p = oneTimeMosquitoLadderPrice(treatableSqFt);
     const addOns = mosquitoStationCount * 75 + mosquitoDunkCount * 15;
-    const fp = Math.round((p + addOns) * rD);
+    // $199 list minimum after the recurring-customer perk (server ONE_TIME.mosquito.floor).
+    const fp = Math.max(ONE_TIME_MOSQUITO_FLOOR, Math.round((p + addOns) * rD));
     const detailParts = [];
     if (mosquitoStationCount > 0) detailParts.push(`${mosquitoStationCount} stations`);
     if (mosquitoDunkCount > 0) detailParts.push(`${mosquitoDunkCount} Bti dunks`);

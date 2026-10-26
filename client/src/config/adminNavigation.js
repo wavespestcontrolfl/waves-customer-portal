@@ -8,7 +8,6 @@ import {
   Calendar,
   CalendarCheck,
   Camera,
-  ClipboardCheck,
   ClipboardList,
   Clock,
   FileText,
@@ -228,26 +227,19 @@ export const ADMIN_NAV_ITEMS = {
     flag: "agent_estimate",
     adminOnly: true,
   },
-  // Bid invites found in the email table (GATE_BID_DESK, dark). `bid_desk` comes from GET /admin/feature-flags, which
-  // only carries it while the gate is on, so the entry is hidden everywhere (and fails closed) otherwise.
-  bidDesk: {
-    id: "bidDesk",
-    keywords: ["bid", "bids", "rfp", "rfq", "invitation to bid", "buildingconnected", "procore", "blue book", "proposal"],
-    path: "/admin/bid-desk",
-    label: "Bid Desk",
+  // Bids has two tabs: Open bids (bid invites found in the email table, GATE_BID_DESK) and Bid kit (the papers and facts
+  // every government bid asks for, GATE_BID_KIT). `bid_desk` / `bid_kit` come from GET /admin/feature-flags, which only
+  // carries each while its gate is on, so the entry shows when EITHER is on and is hidden everywhere (fails closed) otherwise.
+  bids: {
+    id: "bids",
+    keywords: [
+      "bid", "bids", "rfp", "rfq", "invitation to bid", "buildingconnected", "procore", "blue book", "proposal",
+      "bid desk", "bid kit", "bid documents", "license copy", "insurance certificate", "w-9", "references", "facts sheet", "government bid",
+    ],
+    path: "/admin/bids",
+    label: "Bids",
     icon: Gavel,
-    flag: "bid_desk",
-    adminOnly: true,
-  },
-  // The papers and facts every government bid asks for (GATE_BID_KIT, dark). `bid_kit` comes from GET /admin/feature-flags,
-  // which only carries it while the gate is on, so the entry is hidden everywhere (and fails closed) otherwise.
-  bidKit: {
-    id: "bidKit",
-    keywords: ["bid kit", "bid documents", "license copy", "insurance certificate", "w-9", "references", "facts sheet", "government bid"],
-    path: "/admin/bid-kit",
-    label: "Bid kit",
-    icon: ClipboardCheck,
-    flag: "bid_kit",
+    anyFlag: ["bid_desk", "bid_kit"],
     adminOnly: true,
   },
   equipment: {
@@ -360,7 +352,7 @@ export const ADMIN_NAV_ITEMS = {
 const NAV_SECTION_DEFINITIONS = [
   { section: "Overview", itemIds: ["dashboard"] },
   { section: "Operations", itemIds: ["today", "schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-  { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "bidDesk", "bidKit", "priceMatch", "contracts"] },
+  { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "bids", "priceMatch", "contracts"] },
   { section: "Communications", itemIds: ["communications"] },
   { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
   { section: "People", itemIds: ["staff", "recruiting"] },
@@ -414,6 +406,7 @@ function materializeItem(itemId, surface) {
     adminOnly: Boolean(item.adminOnly),
     technicianTab: Boolean(item.technicianTab),
     flag: item.flag || null,
+    anyFlag: item.anyFlag || null,
   };
 }
 
@@ -451,7 +444,7 @@ const WORKSPACE_GROUPS = [
   { id: "dashboard", label: "Dashboard", target: "dashboard", itemIds: ["dashboard"], section: "Daily" },
   { id: "schedule", label: "Schedule", target: "schedule", itemIds: ["today", "schedule"], section: "Daily" },
   { id: "customers", label: "Customers", target: "customers", itemIds: ["customers", "contracts", "gateCodes"], section: "Daily" },
-  { id: "sales", label: "Sales", target: "pipeline", itemIds: ["pipeline", "estimates", "priceMatch", "agentEstimate", "bidDesk", "bidKit"], section: "Daily" },
+  { id: "sales", label: "Sales", target: "pipeline", itemIds: ["pipeline", "estimates", "priceMatch", "agentEstimate", "bids"], section: "Daily" },
   { id: "communications", label: "Communications", target: "communications", itemIds: ["communications"], section: "Daily" },
   { id: "billing", label: "Billing", target: "invoices", itemIds: ["invoices", "recovery", "payers"], section: "Daily" },
   { id: "operations", label: "Operations", icon: Wrench, itemIds: ["jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"], section: "Manage" },
@@ -464,10 +457,18 @@ const WORKSPACE_GROUPS = [
 
 export const ADMIN_WORKSPACE_GROUP_IDS = WORKSPACE_GROUPS.map(({ id }) => id);
 
+// The one flag rule for every menu surface (sidebar, mobile More, grouped workspaces). `flag` needs that flag on;
+// `anyFlag` needs at least one of its flags on. A flag the server did not send counts as off (fails closed).
+export function isAdminNavItemEnabled(item, flags = {}) {
+  if (item.flag && flags[item.flag] !== true) return false;
+  if (item.anyFlag && !item.anyFlag.some((key) => flags[key] === true)) return false;
+  return true;
+}
+
 export function getAdminWorkspaceGroups(role, flags = {}) {
   if (!role) return [];
   const visible = ADMIN_WORKSPACE_DESTINATIONS.filter((item) =>
-    (!item.adminOnly || role === "admin") && (!item.flag || flags[item.flag] === true),
+    (!item.adminOnly || role === "admin") && isAdminNavItemEnabled(item, flags),
   );
   return WORKSPACE_GROUPS.map((group) => {
     const items = group.itemIds.map((id) => visible.find((item) => item.id === id)).filter(Boolean);

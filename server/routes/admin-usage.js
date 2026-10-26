@@ -73,7 +73,7 @@ const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // App.jsx — when you add an admin route, that test tells you to add it here.
 const KNOWN_PAGE_KEYS = new Set([
   'ads', 'agent-decisions', 'agent-estimate', 'agents', 'auto-dispatch',
-  'banking', 'bid-desk', 'bid-kit', 'billing-recovery', 'blog', 'call-recordings', 'communications',
+  'banking', 'bid-desk', 'bid-kit', 'bids', 'billing-recovery', 'blog', 'call-recordings', 'communications',
   'compliance', 'content-engine', 'content-registry', 'contracts',
   'credentials', 'customers', 'dashboard', 'data-hygiene', 'design-system',
   'discounts', 'dispatch', 'document-requests', 'documents', 'drafts', 'email',

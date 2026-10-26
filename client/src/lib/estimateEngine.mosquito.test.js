@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateEstimate, oneTimeMosquitoLadderPrice } from "./estimateEngine";
+import { calculateEstimate, oneTimeMosquitoLadderPrice, ONE_TIME_MOSQUITO_FLOOR } from "./estimateEngine";
 
 // Client mirror of the 2026-08-08 mosquito +5% reprice and the cadence
 // bound (owner directives; server truth in MOSQUITO.basePrices /
@@ -51,11 +51,18 @@ describe("mosquito +5% reprice — client mirror pins", () => {
     }
   });
 
-  it("one-time ladder carries the raised buckets and over-acre increment", () => {
-    expect(oneTimeMosquitoLadderPrice(7000)).toBe(156);
-    expect(oneTimeMosquitoLadderPrice(11000)).toBe(177);
-    expect(oneTimeMosquitoLadderPrice(43560)).toBe(282);
-    // 43560 + 21,440 over → 3 increments of $42 on the $282 base.
-    expect(oneTimeMosquitoLadderPrice(65000)).toBe(282 + 3 * 42);
+  it("one-time ladder carries the 2026-10-25 buckets and over-acre increment", () => {
+    expect(oneTimeMosquitoLadderPrice(7000)).toBe(199);
+    expect(oneTimeMosquitoLadderPrice(11000)).toBe(212);
+    expect(oneTimeMosquitoLadderPrice(43560)).toBe(309);
+    // 43560 + 21,440 over → 3 increments of $26 on the $309 base.
+    expect(oneTimeMosquitoLadderPrice(65000)).toBe(309 + 3 * 26);
+  });
+
+  it("a recurring customer's one-time mosquito never goes under the $199 minimum", () => {
+    const line = (lotSqFt) => calculateEstimate(mosquitoInput({ lotSqFt, svcMosquito: false, svcOnetimeMosquito: true, isRecurringCustomer: true }))
+      .oneTime.items.find((item) => item.name === "OT Mosquito");
+    expect(ONE_TIME_MOSQUITO_FLOOR).toBe(199);
+    expect(line(7000).price).toBe(199);
   });
 });

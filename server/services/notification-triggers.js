@@ -1191,6 +1191,23 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       // operative flag for both push recipients and bell visibility.
       if (!trigger.techVisible) recipientQuery = recipientQuery.where({ role: 'admin' });
       activeAdmins = await recipientQuery.select('id', 'role');
+      // GATE_TECH_LOGIN_PRIVACY: a technician login gets a customer's alert only
+      // for a customer on its own route (technicianServicesCustomer, the rule the
+      // Communications routes use). No customer on the event = today's routing.
+      const scopeCid = demoCid || payload?.scopeCustomerId;
+      if (require('../config/feature-gates').techLoginPrivacyLive?.() && scopeCid && activeAdmins.some((u) => u.role === 'technician')) {
+        const { technicianServicesCustomer } = require('./technician-visit-scope');
+        const own = await Promise.all(activeAdmins.map(async (u) => {
+          if (u.role !== 'technician') return true;
+          try {
+            return await technicianServicesCustomer({ techRole: 'technician', technicianId: u.id }, scopeCid);
+          } catch (e) {
+            logger.warn(`[notification-triggers] technician customer scope failed for '${triggerKey}' — skipping that technician (fail closed): ${e.message}`);
+            return false;
+          }
+        }));
+        activeAdmins = activeAdmins.filter((u, i) => own[i]);
+      }
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
       if (dedupeKey) return { bellWritten: false, push: null, retryable: true };
