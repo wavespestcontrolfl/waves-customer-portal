@@ -1097,6 +1097,9 @@ async function alertRecoveryResendUncertain(row) {
   }, {
     detail: `Bounce recovery ${row.id} (original email ${row.original_message_id}): the worker died after starting the provider send to the corrected address, with no outcome recorded. Check whether the customer received it; the system will not re-send it, so send it by hand if it did not arrive.`,
     dedupeKey: `bounce-recovery-resend-uncertain:${row.id}`,
+    // The admin bell policy (on in production) writes no row for an 'alert' that does not ask to ring. This one
+    // rings unless the owner silences the category.
+    bellDefault: true,
     metadata: { recovery_id: row.id, original_message_id: row.original_message_id, customer_id: row.customer_id || null },
   });
   if (!raised) throw new Error('the uncertain-resend alert was not recorded');
