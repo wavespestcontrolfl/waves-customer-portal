@@ -2188,6 +2188,23 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     expect(converter.convertEstimate).not.toHaveBeenCalled();
   });
 
+  // estimateRowPin: the row-version pin a caller that checked the row in its own transaction passes alone
+  // (commercial-first-visit.js); it is exactly the estimateVersion check's input.
+  test('estimateRowPin alone: the same row version accepts, an edit since refuses with preview_changed', async () => {
+    const { estimateRowPin } = require('../services/estimate-manual-acceptance');
+    const pin = estimateRowPin(estimateRow());
+    expect(pin).toEqual({ estimateVersion: pins.estimateVersion, estimateStatus: 'sent', customerId: 'customer-pins' });
+    const run = (database) => markEstimateManuallyAccepted({
+      estimateId: 'estimate-pins', adminUserId: null, source: 'verbal_yes', expected: pin, database,
+      estimateConverter: { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) },
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+    });
+    await expect(run(dbWith(estimateRow(), customerRow()).database)).resolves.toMatchObject({ estimate: expect.objectContaining({ status: 'accepted' }) });
+    const edited = dbWith(estimateRow({ updated_at: new Date('2026-10-06T12:05:00.000Z') }), customerRow());
+    await expect(run(edited.database)).rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(edited.updates).toEqual([]);
+  });
+
   test('refuses under the locks when a visit was linked to the estimate after the card, and converts nothing', async () => {
     const { database, updates } = dbWith(estimateRow(), customerRow(), { linkedVisit: { id: 'svc-late' } });
     const converter = { convertEstimate: jest.fn() };

@@ -192,11 +192,15 @@ async function loadCustomer(customerId, conn = db) {
 // with the office; Codex #6869 r2 P1), and a completion invoice taxed as the quote is. The customer, or null.
 async function eligibleCustomer(plan, customerId, conn = db) {
   const customer = await loadCustomer(customerId, conn);
-  const { sameProperty } = require('./estimate-consultation-offer');
-  if (!customer || !sameProperty(plan.propertyAddress, { line1: customer.address_line1, line2: customer.address_line2, zip: customer.zip })) {
-    return null;
-  }
+  if (!atSignedPremises(plan, customer)) return null;
   return (await completionTaxMatches(plan, customer.id, conn)) ? customer : null;
+}
+
+// Whether the customer's address on file is the premises the plan's signed agreement names (sameProperty: street,
+// unit and zip).
+function atSignedPremises(plan, customer) {
+  const { sameProperty } = require('./estimate-consultation-offer');
+  return !!customer && sameProperty(plan.propertyAddress, { line1: customer.address_line1, line2: customer.address_line2, zip: customer.zip });
 }
 
 // /data's cta.commercialFirstVisit, or null (nothing new on the payload):
@@ -324,8 +328,12 @@ function findSlot(availability, date, time) {
 // 'ineligible' when the estimate is no longer open, its call-side verdict now blocks it, its plan changed, or its quote
 // is no longer the signed one, else 'ok'. `openFor(row)` is the route's open-estimate verdict.
 function estimateGuardFor(estimate, { openFor }) {
-  return {
+  const guard = {
     estimateId: estimate.id,
+    // The row version the booking committed under (set by an 'ok' verdict; the booking holds the row until commit and
+    // writes nothing to it): the accept pins it, so an edit after the booking (a new price, terms or invoice mode)
+    // refuses the accept instead of marking unchecked terms won (pre-push audit P0).
+    acceptPin: null,
     revalidate: async (trx) => {
       // The kill switch, read again at the commit boundary: a flip during the availability build or a lock wait books
       // nothing.
@@ -340,10 +348,17 @@ function estimateGuardFor(estimate, { openFor }) {
       const was = firstVisitPlan(estimate);
       if (!plan || !was || plan.pricePerVisit !== was.pricePerVisit || plan.taxPerVisit !== was.taxPerVisit
         || plan.durationMinutes !== was.durationMinutes || plan.pattern !== was.pattern) return 'ineligible';
+      // The signed premises, against the customer row the booking holds (a unit or address correction during the
+      // availability lookup can keep the same pin).
+      const customer = await trx('customers').where({ id: fresh.customer_id }).forShare().first('address_line1', 'address_line2', 'zip');
+      if (!atSignedPremises(plan, customer)) return 'ineligible';
       // The quote on this read is still the one the customer signed (no edit landed since the caller's check).
-      return (await require('./commercial-proposal-agreement').signedQuoteMatches(fresh, trx)) ? 'ok' : 'ineligible';
+      if (!(await require('./commercial-proposal-agreement').signedQuoteMatches(fresh, trx))) return 'ineligible';
+      guard.acceptPin = require('./estimate-manual-acceptance').estimateRowPin(fresh);
+      return 'ok';
     },
   };
+  return guard;
 }
 
 function errorLine(err) {
@@ -471,6 +486,7 @@ async function bookFirstVisit(estimate, { date, time, openFor }) {
   const slot = findSlot(await availabilityFor(context, { rangeFrom: date, rangeTo: date, config }), date, time);
   if (!slot) return refusal(409, 'slot_taken', SLOT_TAKEN);
 
+  const guard = estimateGuardFor(estimate, { openFor });
   const result = await booking.createSelfBooking({
     slot_date: date,
     slot_start: slot.start_time,
@@ -492,7 +508,7 @@ async function bookFirstVisit(estimate, { date, time, openFor }) {
       expectedLocation: location,
       alertLabel: ALERT_LABEL,
       billing: { estimatedPrice: plan.pricePerVisit },
-      estimateGuard: estimateGuardFor(estimate, { openFor }),
+      estimateGuard: guard,
     },
   });
   if (!result.ok) {
@@ -506,18 +522,21 @@ async function bookFirstVisit(estimate, { date, time, openFor }) {
   const visitRow = await db('scheduled_services').where({ self_booking_id: result.body.booking.id }).first('id');
   const visit = { id: visitRow?.id, date, windowStart: hhmm(slot.start_time), windowEnd: hhmm(slot.end_time) };
 
-  // Mark won through the staff path: it re-checks the row under its own locks, promotes the customer and flags tax
-  // (the visit already carries source_estimate_id). A refusal leaves the visit booked and tells the office. Every
-  // step after the booking is safe to run again: the accept answers alreadyAccepted, the seeding skips a parent that
-  // is already recurring, and the alert dedupes on the estimate.
+  // Mark won through the staff path, pinned to the row version the booking committed under: it re-checks the row
+  // under its own locks, promotes the customer and flags tax (the visit already carries source_estimate_id). A refusal
+  // (an edit since the booking, among others) leaves the visit booked and tells the office. Every step after the
+  // booking is safe to run again: the accept answers alreadyAccepted, the seeding skips a parent that is already
+  // recurring, and the alert dedupes on the estimate.
   let accepted = false;
   try {
     const { markEstimateManuallyAccepted } = require('./estimate-manual-acceptance');
+    if (!guard.acceptPin) throw Object.assign(new Error('no accept pin'), { code: 'no_accept_pin' });
     await markEstimateManuallyAccepted({
       estimateId: estimate.id,
       adminUserId: null,
       source: ACCEPT_SOURCE,
       bookedAppointmentIds: [visit.id],
+      expected: guard.acceptPin,
     });
     accepted = true;
   } catch (err) {

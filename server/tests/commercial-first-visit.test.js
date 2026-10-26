@@ -26,6 +26,7 @@ jest.mock('../services/commercial-proposal-agreement', () => ({
 const mockAccept = jest.fn();
 jest.mock('../services/estimate-manual-acceptance', () => ({
   markEstimateManuallyAccepted: (...args) => mockAccept(...args),
+  estimateRowPin: (row) => ({ estimateVersion: String(row.updated_at), estimateStatus: row.status, customerId: row.customer_id }),
 }));
 const mockSeeder = { checkActiveSeriesLocked: jest.fn(), seedFollowUpsForParent: jest.fn() };
 jest.mock('../services/recurring-appointment-seeder', () => mockSeeder);
@@ -106,7 +107,12 @@ beforeEach(() => {
     slots: [],
     nearby: false,
   }));
-  mockBooking.createSelfBooking.mockResolvedValue({ ok: true, body: { booking: { id: 'sba-1' } } });
+  // A committed booking passed its estimate guard, which records the accept pin (the real guard: revalidate 'ok').
+  mockBooking.createSelfBooking.mockImplementation(async (payload) => {
+    const guard = payload.callbackVisit?.estimateGuard;
+    if (guard) guard.acceptPin = { estimateVersion: 'v-booked', estimateStatus: 'sent', customerId: CUSTOMER_ID };
+    return { ok: true, body: { booking: { id: 'sba-1' } } };
+  });
   mockBooking.runSeriesTxWithOwnerRetry.mockImplementation(async (_db, body) => body(jest.fn()));
   mockBooking.lockAndVerifySeriesParentOwner.mockResolvedValue({ id: VISIT_ID, customer_id: CUSTOMER_ID, status: 'confirmed', is_recurring: false });
   mockAgreementState.mockReset().mockResolvedValue({ state: 'signed' });
@@ -290,6 +296,8 @@ describe('bookFirstVisit', () => {
     expect(payload.callbackVisit.estimateGuard.estimateId).toBe(ESTIMATE_ID);
     expect(mockAccept).toHaveBeenCalledWith({
       estimateId: ESTIMATE_ID, adminUserId: null, source: 'customer_first_visit_booking', bookedAppointmentIds: [VISIT_ID],
+      // Pinned to the row version the booking committed under (pre-push audit P0).
+      expected: { estimateVersion: 'v-booked', estimateStatus: 'sent', customerId: CUSTOMER_ID },
     });
     expect(mockSeeder.seedFollowUpsForParent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: VISIT_ID }), expect.objectContaining({
       pattern: 'monthly', plannedCount: 12, durationMinutes: 55, estimatedPrice: 81.67, recurringOngoing: true, sourceEstimateId: ESTIMATE_ID,
@@ -307,7 +315,8 @@ describe('bookFirstVisit', () => {
 
   test('order: the booking commits before the accept, and the accept before the seeding', async () => {
     const order = [];
-    mockBooking.createSelfBooking.mockImplementation(async () => { order.push('book'); return { ok: true, body: { booking: { id: 'sba-1' } } }; });
+    const book = mockBooking.createSelfBooking.getMockImplementation();
+    mockBooking.createSelfBooking.mockImplementation(async (payload) => { order.push('book'); return book(payload); });
     mockAccept.mockImplementation(async () => { order.push('accept'); });
     mockSeeder.seedFollowUpsForParent.mockImplementation(async () => { order.push('seed'); return { insertedCount: 11 }; });
     await bookTomorrowAtNine();
@@ -349,6 +358,14 @@ describe('bookFirstVisit', () => {
     expect(opts.detail).toContain('could not be marked won');
   });
 
+  test('no accept pin (the guard never passed this booking): no accept, and the office marks it won', async () => {
+    mockBooking.createSelfBooking.mockResolvedValue({ ok: true, body: { booking: { id: 'sba-1' } } });
+    const { result } = await bookTomorrowAtNine();
+    expect(result.ok).toBe(true);
+    expect(mockAccept).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/mark the estimate won by hand\.$/);
+  });
+
   test('a customer who already runs a pest series keeps it: no second series, and the alert says so', async () => {
     mockSeeder.checkActiveSeriesLocked.mockResolvedValue({ matches: [{ id: 'series-1' }], guardError: null });
     await bookTomorrowAtNine();
@@ -369,16 +386,28 @@ describe('the in-transaction estimate guard', () => {
   function guard(estimate = proposalEstimate()) {
     return firstVisit._private.estimateGuardFor(estimate, { openFor });
   }
+  // Tables a test names answer as given; the rest answer from the defaults (the customer at the signed premises).
   function trxWith(tables) {
     return jest.fn((table) => {
       const c = chain(table);
-      c.first = jest.fn(async () => tables[table]);
+      c.first = jest.fn(async () => (table in tables ? tables[table] : rows[table]));
       return c;
     });
   }
 
-  test('ok: still open, still signed, same plan, no visit yet', async () => {
-    expect(await guard().revalidate(trxWith({ estimates: proposalEstimate() }))).toBe('ok');
+  test('ok: still open, still signed, same plan, no visit yet; it records the accept pin from the held row', async () => {
+    const g = guard();
+    expect(g.acceptPin).toBeNull();
+    expect(await g.revalidate(trxWith({ scheduled_services: undefined, estimates: proposalEstimate({ updated_at: 'v-held' }) }))).toBe('ok');
+    expect(g.acceptPin).toEqual({ estimateVersion: 'v-held', estimateStatus: 'sent', customerId: CUSTOMER_ID });
+  });
+
+  // Pre-push audit P0: the signed premises, against the customer row the booking holds.
+  test('a unit or address correction during the lookup: ineligible, and no accept pin', async () => {
+    const g = guard();
+    const moved = { ...rows.customers, address_line2: 'Suite 9' };
+    expect(await g.revalidate(trxWith({ scheduled_services: undefined, estimates: proposalEstimate(), customers: moved }))).toBe('ineligible');
+    expect(g.acceptPin).toBeNull();
   });
 
   test('a first visit that landed since the read: booked', async () => {
@@ -412,7 +441,7 @@ describe('the in-transaction estimate guard', () => {
     const chains = [];
     const trx = jest.fn((table) => {
       const c = chain(table);
-      c.first = jest.fn(async () => (table === 'estimates' ? proposalEstimate() : undefined));
+      c.first = jest.fn(async () => ({ estimates: proposalEstimate(), customers: rows.customers })[table]);
       if (table === 'estimates') chains.push(c);
       return c;
     });
