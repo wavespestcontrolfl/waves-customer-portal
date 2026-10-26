@@ -94,7 +94,10 @@ async function assessmentEligibility(estimate, data, conn = db) {
   if (!sameProperty(estimate.address, { line1: customer.address_line1, line2: customer.address_line2, zip: customer.zip })) {
     return { state: 'gone' };
   }
-  const visit = await inspection().findOpenVisit(conn, customer.id, { assessmentOnly: true, futureOnly: true });
+  // Any open assessment, past-due ones included: the commit's per-customer assessment lane dedupe blocks on those too,
+  // so the page shows that visit and its reschedule link instead of times it can never book (the inspection page's
+  // own check, inspection-public.js).
+  const visit = await inspection().findOpenVisit(conn, customer.id, { assessmentOnly: true });
   if (visit) return { state: 'already_booked', customer, visit };
   return { state: 'ok', customer };
 }
@@ -305,7 +308,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
       if (result.code === 'ALREADY_BOOKED') {
         // The per-customer assessment lane caught one: answer with the visit that holds it, read afresh.
-        const visit = await inspection().findOpenVisit(db, resolved.customer.id, { assessmentOnly: true, futureOnly: true });
+        const visit = await inspection().findOpenVisit(db, resolved.customer.id, { assessmentOnly: true });
         if (visit) return res.json(await alreadyBookedBody(visit, resolved.lead));
       }
       if (result.status === 409) {

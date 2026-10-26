@@ -146,14 +146,15 @@ describe('GET /:token', () => {
     expect(mockInspection.buildAvailabilityForLead).not.toHaveBeenCalled();
   });
 
-  test('an open assessment: already_booked with the visit and its reschedule link', async () => {
+  // Any date, past-due included (pre-push audit P1): the commit's per-customer assessment lane dedupe counts those too.
+  test('an open assessment, of any date: already_booked with the visit and its reschedule link', async () => {
     mockInspection.findOpenVisit.mockResolvedValue({ id: 'visit-1', scheduled_date: '2026-11-03' });
     const res = await call(TOKEN);
     expect(res.body).toMatchObject({
       state: 'already_booked', code: 'ALREADY_BOOKED', rescheduleUrl: '/reschedule/resched-token',
       visit: { date: '2026-11-03' }, lead: { first_name: 'Pat' },
     });
-    expect(mockInspection.findOpenVisit).toHaveBeenCalledWith(db, 'cust-1', { assessmentOnly: true, futureOnly: true });
+    expect(mockInspection.findOpenVisit).toHaveBeenCalledWith(db, 'cust-1', { assessmentOnly: true });
   });
 
   test('no booking location (a pin under review): the service-area notice, no times', async () => {
@@ -269,7 +270,7 @@ describe('the in-transaction estimate guard', () => {
     expect(await revalidate(trx)).toBe('ok');
     expect(reads.find((q) => q.table === 'estimates').shared).toBe(true);
     expect(mockBlockedUnderLock).toHaveBeenCalledWith(trx, expect.objectContaining({ id: 'est-1' }));
-    expect(mockInspection.findOpenVisit).toHaveBeenCalledWith(trx, 'cust-1', { assessmentOnly: true, futureOnly: true });
+    expect(mockInspection.findOpenVisit).toHaveBeenCalledWith(trx, 'cust-1', { assessmentOnly: true });
     expect(db).not.toHaveBeenCalled();
   });
 

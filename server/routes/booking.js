@@ -4080,6 +4080,20 @@ async function createSelfBooking(payload = {}) {
         .where({ customer_id: custId, date: slotDateStr, start_time: slot_start })
         .whereNot('status', 'cancelled');
       if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);
+      // A paid estimate-page booking replays only its OWN estimate's booking:
+      // another signed proposal's booking for this customer at the same start
+      // is not this one, and replaying it would mark this proposal won against
+      // that visit and price (pre-push audit P0). Its estimate guard already
+      // answers a visit linked to its own estimate as ALREADY_BOOKED, above.
+      if (paidInternalVisit) {
+        const ownEstimateId = callbackVisit.estimateGuard?.estimateId;
+        if (!ownEstimateId) replayQuery.whereRaw('false');
+        else {
+          replayQuery.whereExists((visit) => visit.select(trx.raw('1')).from('scheduled_services')
+            .whereRaw('scheduled_services.self_booking_id = self_booked_appointments.id')
+            .where('scheduled_services.source_estimate_id', String(ownEstimateId)));
+        }
+      }
       const existing = await replayQuery.first();
       if (existing) {
         // A callback/consultation replay (round-10 P2) must also confirm the
