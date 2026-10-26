@@ -4,7 +4,7 @@
 // section rides the glass card treatment. A residential estimate keeps all of those sections.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
 
@@ -168,6 +168,35 @@ describe('commercial first visit on the proposal page', () => {
     expect(within(picker).getByRole('heading', { level: 2, name: 'Pick your first visit' })).toBeInTheDocument();
     expect(screen.queryByTestId('commercial-agreement-signed')).not.toBeInTheDocument();
     expect(screen.getByTestId('proposal-next-steps')).toHaveTextContent('Pick the day and time of your first visit below');
+  });
+
+  // Codex #6869 r2 P2: the signing page's "Back to your estimate" is a history step, so a bfcache restore must refetch
+  // /data, or the page keeps its unsigned card and never shows the picker.
+  it('back from signing (a bfcache restore): /data is read again and the picker shows', async () => {
+    const before = proposalPayload({ canSign: true, state: 'none' });
+    before.cta.commercialFirstVisit = { state: 'after_signing' };
+    const after = proposalPayload({ canSign: false, state: 'signed' });
+    after.cta.commercialFirstVisit = { state: 'pick', durationMinutes: 30 };
+    const queue = [before, after];
+    const fetchMock = vi.fn(async (url) => {
+      if (String(url).includes('/first-visit/availability')) return json({ ok: true, days: [], slots: [] });
+      return json(queue.length > 1 ? queue.shift() : queue[0]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+    await screen.findByRole('button', { name: 'Accept & sign agreement' });
+    await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+    expect(await screen.findByTestId('commercial-first-visit-picker')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(2);
+  });
+
+  it('a commercial proposal with nothing waiting on a signature never refetches on return', async () => {
+    const fetchMock = vi.fn(async () => json(proposalPayload({ canSign: true, state: 'none' })));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+    await screen.findByRole('button', { name: 'Accept & sign agreement' });
+    await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length).toBe(1);
   });
 
   it('accepted with a booked first visit: the accepted card shows the visit date', async () => {

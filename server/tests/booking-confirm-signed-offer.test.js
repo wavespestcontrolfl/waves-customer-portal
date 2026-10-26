@@ -700,7 +700,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       const revalidate = jest.fn().mockResolvedValue('ok');
       await expect(createSelfBooking(firstVisitPayload({ estimateGuard: { estimateId: EST_ID, revalidate } }))).rejects.toThrow(SENTINEL);
       expect(capturedScheduledInsert).toMatchObject({ estimated_price: 81.67 });
-      expect(raws.some(([sql, bindings]) => /pg_advisory_xact_lock/.test(sql) && bindings?.[0] === 'commercial-first-visit' && bindings?.[1] === EST_ID)).toBe(true);
+      expect(raws.some(([sql, bindings]) => /pg_advisory_xact_lock/.test(sql) && bindings?.[0] === 'estimate-booking-guard' && bindings?.[1] === EST_ID)).toBe(true);
       expect(typeof revalidate.mock.calls[0][0]).toBe('function');
     });
 

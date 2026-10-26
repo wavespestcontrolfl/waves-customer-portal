@@ -2509,8 +2509,9 @@ async function createSelfBooking(payload = {}) {
     // only, GATE_COMMERCIAL_FIRST_VISIT): a PAID internal booking, never a
     // callback — the visit carries the server-resolved per-visit price and
     // invoices on completion. callbackVisit.estimateGuard ({ estimateId,
-    // revalidate(trx) }, same caller): one first visit per estimate, re-checked
-    // inside the booking transaction (see the lock below).
+    // revalidate(trx) }): a booking made from an estimate's page
+    // (commercial-first-visit.js) re-checks that estimate inside the booking
+    // transaction (see the lock below).
     const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
       && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
       ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
@@ -4035,16 +4036,18 @@ async function createSelfBooking(payload = {}) {
           });
         }
       }
-      // callbackVisit.estimateGuard (commercial first visit only): one first
-      // visit per estimate. A per-estimate lock taken after every shared rung
-      // and the lane/lead locks (only this caller takes the namespace, and it
-      // is the terminal lock, so no cycle), then the caller's re-check on THIS
-      // transaction: a first visit that landed since its read, or an estimate
-      // no longer open or signed, refuses before the insert below.
+      // callbackVisit.estimateGuard (a booking from an estimate's page,
+      // commercial-first-visit.js): a per-estimate
+      // lock taken after every shared rung and the lane/lead locks (only these
+      // callers take the namespace, and it is the terminal lock, so no cycle),
+      // then the caller's re-check on THIS transaction: 'booked' when the one
+      // visit the caller allows landed since its read (the first visit), any
+      // other verdict but 'ok' when the estimate no longer qualifies (no longer
+      // open, signed, or clear on the call side) refuses before the insert.
       if (callbackVisit?.estimateGuard?.estimateId) {
         await trx.raw(
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['commercial-first-visit', String(callbackVisit.estimateGuard.estimateId)],
+          ['estimate-booking-guard', String(callbackVisit.estimateGuard.estimateId)],
         );
         const { revalidate } = callbackVisit.estimateGuard;
         const verdict = typeof revalidate === 'function' ? await revalidate(trx) : 'ineligible';
@@ -4056,7 +4059,7 @@ async function createSelfBooking(payload = {}) {
           });
         }
         if (verdict !== 'ok') {
-          throw Object.assign(new Error('This proposal just changed — please refresh the page.'), {
+          throw Object.assign(new Error('This estimate just changed — please refresh the page.'), {
             statusCode: 409,
             isOperational: true,
             code: 'ESTIMATE_CHANGED',

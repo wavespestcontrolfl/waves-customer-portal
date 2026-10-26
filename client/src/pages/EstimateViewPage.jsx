@@ -6654,9 +6654,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   );
 
   // Back from the signing page (a bfcache restore or a tab switch), a customer waiting on the Florida consumer notice
-  // sees it signed without a manual reload. Listens only while the notice blocks the accept.
+  // sees it signed without a manual reload; so does the signer of an eligible commercial proposal, whose first-visit
+  // picker shows once the agreement is signed (GATE_COMMERCIAL_FIRST_VISIT). Listens only while one of them waits.
+  const awaitingSignature = consumerNoticeBlocked || data?.cta?.commercialFirstVisit?.state === 'after_signing';
   useEffect(() => {
-    if (!consumerNoticeBlocked) return undefined;
+    if (!awaitingSignature) return undefined;
     const refresh = () => {
       if (ctaPhaseRef.current === 'submitting') return;
       loadEstimate({ preserveSelection: true }).catch(() => {});
@@ -6669,7 +6671,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       window.removeEventListener('pageshow', onPageShow);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [consumerNoticeBlocked, loadEstimate]);
+  }, [awaitingSignature, loadEstimate]);
 
 
   // A different estimate token is a fresh session — let its first load count.

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CommercialAgreementSign, { SIGN_BUTTON_LABEL } from './CommercialAgreementSign';
 
@@ -63,6 +63,21 @@ describe('CommercialAgreementSign', () => {
     fireEvent.click(button);
     await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex #6869 r2 P2: the page left for the signing page with the button busy; a bfcache restore keeps that state.
+  it('back through the browser history (a bfcache restore): the button works again', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 201, json: async () => ({ signingUrl: 'https://portal.example.test/contract/x' }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: true, state: 'none' }} />);
+    fireEvent.click(screen.getByRole('button', { name: SIGN_BUTTON_LABEL }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'Opening your agreement…' })).toBeDisabled();
+    await act(async () => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+    const button = screen.getByRole('button', { name: SIGN_BUTTON_LABEL });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   });
 });
 

@@ -36,11 +36,10 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) =>
 // The completion mint's tax, as a dry run (InvoiceService.previewInvoiceTotals); 7% unless a test says otherwise.
 const mockPreview = jest.fn();
 jest.mock('../services/invoice', () => ({ previewInvoiceTotals: (...args) => mockPreview(...args) }));
-// The call-side verdicts the guard re-runs under lock; clear unless a test says otherwise.
-const mockCallSideBlock = jest.fn();
-jest.mock('../utils/estimate-claim-sql', () => ({ callSideBlockForEstimateData: (...args) => mockCallSideBlock(...args) }));
-const mockStaleLinkage = jest.fn();
-jest.mock('../services/admin-estimate-persistence', () => ({ staleCallLinkageReason: (...args) => mockStaleLinkage(...args) }));
+// The call-side verdict the guard re-runs under lock (its steps: estimate-claim-sql-call-side-under-lock.test.js);
+// clear unless a test says otherwise.
+const mockBlockedUnderLock = jest.fn();
+jest.mock('../utils/estimate-claim-sql', () => ({ callSideBlockedUnderLock: (...args) => mockBlockedUnderLock(...args) }));
 
 const db = require('../models/db');
 const firstVisit = require('../services/commercial-first-visit');
@@ -49,11 +48,15 @@ const ESTIMATE_ID = '0b6f2d0e-1c4a-4d8e-9b1f-6a2c3d4e5f60';
 const CUSTOMER_ID = '4d3c2b1a-0f9e-4d8c-9b7a-6f5e4d3c2b1a';
 const VISIT_ID = '7e8f9a0b-1c2d-4e3f-8a9b-0c1d2e3f4a5b';
 
+// A synthetic suite; the customer row below is at the same premises.
+const PROPERTY = '100 Harbor Way, Suite 4, Sarasota, FL 34236';
+
 function proposalEstimate({ programs, proposal = {}, engineMinutes = 50.8, ...overrides } = {}) {
   return {
     id: ESTIMATE_ID,
     status: 'sent',
     customer_id: CUSTOMER_ID,
+    address: PROPERTY,
     estimate_data: {
       proposal: {
         enabled: true,
@@ -87,7 +90,10 @@ beforeEach(() => {
   process.env.GATE_COMMERCIAL_FIRST_VISIT = 'true';
   rows = {
     scheduled_services: undefined,
-    customers: { id: CUSTOMER_ID, company_name: 'Harbor Dental Suite', first_name: 'Pat', last_name: 'Example' },
+    customers: {
+      id: CUSTOMER_ID, company_name: 'Harbor Dental Suite', first_name: 'Pat', last_name: 'Example',
+      address_line1: '100 Harbor Way', address_line2: 'Suite 4', city: 'Sarasota', state: 'FL', zip: '34236',
+    },
     estimates: proposalEstimate(),
   };
   db.mockReset().mockImplementation((table) => chain(table));
@@ -110,8 +116,7 @@ beforeEach(() => {
   mockSeeder.seedFollowUpsForParent.mockReset().mockResolvedValue({ insertedCount: 11 });
   mockNotifyAdmin.mockReset().mockResolvedValue({ id: 'n1' });
   mockPreview.mockReset().mockImplementation(async ({ amount }) => ({ tax_amount: Math.round(amount * 0.07 * 100) / 100 }));
-  mockCallSideBlock.mockReset().mockResolvedValue(null);
-  mockStaleLinkage.mockReset().mockResolvedValue(null);
+  mockBlockedUnderLock.mockReset().mockResolvedValue(false);
 });
 afterAll(() => {
   if (ORIGINAL_GATE === undefined) delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
@@ -121,7 +126,7 @@ afterAll(() => {
 describe('firstVisitPlan', () => {
   test('one monthly pest program: per-visit price, monthly pattern, the estimator minutes rounded up to 5', () => {
     expect(firstVisitVisitPlan()).toEqual({
-      visitsPerYear: 12, pattern: 'monthly', pricePerVisit: 81.67, taxPerVisit: 5.72, flagsCommercial: true, durationMinutes: 55,
+      visitsPerYear: 12, pattern: 'monthly', pricePerVisit: 81.67, taxPerVisit: 5.72, flagsCommercial: true, propertyAddress: PROPERTY, durationMinutes: 55,
       serviceType: 'Commercial Pest Control', serviceKey: 'pest_control',
     });
   });
@@ -397,37 +402,23 @@ describe('the in-transaction estimate guard', () => {
     expect(mockSignedQuoteMatches).toHaveBeenCalledWith(expect.objectContaining({ id: ESTIMATE_ID }), trx);
   });
 
-  // Pre-push audit P0: the route's call-side verdict, re-run on the held estimate row with the lead and call rows locked.
-  test('a call-side block or a stale call linkage that landed since the route read: ineligible', async () => {
-    mockCallSideBlock.mockResolvedValueOnce('call_rejected');
-    expect(await guard().revalidate(trxWith({ estimates: proposalEstimate() }))).toBe('ineligible');
-    mockStaleLinkage.mockResolvedValueOnce('call_linkage_changed');
+  // Pre-push audit P0: the route's call-side verdict, re-run on the held estimate row inside the booking transaction.
+  test('a call-side verdict that blocks since the route read: ineligible', async () => {
+    mockBlockedUnderLock.mockResolvedValueOnce(true);
     expect(await guard().revalidate(trxWith({ estimates: proposalEstimate() }))).toBe('ineligible');
   });
 
-  test('an estimate-side linkage marker: ineligible, before any call read', async () => {
-    const marked = proposalEstimate();
-    marked.estimate_data = { ...marked.estimate_data, estimatorEngine: { callLogId: 'call-1', linkage_invalidated_at: '2026-10-26T12:00:00Z' } };
-    expect(await guard().revalidate(trxWith({ estimates: marked }))).toBe('ineligible');
-    expect(mockStaleLinkage).not.toHaveBeenCalled();
-  });
-
-  test('the verdict is held: estimate under a share lock, then the linked lead, then the call row', async () => {
-    const linked = proposalEstimate();
-    linked.estimate_data = { ...linked.estimate_data, lead_id: 'lead-1', lead_linkage: 'sid', estimatorEngine: { callLogId: 'call-1' } };
-    const chains = {};
+  test('the verdict is read on the held row: the estimate under a share lock, checked on this transaction', async () => {
+    const chains = [];
     const trx = jest.fn((table) => {
       const c = chain(table);
-      c.first = jest.fn(async () => (table === 'estimates' ? linked : undefined));
-      (chains[table] ||= []).push(c);
+      c.first = jest.fn(async () => (table === 'estimates' ? proposalEstimate() : undefined));
+      if (table === 'estimates') chains.push(c);
       return c;
     });
     expect(await guard().revalidate(trx)).toBe('ok');
-    expect(chains.estimates[0].forShare).toHaveBeenCalled();
-    expect(chains.leads[0].where).toHaveBeenCalledWith({ id: 'lead-1' });
-    expect(chains.leads[0].forUpdate).toHaveBeenCalled();
-    expect(mockStaleLinkage).toHaveBeenCalledWith(trx, expect.objectContaining({ lead_id: 'lead-1' }), expect.objectContaining({ lockCallRow: true }));
-    expect(mockCallSideBlock).toHaveBeenCalledWith(trx, expect.objectContaining({ lead_id: 'lead-1' }), expect.anything());
+    expect(chains[0].forShare).toHaveBeenCalled();
+    expect(mockBlockedUnderLock).toHaveBeenCalledWith(trx, expect.objectContaining({ id: ESTIMATE_ID }));
   });
 
   test('the gate turned off while the booking waited: ineligible, before any read', async () => {
@@ -483,6 +474,27 @@ describe('completion tax parity', () => {
   test('a failed dry run fails closed', async () => {
     mockPreview.mockRejectedValue(new Error('boom'));
     expect(await firstVisit.completionTaxMatches(firstVisitVisitPlan(), CUSTOMER_ID)).toBe(false);
+  });
+});
+
+// Codex #6869 r2 P1: the booking, its pin and the series run at the customer's address on file, so only a proposal
+// whose signed premises (propertyAddress, else the estimate's address) are that address books online.
+describe('the signed premises are the customer\'s address', () => {
+  test.each([
+    ['another building', '200 Harbor Way, Sarasota, FL 34236'],
+    ['another unit at the same street address', '100 Harbor Way, Suite 9, Sarasota, FL 34236'],
+  ])('%s: no picker, no online copy, and the routes answer call us', async (_label, propertyAddress) => {
+    const estimate = proposalEstimate({ proposal: { propertyAddress } });
+    rows.estimates = estimate;
+    expect(await firstVisit.firstVisitCtaFor(estimate, { open: true, picker: true })).toBeNull();
+    expect(await firstVisit.firstVisitOnlineFor(ESTIMATE_ID)).toBe(false);
+    await expect(firstVisit.firstVisitAvailability(estimate)).resolves.toMatchObject({ ok: false, status: 409, code: 'call_us' });
+    expect(mockBooking.buildBookingAvailability).not.toHaveBeenCalled();
+  });
+
+  test('the proposal\'s own property line is the signed premises, over the estimate\'s address', async () => {
+    const estimate = proposalEstimate({ address: '9 Other Rd, Venice, FL 34285', proposal: { propertyAddress: PROPERTY } });
+    expect(await firstVisit.firstVisitCtaFor(estimate, { open: true, picker: true })).toEqual({ state: 'pick', durationMinutes: 55 });
   });
 });
 

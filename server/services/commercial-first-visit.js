@@ -52,6 +52,8 @@ const DEAD_VISIT_STATUSES = ['cancelled', 'canceled', 'skipped', 'rescheduled', 
 const PATTERN_FOR_VISITS = Object.freeze({ 12: 'monthly', 6: 'bimonthly', 4: 'quarterly', 3: 'triannual', 2: 'semiannual', 1: 'annual' });
 const CADENCE_WORD = Object.freeze({ 12: 'monthly', 6: 'every-2-month', 4: 'quarterly', 3: 'every-4-month', 2: 'twice-a-year', 1: 'yearly' });
 const ALERT_LABEL = '🏢 Commercial first visit self-booked:';
+// Structured payment terms the win accepts outside invoice mode: none, or Auto Pay.
+const ONLINE_PAYMENT_TERMS = new Set([undefined, null, '', 'autopay']);
 
 const live = () => require('../config/feature-gates').commercialFirstVisitLive();
 
@@ -99,38 +101,35 @@ function firstVisitPlan(estimate = {}) {
   if (proposal.enabled !== true || proposal.synthesized === true) return null;
   // The win (estimate-manual-acceptance.js winCommercialProposal) refuses a proposal outside invoice mode whose
   // structured payment terms are anything but Auto Pay, so only those proposals book online.
-  const paymentTerms = proposal.commercialTerms?.paymentTerms;
-  if (paymentTerms && paymentTerms !== 'autopay') return null;
-  const programs = proposal.programs || [];
-  if (!programs.length) return null;
-  if ((proposal.buildings || []).some((building) => (building.lineItems || []).length)) return null;
-  if ((proposal.correctiveWork || []).length) return null;
+  if (!ONLINE_PAYMENT_TERMS.has(proposal.commercialTerms?.paymentTerms)) return null;
+  // normalizeProposal keeps only priced programs (null when none) and corrective work as null or a non-empty list, so
+  // with no building lines and no corrective work the proposal has no one-time total and every visit has a price.
+  const programs = proposal.programs;
+  if (!programs || proposal.correctiveWork || proposal.buildings.some((building) => building.lineItems.length)) return null;
   // Pest programs only; a misting system (identity) is not a pest visit.
   if (!programs.every((program) => program.service === 'pest' && !program.identity)) return null;
   const cadences = new Set(programs.map((program) => program.frequencyPerYear));
-  if (cadences.size !== 1) return null;
   const visitsPerYear = [...cadences][0];
-  const pattern = PATTERN_FOR_VISITS[visitsPerYear] || null;
-  if (!pattern) return null;
+  const pattern = PATTERN_FOR_VISITS[visitsPerYear];
+  if (cadences.size !== 1 || !pattern) return null;
   const pricePerVisit = roundMoney(programs.reduce((sum, program) => sum + program.pricePerApplication, 0));
   const totals = computeProposalTotals(proposal);
-  // Every visit bills the same amount, and a year of visits is the quoted annual price; anything the programs do not
-  // explain stays with the office.
-  if (!(pricePerVisit > 0) || totals.oneTime > 0 || roundMoney(pricePerVisit * visitsPerYear) !== totals.annualRecurring) return null;
-  const durationMinutes = visitMinutesFor(programs, parseEstimateData(estimate.estimate_data ?? estimate.estimateData));
+  // Every visit bills the same amount, and a year of visits is the quoted annual price.
+  if (roundMoney(pricePerVisit * visitsPerYear) !== totals.annualRecurring) return null;
+  const durationMinutes = visitMinutesFor(programs, parseEstimateData(estimate.estimate_data));
   if (durationMinutes > MAX_VISIT_MINUTES) return null;
-  // The tax the quote shows for one visit, rounded per application as computeProposalTotals rounds it.
-  const taxPerVisit = roundMoney(programs.reduce(
-    (sum, program) => sum + (program.taxable ? roundMoney(program.pricePerApplication * totals.taxRate) : 0), 0,
-  ));
   return {
     visitsPerYear,
     pattern,
     pricePerVisit,
-    taxPerVisit,
+    // The tax the quote shows for one visit, rounded per application as computeProposalTotals rounds it.
+    taxPerVisit: roundMoney(programs.filter((program) => program.taxable)
+      .reduce((sum, program) => sum + roundMoney(program.pricePerApplication * totals.taxRate), 0)),
     // The win marks the customer commercial for a taxable proposal (proposal-win.js
     // flagProposalCustomerCommercialIfTaxable, the same first-invoice rule), before any completion invoice exists.
     flagsCommercial: require('./proposal-win').buildProposalFirstInvoice(proposal).taxableSubtotal > 0,
+    // The premises the signed agreement names (commercial-proposal-agreement.js buildAgreementValues).
+    propertyAddress: proposal.propertyAddress,
     durationMinutes,
     serviceType: SERVICE_TYPE,
     serviceKey: SERVICE_KEY,
@@ -187,6 +186,19 @@ async function loadCustomer(customerId, conn = db) {
   return conn('customers').where({ id: customerId }).whereNull('deleted_at').first(...customerColumns());
 }
 
+// The customer-side half of eligibility, shared by the page, the signed-agreement alert and both routes: the customer
+// account, whose address on file is the premises the signed agreement names (the booking, its pin and the series all
+// run at the customer's stored address, so a proposal for other premises, another building or a corrected unit, stays
+// with the office; Codex #6869 r2 P1), and a completion invoice taxed as the quote is. The customer, or null.
+async function eligibleCustomer(plan, customerId, conn = db) {
+  const customer = await loadCustomer(customerId, conn);
+  const { sameProperty } = require('./estimate-consultation-offer');
+  if (!customer || !sameProperty(plan.propertyAddress, { line1: customer.address_line1, line2: customer.address_line2, zip: customer.zip })) {
+    return null;
+  }
+  return (await completionTaxMatches(plan, customer.id, conn)) ? customer : null;
+}
+
 // /data's cta.commercialFirstVisit, or null (nothing new on the payload):
 //   { state: 'booked', visit }   a live visit is linked to the estimate (it can be accepted by now);
 //   { state: 'pick', durationMinutes }   signed, still open, no visit yet, and `picker`: the page shows the picker;
@@ -200,8 +212,7 @@ async function firstVisitCtaFor(estimate, { open = false, picker = false, conn =
     if (!plan) return null;
     const visit = await linkedFirstVisit(estimate.id, conn);
     if (visit) return { state: 'booked', visit: publicVisit(visit) };
-    if (!open || !estimate.customer_id) return null;
-    if (!(await completionTaxMatches(plan, estimate.customer_id, conn))) return null;
+    if (!open || !(await eligibleCustomer(plan, estimate.customer_id, conn))) return null;
     const agreement = require('./commercial-proposal-agreement');
     const { state } = await agreement.agreementStateForEstimate(estimate.id, conn);
     if (state !== 'signed') return { state: 'after_signing' };
@@ -215,13 +226,13 @@ async function firstVisitCtaFor(estimate, { open = false, picker = false, conn =
 }
 
 // Whether the signer of this estimate's agreement can book the first visit online (the signed-agreement alert's copy):
-// gate on, an eligible plan, a customer account and no visit yet. Never throws (false on any failure).
+// gate on, an eligible plan and customer, and no visit yet. Never throws (false on any failure).
 async function firstVisitOnlineFor(estimateId, conn = db) {
   try {
     if (!live() || !estimateId) return false;
-    const estimate = await conn('estimates').where({ id: estimateId }).first('id', 'customer_id', 'estimate_data', 'bill_by_invoice');
-    const plan = estimate?.customer_id ? firstVisitPlan(estimate) : null;
-    if (!plan || !(await completionTaxMatches(plan, estimate.customer_id, conn))) return false;
+    const estimate = await conn('estimates').where({ id: estimateId }).first('id', 'customer_id', 'address', 'estimate_data', 'bill_by_invoice');
+    const plan = estimate ? firstVisitPlan(estimate) : null;
+    if (!plan || !(await eligibleCustomer(plan, estimate.customer_id, conn))) return false;
     return !(await linkedFirstVisit(estimate.id, conn));
   } catch (err) {
     logger.warn(`[commercial-first-visit] online check skipped for estimate ${estimateId}: ${err.code || 'error'}`);
@@ -236,7 +247,7 @@ function refusal(status, code, error) {
 const CALL_US = 'Please call us at (941) 297-5749 and we will book your first visit with you.';
 
 // The one eligibility read shared by the availability and the commit routes: the estimate as the route read it (open
-// and customer-viewable, judged by the caller), plus the plan, the signed agreement, the customer and no visit yet.
+// and customer-viewable, judged by the caller), plus the plan, the signed agreement, no visit yet and the customer.
 async function bookingContext(estimate, { conn = db } = {}) {
   if (!live()) return { refusal: refusal(404, 'not_found', 'Estimate not found') };
   const plan = firstVisitPlan(estimate);
@@ -247,8 +258,8 @@ async function bookingContext(estimate, { conn = db } = {}) {
   }
   const visit = await linkedFirstVisit(estimate.id, conn);
   if (visit) return { refusal: { ...refusal(409, 'already_booked', 'Your first visit is already booked.'), visit: publicVisit(visit) } };
-  const customer = await loadCustomer(estimate.customer_id, conn);
-  if (!customer || !(await completionTaxMatches(plan, customer.id, conn))) return { refusal: refusal(409, 'call_us', CALL_US) };
+  const customer = await eligibleCustomer(plan, estimate.customer_id, conn);
+  if (!customer) return { refusal: refusal(409, 'call_us', CALL_US) };
   const booking = require('../routes/booking')._internals;
   const location = await booking.customerBookingLocation(customer);
   if (!location) return { refusal: refusal(409, 'call_us', CALL_US) };
@@ -308,24 +319,6 @@ function findSlot(availability, date, time) {
   return (slots || []).find((slot) => String(slot.start_time || '').slice(0, 5) === time) || null;
 }
 
-// The route's call-side verdict (estimate-public.js firstVisitEstimate), re-run inside the booking transaction with the
-// verdict HELD through the insert: the estimate row under a share lock, then the linked lead and the call row locked
-// (the repo-wide estimates, leads, call_log order; createSelfBooking has already locked the customer, estimate and lead
-// rows it needs in that order). A call-side rejection or linkage correction landing during the availability lookup
-// refuses here instead of booking (pre-push audit P0, AGENTS.md: the commit re-checks the preflight read).
-async function callSideBlockedUnderLock(trx, row) {
-  const data = parseEstimateData(row.estimate_data);
-  const engine = data?.estimatorEngine;
-  if (engine && (engine.linkage_invalidated_at || engine.invalidation_pending_at)) return true;
-  if (data?.lead_id && ['sid', 'stamp'].includes(data?.lead_linkage)) {
-    await trx('leads').where({ id: String(data.lead_id) }).forUpdate().first('id');
-  }
-  const { staleCallLinkageReason } = require('./admin-estimate-persistence');
-  if (await staleCallLinkageReason(trx, data, { lockCallRow: true, estimateStatus: row.status })) return true;
-  const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
-  return !!(await callSideBlockForEstimateData(trx, data, { estimateStatus: row.status }));
-}
-
 // The booking transaction's re-check, on its own connection, under the per-estimate lock createSelfBooking takes:
 // 'ineligible' when the gate was turned off, 'booked' when a first visit landed since the caller's read,
 // 'ineligible' when the estimate is no longer open, its call-side verdict now blocks it, its plan changed, or its quote
@@ -340,7 +333,9 @@ function estimateGuardFor(estimate, { openFor }) {
       if (await linkedFirstVisit(estimate.id, trx)) return 'booked';
       const fresh = await trx('estimates').where({ id: estimate.id }).forShare().first();
       if (!fresh || String(fresh.customer_id || '') !== String(estimate.customer_id) || !openFor(fresh)) return 'ineligible';
-      if (await callSideBlockedUnderLock(trx, fresh)) return 'ineligible';
+      // The route's call-side verdict (estimate-public.js firstVisitEstimate), re-run on the held row and held through
+      // the insert: a call-side rejection or linkage correction landing during the availability lookup refuses here.
+      if (await require('../utils/estimate-claim-sql').callSideBlockedUnderLock(trx, fresh)) return 'ineligible';
       const plan = firstVisitPlan(fresh);
       const was = firstVisitPlan(estimate);
       if (!plan || !was || plan.pricePerVisit !== was.pricePerVisit || plan.taxPerVisit !== was.taxPerVisit
@@ -351,8 +346,8 @@ function estimateGuardFor(estimate, { openFor }) {
   };
 }
 
-function seriesRefusalLine(err) {
-  return err?.code || err?.name || 'error';
+function errorLine(err) {
+  return [err?.statusCode, err?.code || err?.name || 'error'].filter(Boolean).join(' ');
 }
 
 // The series after the first visit, seeded from it in its own transaction with the funnel's lock order (customer
@@ -377,7 +372,7 @@ async function seedSeries({ visit, customerId, plan, estimateId }) {
         serviceType: SERVICE_TYPE,
         excludeParentId: parent.id,
       });
-      if (guardError) logger.warn(`[commercial-first-visit] duplicate-series guard failed (seeding proceeds): ${seriesRefusalLine(guardError)}`);
+      if (guardError) logger.warn(`[commercial-first-visit] duplicate-series guard failed (seeding proceeds): ${errorLine(guardError)}`);
       if (matches.length > 0) return { kept: matches[0] };
       const seeded = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, parent, {
         pattern: plan.pattern,
@@ -398,7 +393,7 @@ async function seedSeries({ visit, customerId, plan, estimateId }) {
     }, { onOwnerChange: (newOwnerId) => { ownerId = newOwnerId; } });
     return outcome;
   } catch (err) {
-    logger.error(`[commercial-first-visit] FIX: series seeding failed for visit ${visit?.id} (estimate ${estimateId}): ${seriesRefusalLine(err)}`);
+    logger.error(`[commercial-first-visit] FIX: series seeding failed for visit ${visit?.id} (estimate ${estimateId}): ${errorLine(err)}`);
     return { failed: true };
   }
 }
@@ -456,20 +451,25 @@ async function alertOffice({ estimate, customer, visit, plan, accepted, series }
 
 // POST-side: book the first visit at { date, time } for a signed proposal, then mark it won and seed the series.
 // `openFor(row)` = the route's open-estimate verdict, re-run on the booking transaction's fresh read.
+// createSelfBooking refusals this caller answers in its own words; any other 409 is a slot race (or a pin that moved
+// under the booking fence) and any other failure is the call-us answer.
+const BOOKING_REFUSALS = Object.freeze({
+  ALREADY_BOOKED: ['already_booked', 'Your first visit is already booked.'],
+  ESTIMATE_CHANGED: ['estimate_changed', 'This proposal just changed. Please refresh the page.'],
+});
+const SLOT_TAKEN = 'That time is no longer open. Please pick another.';
+
 async function bookFirstVisit(estimate, { date, time, openFor }) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(time || ''))) {
-    return refusal(400, 'invalid', 'Pick a day and a time.');
-  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return refusal(400, 'invalid', 'Pick a day and a time.');
   const context = await bookingContext(estimate);
   if (context.refusal) return context.refusal;
   const { booking, plan, customer, location } = context;
   const config = await booking.loadBookingConfig();
   const range = bookingRange(config);
-  if (date < range.rangeFrom || date > range.rangeTo) return refusal(409, 'slot_taken', 'That time is no longer open. Please pick another.');
+  if (date < range.rangeFrom || date > range.rangeTo) return refusal(409, 'slot_taken', SLOT_TAKEN);
   // Anti-forgery: the slot must be in a fresh single-day build at the visit length (the inspection page's model).
-  const day = await availabilityFor(context, { rangeFrom: date, rangeTo: date, config });
-  const slot = findSlot(day, date, time);
-  if (!slot) return refusal(409, 'slot_taken', 'That time is no longer open. Please pick another.');
+  const slot = findSlot(await availabilityFor(context, { rangeFrom: date, rangeTo: date, config }), date, time);
+  if (!slot) return refusal(409, 'slot_taken', SLOT_TAKEN);
 
   const result = await booking.createSelfBooking({
     slot_date: date,
@@ -496,20 +496,15 @@ async function bookFirstVisit(estimate, { date, time, openFor }) {
     },
   });
   if (!result.ok) {
-    if (result.code === 'ALREADY_BOOKED') return refusal(409, 'already_booked', 'Your first visit is already booked.');
-    if (result.code === 'ESTIMATE_CHANGED') return refusal(409, 'estimate_changed', 'This proposal just changed. Please refresh the page.');
-    if (result.status === 409) return refusal(409, 'slot_taken', result.error || 'That time is no longer open. Please pick another.');
-    return refusal(result.status || 500, 'booking_failed', result.error || CALL_US);
+    const known = BOOKING_REFUSALS[result.code];
+    if (known) return refusal(409, ...known);
+    return result.status === 409 ? refusal(409, 'slot_taken', result.error) : refusal(result.status || 500, 'booking_failed', CALL_US);
   }
 
-  const serviceRow = await db('scheduled_services')
-    .where({ self_booking_id: result.body?.booking?.id })
-    .first('id', 'scheduled_date', 'window_start', 'window_end', 'status', 'customer_id');
-  if (!serviceRow) {
-    logger.error(`[commercial-first-visit] FIX: booking ${result.body?.booking?.id} for estimate ${estimate.id} has no visit row`);
-    return { ok: true, visit: { date, windowStart: hhmm(slot.start_time), windowEnd: hhmm(slot.end_time) }, replayed: !!result.body?.replayed };
-  }
-  const visit = { id: serviceRow.id, ...publicVisit(serviceRow) };
+  // The visit this booking inserted (a replay answers the original booking at the same slot). The steps below each
+  // stand on their own: without the row the accept refuses and the seeding skips, and the alert tells the office.
+  const visitRow = await db('scheduled_services').where({ self_booking_id: result.body.booking.id }).first('id');
+  const visit = { id: visitRow?.id, date, windowStart: hhmm(slot.start_time), windowEnd: hhmm(slot.end_time) };
 
   // Mark won through the staff path: it re-checks the row under its own locks, promotes the customer and flags tax
   // (the visit already carries source_estimate_id). A refusal leaves the visit booked and tells the office. Every
@@ -522,15 +517,15 @@ async function bookFirstVisit(estimate, { date, time, openFor }) {
       estimateId: estimate.id,
       adminUserId: null,
       source: ACCEPT_SOURCE,
-      bookedAppointmentIds: [serviceRow.id],
+      bookedAppointmentIds: [visit.id],
     });
     accepted = true;
   } catch (err) {
-    logger.error(`[commercial-first-visit] FIX: visit ${serviceRow.id} booked but estimate ${estimate.id} was not marked won: ${err.statusCode || ''} ${err.code || err.name || 'error'}`);
+    logger.error(`[commercial-first-visit] FIX: visit ${visit.id} booked but estimate ${estimate.id} was not marked won: ${errorLine(err)}`);
   }
-  const series = await seedSeries({ visit, customerId: serviceRow.customer_id || customer.id, plan, estimateId: estimate.id });
+  const series = await seedSeries({ visit, customerId: customer.id, plan, estimateId: estimate.id });
   await alertOffice({ estimate, customer, visit, plan, accepted, series });
-  return { ok: true, visit: publicVisit(serviceRow) };
+  return { ok: true, visit: { date: visit.date, windowStart: visit.windowStart, windowEnd: visit.windowEnd } };
 }
 
 module.exports = {

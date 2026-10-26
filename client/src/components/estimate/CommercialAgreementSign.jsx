@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { COLORS } from '../../theme-brand';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../../constants/business';
 import { estimateCard } from './cardStyles';
@@ -30,6 +30,17 @@ export default function CommercialAgreementSign({ token, commercialAgreement, fi
   const inFlight = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // Back from the signing page through the browser's history: a bfcache restore keeps the busy state set before the
+  // page left, so the button works again.
+  useEffect(() => {
+    const onPageShow = (event) => {
+      if (!event.persisted) return;
+      inFlight.current = false;
+      setBusy(false);
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
   if (!commercialAgreement) return null;
   const { canSign, state, reason } = commercialAgreement;
 
