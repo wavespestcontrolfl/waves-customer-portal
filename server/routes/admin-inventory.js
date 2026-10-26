@@ -79,6 +79,7 @@ const labelExtractLimiter = require('express-rate-limit')({
 });
 const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 const { rateGateOn } = require('../services/product-label-rates');
+const { validEpaRegNumber } = require('../services/epa-reg-number');
 router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE'), rates: rateGateOn() }));
 // One handler set per kind of label evidence; the service holds the shared
 // flow. Paths stay literal below so the staff route census can read them.
@@ -876,11 +877,6 @@ function inferProductType(product = {}) {
   if (category.includes('fertilizer')) return 'fertilizer';
   if (category.includes('wetting')) return 'wetting_agent';
   return 'other';
-}
-
-function validEpaRegNumber(value) {
-  const text = String(value || '').trim();
-  return !!text && !/^(n\/a|not epa|not epa-registered fertilizer|none)$/i.test(text);
 }
 
 function lawnFactReadiness(product) {

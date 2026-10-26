@@ -84,7 +84,10 @@ const outcomeOf = (err, outcome) => {
 // Puts a new file on the row and clears the sign-off in the same update, but only against the version the page loaded
 // (millisecond precision, like every other versioned write): a row that changed since is { conflict: true } and nothing is
 // written. Returns the old key so the caller can remove it AFTER this has committed. A thrown error carries bidKitOutcome.
-async function replaceFile(id, file, expectedUpdatedAt) {
+// options (the daily Product List rebuild only; the route passes none): `details` is merged into the row's details object in
+// the same update, and `attestBySystem` leaves the new file signed off by the system (attested_by null, attested_at now)
+// instead of clearing the sign-off.
+async function replaceFile(id, file, expectedUpdatedAt, options = {}) {
   let trx;
   try {
     trx = await db.transaction();
@@ -105,7 +108,8 @@ async function replaceFile(id, file, expectedUpdatedAt) {
         file_content_type: file.contentType,
         file_size: file.size,
         attested_by: null,
-        attested_at: null,
+        attested_at: options.attestBySystem ? trx.raw('clock_timestamp()') : null,
+        ...(options.details ? { details: trx.raw("COALESCE(details, '{}'::jsonb) || ?::jsonb", [JSON.stringify(options.details)]) } : {}),
         updated_at: trx.raw('clock_timestamp()'),
       });
       result = { item: await getItem(id, trx), oldKey: locked.file_s3_key || null };
