@@ -387,13 +387,20 @@ async function readAll(page, prev) {
   if (!programs.length) throw new Error('SiteOne /eop page showed 0 programs (page changed or not signed in)');
 
   const promoText = await safe('Promotions page', URLS.promotions);
-  if (promoText != null) programs.push(...parsePromotionsPage(promoText));
+  let promos = promoText != null ? parsePromotionsPage(promoText) : null;
+  // A page that loads but shows no promotion (a loading shell, a changed page) is not a
+  // month with none: treat it as unread, or they all come back as "new" next month.
+  if (promos && !promos.length) { warnings.push('Promotions page: no promotions found on the page'); promos = null; }
+  if (promos) programs.push(...promos);
   else if (prev) programs.push(...prev.programs.filter((p) => p.source === 'promo')); // unread is not "gone" and not "new"
 
   const turfText = await safe('Florida turf offer', URLS.turf);
   const pestText = await safe('Pest management offer', URLS.pest);
   const partnersText = await safe('Partners page', URLS.partners);
   let partners = partnersText != null ? parsePartnersPage(partnersText) : null;
+  // A 200 page with no points total (loading shell, changed page) must not replace the saved
+  // reading with zero expiring points (pre-push audit P1, #6800): treat it as unread.
+  if (partners && partners.available == null) { warnings.push('Partners page: no points total found on the page'); partners = null; }
   // Unread is not "no points": keep last month's reading, marked, so an expiring-points alert
   // cannot drop out for a month and the snapshot never records empty points (Codex #6800 r1 P2).
   if (partners == null && prev && prev.points) partners = { ...prev.points, carriedForward: true };

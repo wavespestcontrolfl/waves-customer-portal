@@ -484,6 +484,31 @@ describe('runSiteOneProgramsCheck', () => {
       expect(h.alerts[0].opts.detail).toContain('PARTNERS PROGRAM (last reading; the page was not read this run)');
     });
 
+    test('Partners page loads (200) with no points total → treated as unread: warning, last reading kept and marked', async () => {
+      const prevPoints = { available: 4321, dollarValue: 23.45, expiringPoints: 1234, expiresOn: '2026-12-01', status: 'ENROLLED' };
+      const first = harness();
+      await runSiteOneProgramsCheck(first.deps);
+      const snap = JSON.parse(first.conn.state.snapshot);
+      snap.points = prevPoints;
+      const pages = { ...PAGES, 'https://www.siteone.com/en/my-account/accountPartnerProgram': 'Loading your rewards...\nPlease wait' };
+      const h = harness({ snapshot: JSON.stringify(snap), pages });
+      const r = await runSiteOneProgramsCheck(h.deps);
+      expect(r.warnings.join(' ')).toMatch(/Partners page: no points total found/);
+      expect(r.pointsSoon).toBe(true);
+      expect(JSON.parse(h.conn.state.snapshot).points).toEqual({ ...prevPoints, carriedForward: true });
+    });
+
+    test('Promotions page loads (200) with no promotion → treated as unread: carried, not new next month', async () => {
+      const first = harness();
+      await runSiteOneProgramsCheck(first.deps);
+      const pages = { ...PAGES, 'https://www.siteone.com/en/Promotions': 'Promotions\nCheck back soon' };
+      const h = harness({ snapshot: first.conn.state.snapshot, pages });
+      const r = await runSiteOneProgramsCheck(h.deps);
+      expect(r.added).toBe(0);
+      expect(r.warnings.join(' ')).toMatch(/Promotions page: no promotions found/);
+      expect(JSON.parse(h.conn.state.snapshot).programs.filter((p) => p.source === 'promo')).toHaveLength(2);
+    });
+
     test('/eop HTTP 404 → throws, one failure alert, no snapshot write', async () => {
       const h = harness({ pages: { ...PAGES, 'https://www.siteone.com/eop': { status: 404, text: EOP_TEXT } } });
       await expect(runSiteOneProgramsCheck(h.deps)).rejects.toThrow(/HTTP 404/);
