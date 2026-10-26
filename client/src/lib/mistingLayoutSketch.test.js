@@ -13,6 +13,7 @@ import {
   zoneLabel,
 } from './mistingLayoutSketch';
 import { legendRows, mistingLayoutCountsLine } from './mistingLayoutCounts';
+import { feetToPx, flagInZones } from './mistingLayoutExtras';
 
 const LAT = 26.95;
 const ZOOM = 20;
@@ -103,6 +104,21 @@ describe('text', () => {
       .toBe('Nozzles: 5 (eave 5, fence 0) · Risers: 0 · Pump: not placed · No-mist zones: 0 · Line: 40 ft');
   });
 
+  it('adds the no-mist zone row only when a nozzle sits in a zone', () => {
+    const base = { nozzleCount: 12, eaveCount: 8, fenceCount: 4, riserCount: 3, hasPump: true, zoneCount: 2, linearFt: 118.6 };
+    expect(legendRows({ ...base, flaggedCount: 0 })).toEqual(legendRows(base));
+    expect(legendRows(base)).toHaveLength(5);
+    const rows = legendRows({ ...base, flaggedCount: 2 });
+    expect(rows).toHaveLength(6);
+    expect(rows[5]).toBe('In a no-mist zone: 2 (aim away or move)');
+  });
+
+  it('prints the saved-counts line without a flagged row, because the server counts carry none', () => {
+    const line = mistingLayoutCountsLine({ nozzles: 5, eave: 5, fence: 0, risers: 0, zones: 1, linearFt: 40, pump: false });
+    expect(line).not.toMatch(/no-mist zone:/i);
+    expect(line.split(' · ')).toHaveLength(5);
+  });
+
   it('dates the sketch in Eastern time', () => {
     // 03:30 UTC on Oct 27 is still Oct 26 in Eastern time.
     expect(sketchDateLabel(new Date('2026-10-27T03:30:00Z'))).toBe('October 26, 2026');
@@ -135,6 +151,46 @@ describe('buildSketchModel', () => {
     expect(model.legend[0]).toBe('Nozzles: 2 (eave 2, fence 0)');
     expect(model.legend).toContain('Pump: placed');
     expect(model.scale.feet).toBeGreaterThan(0);
+  });
+
+  describe('nozzles inside a no-mist zone', () => {
+    const zone = { key: 'z1', kind: 'pool', x: 500, y: 500, radiusFt: 15 };
+    const withPx = { ...zone, radiusPx: feetToPx(15, LAT, ZOOM) };
+    const lines = [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 500 }, { x: 900, y: 500 }] }];
+    const R = feetToPx(15, LAT, ZOOM);
+    const build = (nozzles, zones = [withPx]) => buildSketchModel({
+      lat: LAT,
+      zoom: ZOOM,
+      lines,
+      nozzles,
+      risers: [],
+      pump: null,
+      zones,
+      totals: { eaveCount: nozzles.length, fenceCount: 0, linearFt: 100 },
+    });
+    const n = (key, x) => ({ key, x, y: 500, kind: 'eave', lineIndex: 0 });
+
+    it('marks a nozzle inside any zone, by the designer rule (strictly inside), and no other', () => {
+      const nozzles = [n('out-left', 100), n('in', 500), n('edge-in', 500 + R - 1), n('edge', 500 + R), n('out', 500 + R + 20)];
+      const model = build(nozzles);
+      const flaggedKeys = new Set(model.nozzles.filter((m) => m.flagged).map((m) => m.key));
+      expect([...flaggedKeys].sort()).toEqual(['edge-in', 'in']);
+      // the same set the designer flags on screen
+      expect([...flagInZones(nozzles, [withPx], LAT, ZOOM)].sort()).toEqual([...flaggedKeys].sort());
+      expect(model.nozzles.every((m) => typeof m.flagged === 'boolean')).toBe(true);
+    });
+
+    it('adds the legend row with the count when some are flagged, and none when all are clear', () => {
+      const some = build([n('a', 100), n('b', 500), n('c', 510)]);
+      expect(some.legend).toContain('In a no-mist zone: 2 (aim away or move)');
+      expect(some.legend[0]).toBe('Nozzles: 3 (eave 3, fence 0)');
+      const none = build([n('a', 100), n('b', 900)]);
+      expect(none.legend.some((row) => row.startsWith('In a no-mist zone'))).toBe(false);
+      expect(none.legend).toHaveLength(5);
+      const noZones = build([n('a', 500)], []);
+      expect(noZones.nozzles[0].flagged).toBe(false);
+      expect(noZones.legend).toHaveLength(5);
+    });
   });
 
   it('keeps the photo at its native size between the header and the footer', () => {

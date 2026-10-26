@@ -18,6 +18,10 @@ const MUTED = '#475569';
 const COPPER = '#b87333';
 const WARN = '#dc2626';
 const PUMP = '#1d4ed8';
+// A nozzle inside a no-mist zone: amber, as the designer's own warning text (amber-800) with a lighter fill
+// so it reads on the photo. It also gets a dashed ring and a "!", so the warning does not rely on color.
+const AMBER = '#f59e0b';
+const AMBER_DARK = '#92400e';
 const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 export const LOGO_URL = '/waves-logo.png';
 
@@ -119,24 +123,37 @@ function drawLine(ctx, line) {
 }
 
 // Eave nozzles are black with white digits, fence nozzles white with black digits, as on the screen.
+// A nozzle inside a no-mist zone is amber with dark digits, a dashed ring and a "!".
 function drawNozzle(ctx, nozzle) {
   const fence = nozzle.kind === 'fence';
+  const flagged = Boolean(nozzle.flagged);
   ctx.save();
   ctx.beginPath();
   ctx.arc(nozzle.x, nozzle.y, 17, 0, Math.PI * 2);
-  ctx.fillStyle = fence ? '#fff' : '#000';
+  ctx.fillStyle = flagged ? AMBER : fence ? '#fff' : '#000';
   ctx.fill();
   ctx.lineWidth = 3.5;
-  ctx.strokeStyle = fence ? '#000' : '#fff';
+  ctx.strokeStyle = flagged ? AMBER_DARK : fence ? '#000' : '#fff';
   ctx.stroke();
   ctx.restore();
   ctx.save();
   ctx.font = `700 ${nozzle.number > 99 ? 15 : 20}px ${FONT}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = fence ? '#000' : '#fff';
+  ctx.fillStyle = flagged ? '#000' : fence ? '#000' : '#fff';
   ctx.fillText(String(nozzle.number), nozzle.x, nozzle.y + 1);
   ctx.restore();
+  if (flagged) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(nozzle.x, nozzle.y, 24, 0, Math.PI * 2);
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = AMBER_DARK;
+    ctx.stroke();
+    ctx.restore();
+    outlinedText(ctx, '!', nozzle.x + 26, nozzle.y - 20, 26, { fill: AMBER_DARK });
+  }
 }
 
 function triangle(ctx, x, y, r) {

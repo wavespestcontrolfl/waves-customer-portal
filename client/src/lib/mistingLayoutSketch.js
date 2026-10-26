@@ -4,7 +4,7 @@
 // consumes the model built here: numbered nozzles in walking order, the scale bar, the legend rows
 // and the header and footer text.
 import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../components/tech/treatmentZoneSpray';
-import { zoneKindDef } from './mistingLayoutExtras';
+import { insideAnyZone, zoneKindDef } from './mistingLayoutExtras';
 import { legendRows } from './mistingLayoutCounts';
 import { formatETDate } from './timezone';
 
@@ -93,12 +93,18 @@ export function zoneLabel(zone) {
 
 /**
  * Everything the canvas needs, from the designer's final geometry.
+ * Nozzles come back with `flagged` true when inside a zone.
  * @param {{lat:number, zoom:number, address?:string, date?:Date, lines:Array, nozzles:Array, risers:Array,
  *          pump:object|null, zones:Array<{kind,x,y,radiusFt,radiusPx}>, totals:{eaveCount,fenceCount,linearFt}}} layout
  */
 export function buildSketchModel(layout) {
-  const nozzles = numberNozzles(layout.nozzles, layout.lines);
   const zones = layout.zones || [];
+  // A nozzle inside a no-mist zone (the designer's own rule, insideAnyZone) is flagged, so the sketch
+  // draws it amber and the legend counts it instead of printing it as any other nozzle.
+  const nozzles = numberNozzles(layout.nozzles, layout.lines).map((n) => ({
+    ...n,
+    flagged: insideAnyZone(n, zones, layout.lat, layout.zoom),
+  }));
   return {
     title: SKETCH_TITLE,
     concept: SKETCH_CONCEPT,
@@ -118,6 +124,7 @@ export function buildSketchModel(layout) {
       hasPump: Boolean(layout.pump),
       zoneCount: zones.length,
       linearFt: layout.totals.linearFt,
+      flaggedCount: nozzles.filter((n) => n.flagged).length,
     }),
   };
 }

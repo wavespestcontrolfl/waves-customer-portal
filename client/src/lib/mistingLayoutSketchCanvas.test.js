@@ -125,4 +125,63 @@ describe('drawSketch', () => {
     // Concept text is 26 px on an alphabetic baseline: its top is about 26 px above y.
     expect(legend[2] + legend[4]).toBeLessThan(concept[3] - 26);
   });
+
+  describe('nozzles inside a no-mist zone', () => {
+    const flaggedModel = () => buildSketchModel({
+      lat: 26.95,
+      zoom: 20,
+      address: '500 Example Court, Venice, FL',
+      lines: [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 500 }, { x: 900, y: 500 }] }],
+      // Left nozzle is clear; the middle one sits at the pool's center.
+      nozzles: [{ x: 100, y: 500, kind: 'eave', lineIndex: 0 }, { x: 500, y: 500, kind: 'eave', lineIndex: 0 }],
+      risers: [],
+      pump: null,
+      zones: [{ kind: 'pool', x: 500, y: 500, radiusFt: 15, radiusPx: 60 }],
+      totals: { eaveCount: 2, fenceCount: 0, linearFt: 100 },
+    });
+
+    // Records the fillStyle in force at each fill(), so the colour of a nozzle disc can be read back.
+    function styleRecordingContext() {
+      const calls = [];
+      const ctx = new Proxy({ measureText: (t) => ({ width: String(t).length * 14 }) }, {
+        get(target, prop) {
+          if (prop in target) return target[prop];
+          if (prop === 'fill') return () => { calls.push(['fill', target.fillStyle]); };
+          return (...args) => { calls.push([prop, ...args]); };
+        },
+        set(target, prop, value) { target[prop] = value; return true; },
+      });
+      return { ctx, calls };
+    }
+
+    it('draws the flagged nozzle amber with a dashed ring and a "!", and the clear one as before', () => {
+      const { ctx, calls } = styleRecordingContext();
+      drawSketch(ctx, flaggedModel(), { map: {}, logo: null });
+      // The fill that follows each nozzle disc (an arc of radius 17).
+      const discFills = calls
+        .map((c, i) => (c[0] === 'arc' && c[3] === 17 && calls[i + 1] && calls[i + 1][0] === 'fill' ? [c[1], calls[i + 1][1]] : null))
+        .filter(Boolean);
+      expect(discFills).toEqual([[100, '#000'], [500, '#f59e0b']]);
+      // The dashed ring and the "!" belong to the flagged nozzle only, so the warning is not color alone.
+      const rings = calls.filter((c) => c[0] === 'arc' && c[3] === 24);
+      expect(rings).toHaveLength(1);
+      expect(rings[0].slice(1, 3)).toEqual([500, 500]);
+      expect(calls.some((c) => c[0] === 'setLineDash' && c[1].join() === '6,4')).toBe(true);
+      expect(calls.filter((c) => c[0] === 'fillText' && c[1] === '!')).toHaveLength(1);
+    });
+
+    it('prints the legend row, and leaves it out when no nozzle is in a zone', () => {
+      const { ctx, calls } = recordingContext();
+      drawSketch(ctx, flaggedModel(), { map: {}, logo: null });
+      expect(fillsOf(calls, 'In a no-mist zone: 1 (aim away or move)')).toHaveLength(1);
+      // six rows still sit above the concept note
+      const legend = calls.find((c) => c[0] === 'strokeRect' && c[1] === 24);
+      expect(legend[2] + legend[4]).toBeLessThan(fillsOf(calls, SKETCH_CONCEPT)[0][3] - 26);
+
+      const clear = recordingContext();
+      drawSketch(clear.ctx, model(), { map: {}, logo: null });
+      expect(clear.calls.some((c) => c[0] === 'fillText' && String(c[1]).startsWith('In a no-mist zone'))).toBe(false);
+      expect(clear.calls.some((c) => c[0] === 'fillText' && c[1] === '!')).toBe(false);
+    });
+  });
 });
