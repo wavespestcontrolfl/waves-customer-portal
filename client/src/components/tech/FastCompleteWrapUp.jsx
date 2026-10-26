@@ -79,7 +79,7 @@ export function useWrapUp({ gate, submission, service, request, base, applicatio
   const willReview = completionWillReview({ requestReview: choice.requestReview, reviewSuppressionReason: suppression });
   const stepper = useReentrySteppers({ enabled, serviceId: service?.id, base, requestRef, applicationsRecorded });
   const nextVisit = useNextVisit({ enabled, customerId: service?.customerId || service?.routedCustomerId, requestRef });
-  const review = useReviewPreview({ enabled, willReview, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
+  const review = useReviewPreview({ enabled, willReview, firstAskOpen: !suppression, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
   // A first ask stays on: a late verdict turns the box back on unless the one reason was confirmed.
   const firstAsk = review.firstAsk;
   useEffect(() => {

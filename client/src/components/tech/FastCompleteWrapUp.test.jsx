@@ -260,6 +260,16 @@ describe('first review ask (GATE_REVIEW_FIRST_ASK_LOCK)', () => {
     expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
   });
 
+  test('a failed first read, then the box turned off: one read while off finds the first ask and turns it back on', async () => {
+    const request = makeRequest({ previews: [new Error('offline'), FIRST] });
+    render(<Harness request={request} />);
+    const box = await screen.findByRole('checkbox', { name: 'Send review request' });
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.startsWith('/admin/reviews/send-time-preview'))).toHaveLength(1));
+    fireEvent.click(box);
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(true));
+    expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
+  });
+
   test('a customer asked before (firstReviewAsk false) keeps today\'s box: no confirm, no reason', async () => {
     await showFirst({ ...PREVIEW, firstReviewAsk: false });
     const box = await screen.findByRole('checkbox', { name: 'Send review request' });

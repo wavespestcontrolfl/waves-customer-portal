@@ -57,7 +57,8 @@ export function useNextVisit({ enabled, customerId, requestRef }) {
 // time of day). Off, it is forgotten: a preview cached from before must not count as known at submit.
 // `recheck(reviewTiming, { reportTextExpected })` is the submit-time read: it applies a fresh answer and returns the verdict
 // (null to go on, else { message }), per the full form's guards (codex #4140 r3, r13, r18).
-export function useReviewPreview({ enabled, willReview, serviceId, serviceType, requestRef }) {
+// `firstAskOpen`: the box is a choice (no suppression), so a first-ask verdict can matter while it is off.
+export function useReviewPreview({ enabled, willReview, firstAskOpen = true, serviceId, serviceType, requestRef }) {
   const [preview, setPreview] = useState(null);
   // GATE_REVIEW_FIRST_ASK_LOCK: the server's read that this customer was never asked. Kept when the
   // preview is cleared (box off), since the box still needs its label and its reason then.
@@ -69,7 +70,16 @@ export function useReviewPreview({ enabled, willReview, serviceId, serviceType, 
   useEffect(() => {
     if (!enabled || !willReview) {
       setPreview(null);
-      return undefined;
+      if (!enabled || !firstAskOpen) return undefined;
+      // One read still names the first ask while the box is off (a failed first read, then the box
+      // turned off), so the box knows the server will keep that ask on. No poll; the timing preview
+      // stays unknown. The full form's CompletionPanel does the same.
+      let gone = false;
+      fetchPreview().then((data) => {
+        const verdict = firstReviewAskFrom(data);
+        if (!gone && verdict !== null) setFirstAsk(verdict);
+      });
+      return () => { gone = true; };
     }
     let cancelled = false;
     const load = () => fetchPreview().then((data) => {
@@ -84,7 +94,7 @@ export function useReviewPreview({ enabled, willReview, serviceId, serviceType, 
     load();
     const timer = setInterval(load, PREVIEW_POLL_MS);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [enabled, serviceId, serviceType, willReview, requestRef]);
+  }, [enabled, firstAskOpen, serviceId, serviceType, willReview, requestRef]);
 
   const recheck = async (reviewTiming, { reportTextExpected = true } = {}) => {
     const fresh = await fetchPreview();
