@@ -1,7 +1,7 @@
 // Bid kit Product List sync (GATE_BID_KIT_PRODUCT_LIST_SYNC): the snapshot and fingerprint, the diff, the auto sign-off decision
 // table, the PDF, and the run itself. The database, the store, the file storage and the bell service are stand-ins here (the SQL
 // runs in bid-kit-product-list.db.test.js); every bell spec goes through the real notification rules. Synthetic products only.
-const mockTables = { 'service_products as sp': [], purchase_receipt_lines: [] };
+const mockTables = { 'service_products as sp': [], service_products: [], products_catalog: [], purchase_receipt_lines: [] };
 jest.mock('../models/db', () => {
   const chain = (table) => {
     const node = new Proxy({}, {
@@ -43,15 +43,73 @@ describe('snapshot and fingerprint', () => {
       expect(lib.fingerprintOf(snap([a[0], { ...a[1], ...over }, a[2]]))).not.toBe(lib.fingerprintOf(snap(a)));
     }
   });
-  test('a use count or a category change alone is not a change; whitespace is ignored', () => {
+  test('a use count alone is not a change; whitespace is ignored', () => {
     const a = [product(1)];
-    expect(lib.fingerprintOf(snap([{ ...a[0], uses: 99, category: 'Herbicide' }]))).toBe(lib.fingerprintOf(snap(a)));
+    expect(lib.fingerprintOf(snap([{ ...a[0], uses: 99 }]))).toBe(lib.fingerprintOf(snap(a)));
     expect(lib.fingerprintOf(snap([{ ...a[0], name: ` ${a[0].name} ` }]))).toBe(lib.fingerprintOf(snap(a)));
   });
   test('the stored snapshot keeps hashes, never the label links themselves', () => {
     const s = lib.snapshotOf(product(1));
     expect(JSON.stringify(s)).not.toMatch(/example\.test/);
-    expect(Object.keys(s).sort()).toEqual(['ai', 'epa', 'id', 'label', 'name', 'sds']);
+    expect(Object.keys(s).sort()).toEqual(['ai', 'cat', 'epa', 'id', 'label', 'name', 'sds']);
+  });
+});
+
+describe('category is part of the snapshot (the completeness rule reads it)', () => {
+  const fertilizer = product(1, { category: 'Fertilizer', epa_reg_number: 'N/A', label_url: null, sds_url: null });
+  test('a category change changes the fingerprint, ignoring case and spacing', () => {
+    expect(lib.fingerprintOf(snap([{ ...fertilizer, category: 'Insecticide' }]))).not.toBe(lib.fingerprintOf(snap([fertilizer])));
+    expect(lib.fingerprintOf(snap([{ ...fertilizer, category: ' fertilizer ' }]))).toBe(lib.fingerprintOf(snap([fertilizer])));
+  });
+  test('the diff reports it as a change to the category, and it makes a list incomplete when a no-number product turns into a pesticide', () => {
+    const turned = { ...fertilizer, category: 'Herbicide' };
+    expect(lib.diffSnapshots(snap([fertilizer]), snap([turned])).changed).toEqual([{ id: ID(1), name: 'Synthetic Product 1', fields: ['cat'] }]);
+    expect(lib.listIsComplete([fertilizer])).toBe(true);
+    expect(lib.listIsComplete([turned])).toBe(false);
+  });
+  test('a snapshot stored before the category was part of it does not count as changed on that alone', () => {
+    const { cat: _cat, ...old } = lib.snapshotOf(fertilizer);
+    expect(lib.diffSnapshots([old], snap([fertilizer]))).toEqual({ added: [], removed: [], changed: [] });
+  });
+});
+
+describe('visit lines recorded without a catalog product', () => {
+  const cat = (n, over = {}) => ({ id: ID(n), name: `Synthetic Product ${n}`, category: 'Insecticide', active_ingredient: `ingredient ${n}`, epa_reg_number: `100-${n}`, label_url: 'https://l.example.test/x.pdf', sds_url: 'https://s.example.test/x.pdf', active: true, ...over });
+  const linked = (n, uses = 3) => ({ ...product(n), uses: String(uses) });
+  test('an exact name match (after the matcher normalizer) folds into the linked catalog row and counts its uses', () => {
+    const { rows, unmatched } = lib.foldUnlinked([linked(1, 3)], [{ product_name: 'synthetic  PRODUCT-1', uses: '2' }], [cat(1)]);
+    expect(unmatched).toEqual([]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ product_id: ID(1), uses: 5 });
+  });
+  test('a match to a product with no linked lines creates its row from the catalog', () => {
+    const { rows } = lib.foldUnlinked([], [{ product_name: 'Synthetic Product 7', uses: 1 }], [cat(7, { category: 'Herbicide' })]);
+    expect(rows).toEqual([expect.objectContaining({ product_id: ID(7), name: 'Synthetic Product 7', category: 'Herbicide', epa_reg_number: '100-7', uses: 1 })]);
+  });
+  test('an inactive catalog row counts when it is the only exact match; an active one is preferred over it', () => {
+    expect(lib.foldUnlinked([], [{ product_name: 'Synthetic Product 8', uses: 1 }], [cat(8, { active: false })]).rows.map((r) => r.product_id)).toEqual([ID(8)]);
+    const both = [cat(8, { active: false }), cat(9, { name: 'Synthetic Product 8' })];
+    expect(lib.foldUnlinked([], [{ product_name: 'Synthetic Product 8', uses: 1 }], both).rows.map((r) => r.product_id)).toEqual([ID(9)]);
+  });
+  test('two exact candidates or none stay unmatched, with their names and line counts', () => {
+    const twin = [cat(1), cat(2, { name: 'Synthetic Product 1' })];
+    const result = lib.foldUnlinked([linked(3)], [{ product_name: 'Synthetic Product 1', uses: 2 }, { product_name: 'Taurus SC', uses: 5 }, { product_name: 'taurus  sc', uses: 1 }, { product_name: '', uses: 1 }], twin);
+    expect(result.rows.map((r) => r.product_id)).toEqual([ID(3)]);
+    expect(result.unmatched.map((u) => [u.name, u.uses])).toEqual([['', 1], ['Synthetic Product 1', 2], ['Taurus SC', 6]]);
+  });
+  test('the detail sentence counts the lines and names each distinct name', () => {
+    expect(lib.unmatchedSentence([{ name: 'Taurus SC', norm: 'taurus sc', uses: 6 }, { name: 'Bifen I/T', norm: 'bifen i t', uses: 3 }]))
+      .toBe('9 visit lines recorded without a catalog product are not on the list: Taurus SC, Bifen I T.');
+    expect(lib.unmatchedSentence([{ name: 'Taurus SC', norm: 'taurus sc', uses: 1 }])).toBe('1 visit line recorded without a catalog product is not on the list: Taurus SC.');
+    expect(lib.unmatchedSentence([])).toBe('');
+  });
+  test('the set of unmatched names is part of the fingerprint; with none it is the same as before', () => {
+    const rows = snap([product(1)]);
+    const a = [{ name: 'Taurus SC', norm: 'taurus sc', uses: 1 }];
+    expect(lib.fingerprintOf(rows, a)).not.toBe(lib.fingerprintOf(rows));
+    expect(lib.fingerprintOf(rows, [...a, { name: 'Bifen I/T', norm: 'bifen i t', uses: 1 }])).not.toBe(lib.fingerprintOf(rows, a));
+    expect(lib.fingerprintOf(rows, [{ name: 'TAURUS  sc', norm: 'taurus sc', uses: 9 }])).toBe(lib.fingerprintOf(rows, a));
+    expect(lib.fingerprintOf(rows, [])).toBe(lib.fingerprintOf(rows));
   });
 });
 
@@ -252,6 +310,8 @@ describe('runBidKitProductListSync', () => {
     live = { rows: [...rowsBefore], bought: [] };
     mockTables['service_products as sp'] = live.rows;
     mockTables.purchase_receipt_lines = [];
+    mockTables.service_products = [];
+    mockTables.products_catalog = [];
     store.listItems.mockResolvedValue([itemRow()]);
     store.fileInfo.mockResolvedValue({ key: KEY });
     store.replaceFile.mockResolvedValue({ item: itemRow(), oldKey: KEY });
@@ -467,6 +527,49 @@ describe('runBidKitProductListSync', () => {
     expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(2);
     expect(new Set(episodes.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).size).toBe(1);
     expect(store.replaceFile.mock.calls[0][2]).toEqual(new Date('2026-10-26T12:00:00Z'));
+  });
+  test('unmatched visit lines never block the automatic sign-off, and are counted in the result and the log', async () => {
+    setList([...rowsBefore, product(3)], [3]);
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: '5' }, { product_name: 'Bifen I/T', uses: '3' }];
+    mockTables.products_catalog = [];
+    // The stored fingerprint was made without them, so the unmatched set alone already changes the list.
+    const result = await run();
+    expect(result).toEqual({ changed: true, signedOff: true, rang: false, unmatched: { lines: 8, names: ['Bifen I/T', 'Taurus SC'] } });
+    expect(store.logActivity.mock.calls[0][3]).toMatchObject({ unmatched: { lines: 8 } });
+    expect(require('../services/logger').info.mock.calls.flat().join(' ')).toMatch(/unmatchedLines=8 unmatchedNames=2/);
+  });
+  test('a change in the unmatched set alone rebuilds the list; the same set again does nothing', async () => {
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: 5 }];
+    const first = await run();
+    expect(first).toMatchObject({ changed: true });
+    const synced = store.replaceFile.mock.calls[0][3].details.product_list_sync;
+    store.listItems.mockResolvedValue([itemRow({ details: { product_list_sync: synced } })]);
+    store.fileInfo.mockResolvedValue({ key: NEW_KEY });
+    jest.clearAllMocks();
+    expect(await run()).toEqual({ changed: false });
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: 5 }, { product_name: 'Cyzmic CS', uses: 2 }];
+    expect(await run()).toMatchObject({ changed: true });
+  });
+  test('a bell that is raised names the unmatched lines in its detail, also on the first run and for a hand-replaced file', async () => {
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: '5' }];
+    setList([...rowsBefore, product(3)], []);
+    await run();
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][3].detail).toMatch(/5 visit lines recorded without a catalog product are not on the list: Taurus SC\./);
+    expect(store.replaceFile.mock.calls[0][3].details.product_list_sync.pending_alert.detail).toMatch(/not on the list: Taurus SC\./);
+    jest.clearAllMocks();
+    store.listItems.mockResolvedValue([itemRow({ details: null })]);
+    store.fileInfo.mockResolvedValue({ key: KEY });
+    await run();
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][3].detail).toMatch(/not on the list: Taurus SC\./);
+    jest.clearAllMocks();
+    store.listItems.mockResolvedValue([itemRow()]);
+    store.fileInfo.mockResolvedValue({ key: 'bid-kit/item/by-hand.pdf' });
+    await run();
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][3].detail).toMatch(/not on the list: Taurus SC\./);
+  });
+  test('a category change on an unchanged product rebuilds the list and is reported', async () => {
+    setList([rowsBefore[0], { ...rowsBefore[1], category: 'Herbicide' }]);
+    expect(await run()).toMatchObject({ changed: true });
   });
   test('a sign-off by the owner closes the open bell on the next run', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue([`bid-kit:product-list:${ITEM}`]);

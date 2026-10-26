@@ -106,6 +106,30 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
     expect(Number(rows[0].uses)).toBe(2);
   });
 
+  test('visit lines with no catalog id fold into the one exact catalog match (inactive when it is the only one) and the rest are named, not printed', async () => {
+    const linked = await catalogRow('Taurus');
+    const inactiveOnly = await catalogRow('Retired', { active: false });
+    const twinA = await catalogRow('Twin');
+    await catalogRow('Twin');
+    await apply(linked);
+    const unlinked = async (name, daysAgo = 10) => mockPg('service_products').insert({
+      service_record_id: record.id, product_id: null, product_name: name, created_at: mockPg.raw(`now() - interval '${daysAgo} days'`),
+    });
+    await unlinked(`taurus  ${tag.toUpperCase()}`); await unlinked(`Taurus-${tag}`);
+    await unlinked(`Retired ${tag}`);
+    await unlinked(`Twin ${tag}`);
+    await unlinked(`Nothing like it ${tag}`);
+    await unlinked(`Taurus ${tag}`, 400); // outside the 12 months
+    const list = await lib.readProductList();
+    const rows = mine(list.rows);
+    expect(rows.map((r) => [r.name, Number(r.uses)])).toEqual([[`Retired ${tag}`, 1], [`Taurus ${tag}`, 3]]);
+    expect(rows.find((r) => r.name === `Retired ${tag}`).product_id).toBe(inactiveOnly.id);
+    expect(rows.find((r) => r.name === `Taurus ${tag}`).product_id).toBe(linked.id);
+    expect(list.rows.map((r) => r.product_id)).not.toContain(twinA.id);
+    expect(list.unmatched.filter((u) => u.name.endsWith(tag) || u.name.endsWith(tag.toUpperCase())).map((u) => [u.name, u.uses]).sort())
+      .toEqual([[`Nothing like it ${tag}`, 1], [`Twin ${tag}`, 1]]);
+  });
+
   test('a product counts as bought from SiteOne only with a logged SiteOne line for it', async () => {
     const bought = await catalogRow('Bought');
     const amazon = await catalogRow('Amazon');

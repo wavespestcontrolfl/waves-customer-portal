@@ -27,6 +27,7 @@ const { errorTag } = require('./bid-kit-log');
 const { composeAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { fitAction } = require('./admin-alert-names');
 const { validEpaRegNumber } = require('./epa-reg-number');
+const { normalizeForMatch } = require('./purchase-receipts/product-matcher');
 const { buildProductListPdf, fileNameFor } = require('./pdf/product-list-pdf');
 const { WAVES_BUSINESS_NAME, WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
 
@@ -49,15 +50,62 @@ const isPesticideCategory = (category) => PESTICIDE_CATEGORIES.has(String(catego
 
 // ---- the list ----
 
-// Every product applied in the last 12 months, once each. Read only.
-async function readProductRows(conn = db) {
-  const rows = await conn('service_products as sp')
+const CATALOG_COLUMNS = ['id', 'name', 'category', 'active_ingredient', 'epa_reg_number', 'label_url', 'sds_url', 'active'];
+
+// Visit lines typed as free text before they were linked to the catalog (product_id null) fold into a catalog product when
+// the line's name equals exactly one catalog product's name after the repo's matcher normalizer. An active row wins; an inactive
+// row counts only when it is the only exact match (this is history). No match, or two or more, stays unmatched: it is not
+// printed, it never blocks a sign-off, and it is counted and named in the bell and the log. Pure.
+// linked: rows from the catalog join; unlinked: [{ product_name, uses }]; catalog: products_catalog rows.
+// Returns { rows, unmatched: [{ name, norm, uses }] }, rows sorted, unmatched sorted by name.
+function foldUnlinked(linked, unlinked, catalog) {
+  const byId = new Map(linked.map((row) => [String(row.product_id), { ...row, uses: Number(row.uses) || 0 }]));
+  const groups = new Map();
+  for (const line of unlinked) {
+    const norm = normalizeForMatch(line.product_name);
+    const group = groups.get(norm) || { name: text(line.product_name), norm, uses: 0 };
+    group.uses += Number(line.uses) || 0;
+    groups.set(norm, group);
+  }
+  const unmatched = [];
+  for (const group of groups.values()) {
+    const exact = group.norm ? catalog.filter((product) => normalizeForMatch(product.name) === group.norm) : [];
+    const active = exact.filter((product) => product.active !== false);
+    const candidates = active.length ? active : exact;
+    if (candidates.length !== 1) { unmatched.push(group); continue; }
+    const product = candidates[0];
+    const key = String(product.id);
+    const row = byId.get(key) || {
+      product_id: product.id, name: product.name, category: product.category, active_ingredient: product.active_ingredient,
+      epa_reg_number: product.epa_reg_number, label_url: product.label_url, sds_url: product.sds_url, uses: 0,
+    };
+    row.uses += group.uses;
+    byId.set(key, row);
+  }
+  unmatched.sort((a, b) => a.name.localeCompare(b.name) || a.norm.localeCompare(b.norm));
+  return { rows: sortRows([...byId.values()]), unmatched };
+}
+
+// Every product applied in the last 12 months, once each, plus the free-text lines that match no catalog product. Read only.
+async function readProductList(conn = db) {
+  const linked = await conn('service_products as sp')
     .join('products_catalog as p', 'p.id', 'sp.product_id')
     .whereRaw(`sp.created_at > ${WINDOW_SQL}`)
     .groupBy('p.id', 'p.name', 'p.category', 'p.active_ingredient', 'p.epa_reg_number', 'p.label_url', 'p.sds_url')
     .select('p.id as product_id', 'p.name', 'p.category', 'p.active_ingredient', 'p.epa_reg_number', 'p.label_url', 'p.sds_url')
     .count('sp.id as uses');
-  return sortRows(rows);
+  const unlinked = await conn('service_products')
+    .whereNull('product_id')
+    .whereRaw(`created_at > ${WINDOW_SQL}`)
+    .groupBy('product_name')
+    .select('product_name')
+    .count('id as uses');
+  const catalog = unlinked.length ? await conn('products_catalog').select(CATALOG_COLUMNS) : [];
+  return foldUnlinked(linked, unlinked, catalog);
+}
+
+async function readProductRows(conn = db) {
+  return (await readProductList(conn)).rows;
 }
 
 // Category (empty last), then name, then id so the order never depends on the database.
@@ -82,6 +130,7 @@ function snapshotOf(row) {
   return {
     id: String(row.product_id),
     name: text(row.name),
+    cat: short(text(row.category).toLowerCase()),
     ai: short(row.active_ingredient),
     epa: short(row.epa_reg_number),
     label: short(row.label_url),
@@ -89,11 +138,15 @@ function snapshotOf(row) {
   };
 }
 
-const FIELD_WORDS = { name: 'name', ai: 'active ingredient', epa: 'EPA number', label: 'label link', sds: 'SDS link' };
+const FIELD_WORDS = { name: 'name', cat: 'category', ai: 'active ingredient', epa: 'EPA number', label: 'label link', sds: 'SDS link' };
 
-function fingerprintOf(snapshots) {
+// unmatched: the free-text visit lines that match no catalog product. Their distinct normalized names are part of the input, so
+// the list counts as changed when that set changes (and, with none, the fingerprint is the same as without the argument).
+function fingerprintOf(snapshots, unmatched = []) {
   const sorted = [...snapshots].sort((a, b) => a.id.localeCompare(b.id));
-  return crypto.createHash('sha256').update(JSON.stringify(sorted.map((s) => [s.id, s.name, s.ai, s.epa, s.label, s.sds]))).digest('hex');
+  const names = [...new Set(unmatched.map((line) => line.norm))].sort();
+  const input = sorted.map((s) => [s.id, s.name, s.cat, s.ai, s.epa, s.label, s.sds]);
+  return crypto.createHash('sha256').update(JSON.stringify(names.length ? [input, names] : input)).digest('hex');
 }
 
 // What moved between two snapshots: products added, products removed, and products whose name or a shown field changed.
@@ -106,7 +159,8 @@ function diffSnapshots(previous, next) {
   for (const [id, now] of after) {
     const was = before.get(id);
     if (!was) { added.push({ id, name: now.name }); continue; }
-    const fields = Object.keys(FIELD_WORDS).filter((field) => was[field] !== now[field]);
+    // A snapshot stored before the category was part of it has no `cat`: that alone is not a change.
+    const fields = Object.keys(FIELD_WORDS).filter((field) => !(field === 'cat' && was.cat === undefined) && was[field] !== now[field]);
     if (fields.length) changed.push({ id, name: now.name, fields });
   }
   for (const [id, was] of before) if (!after.has(id)) removed.push({ id, name: was.name });
@@ -182,10 +236,22 @@ function segmentsFor({ diff, decision }) {
 
 const productLine = (label, products) => (products.length ? `${label}: ${products.map((p) => tidy(p.name)).join(', ')}.` : '');
 
+// Visit lines recorded without a catalog product that match none: not on the list, never printed, never blocking a sign-off,
+// but always named where a person reads the bell. Empty when there are none.
+const MAX_UNMATCHED_NAMES = 25;
+function unmatchedSentence(unmatched = []) {
+  if (!unmatched.length) return '';
+  const lines = unmatched.reduce((sum, line) => sum + line.uses, 0);
+  const names = unmatched.slice(0, MAX_UNMATCHED_NAMES).map((line) => tidy(line.name)).join(', ');
+  const more = unmatched.length > MAX_UNMATCHED_NAMES ? ` and ${unmatched.length - MAX_UNMATCHED_NAMES} more names` : '';
+  return `${lines} visit ${lines === 1 ? 'line' : 'lines'} recorded without a catalog product ${lines === 1 ? 'is' : 'are'} not on the list: ${names}${more}.`;
+}
+
 // The full text for "Show full text": every product, what changed, and why a person is asked.
-function detailFor({ diff, decision, previous }) {
-  if (previous === 'first_run') return 'Product list: the list now rebuilds itself every day from the products applied in the last 12 months. This is the first rebuilt version. Check it once and sign it off.';
-  if (previous === 'file_replaced') return 'Product list: the file on the kit was replaced by hand since the last rebuild, so the daily rebuild replaced it with the current list. Check it and sign it off.';
+function detailFor({ diff, decision, previous, unmatched = [] }) {
+  const unmatchedLine = unmatchedSentence(unmatched);
+  if (previous === 'first_run') return `Product list: the list now rebuilds itself every day from the products applied in the last 12 months. This is the first rebuilt version. Check it once and sign it off. ${unmatchedLine}`.trim().slice(0, 1900);
+  if (previous === 'file_replaced') return `Product list: the file on the kit was replaced by hand since the last rebuild, so the daily rebuild replaced it with the current list. Check it and sign it off. ${unmatchedLine}`.trim().slice(0, 1900);
   const outside = new Set(decision.outside.map((product) => product.id));
   const mark = (products) => products.map((p) => ({ ...p, name: outside.has(p.id) ? `${p.name} (not a SiteOne purchase)` : p.name }));
   const changedWords = diff.changed.map((p) => ({ ...p, name: `${p.name} (${p.fields.map((f) => FIELD_WORDS[f]).join(', ')})` }));
@@ -195,6 +261,7 @@ function detailFor({ diff, decision, previous }) {
     productLine('Removed', diff.removed),
     decision.reasons.includes('incomplete') ? 'The list is incomplete: a pesticide is missing its EPA number, label or SDS.' : '',
     decision.reasons.includes('unsigned_before') ? 'The earlier version is still not signed off.' : '',
+    unmatchedLine,
     'Check the product list and sign off.',
   ].filter(Boolean);
   return `Product list: ${lines.join(' ')}`.slice(0, 1900);
@@ -215,8 +282,8 @@ function specFor(itemId, whyText) {
 
 // The words of the bell for one decision: { spec, detail }. A product name that trips the notification copy rules costs the
 // names, never the bell: the count-only sentence is used instead.
-function alertFor(itemId, { diff, decision, previous }) {
-  const detail = detailFor({ diff, decision, previous });
+function alertFor(itemId, { diff, decision, previous, unmatched = [] }) {
+  const detail = detailFor({ diff, decision, previous, unmatched });
   if (previous === 'first_run') return { spec: specFor(itemId, 'The list now rebuilds itself; check this version once.'), detail };
   if (previous === 'file_replaced') return { spec: specFor(itemId, 'The file was replaced by hand; check the rebuilt list.'), detail };
   const named = `${segmentsFor({ diff, decision }).join('; ')}; check and sign off.`;
@@ -238,14 +305,14 @@ async function closeBell(itemId, reason, resolution) {
 }
 
 // What this run will do about the list: how it relates to the file on the row, what changed, and whether the kit signs it off.
-async function planRebuild(item, rows, snapshots, info) {
+async function planRebuild(item, rows, snapshots, info, unmatched) {
   const prior = item.details && item.details.product_list_sync;
   let previous = 'first_run';
   if (prior && Array.isArray(prior.rows)) previous = fileIsOurs(prior, info) ? 'ok' : 'file_replaced';
   const diff = previous === 'ok' ? diffSnapshots(prior.rows, snapshots) : { added: [], removed: [], changed: [] };
   const bought = previous === 'ok' ? await siteOnePurchased([...diff.added, ...diff.changed].map((product) => product.id)) : new Set();
   const decision = decideSignOff({ previous, wasSignedOff: Boolean(item.attested_at), complete: listIsComplete(rows), diff, bought });
-  return { previous, diff, decision };
+  return { previous, diff, decision, unmatched };
 }
 
 // The file on the row is the one this job stored last time (a hand upload since then has another key).
@@ -315,18 +382,22 @@ async function clearPending(itemId, fingerprint) {
   return outcome.item || null;
 }
 
+// The unmatched free-text lines in the run's log line (a count only: the names are in the bell and the activity row) and result.
+const unmatchedLog = (unmatched = []) => (unmatched.length ? ` unmatchedLines=${unmatched.reduce((sum, line) => sum + line.uses, 0)} unmatchedNames=${unmatched.length}` : '');
+const unmatchedResult = (unmatched = []) => (unmatched.length ? { unmatched: { lines: unmatched.reduce((sum, line) => sum + line.uses, 0), names: unmatched.map((line) => line.name) } } : {});
+
 // After a committed replacement: the activity rows, then either the automatic sign-off (any open bell is closed) or the one bell.
 async function reportRebuild(item, { snapshots, fingerprint, plan }) {
   const { diff, decision } = plan;
   const names = (products) => products.map((product) => product.name).slice(0, 20);
   await store.logActivity(null, 'bid_kit_file_uploaded', 'Product list (product_list) file uploaded by the daily rebuild',
-    { bid_kit_item_id: item.id, item_key: ITEM_KEY, fields: ['file'], auto: 'product_list_sync', products: snapshots.length });
+    { bid_kit_item_id: item.id, item_key: ITEM_KEY, fields: ['file'], auto: 'product_list_sync', products: snapshots.length, ...unmatchedResult(plan.unmatched) });
   if (decision.auto) {
     await store.logActivity(null, 'bid_kit_attested', 'Product list (product_list) attested automatically: only products bought from SiteOne changed',
       { bid_kit_item_id: item.id, item_key: ITEM_KEY, auto: AUTO_SIGN_OFF, added: names(diff.added), changed: names(diff.changed), removed: names(diff.removed) });
     await closeBell(item.id, 'signed_off', 'Cleared: the product list was signed off automatically');
-    logger.info(`[bid-kit] product list rebuilt and signed off automatically added=${diff.added.length} changed=${diff.changed.length} removed=${diff.removed.length}`);
-    return { changed: true, signedOff: true, rang: false };
+    logger.info(`[bid-kit] product list rebuilt and signed off automatically added=${diff.added.length} changed=${diff.changed.length} removed=${diff.removed.length}${unmatchedLog(plan.unmatched)}`);
+    return { changed: true, signedOff: true, rang: false, ...unmatchedResult(plan.unmatched) };
   }
   const { spec, detail } = alertFor(item.id, plan);
   const rang = await raiseBell(item.id, spec.why, detail, fingerprint);
@@ -336,8 +407,8 @@ async function reportRebuild(item, { snapshots, fingerprint, plan }) {
     // The words stay on the row; the next run raises the same bell again (a silent dedupe) and clears them.
     logger.warn(`[bid-kit] clearing the pending product list bell failed: ${errorTag(err)}`);
   }
-  logger.info(`[bid-kit] product list rebuilt, needs sign-off reasons=${decision.reasons.join(',')}`);
-  return { changed: true, signedOff: false, rang, reasons: decision.reasons };
+  logger.info(`[bid-kit] product list rebuilt, needs sign-off reasons=${decision.reasons.join(',')}${unmatchedLog(plan.unmatched)}`);
+  return { changed: true, signedOff: false, rang, reasons: decision.reasons, ...unmatchedResult(plan.unmatched) };
 }
 
 // A bell whose words were saved with the file but not raised (a failure or a stop in between). Runs first, every day, before the
@@ -366,18 +437,18 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
       await closeBell(item.id, 'signed_off', 'Cleared: the product list was signed off');
     }
     item = await settlePending(item);
-    const rows = await readProductRows();
+    const { rows, unmatched } = await readProductList();
     if (!rows.length) {
       logger.warn('[bid-kit] product list sync found no applied products; the file was left alone');
       return { skipped: 'no_products' };
     }
     const snapshots = rows.map(snapshotOf);
-    const fingerprint = fingerprintOf(snapshots);
+    const fingerprint = fingerprintOf(snapshots, unmatched);
     const prior = item.details && item.details.product_list_sync;
     const info = await store.fileInfo(item.id);
     // Unchanged only while the file on the row is still the one this job stored: a file replaced by hand is rebuilt and flagged.
     if (prior && prior.fingerprint === fingerprint && fileIsOurs(prior, info)) return { changed: false };
-    const plan = await planRebuild(item, rows, snapshots, info);
+    const plan = await planRebuild(item, rows, snapshots, info, unmatched);
     const stored = await storeRebuild(item, { rows, snapshots, fingerprint, plan, now });
     if (stored.skipped) return { skipped: stored.skipped };
     return await reportRebuild(item, { snapshots, fingerprint, plan });
@@ -388,6 +459,6 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
 }
 
 module.exports = {
-  runBidKitProductListSync, readProductRows, sortRows, snapshotOf, fingerprintOf, diffSnapshots, listIsComplete, decideSignOff,
+  runBidKitProductListSync, readProductRows, readProductList, foldUnlinked, unmatchedSentence, sortRows, snapshotOf, fingerprintOf, diffSnapshots, listIsComplete, decideSignOff,
   siteOnePurchased, alertFor, detailFor, isPesticideCategory, keyFor, KEY_PREFIX, AUTO_SIGN_OFF, PESTICIDE_CATEGORIES,
 };
