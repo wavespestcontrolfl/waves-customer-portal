@@ -5239,6 +5239,19 @@ postgres('visit summary recipient recovery', () => {
         expect(strayTexts).toEqual([]);
       });
 
+      // Production runs the admin bell policy (GATE_ADMIN_BELL_POLICY), which writes no row for an
+      // 'alert' that does not ask to ring.
+      test('the office alert reaches the bell under the admin bell policy', async () => {
+        jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(true);
+        const invoiceId = await stop();
+        await coordinate();
+        require('../services/invoice-email').sendInvoiceEmail.mockResolvedValue({ ok: false, blocked: true, error: 'Suppressed: bounce' });
+        await Invoice.processScheduledSends();
+        const alertRow = () => mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`summary-carried-email:${invoiceId}`]);
+        expect(await alertRow().first()).toBeTruthy();
+        await alertRow().del();
+      });
+
       test('a transient email failure retries up to the queue cap, then finalizes as sent and tells the office instead of stranding', async () => {
         const invoiceId = await stop();
         await coordinate();
@@ -5497,6 +5510,18 @@ postgres('visit summary recipient recovery', () => {
         expect(convert).not.toHaveBeenCalled();
         expect(sendSms).not.toHaveBeenCalled();
         expect(strayTexts).toEqual([]);
+      });
+
+      test('the parked invoice\'s alert reaches the bell under the admin bell policy', async () => {
+        jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(true);
+        const invoiceId = await stop();
+        suppressSummary();
+        await coordinate();
+        require('../services/invoice-email').sendInvoiceEmail.mockResolvedValue({ ok: false, blocked: true, error: 'Suppressed: bounce' });
+        await Invoice.processScheduledSends();
+        const alertRow = () => mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`summary-link-undelivered:${invoiceId}`]);
+        expect(await alertRow().first()).toBeTruthy();
+        await alertRow().del();
       });
 
       test('a failed summary text and an email that keeps failing: retried to the cap, then parked for the office', async () => {
