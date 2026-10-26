@@ -73,8 +73,8 @@ const vehicleCardSchema = Joi.object({
   insurancePerYear: num(0, 10000000, 2).default(0),
   loanInterestPerYear: num(0, 10000000, 2).default(0),
   otherFixedPerYear: num(0, 10000000, 2).default(0),
-  fuelPerMile: num(0, 100, 4).default(0),
-  upkeepPerMile: num(0, 100, 4).default(0),
+  fuelPerMile: num(0, 99.9999, 4).default(0), // numeric(6,4)
+  upkeepPerMile: num(0, 99.9999, 4).default(0),
   note: noteField,
 });
 

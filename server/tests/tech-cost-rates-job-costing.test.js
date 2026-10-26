@@ -245,6 +245,37 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
       expect(db.writes.jobCosts[0]).toMatchObject({ labor_cost: 36.33, drive_cost: 8.88 });
     });
 
+    test('a stop shared by two physical visits splits its drive two ways', async () => {
+      const res = await calculateJobCost('svc-1', fakeDb({
+        legs: [{ scheduled_service_id: 'svc-1', status: 'matched', drive_minutes: '20.00', drive_miles: '8.00', shared_stop_count: 2, leg_group_key: 'svc-1' }],
+      }));
+      expect(res.costRates).toMatchObject({ driveMinutes: 10, driveMiles: 4, driveSource: 'gps_leg' });
+      // 60 + 10 = 70 min.
+      expect(res.labor_cost).toBe(31.79); // 27.25 x 70 / 60
+    });
+
+    test('a grouped visit with no closeout marker: its one leg goes to the lowest service id only', async () => {
+      const legsOf = [
+        { scheduled_service_id: 'svc-a', status: 'matched', drive_minutes: '20.00', drive_miles: '8.00', shared_stop_count: 1, leg_group_key: 'visit-1' },
+        { scheduled_service_id: 'svc-b', status: 'matched', drive_minutes: '20.00', drive_miles: '8.00', shared_stop_count: 1, leg_group_key: 'visit-1' },
+      ];
+      const a = await calculateJobCost('svc-a', fakeDb({ svc: { ...SVC, id: 'svc-a' }, legs: legsOf }));
+      const b = await calculateJobCost('svc-b', fakeDb({ svc: { ...SVC, id: 'svc-b' }, legs: legsOf }));
+      expect(a.costRates).toMatchObject({ driveMinutes: 20, driveMiles: 8, driveSource: 'gps_leg' });
+      expect(b.costRates).toMatchObject({ driveMinutes: 0, driveMiles: 0, driveSource: 'group_member' });
+    });
+
+    test('a grouped visit WITH a closeout marker: the marked owner carries the leg even when it is not the lowest id', async () => {
+      const legsOf = [
+        { scheduled_service_id: 'svc-a', status: 'matched', drive_minutes: '20.00', drive_miles: '8.00', shared_stop_count: 1, leg_group_key: 'visit-1' },
+        { scheduled_service_id: 'svc-b', status: 'matched', drive_minutes: '20.00', drive_miles: '8.00', shared_stop_count: 1, leg_group_key: 'visit-1' },
+      ];
+      const b = await calculateJobCost('svc-b', fakeDb({ svc: { ...SVC, id: 'svc-b' }, record: marked('svc-b', 30), legs: legsOf }));
+      const a = await calculateJobCost('svc-a', fakeDb({ svc: { ...SVC, id: 'svc-a' }, record: marked('svc-b', 30), legs: legsOf }));
+      expect(b.costRates).toMatchObject({ driveMinutes: 20, driveMiles: 8, driveSource: 'gps_leg' });
+      expect(a.costRates).toMatchObject({ driveMinutes: 0, driveMiles: 0, driveSource: 'none' });
+    });
+
     test('the table exists but has no row for the visit: 24 minutes and 11 miles', async () => {
       const res = await calculateJobCost('svc-1', fakeDb({ legs: [] }));
       expect(jobCosting.DEFAULT_DRIVE_MINUTES_PER_STOP).toBe(24);

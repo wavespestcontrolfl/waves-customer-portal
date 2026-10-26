@@ -101,7 +101,9 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
     if (await legsTableExists()) return;
     await trx.raw(`create table visit_gps_legs (
       scheduled_service_id uuid primary key references scheduled_services(id) on delete cascade,
+      leg_group_key text not null,
       status text not null,
+      shared_stop_count integer not null default 1,
       drive_minutes numeric(8,2),
       drive_miles numeric(8,2)
     )`);
@@ -109,10 +111,10 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
   const addLeg = async (over = {}) => {
     await ensureLegsTable();
     const row = {
-      scheduled_service_id: visitId, status: 'matched', drive_minutes: 20, drive_miles: 8, ...over,
+      scheduled_service_id: visitId, leg_group_key: visitId, status: 'matched', drive_minutes: 20, drive_miles: 8, ...over,
     };
-    if (await trx.schema.hasColumn('visit_gps_legs', 'leg_group_key')) row.leg_group_key = row.leg_group_key || visitId;
     if (await trx.schema.hasColumn('visit_gps_legs', 'service_date')) row.service_date = row.service_date || '2026-10-26';
+    if (await trx.schema.hasColumn('visit_gps_legs', 'algorithm_version')) row.algorithm_version = row.algorithm_version || 1;
     await trx('visit_gps_legs').insert(row);
   };
 

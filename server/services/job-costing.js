@@ -180,22 +180,37 @@ async function visitGpsLegsTableExists(db) {
 // The drive to a visit: its matched GPS leg when there is one, else the
 // measured per-stop defaults. A matched leg with no miles (a trip without a
 // mileage log) takes the default miles; no minutes takes the default minutes.
+// A stop that served several physical visits (one parking spot,
+// shared_stop_count N) splits its drive N ways. The members of one grouped
+// visit share one leg (one leg_group_key): groupOwnerId names the member that
+// carries it (the lowest service id), for the caller to apply when no
+// combined-closeout marker names an owner.
 async function loadDriveLeg(db, scheduledServiceId) {
   const fallback = {
-    minutes: DEFAULT_DRIVE_MINUTES_PER_STOP, miles: DEFAULT_DRIVE_MILES_PER_STOP, source: 'default',
+    minutes: DEFAULT_DRIVE_MINUTES_PER_STOP, miles: DEFAULT_DRIVE_MILES_PER_STOP, source: 'default', groupOwnerId: null,
   };
   try {
     if (!(await visitGpsLegsTableExists(db))) return fallback;
     const leg = await db('visit_gps_legs')
       .where({ scheduled_service_id: scheduledServiceId, status: 'matched' })
-      .first('drive_minutes', 'drive_miles');
+      .first('drive_minutes', 'drive_miles', 'shared_stop_count', 'leg_group_key');
     if (!leg) return fallback;
     const minutes = leg.drive_minutes == null ? NaN : Number(leg.drive_minutes);
     const miles = leg.drive_miles == null ? NaN : Number(leg.drive_miles);
+    const sharedBy = Math.max(1, Math.floor(Number(leg.shared_stop_count)) || 1);
+    let groupOwnerId = null;
+    if (leg.leg_group_key != null && String(leg.leg_group_key) !== String(scheduledServiceId)) {
+      const first = await db('visit_gps_legs')
+        .where({ leg_group_key: leg.leg_group_key, status: 'matched' })
+        .orderBy('scheduled_service_id')
+        .first('scheduled_service_id');
+      groupOwnerId = first ? String(first.scheduled_service_id) : null;
+    }
     return {
-      minutes: Number.isFinite(minutes) && minutes >= 0 ? minutes : DEFAULT_DRIVE_MINUTES_PER_STOP,
-      miles: Number.isFinite(miles) && miles >= 0 ? miles : DEFAULT_DRIVE_MILES_PER_STOP,
+      minutes: (Number.isFinite(minutes) && minutes >= 0 ? minutes : DEFAULT_DRIVE_MINUTES_PER_STOP) / sharedBy,
+      miles: (Number.isFinite(miles) && miles >= 0 ? miles : DEFAULT_DRIVE_MILES_PER_STOP) / sharedBy,
       source: 'gps_leg',
+      groupOwnerId,
     };
   } catch {
     return fallback;
@@ -724,9 +739,14 @@ async function calculateJobCost(scheduledServiceId, db, {
     // on-site minutes (its allocated share in a combined closeout) carry the
     // technician's labor and the vehicle's fixed cost, so a stop's members add
     // up to the stop's real minutes with nothing counted twice.
-    const driven = ownsDriveCost && svc.status === 'completed'
+    let driven = ownsDriveCost && svc.status === 'completed'
       ? await loadDriveLeg(db, scheduledServiceId)
       : { minutes: 0, miles: 0, source: 'none' };
+    // A grouped visit with no closeout marker: its one GPS leg goes to one
+    // member, never to each of them.
+    if (driveAllocation?.version !== 1 && driven.groupOwnerId && driven.groupOwnerId !== String(svc.id)) {
+      driven = { minutes: 0, miles: 0, source: 'group_member' };
+    }
     const chargedMinutes = laborMinutes + driven.minutes;
     const vehicle = costRates.vehicle;
     laborCost = (costRates.laborPerWorkedHourCents / 100) * (chargedMinutes / 60);
