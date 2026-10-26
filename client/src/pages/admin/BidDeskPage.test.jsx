@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
@@ -33,10 +33,29 @@ function route(handlers) {
     return handler(options);
   });
 }
-const renderPage = (url = "/") => render(<MemoryRouter initialEntries={[url]}><BidDeskPage /></MemoryRouter>);
+const VERIFIED_USER = { id: "bid-desk-admin", role: "admin" };
+const renderPage = (url = "/") => render(
+  <MemoryRouter initialEntries={[url]}>
+    <Routes>
+      <Route element={<Outlet context={{ user: VERIFIED_USER }} />}>
+        <Route path="*" element={<BidDeskPage />} />
+      </Route>
+    </Routes>
+  </MemoryRouter>,
+);
 
-beforeEach(() => adminFetch.mockReset());
-afterEach(() => cleanup());
+beforeEach(() => {
+  adminFetch.mockReset();
+  localStorage.clear();
+  vi.stubGlobal("navigator", Object.assign(Object.create(navigator), {
+    locks: { request: (_key, _options, callback) => Promise.resolve().then(callback) },
+  }));
+});
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+  vi.unstubAllGlobals();
+});
 
 it("lists open bids with the date, an Unconfirmed chip and the line it was read from", async () => {
   route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }) });
@@ -75,16 +94,51 @@ it("enables shared controls by default and preserves them while opening a bid", 
     "GET /admin/bid-desk/": () => reply({ bids: LIST }),
     "GET /admin/bid-desk/b1": () => reply({ bid: bid(), emails: [] }),
   });
-  renderPage();
+  renderPage("/?savedViews=1");
   expect(await screen.findByRole("searchbox", { name: "Bid Desk search" })).toBeInTheDocument();
   expect(screen.getByLabelText("Status")).toHaveValue("open");
   expect(screen.getByLabelText("Earlier mail")).toHaveValue("show");
   expect(screen.getByLabelText("Sort")).toHaveValue("workflow");
   expect(screen.getByLabelText("Bid Desk rows per page")).toHaveValue("100");
 
+  fireEvent.change(screen.getByRole("searchbox", { name: "Bid Desk search" }), { target: { value: "Sample Ridge" } });
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "all" } });
+  fireEvent.change(screen.getByLabelText("Earlier mail"), { target: { value: "hide" } });
+  fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "due" } });
+  fireEvent.change(screen.getByLabelText("Bid Desk rows per page"), { target: { value: "25" } });
+
   fireEvent.click(screen.getByRole("button", { name: "Open Sample Ridge Residences" }));
   expect(await screen.findByLabelText("Due date (Eastern time)")).toBeInTheDocument();
-  expect(screen.getByRole("searchbox", { name: "Bid Desk search" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(screen.queryByLabelText("Due date (Eastern time)")).toBeNull());
+  expect(screen.getByRole("searchbox", { name: "Bid Desk search" })).toHaveValue("Sample Ridge");
+  expect(screen.getByLabelText("Status")).toHaveValue("all");
+  expect(screen.getByLabelText("Earlier mail")).toHaveValue("hide");
+  expect(screen.getByLabelText("Sort")).toHaveValue("due");
+  expect(screen.getByLabelText("Bid Desk rows per page")).toHaveValue("25");
+});
+
+it("shows saved views only for the explicit opt-in with enhanced controls active", async () => {
+  route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }) });
+  const defaultView = renderPage();
+  await screen.findByText("Sample Ridge Residences");
+  expect(screen.queryByRole("button", { name: "Bid Desk saved views" })).toBeNull();
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "all" } });
+  defaultView.unmount();
+
+  const remountedDefault = renderPage();
+  await screen.findByText("Sample Ridge Residences");
+  expect(screen.getByLabelText("Status")).toHaveValue("open");
+  remountedDefault.unmount();
+
+  const legacyView = renderPage("/?savedViews=1&tableControls=0");
+  await screen.findByText("Sample Ridge Residences");
+  expect(screen.queryByRole("button", { name: "Bid Desk saved views" })).toBeNull();
+  legacyView.unmount();
+
+  renderPage("/?savedViews=1");
+  await screen.findByText("Sample Ridge Residences");
+  expect(screen.getByRole("button", { name: "Bid Desk saved views" })).toBeInTheDocument();
 });
 
 it("searches the known loaded bid text and applies the preview filters", async () => {
@@ -164,18 +218,34 @@ it("resets paging when search or page size changes", async () => {
   expect(screen.getByLabelText("Bid Desk rows per page")).toHaveValue("500");
 });
 
-it("clamps the page after a reload returns fewer loaded bids", async () => {
+it("keeps a restored page through initial loading, then clamps it after the loaded set shrinks", async () => {
   const many = Array.from({ length: 101 }, (_, index) => bid({ id: `p${index + 1}`, project_title: `Project ${String(index + 1).padStart(3, "0")}` }));
-  let listLoads = 0;
-  route({
-    "GET /admin/bid-desk/": () => reply({ bids: listLoads++ === 0 ? many : [many[0]] }),
-    "POST /admin/bid-desk/from-email": () => reply({ created: false, bid_id: "p1" }),
-    "GET /admin/bid-desk/p1": () => reply({ bid: many[0], emails: [] }),
-  });
-  renderPage("/?tableControls=1");
+  route({ "GET /admin/bid-desk/": () => reply({ bids: many }) });
+  const first = renderPage("/?savedViews=1");
   await screen.findByText("Project 001");
   fireEvent.click(screen.getByRole("button", { name: "Next page" }));
   expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
+  await waitFor(() => expect(localStorage.length).toBeGreaterThan(0));
+  first.unmount();
+
+  let resolveInitialLoad;
+  let listLoads = 0;
+  route({
+    "GET /admin/bid-desk/": () => {
+      listLoads += 1;
+      if (listLoads === 1) return new Promise((resolve) => { resolveInitialLoad = resolve; });
+      return reply({ bids: [many[0]] });
+    },
+    "POST /admin/bid-desk/from-email": () => reply({ created: false, bid_id: "p1" }),
+    "GET /admin/bid-desk/p1": () => reply({ bid: many[0], emails: [] }),
+  });
+  renderPage("/?savedViews=1");
+  expect(await screen.findByText("Loading bids…")).toBeInTheDocument();
+  await act(async () => {
+    resolveInitialLoad({ ok: true, status: 200, json: async () => ({ bids: many }) });
+  });
+  expect(await screen.findByText("Page 2 of 2")).toBeInTheDocument();
+  expect(screen.getByText("Project 101")).toBeInTheDocument();
 
   fireEvent.change(screen.getByLabelText("Mark an email as a bid"), { target: { value: "mail-1" } });
   fireEvent.click(screen.getByRole("button", { name: "Mark as bid" }));
@@ -205,6 +275,95 @@ it("keeps the project action column and lets the other columns be hidden", async
   expect(screen.queryByText("Fixture Build Co")).toBeNull();
   expect(screen.getAllByRole("button", { name: /^Open / })).not.toHaveLength(0);
   expect(table.style.getPropertyValue("--bid-desk-table-min-width")).toBe("680px");
+});
+
+it("round-trips current table settings for the verified user", async () => {
+  const many = Array.from({ length: 61 }, (_, index) => bid({
+    id: `saved-${index + 1}`,
+    project_title: `Saved Project ${String(index + 1).padStart(3, "0")}`,
+  }));
+  route({ "GET /admin/bid-desk/": () => reply({ bids: many }) });
+  const first = renderPage("/?savedViews=1");
+  await screen.findByText("Saved Project 001");
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "all" } });
+  fireEvent.change(screen.getByLabelText("Earlier mail"), { target: { value: "hide" } });
+  fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "project" } });
+  fireEvent.change(screen.getByLabelText("Bid Desk rows per page"), { target: { value: "25" } });
+  fireEvent.click(screen.getByRole("button", { name: "Columns" }));
+  fireEvent.click(screen.getByLabelText("Buyer"));
+  fireEvent.click(screen.getByRole("button", { name: "Done" }));
+  fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+  expect(screen.getByText("Page 2 of 3")).toBeInTheDocument();
+  await waitFor(() => expect(localStorage.length).toBeGreaterThan(0));
+  first.unmount();
+
+  renderPage("/?savedViews=1");
+  expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument();
+  expect(screen.getByLabelText("Status")).toHaveValue("all");
+  expect(screen.getByLabelText("Earlier mail")).toHaveValue("hide");
+  expect(screen.getByLabelText("Sort")).toHaveValue("project");
+  expect(screen.getByLabelText("Bid Desk rows per page")).toHaveValue("25");
+  expect(screen.getByRole("columnheader", { name: "Project" })).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "Buyer" })).toBeNull();
+});
+
+it("sanitizes restored columns and always restores the required project action", async () => {
+  route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }) });
+  const first = renderPage("/?savedViews=1");
+  await screen.findByText("Sample Ridge Residences");
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "all" } });
+  await waitFor(() => expect(localStorage.length).toBe(1));
+  const storageKey = localStorage.key(0);
+  const record = JSON.parse(localStorage.getItem(storageKey));
+  record.current.visibleColumns = ["buyer", "unknown", "buyer"];
+  localStorage.setItem(storageKey, JSON.stringify(record));
+  first.unmount();
+
+  renderPage("/?savedViews=1");
+  await screen.findByText("Sample Ridge Residences");
+  expect(screen.getByRole("columnheader", { name: "Project" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "Buyer" })).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "Source" })).toBeNull();
+  expect(screen.getByRole("table").style.getPropertyValue("--bid-desk-table-min-width")).toBe("460px");
+  fireEvent.click(screen.getByRole("button", { name: "Columns" }));
+  expect(screen.getByLabelText("Project / action")).toBeChecked();
+  expect(screen.getByLabelText("Project / action")).toBeDisabled();
+});
+
+it("saves and applies a named Bid Desk view through the shared control", async () => {
+  route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }) });
+  renderPage("/?savedViews=1");
+  await screen.findByText("Sample Ridge Residences");
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "all" } });
+  fireEvent.change(screen.getByLabelText("Earlier mail"), { target: { value: "hide" } });
+  fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "due" } });
+  fireEvent.click(screen.getByRole("button", { name: "Columns" }));
+  fireEvent.click(screen.getByLabelText("Buyer"));
+  fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Bid Desk saved views" }));
+  fireEvent.change(screen.getByLabelText("View name"), { target: { value: "Due without buyer" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save current view" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Bid Desk saved views" })).toBeNull());
+
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "open" } });
+  fireEvent.change(screen.getByLabelText("Earlier mail"), { target: { value: "show" } });
+  fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "workflow" } });
+  fireEvent.click(screen.getByRole("button", { name: "Columns" }));
+  fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+  fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Bid Desk saved views" }));
+  const savedView = screen.getByRole("option", { name: "Due without buyer" });
+  fireEvent.change(screen.getByLabelText("Bid Desk saved view"), { target: { value: savedView.value } });
+  fireEvent.click(screen.getByRole("button", { name: "Use view" }));
+
+  expect(screen.getByLabelText("Status")).toHaveValue("all");
+  expect(screen.getByLabelText("Earlier mail")).toHaveValue("hide");
+  expect(screen.getByLabelText("Sort")).toHaveValue("due");
+  expect(screen.getByRole("columnheader", { name: "Project" })).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "Buyer" })).toBeNull();
+  expect(screen.getByText("Page 1 of 1")).toBeInTheDocument();
 });
 
 it("warns that the capped response contains only the first 500 loaded bids", async () => {
