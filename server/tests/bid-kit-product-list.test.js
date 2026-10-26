@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/bid-kit-store', () => ({
-  listItems: jest.fn(), fileInfo: jest.fn(), replaceFile: jest.fn(), logActivity: jest.fn(),
+  listItems: jest.fn(), fileInfo: jest.fn(), replaceFile: jest.fn(), logActivity: jest.fn(), updateItem: jest.fn(),
 }));
 jest.mock('../services/bid-kit-files', () => ({ putFile: jest.fn(), deleteFile: jest.fn() }));
 jest.mock('../services/admin-alert-episodes', () => ({ raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn() }));
@@ -256,6 +256,13 @@ describe('runBidKitProductListSync', () => {
     store.fileInfo.mockResolvedValue({ key: KEY });
     store.replaceFile.mockResolvedValue({ item: itemRow(), oldKey: KEY });
     store.logActivity.mockResolvedValue();
+    // The fenced update, run against the listed row; the row it returns carries a later version.
+    store.updateItem.mockImplementation(async (id, compute) => {
+      const row = (await store.listItems())[0];
+      const decision = compute(row);
+      const details = decision.patch.details ? JSON.parse(decision.patch.details) : row.details;
+      return { item: { ...row, details, updated_at: new Date('2026-10-26T12:00:00Z') }, before: row };
+    });
     files.putFile.mockImplementation(async (id, file) => ({ key: NEW_KEY, fileName: file.originalname, contentType: 'application/pdf', size: file.size }));
     files.deleteFile.mockResolvedValue();
     episodes.openAdminAlertKeys.mockResolvedValue([]);
@@ -368,6 +375,98 @@ describe('runBidKitProductListSync', () => {
     store.replaceFile.mockRejectedValueOnce(Object.assign(new Error('x'), { bidKitOutcome: 'unknown' }));
     expect(await run()).toEqual({ failed: true });
     expect(files.deleteFile).not.toHaveBeenCalled();
+  });
+  const withPending = (over = {}) => itemRow({
+    attested_at: null,
+    details: { product_list_sync: { ...itemRow().details.product_list_sync, pending_alert: { why: 'Added Gentrol Complete EC3 (not a SiteOne purchase); check and sign off.', detail: 'Product list: Added: Gentrol Complete EC3 (not a SiteOne purchase). Check the product list and sign off.' } } }, ...over,
+  });
+
+  test('an unchanged list whose file was replaced by hand is rebuilt and flagged once, never auto signed off', async () => {
+    store.fileInfo.mockResolvedValue({ key: 'bid-kit/item/by-hand.pdf' });
+    expect(await run()).toMatchObject({ changed: true, signedOff: false, reasons: ['file_replaced'] });
+    expect(files.putFile).toHaveBeenCalledTimes(1);
+    const options = store.replaceFile.mock.calls[0][3];
+    expect(options.attestBySystem).toBe(false);
+    expect(options.details.product_list_sync.file_ref).toBe(refOf(NEW_KEY));
+    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toBe('The file was replaced by hand; check the rebuilt list.');
+    // The next day the refs match again: nothing.
+    store.listItems.mockResolvedValue([itemRow({ details: { product_list_sync: options.details.product_list_sync } })]);
+    store.fileInfo.mockResolvedValue({ key: NEW_KEY });
+    jest.clearAllMocks();
+    expect(await run()).toEqual({ changed: false });
+    expect(files.putFile).not.toHaveBeenCalled();
+  });
+  test('a row with no file at all counts as replaced', async () => {
+    store.fileInfo.mockResolvedValue({ key: null });
+    expect(await run()).toMatchObject({ changed: true, reasons: ['file_replaced'] });
+  });
+  test('when the owner is to be asked, the bell words are saved in the same update as the file; an automatic sign-off saves none', async () => {
+    setList([...rowsBefore, product(3, { name: 'Gentrol Complete EC3' })], []);
+    await run();
+    expect(store.replaceFile.mock.calls[0][3].details.product_list_sync.pending_alert).toEqual({
+      why: 'Added Gentrol Complete EC3 (not a SiteOne purchase); check and sign off.',
+      detail: expect.stringContaining('Gentrol Complete EC3 (not a SiteOne purchase)'),
+    });
+    store.replaceFile.mockClear();
+    setList([...rowsBefore, product(3)], [3]);
+    await run();
+    expect(store.replaceFile.mock.calls[0][3].details.product_list_sync).not.toHaveProperty('pending_alert');
+  });
+  test('after the bell is raised, the saved words are cleared by a fenced update that leaves the rest and the sign-off alone', async () => {
+    setList([...rowsBefore, product(3, { name: 'Gentrol Complete EC3' })], []);
+    const synced = lib.fingerprintOf(snap([...rowsBefore, product(3, { name: 'Gentrol Complete EC3' })]));
+    store.listItems.mockResolvedValue([withPending({ details: { product_list_sync: { fingerprint: synced, file_ref: refOf(NEW_KEY), rows: [], pending_alert: { why: 'x', detail: 'y' } } } })]);
+    await run();
+    // A different stored list is never cleared by this update; this list's words go and every other key stays.
+    const compute = store.updateItem.mock.calls[0][1];
+    expect(compute({ details: { product_list_sync: { fingerprint: 'F', pending_alert: { why: 'a', detail: 'b' } } } })).toEqual({ patch: {} });
+    const ours = compute({ details: { other: 1, product_list_sync: { fingerprint: synced, rows: [1], pending_alert: { why: 'a', detail: 'b' } } } });
+    expect(Object.keys(ours.patch)).toEqual(['details']);
+    expect(JSON.parse(ours.patch.details)).toEqual({ other: 1, product_list_sync: { fingerprint: synced, rows: [1] } });
+  });
+  test('a bell that failed to raise keeps its words on the row; the next run raises it before the unchanged return, then clears it', async () => {
+    setList([...rowsBefore, product(3, { name: 'Gentrol Complete EC3' })], []);
+    episodes.raiseAdminAlertWithReopen.mockRejectedValueOnce(new Error('bell down'));
+    expect(await run()).toEqual({ failed: true });
+    const saved = store.replaceFile.mock.calls[0][3].details.product_list_sync;
+    expect(saved.pending_alert).toBeDefined();
+    expect(store.updateItem).not.toHaveBeenCalled();
+    // Next day: the list is the same as the fingerprint stored, the file is ours, the words are still there.
+    jest.clearAllMocks();
+    store.listItems.mockResolvedValue([itemRow({ attested_at: null, details: { product_list_sync: saved } })]);
+    store.fileInfo.mockResolvedValue({ key: NEW_KEY });
+    store.updateItem.mockImplementation(async (id, compute) => ({ item: { ...itemRow({ attested_at: null }), details: { product_list_sync: { ...saved, pending_alert: undefined } }, updated_at: new Date('2026-10-27T12:00:00Z') }, before: compute({ details: { product_list_sync: saved } }) }));
+    episodes.openAdminAlertKeys.mockResolvedValue([]);
+    episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n1', rang: true });
+    expect(await run()).toEqual({ changed: false });
+    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
+    const [, headline, why, opts] = episodes.raiseAdminAlertWithReopen.mock.calls[0];
+    expect(headline).toBe('Estimates — check the product list and sign off');
+    expect(why).toBe(saved.pending_alert.why);
+    expect(opts).toMatchObject({ dedupeKey: `bid-kit:product-list:${ITEM}`, dedupeVersion: saved.fingerprint, detail: saved.pending_alert.detail });
+    expect(store.updateItem).toHaveBeenCalledTimes(1);
+  });
+  test('a failed retry is logged and never blocks the rest of the run; the words stay for the next day', async () => {
+    store.listItems.mockResolvedValue([withPending()]);
+    episodes.raiseAdminAlertWithReopen.mockRejectedValue(new Error('bell down'));
+    expect(await run()).toEqual({ changed: false });
+    expect(store.updateItem).not.toHaveBeenCalled();
+  });
+  test('words saved for an item the owner has since signed off are cleared without a bell', async () => {
+    store.listItems.mockResolvedValue([withPending({ attested_at: new Date('2026-10-26T01:00:00Z') })]);
+    expect(await run()).toEqual({ changed: false });
+    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(store.updateItem).toHaveBeenCalledTimes(1);
+  });
+  test('after a retry the rebuild in the same run uses the version the clearing update produced', async () => {
+    store.listItems.mockResolvedValue([withPending()]);
+    setList([...rowsBefore, product(3)], [3]);
+    await run();
+    // The saved bell is raised first, then the rebuild's own (the new list is a SiteOne add on a version nobody signed off): same key.
+    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(2);
+    expect(new Set(episodes.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).size).toBe(1);
+    expect(store.replaceFile.mock.calls[0][2]).toEqual(new Date('2026-10-26T12:00:00Z'));
   });
   test('a sign-off by the owner closes the open bell on the next run', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue([`bid-kit:product-list:${ITEM}`]);

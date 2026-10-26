@@ -238,27 +238,38 @@ async function closeBell(itemId, reason, resolution) {
 }
 
 // What this run will do about the list: how it relates to the file on the row, what changed, and whether the kit signs it off.
-async function planRebuild(item, rows, snapshots) {
+async function planRebuild(item, rows, snapshots, info) {
   const prior = item.details && item.details.product_list_sync;
-  const info = await store.fileInfo(item.id);
   let previous = 'first_run';
-  if (prior && Array.isArray(prior.rows)) previous = info && info.key && prior.file_ref === refOf(info.key) ? 'ok' : 'file_replaced';
+  if (prior && Array.isArray(prior.rows)) previous = fileIsOurs(prior, info) ? 'ok' : 'file_replaced';
   const diff = previous === 'ok' ? diffSnapshots(prior.rows, snapshots) : { added: [], removed: [], changed: [] };
   const bought = previous === 'ok' ? await siteOnePurchased([...diff.added, ...diff.changed].map((product) => product.id)) : new Set();
   const decision = decideSignOff({ previous, wasSignedOff: Boolean(item.attested_at), complete: listIsComplete(rows), diff, bought });
   return { previous, diff, decision };
 }
 
-// Builds the PDF, stores it and puts it on the row in one fenced update. Returns { outcome } or { skipped }; throws on a failed write.
-async function storeRebuild(item, { rows, snapshots, fingerprint, decision, now }) {
+// The file on the row is the one this job stored last time (a hand upload since then has another key).
+const fileIsOurs = (prior, info) => Boolean(prior && info && info.key && prior.file_ref === refOf(info.key));
+
+// Builds the PDF, stores it and puts it on the row in one fenced update. When the owner must be asked, the bell's words go into
+// the SAME update as `pending_alert`, so a failure or a stop before the bell is raised leaves the words on the row and the next
+// run raises it. Returns { outcome } or { skipped }; throws on a failed write.
+async function storeRebuild(item, { rows, snapshots, fingerprint, plan, now }) {
   const asOf = catalog.etToday(now);
   const buffer = await buildProductListPdf({ rows, asOf, businessName: WAVES_BUSINESS_NAME, licenseNumber: WAVES_FDACS_LICENSE_NUMBER });
   const stored = await files.putFile(item.id, { buffer, originalname: fileNameFor(asOf), mimetype: 'application/pdf', size: buffer.length });
+  const { decision } = plan;
+  const pending = decision.auto ? null : alertFor(item.id, plan);
   let outcome;
   try {
     outcome = await store.replaceFile(item.id, stored, item.updated_at, {
       attestBySystem: decision.auto,
-      details: { product_list_sync: { fingerprint, built_at: now.toISOString(), file_ref: refOf(stored.key), rows: snapshots } },
+      details: {
+        product_list_sync: {
+          fingerprint, built_at: now.toISOString(), file_ref: refOf(stored.key), rows: snapshots,
+          ...(pending ? { pending_alert: { why: pending.spec.why, detail: pending.detail } } : {}),
+        },
+      },
     });
   } catch (err) {
     // Delete the new object only when the row is known not to point at it (the route's rule).
@@ -276,9 +287,37 @@ async function storeRebuild(item, { rows, snapshots, fingerprint, decision, now 
   return { outcome };
 }
 
+// Raises the one bell (idempotent: the same key and version dedupe onto the open row). Returns whether it rang.
+async function raiseBell(itemId, why, detail, fingerprint) {
+  const composed = composeAdminAlert(specFor(itemId, why));
+  const raised = await episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
+    bell: true,
+    dedupeKey: keyFor(itemId),
+    // One open episode: a later rebuild rewrites this row (and rings it again, because the list changed again).
+    dedupeVersion: fingerprint,
+    refreshOnDedupe: true,
+    detail,
+    link: composed.link,
+    metadata: { bidKitItemId: itemId, ...composed.metadata },
+  });
+  return Boolean(raised && raised.rang);
+}
+
+// Removes the pending words once the bell is raised (or no longer needed). A small fenced update: it only runs against the
+// stored list it was raised for, never touches the sign-off, and returns the row as it is afterwards (its version moved).
+async function clearPending(itemId, fingerprint) {
+  const outcome = await store.updateItem(itemId, (row) => {
+    const sync = row.details && row.details.product_list_sync;
+    if (!sync || !sync.pending_alert || sync.fingerprint !== fingerprint) return { patch: {} };
+    const { pending_alert: _gone, ...rest } = sync;
+    return { patch: { details: JSON.stringify({ ...row.details, product_list_sync: rest }) } };
+  });
+  return outcome.item || null;
+}
+
 // After a committed replacement: the activity rows, then either the automatic sign-off (any open bell is closed) or the one bell.
 async function reportRebuild(item, { snapshots, fingerprint, plan }) {
-  const { previous, diff, decision } = plan;
+  const { diff, decision } = plan;
   const names = (products) => products.map((product) => product.name).slice(0, 20);
   await store.logActivity(null, 'bid_kit_file_uploaded', 'Product list (product_list) file uploaded by the daily rebuild',
     { bid_kit_item_id: item.id, item_key: ITEM_KEY, fields: ['file'], auto: 'product_list_sync', products: snapshots.length });
@@ -289,20 +328,30 @@ async function reportRebuild(item, { snapshots, fingerprint, plan }) {
     logger.info(`[bid-kit] product list rebuilt and signed off automatically added=${diff.added.length} changed=${diff.changed.length} removed=${diff.removed.length}`);
     return { changed: true, signedOff: true, rang: false };
   }
-  const { spec, detail } = alertFor(item.id, { diff, decision, previous });
-  const composed = composeAdminAlert(spec);
-  const raised = await episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
-    bell: true,
-    dedupeKey: keyFor(item.id),
-    // One open episode: a later rebuild rewrites this row (and rings it again, because the list changed again).
-    dedupeVersion: fingerprint,
-    refreshOnDedupe: true,
-    detail,
-    link: composed.link,
-    metadata: { bidKitItemId: item.id, ...composed.metadata },
-  });
+  const { spec, detail } = alertFor(item.id, plan);
+  const rang = await raiseBell(item.id, spec.why, detail, fingerprint);
+  try {
+    await clearPending(item.id, fingerprint);
+  } catch (err) {
+    // The words stay on the row; the next run raises the same bell again (a silent dedupe) and clears them.
+    logger.warn(`[bid-kit] clearing the pending product list bell failed: ${errorTag(err)}`);
+  }
   logger.info(`[bid-kit] product list rebuilt, needs sign-off reasons=${decision.reasons.join(',')}`);
-  return { changed: true, signedOff: false, rang: Boolean(raised && raised.rang), reasons: decision.reasons };
+  return { changed: true, signedOff: false, rang, reasons: decision.reasons };
+}
+
+// A bell whose words were saved with the file but not raised (a failure or a stop in between). Runs first, every day, before the
+// unchanged-list return. Signed off in the meantime = nothing to raise, just clear. Returns the row as it is afterwards.
+async function settlePending(item) {
+  const sync = item.details && item.details.product_list_sync;
+  if (!sync || !sync.pending_alert) return item;
+  try {
+    if (!item.attested_at) await raiseBell(item.id, sync.pending_alert.why, sync.pending_alert.detail, sync.fingerprint);
+    return (await clearPending(item.id, sync.fingerprint)) || item;
+  } catch (err) {
+    logger.warn(`[bid-kit] raising the pending product list bell failed: ${errorTag(err)}`);
+    return item;
+  }
 }
 
 // Daily. Returns { skipped } with the gate off or nothing to do; otherwise { changed: false } or
@@ -310,12 +359,13 @@ async function reportRebuild(item, { snapshots, fingerprint, plan }) {
 async function runBidKitProductListSync({ now = new Date() } = {}) {
   if (!bidKitLive() || !bidKitProductListSyncLive()) return { skipped: 'gate_off' };
   try {
-    const item = (await store.listItems()).find((row) => row.kind === 'document' && row.item_key === ITEM_KEY);
+    let item = (await store.listItems()).find((row) => row.kind === 'document' && row.item_key === ITEM_KEY);
     if (!item) return { skipped: 'no_item' };
     // The owner signed the open version off by hand: its bell has done its job.
     if (item.attested_at && (await episodes.openAdminAlertKeys(db, keyFor(item.id))).includes(keyFor(item.id))) {
       await closeBell(item.id, 'signed_off', 'Cleared: the product list was signed off');
     }
+    item = await settlePending(item);
     const rows = await readProductRows();
     if (!rows.length) {
       logger.warn('[bid-kit] product list sync found no applied products; the file was left alone');
@@ -324,9 +374,11 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
     const snapshots = rows.map(snapshotOf);
     const fingerprint = fingerprintOf(snapshots);
     const prior = item.details && item.details.product_list_sync;
-    if (prior && prior.fingerprint === fingerprint) return { changed: false };
-    const plan = await planRebuild(item, rows, snapshots);
-    const stored = await storeRebuild(item, { rows, snapshots, fingerprint, decision: plan.decision, now });
+    const info = await store.fileInfo(item.id);
+    // Unchanged only while the file on the row is still the one this job stored: a file replaced by hand is rebuilt and flagged.
+    if (prior && prior.fingerprint === fingerprint && fileIsOurs(prior, info)) return { changed: false };
+    const plan = await planRebuild(item, rows, snapshots, info);
+    const stored = await storeRebuild(item, { rows, snapshots, fingerprint, plan, now });
     if (stored.skipped) return { skipped: stored.skipped };
     return await reportRebuild(item, { snapshots, fingerprint, plan });
   } catch (err) {

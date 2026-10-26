@@ -178,6 +178,49 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
     expect(episodes.raiseAdminAlertWithReopen.mock.calls[1][2]).toBe(`Added Delta ${tag} (not a SiteOne purchase); check and sign off.`);
   });
 
+  test('a bell that failed to raise survives on the row, is raised on the next run, and clearing it leaves the sign-off and the rest alone', async () => {
+    const item = await kitItem();
+    const a = await catalogRow('Alpha');
+    await apply(a);
+    episodes.raiseAdminAlertWithReopen.mockRejectedValueOnce(new Error('bell down'));
+    expect(await lib.runBidKitProductListSync()).toEqual({ failed: true });
+    let row = await rowOf(item.id);
+    expect(row.attested_at).toBeNull();
+    expect(row.details.product_list_sync.pending_alert).toEqual({ why: expect.any(String), detail: expect.any(String) });
+    const saved = row.details.product_list_sync;
+    // Next run: same list, same file, but the words are still there: the bell is raised again (same key and version), then cleared.
+    expect(await lib.runBidKitProductListSync()).toEqual({ changed: false });
+    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(2);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[1][2]).toBe(saved.pending_alert.why);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[1][3]).toMatchObject({ dedupeKey: `bid-kit:product-list:${item.id}`, dedupeVersion: saved.fingerprint });
+    row = await rowOf(item.id);
+    expect(row.details.product_list_sync).not.toHaveProperty('pending_alert');
+    expect(row.details.product_list_sync).toMatchObject({ fingerprint: saved.fingerprint, file_ref: saved.file_ref });
+    expect(row.attested_at).toBeNull();
+    expect(row.file_s3_key).toBeTruthy();
+    // Third run: nothing.
+    expect(await lib.runBidKitProductListSync()).toEqual({ changed: false });
+    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(2);
+  });
+
+  test('an unchanged list with a file replaced by hand is rebuilt once and flagged, never signed off; the next run does nothing', async () => {
+    const item = await kitItem();
+    await apply(await catalogRow('Alpha'));
+    await lib.runBidKitProductListSync();
+    await signOff(item.id);
+    // The owner uploads a file by hand: the route's replaceFile (no options) clears the sign-off and leaves the details.
+    let row = await rowOf(item.id);
+    await store.replaceFile(item.id, { key: `bid-kit/${item.id}/by-hand.pdf`, fileName: 'mine.pdf', contentType: 'application/pdf', size: 10 }, row.updated_at);
+    await signOff(item.id);
+    expect(await lib.runBidKitProductListSync()).toMatchObject({ changed: true, signedOff: false, reasons: ['file_replaced'] });
+    row = await rowOf(item.id);
+    expect(row.attested_at).toBeNull();
+    expect(row.file_name).toMatch(/^product-list-/);
+    expect(deletes()).toContain(`bid-kit/${item.id}/by-hand.pdf`);
+    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(2);
+    expect(await lib.runBidKitProductListSync()).toEqual({ changed: false });
+  });
+
   test('a kit with no product list item is left alone', async () => {
     expect(await lib.runBidKitProductListSync()).toEqual({ skipped: 'no_item' });
     expect(puts()).toHaveLength(0);
