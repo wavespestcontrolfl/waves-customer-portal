@@ -24,7 +24,7 @@ vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) =>
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
   default: ({ service, onFullForm, onViewDetails, voiceFillEnabled, suspended }) => (
     <div data-recap-enabled={String(service.recapEnabled)} data-voice-fill-enabled={String(voiceFillEnabled)} data-suspended={String(!!suspended)}>
-      Fast Complete sheet for {service.id}
+      Fast Complete sheet for {service.id} <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
       {onViewDetails && <button type="button" onClick={onViewDetails}>Sheet details</button>}
     </div>
@@ -205,4 +205,15 @@ it('the voice-fill flag alone never opens the sheet: the routing gate still deci
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(await screen.findByText('Existing recap form for svc-voice-only')).toBeInTheDocument();
   expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
+});
+
+// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): the sheet's copy of the row
+// keeps the codes, so the Complete service header can show them (Codex P2 on #6784).
+const ACCESS = { scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
+
+it('hands the sheet the row\'s gate codes for its header', async () => {
+  rows = [row('svc-codes', { reserviceFastCompleteEnabled: true, ...ACCESS })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByTestId('sheet-access')).toHaveTextContent('Gate: #4821 (neighborhood)|1 dog');
 });

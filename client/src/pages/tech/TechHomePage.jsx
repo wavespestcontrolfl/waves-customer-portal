@@ -61,6 +61,7 @@ import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complet
 import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
 import { onSiteTimeOf } from '../../lib/on-site-time';
 import { completionBillingFacts, wrapUpSheetFields } from '../../lib/completion-billing-facts';
+import { accessSheetFields } from '../../lib/schedule-access';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import TechRecapCapture from './TechRecapCapture';
@@ -999,6 +1000,8 @@ export default function TechHomePage({ section = 'today' }) {
           service={{
             // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(fastCompleteService),
+            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            ...accessSheetFields(fastCompleteService),
             id: fastCompleteService.id,
             customerName: fastCompleteService.customer_name || fastCompleteService.customerName,
             serviceType: fastCompleteService.service_type || fastCompleteService.serviceType,
@@ -1080,6 +1083,8 @@ export default function TechHomePage({ section = 'today' }) {
             customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
             onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
             ...completionBillingFacts(treeShrubFastService),
+            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            ...accessSheetFields(treeShrubFastService),
             // The visit the tech tapped, checked against the live context
             // (same fields the pest sheet routes with).
             routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
@@ -1114,6 +1119,8 @@ export default function TechHomePage({ section = 'today' }) {
           service={{
             // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(lawnReserviceFastService),
+            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            ...accessSheetFields(lawnReserviceFastService),
             id: lawnReserviceFastService.id,
             customerName: lawnReserviceFastService.customer_name || lawnReserviceFastService.customerName,
             serviceType: lawnReserviceFastService.service_type || lawnReserviceFastService.serviceType,

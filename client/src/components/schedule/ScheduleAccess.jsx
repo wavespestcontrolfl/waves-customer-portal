@@ -51,7 +51,7 @@ export function ScheduleAccessLine({ service }) {
             {line.value}
           </span>
           {lineTag(line) && (
-            <span style={{ fontSize: 12, color: line.unconfirmed ? WARN.text : undefined, fontWeight: line.unconfirmed ? 500 : undefined }} className={line.unconfirmed ? '' : 'text-ink-secondary'}>
+            <span style={{ fontSize: 14, color: line.unconfirmed ? WARN.text : undefined, fontWeight: line.unconfirmed ? 500 : undefined }} className={line.unconfirmed ? '' : 'text-ink-secondary'}>
               {lineTag(line)}
             </span>
           )}
@@ -137,7 +137,7 @@ function PanelLine({ line }) {
     <div className="flex items-baseline gap-2 flex-wrap mt-1">
       <span className="text-14 text-ink-secondary">{line.label}</span>
       <span className={valueClass(line.codeLike)} style={{ fontSize: 15, overflowWrap: 'anywhere' }}>{line.value}</span>
-      {lineTag(line) && <span className="text-12" style={{ color: line.unconfirmed ? WARN.text : undefined }}>{lineTag(line)}</span>}
+      {lineTag(line) && <span className="text-14" style={{ color: line.unconfirmed ? WARN.text : undefined }}>{lineTag(line)}</span>}
     </div>
   );
 }

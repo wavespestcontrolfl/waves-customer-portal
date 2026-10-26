@@ -56,6 +56,16 @@ export function accessLinesOf(service) {
   return lines;
 }
 
+// The two row fields the codes are read from, for every builder that hands a
+// Complete service sheet a trimmed copy of the schedule row (Dispatch →
+// Schedule and the tech app): without them the sheet's header shows nothing.
+export function accessSheetFields(row) {
+  return {
+    scheduleAccessEnabled: row?.scheduleAccessEnabled === true,
+    propertyAlerts: Array.isArray(row?.propertyAlerts) ? row.propertyAlerts : [],
+  };
+}
+
 export const ACCESS_KIND_LABELS = {
   neighborhood_gate: 'Neighborhood gate',
   property_gate: 'Yard gate',

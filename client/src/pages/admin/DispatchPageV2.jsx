@@ -67,6 +67,7 @@ import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
 import { onSiteTimeOf } from "../../lib/on-site-time";
 import { completionBillingFacts, wrapUpSheetFields } from "../../lib/completion-billing-facts";
+import { accessSheetFields } from "../../lib/schedule-access";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
 import MobilePaymentSheet from "../../components/schedule/MobilePaymentSheet";
 import MobileServiceEditModal from "../../components/schedule/MobileServiceEditModal";
@@ -392,6 +393,8 @@ function lawnReserviceSheetService(row) {
   return {
     // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
     ...wrapUpSheetFields(row),
+    // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+    ...accessSheetFields(row),
     id: row.id,
     customerName: row.customer_name || row.customerName,
     serviceType: row.service_type || row.serviceType,
@@ -1010,6 +1013,8 @@ export default function DispatchPageV2({
   const lawnSheetService = (row) => ({
     // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads to know whether the visit invoices and who pays.
     ...completionBillingFacts(row),
+    // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+    ...accessSheetFields(row),
     id: row.id,
     customerName: pickOf(row, 'customer_name', 'customerName'),
     serviceType: pickOf(row, 'service_type', 'serviceType'),
@@ -1043,6 +1048,8 @@ export default function DispatchPageV2({
   const pestSheetService = (row) => ({
     // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
     ...wrapUpSheetFields(row),
+    // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+    ...accessSheetFields(row),
     id: row.id,
     customerName: pickOf(row, 'customer_name', 'customerName'),
     serviceType: pickOf(row, 'service_type', 'serviceType'),
@@ -2142,6 +2149,8 @@ export default function DispatchPageV2({
             customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
             onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
             ...completionBillingFacts(treeShrubFastService),
+            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            ...accessSheetFields(treeShrubFastService),
             // The visit the user opened, checked against the live context
             // (same fields TechHomePage routes the sheet with).
             routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
@@ -2243,6 +2252,8 @@ export default function DispatchPageV2({
             address: shortAddress(assessmentFastService.address) || assessmentFastService.address || "",
             // The whole address, for the "Create estimate" prefill (the line above is display only).
             fullAddress: assessmentFastService.address || "",
+            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            ...accessSheetFields(assessmentFastService),
             timeLabel: serviceWindowLabel(assessmentFastService) || "",
             // The visit the user opened. The sheet sends it with the completion
             // for the server to check against the live visit.

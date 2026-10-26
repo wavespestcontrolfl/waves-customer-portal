@@ -23,7 +23,7 @@ vi.mock('./SchedulePage', () => ({
 vi.mock('../../components/tech/FastCompleteAssessmentSheet', () => ({
   default: ({ service, onClose, onCompleted, onFullForm }) => (
     <div>
-      Assessment sheet for {service.id} credit {String(service.inspectionCreditAvailable)} property {String(service.routedPropertyId)}
+      Assessment sheet for {service.id} credit {String(service.inspectionCreditAvailable)} property {String(service.routedPropertyId)} <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
       {' '}address [{service.address}] full [{service.fullAddress}]
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onCompleted({ success: true })}>Sheet completed</button>
@@ -103,5 +103,17 @@ describe('Dispatch completion routing for the Waves Assessment', () => {
     await waitFor(() => expect(loads()).toBe(before + 1));
     expect(screen.queryByText(/Assessment sheet/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Completion panel/)).not.toBeInTheDocument();
+  });
+});
+
+// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): the sheet's copy of the row
+// keeps the codes, so the Complete service header can show them (Codex P2 on #6784).
+const ACCESS = { scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
+
+describe('the Fast Complete sheet gets the row\'s gate codes', () => {
+  it('passes them through', async () => {
+    mount([visit('svc-as-codes', ACCESS)]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-as-codes' }));
+    expect(await screen.findByTestId('sheet-access')).toHaveTextContent('Gate: #4821 (neighborhood)|1 dog');
   });
 });
