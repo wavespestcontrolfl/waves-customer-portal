@@ -349,8 +349,9 @@ function makeMoveGuard({ service, best, config = {} }) {
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
-    // GATE_TECH_START_POINTS: the start points the move was scored from still stand.
-    await assertScoredStartPoints(trx, [service.technician_id, receiving], config.startPointFor);
+    // GATE_TECH_START_POINTS: the start points the move was scored from still
+    // stand — an unassigned visit's current day included (sourceDayTechnicianId).
+    await assertScoredStartPoints(trx, [service.technician_id, config.sourceDayTechnicianId, receiving], config.startPointFor);
     // A person may have placed this visit since pass 1 (even back onto the
     // same slot, which the field CAS cannot see). The row handed in is the
     // pre-transaction snapshot, so the check re-reads the row's own lock and
@@ -983,10 +984,11 @@ async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, a
 // evaluation, so its move guard re-reads THAT evaluation's conflict: a
 // conflict found only on the rescore is fenced too, and a conflict that had
 // cleared by the rescore does not refuse a move that passed the normal bar
-// (pre-push P1).
+// (pre-push P1). Its start-point fence covers THAT evaluation's current day.
 function attemptConfig(config, evaluation) {
   if (!evaluation) return config;
-  return { ...config, sourceConflict: (evaluation.current && evaluation.current.conflict) || null };
+  const current = evaluation.current || {};
+  return { ...config, sourceConflict: current.conflict || null, sourceDayTechnicianId: current.day_technician_id || null };
 }
 
 /**

@@ -834,8 +834,9 @@ test('openMembers is read exactly once per evaluation; the current placement and
 });
 
 // Codex r7 (PRRT_kwDOR3YQi86mRfE_): an unassigned visit whose day cannot be
-// pinned to exactly one technician is skipped, never scored on the
-// unassigned rows alone.
+// pinned to any technician is skipped, never scored on the unassigned rows
+// alone. Several assignable technicians resolve to the day the visit fits
+// best (auto-dispatch-unassigned-current-day.test.js).
 describe('unassigned visit, day technician unresolved: fail closed', () => {
   const techlessDb = (techs) => (table) => {
     const c = {};
@@ -851,7 +852,6 @@ describe('unassigned visit, day technician unresolved: fail closed', () => {
 
   test.each([
     ['no assignable technician', []],
-    ['several assignable technicians', [{ id: 't1' }, { id: 't2' }]],
     ['an unreadable technicians table', new Error('boom')],
   ])('%s -> CURRENT_DAY_TECH_UNRESOLVED (skip)', async (_label, techs) => {
     process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
