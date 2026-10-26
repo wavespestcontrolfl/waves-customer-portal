@@ -9,7 +9,7 @@ const { restockMeta } = require('../services/inventory-restock-queue');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
-const { buildWaveGuardInventoryForecast } = require('../services/waveguard-inventory-forecast');
+const { buildWaveGuardInventoryForecast, DEFAULT_FORECAST_DAYS } = require('../services/waveguard-inventory-forecast');
 const { passwordWriteAction, vendorCredentialKey, encryptedPasswordRaw } = require('../services/vendor-credentials');
 const {
   normalizeInventoryUnit,
@@ -2987,7 +2987,7 @@ router.get('/stats', async (req, res, next) => {
 router.get('/waveguard-forecast', async (req, res, next) => {
   try {
     const forecast = await buildWaveGuardInventoryForecast({
-      days: req.query.days || 14,
+      days: req.query.days || DEFAULT_FORECAST_DAYS,
       limit: req.query.limit || 150,
     });
     res.json({ forecast });
@@ -3084,7 +3084,7 @@ router.get('/unit-review', async (req, res, next) => {
       .limit(250);
 
     const forecast = await buildWaveGuardInventoryForecast({
-      days: req.query.days || 14,
+      days: req.query.days || DEFAULT_FORECAST_DAYS,
       limit: req.query.limit || 150,
     }).catch((err) => ({ error: err.message, products: [] }));
     const forecastRows = (forecast.products || [])

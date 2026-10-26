@@ -116,6 +116,31 @@ describe('a check of the visit where it is saved keeps today\'s answer', () => {
     expect(evaluateArrivalPlacement(input, at('09:00'))).toMatchObject({ feasible: false, reason: 'arrival_window' });
   });
 
+  describe('on a day of leftover numbers (only the 10 AM stop has one)', () => {
+    const stays = () => context({
+      rows: [stop('early', '08:00', 27.55), stop('late', '10:00', 27.45, { route_order: 1 })],
+      target: stop('target', '13:00', 27.5), placedAt: { date: DATE, technicianId: 'tech', windowStart: '13:00' },
+    });
+
+    test('its own hour reads in clock order, like every other hour, with no order to write', () => {
+      const fit = evaluateArrivalPlacement(stays(), at('13:00'));
+      expect(fit.feasible).toBe(true);
+      expect(order(fit)).toEqual(['early', 'late', 'target']);
+      expect(fit).not.toHaveProperty('routeOrder');
+    });
+
+    test('gate off: the stored number runs 10 AM first, so the 8 AM stop is late and the hour is refused', () => {
+      delete process.env.GATE_STAFF_ROUTE_INSERTION;
+      expect(evaluateArrivalPlacement(stays(), at('13:00')).feasible).toBe(false);
+    });
+
+    test('a hand-built context with no saved place (the gap tool) keeps the saved order', () => {
+      const input = stays();
+      delete input.placedAt;
+      expect(evaluateArrivalPlacement(input, at('13:00')).feasible).toBe(false);
+    });
+  });
+
   test('the save writer\'s own placement (place:true) does try every place', () => {
     const target = stop('target', '09:00', 27.545);
     const fit = evaluateArrivalPlacement(context({ target, placedAt: { date: DATE, technicianId: 'tech', windowStart: '09:00' } }),

@@ -9,7 +9,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const db = require('../models/db');
 const { buildPlanForService, customerBillingModeColumnExists } = require('../services/waveguard-plan-engine');
-const { buildWaveGuardInventoryForecast, runWaveGuardInventoryForecastCheck } = require('../services/waveguard-inventory-forecast');
+const { DEFAULT_FORECAST_DAYS, buildWaveGuardInventoryForecast, runWaveGuardInventoryForecastCheck } = require('../services/waveguard-inventory-forecast');
 const router = require('../routes/admin-inventory');
 
 // Read-only query double: unexpected tables/writes fail instead of touching a DB.
@@ -182,6 +182,23 @@ test('forecast HTTP handler returns computed demand and forwards query bounds', 
   expect(db.transaction).not.toHaveBeenCalled();
 });
 
+test('forecast defaults to a one-week window when no days are given (owner 2026-10-26)', async () => {
+  expect(DEFAULT_FORECAST_DAYS).toBe(7);
+  const result = await buildWaveGuardInventoryForecast({ limit: 20 });
+  expect(result).toMatchObject({ startDate: '2030-01-09', endDate: '2030-01-16', days: 7 });
+  expect(visits.whereBetween).toHaveBeenCalledWith('ss.scheduled_date', ['2030-01-09', '2030-01-16']);
+});
+
+test('forecast and unit-review routes default to the one-week window', async () => {
+  const forecast = await get('/waveguard-forecast');
+  expect(forecast.next).not.toHaveBeenCalled();
+  expect(forecast.body.forecast).toMatchObject({ days: 7, endDate: '2030-01-16' });
+  visits.whereBetween.mockClear();
+  const review = await get('/unit-review');
+  expect(review.next).not.toHaveBeenCalled();
+  expect(visits.whereBetween).toHaveBeenCalledWith('ss.scheduled_date', ['2030-01-09', '2030-01-16']);
+});
+
 test('unit-review HTTP handler keeps only mismatches from the computed forecast', async () => {
   const { body, next } = await get('/unit-review', { days: '2', limit: '20' });
   expect(next).not.toHaveBeenCalled();
@@ -236,4 +253,24 @@ test('cron runs forecast and deduplicated alert writes on its locked transaction
   expect(alert.insert).toHaveBeenCalledWith(expect.objectContaining({ dedupe_key: 'waveguard_inventory_forecast', severity: 'high' }));
   expect(alert.onConflict).toHaveBeenCalledWith('dedupe_key');
   expect(alert.merge).toHaveBeenCalledWith(expect.objectContaining({ status: 'open', severity: 'high' }));
+});
+
+test('cron check defaults to the one-week window', async () => {
+  const alert = {};
+  for (const method of ['insert', 'onConflict', 'merge']) alert[method] = jest.fn(() => alert);
+  alert.returning = jest.fn(async () => [{ id: 'alert-1' }]);
+  const trx = jest.fn((table) => {
+    if (table === 'scheduled_services as ss') return visits;
+    if (table === 'admin_alerts') return alert;
+    throw new Error(`Unexpected transaction table: ${table}`);
+  });
+  trx.raw = jest.fn(async () => undefined);
+  trx.schema = { hasTable: jest.fn(async () => true) };
+  db.transaction.mockImplementation(async (fn) => fn(trx));
+
+  await runWaveGuardInventoryForecastCheck({ limit: 20 });
+  expect(visits.whereBetween).toHaveBeenCalledWith('ss.scheduled_date', ['2030-01-09', '2030-01-16']);
+  expect(alert.insert).toHaveBeenCalledWith(expect.objectContaining({
+    description: expect.stringContaining('for 2030-01-09 through 2030-01-16.'),
+  }));
 });

@@ -248,7 +248,8 @@ it('open times, New Appointment: every route is listed, and a row books its tech
     />,
   );
   await screen.findByTestId('open-times-box');
-  expect(hooks.bestTimesArgs).toMatchObject({ openTimes: true, techPick: true });
+  // arrivalWindows: the route check on a new stop, when the server's gate allows it.
+  expect(hooks.bestTimesArgs).toMatchObject({ openTimes: true, techPick: true, arrivalWindows: true });
   const amber = screen.getAllByTestId('open-time-row').find((row) => row.textContent.includes('1 PM'));
   expect(amber).toHaveAttribute('data-far', 'true');
   fireEvent.click(screen.getAllByTestId('open-time-row').find((row) => row.textContent.includes('11 AM')));

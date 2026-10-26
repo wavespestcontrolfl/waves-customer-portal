@@ -115,6 +115,18 @@ customer's message by this rule.
    and off the bell; it rings as the ordinary needs-a-person notice once it is within 14 days.
 4. **Retention.** An `fyi` fact lives on its page for 7 days at most. A `needs-you` row
    unread for 14 days belongs in the Monday summary, not in the bell.
+   Built now (owner 2026-10-26, `GATE_ALERT_RETENTION`, `server/services/admin-alert-retention.js`,
+   nightly 1:32 AM ET): a bell row not done whose last activity is more than 30 days old is marked
+   done, read or unread; an `fyi` row (and an `ops_digest` row of audience `fyi`) idle for more than
+   7 days is marked done. Last activity is the latest of `created_at`, `metadata.rungAt`,
+   `metadata.observedAt` and `metadata.lastFailureAt`, so a row its emitter still refreshes with a
+   ring stays; a quiet refresh leaves no stamp and ages from the last ring. The row is marked done
+   (`done_by` `retention`, a plain `resolution`, `metadata.retention` with the run time), never
+   deleted, and its read state is not touched. The 14-day Monday-summary rule is not built. An
+   emitter that dedupes on open rows only (`dedupeOpenOnly`) raises a fresh row when its condition
+   still holds after the old one expired; `RERING` in the module names each one, caps the ones a
+   sweep raises again with no new event, and skips an overdue-promise row while its promise is open.
+   `server/scripts/undo-admin-alert-retention.js` reopens one run.
 5. **Read is not done.** A row has a `done` state (`notifications.done_at`, `done_by`,
    `resolution`), the GitHub inbox model. Reading a row only stops it counting as unread; a
    done row leaves the bell, its unread count and mark-all-read. A row goes done when the
@@ -143,6 +155,7 @@ resolves a `person` row.
 | New code must use the helper | `server/tests/admin-alert-raw-callsite-ratchet.test.js` counts raw `notifyAdmin(` call sites per file against a checked-in ceiling; a file may not gain one | ratchet |
 | No emoji in admin text | `notification-service.js` | enforced, all categories |
 | Done state: a done row is hidden from the bell list, its unread count and mark-all-read (the Activity feed keeps it, marked Done). Every id-addressed done write is `NotificationService.markAdminDone`; emitters that close inside their own fenced update spread `doneColumns` into it. Auto-done sources: episode closes (`closeAdminAlertKeys`, `done_by` `episodes`), the relevance sweep (`relevance`; also the customer-contact bells once a person answered, behind `GATE_ALERT_CONTACT_CLOSE`: a text no longer needing a reply, a voicemail or missed call after a person called back or texted or a visit or quote followed, an email a person replied to, a lead a person contacted), an ops-digest fall-off resolve, a superseded missed-call bell (a voicemail on the same call, or the caller got through on a later call within 7 days: `retireCalledBackMissedCalls`, 2-minute call-alert cron), a retired missing-deduction bell, a superseded promise-chaser bell, a resolved no-show dispatch tracking bell, a booking-miss bell once its visit is booked, done on another day, or 14 days after its agreed day (`call-booking-miss-watchdog.js`; a visit booked on another day turns the bell into a date check), a logged-delivery bell once no live restock request may cover it (`purchase-receipts/sweep.js`; a delivery with no such request writes none), and every other system retire (a newer bell replaced it, a batch absorbed it, the work was done: the call-commitments watchdog, the follow-up pager, procurement, collections cards, the setup-fee and first-application alerts, the cancellation review bell). A system writer never retires an alert with `read_at` alone; `server/tests/notification-system-retire-closes-done-contract.test.js` fails any non-null `read_at` write that does not also close done, unless it is a named person's read or another table. Not done: any mark-read by a person (a thread open, mark-all-read, a dashboard dismiss). | `PUT /api/admin/notifications/:id/done` (same role scope as mark-read) and `/:id/reopen` (admin only; body `{ doneAt }` is the `done_at_token` the Recently-done list served, a row done again since answers 409 `changed`, and only a row a person closed (`done_by` a technician id or `claude`) can be reopened, a system close answers 409 `not_reopenable`); the bell's Done control | enforced |
+| Retention: a bell row idle 30 days, and an `fyi` row idle 7 days, is marked done (never deleted, read state kept). Not built: the 14-day Monday summary for an unread `needs-you` row | `runAdminAlertRetention` in `server/services/admin-alert-retention.js`, nightly 1:32 AM ET, gate `GATE_ALERT_RETENTION` (`shadow` records one audit_log summary, `true` expires); undo with `server/scripts/undo-admin-alert-retention.js` | enforced when the gate is `true` |
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
