@@ -1793,6 +1793,7 @@ function CustomerFiltersDialog({
 // editor drafts survive opening a workspace or switching the selected record.
 function CustomersWorkspacePage({
   selectedId,
+  feedbackEnabled,
   onSelect,
   onClose,
   onCustomerMutation,
@@ -1813,6 +1814,7 @@ function CustomersWorkspacePage({
           onClose={onClose}
           onCustomerMutation={onCustomerMutation}
           onDraftActiveChange={onDraftActiveChange}
+          feedbackEnabled={feedbackEnabled}
         />
       ) : (
         children
@@ -1824,6 +1826,7 @@ function CustomersWorkspacePage({
 
 function CustomersOverlayPage({
   selectedId,
+  feedbackEnabled,
   onSelect,
   onClose,
   onCustomerMutation,
@@ -1846,6 +1849,7 @@ function CustomersOverlayPage({
           onClose={onClose}
           onCustomerMutation={onCustomerMutation}
           onDraftActiveChange={onDraftActiveChange}
+          feedbackEnabled={feedbackEnabled}
         />
       )}
     </UiSurface>
@@ -1948,6 +1952,7 @@ export default function CustomersPageV2() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  const feedbackEnabled = searchParams.get("feedback") === "1";
   const tableControlsRequested = searchParams.get("tableControls") !== "0";
   // Default is Directory on both mobile and desktop (list-first).
   // Explicit ?view=… URLs win — deep-links still work.
@@ -2024,7 +2029,7 @@ export default function CustomersPageV2() {
     editingId,
     startEdit,
     editor: customerEditor,
-  } = useCustomerEditor(refreshCustomersAndGeocodeReview, STAGES);
+  } = useCustomerEditor(refreshCustomersAndGeocodeReview, STAGES, feedbackEnabled);
   const loadSeqRef = useRef(0);
   const loadAbortRef = useRef(null);
 
@@ -2495,6 +2500,7 @@ export default function CustomersPageV2() {
   return (
     <PagePresentation
       selectedId={selected360Id}
+      feedbackEnabled={feedbackEnabled}
       // Raw, not guardedOpenCustomerProfile: Customer360ProfileV2's own
       // guardedSelectCustomer already confirms its local draft before this
       // ever fires (account-properties/address-neighbor customer switches),
