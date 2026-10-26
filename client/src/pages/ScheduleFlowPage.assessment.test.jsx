@@ -160,6 +160,14 @@ describe('assessment flow (estimate token)', () => {
     expect(await screen.findByText(/Your free Waves Assessment is already scheduled/i)).toBeInTheDocument();
   });
 
+  it('a commit that finds the estimate can no longer book (out of the area, closed) shows the estimate card', async () => {
+    stubFetch({ post: jsonResponse({ state: 'gone' }) });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    expect(await screen.findByText("This estimate can't book an assessment online")).toBeInTheDocument();
+  });
+
   it('a service-area hold shows the recoverable notice, never an empty calendar', async () => {
     stubFetch({ get: jsonResponse({ ...okPayload({ availability: null }), service_area_unavailable: true }) });
     renderPage();

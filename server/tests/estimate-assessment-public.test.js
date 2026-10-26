@@ -22,6 +22,7 @@ const mockInspection = {
   visitShape: jest.fn((row) => ({ date: row.scheduled_date, window: { start: '09:00', end: '11:00' }, serviceType: 'Waves Assessment' })),
   rescheduleUrlFor: jest.fn(async () => '/reschedule/resched-token'),
   bookAssessmentVisit: jest.fn(),
+  serviceAreaFailure: jest.fn(),
   finishCommittedBooking: jest.fn(async ({ date, bookingSlot }) => ({ success: true, state: 'ok', visit: { date, window: { start: bookingSlot.start_time } } })),
 };
 jest.mock('../routes/inspection-public', () => ({ _internals: mockInspection }));
@@ -80,6 +81,7 @@ beforeEach(() => {
   mockInspection.buildAvailabilityForLead.mockResolvedValue({ days: [{ date: '2026-11-03', slots: [{ start_time: '09:00', end_time: '09:45' }] }], slots: [], nearby: false });
   mockInspection.findSlotIn.mockImplementation((day, date, time) => day?.days?.find((d) => d.date === date)?.slots?.find((s) => s.start_time === time) || null);
   mockInspection.findOpenVisit.mockResolvedValue(null);
+  mockInspection.serviceAreaFailure.mockReset().mockResolvedValue(null);
   mockInspection.bookAssessmentVisit.mockResolvedValue({ ok: true, body: { booking: { id: 'sba-1' } } });
   mockBookingInternals.customerBookingLocation.mockReset().mockResolvedValue({ lat: 27.45, lng: -82.55 });
   mockCallSideBlock.mockClear();
@@ -157,6 +159,27 @@ describe('GET /:token', () => {
     expect(mockInspection.findOpenVisit).toHaveBeenCalledWith(db, 'cust-1', { assessmentOnly: true });
   });
 
+  // Codex #6877 P2: the inspection page's own service-area check, at the pin and the stored address.
+  test('out of the service area: gone, with no times built; the check ran at the pin and the stored address', async () => {
+    mockInspection.serviceAreaFailure.mockResolvedValue({ failure: 'out_of_area', county: 'Lee' });
+    expect(await call(TOKEN)).toMatchObject({ status: 200, body: { state: 'gone' } });
+    expect(mockInspection.serviceAreaFailure).toHaveBeenCalledWith({ lat: 27.45, lng: -82.55 }, expect.objectContaining({ zip: '34205' }));
+    expect(mockInspection.buildAvailabilityForLead).not.toHaveBeenCalled();
+  });
+
+  test('a service-area check that cannot answer: the service-area notice, no times', async () => {
+    mockInspection.serviceAreaFailure.mockResolvedValue({ failure: 'service_area_unavailable' });
+    expect((await call(TOKEN)).body).toMatchObject({ state: 'ok', availability: null, service_area_unavailable: true });
+    expect(mockInspection.buildAvailabilityForLead).not.toHaveBeenCalled();
+  });
+
+  test('an excluded locality (Punta Gorda) is gone before any location work, and /data never offers it', async () => {
+    customerRow = { ...CUSTOMER, city: 'Punta Gorda' };
+    expect((await call(TOKEN)).body).toEqual({ state: 'gone' });
+    expect(mockBookingInternals.customerBookingLocation).not.toHaveBeenCalled();
+    expect(await router._internals.assessmentFirstFor(estimate(), { open: true })).toBeNull();
+  });
+
   test('no booking location (a pin under review): the service-area notice, no times', async () => {
     mockBookingInternals.customerBookingLocation.mockResolvedValue(null);
     expect((await call(TOKEN)).body).toMatchObject({ state: 'ok', availability: null, service_area_unavailable: true });
@@ -200,6 +223,12 @@ describe('POST /:token (book)', () => {
   test('a time that is not in a fresh build: 409 SLOT_TAKEN with fresh times, nothing booked', async () => {
     const res = await book({ date: '2026-11-03', time: '13:00' });
     expect(res).toMatchObject({ status: 409, body: { code: 'SLOT_TAKEN', availability: { days: [{ date: '2026-11-03' }] } } });
+    expect(mockInspection.bookAssessmentVisit).not.toHaveBeenCalled();
+  });
+
+  test('out of the service area at commit: gone, and nothing booked', async () => {
+    mockInspection.serviceAreaFailure.mockResolvedValue({ failure: 'out_of_area' });
+    expect(await book()).toMatchObject({ status: 200, body: { state: 'gone' } });
     expect(mockInspection.bookAssessmentVisit).not.toHaveBeenCalled();
   });
 

@@ -94,6 +94,11 @@ async function assessmentEligibility(estimate, data, conn = db) {
   if (!sameProperty(estimate.address, { line1: customer.address_line1, line2: customer.address_line2, zip: customer.zip })) {
     return { state: 'gone' };
   }
+  // An excluded locality (Punta Gorda, owner ruling 2026-10-22) never books, by the address's own city or ZIP: the
+  // cheap half of the inspection page's service-area check, so /data never offers it. The booking page runs the
+  // whole check (bookingSetup).
+  const { isExcludedLocality, isExcludedZip } = require('../services/excluded-localities');
+  if (isExcludedLocality(customer.city) || isExcludedZip(customer.zip)) return { state: 'gone' };
   // Any open assessment, past-due ones included: the commit's per-customer assessment lane dedupe blocks on those too,
   // so the page shows that visit and its reschedule link instead of times it can never book (the inspection page's
   // own check, inspection-public.js).
@@ -135,9 +140,14 @@ async function bookingLocationFor(customer) {
 // the catalog. `blocked` is the GET-shaped answer when times cannot be offered.
 async function bookingSetup(customer, lead) {
   const location = await bookingLocationFor(customer);
-  if (!location) {
-    return { blocked: { state: 'ok', lead, availability: null, needs_address: false, selfServeNotice: true, service_area_unavailable: true } };
-  }
+  const areaHold = { blocked: { state: 'ok', lead, availability: null, needs_address: false, selfServeNotice: true, service_area_unavailable: true } };
+  if (!location) return areaHold;
+  // The inspection page's own service-area check at that pin and the stored address (the box, the county, the
+  // excluded localities; Codex #6877 P2): out of the area, the estimate cannot book online (gone); a check that
+  // cannot answer holds the times like a missing pin.
+  const areaFailure = await inspection().serviceAreaFailure(location, customer);
+  if (areaFailure?.failure === 'out_of_area') return { blocked: { state: 'gone' } };
+  if (areaFailure) return areaHold;
   const booking = require('./booking');
   const config = await booking._internals.loadBookingConfig();
   const range = inspection().bookingRange(config);
@@ -158,6 +168,13 @@ async function resolveRequest(token) {
   const lead = customerPayload(eligibility.customer);
   if (eligibility.state === 'already_booked') return { body: await alreadyBookedBody(eligibility.visit, lead) };
   return { estimate: found.estimate, customer: eligibility.customer, lead };
+}
+
+// A POST that cannot reach times: the page's terminal state for an estimate that cannot book (gone), else the
+// recoverable 503 the inspection page answers (no catalog row, or no service-area answer yet).
+function sendBlocked(res, blocked) {
+  if (blocked.state === 'gone') return res.json(blocked);
+  return res.status(503).json({ error: blocked.booking_unavailable ? 'booking_unavailable' : 'service_area_unavailable' });
 }
 
 function send(res, resolved) {
@@ -199,7 +216,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const resolved = await resolveRequest(req.params.token);
     if (resolved.body) return send(res, resolved);
     const setup = await bookingSetup(resolved.customer, resolved.lead);
-    if (setup.blocked) return res.status(503).json({ error: setup.blocked.booking_unavailable ? 'booking_unavailable' : 'service_area_unavailable' });
+    if (setup.blocked) return sendBlocked(res, setup.blocked);
     const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
     const when = await parseWhen(query, inspection().searchParseOpts(setup.config));
     let availability = null;
@@ -274,7 +291,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const resolved = await resolveRequest(req.params.token);
     if (resolved.body) return send(res, resolved);
     const setup = await bookingSetup(resolved.customer, resolved.lead);
-    if (setup.blocked) return res.status(503).json({ error: setup.blocked.booking_unavailable ? 'booking_unavailable' : 'service_area_unavailable' });
+    if (setup.blocked) return sendBlocked(res, setup.blocked);
     const windowFailure = inspection().commitWindowFailure(date, setup.range, setup.catalog);
     if (windowFailure) return res.status(windowFailure.status).json({ error: windowFailure.error });
 
@@ -314,6 +331,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       if (result.status === 409) {
         // A slot race, or the customer's pin moved under the booking fence: fresh times at the current pin.
         const fresh = await bookingSetup(resolved.customer, resolved.lead);
+        if (fresh.blocked?.state === 'gone') return res.json(fresh.blocked);
         if (fresh.blocked) return res.status(409).json({ error: result.error || 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null });
         return sendSlotTaken(res, fresh, result.error);
       }

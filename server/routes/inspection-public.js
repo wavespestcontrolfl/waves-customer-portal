@@ -2663,6 +2663,7 @@ router._internals = {
   ASSESSMENT_EXPECTED_IDENTITY,
   addressDisplay,
   maskPhone,
+  serviceAreaFailure,
   bookingRange,
   searchParseOpts,
   loadAssessmentCatalog,
