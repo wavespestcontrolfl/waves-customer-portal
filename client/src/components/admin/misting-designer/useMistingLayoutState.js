@@ -8,7 +8,7 @@
 // A manual spray direction (aim) is one more manual edit: `aimed` for an automatic nozzle, `aim` on an added
 // one. A line change that re-places the nozzles clears it with the rest, under the same notice and Undo.
 //
-// A bed line (a landscape bed edge) gets risers about every 8 ft instead of nozzles. Those risers are derived like the automatic
+// A bed line (a landscape bed edge) gets risers about every 10 ft instead of nozzles. Those risers are derived like the automatic
 // nozzles, and moving or deleting one is the same kind of manual edit (`riserMoved`, `riserRemoved`): cleared with the rest,
 // under the same notice and Undo, when the lines change.
 //

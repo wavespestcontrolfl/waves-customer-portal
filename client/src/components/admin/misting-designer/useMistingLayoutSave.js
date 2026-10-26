@@ -6,6 +6,7 @@
 // saved from the first render in which its geometry is ready.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { MAP_HEIGHT, MAP_WIDTH } from '../../tech/treatmentZoneSpray';
+import { pumpChecklistDone } from '../../../lib/mistingLayoutExtras';
 import { buildLayoutPayload, layoutForExport, putLayout } from '../../../lib/mistingLayoutPersist';
 import { buildSketchModel } from '../../../lib/mistingLayoutSketch';
 import { composeSketchPng } from '../../../lib/mistingLayoutSketchCanvas';
@@ -36,7 +37,7 @@ export default function useMistingLayoutSave({ estimateId, mapState, address, la
   }, [saved, payload, signature]);
 
   const save = async () => {
-    if (!payload || !estimateId || !pump || phase.state === 'saving') return;
+    if (!payload || !estimateId || !pumpChecklistDone(pump) || phase.state === 'saving') return;
     setPhase({ state: 'saving', message: '' });
     const sentSignature = signature;
     try {
@@ -71,6 +72,7 @@ export default function useMistingLayoutSave({ estimateId, mapState, address, la
     error: phase.state === 'error' ? phase.message : '',
     hasEstimate: Boolean(estimateId),
     hasPump: Boolean(pump),
-    canSave: Boolean(estimateId && payload && pump) && phase.state !== 'saving',
+    checklistDone: pumpChecklistDone(pump),
+    canSave: Boolean(estimateId && payload && pumpChecklistDone(pump)) && phase.state !== 'saving',
   };
 }

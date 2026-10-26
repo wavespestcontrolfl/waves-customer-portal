@@ -176,7 +176,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     for (const k of ['runMinutes: scheduleUnconfirmed \\? null : irrigationRunMinutes', 'wateringDays: scheduleUnconfirmed \\? null : wateringDays', 'systemType: scheduleUnconfirmed \\? null : irrigationSystemType', 'explicitInchesPerWeek: scheduleUnconfirmed \\? null : prefsInches', 'runMinutes: scheduleUnconfirmed \\? null : runtimeInputs\\.runMinutes']) {
       expect(sweep).toMatch(new RegExp(k));
     }
-    expect(sweep).toMatch(/const lastWeekLine = scheduleUnconfirmed\s*\? `Rain near your home last week came to/);
+    expect(sweep).toMatch(/const lastWeekLine = scheduleUnconfirmed\s*\? `\$\{noMeasurableRain\(rain\) \? 'No measurable rain fell near your home last week' : `Rain near your home last week came to/);
     expect(sweep).toMatch(/'pp\.irrigation_confirmed_fields',\s*'pp\.irrigation_home_changed_at',/);
     expect(sweep).toMatch(/scheduleUnconfirmed,\s*rateTable: table,\s*(\/\/[^\n]*\n\s*)*waterSaved: decisionInputs\.waterSaved \|\| null,\s*(\/\/[^\n]*\n\s*)*headTypes: decisionInputs\.headTypes \|\| null,\s*\}\);/); // renderWeekPlanEmail ctx: frozen inputs only
   });
@@ -290,6 +290,21 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     const first = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2 });
     expect(first.decisionInputs.appliedInches).toBeGreaterThan(0);
     expect(first.payload.summary_line).not.toMatch(/last week's watering plan/);
+  });
+
+  test('a dry week has no amount to quote: "no measurable rain" / "no measurable water" (owner 2026-10-26)', () => {
+    const dry = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0, rainfallInches7d: 0 });
+    expect(dry.templateKey).toBe(TEMPLATE_WEEK_PLAN);
+    expect(dry.payload.summary_line).toMatch(/^Last week brought no measurable rain near your home, and last week's plan said to skip watering, so your lawn got no measurable water; your St\. Augustine needs about/);
+    expect(dry.payload.summary_line).not.toMatch(/about 0"/);
+    // A run last week still quotes its amount.
+    const ran = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0.75, rainfallInches7d: 0 });
+    expect(ran.payload.summary_line).toMatch(/last week's watering plan \(0\.75" of irrigation\), your lawn got about 0\.75" of water/);
+    const moved = buildWeeklyEmailDecision({ ...base, scheduleUnconfirmed: true, rainfallInches7d: 0 });
+    expect(moved.payload.summary_line).toMatch(/^No measurable rain fell near your home last week; your St\. Augustine needs about/);
+    const short = buildWeeklyEmailDecision({ ...BASE, irrigationInchesPerWeek: 0.25, irrigationRunMinutes: null, rainfallInches7d: 0, forecastRainInches: 0 });
+    expect(short.templateKey).toBe(TEMPLATE_WEEK_PLAN);
+    expect(short.payload.summary_line).toMatch(/^There was no measurable rain near your home last week, so with your irrigation schedule \(0\.25" per week\)/);
   });
 
   test('a prior plan\'s depth is added to the OBSERVED rain — a held week after heavy rain still carries the surplus (codex gh-r32)', () => {

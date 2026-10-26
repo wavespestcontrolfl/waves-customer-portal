@@ -81,10 +81,11 @@ async function drawLine() {
   fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
   return frame;
 }
-// The pump is required before a layout can be saved.
+// The pump and its spot checklist are required before a layout can be saved.
 const placePump = (frame) => {
   fireEvent.click(screen.getByRole('button', { name: 'Pump' }));
   tap(frame, 320, 360);
+  within(screen.getByTestId('layout-pump-checklist')).getAllByRole('checkbox').forEach((box) => fireEvent.click(box));
 };
 const placed = placeNozzles([{ kind: 'eave', points: [{ x: 200, y: 200 }, { x: 600, y: 200 }] }], { lat: LAT, zoom: ZOOM });
 // Nozzle 4 of the walk, in css px, and where its arrow tip is while it points down the photo (heading 180, 40 map px from the nozzle).

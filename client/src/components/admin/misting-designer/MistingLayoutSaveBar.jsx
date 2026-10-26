@@ -5,6 +5,7 @@ import { formatETDateTime } from '../../../lib/timezone';
 function statusText(save) {
   if (!save.hasEstimate) return 'Save the estimate first';
   if (!save.hasPump) return 'Place the pump first';
+  if (!save.checklistDone) return 'Confirm the pump checklist';
   if (save.saving) return 'Saving…';
   if (save.status === 'saved') {
     return `Saved ${save.savedAt ? formatETDateTime(save.savedAt, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''}`.trim();

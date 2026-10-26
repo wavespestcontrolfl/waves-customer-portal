@@ -18,7 +18,7 @@ const state = () => ({
   },
   extras: {
     risers: [{ key: 'R1', x: 640, y: 480 }],
-    pump: { x: 700, y: 440 },
+    pump: { x: 700, y: 440, checks: { outlet: true, level: true, dry: false, stucco: true } },
     zones: [{ key: 'Z1', kind: 'pool', x: 560, y: 430, radiusFt: 15, radiusPx: 99 }],
   },
 });
@@ -44,7 +44,8 @@ describe('scaling a layout with the photo\'s zoom', () => {
     expect(out.edits.riserRemoved).toEqual(['bed:L3:s0:1']);
     expect(out.edits.aimed).toEqual({ 'L1:v0': 45 });
     expect(out.extras.risers[0]).toMatchObject({ key: 'R1', x: CX, y: CY });
-    expect(out.extras.pump).toEqual({ x: CX + 120, y: CY - 80 });
+    // The pump's spot checklist stays ticked: a zoom step is the same ground, not a new spot.
+    expect(out.extras.pump).toEqual({ x: CX + 120, y: CY - 80, checks: { outlet: true, level: true, dry: false, stucco: true } });
     // A zone keeps its radius in feet, so it follows the photo on its own.
     expect(out.extras.zones[0]).toMatchObject({ kind: 'pool', radiusFt: 15, x: CX - 160, y: CY - 100 });
   });

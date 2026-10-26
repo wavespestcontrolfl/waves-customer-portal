@@ -74,6 +74,7 @@
  *   GATE_SATELLITE_PALM_COUNT_TYPED=true (owner 2026-10-24 "ok go", follow-up B to #6562: a never-sent estimate whose Tree & Shrub line priced a palm count read from the satellite image (palmCountFromLookup) is sent only after an admin types the palm count from the aerial photo in Review and send. Acknowledging the AI review is no longer enough; a typed count other than the priced one refuses the send with PALM_COUNT_MISMATCH, so the quote is rebuilt with the real count. Read at call time via satellitePalmCountTypedLive(), strict 'true', dark by default; off = the one-click acknowledgment as before. Never sends, never changes a price.)
  *   GATE_TRUCK_KIT=true (truck check, docs/tool-inventory-tracker-scope.md PR 1: a technician whose truck is an equipment row (category vehicle, assigned to them) gets a Truck check in the field workspace listing every equipment row kept on that truck (assigned_vehicle_id, set on Equipment → Assets) and a Today card once the last check is 7 or more days old; a check writes one equipment_checks row, a missing or damaged item opens a maintenance alert (tool_missing / tool_damaged, resolved on Equipment → Maintenance with Found / Lost or Repaired / Retired) and the check rings one office bell per truck that closes itself when every tool alert on the truck is resolved; with kit keys on rows and checklist items (PR 2) the Schedule readiness strip and the technician's Today page say which required tool a truck lacks. Read at call time via truckKitLive(), strict 'true', dark by default; off = GET and POST /api/tech/truck-check answer 404 { enabled: false }, the readiness poll reads nothing from the kit, nothing renders, nothing is written. Never contacts a customer, never changes an item's status by itself.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
+ *   GATE_TRIP_LINK=true (trip link, owner "TRIP LINK" and "BOTH" 2026-10-26: a nightly job (01:40 ET, yesterday) and a backfill script link each Bouncie trip and truck stop to the completed visit it served, and store per-visit GPS arrival and departure, GPS minutes on site, drive minutes and drive miles in visit_gps_legs, plus where each trip ended and a business / personal SUGGESTION in trip_links. Shadow data only: it never writes mileage_log, scheduled_services, job_costs, pins or alerts and sends nothing. Read at call time via tripLinkLive(), strict 'true', dark by default; off = the job reads nothing and writes nothing and the summary route answers 404.)
  *   GATE_BID_DESK=true (Bid Desk, PR 1: every 15 minutes a job reads new rows of the emails table and files bid invites (BuildingConnected, Procore, bid portals, government RFP/RFQ mail) as bid opportunities with their due dates read from the fixed provider templates only, posts ONE admin notification per new bid, one when an addendum arrives on an open bid, and reminders 7 and 2 days before a due date the operator CONFIRMED; the admin Bid Desk page lists them and lets the operator confirm the date and set bid / no bid / submitted / won / lost. No AI call, no change to leads or the classifier, and it sends nothing to a buyer, contractor or customer. Read at call time via bidDeskLive(), strict 'true', dark by default; off = no job work, the routes answer 404 and the nav entry is hidden.)
  *   GATE_BID_DESK_SAM=true (Bid Desk, PR 2: once a day at 7:25 AM ET a job reads new federal notices from the official SAM.gov Opportunities API (NAICS 561710 pest control and 561730 landscaping, Florida, solicitations, combined synopses, presolicitations and sources sought) whose place of performance is in the Tampa Bay to Southwest Florida ZIP areas, and files each as a bid opportunity (source sam_gov, one per notice id) with its SAM.gov link and response deadline (never confirmed until the operator confirms it), posting ONE admin notification per new bid. Needs GATE_BID_DESK and SAM_GOV_API_KEY. No AI call; it sends nothing to an agency, contractor or customer. Read at call time via bidDeskSamLive(), strict 'true', dark by default; off = the job returns before any request.)
  *   GATE_BID_CHECKLIST=true (Bid Desk PR B, needs GATE_BID_DESK: each bid also carries its solicitation type, scored or pass/fail, a questions-due date, a mandatory job walk, a link to its estimate and proposal, its documents (the attachments of its emails), a per-bid checklist built from templates, and a submission record; adds a 14-day reminder before a confirmed due date, one reminder 2 days before the questions date and one 2 days before the job walk. Admin bell only: nothing goes to a buyer, contractor or agency. Read at call time via bidChecklistLive(), strict 'true', dark by default; off = the new fields are hidden and refused, no new reminder fires, and the Bid Desk works as before.)
@@ -86,6 +87,7 @@
  *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
  *   GATE_PNL_PAY_RUN_WAGES=true (census M11, owner 2026-10-26, choice B "from the payroll the portal already runs": the P&L and the Schedule C draft count W-2 wages and employer payroll taxes from FINALIZED pay runs (payroll_checks.status 'finalized', by pay_date): wages = gross, employer taxes = employer Social Security + employer Medicare + FUTA + Florida reemployment. Bank payroll payments (net pay, the federal deposit, FUTA, RT-6) go in the expense category "Payroll (counted from pay runs)" (expense_categories.counted_from_pay_runs), which both leave out so nothing counts twice. P&L labor line = wages + employer taxes, plus a payroll block in the P&L JSON; Schedule C line 26 = wages, line 23 = employer taxes plus the other Taxes and licenses rows; the CPA README says so when GATE_TAX_PACKAGE_W2_LABOR is also on. Read at call time via pnlPayRunWagesLive(), strict 'true', dark by default; off = every output is byte for byte today's; rollback = unset. Changes report figures only; sends, files and pays nothing.)
  *   GATE_TECH_STAFF_GUARDS=true (census M12 + M6, owner 2026-10-25: (M12) an inbound text or call FROM the phone of an ACTIVE technician (technicians.employment_status 'active') is staff, like the env staff phones: a text to an office line stays in the office inbox (unread, with the owner's usual unknown-sender text forward) but gets no spam screen, estimator draft or new-prospect bell; a call keys no customer or lead and gets no missed-call text-back; a number that is also on a customer record stays a customer. Outbound sends and the owner phone set are unchanged. (M6) a technician's En Route or On Site tap on a booking the office has not reviewed no longer approves it: the tap answers 409 and ONE office notification per visit rings (Schedule, needs-you); an admin login still auto-confirms. Read at call time via techStaffGuardsLive(), strict 'true', dark by default; off = today's behavior byte for byte; rollback = unset. Sends nothing to a customer.)
+ *   GATE_TECH_COST_RATES=true (L11a, owner 2026-10-26: "we need real actual calculation, this ($35) was a number I just thought". Job costing charges each visit for its own on-site minutes plus its drive minutes at its technician's worked-hour cost, and for its miles and vehicle time, when a cost card is in effect for that technician on the visit date (technician_cost_cards, vehicle_cost_cards; admin API /api/admin/cost-cards; Cost cards section on Settings > Operating costs). Read at call time via techCostRatesLive(), dark by default; exactly `true`. Off, or no card in effect = job_costs and service_records values are byte for byte today's loaded_labor_rate x on-job hours and drive_cost_per_stop. Customer prices never change. Kill switch: unset.)
  *   GATE_TAX_PACKAGE_W2_LABOR=true (census A8, owner 2026-10-25: the CPA tax package stops calling every technician's tracked time the owner's own non-deductible time. labor-timetracking-informational.csv keeps only technicians who are NOT W-2 employees (technicians.employment_type not 'w2'), and a new w2-payroll.csv lists one row per FINALIZED pay check (payroll_checks.status 'finalized') whose pay date falls in the package window: employee, week, pay date, regular and overtime hours, gross wages, the taxes withheld, the employer taxes and net pay, with a totals row; the README lists it (wages are Schedule C line 26, employer taxes line 23). Read at call time via taxPackageW2LaborLive(), strict 'true', dark by default; off = the package is byte for byte today's; rollback = unset. Changes a file for the CPA only; sends, files and pays nothing.)
  *   GATE_MISTING_LAYOUT_DESIGNER=true (mosquito misting satellite-map layout designer, step 1, owner 2026-10-26 "build staff version": the staff estimator shows a Design on map button beside the misting Nozzles input; it opens a modal over the property's satellite photo where staff draw eave and fence lines, nozzles are placed at every corner and about every 10 ft, and Use counts writes the nozzle total into the Nozzles input. Step 3 saves the layout per estimate (admin-estimate-misting-layout routes, misting_layouts) and adds a Proposed misting layout section to the estimate document. Staff drawing screen; no customer message, no price changes beyond the nozzle count staff already type. Needs GATE_MOSQUITO_MISTING also on. Ships DARK: strict true only. Off = the misting block of GET /admin/pricing-config/mosquito_misting_pricing, the layout routes (404), the estimate document and the estimator are byte-identical.)
  *   GATE_CONTACT_LOGIN=true (an on-location contact signs into the customer app with their OWN phone number through the same SMS code login, landing on the account they are a contact for as a CONTACT session: view-only schedule, visit history, technician tracking, service-report documents (never for a contact the report rule withholds from) and their own notification choices (GET/PUT /api/notifications/contact-preferences); every other portal route answers 403 ACCOUNT_HOLDER_ONLY — billing, payments, cards, referrals, credits, requests, chat, property, account deletion, the holder's preferences, push subscriptions. The account holder's own number always wins; a contact number is tried only when no holder row matches, and the contact's session dies at its next refresh once the holder removes them. Per-contact notification choices (service_contact_notification_prefs) only NARROW what the account sends: a purpose the holder turned off stays off. Owner rulings 2026-10-20: view only, no confirm or reschedule; the contact's in-app text-consent checkbox counts as the YES for a pending opt-in ask only, never over a STOP. Read at call time via contactLoginLive(), strict 'true', dark by default; off = a contact number never logs in, an existing contact token is refused (401) and the senders ignore the per-contact table, byte-identical to before. Sends nothing to a customer.)
@@ -2304,6 +2306,10 @@ const gates = {
   // unless exactly 'true'. This entry is for logGateStatus only — the canonical
   // CALL-TIME reader is pinParkedCheckLive() below.
   pinParkedCheck: process.env.GATE_PIN_PARKED_CHECK === 'true',
+  // Trip link (owner "TRIP LINK" 2026-10-26). Ships DARK: off unless exactly
+  // 'true'. This entry is for logGateStatus only — the canonical CALL-TIME
+  // reader is tripLinkLive() below.
+  tripLink: process.env.GATE_TRIP_LINK === 'true',
   // Truck check (docs/tool-inventory-tracker-scope.md PR 1). Ships DARK: off
   // unless exactly 'true'. This entry is for logGateStatus only — the canonical
   // CALL-TIME reader is truckKitLive() below.
@@ -4542,6 +4548,11 @@ const gates = {
   // logGateStatus; pnl-report.js and tax-return-engine.js read pnlPayRunWagesLive() at CALL time.
   // Ships DARK: exactly 'true' only.
   pnlPayRunWages: process.env.GATE_PNL_PAY_RUN_WAGES === 'true',
+  // Tech cost rates (L11a, owner 2026-10-26): job costing charges a visit at its technician's cost card
+  // (labor per worked hour, vehicle fixed per worked hour and per mile). This entry is for logGateStatus;
+  // job-costing.js and admin-cost-cards.js read techCostRatesLive() at CALL time. Ships DARK: exactly
+  // 'true' only.
+  techCostRates: process.env.GATE_TECH_COST_RATES === 'true',
   // Misting layout designer (step 1, owner 2026-10-26): the staff estimator's Design on map button. This
   // entry is for logGateStatus; admin-pricing-config reads mistingLayoutDesignerLive() at CALL time.
   // Ships DARK: exactly 'true' only.
@@ -7410,6 +7421,17 @@ function pinParkedCheckLive() {
   return process.env.GATE_PIN_PARKED_CHECK === 'true';
 }
 
+// GATE_TRIP_LINK read at CALL time — strict `=== 'true'`, dark by default
+// (owner "TRIP LINK" and "BOTH" 2026-10-26). The canonical reader for
+// services/trip-link.js (the 01:40 ET job in scheduler.js, the backfill script)
+// and routes/admin-trip-link.js. Off: the job reads nothing and writes nothing
+// and the summary route answers 404. It writes only visit_gps_legs and
+// trip_links, never mileage_log, scheduled_services, job_costs, pins or alerts,
+// and sends nothing. Kill: unset.
+function tripLinkLive() {
+  return process.env.GATE_TRIP_LINK === 'true';
+}
+
 // Auto lunch (services/time-tracking.js), read at CALL time. Strict
 // `=== 'true'`, dark in every environment; unsetting it is the kill switch.
 function autoLunchLive() {
@@ -7440,6 +7462,12 @@ function taxPackageW2LaborLive() {
 // it is the kill switch.
 function pnlPayRunWagesLive() {
   return process.env.GATE_PNL_PAY_RUN_WAGES === 'true';
+}
+
+// Tech cost rates (services/job-costing.js, routes/admin-cost-cards.js), read at CALL time. Strict
+// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
+function techCostRatesLive() {
+  return process.env.GATE_TECH_COST_RATES === 'true';
 }
 
 // Misting layout designer (routes/admin-pricing-config.js misting block), read at CALL time. Strict
@@ -8423,6 +8451,8 @@ module.exports.truckClockInMode = truckClockInMode;
 module.exports.callLastNameLookupLive = callLastNameLookupLive;
 // GATE_PIN_PARKED_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.pinParkedCheckLive = pinParkedCheckLive;
+// GATE_TRIP_LINK reader, on its own line so gate PRs never conflict.
+module.exports.tripLinkLive = tripLinkLive;
 // GATE_AUTO_LUNCH reader, on its own line so gate PRs never conflict.
 module.exports.autoLunchLive = autoLunchLive;
 module.exports.truckKitLive = truckKitLive;
@@ -8791,3 +8821,5 @@ module.exports.customerTextToVisitTechLive = customerTextToVisitTechLive;
 module.exports.siteOneEmailOrderLive = siteOneEmailOrderLive;
 // GATE_AUTOPAY_HOLD_TIMEOUT reader, on its own line so gate PRs never conflict.
 module.exports.autopayHoldTimeoutMode = autopayHoldTimeoutMode;
+// GATE_TECH_COST_RATES reader, on its own line so gate PRs never conflict.
+module.exports.techCostRatesLive = techCostRatesLive;

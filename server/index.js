@@ -928,6 +928,7 @@ app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/twili
 app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/collections-voice-webhook'));
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
+app.use('/api/admin/cost-cards', require('./routes/admin-cost-cards'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));
 app.use('/api/admin/schedule/new-caller', require('./routes/admin-schedule-new-caller'));
 app.use('/api/admin/schedule', require('./routes/admin-schedule'));
@@ -1031,6 +1032,8 @@ app.use('/api/admin/email', require('./routes/admin-email'));
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
 // Bid kit (GATE_BID_KIT, dark): the router answers 404 for every path while the gate is off.
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
+// Trip link summary (GATE_TRIP_LINK, dark): the router answers 404 for every path while the gate is off.
+app.use('/api/admin/trip-link', require('./routes/admin-trip-link'));
 app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));
 app.use('/api/admin/pest-pressure', require('./routes/admin-pest-pressure'));
 app.use('/api/admin/pricing-proposals', require('./routes/admin-pricing-proposals'));
