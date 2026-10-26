@@ -5,6 +5,7 @@ import {
   Bell,
   Bug,
   CalendarDays,
+  ChevronDown,
   ClipboardCheck,
   Clover,
   Droplets,
@@ -27,6 +28,7 @@ import DocumentActionBar from "../components/DocumentActionBar";
 import { useGlassSurface } from "../glass/glass-engine";
 import { PublicStateCard } from "../components/brand";
 import { WAVES_SUPPORT_PHONE_DISPLAY } from "../constants/business";
+import { etDateString } from "../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -103,10 +105,14 @@ function IconBadge({ name, size = 18 }) {
   );
 }
 
+// A tile with an `until` date (the detailed outline's watering-order tile) stops showing after that ET day: the
+// packet is stored, and the order it describes ends.
+const tileStillShown = (tile) => !tile.until || etDateString() <= tile.until;
+
 function TilesVisual({ items = [] }) {
   return (
     <ul className="mt-4 grid gap-3 sm:grid-cols-2">
-      {items.map((tile) => (
+      {items.filter(tileStillShown).map((tile) => (
         <li key={tile.title} data-glass="soft" className="flex gap-3 rounded-md border border-zinc-200 bg-surface-page p-4">
           <IconBadge name={tile.icon} size={20} />
           <span>
@@ -149,10 +155,45 @@ function ChipsVisual({ items = [], note }) {
   );
 }
 
-function YearVisual({ months = [], labels = {}, limitLabel }) {
-  // The key lists the steps the chart uses, in the treatment cards' order.
+// The key under the year chart and the month list: the steps the months use, in the treatment cards' order, and
+// the summer-limit swatch.
+function StepKey({ months, labels, limitLabel }) {
   const usedSteps = new Set(months.flatMap((m) => [...m.main, ...m.asNeeded]));
   const used = Object.keys(labels).filter((step) => usedSteps.has(step));
+  return (
+    <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-sm text-slate-600">
+      {used.map((step) => (
+        <li key={step} className="inline-flex items-center gap-1.5">
+          <VisualIcon name={step} size={16} className="text-waves-blue-deeper" />
+          {labels[step] || step}
+        </li>
+      ))}
+      {limitLabel && (
+        <li className="inline-flex items-center gap-1.5">
+          <span aria-hidden="true" className="h-4 w-4 rounded-sm border border-waves-gold bg-waves-gold-light" />
+          {limitLabel}
+        </li>
+      )}
+    </ul>
+  );
+}
+
+function AsNeededIcons({ steps, labels }) {
+  if (!steps.length) return null;
+  return (
+    <span className="flex flex-wrap items-center gap-1.5 text-sm text-slate-500">
+      <span>As needed</span>
+      {steps.map((step) => (
+        <span key={step} title={labels[step] || step} className="inline-flex">
+          <VisualIcon name={step} size={16} />
+          <span className="sr-only">{labels[step] || step}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function YearVisual({ months = [], labels = {}, limitLabel }) {
   return (
     <div className="mt-4">
       <ol className="grid list-none grid-cols-2 gap-2 pl-0 sm:grid-cols-3 md:grid-cols-4">
@@ -172,33 +213,59 @@ function YearVisual({ months = [], labels = {}, limitLabel }) {
               ))}
             </ul>
             {m.asNeeded.length > 0 && (
-              <p className="mt-2 flex flex-wrap items-center gap-1.5 text-sm text-slate-500">
-                <span>As needed</span>
-                {m.asNeeded.map((step) => (
-                  <span key={step} title={labels[step] || step} className="inline-flex">
-                    <VisualIcon name={step} size={16} />
-                    <span className="sr-only">{labels[step] || step}</span>
-                  </span>
-                ))}
+              <p className="mt-2">
+                <AsNeededIcons steps={m.asNeeded} labels={labels} />
               </p>
             )}
           </li>
         ))}
       </ol>
-      <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-sm text-slate-600">
-        {used.map((step) => (
-          <li key={step} className="inline-flex items-center gap-1.5">
-            <VisualIcon name={step} size={16} className="text-waves-blue-deeper" />
-            {labels[step] || step}
+      <StepKey months={months} labels={labels} limitLabel={limitLabel} />
+    </div>
+  );
+}
+
+// The detailed outline's month list (GATE_LAWN_OUTLINE_DETAIL): one row per month with its steps; the build month
+// and the next two arrive open, and any other row opens on a tap to show what that visit does and one thing to do at
+// home.
+function MonthsVisual({ months = [], labels = {}, limitLabel }) {
+  return (
+    <div className="mt-4">
+      <ol className="list-none space-y-2 pl-0">
+        {months.map((m) => (
+          <li key={m.month}>
+            <details
+              open={m.open || undefined}
+              data-limited={m.limited ? "true" : undefined}
+              className={`group rounded-md border ${m.limited ? "border-waves-gold/40 bg-waves-gold-light" : "border-zinc-200 bg-white"}`}
+            >
+              <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-3 [&::-webkit-details-marker]:hidden">
+                <span className="w-10 flex-shrink-0 text-sm font-bold uppercase tracking-wide text-waves-blue-deeper">{m.label}</span>
+                <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
+                  {m.main.map((step) => (
+                    <span key={step} className="inline-flex items-center gap-1.5 text-sm font-semibold text-waves-blue-deeper">
+                      <VisualIcon name={step} size={16} />
+                      {labels[step] || step}
+                    </span>
+                  ))}
+                  <AsNeededIcons steps={m.asNeeded} labels={labels} />
+                </span>
+                <ChevronDown size={18} strokeWidth={1.75} aria-hidden="true" className="flex-shrink-0 text-slate-500 transition-transform group-open:rotate-180" />
+              </summary>
+              <div className="space-y-2 px-3 pb-3">
+                {m.visit && <p className="text-base leading-6 text-slate-600">{m.visit}</p>}
+                {m.atHome && (
+                  <p className="rounded-md bg-waves-blue-light px-3 py-2 text-base leading-6 text-waves-blue-deeper">
+                    <span className="font-semibold">At home: </span>
+                    {m.atHome}
+                  </p>
+                )}
+              </div>
+            </details>
           </li>
         ))}
-        {limitLabel && (
-          <li className="inline-flex items-center gap-1.5">
-            <span aria-hidden="true" className="h-4 w-4 rounded-sm border border-waves-gold bg-waves-gold-light" />
-            {limitLabel}
-          </li>
-        )}
-      </ul>
+      </ol>
+      <StepKey months={months} labels={labels} limitLabel={limitLabel} />
     </div>
   );
 }
@@ -255,6 +322,7 @@ const SECTION_VISUALS = {
   tiles: TilesVisual,
   chips: ChipsVisual,
   year: YearVisual,
+  months: MonthsVisual,
   steps: StepsVisual,
   categories: CategoriesVisual,
   tags: TagsVisual,
