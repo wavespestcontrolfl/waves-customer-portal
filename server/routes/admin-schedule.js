@@ -23890,6 +23890,11 @@ router.get('/:id/series-summary', async (req, res, next) => {
       canSetCount: isEnabled('editApptVisitCount'),
       // Same dark-ship contract for the price/service "Apply to" selector.
       canScopePriceService: isEnabled('editApptPriceServiceScope'),
+      // The service-line sheet's "Apply price change to" choice. The sheet
+      // posts the same priceServiceScope, which update-details refuses while
+      // editApptPriceServiceScope is off — so both gates, never the sheet's
+      // own alone.
+      canScopeSheetPrice: isEnabled('editApptPriceServiceScope') && isEnabled('serviceSheetPriceScope'),
     });
   } catch (err) { next(err); }
 });
