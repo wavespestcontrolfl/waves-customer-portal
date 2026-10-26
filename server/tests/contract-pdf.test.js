@@ -46,6 +46,31 @@ describe('contract-pdf', () => {
     await isPdf(buf);
   });
 
+  test('the existing annual-agreement title is fully printed above its recipient block', async () => {
+    const PDFDocument = require('pdfkit');
+    const fragments = [];
+    const original = PDFDocument.prototype._fragment;
+    const spy = jest.spyOn(PDFDocument.prototype, '_fragment').mockImplementation(function fragment(text, x, y, options) {
+      fragments.push({ text: String(text), x, y, size: this._fontSize });
+      return original.call(this, text, x, y, options);
+    });
+    const title = 'Waves Subterranean Termite Protection — Annual Service Agreement';
+    try {
+      await isPdf(await buildContractPDFBuffer({
+        ...baseContract,
+        title,
+        contract_text_snapshot: 'Approved terms remain complete.',
+      }, customer, { signed: false }));
+    } finally {
+      spy.mockRestore();
+    }
+    const recipient = fragments.find((fragment) => fragment.text === 'PREPARED FOR');
+    expect(recipient).toBeDefined();
+    const titleFragments = fragments.filter((fragment) => fragment.x === 40 && fragment.y >= 107 && fragment.y < recipient.y);
+    expect(titleFragments.map((fragment) => fragment.text).join('').replace(/\s+/g, ' ').trim()).toBe(title);
+    expect(Math.max(...titleFragments.map((fragment) => fragment.y + fragment.size))).toBeLessThan(recipient.y);
+  });
+
   test('builds an executed-copy PDF with signature details', async () => {
     const signed = {
       ...baseContract,
