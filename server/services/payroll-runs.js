@@ -764,7 +764,7 @@ const CSV_HEADERS = [
 ];
 
 // Appended at the END, gate on only, so a reader of the old columns keeps working.
-const CSV_TIME_OFF_HEADERS = ['PTO hours', 'PTO pay', 'Holiday hours', 'Holiday pay'];
+const CSV_TIME_OFF_HEADERS = ['PTO Hours', 'PTO Pay', 'Holiday Hours', 'Holiday Pay'];
 
 function checksToCsv(rows) {
   const withTimeOff = timeOffOn();

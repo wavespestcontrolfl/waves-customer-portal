@@ -1814,8 +1814,10 @@ router.get('/export/tax-package', async (req, res, next) => {
     // GATE_TAX_PACKAGE_W2_LABOR: finalized W-2 pay checks paid in the window, read
     // before the ZIP starts so a failure is an error response, not a cut stream.
     let w2Checks = null;
+    // GATE_PAYROLL_TIME_OFF: the CSV adds the paid time off and holiday hours.
+    const w2TimeOff = typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
     if (w2Labor) {
-      try { w2Checks = await taxPackageW2.loadFinalizedW2Checks(db, sd, ed); } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ w2Checks = []; }
+      try { w2Checks = await taxPackageW2.loadFinalizedW2Checks(db, sd, ed, { timeOff: w2TimeOff }); } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ w2Checks = []; }
     }
 
     // P&L from the shared builder — identical numbers to GET /pnl and
@@ -1850,7 +1852,7 @@ router.get('/export/tax-package', async (req, res, next) => {
     // Renamed so a CPA can't mistake the imputed job-costing figures for a
     // payroll expense schedule (owner labor is not deductible).
     archive.append(csv.laborToCSV(laborSummaries), { name: 'labor-timetracking-informational.csv' });
-    if (w2Checks) archive.append(csv.w2PayrollToCSV(w2Checks), { name: 'w2-payroll.csv' });
+    if (w2Checks) archive.append(csv.w2PayrollToCSV(w2Checks, { timeOff: w2TimeOff }), { name: 'w2-payroll.csv' });
     archive.append(csv.pnlToCSV(pnlData), { name: 'pnl.csv' });
     if (homeOffice) archive.append(csv.homeOfficeToCSV(homeOffice, sharedBills.homeOfficeDeduction(homeOffice)), { name: 'home-office.csv' });
     if (sharedBillRows && sharedBillRows.length) archive.append(csv.sharedBillsToCSV(sharedBillRows), { name: 'shared-bills.csv' });
@@ -1878,7 +1880,7 @@ const sharedBills = require('../services/tax-shared-bills');
 const taxYears = require('../services/tax-years');
 const returnEngine = require('../services/tax-return-engine');
 const { hasYearConstants, YEARS: TAX_YEAR_CONSTANTS } = require('../services/tax-year-constants');
-const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive, taxPackageW2LaborLive, pnlPayRunWagesLive } = require('../config/feature-gates');
+const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive, taxPackageW2LaborLive, pnlPayRunWagesLive, payrollTimeOffLive } = require('../config/feature-gates');
 const taxPackageW2 = require('../services/tax-package-w2');
 const worksheets = require('../services/tax-worksheets');
 

@@ -162,11 +162,11 @@ describe('Time off panel (GATE_PAYROLL_TIME_OFF on)', () => {
   });
 
   it('shows the lock message from the server in plain words', async () => {
-    writeReply = () => reply({ error: 'This week is already paid. Void the pay run first.' }, false, 409);
+    writeReply = () => reply({ error: "This week's pay run is final. Void it first to change its pay." }, false, 409);
     render(<PayrollSettings />);
     const view = within(await panel());
     fireEvent.click(view.getByRole('button', { name: 'Remove time off for Sample Alpha on Oct 14, 2026' }));
-    expect(await view.findByRole('alert')).toHaveTextContent('This week is already paid. Void the pay run first.');
+    expect(await view.findByRole('alert')).toHaveTextContent("This week's pay run is final. Void it first to change its pay.");
   });
 });
 

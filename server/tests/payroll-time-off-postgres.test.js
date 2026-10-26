@@ -247,7 +247,7 @@ postgres('payroll time off', () => {
       expect(stub.ytd.grossCents).toBe(88000);
 
       const csv = (await api('GET', `/runs/${done.id}/export.csv`, { raw: true })).text.split('\n');
-      expect(csv[0].endsWith(',Check Number,PTO hours,PTO pay,Holiday hours,Holiday pay')).toBe(true);
+      expect(csv[0].endsWith(',Check Number,PTO Hours,PTO Pay,Holiday Hours,Holiday Pay')).toBe(true);
       expect(csv[1].endsWith(',Paper check,,0.00,0.00,10.00,220.00')).toBe(true);
     });
 
@@ -520,7 +520,7 @@ postgres('payroll time off', () => {
   });
 
   describe('the lock once a week is paid', () => {
-    const LOCK = 'This week is already paid. Void the pay run first.';
+    const LOCK = "This week's pay run is final. Void it first to change its pay.";
 
     it('refuses change and delete after finalize, and allows them again after a void', async () => {
       const id = await readyTech('Sample Alpha');
@@ -543,7 +543,7 @@ postgres('payroll time off', () => {
       expect((await api('DELETE', `/time-off/${entryId}`)).status).toBe(409);
     });
 
-    it('refuses to add a day to a paid week (the date rule is checked first, so run it with the clock on that week)', async () => {
+    it('refuses to add a day to a paid week, whichever technician the run paid (the date rule is checked first, so run it with the clock on that week)', async () => {
       const id = await readyTech('Sample Alpha');
       await approvedWeek(id, W1, '1800.00');
       await draftAndFinalize(W1);
@@ -553,15 +553,48 @@ postgres('payroll time off', () => {
       try {
         await expect(timeOff.createTimeOff({ technicianId: id, workDate: addDays(W1, 2), kind: 'pto', hours: 8 }, ADMIN_ID, trx))
           .rejects.toMatchObject({ status: 409, message: LOCK });
-        // Another week is not locked, and another technician in the same week is not locked.
+        // A technician the run did not pay is locked too, on every day of that week.
         const other = await readyTech('Sample Beta');
-        const ok = await timeOff.createTimeOff({ technicianId: other, workDate: addDays(W1, 2), kind: 'pto', hours: 8 }, ADMIN_ID, trx);
-        expect(ok.entry.hours).toBe('8.00');
+        for (const offset of [0, 6]) {
+          await expect(timeOff.createTimeOff({ technicianId: other, workDate: addDays(W1, offset), kind: 'pto', hours: 8 }, ADMIN_ID, trx))
+            .rejects.toMatchObject({ status: 409, message: LOCK });
+        }
+        // The days either side of the week are not locked.
+        const before = await timeOff.createTimeOff({ technicianId: other, workDate: addDays(W1, -1), kind: 'pto', hours: 8 }, ADMIN_ID, trx);
+        expect(before.entry.hours).toBe('8.00');
         const next = await timeOff.createTimeOff({ technicianId: id, workDate: addDays(W1, 7), kind: 'pto', hours: 8 }, ADMIN_ID, trx);
         expect(next.entry.workDate).toBe(addDays(W1, 7));
       } finally {
         jest.useRealTimers();
       }
+    });
+
+    it('locks on the finalized RUN: a run with no check for this technician refuses create, change and delete, and a void frees the week', async () => {
+      const paid = await readyTech('Sample Paid');
+      const idle = await readyTech('Sample Idle');
+      await approvedWeek(paid, W1);
+      const row = (await offDay(idle, addDays(W1, 2), 'pto', '480.00').returning('id'))[0];
+      const entryId = row.id || row;
+      // The run is drafted before this technician's entry exists in the final run: remove it, finalize, put it back.
+      await trx('payroll_time_off').where({ id: entryId }).del();
+      const run = await draftAndFinalize(W1);
+      expect(run.checks.map((c) => c.name)).toEqual(['Sample Paid']);
+      expect(await trx('payroll_checks').where({ technician_id: idle }).count('* as n').first().then((r) => Number(r.n))).toBe(0);
+      const restored = (await offDay(idle, addDays(W1, 2), 'pto', '480.00').returning('id'))[0];
+      const restoredId = restored.id || restored;
+
+      const put = await api('PUT', `/time-off/${restoredId}`, { body: { kind: 'pto', hours: 4 } });
+      expect([put.status, put.body.error]).toEqual([409, LOCK]);
+      const del = await api('DELETE', `/time-off/${restoredId}`);
+      expect([del.status, del.body.error]).toEqual([409, LOCK]);
+      expect(await trx('payroll_time_off').where({ id: restoredId }).first('minutes')).toEqual({ minutes: '480.00' });
+
+      expect((await api('POST', `/runs/${run.id}/void`, { body: { reason: 'Redo' } })).status).toBe(200);
+      expect((await api('PUT', `/time-off/${restoredId}`, { body: { kind: 'pto', hours: 4 } })).status).toBe(200);
+      const redone = (await draft(W1)).body.run;
+      expect(byName(redone, 'Sample Idle')).toMatchObject({ ptoHours: '4.00', grossCents: 8800 });
+      expect((await finalize(redone.id)).status).toBe(200);
+      expect((await api('DELETE', `/time-off/${restoredId}`)).status).toBe(409);
     });
 
     it('does not lock a week whose only check is a draft or voided', async () => {

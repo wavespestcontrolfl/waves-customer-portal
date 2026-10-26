@@ -142,6 +142,35 @@ describe('writes', () => {
     expect(trx.lockArgs[1]).toEqual([PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY]);
   });
 
+  it('refuses every write with the pay-run-is-final message when the week\'s run is finalized', async () => {
+    const queries = [];
+    const finalRun = { id: 'run-final' };
+    const trx = (table) => {
+      queries.push(table);
+      const chain = new Proxy(() => {}, {
+        get: (_t, key) => {
+          if (key === 'then') return undefined;
+          if (key === 'where') return (...args) => { queries.push(args[0]); return chain; };
+          if (key === 'first') return () => Promise.resolve(table === 'payroll_runs' ? finalRun : { technician_id: TECH_ID, work_date: '2026-10-28', employment_type: 'w2', name: 'Sample' });
+          return () => chain;
+        },
+      });
+      return chain;
+    };
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.fn = { now: () => 'now' };
+    const conn = { transaction: (callback) => callback(trx) };
+    const message = "This week's pay run is final. Void it first to change its pay.";
+    await expect(createTimeOff(good(), TECH_ID, conn)).rejects.toMatchObject({ status: 409, message });
+    await expect(updateTimeOff(ENTRY_ID, { kind: 'pto', hours: 1 }, TECH_ID, conn)).rejects.toMatchObject({ status: 409, message });
+    await expect(deleteTimeOff(ENTRY_ID, TECH_ID, conn)).rejects.toMatchObject({ status: 409, message });
+    expect(queries).toContain('payroll_runs');
+    expect(queries).toContainEqual({ week_start: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), status: 'finalized' });
+    expect(queries).not.toContain('payroll_checks');
+    // The finalize lock is taken first, once per write.
+    expect(trx.raw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock/.test(sql))).toHaveLength(3);
+  });
+
   it('answers a second entry for the same technician and date with 409 and a plain message', async () => {
     const conn = { transaction: () => Promise.reject(Object.assign(new Error('duplicate key'), { code: '23505' })) };
     await expect(createTimeOff(good(), TECH_ID, conn)).rejects.toMatchObject({

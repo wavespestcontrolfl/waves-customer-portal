@@ -310,7 +310,7 @@ describe('GATE_PAYROLL_TIME_OFF', () => {
 
     it('appends the four time-off columns at the end of the CSV', () => {
       const lines = checksToCsv([{ ...build({ regular_minutes: '1800.00', pto_minutes: '600.00', holiday_minutes: '480.00' }), id: 'c1', check_number: null }]).split('\n');
-      expect(lines[0].endsWith('Pay Method,Check Number,PTO hours,PTO pay,Holiday hours,Holiday pay')).toBe(true);
+      expect(lines[0].endsWith('Pay Method,Check Number,PTO Hours,PTO Pay,Holiday Hours,Holiday Pay')).toBe(true);
       expect(lines[1].endsWith(',Paper check,,10.00,220.00,8.00,176.00')).toBe(true);
     });
 

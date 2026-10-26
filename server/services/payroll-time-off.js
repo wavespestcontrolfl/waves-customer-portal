@@ -10,8 +10,10 @@
  * The benefits policy is not final, so no allowance and no holiday list live in
  * code: the yearly allowance is a setting on the technician and only warns.
  *
- * Once a finalized, non-voided check covers the technician's week, the day
- * cannot be added, changed or removed: void the pay run first. The write takes
+ * Once the pay run for the staff week that holds the date is finalized (not
+ * voided), the day cannot be added, changed or removed, whichever technician the
+ * run paid: a run finalized without a check for this technician would otherwise
+ * never pay a day added afterwards. Void the pay run first. The write takes
  * the same advisory lock finalizeRun takes (lockPayrollMutations), so a finalize
  * and a time-off edit cannot interleave.
  *
@@ -31,7 +33,7 @@ const KINDS = ['pto', 'holiday'];
 const MAX_NOTE = 500;
 const MAX_DAYS_AWAY = 400;
 const MAX_ALLOWANCE_HOURS = 400;
-const LOCKED_MESSAGE = 'This week is already paid. Void the pay run first.';
+const LOCKED_MESSAGE = "This week's pay run is final. Void it first to change its pay.";
 const KIND_WORDS = { pto: 'Paid time off', holiday: 'Holiday' };
 
 function validate(schema, input) {
@@ -216,12 +218,10 @@ const audit = (trx, actorId, action, id, metadata) => recordAuditEvent({
   resource_type: 'payroll_time_off', resource_id: id, metadata,
 });
 
-// Take the finalize lock first, then refuse when a finalized check already pays the week.
-async function refuseWhenPaid(trx, technicianId, workDate) {
+// The caller has taken the finalize lock. Refuse when the week's pay run is final.
+async function refuseWhenPaid(trx, workDate) {
   const weekStart = staffWeekStartForWorkDate(workDate);
-  const paid = await trx('payroll_checks')
-    .where({ technician_id: technicianId, week_start: weekStart, status: 'finalized' })
-    .first('id');
+  const paid = await trx('payroll_runs').where({ week_start: weekStart, status: 'finalized' }).first('id');
   if (paid) throw new PayrollError(409, LOCKED_MESSAGE);
 }
 
@@ -237,7 +237,7 @@ async function createTimeOff(input, actor, conn = db) {
       const tech = await trx('technicians').where({ id: technicianId }).first('id', 'name', 'employment_type');
       if (!tech) throw new PayrollError(404, 'Technician not found.');
       if (tech.employment_type !== 'w2') throw new PayrollError(409, 'Paid time off is for W-2 employees.');
-      await refuseWhenPaid(trx, technicianId, workDate);
+      await refuseWhenPaid(trx, workDate);
       const [inserted] = await trx('payroll_time_off').insert({
         technician_id: technicianId, work_date: workDate, kind: v.kind, minutes: minutesText(v.hours),
         note: v.note || null, created_by: actorId,
@@ -262,7 +262,7 @@ async function updateTimeOff(id, input, actor, conn = db) {
     const row = await trx('payroll_time_off as o').where('o.id', id).forUpdate('o')
       .first('o.technician_id', trx.raw("to_char(o.work_date, 'YYYY-MM-DD') as work_date"));
     if (!row) throw new PayrollError(404, 'Time off entry not found.');
-    await refuseWhenPaid(trx, row.technician_id, row.work_date);
+    await refuseWhenPaid(trx, row.work_date);
     await trx('payroll_time_off').where({ id }).update({
       kind: v.kind, minutes: minutesText(v.hours), note: v.note || null, updated_by: actorId, updated_at: trx.fn.now(),
     });
@@ -283,7 +283,7 @@ async function deleteTimeOff(id, actor, conn = db) {
     const row = await trx('payroll_time_off as o').where('o.id', id).forUpdate('o')
       .first('o.technician_id', 'o.kind', trx.raw("to_char(o.work_date, 'YYYY-MM-DD') as work_date"));
     if (!row) throw new PayrollError(404, 'Time off entry not found.');
-    await refuseWhenPaid(trx, row.technician_id, row.work_date);
+    await refuseWhenPaid(trx, row.work_date);
     await trx('payroll_time_off').where({ id }).del();
     await audit(trx, actorId, 'payroll.time_off_removed', id, {
       technician_id: row.technician_id, entry_id: id, work_date: row.work_date, kind: row.kind,

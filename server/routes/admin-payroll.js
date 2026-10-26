@@ -39,8 +39,9 @@
  *                                    201 { entry, warning } (409 on a second entry for the date).
  * PUT    /time-off/:id               { kind, hours, note } -> { entry, warning }
  * DELETE /time-off/:id               remove an entry.
- *                                    Create, change and delete answer 409 once a finalized check
- *                                    pays that technician's week: void the pay run first.
+ *                                    Create, change and delete answer 409 once the pay run for the
+ *                                    week that holds the date is final (whichever technician it
+ *                                    paid): void the pay run first.
  * GET    /time-off/balance?technicianId=&year=   allowance, hours booked, hours paid, holidays.
  * PUT    /technicians/:id/pto-allowance          { hoursPerYear | null } the yearly allowance.
  *                                    The allowance only warns; it never blocks an entry.

@@ -147,7 +147,7 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
       <h3 className="m-0 text-ui-body font-medium">Time off</h3>
       <p className="m-0 mt-1 text-ui-caption text-ink-secondary">
         Paid time off and holidays are hours not worked. The pay run for that week pays them at the regular rate. They never count toward overtime.
-        Once a week is paid, void its pay run before you change a day.
+        Once a week's pay run is final, void it before you change a day.
       </p>
     </header>
     {message && <p role="status" className="m-0 text-ui-caption text-zinc-900">{message}</p>}
