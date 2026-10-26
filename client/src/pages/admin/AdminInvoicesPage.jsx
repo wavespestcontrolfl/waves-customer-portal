@@ -109,6 +109,29 @@ import { stackDocumentDiscounts, stackablePresets } from "../../lib/discountStac
 import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
 import useDictationPending from "../../hooks/dictationPending";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+const INVOICE_STATUS_FILTERS = [
+  { key: "all", label: "All" },
+  { key: "overdue", label: "Overdue" },
+  { key: "unpaid", label: "Unpaid" },
+  { key: "paid", label: "Paid" },
+  { key: "prepaid", label: "Prepaid" },
+  { key: "needs_receipt", label: "Needs receipt" },
+  { key: "draft", label: "Draft" },
+  { key: "archived", label: "Archived" },
+];
+const INVOICE_DATE_FILTERS = [
+  { key: "all", label: "All" },
+  { key: "today", label: "Today" },
+  { key: "7d", label: "Last 7 days" },
+  { key: "30d", label: "Last 30 days" },
+  { key: "month", label: "This month" },
+];
+const INVOICE_SORT_OPTIONS = [
+  { key: "newest", label: "Newest" },
+  { key: "oldest", label: "Oldest" },
+  { key: "amount_high", label: "Amount ↓" },
+  { key: "amount_low", label: "Amount ↑" },
+];
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
 
@@ -1559,6 +1582,24 @@ function InvoiceFilter({ label, value, options, onChange, disabled }) {
 }
 
 // ── Invoice List (mirrors attached UI) ──
+function InvoiceSummaryStats({ stats, isMobile }) {
+  if (!stats || isMobile) return null;
+  return (
+    <span style={{ marginLeft: "auto" }} className="text-ui-body text-ink-secondary">
+      {stats.paid} paid · {stats.outstanding} outstanding · {stats.overdue} overdue
+      {Number(stats.deposits?.onHand) > 0 && (
+        <>
+          {" · "}
+          <span className="text-ink-secondary">
+            ${Number(stats.deposits.onHand).toFixed(2)} deposits on hand
+            {stats.deposits.onHandCount > 1 ? ` (${stats.deposits.onHandCount})` : ""}
+          </span>
+        </>
+      )}
+    </span>
+  );
+}
+
 function InvoiceList({
   showToast,
   onRefresh,
@@ -2255,92 +2296,21 @@ function InvoiceList({
           disabled={batchSending}
           value={filter}
           onChange={setFilter}
-          options={[
-            {
-              key: "all",
-              label: "All",
-            },
-            {
-              key: "overdue",
-              label: "Overdue",
-            },
-            {
-              key: "unpaid",
-              label: "Unpaid",
-            },
-            {
-              key: "paid",
-              label: "Paid",
-            },
-            {
-              key: "prepaid",
-              label: "Prepaid",
-            },
-            {
-              key: "needs_receipt",
-              label: "Needs receipt",
-            },
-            {
-              key: "draft",
-              label: "Draft",
-            },
-            {
-              key: "archived",
-              label: "Archived",
-            },
-          ]}
+          options={INVOICE_STATUS_FILTERS}
         />{" "}
         <InvoiceFilter
           label="Date"
           disabled={batchSending}
           value={datePeriod}
           onChange={setDatePeriod}
-          options={[
-            {
-              key: "all",
-              label: "All",
-            },
-            {
-              key: "today",
-              label: "Today",
-            },
-            {
-              key: "7d",
-              label: "Last 7 days",
-            },
-            {
-              key: "30d",
-              label: "Last 30 days",
-            },
-            {
-              key: "month",
-              label: "This month",
-            },
-          ]}
+          options={INVOICE_DATE_FILTERS}
         />{" "}
         <InvoiceFilter
           label="Sort"
           disabled={batchSending}
           value={sort}
           onChange={setSort}
-          options={[
-            {
-              key: "newest",
-              label: "Newest",
-            },
-            {
-              key: "oldest",
-              label: "Oldest",
-            },
-            {
-              key: "amount_high",
-              label: "Amount ↓",
-            },
-            {
-              key: "amount_low",
-              label: "Amount ↑",
-            },
-          ]}
+          options={INVOICE_SORT_OPTIONS}
         />
         {sendableInvoices.length > 0 && (
           <Button
@@ -2359,28 +2329,7 @@ function InvoiceList({
               : `Select sendable (${sendableInvoices.length})`}
           </Button>
         )}
-        {stats && !isMobile && (
-          <span
-            style={{
-              marginLeft: "auto",
-            }}
-            className="text-ui-body text-ink-secondary"
-          >
-            {stats.paid} paid · {stats.outstanding} outstanding ·{" "}
-            {stats.overdue} overdue
-            {Number(stats.deposits?.onHand) > 0 && (
-              <>
-                {" · "}
-                <span className="text-ink-secondary">
-                  ${Number(stats.deposits.onHand).toFixed(2)} deposits on hand
-                  {stats.deposits.onHandCount > 1
-                    ? ` (${stats.deposits.onHandCount})`
-                    : ""}
-                </span>
-              </>
-            )}
-          </span>
-        )}
+        <InvoiceSummaryStats stats={stats} isMobile={isMobile} />
       </div>
       {/* List */}
       {deepLinkError && (

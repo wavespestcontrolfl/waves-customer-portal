@@ -2,10 +2,8 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
-const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { formatAddress } = require('../utils/address-normalizer');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { answerProjectReportQuestion, PROMPT_INTENTS } = require('../services/project-report-assistant');
@@ -188,16 +186,8 @@ const {
   routeServiceReportQuestion,
 } = require('../services/service-report/report-assistant');
 const {
-  WAVES_SUPPORT_PHONE_DISPLAY,
-  WAVES_FL_LICENSE_LINE,
-  WAVES_PRODUCTS_SAFETY_URL,
-} = require('../constants/business');
-
-const PDF_NAVY = '#1B2C5B';
-const PDF_BLUE = '#009CDE';
-const PDF_BODY = '#3F4A65';
-const PDF_MUTED = '#6B7280';
-const PDF_RULE = '#E7E2D7';
+  renderLegacyServiceReportPdf,
+} = require('../services/pdf/legacy-service-report-pdf');
 
 // Rate-limit public report access to deter token brute-forcing. Two surfaces are
 // exempt: report-interaction event posts, and recap-video playback (Safari/iOS issues
@@ -2659,124 +2649,19 @@ router.get('/:token/data', async (req, res, next) => {
 });
 
 function generateReportPDF(service, products, weather, dryTimes, irrigation, res) {
-  const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service, { prefix: 'Waves-Report' })}"`);
-  doc.pipe(res);
-
-  // Header — logo (centered) with license + contact lines beneath. Falls
-  // back to the wordmark if the logo asset is missing in this deploy.
-  const { getLogoBuffer } = require('../services/pdf/brand-logo');
-  const logoBuf = getLogoBuffer();
-  if (logoBuf) {
-    doc.image(logoBuf, 281, doc.y, { width: 50, height: 50 });  // center of 612px letter page, 50px square
-    doc.moveDown(3);
-  } else {
-    doc.fontSize(20).font('Helvetica-Bold').text('WAVES PEST CONTROL', { align: 'center' });
-  }
-  doc.fontSize(9).font('Helvetica').text(`Licensed & Insured · ${WAVES_FL_LICENSE_LINE}`, { align: 'center' });
-  doc.text(`${WAVES_SUPPORT_PHONE_DISPLAY} · wavespestcontrol.com`, { align: 'center' });
-  doc.moveDown(0.5);
-  doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor(PDF_BLUE).lineWidth(2).stroke();
-  doc.moveDown(1);
-
-  doc.fontSize(14).font('Helvetica-Bold').fillColor(PDF_NAVY).text('SERVICE REPORT');
-  doc.moveDown(0.5);
-
-  // Customer info
-  doc.fontSize(10).font('Helvetica-Bold').fillColor(PDF_BODY).text('Customer:');
-  doc.font('Helvetica').text(`${service.first_name} ${service.last_name}`);
-  doc.text(formatAddress({ line1: service.address_line1, city: service.city, state: service.state, zip: service.zip }));
-  doc.moveDown(0.5);
-
-  doc.font('Helvetica-Bold').text('Service Details:');
-  doc.font('Helvetica');
-  doc.text(`Date: ${new Date(typeof service.service_date === 'string' ? service.service_date + 'T12:00:00' : service.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`);
-  doc.text(`Type: ${service.service_type}`);
-  doc.text(`Technician: ${service.technician_name || 'Waves Team'}`);
-  doc.moveDown(1);
-
-  // Weather conditions
-  if (weather) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('CONDITIONS AT TIME OF SERVICE');
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY);
-    doc.text(`Air Temp: ${weather.temp || '—'}°F  Humidity: ${weather.humidity || '—'}%  Wind: ${weather.wind || '—'}  Cloud Cover: ${weather.cloudCover || '—'}%`);
-    if (service.soil_temp) doc.text(`Soil Temp: ${service.soil_temp}°F  Soil pH: ${service.soil_ph || '—'}  Thatch: ${service.thatch_measurement || '—'}"  Moisture: ${service.soil_moisture || '—'}`);
-    doc.moveDown(1);
-  }
-
   // Tech notes — raw technician_notes is internal (owner ruling 2026-07-16);
   // print only the reviewed parse, through the one rule every customer
   // render uses (context-aggregator customerSafeVisitNotes), or nothing.
   const reviewedNotes = customerSafeVisitNotes(service);
-  if (reviewedNotes) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('TECHNICIAN NOTES');
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(reviewedNotes, { width: 512, lineGap: 3 });
-    doc.moveDown(1);
-  }
-
-  // Products
-  if (products.length) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('PRODUCTS APPLIED');
-    doc.moveDown(0.3);
-    const tTop = doc.y;
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(PDF_MUTED);
-    doc.text('Product', 50, tTop); doc.text('Active Ingredient', 220, tTop);
-    doc.text('MOA Group', 370, tTop); doc.text('Category', 470, tTop);
-    doc.moveTo(50, tTop + 14).lineTo(562, tTop + 14).strokeColor(PDF_RULE).lineWidth(0.5).stroke();
-    let rY = tTop + 20;
-    doc.font('Helvetica').fillColor(PDF_BODY);
-    products.forEach(p => {
-      if (rY > 700) { doc.addPage(); rY = 50; }
-      doc.fontSize(9).text(p.product_name || '', 50, rY, { width: 165 });
-      doc.text(p.active_ingredient || '—', 220, rY, { width: 145 });
-      doc.text(p.moa_group || '—', 370, rY, { width: 95 });
-      doc.text(p.product_category || '—', 470, rY, { width: 90 });
-      rY += 16;
-    });
-    doc.y = rY;
-    doc.moveDown(1);
-  }
-
-  // Dry times
-  if (dryTimes) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('ESTIMATED DRY TIMES');
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY);
-    if (dryTimes.lawn) doc.text(`• Lawn treatment: ${dryTimes.lawn}`);
-    if (dryTimes.foundation) doc.text(`• Foundation perimeter: ${dryTimes.foundation}`);
-    if (dryTimes.interior) doc.text(`• Interior application: ${dryTimes.interior}`);
-    if (dryTimes.rainAdvisory) doc.text(`Rain advisory: ${dryTimes.rainAdvisory}`);
-    doc.moveDown(1);
-  }
-
-  // Irrigation
-  if (irrigation) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('IRRIGATION RECOMMENDATIONS');
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY);
-    if (irrigation.recommendation) doc.text(irrigation.recommendation, { width: 512, lineGap: 3 });
-    if (irrigation.instructions?.length) {
-      doc.moveDown(0.5);
-      irrigation.instructions.forEach(inst => doc.text(`${inst.allowed ? '✓' : '✗'} ${inst.text}`));
-    }
-    doc.moveDown(1);
-  }
-
-  // Footer
-  doc.moveDown(2);
-  doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor(PDF_RULE).lineWidth(0.5).stroke();
-  doc.moveDown(0.5);
-  doc.fontSize(8).font('Helvetica').fillColor(PDF_MUTED);
-  doc.text(`This report is provided for your records. For questions contact Waves Pest Control at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, { align: 'center' });
-  // Owner ask 2026-09-28: every report, legacy ones included, links to the
-  // public Products & Safety page. The URL prints in full for paper copies.
-  doc.text(`Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`, { align: 'center', link: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol` });
-  doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`, { align: 'center' });
-
-  doc.end();
+  renderLegacyServiceReportPdf({
+    service,
+    products,
+    weather,
+    dryTimes,
+    irrigation,
+    reviewedNotes,
+    fileName: reportPdfFileName(service, { prefix: 'Waves-Report' }),
+  }, res);
 }
 
 // Helper: generate a report token for a service record

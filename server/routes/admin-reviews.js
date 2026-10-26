@@ -137,7 +137,17 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
         : null;
     const at = plan ? plan.at : new Date(Date.now() + ReviewService.LEGACY_REVIEW_DELAY_MINUTES * 60000);
     const serviceReportV1Delivery = await serviceRecordsHaveReportTemplateColumn();
+    // GATE_REVIEW_FIRST_ASK_LOCK: with a serviceId, say whether this visit's customer was never
+    // asked for a review (the panel then shows "First review ask", locked on). Gate off, or no
+    // visit named: the key is absent and the answer is byte for byte as before.
+    let firstReviewAsk;
+    if (require('../config/feature-gates').reviewFirstAskLockLive() && typeof req.query.serviceId === 'string' && req.query.serviceId) {
+      // A re-service visit stays off, as the completion's own rule does.
+      const visit = await ReviewService.firstAskLockVisit(req.query.serviceId);
+      firstReviewAsk = Boolean(visit) && await ReviewService.customerNeverAskedForReview(visit.customer_id);
+    }
     res.json({
+      ...(firstReviewAsk === undefined ? {} : { firstReviewAsk }),
       at: at.toISOString(),
       // Names the rule behind `at`; the panel compares buckets, not instants
       // (a relative answer moves with every request) — codex #4140 r4 P1.

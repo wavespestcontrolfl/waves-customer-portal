@@ -914,6 +914,13 @@ const LEAD_FILTER_KEYS = {
   end_date: "end_date",
   builder_warranty: "builder_warranty",
 };
+const LEAD_VIEWS = [
+  { value: "table", label: "List" },
+  { value: "board", label: "Board" },
+];
+const BUILDER_WARRANTY_FILTER_LABELS = {
+  expiring: "Builder warranty expiring",
+};
 function leadFiltersFromParams(params) {
   const drill = readSourceDrillParams(params);
   const status = params.get("leadStatus");
@@ -943,7 +950,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const feedbackEnabled = searchParams.get("feedback") === "1";
   const feedbackEnabledRef = useRef(feedbackEnabled);
   feedbackEnabledRef.current = feedbackEnabled;
-  const isMobile = useIsMobile();
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
   const compactQueue = useIsMobile(1280);
   const [tab, setTab] = useState("pipeline");
@@ -1601,9 +1607,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // PIPELINE TAB
   // ═════════════════════════════════════════════════════════════════════════
   const renderPipeline = () => {
-    const draggingLead = draggingLeadId
-      ? leads.find((lead) => lead.id === draggingLeadId)
-      : null;
+    const draggingLead = leads.find((lead) => lead.id === draggingLeadId);
     const handleBoardDrop = (event, stage) => {
       event.preventDefault();
       const droppedId = event.dataTransfer.getData("text/plain");
@@ -1611,6 +1615,38 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage, lead.status, lead.updated_at);
       setDraggingLeadId(null);
     };
+    const viewSwitcher = (
+      <div
+        role="group"
+        aria-label="Lead view"
+        className="hidden gap-[4px] md:flex"
+      >
+        {LEAD_VIEWS.map((view) => (
+          <Button
+            key={view.value}
+            onClick={() => setPipelineView(view.value)}
+            aria-pressed={pipelineView === view.value}
+            variant={pipelineView === view.value ? "primary" : "secondary"}
+          >
+            {view.label}
+          </Button>
+        ))}
+      </div>
+    );
+    const hasActiveFilters = [
+      filters.status !== "open",
+      filters.source_name,
+      filters.builder_warranty,
+      filters.sort !== "first_contact_at",
+    ].some(Boolean);
+    const pipelineResultText = {
+      loading: "Loading leads…",
+      error: "Lead results unavailable",
+      success:
+        leadsTotal === 0
+          ? "No matching leads"
+          : `${(filters.page - 1) * 50 + 1}–${Math.min(filters.page * 50, leadsTotal)} of ${leadsTotal} matching leads`,
+    }[pipelineLoadState];
     return (
       <>
         <div className="mb-[16px]">
@@ -1644,40 +1680,19 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               className="inline-flex gap-[6px] items-center"
             >
               <SlidersHorizontal size={18} aria-hidden /> Filters
-              {(filters.status !== "open" ||
-                filters.source_name ||
-                filters.builder_warranty ||
-                filters.sort !== "first_contact_at") && (
+              {hasActiveFilters && (
                 <span
                   aria-label="Active filters"
                   className="h-[6px] w-[6px] rounded-sm bg-white"
                 />
               )}
             </Button>
-            {!isMobile && (
-              <div
-                role="group"
-                aria-label="Lead view"
-                className="flex gap-[4px]"
-              >
-                {["table", "board"].map((view) => (
-                  <Button
-                    key={view}
-                    onClick={() => setPipelineView(view)}
-                    aria-pressed={pipelineView === view}
-                    variant={pipelineView === view ? "primary" : "secondary"}
-                  >
-                    {view === "table" ? "List" : "Board"}
-                  </Button>
-                ))}
-              </div>
-            )}
+            {viewSwitcher}
           </div>
-          {(filtersOpen || !isMobile) && (
-            <div
-              id="lead-queue-filters"
-              className="flex flex-wrap items-end gap-[12px] mt-[12px]"
-            >
+          <div
+            id="lead-queue-filters"
+            className={`flex flex-wrap items-end gap-[12px] mt-[12px] ${filtersOpen ? "" : "hidden md:flex"}`}
+          >
               <LeadField
                 label="Stage"
                 value={filters.status || "all"}
@@ -1736,29 +1751,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   },
                 ]}
               />
-              {isMobile && (
+              <div className="md:hidden">
                 <LeadField
                   label="View"
                   value={pipelineView}
                   onChange={setPipelineView}
-                  options={[
-                    {
-                      value: "table",
-                      label: "List",
-                    },
-                    {
-                      value: "board",
-                      label: "Board",
-                    },
-                  ]}
+                  options={LEAD_VIEWS}
                 />
-              )}
+              </div>
               {(filters.source_name || filters.builder_warranty) && (
                 <p className="text-ui-body">
                   {[
                     filters.source_name,
                     sourcePeriodLabel,
-                    filters.builder_warranty && "Builder warranty expiring",
+                    BUILDER_WARRANTY_FILTER_LABELS[filters.builder_warranty],
                   ]
                     .filter(Boolean)
                     .join(" · ")}
@@ -1779,20 +1785,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               >
                 Reset filters
               </Button>
-            </div>
-          )}
+          </div>
           <div
             role="status"
             aria-live="polite"
             className="mt-[12px] text-ink-secondary text-ui-body"
           >
-            {pipelineLoadState === "loading"
-              ? "Loading leads…"
-              : pipelineLoadState === "error"
-                ? "Lead results unavailable"
-                : leadsTotal === 0
-                  ? "No matching leads"
-                  : `${(filters.page - 1) * 50 + 1}–${Math.min(filters.page * 50, leadsTotal)} of ${leadsTotal} matching leads`}
+            {pipelineResultText}
             {pipelineView === "board" ? " · column counts show this page" : ""}
           </div>
         </div>
@@ -1805,33 +1804,29 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             Loading leads…
           </Card>
         )}
-        {pipelineLoadState === "success" && pipelineView === "table" && (
+        {pipelineLoadState === "success" && ({
+          table: (
           <>
             {/* Leads Table */}
             <Card className="p-[0px]">
               {" "}
               <Table className="lead-queue-table table-fixed" layout="records">
-                {!compactQueue && (
-                  <colgroup>
+                  <colgroup className="hidden xl:table-column-group">
                     {[26, 13, 19, 8, 18, 10, 6].map((width, index) => (
                       <col key={index} style={{ width: `${width}%` }} />
                     ))}
                   </colgroup>
-                )}
-                <THead className={compactQueue ? "hidden" : ""}>
+                <THead className="hidden xl:table-header-group">
                   <TR>
-                    {(compactQueue
-                      ? ["Name / Phone", "Status"]
-                      : [
-                          "Name / Phone",
-                          "Source",
-                          "Service",
-                          "Urgency",
-                          "Status",
-                          "Response",
-                          "Actions",
-                        ]
-                    ).map((h) => (
+                    {[
+                      "Name / Phone",
+                      "Source",
+                      "Service",
+                      "Urgency",
+                      "Status",
+                      "Response",
+                      "Actions",
+                    ].map((h) => (
                       <TH key={h} className="text-left text-ink-secondary">
                         {h}
                       </TH>
@@ -3183,9 +3178,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               </Table>{" "}
             </Card>
           </>
-        )}
-
-        {pipelineLoadState === "success" && pipelineView === "board" && (
+          ),
+          board: (
           <div
             role="region"
             aria-label="Lead board"
@@ -3331,7 +3325,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               );
             })}
           </div>
-        )}
+          ),
+        }[pipelineView])}
         {/* Pagination */}
         {pipelineLoadState === "success" && leadsTotal > 50 && (
           <div className="flex justify-center gap-[8px] mt-[16px]">

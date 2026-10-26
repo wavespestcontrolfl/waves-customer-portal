@@ -9,19 +9,25 @@ const path = require('path');
 const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
 
 describe('legacy token report PDF footer (reports-public.js)', () => {
-  const src = read('../routes/reports-public.js');
-  const fn = src.slice(src.indexOf('function generateReportPDF('));
+  const routeSrc = read('../routes/reports-public.js');
+  const rendererSrc = read('../services/pdf/legacy-service-report-pdf.js');
+  const fn = routeSrc.slice(routeSrc.indexOf('function generateReportPDF('));
 
   it('prints the Products & Safety URL from the shared constant', () => {
-    expect(fn).toMatch(/Every product we use and our safety protocol: \$\{WAVES_PRODUCTS_SAFETY_URL\}/);
+    expect(rendererSrc).toMatch(/Every product we use and our safety protocol: \$\{WAVES_PRODUCTS_SAFETY_URL\}/);
   });
 
   it('adds a link annotation to the safety protocol anchor', () => {
-    expect(fn).toMatch(/link: `\$\{WAVES_PRODUCTS_SAFETY_URL\}#safety-protocol`/);
+    expect(rendererSrc).toMatch(/link: `\$\{WAVES_PRODUCTS_SAFETY_URL\}#safety-protocol`/);
   });
 
-  it('imports the constant from the business constants module', () => {
-    expect(src).toMatch(/WAVES_PRODUCTS_SAFETY_URL,\n\} = require\('\.\.\/constants\/business'\);/);
+  it('keeps the reviewed-note privacy gate in the route before rendering', () => {
+    expect(fn).toMatch(/const reviewedNotes = customerSafeVisitNotes\(service\);/);
+    expect(fn).toMatch(/renderLegacyServiceReportPdf\(\{[\s\S]*reviewedNotes,/);
+  });
+
+  it('imports the constant in the focused renderer from the business constants module', () => {
+    expect(rendererSrc).toMatch(/WAVES_PRODUCTS_SAFETY_URL,[\s\S]*require\('\.\.\/\.\.\/constants\/business'\);/);
   });
 });
 

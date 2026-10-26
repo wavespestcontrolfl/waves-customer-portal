@@ -244,6 +244,9 @@ async function alertCarriedReceiptEmail(job, reason) {
         ? `Invoice ${job.invoice_id}: its receipt link was sent only in the visit summary text, and the receipt email did not go (${reason}). Check that the customer has the receipt, or resend it.`
         : `Invoice ${job.invoice_id}: the visit summary text that was to carry its receipt link has not been accepted (deferred or not sent), and the receipt email did not go (${reason}). Send the customer their receipt.`,
       dedupeKey: `summary-carried-receipt-email:${job.invoice_id}`,
+      // The admin bell policy (on in production) writes no row for an 'alert' that does not ask to
+      // ring. This one rings unless the owner silences the category.
+      bellDefault: true,
       metadata: { invoice_id: job.invoice_id },
     });
     // The summary text may have been accepted between the read above and the insert: its
