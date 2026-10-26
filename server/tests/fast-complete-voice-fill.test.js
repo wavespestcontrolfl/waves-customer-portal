@@ -499,7 +499,7 @@ describe('the selected product must be named in its heard words', () => {
   });
 
   test('after the catalog row became Atticus Antapex WSG (2026-10-26), a tech who still says "Alpine WSG" or "Antapex" lands on it', () => {
-    // The old name is a product alias of the row (migration 20261026180000), so the spoken word keeps resolving.
+    // The old name is a product alias of the row (migration 20261026190000), so the spoken word keeps resolving.
     const renamed = {
       ...ctx,
       products: [

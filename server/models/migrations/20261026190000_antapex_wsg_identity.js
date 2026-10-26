@@ -29,7 +29,7 @@
 // (see addOldNameAlias) so exact-name lookups of "Alpine WSG" (and what a tech says) still find
 // the row. service_products (the past visit lines, which keep the name and EPA number recorded
 // on the day), vendor_pricing, existing aliases, stock and movements are NOT touched; the
-// added alias also stays on rollback.
+// added alias also stays; down() is a no-op, see below.
 
 // Production id of the row: 999bb709-949e-4d52-9e3e-a225643d1331. Matched by name + EPA number
 // instead, so a dev or preview database seeded with a different id follows the same rule.
@@ -51,7 +51,7 @@ const OLD_LABEL_SOURCE_NOTE = 'EPA label registration 499-561 lists Alpine WSG w
   + " | NOTE: EPA-stamped label (accepted 08/12/2014) for product 'TC-315' with Alpine WSG as accepted alternate brand name;"
   + ' Dinotefuran 40.0% confirmed. LABEL RATES ARE IN GRAMS PER GAL';
 
-// The values the row holds before this migration, written back by down().
+// The values the row held before this migration (production, read 2026-10-26). Kept for reference and checked by the test; down() does not write them back.
 const OLD = Object.freeze({
   name: OLD_NAME,
   epa_reg_number: OLD_EPA,
@@ -119,31 +119,25 @@ exports.up = async function up(knex) {
     });
 
   if (!updated) {
-    console.log('[20261026180000] Alpine WSG row not changed: it no longer has the name "Alpine WSG" with EPA 499-561 (already corrected, or edited by hand). No-op.');
+    console.log('[20261026190000] Alpine WSG row not changed: it no longer has the name "Alpine WSG" with EPA 499-561 (already corrected, or edited by hand). No-op.');
     return;
   }
 
   const renamed = await renameDefaultProduct(knex, OLD_NAME, NEW_NAME);
   const row = await knex('products_catalog').where({ name: NEW_NAME, epa_reg_number: NEW_EPA }).first('id');
   const aliased = await addOldNameAlias(knex, row && row.id);
-  console.log(`[20261026180000] Alpine WSG is now Atticus Antapex WSG (EPA 91234-401); ${renamed} service library row(s) renamed in default_products; old-name alias ${aliased ? 'added' : 'not added (one already exists)'}.`);
+  console.log(`[20261026190000] Alpine WSG is now Atticus Antapex WSG (EPA 91234-401); ${renamed} service library row(s) renamed in default_products; old-name alias ${aliased ? 'added' : 'not added (one already exists)'}.`);
 };
 
-// Restores every column up() changed, only while the row still holds the new identity.
-// The "Alpine WSG" alias stays: it may predate this migration, and an alias for the old
-// name on a row named "Alpine WSG" is harmless after a rollback.
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('products_catalog'))) return;
-
-  const reverted = await knex('products_catalog')
-    .where({ name: NEW_NAME, epa_reg_number: NEW_EPA })
-    .update({ ...OLD, updated_at: knex.fn.now() });
-
-  if (!reverted) {
-    console.log('[20261026180000] down: the Alpine WSG row no longer holds the Antapex identity. No-op.');
-    return;
-  }
-  await renameDefaultProduct(knex, NEW_NAME, OLD_NAME);
+// Deliberately a no-op. This is a data correction, not a schema change: down() cannot tell the
+// values up() wrote from later administrator edits (a label link or verification note changed
+// through the inventory API keeps the same name and EPA number), and it cannot tell a row up()
+// renamed from one an administrator had already corrected to the Antapex identity before this
+// ran (then up() did nothing). Restoring the hard-coded Alpine values would erase
+// administrator-owned data this migration never wrote. Going back to the Alpine name would be a
+// new forward migration. The "Alpine WSG" alias and the renamed default_products entries stay.
+exports.down = async function down() {
+  console.log('[20261026190000] down: no-op. The Antapex identity is a data correction; rolling back would overwrite administrator edits. Rename back with a new forward migration if ever needed.');
 };
 
 exports.OLD = OLD;

@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const migration = require('../models/migrations/20261026180000_antapex_wsg_identity.js');
+const migration = require('../models/migrations/20261026190000_antapex_wsg_identity.js');
 
 const MIGRATIONS = path.join(__dirname, '../models/migrations');
 
@@ -35,12 +35,12 @@ function fakeKnex({ product = true, aliases = [] } = {}) {
   return { knex, calls, db };
 }
 
-describe('20261026180000 Atticus Antapex WSG identity', () => {
+describe('20261026190000 Atticus Antapex WSG identity', () => {
   let log;
   beforeEach(() => { log = jest.spyOn(console, 'log').mockImplementation(() => {}); });
   afterEach(() => { log.mockRestore(); });
 
-  test('the old values it restores are what the seeding migrations wrote', () => {
+  test('the old values it documents are what the seeding migrations wrote', () => {
     const batch1 = fs.readFileSync(path.join(MIGRATIONS, '20260528000002_inventory_product_data_completion_batch1.js'), 'utf8');
     const backfill = fs.readFileSync(path.join(MIGRATIONS, '20260712100000_catalog_label_rate_backfill.js'), 'utf8');
     const enrich = fs.readFileSync(path.join(MIGRATIONS, '20260717000010_enrich_products_catalog_public_page.js'), 'utf8');
@@ -118,51 +118,42 @@ describe('20261026180000 Atticus Antapex WSG identity', () => {
     }
   });
 
-  test('down restores every changed column, only while the row holds the new identity', async () => {
+  test('down is a documented no-op: it changes no row, alias or default_products entry', async () => {
     const { knex, calls, db } = fakeKnex();
-    Object.assign(db.products_catalog[0], { name: 'Atticus Antapex WSG', epa_reg_number: '91234-401' });
+    Object.assign(db.products_catalog[0], { name: 'Atticus Antapex WSG', epa_reg_number: '91234-401', label_url: 'https://example.test/admin-edited-label.pdf' });
+    const before = JSON.stringify(db);
     await migration.down(knex);
-    const catalogUpdate = calls.update.find((u) => u.table === 'products_catalog');
-    expect(catalogUpdate.values).toMatchObject({
-      name: 'Alpine WSG',
-      epa_reg_number: '499-561',
-      label_url: 'https://www.domyown.com/msds/Alpine_WSG_Label_2020.pdf',
-      sds_url: 'https://www.domyown.com/msds/Alpine_WSG_SDS_2025.pdf',
-      label_verified_at: '2026-05-28T00:00:00Z',
-      label_verified_by: 'inventory-data-completion-batch-1',
-      label_source_note: migration.OLD.label_source_note,
-    });
+    expect(JSON.stringify(db)).toBe(before);
+    expect(calls.tables).toEqual([]);
+    expect(calls.update).toEqual([]);
+    expect(calls.insert).toEqual([]);
+    expect(calls.del).toEqual([]);
+    expect(calls.raw).toEqual([]);
+  });
+
+  test('down leaves administrator edits alone, with or without the alias and whatever the row holds', async () => {
+    for (const row of [
+      { name: 'Alpine WSG', epa_reg_number: '499-561' },
+      { name: 'Atticus Antapex WSG', epa_reg_number: '91234-401', label_verified_by: 'admin-edit' },
+    ]) {
+      const { knex, calls, db } = fakeKnex({ aliases: [{ product_id: 'p-1', alias_name: 'Alpine WSG' }] });
+      Object.assign(db.products_catalog[0], row);
+      await migration.down(knex);
+      expect(db.products_catalog[0]).toMatchObject(row);
+      expect(db.product_aliases).toHaveLength(1);
+      expect(calls.update).toEqual([]);
+      expect(calls.raw).toEqual([]);
+    }
+  });
+
+  test('the old values it documents are all columns up() writes, plus label_verified_at', () => {
     expect(Object.keys(migration.OLD).sort()).toEqual(
       [...Object.keys(migration.NEW), 'label_verified_at'].sort(),
     );
-    expect(calls.raw[0].bindings).toEqual(['Atticus Antapex WSG', 'Alpine WSG', 'Atticus Antapex WSG']);
-  });
-
-  test('down leaves the alias in place (it may predate the migration, and is harmless on a row named Alpine WSG)', async () => {
-    const { knex, calls, db } = fakeKnex({
-      aliases: [
-        { product_id: 'p-1', alias_name: 'Alpine WSG' },
-        { product_id: 'p-1', alias_name: 'ANTAPEX WSG BROAD SPECTURM WATER DISPERSIBLE GRANULE (WDG/WG) INSECTICIDE 500 GM. BOTTLE' },
-      ],
-    });
-    Object.assign(db.products_catalog[0], { name: 'Atticus Antapex WSG', epa_reg_number: '91234-401' });
-    await migration.down(knex);
-    expect(calls.del).toEqual([]);
-    expect(db.product_aliases).toHaveLength(2);
-    expect(db.products_catalog[0].name).toBe('Alpine WSG');
-  });
-
-  test('down is a no-op (rows and aliases) when the row no longer holds the new identity', async () => {
-    const { knex, calls, db } = fakeKnex({ aliases: [{ product_id: 'p-1', alias_name: 'Alpine WSG' }] });
-    await migration.down(knex);
-    expect(calls.del).toEqual([]);
-    expect(calls.raw).toEqual([]);
-    expect(db.products_catalog[0]).toMatchObject({ id: 'p-1', name: 'Alpine WSG', epa_reg_number: '499-561' });
-    expect(db.product_aliases).toHaveLength(1);
   });
 
   test('the SQL carries no literal ? (a raw ? is a knex binding) and never touches past visit lines', async () => {
-    const source = fs.readFileSync(path.join(MIGRATIONS, '20261026180000_antapex_wsg_identity.js'), 'utf8');
+    const source = fs.readFileSync(path.join(MIGRATIONS, '20261026190000_antapex_wsg_identity.js'), 'utf8');
     for (const forbidden of ['service_products', 'vendor_pricing', 'inventory']) {
       expect(source).not.toMatch(new RegExp(`(?:knex\\(|FROM|UPDATE|INTO)\\s*['"\`]?${forbidden}`, 'i'));
     }
