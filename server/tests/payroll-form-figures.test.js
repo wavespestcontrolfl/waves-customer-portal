@@ -187,6 +187,23 @@ describe('Florida RT-6', () => {
     expect(line(out.rt6, '5').note).toMatch(/The paychecks charged \$8\.10; the difference is per-paycheck rounding\./);
   });
 
+  test('the rate is never rebuilt from a rounded tax (pre-push audit P1): three $25.25 checks at 2.7% owe $2.05', () => {
+    // Each check stores $0.68; 68 / 2525 would read back as 2.69%.
+    const out = build(['2026-10-05', '2026-10-12', '2026-10-19'].map((week, i) => check(week, `2026-10-${16 + 7 * i}`, {
+      tech: 1, gross_cents: 2525, ytd_gross_before_cents: 2525 * i, fl_reemployment_cents: 68,
+      calc_snapshot: JSON.stringify({ floridaReemploymentCents: 68, taxableWages: { floridaReemploymentCents: 2525 } }),
+    })));
+    expect(line(out.rt6, '5').rate).toBe('2.7%');
+    expect(line(out.rt6, '5').value).toBe(205);
+  });
+
+  test('a rate stored with the check is the rate used', () => {
+    const snapshot = { floridaReemploymentRateBp: 100, floridaReemploymentCents: 100, taxableWages: { floridaReemploymentCents: 10000 } };
+    const out = build([check('2026-10-05', '2026-10-16', { tech: 1, gross_cents: 10000, fl_reemployment_cents: 100, calc_snapshot: JSON.stringify(snapshot) })]);
+    expect(line(out.rt6, '5').rate).toBe('1.0%');
+    expect(line(out.rt6, '5').value).toBe(100);
+  });
+
   test('the rate is read back from the stored pay figures', () => {
     const snapshot = { floridaReemploymentCents: 270, taxableWages: { floridaReemploymentCents: 10000 } };
     const out = build([check('2026-10-05', '2026-10-16', { tech: 1, calc_snapshot: JSON.stringify(snapshot), fl_reemployment_cents: 270 })]);

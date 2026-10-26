@@ -155,6 +155,11 @@ describe('computePaycheck: pay and payroll taxes', () => {
   test('uses the Florida rate assigned to Waves when it is not the new-employer 2.7%', () => {
     expect(paycheck({ reemploymentRateBp: 100 }).floridaReemploymentCents).toBe(920);
   });
+
+  test('returns the Florida rate it used, so the RT-6 figures never rebuild it from a rounded tax', () => {
+    expect(paycheck().floridaReemploymentRateBp).toBe(270);
+    expect(paycheck({ reemploymentRateBp: 100 }).floridaReemploymentRateBp).toBe(100);
+  });
 });
 
 describe('computePaycheck: refuses to guess', () => {

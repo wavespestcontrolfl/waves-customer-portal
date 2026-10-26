@@ -236,6 +236,9 @@ function computePaycheck({
   return {
     taxYear,
     payPeriodsPerYear: periods,
+    // The Florida rate this paycheck used, kept so the RT-6 figures read the
+    // real rate (a rate rebuilt from a rounded tax can be off by a hundredth).
+    floridaReemploymentRateBp: reemploymentRateBp,
     ...toNumbers({
       hourlyRateCents: rateCents,
       regularPayCents: regularPay,

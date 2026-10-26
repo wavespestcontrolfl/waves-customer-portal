@@ -183,20 +183,24 @@ function form941(year, quarter, quarterChecks, depositsCents) {
   return { form: '941', year, quarter, rows, notes };
 }
 
+// The Florida rate each check used: the stored `floridaReemploymentRateBp`
+// (written since tax forms layer 3a), else the calculator's new-employer rate,
+// which is the only rate pay runs have ever passed (payroll-runs.js passes no
+// reemploymentRateBp). Never rebuilt from a rounded tax: dividing a rounded
+// cent amount by taxable wages can miss the rate (pre-push audit P1).
 function rt6Rate(quarterChecks) {
   const rates = new Map();
-  let widest = null;
   for (const c of quarterChecks) {
-    const snap = c.snapshot;
-    const tax = snap && num(snap.floridaReemploymentCents);
-    const cap = snap && snap.taxableWages && num(snap.taxableWages.floridaReemploymentCents);
-    if (!cap || !tax) continue;
-    const bp = Math.round((tax * 10000) / cap);
-    if (!widest || cap > widest.cap) widest = { cap, bp };
-    rates.set(bp, (rates.get(bp) || 0) + 1);
+    if (!c.capWages) continue;
+    const stored = c.snapshot && Number(c.snapshot.floridaReemploymentRateBp);
+    const bp = Number.isInteger(stored) && stored >= 0 ? stored : RATES.floridaNewEmployerBp;
+    rates.set(bp, (rates.get(bp) || 0) + c.capWages);
   }
   if (!rates.size) return { bp: null, distinct: [] };
-  return { bp: widest.bp, distinct: [...rates.keys()].sort((a, b) => a - b) };
+  // More than one rate in a quarter (a rate notice mid-quarter): the rate on
+  // the most taxable wages leads, and a note lists them all.
+  const [bp] = [...rates.entries()].sort((a, b) => b[1] - a[1])[0];
+  return { bp, distinct: [...rates.keys()].sort((a, b) => a - b) };
 }
 
 function formRt6(year, quarter, quarterChecks) {
@@ -207,10 +211,8 @@ function formRt6(year, quarter, quarterChecks) {
   const { bp, distinct } = rt6Rate(quarterChecks);
   // RT-6 line 5 is line 4 times the rate, rounded once on the quarter's taxable
   // wages (Florida RT-6 instructions), not the sum of per-paycheck rounding.
-  // Pay runs pass no rate, so every check uses the calculator's new-employer
-  // rate; if the stored figures do not show it, that rate is used and said so.
   const taxable = gross - excess;
-  const rateBp = bp != null ? bp : (taxable > 0 ? RATES.floridaNewEmployerBp : null);
+  const rateBp = bp;
   const tax = rateBp == null ? 0 : pct(taxable, rateBp);
   const rows = months.map((month, index) => count(`1 month ${index + 1}`, `Covered employees, ${MONTH_NAMES[month - 1]}`, employeesOnTwelfth(quarterChecks, year, month)));
   rows.push(
@@ -221,8 +223,7 @@ function formRt6(year, quarter, quarterChecks) {
       rate: rateBp == null ? null : pctText(rateBp),
       note: [
         rateBp == null ? `No taxable wages this quarter. New employers start at ${pctText(RATES.floridaNewEmployerBp)}.`
-          : bp != null ? 'The rate the paychecks used, read back from the stored pay figures.'
-            : `The stored pay figures do not show the rate; this uses the new-employer rate, ${pctText(RATES.floridaNewEmployerBp)}.`,
+          : 'The rate the paychecks used.',
         checkTax !== tax ? `The paychecks charged ${centsText(checkTax)}; the difference is per-paycheck rounding.` : null,
       ].filter(Boolean).join(' '),
     }),
