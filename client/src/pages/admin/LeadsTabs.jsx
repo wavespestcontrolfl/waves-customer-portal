@@ -651,6 +651,47 @@ function LeadsWorkspaceNav({ active, onChange }) {
     </nav>
   );
 }
+const SOURCE_READ_COPY = {
+  roi: {
+    loading: "Loading source ROI…",
+    refreshing: "Refreshing source ROI…",
+    error:
+      "Source ROI is unavailable. Lead counts and configured costs remain visible.",
+    refreshError:
+      "Source ROI could not be refreshed. The last loaded ROI remains visible.",
+  },
+  detail: {
+    loading: "Loading source details…",
+    refreshing: "Refreshing source details…",
+    error: "Source funnel and ROI details are unavailable.",
+    refreshError:
+      "Source details could not be refreshed. The last loaded totals remain visible.",
+  },
+};
+function SourceReadFeedback({
+  enabled,
+  active = true,
+  read,
+  hasData,
+  kind,
+  onRetry,
+}) {
+  if (!enabled || !active || (!read.loading && !read.error)) return null;
+  const failed = Boolean(read.error);
+  const copy = SOURCE_READ_COPY[kind];
+  const message = failed
+    ? copy[hasData ? "refreshError" : "error"]
+    : copy[hasData ? "refreshing" : "loading"];
+  return (
+    <ActionFeedback
+      error={failed}
+      onRetry={failed ? onRetry : undefined}
+      className="mb-4"
+    >
+      {message}
+    </ActionFeedback>
+  );
+}
 function LeadField({
   label,
   value,
@@ -936,6 +977,9 @@ function leadFiltersFromParams(params) {
 export function LeadsSection({ newLeadRequest = 0 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const feedbackEnabled = searchParams.get("feedback") === "1";
+  const feedbackEnabledRef = useRef(feedbackEnabled);
+  feedbackEnabledRef.current = feedbackEnabled;
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
   const compactQueue = useIsMobile(1280);
   const [tab, setTab] = useState("pipeline");
@@ -979,6 +1023,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // sources and is fetched only on the Sources tab, so a late-resolving response
   // can never overwrite the Analytics tab's active-only `bySource`.
   const [sourcesRoi, setSourcesRoi] = useState([]);
+  const [sourceRoiRead, setSourceRoiRead] = useState({
+    loading: false,
+    error: null,
+  });
+  const sourceRoiRequestRef = useRef(0);
   const [byChannel, setByChannel] = useState([]);
   const [responseBuckets, setResponseBuckets] = useState([]);
   const [lostReasons, setLostReasons] = useState([]);
@@ -1251,6 +1300,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // `bySource` via loadAnalytics, so this avoids double-running the expensive
   // calculateAllSourceROI on those tabs.
   const loadSourceROI = useCallback(async () => {
+    const requestId = ++sourceRoiRequestRef.current;
+    if (feedbackEnabledRef.current) {
+      setSourceRoiRead({ loading: true, error: null });
+    }
     try {
       // include_inactive: the Sources table lists inactive sources too and needs
       // their ROI. The Analytics tab (loadAnalytics) calls without it, so its
@@ -1258,9 +1311,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       const bs = await adminFetch(
         "/admin/leads/analytics/by-source?include_inactive=1",
       );
+      if (requestId !== sourceRoiRequestRef.current) return;
       setSourcesRoi(bs.sources || []);
     } catch (e) {
+      if (requestId !== sourceRoiRequestRef.current) return;
       console.error("loadSourceROI", e);
+      if (feedbackEnabledRef.current) {
+        setSourceRoiRead({ loading: false, error: e });
+      } else {
+        setSourceRoiRead({ loading: false, error: null });
+      }
+      return;
+    }
+    if (requestId === sourceRoiRequestRef.current) {
+      setSourceRoiRead({ loading: false, error: null });
     }
   }, []);
   const loadAnalytics = useCallback(async ({ silent = false } = {}) => {
@@ -3454,24 +3518,68 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // SOURCES TAB
   // ═════════════════════════════════════════════════════════════════════════
   const [expandedSource, setExpandedSource] = useState(null);
-  const [sourceROI, setSourceROI] = useState(null);
+  const expandedSourceRef = useRef(null);
+  const [sourceDetails, setSourceDetails] = useState({});
+  const [sourceDetailRead, setSourceDetailRead] = useState({
+    sourceId: null,
+    loading: false,
+    error: null,
+  });
+  const sourceDetailRequestRef = useRef(0);
+  const loadSourceDetail = async (sourceId) => {
+    const requestId = ++sourceDetailRequestRef.current;
+    if (feedbackEnabledRef.current) {
+      setSourceDetailRead({ sourceId, loading: true, error: null });
+    }
+    try {
+      const data = await adminFetch(`/admin/leads/sources/${sourceId}`);
+      if (
+        requestId !== sourceDetailRequestRef.current ||
+        expandedSourceRef.current !== sourceId
+      ) {
+        return;
+      }
+      setSourceDetails((current) => ({ ...current, [sourceId]: data }));
+      setSourceDetailRead({ sourceId, loading: false, error: null });
+    } catch (e) {
+      if (
+        requestId !== sourceDetailRequestRef.current ||
+        expandedSourceRef.current !== sourceId
+      ) {
+        return;
+      }
+      if (feedbackEnabledRef.current) {
+        console.error("loadSourceDetail", e);
+        setSourceDetailRead({ sourceId, loading: false, error: e });
+      } else {
+        setSourceDetails((current) => {
+          if (!Object.prototype.hasOwnProperty.call(current, sourceId))
+            return current;
+          const next = { ...current };
+          delete next[sourceId];
+          return next;
+        });
+        setSourceDetailRead({ sourceId, loading: false, error: null });
+      }
+    }
+  };
   const expandSource = async (source) => {
     if (expandedSource === source.id) {
+      sourceDetailRequestRef.current += 1;
+      expandedSourceRef.current = null;
       setExpandedSource(null);
       return;
     }
+    expandedSourceRef.current = source.id;
     setExpandedSource(source.id);
-    try {
-      const data = await adminFetch(`/admin/leads/sources/${source.id}`);
-      setSourceROI(data);
-    } catch (e) {
-      setSourceROI(null);
-    }
+    await loadSourceDetail(source.id);
   };
   const renderSources = () => {
     // Real revenue-based ROI per source from /analytics/by-source (same backend
     // as Channel Comparison / ROI Matrix / Phone Number ROI), keyed by id.
     const roiBySourceId = new Map(sourcesRoi.map((b) => [b.source?.id, b]));
+    const expandedDetail =
+      roiBySourceId.get(expandedSource) || sourceDetails[expandedSource];
     return (
       <>
         {" "}
@@ -3495,6 +3603,21 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             </Button>{" "}
           </div>{" "}
         </div>{" "}
+        <SourceReadFeedback
+          enabled={feedbackEnabled}
+          read={sourceRoiRead}
+          hasData={sourcesRoi.length > 0}
+          kind="roi"
+          onRetry={loadSourceROI}
+        />
+        <SourceReadFeedback
+          enabled={feedbackEnabled}
+          active={sourceDetailRead.sourceId === expandedSource}
+          read={sourceDetailRead}
+          hasData={Boolean(expandedDetail)}
+          kind="detail"
+          onRetry={() => loadSourceDetail(expandedSource)}
+        />
         <Card className="p-[0px] overflow-auto">
           {" "}
           <Table className="w-full min-w-[900px]">
@@ -3550,7 +3673,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 // Expanded-row totals come from the globally-attributed table row
                 // (r) so they agree with the row above; /sources/:id (sourceROI)
                 // has no winner map and would show un-attributed revenue.
-                const detail = r || sourceROI;
+                const detail = r || sourceDetails[src.id];
                 const isExp = expandedSource === src.id;
                 return (
                   <React.Fragment key={src.id}>
