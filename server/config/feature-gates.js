@@ -3913,6 +3913,17 @@ const gates = {
   // only.
   newApptRouteTimes: gateEnvValue('GATE_NEW_APPT_ROUTE_TIMES'),
 
+  // New Appointment stop order (owner 2026-10-26, "OK GO"): after a New
+  // Appointment save (POST /api/admin/schedule), the booked visit's technician
+  // day is numbered in the order the route check certifies (placeMovedVisit,
+  // like a staff move), so the board and the tech app list the visit in its
+  // place instead of last. Needs
+  // GATE_STAFF_ROUTE_INSERTION and GATE_ADMIN_ARRIVAL_WINDOWS. Never changes a
+  // time or sends a message. The create route reads it through gateEnvValue()
+  // at call time. Dark in every environment. Kill switch: unset. This entry is
+  // for logGateStatus only.
+  newApptStopOrder: gateEnvValue('GATE_NEW_APPT_STOP_ORDER'),
+
   // New Appointment address-first best times (owner 2026-10-24, replacing the
   // 2026-10-21 Dispatch "Find a time" drawer): office staff on a call with a
   // NEW caller open New Appointment, pick the address in its New customer
