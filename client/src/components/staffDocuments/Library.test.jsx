@@ -36,6 +36,7 @@ test('effective-date changes invalidate approval and ignore stale wording respon
   render(<DocumentReader {...props(draft())} />);
   const approve = screen.getByLabelText('I reviewed the wording, authority, owner, citations and next-review date.');
   const issue = screen.getByRole('button', { name: 'Issue version 1' });
+  expect(screen.getByText('Draft — no issued hash')).toBeInTheDocument();
   await act(async () => previews[0].resolve({ rendered: wording('Reviewed wording'), preview_hash: 'first' }));
   fireEvent.click(approve);
   expect(issue).toBeEnabled();
@@ -50,6 +51,25 @@ test('effective-date changes invalidate approval and ignore stale wording respon
   expect(screen.queryByText('Stale wording')).not.toBeInTheDocument();
   fireEvent.click(approve); fireEvent.click(issue);
   await waitFor(() => expect(request).toHaveBeenCalledWith('/doc/issue', { version_id: 'v1', effective_at: '2099-01-03T09:00', preview_hash: 'final' }));
+});
+
+test('the authored procedure uses Field presentation while staff controls remain outside it', () => {
+  const detail = draft();
+  detail.document.staff_kind = 'procedure'; detail.rendered.kind = 'procedure';
+  detail.version.content_hash = 'a'.repeat(64); detail.version.effective_at = '2020-01-01T12:00:00Z'; detail.current_version_id = 'v1';
+  const { container } = render(<DocumentReader {...props(detail)} />);
+  const authored = container.querySelector('.staff-document-reader-body');
+  const clauseNav = screen.getByRole('navigation', { name: 'Document clauses' });
+  expect(authored).toHaveTextContent('Waves Pest Control');
+  expect(authored).toHaveTextContent('Controlled staff document');
+  expect(authored).toHaveTextContent('procedure · v1 · Issued');
+  expect(authored).toHaveTextContent(`SHA-256: ${'a'.repeat(64)}`);
+  expect(authored).toContainElement(screen.getByRole('heading', { level: 1, name: 'QA policy' }));
+  expect(authored).toContainElement(screen.getByText('Current wording'));
+  expect(authored.querySelector('details#scope')).toHaveTextContent('1. Scope');
+  expect(clauseNav.closest('.staff-document-reader-body')).toBeNull();
+  expect(screen.getByLabelText('Version history').closest('.staff-document-reader-body')).toBeNull();
+  expect(screen.queryByAltText('Waves Pest Control')).not.toBeInTheDocument();
 });
 
 test('historical policies retain acknowledgment exports and cannot accept a new signature', () => {
