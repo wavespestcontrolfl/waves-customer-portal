@@ -706,7 +706,7 @@ describe('Customer360ProfileV2 profile state', () => {
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Comms' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Comms' }));
 
     const box = await screen.findByRole('checkbox', {
       name: /Also send appointment SMS to the account owner/i,
@@ -839,7 +839,7 @@ describe('Customer360ProfileV2 profile state', () => {
     vi.stubGlobal('fetch', techFetch);
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
-    fireEvent.click(screen.getByRole('button', { name: 'Property' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Property' }));
     await screen.findByText('Property Details');
     expect(screen.queryByTestId('customer-properties-panel')).not.toBeInTheDocument();
     expect(techFetch.mock.calls.some(([u]) => String(u).endsWith('/properties'))).toBe(false);
@@ -851,7 +851,7 @@ describe('Customer360ProfileV2 profile state', () => {
     vi.stubGlobal('fetch', adminFetch);
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
-    fireEvent.click(screen.getByRole('button', { name: 'Property' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Property' }));
     expect(await screen.findByTestId('customer-properties-panel')).toBeInTheDocument();
     await waitFor(() => expect(adminFetch.mock.calls.some(([u]) => String(u).endsWith('/properties'))).toBe(true));
   });
@@ -870,7 +870,7 @@ describe('Customer360ProfileV2 profile state', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
-    fireEvent.click(screen.getByRole('button', { name: 'Property' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Property' }));
     await screen.findByTestId('customer-properties-panel');
     const propertyFetches = () => fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/admin/customers/customer-a/properties')).length;
     await waitFor(() => expect(propertyFetches()).toBe(1));
@@ -1017,7 +1017,7 @@ describe('Customer360ProfileV2 profile state', () => {
   // guard (requestTabChange, via useCustomerProfileNavigation's
   // guardNavigateAway) sits in front of every control that would unmount
   // it — this test pins the tab-switch path.
-  it('guards a tab switch away from an open address-review draft', async () => {
+  it('keeps arrow-key tab navigation behind the address-review draft guard', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     vi.stubGlobal('fetch', unresolvedGeocodeFetchMock());
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
@@ -1027,15 +1027,23 @@ describe('Customer360ProfileV2 profile state', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Review location' }));
     await screen.findByLabelText('Evidence');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Billing' }));
+    const overview = screen.getByRole('tab', { name: 'Overview' });
+    const services = screen.getByRole('tab', { name: 'Services' });
+    overview.focus();
+    fireEvent.keyDown(overview, { key: 'ArrowRight' });
     expect(confirmSpy).toHaveBeenCalledWith('This will discard the unsaved address review draft. Continue?');
     // Declined: the switch never happened, the draft form is still there.
-    expect(screen.getByRole('button', { name: 'Billing' })).toHaveAttribute('aria-pressed', 'false');
+    expect(overview).toHaveAttribute('aria-selected', 'true');
+    expect(services).toHaveAttribute('aria-selected', 'false');
+    expect(services).toHaveFocus();
     expect(screen.getByLabelText('Evidence')).toBeInTheDocument();
 
     confirmSpy.mockReturnValue(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Billing' }));
-    expect(screen.getByRole('button', { name: 'Billing' })).toHaveAttribute('aria-pressed', 'true');
+    overview.focus();
+    fireEvent.keyDown(overview, { key: 'ArrowRight' });
+    expect(services).toHaveAttribute('aria-selected', 'true');
+    expect(services).toHaveFocus();
+    expect(screen.getByRole('tabpanel', { name: 'Services' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Evidence')).not.toBeInTheDocument();
     confirmSpy.mockRestore();
   });
