@@ -8,8 +8,8 @@ import { UiSurface } from './UiSurface';
 
 afterEach(cleanup);
 const controllerFor = (overrides = {}) => ({
-  available: true, views: [{ id: 'open', name: 'Open projects', state: {} }], error: null,
-  saveView: vi.fn(async () => true), applyView: vi.fn(() => ({})), removeView: vi.fn(async () => true),
+  available: true, catalogLoading: false, views: [{ id: 'open', name: 'Open projects', state: {} }], error: null,
+  refreshViews: vi.fn(async () => true), saveView: vi.fn(async () => true), applyView: vi.fn(async () => ({})), removeView: vi.fn(async () => true),
   ...overrides,
 });
 const example = (controller, onApply) => <UiSurface density="comfortable"><TableSavedViews label="Bids" controller={controller} onApply={onApply} /></UiSurface>;
@@ -19,6 +19,7 @@ it('saves a named view through a labeled form and returns keyboard focus', async
   render(example(controller));
   const trigger = screen.getByRole('button', { name: 'Bids saved views' });
   fireEvent.click(trigger);
+  expect(controller.refreshViews).toHaveBeenCalledTimes(1);
   expect(screen.getByRole('button', { name: 'Save current view' })).toBeDisabled();
   fireEvent.change(screen.getByRole('textbox', { name: 'View name' }), { target: { value: 'Upcoming projects' } });
   fireEvent.submit(screen.getByRole('textbox', { name: 'View name' }).closest('form'));
@@ -30,7 +31,7 @@ it('saves a named view through a labeled form and returns keyboard focus', async
 
 it('separates choosing, applying, and deleting a view and permits a caller URL update', async () => {
   const controller = controllerFor();
-  const apply = vi.fn(() => ({}));
+  const apply = vi.fn(async () => ({}));
   render(example(controller, apply));
   const trigger = screen.getByRole('button', { name: 'Bids saved views' });
   fireEvent.click(trigger);
@@ -47,6 +48,44 @@ it('separates choosing, applying, and deleting a view and permits a caller URL u
   expect(controller.removeView).toHaveBeenCalledWith('open');
   expect(screen.getByRole('dialog')).toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('View deleted.'));
+});
+
+it('shows catalog loading and waits for apply before allowing another action', async () => {
+  let finishApply;
+  const apply = vi.fn(() => new Promise((resolve) => { finishApply = resolve; }));
+  const controller = controllerFor({ catalogLoading: true });
+  const { rerender } = render(example(controller, apply));
+  fireEvent.click(screen.getByRole('button', { name: 'Bids saved views' }));
+  expect(screen.getByRole('status')).toHaveTextContent('Loading saved views…');
+  expect(screen.getByRole('button', { name: 'Save current view' })).toBeDisabled();
+
+  rerender(example({ ...controller, catalogLoading: false }, apply));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Bids saved view' }), { target: { value: 'open' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Use view' }));
+  expect(apply).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole('button', { name: 'Use view' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Delete view' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Done' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Use view' }));
+  expect(apply).toHaveBeenCalledTimes(1);
+
+  await act(async () => { finishApply({}); });
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(screen.getByRole('status')).toHaveTextContent('View “Open projects” applied.');
+});
+
+it('unlocks the dialog without claiming success when a custom apply rejects', async () => {
+  const apply = vi.fn(async () => { throw new Error('URL update failed'); });
+  render(example(controllerFor(), apply));
+  fireEvent.click(screen.getByRole('button', { name: 'Bids saved views' }));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Bids saved view' }), { target: { value: 'open' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Use view' }));
+
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled());
+  expect(screen.getByRole('dialog')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Use view' })).toBeEnabled();
+  expect(screen.getByRole('alert')).toHaveTextContent('The view could not be applied. Try again.');
+  expect(screen.queryByText('View “Open projects” applied.')).not.toBeInTheDocument();
 });
 
 it('keeps a failed save open, exposes its error, and closes on Escape without claiming success', async () => {
