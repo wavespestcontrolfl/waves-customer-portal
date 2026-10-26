@@ -11,7 +11,9 @@
 //   Draw modes   a tap adds a point. A tap on the last point finishes the line (the
 //                double-click / double-tap), a tap on the first point of a line of
 //                3+ points closes the loop. The Finish button does the same.
-//   Edit mode    a tap on a nozzle deletes it, a drag moves it, a tap on a line adds one.
+//   Edit nozzles a tap on a nozzle deletes it (the newest one when they overlap), a drag moves it,
+//                a tap anywhere else does nothing.
+//   Add nozzle   a tap on or near a line adds a nozzle there. It never deletes.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle } from '../ui';
 import {
@@ -43,6 +45,7 @@ const MODES = [
   { key: 'eave', label: 'Eave line' },
   { key: 'fence', label: 'Fence line' },
   { key: 'edit', label: 'Edit nozzles' },
+  { key: 'add', label: 'Add nozzle' },
 ];
 
 function geocodeInBrowser(address) {
@@ -77,6 +80,7 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
   // re-runs auto-placement and clears the overlay (applyGeometry), keeping one snapshot so
   // the notice's Undo can put the previous lines and edits back in a single step.
   const [edits, setEdits] = useState(NO_EDITS);
+  const [addMiss, setAddMiss] = useState(false); // last Add nozzle tap was off every line
   const [notice, setNotice] = useState(null); // { count, snapshot: { lines, draft, edits } }
   const frameRef = useRef(null);
   const gestureRef = useRef(null);
@@ -187,14 +191,24 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
   const moveNozzle = (n, p) => {
     const x = Math.max(0, Math.min(MAP_WIDTH, p.x));
     const y = Math.max(0, Math.min(MAP_HEIGHT, p.y));
-    editOverlay((prev) => (n.manual
-      ? { ...prev, added: prev.added.map((a) => (a.key === n.key ? { ...a, x, y } : a)) }
-      : { ...prev, moved: { ...prev.moved, [n.key]: { x, y } } }));
+    editOverlay((prev) => {
+      if (n.manual) {
+        const current = prev.added.find((a) => a.key === n.key);
+        return current ? { ...prev, added: [...prev.added.filter((a) => a.key !== n.key), { ...current, x, y }] } : prev;
+      }
+      // Re-insert the key so the most recently moved nozzle is last (it is the first one a tap selects).
+      const { [n.key]: _previous, ...others } = prev.moved;
+      return { ...prev, moved: { ...others, [n.key]: { x, y } } };
+    });
   };
 
   const addNozzleOnLine = (p, scale) => {
     const hit = nearestPointOnLines(allLines, p, LINE_HIT_CSS_PX * scale);
-    if (!hit) return;
+    if (!hit) {
+      setAddMiss(true);
+      return;
+    }
+    setAddMiss(false);
     editOverlay((prev) => ({
       ...prev,
       added: [...prev.added, {
@@ -247,8 +261,8 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
     }
     // A drag that started on empty photo is not a tap.
     if (Math.hypot(p.x - g.start.x, p.y - g.start.y) > DRAG_START_CSS_PX * p.scale) return;
-    if (mode === 'edit') addNozzleOnLine(p, p.scale);
-    else addDraftPoint(p, p.scale);
+    if (mode === 'add') addNozzleOnLine(p, p.scale);
+    else if (mode !== 'edit') addDraftPoint(p, p.scale);
   };
 
   const onPointerCancel = () => { gestureRef.current = null; };
@@ -256,6 +270,7 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
   // ── Toolbar actions ────────────────────────────────────────────────────────
   const chooseMode = (next) => {
     if (next !== mode) finishDraft();
+    setAddMiss(false);
     setMode(next);
   };
 
@@ -288,9 +303,10 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
       ? `The system includes at least ${minNozzles} nozzles. A lower count is billed at the included count.`
       : null;
 
-  const hint = mode === 'edit'
-    ? 'Tap a nozzle to delete it. Drag a nozzle to move it. Tap a line to add a nozzle.'
-    : `Tap the photo to drop points along the ${mode === 'fence' ? 'fence' : 'eave'}. Tap the last point again, or press Finish line, to end it. Tap the first point to close a loop.`;
+  const hint = {
+    edit: 'Tap a nozzle to delete it. Drag a nozzle to move it.',
+    add: 'Tap a drawn line to add a nozzle.',
+  }[mode] || `Tap the photo to drop points along the ${mode === 'fence' ? 'fence' : 'eave'}. Tap the last point again, or press Finish line, to end it. Tap the first point to close a loop.`;
 
   const strokeFor = (kind) => ({ dash: kind === 'fence' ? '18 12' : undefined });
 
@@ -341,6 +357,9 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
               </Button>
             </div>
             <p className="text-14 text-zinc-600 mb-3">{hint}</p>
+            {mode === 'add' && addMiss && (
+              <p role="status" className="text-14 text-amber-800 mb-3">Tap on a drawn line to add a nozzle</p>
+            )}
             <div
               ref={frameRef}
               data-testid="layout-map"
@@ -349,7 +368,7 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
               onPointerUp={onPointerUp}
               onPointerCancel={onPointerCancel}
               className="relative w-full overflow-hidden rounded-xs border-hairline border-zinc-300 bg-zinc-100 select-none"
-              style={{ aspectRatio: `${MAP_WIDTH} / ${MAP_HEIGHT}`, touchAction: 'none', cursor: mode === 'edit' ? 'pointer' : 'crosshair' }}
+              style={{ aspectRatio: `${MAP_WIDTH} / ${MAP_HEIGHT}`, touchAction: 'none', cursor: mode === 'edit' || mode === 'add' ? 'pointer' : 'crosshair' }}
             >
               <img
                 src={mapState.url}

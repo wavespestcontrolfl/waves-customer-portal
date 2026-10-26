@@ -175,17 +175,25 @@ describe('MistingLayoutDesigner', () => {
     tap(frame, 100, 100);
     expect(nozzleCount()).toBe(total - 1);
 
-    // add: a tap on the line midway between two neighbouring nozzles
+    // Edit nozzles: a tap that is not on a nozzle does nothing, even on a line
     const xs = screen.getAllByTestId('layout-nozzle').map((n) => Number(n.getAttribute('cx'))).sort((a, b) => a - b);
     const wanted = (xs[2] + xs[3]) / 2;
+    tap(frame, wanted / 2, 101);
+    expect(nozzleCount()).toBe(total - 1);
+
+    // add: Add nozzle, a tap on the line midway between two neighbouring nozzles
+    fireEvent.click(screen.getByRole('button', { name: 'Add nozzle' }));
     tap(frame, wanted / 2, 101);
     expect(nozzleCount()).toBe(total);
     const added = screen.getAllByTestId('layout-nozzle').find((n) => Math.abs(Number(n.getAttribute('cx')) - wanted) < 1);
     expect(added).toBeTruthy();
 
-    // a tap on empty photo, away from every line, does nothing
+    // a tap away from every line adds nothing and says where to tap
     tap(frame, 400, 400);
     expect(nozzleCount()).toBe(total);
+    expect(screen.getByText('Tap on a drawn line to add a nozzle')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+    expect(screen.queryByText('Tap on a drawn line to add a nozzle')).not.toBeInTheDocument();
 
     // drag the last corner (css 300, 100) to (320, 140)
     fireEvent.pointerDown(frame, { clientX: 300, clientY: 100, pointerId: 2, button: 0 });
@@ -215,13 +223,74 @@ describe('MistingLayoutDesigner', () => {
     const gap = xs()[3] - xs()[2];
     expect(gap / 4).toBeLessThan(8); // the nozzles really are crowded on screen
 
-    // midway between two nozzles: adds, never deletes
+    // Add nozzle: midway between two nozzles adds one
+    fireEvent.click(screen.getByRole('button', { name: 'Add nozzle' }));
     tap(frame, (xs()[2] + xs()[3]) / 2 / 4, 100);
     expect(nozzleCount()).toBe(total + 1);
 
-    // exactly on a nozzle: deletes it
-    tap(frame, xs()[5] / 4, 100);
+    // Edit nozzles: exactly on a nozzle deletes it
+    fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+    tap(frame, xs()[6] / 4, 100);
     expect(nozzleCount()).toBe(total);
+  });
+
+  describe('Edit nozzles and Add nozzle are separate tools', () => {
+    async function drawn() {
+      const utils = await open();
+      tap(utils.frame, 100, 100);
+      tap(utils.frame, 300, 100);
+      fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+      return { ...utils, total: nozzleCount() };
+    }
+    const xsNow = () => screen.getAllByTestId('layout-nozzle').map((n) => Number(n.getAttribute('cx'))).sort((a, b) => a - b);
+
+    it('selects overlapping nozzles one at a time: each Edit tap deletes one, the other stays', async () => {
+      const { frame, total } = await drawn();
+      fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+      const [, , third, fourth] = xsNow();
+      // drag the third nozzle exactly onto the fourth
+      fireEvent.pointerDown(frame, { clientX: third / 2, clientY: 100, pointerId: 3, button: 0 });
+      fireEvent.pointerMove(frame, { clientX: (third + fourth) / 4, clientY: 100, pointerId: 3 });
+      fireEvent.pointerMove(frame, { clientX: fourth / 2, clientY: 100, pointerId: 3 });
+      fireEvent.pointerUp(frame, { clientX: fourth / 2, clientY: 100, pointerId: 3, button: 0 });
+      expect(nozzleCount()).toBe(total);
+      expect(xsNow().filter((x) => Math.abs(x - fourth) < 0.5)).toHaveLength(2);
+
+      tap(frame, fourth / 2, 100);
+      expect(nozzleCount()).toBe(total - 1);
+      expect(xsNow().filter((x) => Math.abs(x - fourth) < 0.5)).toHaveLength(1);
+      tap(frame, fourth / 2, 100);
+      expect(nozzleCount()).toBe(total - 2);
+      expect(xsNow().filter((x) => Math.abs(x - fourth) < 0.5)).toHaveLength(0);
+      // nothing left there: a further Edit tap does nothing
+      tap(frame, fourth / 2, 100);
+      expect(nozzleCount()).toBe(total - 2);
+    });
+
+    it('Add nozzle on a nozzle adds next to it and never deletes', async () => {
+      const { frame, total } = await drawn();
+      fireEvent.click(screen.getByRole('button', { name: 'Add nozzle' }));
+      const [, , third] = xsNow();
+      tap(frame, third / 2, 100);
+      expect(nozzleCount()).toBe(total + 1);
+      tap(frame, third / 2, 100);
+      expect(nozzleCount()).toBe(total + 2);
+    });
+
+    it('Add nozzle ignores the photo away from every line and shows a hint; Edit tap off a nozzle does nothing', async () => {
+      const { frame, total } = await drawn();
+      fireEvent.click(screen.getByRole('button', { name: 'Add nozzle' }));
+      expect(screen.queryByText('Tap on a drawn line to add a nozzle')).not.toBeInTheDocument();
+      tap(frame, 300, 400);
+      expect(nozzleCount()).toBe(total);
+      expect(screen.getByRole('status')).toHaveTextContent('Tap on a drawn line to add a nozzle');
+      tap(frame, 100, 101); // on the line: adds, and the hint goes
+      expect(nozzleCount()).toBe(total + 1);
+      expect(screen.queryByText('Tap on a drawn line to add a nozzle')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+      tap(frame, 300, 400);
+      expect(nozzleCount()).toBe(total + 1);
+    });
   });
 
   describe('manual edits belong to the current lines', () => {
@@ -238,6 +307,7 @@ describe('MistingLayoutDesigner', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
       tap(frame, 100, 100); // delete
       const xs = screen.getAllByTestId('layout-nozzle').map((n) => Number(n.getAttribute('cx'))).sort((a, b) => a - b);
+      fireEvent.click(screen.getByRole('button', { name: 'Add nozzle' }));
       tap(frame, (xs[2] + xs[3]) / 2 / 2, 100); // add
       expect(nozzleCount()).toBe(base); // -1 +1
       return { ...utils, base, afterEdits: screen.getAllByTestId('layout-nozzle').map((n) => n.getAttribute('cx')).sort() };

@@ -257,6 +257,15 @@ describe('polylineFeet', () => {
 });
 
 describe('applyNozzleEdits', () => {
+  it('lists the most recently moved and added nozzles last, so a tap on overlapping ones takes them first', () => {
+    const base = [{ key: 'a', x: 0, y: 0 }, { key: 'b', x: 1, y: 0 }, { key: 'c', x: 2, y: 0 }];
+    const out = applyNozzleEdits(base, {
+      moved: { a: { x: 9, y: 9 }, c: { x: 8, y: 8 } },
+      added: [{ key: 'm1', x: 5, y: 5 }],
+    });
+    expect(out.map((n) => n.key)).toEqual(['b', 'a', 'c', 'm1']);
+  });
+
   const base = placeNozzles([line('eave', [[0, 0], [30, 0]], 'a')], opts).nozzles;
 
   it('removes, moves and adds nozzles', () => {
@@ -316,13 +325,22 @@ describe('nozzle hit radius', () => {
     expect(cssPx(19, 2)).toBeGreaterThanOrEqual(4);
   });
 
-  it('never treats the midpoint between two nozzles as a hit, but does hit a nozzle', () => {
+  it('selects the nearest nozzle within the radius, and none beyond it', () => {
     const pts = [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 80, y: 0 }];
-    expect(hitNozzleIndex(pts, { x: 0, y: 0 }, 30)).toBe(0);
-    expect(hitNozzleIndex(pts, { x: 17, y: 0 }, 30)).toBe(0);
-    expect(hitNozzleIndex(pts, { x: 20, y: 0 }, 30)).toBe(-1); // exactly midway
-    expect(hitNozzleIndex(pts, { x: 22, y: 5 }, 30)).toBe(-1);
-    expect(hitNozzleIndex(pts, { x: 200, y: 0 }, 30)).toBe(-1);
-    expect(hitNozzleIndex([{ x: 5, y: 5 }], { x: 6, y: 5 }, 10)).toBe(0); // a lone nozzle
+    expect(hitNozzleIndex(pts, { x: 0, y: 0 }, 12)).toBe(0);
+    expect(hitNozzleIndex(pts, { x: 17, y: 0 }, 12)).toBe(-1); // between nozzles, outside the radius
+    expect(hitNozzleIndex(pts, { x: 33, y: 4 }, 12)).toBe(1);
+    expect(hitNozzleIndex(pts, { x: 200, y: 0 }, 12)).toBe(-1);
+    expect(hitNozzleIndex([{ x: 5, y: 5 }], { x: 6, y: 5 }, 10)).toBe(0);
+    expect(hitNozzleIndex([], { x: 0, y: 0 }, 10)).toBe(-1);
+  });
+
+  it('lets overlapping nozzles be selected one at a time, newest first', () => {
+    const list = [{ key: 'a', x: 10, y: 10 }, { key: 'b', x: 10, y: 10 }, { key: 'c', x: 50, y: 10 }];
+    expect(list[hitNozzleIndex(list, { x: 10, y: 10 }, 12)].key).toBe('b');
+    expect(list[hitNozzleIndex(list.slice(0, 1), { x: 10, y: 10 }, 12)].key).toBe('a'); // then the other
+    // a nearer, older nozzle still beats a farther, newer one
+    const pair = [{ key: 'old', x: 10, y: 10 }, { key: 'new', x: 14, y: 10 }];
+    expect(pair[hitNozzleIndex(pair, { x: 10, y: 10 }, 12)].key).toBe('old');
   });
 });

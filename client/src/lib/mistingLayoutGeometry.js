@@ -231,16 +231,20 @@ export function computeTotals(lineStats, nozzles) {
 export function applyNozzleEdits(nozzles, edits = {}) {
   const removed = new Set(edits.removed || []);
   const moved = edits.moved || {};
-  const out = [];
+  const untouched = [];
+  const byKey = new Map();
   (nozzles || []).forEach((n) => {
     if (removed.has(n.key)) return;
     const m = moved[n.key];
-    out.push(m && validPoint(m) ? { ...n, x: m.x, y: m.y, edited: true } : n);
+    if (m && validPoint(m)) byKey.set(n.key, { ...n, x: m.x, y: m.y, edited: true });
+    else untouched.push(n);
   });
-  (edits.added || []).forEach((n) => {
-    if (!removed.has(n.key) && validPoint(n)) out.push({ ...n, edited: true });
-  });
-  return out;
+  // Most recently edited last, so a tap on overlapping nozzles takes the newest first.
+  const movedOut = Object.keys(moved).filter((k) => byKey.has(k)).map((k) => byKey.get(k));
+  const addedOut = (edits.added || [])
+    .filter((n) => !removed.has(n.key) && validPoint(n))
+    .map((n) => ({ ...n, edited: true }));
+  return [...untouched, ...movedOut, ...addedOut];
 }
 
 /** Closest point on any line to `p` within `thresholdPx`, or null. */
@@ -297,18 +301,19 @@ export function nozzleHitRadiusPx(lat, zoom, cssScale, spacingFt = NOMINAL_SPACI
 }
 
 /**
- * Index of the nozzle a tap at `p` hits, or -1. A hit needs the nearest nozzle within
- * `radiusPx` AND within 45% of the distance to that nozzle's own nearest neighbour, so the
- * tap midway between two nozzles never counts as a hit (it adds instead), float noise included.
+ * Index of the nozzle a tap at `p` selects, or -1: the nearest nozzle within `radiusPx`.
+ * When nozzles overlap (equal distance), the one later in the list wins, which is the most
+ * recently added or moved one (applyNozzleEdits lists those last), so each tap peels one off.
  */
 export function hitNozzleIndex(nozzles, p, radiusPx) {
-  const list = nozzles || [];
-  const idx = nearestNozzleIndex(list, p, radiusPx);
-  if (idx < 0) return -1;
-  const d = distance(list[idx], p);
-  let nearestNeighbour = Infinity;
-  list.forEach((n, i) => {
-    if (i !== idx) nearestNeighbour = Math.min(nearestNeighbour, distance(n, list[idx]));
+  let best = -1;
+  let bestDistance = Infinity;
+  (nozzles || []).forEach((n, i) => {
+    const d = distance(n, p);
+    if (d <= radiusPx && d <= bestDistance + EPS) {
+      best = i;
+      bestDistance = Math.min(bestDistance, d);
+    }
   });
-  return d < nearestNeighbour * 0.45 ? idx : -1;
+  return best;
 }
