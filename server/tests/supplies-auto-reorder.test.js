@@ -64,11 +64,8 @@ jest.mock('../services/procurement/order-dispatch', () => ({
   // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2).
   settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
   retireRequestBell: jest.fn(async (_conn, requestId) => { (mockState.retiredBells = mockState.retiredBells || []).push(requestId); }),
-}));
-
-jest.mock('../services/procurement/vendor-order-email', () => ({
   // a SiteOne order email sent, or sending; emailOutAfterRing = one that lands while the bell is written
-  findEmailOrderOut: jest.fn(async () => {
+  emailOrderOutFor: jest.fn(async () => {
     mockState.emailReads = (mockState.emailReads || 0) + 1;
     if (mockState.emailOutAfterRing && mockState.emailReads > 1) return mockState.emailOutAfterRing;
     return mockState.emailOut || null;

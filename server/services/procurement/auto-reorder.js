@@ -153,7 +153,7 @@ async function bellOrWarn(ctx, product, request, bucket) {
     const row = await ringRestockBell({ notify: ctx.notify, product, request });
     if (!row) throw new Error('notification not persisted');
     ctx.result[bucket].push({ productId: product.id, requestId: request.id });
-    if (await require('./vendor-order-email').findEmailOrderOut(ctx.conn, request.id)) {
+    if (await require('./order-dispatch').emailOrderOutFor(ctx.conn, request.id)) {
       await require('./order-dispatch').retireRequestBell(ctx.conn, request.id);
     }
   } catch (notifyErr) {
@@ -237,7 +237,7 @@ async function handleLiveRequest(ctx, p, existing) {
   // An order EMAILED to SiteOne for this request (vendor_order_emails: sent, or sending with the
   // outcome unknown) may already be with the vendor: the same stand-down, never "order manually"
   // on top of it. The Restock tab shows the emailed order; receiving it closes the request.
-  if (await require('./vendor-order-email').findEmailOrderOut(ctx.conn, request.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'email_order_out' }); return; }
+  if (await require('./order-dispatch').emailOrderOutFor(ctx.conn, request.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'email_order_out' }); return; }
   // A pre-submit park (no_price, dry_run, …) left this request a versioned
   // ledger bell that already says "order manually": the generic hand-off
   // must not ring beside it. Settle the ledger's bell first; when that

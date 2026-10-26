@@ -128,7 +128,7 @@ describe('POST /restock-requests/:id/action', () => {
         if (q.called('update')) { orderUpdates.push(q.args('update')[0]); return 1; } // settleLandedAfterReceive
         return requestRow.ledger || null; // assertManualActionAllowed's one read
       }
-      if (q._table === 'vendor_order_emails') return requestRow.emailOrder || null; // assertNoEmailOrderOut's one read on cancel
+      if (q._table === 'vendor_order_emails') return requestRow.emailOrder || null; // assertManualActionAllowed's email read on cancel
       if (q._table === 'product_inventory_movements') {
         movements.push(q.args('insert')[0]);
         return [{ id: 'movement-1', ...q.args('insert')[0] }];

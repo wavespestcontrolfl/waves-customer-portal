@@ -136,32 +136,16 @@ const EARLIER_REFUSALS = {
 const CLAIMABLE_SQL = `(${TABLE}.status IN ('pending', 'failed', 'dismissed') OR (${TABLE}.status = 'sending' AND ${TABLE}.send_attempted_at IS NULL AND ${TABLE}.claimed_at < ?))`;
 
 // The order bot and this email must never both buy a request: the bot claims
-// an open auto-reorder request on its own schedule, and its claim does not
-// look at this table. So the email refuses while the bot would place THIS
-// request for real (gates on, credentials set, not a dry run). A dry run
-// submits nothing, so it does not block. The dispatcher is read, not changed.
+// an open auto-reorder request on its own schedule. So the email refuses while
+// the bot would place THIS request for real (gates on, credentials set, not a
+// dry run). A dry run submits nothing, so it does not block. The dispatcher is
+// read, not changed.
 async function assertBotCannotOrder(conn, request, vendor, env) {
   if (request.source !== 'auto_reorder') return;
   if (String(env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true') return;
   if (await dispatch.canAutoOrder({ conn, vendor })) {
     throw refuse('bot_can_order', 'The automatic SiteOne order bot is turned on and would also order this request. Turn off GATE_AUTO_ORDER_SITEONE before emailing the order, so SiteOne is not ordered twice.');
   }
-}
-
-// A request whose order email went to SiteOne (or may have) cannot be cancelled
-// from the Restock tab: a cancelled request drops out of the reorder sweep's
-// dedupe, and the next tick would raise a new request and buy the product
-// again on top of the emailed order. Called by the Restock cancel path.
-// The order email for a request that SiteOne has, or may have: sent, or sending with the outcome
-// unknown. null = no email out. The cancel guard and the reorder sweep's stand-down both read it.
-function findEmailOrderOut(conn, requestId) {
-  return conn(TABLE).where({ restock_request_id: requestId }).whereIn('status', ['sent', 'sending']).first('po', 'status');
-}
-
-async function assertNoEmailOrderOut(conn, requestId) {
-  const out = await findEmailOrderOut(conn, requestId);
-  if (!out) return;
-  throw refuse('email_order_out', `SiteOne was emailed an order for this request (PO ${out.po})${out.status === 'sending' ? ', and the email may have gone out' : ''}. Receive it when it arrives. To cancel it, tell SiteOne first, then mark the email row dismissed.`);
 }
 
 // What a SENT order email's packages hold, in the request's own unit: the
@@ -410,13 +394,11 @@ async function sendOrderEmail(requestId, { actor, actorId, version }, deps = {})
 }
 
 module.exports = {
-  findEmailOrderOut,
   emailOrderState,
   buildSiteOneOrderEmail,
   previewOrderEmail,
   sendOrderEmail,
   purchaseOrderFor,
-  assertNoEmailOrderOut,
   emailOrderedQuantityFor,
   _internals: { claimable, loadOrderEmail, paymentLine, STALE_UNATTEMPTED_MS },
 };

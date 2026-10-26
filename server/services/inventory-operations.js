@@ -470,7 +470,6 @@ async function previewRestockAction(requestId, raw) {
   const request = await loadRequest(requestId);
   const product = await loadProduct(request.product_id);
   const guard = await require('./procurement/order-dispatch').assertManualActionAllowed(db, requestId, input.action);
-  if (input.action === 'cancel') await require('./procurement/vendor-order-email').assertNoEmailOrderOut(db, requestId);
   const plan = await restockActionPlan(db, request, product, input, guard);
   return actionPreview(request, product, input, plan);
 }
@@ -482,7 +481,6 @@ async function updateRestockRequest(requestId, raw, options = {}) {
     const request = await loadRequest(requestId, trx, true);
     const dispatch = require('./procurement/order-dispatch');
     const guard = await dispatch.assertManualActionAllowed(trx, requestId, input.action);
-    if (input.action === 'cancel') await require('./procurement/vendor-order-email').assertNoEmailOrderOut(trx, requestId);
     const product = await loadProduct(request.product_id, trx, true);
     const plan = await restockActionPlan(trx, request, product, input, guard);
     const preview = actionPreview(request, product, input, plan);
@@ -506,7 +504,7 @@ async function updateRestockRequest(requestId, raw, options = {}) {
     }
     const [updated] = await trx('product_restock_requests').where({ id: requestId }).update({
       status: preview.new_status, updated_at: new Date(),
-      metadata: { ...restockMeta(request.metadata), ...(options.metadataPatch || {}), lastManualAction: {
+      metadata: { ...restockMeta(request.metadata), ...options.metadataPatch, lastManualAction: {
         action: input.action, note: input.note || null, actorId: options.actorId || null, recordedAt: new Date().toISOString(),
       } },
       ...(input.action !== 'mark_ordered' ? { closed_by: options.actorId || null, closed_at: new Date() } : {}),

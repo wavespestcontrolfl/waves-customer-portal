@@ -315,13 +315,18 @@ async function assertNoLiveAutoOrder(trx, productId) {
  *     would raise a fresh request and order AGAIN on top of an order that
  *     may already be on its way. Receive stays open (the stock arrived);
  *     mark ordered stays open (it is already ordered).
+ *   - an order email out (vendor_order_emails sent, or sending with the
+ *     outcome unknown) → 'cancel' refuses for the same reason, read before
+ *     the automatic order row because an emailed request has none.
  * Call under the request row lock. Throws { statusCode: 409, code:
- * 'auto_order_placing' | 'auto_order_out' }.
+ * 'auto_order_placing' | 'auto_order_out' | 'email_order_out' }.
  */
 async function assertManualActionAllowed(trx, requestId, action) {
   const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id', 'status', 'placed_at', 'external_order_number', 'evidence');
-  if (!row) return {};
   const refuse = (code, message) => { const err = new Error(message); err.statusCode = 409; err.code = code; throw err; };
+  const emailed = action === 'cancel' && await emailOrderOutFor(trx, requestId);
+  if (emailed) refuse('email_order_out', `SiteOne was emailed an order for this request (PO ${emailed.po})${emailed.status === 'sending' ? ', and the email may have gone out' : ''}. Receive it when it arrives. To cancel it, tell SiteOne first, then mark the email row dismissed.`);
+  if (!row) return {};
   if (row.status === 'placing') refuse('auto_order_placing', 'An automatic order for this request is being placed right now — wait for it to place or park (Restock tab), then act.');
   if (action === 'cancel' && row.placed_at && !meta(row.evidence).revokedAt) {
     refuse('auto_order_out', `An automatic order for this request${row.external_order_number ? ` (#${row.external_order_number})` : ''} may already have gone out. Receive it when it arrives, or cancel it with the vendor and record the revoke (ops/agents/auto-order-revoke.js --order=${row.id}) — only then cancel the request.`);
@@ -756,11 +761,11 @@ async function prefetchVendorLogin(conn, requestId, registry, deadAdapters = nul
 // claim CANCELS the request: a bell telling staff to buy a need that is gone
 // is an unnecessary purchase (Codex r20 P1, r24 P1).
 // An order EMAILED to the vendor for this request (vendor_order_emails, GATE_SITEONE_EMAIL_ORDER):
-// sent, or sending with the outcome unknown. The vendor has the order, or may: nothing here may
-// claim it for the bot or tell staff to order it by hand. Same statuses as the email service's
-// findEmailOrderOut (vendor-order-email.js requires this module, so it is not required back).
+// sent, or sending with the outcome unknown. The vendor has the order, or may: nothing may claim
+// it for the bot, tell staff to order it by hand, or cancel the request. The one read for the
+// claim, the bells, the manual cancel guard and the reorder sweep's stand-down. null = none.
 function emailOrderOutFor(conn, requestId) {
-  return conn('vendor_order_emails').where({ restock_request_id: requestId }).whereIn('status', ['sending', 'sent']).first('id');
+  return conn('vendor_order_emails').where({ restock_request_id: requestId }).whereIn('status', ['sending', 'sent']).first('po', 'status');
 }
 
 function retireRequestBell(trx, requestId) {
@@ -1526,6 +1531,7 @@ module.exports = {
   vendorOrderQuantity,
   assertNoLiveAutoOrder,
   assertManualActionAllowed,
+  emailOrderOutFor,
   orderedQuantityFor,
   AUTO_ORDER_GATE: GATE,
   _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },

@@ -119,6 +119,12 @@ function asmBlockFor(groupId) {
   return { group_id: Number(groupId) };
 }
 
+// An optional list field (cc, attachments): the list when it has entries, else
+// undefined, so JSON.stringify leaves the key out of the payload.
+function nonEmptyList(list) {
+  return Array.isArray(list) && list.length ? list : undefined;
+}
+
 // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydm/Ydn — structural move):
 // the annual-offer guard now lives HERE, the true provider boundary,
 // immediately before the actual SendGrid request — not in any higher-level
@@ -265,7 +271,7 @@ async function sendOne({
   const payload = {
     personalizations: [{
       to: (Array.isArray(to) ? to : [to]).map((email) => ({ email })),
-      ...(Array.isArray(cc) && cc.length ? { cc: cc.map((email) => ({ email })) } : {}),
+      cc: nonEmptyList(cc)?.map((email) => ({ email })),
       headers: headers || undefined,
       // Echoed back on every webhook event for this send — lets the event
       // handler resolve the row by a stable id even before provider_message_id
@@ -281,7 +287,7 @@ async function sendOne({
     ],
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
-    attachments: Array.isArray(attachments) && attachments.length ? attachments : undefined,
+    attachments: nonEmptyList(attachments),
     // Standard sends keep the existing provider tracking behavior. Security
     // emails opt out so one-time credentials never enter click/open metadata.
     tracking_settings: {
