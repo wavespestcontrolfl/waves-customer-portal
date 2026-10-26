@@ -11,6 +11,11 @@ price-change/rate-review notices and service/program outlines. Invoice browser
 printing uses the same Field document boundary as the other customer exports;
 payment controls stay outside the paper output.
 
+**Estimates and proposals (owner 2026-10-26):** Field is the PDF only — the
+emailed attachment, the staff download and printing (`EstimateProposalDocument`).
+The `/estimate/:token` page keeps its glass layout, the on-page proposal card
+included: no Field masthead or paper body on the page.
+
 - React: `FIELD_DOCUMENT` in `client/src/theme-doc.js` and the shared
   `components/FieldDocument.jsx` / `field-document.css` boundary. Use
   `FieldDocument` for standalone browser/PDF documents and `FieldDocumentBody`
