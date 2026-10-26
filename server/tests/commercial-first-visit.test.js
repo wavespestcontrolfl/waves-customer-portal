@@ -349,13 +349,16 @@ describe('bookFirstVisit', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('an accept refusal leaves the visit booked and the alert says to mark it won', async () => {
+  // Pre-push audit P1: a refused accept seeds no series (a year of visits at terms the accept could not confirm).
+  test('an accept refusal leaves the visit booked, seeds no series, and the alert asks for the win and the series', async () => {
     mockAccept.mockRejectedValue(Object.assign(new Error('changed'), { statusCode: 409 }));
     const { result } = await bookTomorrowAtNine();
     expect(result.ok).toBe(true);
+    expect(mockSeeder.seedFollowUpsForParent).not.toHaveBeenCalled();
     const [, , why, opts] = mockNotifyAdmin.mock.calls[0];
-    expect(why).toMatch(/mark the estimate won by hand\.$/);
+    expect(why).toMatch(/mark the estimate won and set the repeat visits\.$/);
     expect(opts.detail).toContain('could not be marked won');
+    expect(opts.detail).toContain('No repeat visits were added');
   });
 
   test('no accept pin (the guard never passed this booking): no accept, and the office marks it won', async () => {
@@ -363,7 +366,8 @@ describe('bookFirstVisit', () => {
     const { result } = await bookTomorrowAtNine();
     expect(result.ok).toBe(true);
     expect(mockAccept).not.toHaveBeenCalled();
-    expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/mark the estimate won by hand\.$/);
+    expect(mockSeeder.seedFollowUpsForParent).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/mark the estimate won and set the repeat visits\.$/);
   });
 
   test('a customer who already runs a pest series keeps it: no second series, and the alert says so', async () => {
