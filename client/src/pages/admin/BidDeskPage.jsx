@@ -86,10 +86,10 @@ const emailHref = (emailId) => `/admin/communications?id=${encodeURIComponent(em
 function DueCell({ bid }) {
   if (!bid.due_at) return <span className="text-ink-secondary" title="No due date was read from the email">Not read</span>;
   return (
-    <div className="grid gap-1">
-      <span title={bid.due_source_line ? `Read from: ${bid.due_source_line}` : undefined}>{dueText(bid.due_at)}</span>
+    <div className="grid gap-1 break-normal">
+      <span className="break-normal" title={bid.due_source_line ? `Read from: ${bid.due_source_line}` : undefined}>{dueText(bid.due_at)}</span>
       <span className="flex flex-wrap gap-1">
-        {bid.due_confirmed ? <Badge tone="strong">Confirmed</Badge> : <Badge tone="warn">Unconfirmed</Badge>}
+        {bid.due_confirmed ? <Badge className="whitespace-nowrap" tone="strong">Confirmed</Badge> : <Badge className="whitespace-nowrap" tone="warn">Unconfirmed</Badge>}
         {bid.needs_date_confirmation && <Badge tone="warn">Date may have changed</Badge>}
       </span>
     </div>
@@ -98,36 +98,47 @@ function DueCell({ bid }) {
 
 function BidTable({ bids, selectedId, onSelect, checklistLive }) {
   return (
-    <Table>
+    <Table layout="records" containerClassName="bid-desk-table" className="table-fixed min-[1101px]:min-w-[1100px]" aria-label="Bid desk projects">
       <THead>
         <TR>
-          <TH>Buyer</TH>
-          <TH>Project</TH>
-          <TH>Source</TH>
-          <TH>Due</TH>
-          <TH>Days left</TH>
-          <TH>Status</TH>
+          <TH scope="col">Project</TH>
+          <TH scope="col" className="w-[180px]">Buyer</TH>
+          <TH scope="col" className="w-[160px]">Source</TH>
+          <TH scope="col" className="w-[240px]">Due</TH>
+          <TH scope="col" className="w-[120px]">Deadline</TH>
+          <TH scope="col" className="w-[120px]">Status</TH>
         </TR>
       </THead>
       <TBody>
         {bids.map((bid) => (
           <TR key={bid.id} className={bid.id === selectedId ? "bg-zinc-50" : undefined}>
-            <TD>{buyerOf(bid)}</TD>
-            <TD>
-              <button type="button" className="text-left font-medium text-zinc-900 underline" onClick={() => onSelect(bid.id)} aria-label={`Open ${titleOf(bid)}`}>
-                {titleOf(bid)}
-              </button>
-              {bid.historical && <Badge className="ml-2">Earlier</Badge>}
-              {checklistLive && bid.checklist_progress?.required > 0 && (
-                <Badge className="ml-2" tone={bid.checklist_progress.checked === bid.checklist_progress.required ? "strong" : "neutral"} title="Required checklist lines checked">
-                  {bid.checklist_progress.checked}/{bid.checklist_progress.required}
-                </Badge>
-              )}
+            <TD data-label="Project" className="bid-desk-project-cell">
+              <div className="grid min-w-0 justify-items-start gap-2">
+                <Button
+                  variant="secondary"
+                  className="bid-desk-open-record h-auto min-h-11 max-w-full justify-start whitespace-normal px-3 py-2 text-left"
+                  onClick={() => onSelect(bid.id)}
+                  aria-label={`Open ${titleOf(bid)}`}
+                >
+                  <span className="min-w-0 break-words">{titleOf(bid)}</span>
+                </Button>
+                {(bid.historical || (checklistLive && bid.checklist_progress?.required > 0)) && (
+                  <span className="flex flex-wrap gap-1">
+                    {bid.historical && <Badge className="whitespace-nowrap">Earlier</Badge>}
+                    {checklistLive && bid.checklist_progress?.required > 0 && (
+                      <Badge className="whitespace-nowrap" tone={bid.checklist_progress.checked === bid.checklist_progress.required ? "strong" : "neutral"} title="Required checklist lines checked">
+                        {bid.checklist_progress.checked}/{bid.checklist_progress.required}
+                      </Badge>
+                    )}
+                  </span>
+                )}
+              </div>
             </TD>
-            <TD>{SOURCE_LABEL[bid.source] || bid.source}</TD>
-            <TD><DueCell bid={bid} /></TD>
-            <TD nums>{OPEN.includes(bid.status) ? daysText(bid.days_left) : ""}</TD>
-            <TD>{STATUS_LABEL[bid.status] || bid.status}</TD>
+            <TD data-label="Buyer">{buyerOf(bid)}</TD>
+            <TD data-label="Source">{SOURCE_LABEL[bid.source] || bid.source}</TD>
+            <TD data-label="Due" className="bid-desk-due-cell"><DueCell bid={bid} /></TD>
+            <TD data-label="Deadline" nums className="whitespace-nowrap">{OPEN.includes(bid.status) ? daysText(bid.days_left) : ""}</TD>
+            <TD data-label="Status" className="whitespace-nowrap">{STATUS_LABEL[bid.status] || bid.status}</TD>
           </TR>
         ))}
       </TBody>

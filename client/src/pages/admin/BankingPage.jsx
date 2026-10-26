@@ -22,6 +22,8 @@ import {
 import { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import {
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clock3,
   Download,
   Landmark,
@@ -249,274 +251,255 @@ function PayoutsTab() {
           </Button>
         </div>
       )}
-      <div
-        style={{
-          overflowX: "auto",
-        }}
+      <Table
+        layout="records"
+        aria-label="Stripe payouts"
+        containerClassName="banking-payouts-records"
+        className="min-[1101px]:min-w-[860px]"
       >
-        <Table>
-          <THead>
-            <TR>
-              <TH>Date</TH>
-              <TH
+        <THead>
+          <TR>
+            <TH>Date</TH>
+            <TH align="right">Amount</TH>
+            <TH>Status</TH>
+            <TH align="right">Transactions</TH>
+            <TH align="right">Fees</TH>
+            <TH>Arrival</TH>
+            <TH>Reconciled</TH>
+          </TR>
+        </THead>
+        <TBody>
+          {payouts.map((p) => (
+            <Fragment key={p.id}>
+              <TR
+                className="banking-payout-row"
+                onClick={() => toggleExpand(p.id)}
                 style={{
-                  textAlign: "right",
+                  cursor: "pointer",
+                  background: expanded === p.id ? "#F4F4F5" : "transparent",
+                  transition: "background 0.15s",
+                }}
+                onMouseEnter={(e) => {
+                  if (expanded !== p.id)
+                    e.currentTarget.style.background = "#FFFFFF88";
+                }}
+                onMouseLeave={(e) => {
+                  if (expanded !== p.id)
+                    e.currentTarget.style.background = "transparent";
                 }}
               >
-                Amount
-              </TH>
-              <TH>Status</TH>
-              <TH
-                style={{
-                  textAlign: "right",
-                }}
-              >
-                Transactions
-              </TH>
-              <TH
-                style={{
-                  textAlign: "right",
-                }}
-              >
-                Fees
-              </TH>
-              <TH>Arrival</TH>
-              <TH>Reconciled</TH>
-            </TR>
-          </THead>
-          <TBody>
-            {payouts.map((p) => (
-              <Fragment key={p.id}>
-                <TR
-                  onClick={() => toggleExpand(p.id)}
-                  style={{
-                    cursor: "pointer",
-                    background: expanded === p.id ? "#F4F4F5" : "transparent",
-                    transition: "background 0.15s",
-                  }}
-                  onMouseEnter={(e) => {
-                    if (expanded !== p.id)
-                      e.currentTarget.style.background = "#FFFFFF88";
-                  }}
-                  onMouseLeave={(e) => {
-                    if (expanded !== p.id)
-                      e.currentTarget.style.background = "transparent";
-                  }}
+                <TD
+                  data-label="Date"
+                  nums
+                  className="banking-payout-date whitespace-nowrap font-medium text-zinc-900"
                 >
-                  <TD>
-                    <Button
-                      variant="ghost"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        toggleExpand(p.id);
-                      }}
-                      aria-expanded={expanded === p.id}
-                      aria-controls={
-                        expanded === p.id ? `payout-detail-${p.id}` : undefined
-                      }
-                      aria-label={`Payout ${p.id}`}
-                    >
-                      {fmtD(
-                        p.created_at_stripe ||
-                          p.created_at ||
-                          p.date ||
-                          p.created,
-                      )}
-                    </Button>
-                  </TD>
-                  <TD
-                    style={{
-                      textAlign: "right",
+                  <Button
+                    variant="ghost"
+                    className="justify-start gap-1 whitespace-nowrap px-0"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleExpand(p.id);
                     }}
+                    aria-expanded={expanded === p.id}
+                    aria-controls={
+                      expanded === p.id ? `payout-detail-${p.id}` : undefined
+                    }
+                    aria-label={`Payout ${p.id}`}
                   >
-                    {fmtM(p.amount)}
-                  </TD>
-                  <TD>
-                    <Badge
-                      tone={
-                        (STATUS_COLORS[p.status] || "#71717A") === "#C8312F"
-                          ? "alert"
-                          : "neutral"
-                      }
-                    >
-                      {p.status}
-                    </Badge>
-                  </TD>
-                  <TD
-                    style={{
-                      textAlign: "right",
-                    }}
-                  >
-                    {p.transaction_count ?? "--"}
-                  </TD>
-                  <TD
-                    style={{
-                      textAlign: "right",
-                      color: "#71717A",
-                    }}
-                  >
-                    {p.fee_total != null
-                      ? fmtM(p.fee_total)
-                      : p.fees != null
-                        ? fmtM(p.fees)
-                        : "--"}
-                  </TD>
-                  <TD>{fmtDay(p.arrival_date)}</TD>
-                  <TD
-                    style={{
-                      textAlign: "center",
-                    }}
-                  >
-                    {p.reconciled ? (
-                      <span
-                        style={{
-                          color: "#18181B",
-                          fontSize: 16,
-                        }}
-                      >
-                        &#10003;
-                      </span>
-                    ) : (
-                      <span
-                        style={{
-                          color: "#71717A",
-                        }}
-                      >
-                        --
-                      </span>
+                    {expanded === p.id ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+                    {fmtD(
+                      p.created_at_stripe ||
+                        p.created_at ||
+                        p.date ||
+                        p.created,
                     )}
+                  </Button>
+                </TD>
+                <TD
+                  data-label="Amount"
+                  align="right"
+                  nums
+                  className="banking-payout-amount whitespace-nowrap font-medium text-zinc-900"
+                >
+                  {fmtM(p.amount)}
+                </TD>
+                <TD data-label="Status" className="banking-payout-status">
+                  <Badge
+                    tone={
+                      (STATUS_COLORS[p.status] || "#71717A") === "#C8312F"
+                        ? "alert"
+                        : "neutral"
+                    }
+                  >
+                    {p.status}
+                  </Badge>
+                </TD>
+                <TD
+                  data-label="Transactions"
+                  align="right"
+                  nums
+                  className="banking-payout-transactions whitespace-nowrap"
+                >
+                  {p.transaction_count ?? "--"}
+                </TD>
+                <TD
+                  data-label="Fees"
+                  align="right"
+                  nums
+                  className="banking-payout-fees whitespace-nowrap text-zinc-500"
+                >
+                  {p.fee_total != null
+                    ? fmtM(p.fee_total)
+                    : p.fees != null
+                      ? fmtM(p.fees)
+                      : "--"}
+                </TD>
+                <TD
+                  data-label="Arrival"
+                  nums
+                  className="banking-payout-arrival whitespace-nowrap"
+                >
+                  {fmtDay(p.arrival_date)}
+                </TD>
+                <TD
+                  data-label="Reconciled"
+                  align="center"
+                  className="banking-payout-reconciled"
+                >
+                  {p.reconciled ? (
+                    <span
+                      style={{
+                        color: "#18181B",
+                        fontSize: 16,
+                      }}
+                    >
+                      &#10003;
+                    </span>
+                  ) : (
+                    <span
+                      style={{
+                        color: "#71717A",
+                      }}
+                    >
+                      --
+                    </span>
+                  )}
+                </TD>
+              </TR>
+              {expanded === p.id && (
+                <TR key={`${p.id}-detail`} id={`payout-detail-${p.id}`}>
+                  <TD
+                    colSpan={7}
+                    style={{
+                      background: "#F4F4F5",
+                    }}
+                  >
+                    <div className="px-0 py-3 min-[1101px]:px-5">
+                      {txnErrors[p.id] ? (
+                        <ActionFeedback
+                          error
+                          onRetry={() => loadTransactions(p.id)}
+                        >
+                          Could not load payout transactions: {txnErrors[p.id]}
+                        </ActionFeedback>
+                      ) : !txns[p.id] ? (
+                        <div
+                          style={{
+                            color: "#71717A",
+                            fontSize: 14,
+                          }}
+                        >
+                          Loading transactions...
+                        </div>
+                      ) : txns[p.id].length === 0 ? (
+                        <div
+                          style={{
+                            color: "#71717A",
+                            fontSize: 14,
+                          }}
+                        >
+                          No transaction details available
+                        </div>
+                      ) : (
+                        <Table
+                          layout="records"
+                          aria-label={`Transactions for payout ${p.id}`}
+                          className="min-[1101px]:min-w-[680px]"
+                        >
+                          <THead>
+                            <TR>
+                              <TH>Customer / Type</TH>
+                              <TH>Description</TH>
+                              <TH align="right">Amount</TH>
+                              <TH align="right">Fee</TH>
+                              <TH align="right">Net</TH>
+                            </TR>
+                          </THead>
+                          <TBody>
+                            {txns[p.id].map((t, i) => {
+                              const isFee =
+                                t.type === "stripe_fee" || t.type === "fee";
+                              return (
+                                <TR
+                                  key={i}
+                                  style={{
+                                    opacity: isFee ? 0.5 : 1,
+                                  }}
+                                >
+                                  <TD
+                                    data-label="Customer / Type"
+                                    className={
+                                      isFee
+                                        ? "break-words text-zinc-500"
+                                        : "break-words text-zinc-800"
+                                    }
+                                  >
+                                    {t.customer_name || t.type || "--"}
+                                  </TD>
+                                  <TD
+                                    data-label="Description"
+                                    className="break-words text-zinc-500"
+                                  >
+                                    {t.description || "--"}
+                                  </TD>
+                                  <TD
+                                    data-label="Amount"
+                                    align="right"
+                                    nums
+                                    className="whitespace-nowrap"
+                                  >
+                                    {fmtM(t.amount)}
+                                  </TD>
+                                  <TD
+                                    data-label="Fee"
+                                    align="right"
+                                    nums
+                                    className="whitespace-nowrap text-zinc-500"
+                                  >
+                                    {t.fee != null ? fmtM(t.fee) : "--"}
+                                  </TD>
+                                  <TD
+                                    data-label="Net"
+                                    align="right"
+                                    nums
+                                    className="whitespace-nowrap"
+                                  >
+                                    {t.net != null ? fmtM(t.net) : "--"}
+                                  </TD>
+                                </TR>
+                              );
+                            })}
+                          </TBody>
+                        </Table>
+                      )}
+                    </div>{" "}
                   </TD>
                 </TR>
-                {expanded === p.id && (
-                  <TR key={`${p.id}-detail`} id={`payout-detail-${p.id}`}>
-                    <TD
-                      colSpan={7}
-                      style={{
-                        background: "#F4F4F5",
-                      }}
-                    >
-                      <div
-                        style={{
-                          padding: "12px 20px",
-                        }}
-                      >
-                        {txnErrors[p.id] ? (
-                          <ActionFeedback
-                            error
-                            onRetry={() => loadTransactions(p.id)}
-                          >
-                            Could not load payout transactions:{" "}
-                            {txnErrors[p.id]}
-                          </ActionFeedback>
-                        ) : !txns[p.id] ? (
-                          <div
-                            style={{
-                              color: "#71717A",
-                              fontSize: 14,
-                            }}
-                          >
-                            Loading transactions...
-                          </div>
-                        ) : txns[p.id].length === 0 ? (
-                          <div
-                            style={{
-                              color: "#71717A",
-                              fontSize: 14,
-                            }}
-                          >
-                            No transaction details available
-                          </div>
-                        ) : (
-                          <Table>
-                            <THead>
-                              <TR>
-                                <TH>Customer / Type</TH>
-                                <TH>Description</TH>
-                                <TH
-                                  style={{
-                                    textAlign: "right",
-                                  }}
-                                >
-                                  Amount
-                                </TH>
-                                <TH
-                                  style={{
-                                    textAlign: "right",
-                                  }}
-                                >
-                                  Fee
-                                </TH>
-                                <TH
-                                  style={{
-                                    textAlign: "right",
-                                  }}
-                                >
-                                  Net
-                                </TH>
-                              </TR>
-                            </THead>
-                            <TBody>
-                              {txns[p.id].map((t, i) => {
-                                const isFee =
-                                  t.type === "stripe_fee" || t.type === "fee";
-                                return (
-                                  <TR
-                                    key={i}
-                                    style={{
-                                      opacity: isFee ? 0.5 : 1,
-                                    }}
-                                  >
-                                    <TD
-                                      style={{
-                                        color: isFee ? "#71717A" : "#27272A",
-                                      }}
-                                    >
-                                      {t.customer_name || t.type || "--"}
-                                    </TD>
-                                    <TD
-                                      style={{
-                                        color: "#71717A",
-                                      }}
-                                    >
-                                      {t.description || "--"}
-                                    </TD>
-                                    <TD
-                                      style={{
-                                        textAlign: "right",
-                                      }}
-                                    >
-                                      {fmtM(t.amount)}
-                                    </TD>
-                                    <TD
-                                      style={{
-                                        textAlign: "right",
-                                        color: "#71717A",
-                                      }}
-                                    >
-                                      {t.fee != null ? fmtM(t.fee) : "--"}
-                                    </TD>
-                                    <TD
-                                      style={{
-                                        textAlign: "right",
-                                      }}
-                                    >
-                                      {t.net != null ? fmtM(t.net) : "--"}
-                                    </TD>
-                                  </TR>
-                                );
-                              })}
-                            </TBody>
-                          </Table>
-                        )}
-                      </div>{" "}
-                    </TD>
-                  </TR>
-                )}
-              </Fragment>
-            ))}
-          </TBody>
-        </Table>
-      </div>
+              )}
+            </Fragment>
+          ))}
+        </TBody>
+      </Table>
       {loading && (
         <div
           style={{
