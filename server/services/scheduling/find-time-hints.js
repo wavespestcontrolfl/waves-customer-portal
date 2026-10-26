@@ -226,8 +226,8 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
       unit: !moveAlone, alone: !!moveAlone,
       changes: { ...changes, window_start: pickedWindow.start, window_end: pickedWindow.end },
       windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
-      // A technician's own picker spends no Google (Codex #6881 security).
-      roads: paidRoads,
+      // Staff only: a technician's own picker spends no Google (Codex #6881).
+      roads: paidRoads === true,
     });
     // A whole visit (unit): the technician must be able to do every service
     // on it, as the offered hours require. One switched off = no verdict at

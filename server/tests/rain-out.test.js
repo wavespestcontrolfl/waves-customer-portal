@@ -4283,3 +4283,27 @@ describe('commit summary — visit-covered members are not separate stops (local
     expect(summarizeCommitResults([{ id: 'x', ok: false, error: 'boom' }])).toMatchObject({ ok: false, reason: 'boom', movedCount: 0, coveredCount: 0, failedCount: 1 });
   });
 });
+
+// Codex #6881 r3: the pickers' Google road times (GATE_PICKER_ROAD_CHECK)
+// are staff-only — the generic slot check asks for them only for an admin.
+describe('checkSlots: paid road times are staff-only', () => {
+  const SERVICE = '11111111-1111-4111-8111-111111111111';
+  const TECH = '22222222-2222-4222-8222-222222222222';
+  test.each([[true, true], [false, false]])('admin caller %s → roads %s', async (isAdmin, roads) => {
+    const arrival = require('../services/scheduling/arrival-route');
+    const routing = jest.spyOn(arrival, 'arrivalWindowRoutingEnabled').mockReturnValue(true);
+    const check = jest.spyOn(arrival, 'checkArrivalPlacement').mockResolvedValue({ feasible: true });
+    try {
+      const { checkSlots } = require('../services/rain-out');
+      const out = await checkSlots({
+        targets: [{ date: '2035-01-02', window: { start: '09:00', end: '10:00' }, serviceId: SERVICE, technicianId: TECH }],
+        caller: { isAdmin, technicianId: TECH },
+      });
+      expect(out.ok).toBe(true);
+      expect(check).toHaveBeenCalledWith(expect.objectContaining({ serviceId: SERVICE, roads }));
+    } finally {
+      routing.mockRestore();
+      check.mockRestore();
+    }
+  });
+});

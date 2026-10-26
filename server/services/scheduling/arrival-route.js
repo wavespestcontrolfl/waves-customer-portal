@@ -955,16 +955,18 @@ async function recordCapacityDecision(conn, fit, targetId) {
 }
 
 // Staff checks agree with the pickers' list (GATE_PICKER_ROAD_CHECK): a
-// route under way today continues from the tech's current stop, and the
-// placement is driven on the same Google road times (`roads`; the pickers'
-// hour-rounded cache, so an hour the list offered is mostly answered from
-// it). A caller may opt out of either (the automatic tech-out mover, a
-// technician's own picker).
-async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, roads, ...options }) {
+// route under way today continues from the tech's current stop (a caller
+// may opt out: the automatic tech-out mover). `roads: true` also drives the
+// placement on the same Google road times (the pickers' hour-rounded cache,
+// so an hour the list offered is mostly answered from it). Opt-in (Codex
+// #6881 r3): only a staff caller outside any lock asks — never a technician
+// (the allowance is staff-only) and never a save probe inside its
+// transaction (road times are preloaded before a scheduling lock).
+async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, roads = false, ...options }) {
   const live = gateEnvValue('GATE_PICKER_ROAD_CHECK');
   const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
   const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false };
-  if (context && live && roads !== false) {
+  if (context && live && roads === true) {
     context.travel = require('./hint-road-times').createPickerTravel();
     // Three passes, as certifyArrivalPlacement: a re-timed leg is asked again.
     for (let pass = 0; pass < 3; pass++) {
