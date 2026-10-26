@@ -196,3 +196,20 @@ describe('AT_RISK_PREDICATE definition', () => {
     expect(AT_RISK_PREDICATE).not.toContain('autopay_enabled = false');
   });
 });
+
+describe('computeRecurringPlans', () => {
+  test('counts every WaveGuard plan member across billing lanes — membership audience, not the monthly-dues lane', async () => {
+    const { MEMBERSHIP_TIER_SQL } = require('../services/billing-lane');
+    const { computeRecurringPlans } = require('../services/mrr-breakdown');
+    const db = makeFakeDb([{ customers: '233', monthly: '12482.495' }]);
+    await expect(computeRecurringPlans(db)).resolves.toEqual({ customers: 233, monthly: 12482.5 });
+    const lanes = db._rawCalls.filter((c) => c.whereRaw).map((c) => c.whereRaw);
+    expect(lanes).toEqual([MEMBERSHIP_TIER_SQL]);
+    expect(lanes).not.toContain(MONTHLY_LANE_SQL);
+  });
+
+  test('an empty population is zero, not NaN', async () => {
+    const { computeRecurringPlans } = require('../services/mrr-breakdown');
+    await expect(computeRecurringPlans(makeFakeDb([{ customers: '0', monthly: null }]))).resolves.toEqual({ customers: 0, monthly: 0 });
+  });
+});

@@ -45,3 +45,16 @@ it('labels retained growth and channel data as stale without removing it', () =>
   for (const button of screen.getAllByRole('button', { name: 'Try again' })) fireEvent.click(button);
   expect(retry).toHaveBeenCalledTimes(3);
 });
+
+it('shows recurring plans beside MRR, and a dash rather than $0 when the feed lacks them', () => {
+  mount({ data: { ...data, recurringPlans: { customers: 233, monthly: 12482.5 } } });
+  expect(screen.getAllByText('MRR').length).toBeGreaterThan(0);
+  expect(screen.getByText('Recurring plans')).toBeInTheDocument();
+  expect(screen.getByText('$12,483')).toBeInTheDocument();
+  expect(screen.getByText('233 members · every billing type')).toBeInTheDocument();
+  cleanup();
+  mount({ data });
+  expect(screen.getByText('Recurring plans')).toBeInTheDocument();
+  expect(screen.getByText('every billing type')).toBeInTheDocument();
+  expect(screen.queryByText('0 members · every billing type')).not.toBeInTheDocument();
+});

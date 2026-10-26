@@ -101,6 +101,16 @@ export default function GrowthSection({
           : `ARR ${fmtMoneyCompact(data?.mrr * 12)}`,
     },
     {
+      // Every WaveGuard plan member whatever the billing type, at the plan's
+      // monthly average. MRR above counts the monthly-dues lane only, so it
+      // leaves most plan members out.
+      label: "Recurring plans",
+      value: data?.recurringPlans ? fmtMoney(data.recurringPlans.monthly) : "—",
+      sub: data?.recurringPlans
+        ? `${fmtInt(data.recurringPlans.customers)} members · every billing type`
+        : "every billing type",
+    },
+    {
       label: "Review Index",
       value: kpis?.quality?.nps != null ? String(kpis.quality.nps) : "—",
       sub: kpis?.quality?.csatResponses
@@ -166,7 +176,7 @@ export default function GrowthSection({
       </div>
 
       {/* Hero KPI row — sparkline + delta */}
-      {data?.kpis && <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4 md:mb-5">
+      {data?.kpis && <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4 md:mb-5 max-md:[&>:last-child:nth-child(odd)]:col-span-2">
         {HERO.map((h) => (
           <KpiSparklineTile key={h.label} {...h} />
         ))}

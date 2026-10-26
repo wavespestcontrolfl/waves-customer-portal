@@ -13,7 +13,7 @@ const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
-const { computeMrrBreakdown } = require('../services/mrr-breakdown');
+const { computeMrrBreakdown, computeRecurringPlans } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
 const { buildCohortSeries, makeRateAt } = require('../services/retention-cohort');
@@ -260,7 +260,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
     const [
       revMTD, revLastMonth, activeCustomers, newThisMonth,
       estimatesPending, servicesWeek, avgResponse, mrrBreakdown, oneTimeMonth,
-      todaysSchedule, recentActivity, tierRevenue, reviewStats
+      todaysSchedule, recentActivity, tierRevenue, reviewStats, recurringPlans
     ] = await Promise.all([
       paidRevenueTotal(som, today),
       paidRevenueTotal(solm, eolm),
@@ -389,6 +389,9 @@ router.get('/', dashboardCache, async (req, res, next) => {
           return { total: 0, avg_rating: '0', unresponded: 0 };
         }
       })(),
+      // Every WaveGuard plan member across billing lanes — shown beside MRR,
+      // which counts the monthly-dues lane only.
+      computeRecurringPlans(db),
     ]);
 
     const revMTDVal = parseFloat(revMTD || 0);
@@ -423,6 +426,9 @@ router.get('/', dashboardCache, async (req, res, next) => {
       // vs. paused-autopay / overdue accounts (atRisk).
       mrr: mrrBreakdown.total,
       mrrBreakdown,
+      // { customers, monthly }: every WaveGuard plan member at its monthly
+      // average, whatever the billing lane — the recurring base MRR leaves out.
+      recurringPlans,
       oneTimeThisMonth: parseFloat(oneTimeMonth?.total || 0),
       revenueChart: { daily: dailyRevenue.map(d => ({ date: d.date, total: parseFloat(d.total || 0) })) },
       todaysSchedule: todaysSchedule.map(s => ({
@@ -538,8 +544,12 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       : null;
 
     // Revenue/job, RPMH, job efficiency, gross margin
-    // Both per-job average AND revenue-weighted gross margin so a $50 callback
-    // at 100% can't visually offset a $5,000 job at 30%.
+    // Both per-job average AND the aggregate gross margin so a $50 callback
+    // at 100% can't visually offset a $5,000 job at 30%. The aggregate is
+    // SUM(gross_profit) / SUM(revenue) over every costed visit, $0-revenue
+    // ones included: free visits (assessments, re-services, included
+    // follow-ups) cost labor and drive, and weighting by revenue alone hid
+    // that cost (Oct 2026: 31 free visits, 61.5% shown vs 52.4% true).
     const srFin = await db('service_records')
       .where('service_date', '>=', start).where('service_date', '<=', endDate)
       .whereNotNull('revenue')
@@ -549,7 +559,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         db.raw("AVG(revenue) as avg_rev"),
         db.raw("AVG(revenue_per_man_hour) as avg_rpmh"),
         db.raw("AVG(gross_margin_pct) as avg_margin"),
-        db.raw("SUM(revenue * gross_margin_pct) / NULLIF(SUM(revenue), 0) as weighted_margin"),
+        db.raw("100.0 * SUM(gross_profit) / NULLIF(SUM(revenue), 0) as weighted_margin"),
         db.raw("COUNT(*) as jobs")
       ).first();
     const revPerJob = srFin?.avg_rev ? parseFloat(srFin.avg_rev) : null;
@@ -1048,9 +1058,10 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       financial: {
         revPerJob,
         rpmh,
-        // grossMargin kept for V1 backwards compat = revenue-weighted (the
-        // accurate one). V2 reads grossMarginWeighted + grossMarginAvg
-        // explicitly so it can show both.
+        // grossMargin kept for V1 backwards compat = the aggregate margin
+        // (the accurate one; the field keeps its old "Weighted" name). V2
+        // reads grossMarginWeighted + grossMarginAvg explicitly so it can show
+        // both.
         grossMargin: grossMarginWeighted ?? grossMarginAvg,
         grossMarginWeighted,
         grossMarginAvg,
@@ -1197,15 +1208,16 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
     const daysInMonth = Number(etMonthEnd(now).slice(8, 10));
     const monthFraction = elapsedDays / daysInMonth;
 
-    // Revenue + gross profit — same source, window shape, and margin-weighting
-    // convention as the core-KPIs gross-margin tile (uncosted rows count their
+    // Revenue + gross profit — same source, window shape, and margin
+    // convention as the core-KPIs gross-margin tile (every costed visit's
+    // gross_profit, $0-revenue visits included; uncosted rows count their
     // revenue but zero GP), so the bridge and the tile can't disagree.
     const fin = await db('service_records')
       .where('service_date', '>=', monthStart).where('service_date', '<=', today)
       .whereNotNull('revenue')
       .select(
         db.raw('SUM(revenue) as rev'),
-        db.raw('SUM(revenue * gross_margin_pct / 100.0) as gp'),
+        db.raw('COALESCE(SUM(gross_profit), 0) as gp'),
         db.raw('SUM(revenue) FILTER (WHERE gross_margin_pct IS NULL) as uncosted'),
         db.raw('COUNT(*) as jobs'),
       ).first();
