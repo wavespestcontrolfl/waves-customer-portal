@@ -49,7 +49,56 @@ function drawZone(ctx, zone) {
   ctx.strokeStyle = WARN;
   ctx.stroke();
   ctx.restore();
-  outlinedText(ctx, zoneLabel(zone), zone.x, zone.y, 26);
+}
+
+// Labels are drawn after the nozzles so a nozzle never covers them. Each label takes the candidate spot
+// that stays on the photo, clears the labels already placed, and covers the fewest nozzles (ties keep the
+// first candidate, so the same layout always draws the same way).
+const LABEL_SIZE = 26;
+const NOZZLE_R = 17;
+
+function labelBox(ctx, text, x, y) {
+  ctx.font = `700 ${LABEL_SIZE}px ${FONT}`;
+  const w = ctx.measureText(text).width;
+  return { x0: x - w / 2, x1: x + w / 2, y0: y - LABEL_SIZE / 2, y1: y + LABEL_SIZE / 2 };
+}
+
+function boxesOverlap(a, b) {
+  return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+}
+
+function labelCost(box, nozzles, placed) {
+  const offMap = box.x0 < 0 || box.x1 > MAP_WIDTH || box.y0 < 0 || box.y1 > MAP_HEIGHT ? 10000 : 0;
+  const clash = placed.filter((p) => boxesOverlap(box, p)).length * 1000;
+  const covered = nozzles.filter((n) => n.x > box.x0 - NOZZLE_R && n.x < box.x1 + NOZZLE_R
+    && n.y > box.y0 - NOZZLE_R && n.y < box.y1 + NOZZLE_R).length;
+  return offMap + clash + covered;
+}
+
+// `around` is the marker: its center and how far the label must stay from it.
+function drawLabelNear(ctx, text, around, nozzles, placed) {
+  const half = labelBox(ctx, text, 0, 0).x1;
+  const { x, y, gap } = around;
+  const candidates = [
+    { x, y: y - gap - LABEL_SIZE / 2 },
+    { x, y: y + gap + LABEL_SIZE / 2 },
+    { x: x - gap - half - 6, y },
+    { x: x + gap + half + 6, y },
+  ];
+  let best = null;
+  candidates.forEach((c) => {
+    const box = labelBox(ctx, text, c.x, c.y);
+    const cost = labelCost(box, nozzles, placed);
+    if (!best || cost < best.cost) best = { ...c, box, cost };
+  });
+  placed.push(best.box);
+  outlinedText(ctx, text, best.x, best.y, LABEL_SIZE);
+}
+
+function drawLabels(ctx, model) {
+  const placed = [];
+  model.zones.forEach((z) => drawLabelNear(ctx, zoneLabel(z), { x: z.x, y: z.y, gap: z.radiusPx + 6 }, model.nozzles, placed));
+  if (model.pump) drawLabelNear(ctx, 'Pump', { x: model.pump.x, y: model.pump.y, gap: 22 }, model.nozzles, placed);
 }
 
 function drawLine(ctx, line) {
@@ -118,7 +167,6 @@ function drawPump(ctx, pump) {
   ctx.strokeStyle = '#fff';
   ctx.strokeRect(pump.x - 14, pump.y - 14, 28, 28);
   ctx.restore();
-  outlinedText(ctx, 'Pump', pump.x, pump.y + 40, 26);
 }
 
 function drawHeader(ctx, model, logo) {
@@ -144,19 +192,26 @@ function drawHeader(ctx, model, logo) {
   ctx.stroke();
 }
 
+// Two columns, filled down the left first, so up to six rows fit above the concept note.
+const LEGEND_W = 820;
+const LEGEND_COL_W = LEGEND_W / 2;
 function drawLegend(ctx, model, top) {
   const rowH = 34;
-  const boxH = 24 + model.legend.length * rowH;
+  const perCol = Math.ceil(model.legend.length / 2);
+  const boxH = 24 + perCol * rowH;
   ctx.fillStyle = '#f8fafc';
-  ctx.fillRect(24, top, 560, boxH);
+  ctx.fillRect(24, top, LEGEND_W, boxH);
   ctx.strokeStyle = '#94a3b8';
   ctx.lineWidth = 2;
-  ctx.strokeRect(24, top, 560, boxH);
+  ctx.strokeRect(24, top, LEGEND_W, boxH);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = INK;
   ctx.font = `400 26px ${FONT}`;
-  model.legend.forEach((row, i) => ctx.fillText(row, 44, top + 28 + i * rowH));
+  model.legend.forEach((row, i) => {
+    const col = Math.floor(i / perCol);
+    ctx.fillText(row, 44 + col * LEGEND_COL_W, top + 28 + (i % perCol) * rowH, LEGEND_COL_W - 30);
+  });
   return boxH;
 }
 
@@ -212,6 +267,7 @@ export function drawSketch(ctx, model, { map, logo = null }) {
   model.risers.forEach((r) => drawRiser(ctx, r));
   if (model.pump) drawPump(ctx, model.pump);
   model.nozzles.forEach((n) => drawNozzle(ctx, n));
+  drawLabels(ctx, model);
   ctx.restore();
   drawFooter(ctx, model);
 }

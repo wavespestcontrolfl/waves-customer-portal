@@ -7,7 +7,8 @@ import { drawSketch } from './mistingLayoutSketchCanvas';
 // A recording 2D context: every method is a spy, every property just stores what was set.
 function recordingContext() {
   const calls = [];
-  const ctx = new Proxy({}, {
+  // About 14 px per character at the 26 px label size, like the browser's sans-serif.
+  const ctx = new Proxy({ measureText: (text) => ({ width: String(text).length * 14 }) }, {
     get(target, prop) {
       if (prop in target) return target[prop];
       return (...args) => { calls.push([prop, ...args]); };
@@ -16,6 +17,10 @@ function recordingContext() {
   });
   return { ctx, calls };
 }
+
+// [text, x, y] of every fillText of `text` inside the photo (the label pass draws with the photo origin moved).
+const fillsOf = (calls, text) => calls.filter((c) => c[0] === 'fillText' && c[1] === text);
+const box = ([, text, x, y]) => ({ x0: x - text.length * 7, x1: x + text.length * 7, y0: y - 13, y1: y + 13 });
 
 const model = () => buildSketchModel({
   lat: 26.95,
@@ -77,5 +82,47 @@ describe('drawSketch', () => {
     expect(() => drawSketch(ctx, model(), { map: {}, logo: null })).not.toThrow();
     expect(calls.filter((c) => c[0] === 'drawImage')).toHaveLength(1);
     vi.restoreAllMocks();
+  });
+
+  it('draws the labels after the nozzles, beside the pump when a nozzle sits under it, and never on top of each other', () => {
+    const crowded = buildSketchModel({
+      lat: 26.95,
+      zoom: 20,
+      address: '500 Example Court, Venice, FL',
+      lines: [{ id: 'L1', kind: 'eave', points: [{ x: 300, y: 340 }, { x: 900, y: 340 }] }],
+      // One nozzle right where the pump label would go by default (below the pump).
+      nozzles: [{ x: 600, y: 340, kind: 'eave', lineIndex: 0 }],
+      risers: [],
+      pump: { x: 600, y: 300 },
+      // Two zones side by side whose default (above) labels would collide.
+      zones: [
+        { kind: 'pool', x: 500, y: 600, radiusFt: 15, radiusPx: 60 },
+        { kind: 'ac', x: 620, y: 600, radiusFt: 8, radiusPx: 32 },
+      ],
+      totals: { eaveCount: 1, fenceCount: 0, linearFt: 60 },
+    });
+    const { ctx, calls } = recordingContext();
+    drawSketch(ctx, crowded, { map: {}, logo: null });
+
+    const lastNozzleNumber = calls.map((c) => c[0] === 'fillText' && c[1] === '1').lastIndexOf(true);
+    const pump = fillsOf(calls, 'Pump')[0];
+    expect(calls.indexOf(pump)).toBeGreaterThan(lastNozzleNumber);
+    // The label clears the nozzle (radius 17) under the default spot.
+    const p = box(pump);
+    expect(600 > p.x0 - 17 && 600 < p.x1 + 17 && 340 > p.y0 - 17 && 340 < p.y1 + 17).toBe(false);
+
+    const labels = [pump, fillsOf(calls, 'No mist: Pool')[0], fillsOf(calls, 'No mist: AC intake')[0]].map(box);
+    labels.forEach((a, i) => labels.slice(i + 1).forEach((b) => {
+      expect(a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1).toBe(false);
+    }));
+  });
+
+  it('keeps the concept note below the legend box', () => {
+    const { ctx, calls } = recordingContext();
+    drawSketch(ctx, model(), { map: {}, logo: null });
+    const legend = calls.find((c) => c[0] === 'strokeRect' && c[1] === 24);
+    const concept = fillsOf(calls, SKETCH_CONCEPT)[0];
+    // Concept text is 26 px on an alphabetic baseline: its top is about 26 px above y.
+    expect(legend[2] + legend[4]).toBeLessThan(concept[3] - 26);
   });
 });
