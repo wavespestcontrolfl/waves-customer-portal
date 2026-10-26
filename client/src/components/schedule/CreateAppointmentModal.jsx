@@ -4258,6 +4258,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Address-only: no row pins a technician, so no tech pick.
     openTimes: true,
     techPick: !addressOnlyTimes,
+    // The route check Edit uses, on a new stop at this address
+    // (GATE_NEW_APPT_ROUTE_TIMES; the server decides, gaps while it is off).
+    arrivalWindows: true,
   });
 
   // Submit

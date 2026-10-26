@@ -82,7 +82,7 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
-const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX', 'GATE_BOARD_OPEN_TIMES', 'GATE_BOOKING_RAIN_RANK', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX', 'GATE_BOARD_OPEN_TIMES', 'GATE_BOOKING_RAIN_RANK', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY', 'GATE_NEW_APPT_ROUTE_TIMES'];
 const ORIGINAL = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 afterAll(() => {
   for (const name of GATES) {
@@ -235,6 +235,22 @@ test('the Dispatch grid\'s lit hours: the board gate alone allows the open-times
   expect(body.summary.days[0].hours.map((hour) => hour.technician.id)).toEqual(['t1', 't2']);
   // The pickers still ask for the box by its own gate.
   expect(await (await fetch(`${baseUrl}/admin/schedule/find-time/ui`)).json()).toEqual({ ok: true, openTimes: false });
+});
+
+test('New Appointment (no visit yet): GATE_NEW_APPT_ROUTE_TIMES runs the box\'s search as the route check on a new stop', async () => {
+  process.env.GATE_OPEN_TIMES_BOX = 'true';
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  const asked = () => findAvailableSlots.mock.calls.at(-1)[0];
+  // Gate off: the gap check, as before.
+  await post({ ...LIST, arrivalWindows: true });
+  expect(asked()).not.toHaveProperty('arrivalWindow');
+  process.env.GATE_NEW_APPT_ROUTE_TIMES = 'true';
+  await post({ ...LIST, arrivalWindows: true });
+  expect(asked().arrivalWindow).toEqual({ prospective: { lat: 27.4, lng: -82.5, estimated_duration_minutes: 60 } });
+  // Only the open-times box asks it: the strip's summary keeps the gap check.
+  delete process.env.GATE_OPEN_TIMES_BOX;
+  await post({ ...LIST, arrivalWindows: true });
+  expect(asked()).not.toHaveProperty('arrivalWindow');
 });
 
 test('GATE_BOARD_OPEN_TIMES is off unless set and rides the admin schedule day view to Dispatch', () => {

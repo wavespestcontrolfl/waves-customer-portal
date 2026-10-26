@@ -74,6 +74,16 @@ test('the pre-capacity arrival finder keeps its enumerator\'s refusal counts, pe
   });
 });
 
+test('a new stop (New Appointment, GATE_NEW_APPT_ROUTE_TIMES) runs the same finder on a prospective context', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  enumerateArrivalPlacements.mockReturnValue({ placements: [{ windowStart: '17:00', windowEnd: '18:00', fit }], evaluated: 12, rejections: {} });
+  const prospective = { lat: 27.4, lng: -82.5, estimated_duration_minutes: 60 };
+  const result = await findAvailableSlots({ ...BASE, dateTo: OPEN_DAY, arrivalWindow: { prospective } });
+  expect(loadArrivalRouteContext).toHaveBeenCalledWith(expect.objectContaining({ prospective, date: OPEN_DAY, technicianId: 'tech-1' }));
+  expect(loadArrivalRouteContext.mock.calls[0][0]).not.toHaveProperty('serviceId');
+  expect(result.slots.map((slot) => [slot.date, slot.start_time, slot.route_mode])).toEqual([[OPEN_DAY, '17:00', 'arrival_windows']]);
+});
+
 test('the capacity finder splits its refusal counts by date', async () => {
   process.env.GATE_SCHEDULING_CAPACITY = 'true';
   evaluateArrivalPlacement.mockImplementation((context, options) => {
