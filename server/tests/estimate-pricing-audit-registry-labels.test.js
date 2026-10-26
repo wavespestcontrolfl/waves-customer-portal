@@ -31,7 +31,7 @@ const registry = {
     row('Bora-Care Treatment', 'Bora-Care', boraCare),
     row('Termite Wood Treatment', 'Bora-Care', boraCare),
     row('German Roach Cleanout', 'Alpine WSG'),
-    row('German Roach Cleanout', 'Gentrol IGR'),
+    row('German Roach Cleanout', 'Gentrol Complete EC3'),
     row('Cockroach Treatment', 'Alpine WSG'),
     row('Cockroach Treatment', 'JT Eaton glue board', { usage_amount: 4, usage_unit: 'boards', cost_per_unit: 0.3936, cost_unit: 'each' }),
   ],
@@ -51,7 +51,7 @@ describe('estimate pricing audit reads the registry service labels', () => {
     for (const key of ['german_roach', 'german_roach_initial']) {
       const cogs = inventoryCostFromRows(key, { homeSqFt: 2000 }, registry);
       expect(cogs.matchedServiceType).toBe('German Roach Cleanout');
-      expect(cogs.lines.map((l) => l.productName)).toEqual(['Alpine WSG', 'Gentrol IGR']);
+      expect(cogs.lines.map((l) => l.productName)).toEqual(['Alpine WSG', 'Gentrol Complete EC3']);
       expect(cogs.totalPerVisit).toBe(4);
     }
   });

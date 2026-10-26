@@ -3,7 +3,7 @@ import { KeyRound } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
-  ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Textarea, UiSurface,
+  ActionFeedback, Badge, Button, Card, CardBody, Checkbox, Field, Input, Select, Textarea, UiSurface,
 } from "../../components/ui";
 import { adminFetch as rawAdminFetch } from "../../lib/adminFetch";
 import { FoundCodeCard } from "../../components/admin/AccessCodePanels";
@@ -44,7 +44,7 @@ function fmtDate(value) {
   return date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" });
 }
 
-const BLANK_FORM = { gateLabel: "Main gate", accessType: "keypad", code: "", instructions: "", gateLocation: "" };
+const BLANK_FORM = { gateLabel: "Main gate", accessType: "keypad", code: "", instructions: "", gateLocation: "", unconfirmed: false };
 
 // "27.4321, -82.4567": the stored pin as the office typed it, and as it reads
 // back in the form.
@@ -70,10 +70,12 @@ function bodyFromForm(form) {
   const body = { gate_label: form.gateLabel, access_type: form.accessType, gate_location: form.gateLocation.trim() || null };
   if (form.accessType === "keypad") body.code = form.code;
   else body.instructions = form.instructions;
+  // An old code the office has not seen work files as Needs confirm (owner 2026-10-26).
+  if (form.unconfirmed) body.unconfirmed = true;
   return body;
 }
 
-function EntryForm({ initial, submitLabel, busy, error, onSubmit, onCancel, idPrefix }) {
+function EntryForm({ initial, submitLabel, busy, error, onSubmit, onCancel, idPrefix, showUnconfirmed = false }) {
   const [form, setForm] = useState(initial);
   const set = (key) => (event) => setForm((f) => ({ ...f, [key]: event.target.value }));
   const keypad = form.accessType === "keypad";
@@ -109,6 +111,14 @@ function EntryForm({ initial, submitLabel, busy, error, onSubmit, onCancel, idPr
       >
         <Input value={form.gateLocation} onChange={set("gateLocation")} maxLength={2048} autoComplete="off" placeholder="27.4321, -82.4567 or a Google Maps link" />
       </Field>
+      {showUnconfirmed && (
+        <Checkbox
+          id={`${idPrefix}-unconfirmed`}
+          label="I have not seen this work (file it as Needs confirm)"
+          checked={form.unconfirmed === true}
+          onChange={(event) => setForm((f) => ({ ...f, unconfirmed: event.target.checked }))}
+        />
+      )}
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap items-center gap-2">
         <Button type="submit" size="sm" disabled={busy}>{submitLabel}</Button>
@@ -393,6 +403,55 @@ function SuggestedMerges({ items, hidden, reviewing, disabled, onReview, onDismi
   );
 }
 
+// Why a home is on the Homes not placed list, in the office's words.
+function unplacedReason(h) {
+  const parts = [];
+  if (h.countyLot) {
+    const named = h.countyLot.community ? `the county puts it in ${h.countyLot.community}` : "the county gives no community";
+    parts.push(`ZIP ${h.zip || "blank"} here, ${h.countyLot.zip} on the county's lot; ${named}.`);
+  }
+  if (h.savedCode) parts.push("Its saved gate code reaches only this customer's stops.");
+  return parts.join(" ");
+}
+
+// Homes the directory cannot place (owner ruling 2026-10-26): no neighborhood,
+// so no shared gate code reaches them. A person links each one; nothing links
+// by itself. Empty while the switch is off (the page clears the list).
+function UnplacedHomes({ items, hidden, disabled, onLink }) {
+  const [all, setAll] = useState(false);
+  if (hidden || !items.length) return null;
+  const shown = all ? items : items.slice(0, SUGGESTIONS_SHOWN);
+  return (
+    <div className="mb-3 grid gap-2 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-3">
+      <div className="text-ui-body font-medium text-zinc-900">{`Homes not placed (${items.length})`}</div>
+      <div className="text-ui-body text-ink-secondary">
+        These homes have no neighborhood, so no shared gate code reaches them. Check the county's community, then link the home.
+      </div>
+      {shown.map((h) => (
+        <div key={h.propertyId} className="grid gap-1 rounded-sm border-hairline border-zinc-200 px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="min-w-0 break-words text-ui-body text-zinc-900">
+              <Link className="underline underline-offset-2 hover:no-underline u-focus-ring" to={`/admin/customers?customerId=${encodeURIComponent(h.customerId)}`}>
+                {h.customerName || "Customer"}
+              </Link>
+              {h.address ? ` · ${h.address}` : ""}
+            </span>
+            {h.countyLot?.community && (
+              <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onLink(h)}>{`Link to ${h.countyLot.community}`}</Button>
+            )}
+          </div>
+          <div className="text-ui-body text-ink-secondary">{unplacedReason(h)}</div>
+        </div>
+      ))}
+      {items.length > SUGGESTIONS_SHOWN && (
+        <div>
+          <Button size="sm" variant="ghost" onClick={() => setAll(!all)}>{all ? "Show fewer" : `Show all (${items.length})`}</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // The entries merged into this one: their names still find it, and each
 // merge can be undone.
 function MergedIn({ merges, disabled, onUndo }) {
@@ -445,6 +504,8 @@ export default function NeighborhoodGateCodesPage() {
   const [mergingFrom, setMergingFrom] = useState("");
   const [mergeEnabled, setMergeEnabled] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
+  const [unplacedEnabled, setUnplacedEnabled] = useState(false);
+  const [unplaced, setUnplaced] = useState([]);
   const [reviewing, setReviewing] = useState("");
   const [formError, setFormError] = useState("");
 
@@ -523,6 +584,7 @@ export default function NeighborhoodGateCodesPage() {
       if (seq !== readSeq.current) return;
       setDisabled(false);
       setMergeEnabled(data.mergeEnabled === true);
+      setUnplacedEnabled(data.unplacedEnabled === true);
       setNeighborhoods((prev) => (offset ? [...prev, ...(data.neighborhoods || [])] : data.neighborhoods || []));
       setTotal(data.total || 0);
     } catch (err) {
@@ -570,6 +632,20 @@ export default function NeighborhoodGateCodesPage() {
     else setSuggestions([]);
   }, [mergeEnabled, loadSuggestions]);
 
+  const loadUnplaced = useCallback(async () => {
+    try {
+      const data = await api("/admin/neighborhood-access/unplaced");
+      setUnplaced(data.homes || []);
+    } catch {
+      // A help list, not the page: on any failure it is just not shown.
+      setUnplaced([]);
+    }
+  }, []);
+  useEffect(() => {
+    if (unplacedEnabled) loadUnplaced();
+    else setUnplaced([]);
+  }, [unplacedEnabled, loadUnplaced]);
+
   const mutate = async ({ key, path, method, body, successText, onError }) => {
     setBusyKey(key);
     setActionError("");
@@ -579,6 +655,7 @@ export default function NeighborhoodGateCodesPage() {
       closeForms();
       await loadRef.current();
       if (mergeEnabled) await loadSuggestions();
+      if (unplacedEnabled) await loadUnplaced();
       setToast(typeof successText === "function" ? successText(result) : successText);
     } catch (err) {
       if (onError) onError(err.message || "Action failed");
@@ -654,6 +731,19 @@ export default function NeighborhoodGateCodesPage() {
     body: { sourceId: s.source.id, targetId: s.target.id },
     successText: `Marked ${s.source.name} and ${s.target.name} as not the same`,
   });
+  // The office pick on the county's community (the Customer 360 picker's own
+  // route): it finds that community under any spelling, or adds it.
+  const onLinkUnplaced = (h) => {
+    const { community, county } = h.countyLot;
+    if (!window.confirm(`Link ${h.address || "this home"} to ${community}? That neighborhood's gate codes will show at this home.`)) return;
+    mutate({
+      key: `${h.propertyId}:link`,
+      path: `/admin/neighborhood-access/properties/${h.propertyId}/neighborhood`,
+      method: "PUT",
+      body: { create: { name: community, county } },
+      successText: `Linked ${h.address || "the home"} to ${community}`,
+    });
+  };
 
   const showEmpty = !loading && !readError && !disabled && neighborhoods.length === 0;
 
@@ -690,6 +780,13 @@ export default function NeighborhoodGateCodesPage() {
         <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Gate codes are not turned on yet.</div>
       ) : (
         <>
+          <UnplacedHomes
+            items={unplaced}
+            hidden={Boolean(onlyNeighborhood)}
+            disabled={busyKey !== ""}
+            onLink={onLinkUnplaced}
+          />
+
           <SuggestedMerges
             items={suggestions}
             hidden={Boolean(onlyNeighborhood)}
@@ -838,6 +935,7 @@ export default function NeighborhoodGateCodesPage() {
                       <EntryForm
                         idPrefix={`add-${n.id}`}
                         initial={BLANK_FORM}
+                        showUnconfirmed={unplacedEnabled}
                         submitLabel="Save entry"
                         busy={busyKey === `${n.id}:add`}
                         error={formError}

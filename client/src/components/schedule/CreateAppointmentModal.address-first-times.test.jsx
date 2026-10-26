@@ -48,8 +48,9 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+// The searches only: the pickers also ask GET /find-time/ui which box to draw.
 const findTimeBodies = () => fetcher.mock.calls
-  .filter(([url]) => String(url).includes('/find-time'))
+  .filter(([url, options]) => String(url).includes('/find-time') && options?.method === 'POST')
   .map(([, options]) => JSON.parse(options.body));
 
 const renderModal = (props = {}) => render(

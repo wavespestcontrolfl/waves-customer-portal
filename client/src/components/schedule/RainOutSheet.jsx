@@ -557,6 +557,8 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
     // rain fit (GATE_BOOKING_RAIN_RANK). The server reads what the visit
     // books from its own rows (serviceId), add-ons and a shared stop included.
     bestRows: true,
+    // The open-times box (GATE_OPEN_TIMES_BOX), on the visit's own route.
+    openTimes: true,
   });
 
   // Two lists, one scope toggle (codex #3375 P2 ×2):

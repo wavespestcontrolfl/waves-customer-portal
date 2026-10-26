@@ -116,6 +116,8 @@ function chain(row) {
 
 // technicians: a single active + field-dispatchable row, whatever the where().
 // work_days (GATE_TECH_WORK_DAYS) is whatever the test sets; null = every day.
+// technician_capabilities rows that are Off (GATE_TECH_JOB_TYPE_CHECKS); [] = qualified or needs review.
+let capabilityOffCategories = [];
 let techWorkDays = null;
 function chainTechnician() {
   return chain({ id: 'any-tech', name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true, work_days: techWorkDays });
@@ -153,21 +155,36 @@ let updateCalls;
 
 // Wires the strict mock for one scenario: the row as it stands, and which
 // (technician_id, absence_date) pair the technician_absences table answers.
-function setup({ svc, absenceTechId, absenceDate }) {
+// seriesRows: what a LIST read of scheduled_services returns (a series scope's
+// targets); a .first() read still returns svc.
+function setup({ svc, absenceTechId, absenceDate, seriesRows = null }) {
   updateCalls = [];
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
-  db.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...svc } : (table === 'customers' ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null } : undefined)));
+  const listOf = (c) => {
+    if (seriesRows) c.then = (resolve, reject) => Promise.resolve(seriesRows.map((row) => ({ ...row }))).then(resolve, reject);
+    return c;
+  };
+  db.mockImplementation((table) => (table === 'scheduled_services'
+    ? listOf(chain({ ...svc }))
+    : chain(table === 'customers' ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null } : undefined)));
   trx = jest.fn((table) => {
     if (table === 'technicians') return chainTechnician();
     if (table === 'technician_absences') return chainTechAbsences(absenceTechId, absenceDate);
+    if (table === 'technician_capabilities') {
+      const caps = chain(undefined);
+      caps.pluck = jest.fn().mockResolvedValue(capabilityOffCategories);
+      return caps;
+    }
     const c = chain(table === 'scheduled_services' ? { ...svc } : (table === 'customers' ? { id: 'cust-1' } : undefined));
     if (table === 'scheduled_services') {
       c.update = jest.fn(async (data) => { updateCalls.push(data); return 1; });
+      listOf(c);
     }
     return c;
   });
-  trx.raw = jest.fn(async (sql, bindings) => ({ sql, bindings, rows: [] }));
+  // A series scope takes the per-parent maintenance try-lock: granted.
+  trx.raw = jest.fn(async (sql, bindings) => ({ sql, bindings, rows: /pg_try_advisory_xact_lock/.test(String(sql)) ? [{ locked: true }] : [] }));
   trx.fn = { now: jest.fn(() => 'now()') };
   trx.transaction = jest.fn(async (cb) => cb(trx));
   trx.commit = jest.fn();
@@ -178,7 +195,9 @@ function setup({ svc, absenceTechId, absenceDate }) {
 beforeEach(() => {
   jest.clearAllMocks();
   techWorkDays = null;
+  capabilityOffCategories = [];
   delete process.env.GATE_TECH_WORK_DAYS;
+  delete process.env.GATE_TECH_JOB_TYPE_CHECKS;
   findConflictingVisits.mockResolvedValue([]);
   acquireOccupancyLock.mockImplementation(async () => {});
   lockCustomerComms.mockImplementation(async () => {});
@@ -297,3 +316,75 @@ describe('PUT /:id/update-details — technician work days (office paths warn, n
   });
 });
 
+
+// GATE_TECH_JOB_TYPE_CHECKS (owner 2026-10-25): the office edit saves and warns when the
+// NEW technician is set to Off for the visit's category.
+describe('PUT /:id/update-details — technician job type (office paths warn, never block)', () => {
+  afterEach(() => { delete process.env.GATE_TECH_JOB_TYPE_CHECKS; });
+
+  test('gate on, the new technician is Off for the visit\'s category: the edit is written and the reply warns', async () => {
+    process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
+    capabilityOffCategories = ['general'];
+    setup({ svc: baseSvc({ technician_id: TECH_A }), absenceTechId: null, absenceDate: null });
+    assignDispatchJob.mockResolvedValue({ changed: true, technicianName: 'Test Tech B' });
+
+    const { status, body } = await put('svc-1', { technicianId: TECH_B });
+
+    expect(status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.warnings).toEqual(['Test Tech is set to Off for General pest work.']);
+  });
+
+  test('gate on, no Off row (qualified or needs review): no warning', async () => {
+    process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
+    setup({ svc: baseSvc({ technician_id: TECH_A }), absenceTechId: null, absenceDate: null });
+    assignDispatchJob.mockResolvedValue({ changed: true, technicianName: 'Test Tech B' });
+
+    const { status, body } = await put('svc-1', { technicianId: TECH_B });
+
+    expect(status).toBe(200);
+    expect((body.warnings || []).some((w) => /set to Off/.test(w))).toBe(false);
+  });
+
+  test('gate on, the technician is unchanged (a date-only edit): no warning', async () => {
+    process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
+    capabilityOffCategories = ['general'];
+    setup({ svc: baseSvc({ technician_id: TECH_A }), absenceTechId: null, absenceDate: null });
+
+    const { status, body } = await put('svc-1', { scheduledDate: NEW_DATE });
+
+    expect(status).toBe(200);
+    expect((body.warnings || []).some((w) => /set to Off/.test(w))).toBe(false);
+  });
+
+  test('gate on, a following scope moves the later visits to a technician Off for their category while this visit keeps its technician: the reply warns (Codex #6740 r2)', async () => {
+    process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
+    const LINE = 'Test Tech B is set to Off for General pest work.';
+    const anchor = baseSvc({ technician_id: TECH_B, recurring_parent_id: 'parent-1' });
+    const later = baseSvc({ id: 'svc-2', technician_id: TECH_A, recurring_parent_id: 'parent-1', scheduled_date: NEW_DATE, day: NEW_DATE });
+    setup({ svc: anchor, absenceTechId: null, absenceDate: null, seriesRows: [anchor, later] });
+    assignDispatchJob.mockImplementation(async ({ jobId }) => (jobId === 'svc-2'
+      ? { changed: true, technicianName: 'Test Tech B', warnings: [LINE], capabilityWarnings: [LINE] }
+      // The edited visit's own line comes from the values the save writes, never
+      // from the assignment's read of the row as it stood.
+      : { changed: false, technicianName: 'Test Tech B', capabilityWarnings: ['stale line for the edited visit'] }));
+
+    const { status, body } = await put('svc-1', { technicianId: TECH_B, assignmentScope: 'following' });
+
+    expect(status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(assignDispatchJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'svc-2', technicianId: TECH_B }));
+    expect(body.warnings).toEqual([LINE]);
+  });
+
+  test('gate off: an Off category is ignored', async () => {
+    capabilityOffCategories = ['general'];
+    setup({ svc: baseSvc({ technician_id: TECH_A }), absenceTechId: null, absenceDate: null });
+    assignDispatchJob.mockResolvedValue({ changed: true, technicianName: 'Test Tech B' });
+
+    const { status, body } = await put('svc-1', { technicianId: TECH_B });
+
+    expect(status).toBe(200);
+    expect((body.warnings || []).some((w) => /set to Off/.test(w))).toBe(false);
+  });
+});

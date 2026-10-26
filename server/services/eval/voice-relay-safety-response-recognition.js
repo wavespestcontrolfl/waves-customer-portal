@@ -87,7 +87,7 @@ const SAFETY_MIGRATION_PRODUCT_NAMES = Object.freeze([
   "Cyzmic CS", "Atticus Talak", "Scion Insecticide",
   "Onslaught Fastcap", "Permethrin SFR", "Temprid FX",
   "Alpine WSG", "Delta Dust", "Elector PSP",
-  "Gentrol IGR", "Tekko Pro IGR", "LESCO Crosscheck Plus",
+  "Gentrol IGR", "Gentrol Complete EC3", "Tekko Pro IGR", "LESCO Crosscheck Plus",
   "Talstar P", "Aprehend", "Topchoice Granular Insecticide",
   "Acelepryn Insecticide", "Acelepryn Xtra", "Dylox 420 SL T&O Insecticide",
   "Arena 50 WDG", "Nufarm Arena 0.25G Clothianidin 0.25 Systemic Granular Insecticide", "Tetrino Insecticide",

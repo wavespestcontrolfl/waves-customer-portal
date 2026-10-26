@@ -2470,6 +2470,9 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
   }
 
   const assignmentWarnings = new Set();
+  // Job-type lines for the OTHER visits a series scope reassigns. The edit
+  // handler warns for the edited visit itself, from the values it is saving.
+  const siblingCapabilityWarnings = new Set();
   for (const targetId of targetIds) {
     const assignment = await assignDispatchJob({
       jobId: targetId,
@@ -2484,6 +2487,9 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     if (assignment.technicianName) technicianName = assignment.technicianName;
     if (assignment.changed) changedJobIds.push(targetId);
     for (const line of assignment.warnings || []) assignmentWarnings.add(line);
+    if (String(targetId) !== String(jobId)) {
+      for (const line of assignment.capabilityWarnings || []) siblingCapabilityWarnings.add(line);
+    }
   }
 
   if (scope !== 'this_only' && parentId) {
@@ -2512,6 +2518,7 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
     changed: changedJobIds.length > 0 || templateChanged,
     technicianName,
     ...(assignmentWarnings.size ? { warnings: [...assignmentWarnings] } : {}),
+    ...(siblingCapabilityWarnings.size ? { siblingCapabilityWarnings: [...siblingCapabilityWarnings] } : {}),
   };
 }
 
@@ -9437,6 +9444,15 @@ async function scheduleCreateHandler(req, res, next) {
         const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
         bookingWarnings.push(...await offDayWarningsFor(resolvedTechId, offDayDates, { conn: trx }));
       }
+      // Job type (GATE_TECH_JOB_TYPE_CHECKS): the chosen technician is set to Off for this
+      // service's category - the same advisory path, never a block ([] with the gate off).
+      if (resolvedTechId) {
+        bookingWarnings.push(...await require('../services/technician-eligibility').capabilityOffWarningsFor(
+          resolvedTechId,
+          [{ service_type: serviceType, service_id: serviceId || null, service_key: pricing.primaryServiceKey || null }],
+          { conn: trx },
+        ));
+      }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -14903,7 +14919,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // as the create-appointment path.
       if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
         const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
-          .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
         const finalTechnicianId = hasTechnicianIdUpdate
           ? requestedTechnicianId
           : (eligibilityRow?.technician_id || null);
@@ -14924,6 +14940,16 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             const { offDayWarningFor } = require('../services/technician-eligibility');
             const offDayLine = await offDayWarningFor(finalTechnicianId, finalDate, { conn: trx });
             if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
+          }
+          // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
+          // category. Advisory, never a block ([] with the gate off).
+          if (finalTechChanging) {
+            const capabilityLines = await require('../services/technician-eligibility').capabilityOffWarningsFor(finalTechnicianId, [{
+              service_type: updates.service_type !== undefined ? updates.service_type : eligibilityRow?.service_type,
+              service_id: updates.service_id !== undefined ? updates.service_id : eligibilityRow?.service_id,
+              service_key: updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : eligibilityRow?.service_key_snapshot,
+            }], { conn: trx });
+            for (const line of capabilityLines) if (!editWarnings.includes(line)) editWarnings.push(line);
           }
         }
       }
@@ -15334,6 +15360,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         });
         assignmentChanged = !!assignment.changed;
         assignmentUpdatedJobIds = assignment.changedJobIds || [];
+        // Job type (GATE_TECH_JOB_TYPE_CHECKS): a following or whole-series scope
+        // can move the other visits to a technician who is Off for their job type
+        // even when this visit keeps its technician (Codex #6740 r2).
+        for (const line of assignment.siblingCapabilityWarnings || []) {
+          if (!editWarnings.includes(line)) editWarnings.push(line);
+        }
       }
 
       // Shared occupancy probe for window, duration, and route edits — the

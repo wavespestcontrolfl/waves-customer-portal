@@ -48,7 +48,8 @@ const {
   customerLastStart16Enabled,
 } = require('./scheduling/customer-windows');
 const { selfServeNoticeMinutes } = require('./scheduling/self-serve-notice');
-const { isEnabled } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+const { isEnabled } = featureGates;
 const { slotRainTierOf, demoteByRainTier } = require('./scheduling/customer-rain-rank');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
@@ -1235,6 +1236,50 @@ function dedupeSlots(slots = []) {
   return [...byKey.values()];
 }
 
+// GATE_ESTIMATE_SLOT_ONE_PER_HOUR (owner 2026-10-25, second technician): the
+// picker lists ONE opening per date + start time, the way /book keeps one
+// technician per `date|startTime` (routes/booking.js). dedupeSlots keys on the
+// technician, so two technicians at the same hour both reached the customer
+// ("Tue 9:00" twice), the "Only N openings" badge counted both, and the repeat
+// pushed other times out of the short list. The kept slot is one COMPLETE
+// slot object (its own techId, slotId and hold fields) — nothing is merged
+// from the dropped one, so reserve still holds a real technician. The best
+// slot of an hour is the one the picker itself sorts first
+// (compareCustomerFacingSlots: route-optimal, then the shortest detour to a
+// nearby job, then the slot id), so the choice never depends on list order.
+// A slot with no date or no start is left alone.
+function collapseSameStartSlots(slots = []) {
+  const byStart = new Map();
+  const out = [];
+  for (const slot of slots) {
+    if (!slot?.date || !slot?.windowStart) {
+      out.push(slot);
+      continue;
+    }
+    const key = `${slot.date}|${slot.windowStart}`;
+    const at = byStart.get(key);
+    if (at === undefined) {
+      byStart.set(key, out.length);
+      out.push(slot);
+    } else if (compareCustomerFacingSlots(slot, out[at]) < 0) {
+      out[at] = slot;
+    }
+  }
+  return out;
+}
+
+// Read through the module object at call time: suites that mock
+// config/feature-gates down to a few functions then read the gate as off.
+function onePerHourOn() {
+  return typeof featureGates.estimateSlotOnePerHourLive === 'function'
+    && featureGates.estimateSlotOnePerHourLive() === true;
+}
+
+// Gate off returns the very same array, so the output is byte-identical.
+function applyOnePerHour(slots) {
+  return onePerHourOn() ? collapseSameStartSlots(slots) : slots;
+}
+
 function compareCustomerFacingSlots(a, b) {
   const dateCmp = String(a?.date || '').localeCompare(String(b?.date || ''));
   if (dateCmp !== 0) return dateCmp;
@@ -1946,6 +1991,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     lunchBlockEnabled() ? 'lunch_blocked' : 'noon_open',
     // A flip of GATE_CUSTOMER_LAST_START_16 must not serve cached 17:00 offers.
     customerLastStart16Enabled() ? 'last_start_16' : 'last_start_17',
+    // A flip of GATE_ESTIMATE_SLOT_ONE_PER_HOUR must not serve the other list shape.
+    onePerHourOn() ? 'one_per_hour' : 'per_tech',
     // The RESOLVED bounds, not just the gate flag (Codex push-audit P1 on
     // #4663): booking_config's lunch interval / day-end override refreshes
     // on its own 60s TTL (customer-windows.js), independent of this 5-min
@@ -2111,7 +2158,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     ]);
     const asapRaw = asapLists.flat().filter((s) => !stopDates.has(s.date));
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
-    const filtered = dedupeSlots(asap).sort(compareCustomerFacingSlots);
+    const filtered = applyOnePerHour(dedupeSlots(asap)).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
       filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
       serviceProfile,
@@ -2247,7 +2294,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
   const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
-  const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
+  const sortedPool = applyOnePerHour(dedupeSlots([...asap, ...classified])).sort(compareCustomerFacingSlots);
   // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(
     filterPastSlotsForToday(sortedPool, { minimumLeadMinutes: opts.minimumLeadMinutes }),
@@ -2575,6 +2622,7 @@ module.exports = {
     buildAsapCapacitySlots,
     buildAsapCapacitySlotsForTechs,
     dedupeSlots,
+    collapseSameStartSlots,
     earliestBookableMinuteForDate,
     enumerateETDateStrings,
     etDateRange,

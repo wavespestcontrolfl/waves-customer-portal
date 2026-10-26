@@ -46,6 +46,47 @@ describe('contract-pdf', () => {
     await isPdf(buf);
   });
 
+  const imageCount = (buf) => (buf.toString('latin1').match(/\/Subtype\s*\/Image/g) || []).length;
+
+  // A 240×64 PNG with one dark stroke, like the signing page's pad exports.
+  async function drawnSignatureDataUrl() {
+    const sharp = require('sharp');
+    const png = await sharp({ create: { width: 240, height: 64, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
+      .composite([{ input: { create: { width: 160, height: 6, channels: 4, background: { r: 27, g: 44, b: 91, alpha: 1 } } }, left: 40, top: 30 }])
+      .png().toBuffer();
+    return `data:image/png;base64,${png.toString('base64')}`;
+  }
+
+  test('builds an executed-copy PDF that stamps the drawn signature above the typed name', async () => {
+    const signed = {
+      ...baseContract,
+      status: 'signed',
+      signed_name: 'Jane Buyer',
+      recipient_initials: 'JB',
+      signed_at: '2026-06-23T15:04:00Z',
+      signature_image: await drawnSignatureDataUrl(),
+    };
+    const withDrawn = await buildContractPDFBuffer(signed, customer, { signed: true });
+    await isPdf(withDrawn);
+    const typedOnly = await buildContractPDFBuffer({ ...signed, signature_image: null }, customer, { signed: true });
+    // More image XObjects than the typed-only copy (the brand logo is an image on both; a PNG with alpha embeds
+    // its soft mask as a second image object, so the count is compared, not fixed).
+    expect(imageCount(withDrawn)).toBeGreaterThan(imageCount(typedOnly));
+    expect(withDrawn.length).toBeGreaterThan(typedOnly.length);
+  });
+
+  test('a review copy never prints a drawn signature, and an undecodable image is skipped rather than fatal', async () => {
+    const plainReview = await buildContractPDFBuffer(baseContract, customer, { signed: false });
+    const review = await buildContractPDFBuffer({ ...baseContract, signature_image: await drawnSignatureDataUrl() }, customer, { signed: false });
+    await isPdf(review);
+    expect(imageCount(review)).toBe(imageCount(plainReview));
+    const garbage = await buildContractPDFBuffer({
+      ...baseContract, status: 'signed', signed_name: 'Jane Buyer', signed_at: '2026-06-23T15:04:00Z',
+      signature_image: `data:image/png;base64,${Buffer.from('not a png at all').toString('base64')}`,
+    }, customer, { signed: true });
+    await isPdf(garbage);
+  });
+
   test('the existing annual-agreement title is fully printed above its recipient block', async () => {
     const PDFDocument = require('pdfkit');
     const fragments = [];

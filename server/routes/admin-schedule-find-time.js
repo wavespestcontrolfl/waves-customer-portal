@@ -25,7 +25,14 @@
  *                             // (same order, '' when none), for the rain ranking
  *     serviceTypes?,          // compareTechs: every service in the booking; a tech that
  *                             // cannot perform one is left out of `pickedByTech`
+ *     openTimes?,             // summary mode, GATE_OPEN_TIMES_BOX on: the open-times box's
+ *                             // list instead (up to 28 days, every technician's hours, no
+ *                             // picked verdict, no best-times rows); answers `summary.open_times`
  *   }
+ *
+ * GET /api/admin/schedule/find-time/ui
+ *   { openTimes } — whether the staff pickers show the open-times box
+ *   (GATE_OPEN_TIMES_BOX, which needs GATE_BEST_TIME_HINTS for an answer).
  */
 
 const express = require('express');
@@ -207,6 +214,26 @@ async function resolveFindTimeTarget({ serviceId, propertyId, customerId, addres
   };
 }
 
+// The technicians among `techIds` who cannot perform one of the booking's
+// services. A list row books its technician explicitly, past the auto
+// matcher's capability check, so such a technician is never listed.
+async function techsLackingServices(techIds, { serviceType, serviceTypes }) {
+  const wanted = [...new Set([serviceType, ...(Array.isArray(serviceTypes) ? serviceTypes : [])]
+    .filter((t) => typeof t === 'string' && t.trim()))];
+  const ids = [...new Set(techIds.filter(Boolean).map(String))];
+  if (!wanted.length || !ids.length) return new Set();
+  const inactive = await require('../services/technician-capabilities').inactiveCapabilitiesForServices(
+    db, ids, wanted.map((service_type) => ({ service_type })),
+  );
+  return new Set(inactive.map((row) => String(row.technician_id)));
+}
+
+// The pickers ask once which box to draw, so a search is shaped for it from
+// the start. Read at call time: a flip needs no redeploy.
+router.get('/ui', (req, res) => {
+  res.json({ ok: true, openTimes: gateEnvValue('GATE_BEST_TIME_HINTS') && gateEnvValue('GATE_OPEN_TIMES_BOX') });
+});
+
 router.post('/', async (req, res) => {
   try {
     const {
@@ -304,8 +331,11 @@ router.post('/', async (req, res) => {
     // (range in the past, picked date outside the range) throws a 400 the
     // handler's catch reports like every other.
     const startedAt = Date.now();
+    // The open-times box (owner 2026-10-25, layout A): only open times, over
+    // four weeks, on every technician's route. Off = the strip's summary.
+    const openTimes = hint && summary === true && req.body?.openTimes === true && gateEnvValue('GATE_OPEN_TIMES_BOX');
     const plan = hintSearchPlan({
-      hint, summary,
+      hint, summary, openTimes,
       from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes,
     });
 
@@ -383,14 +413,14 @@ router.post('/', async (req, res) => {
     const rawSlots = markUnknownDetours(Array.isArray(result?.slots) ? result.slots : []);
     // One guard pass answers both lists: `ranked` is the plain hint's top-N
     // (one start per gap); `every` is each start that fits, for the summary.
-    const { ranked: slots, every } = hint
+    const { ranked: slots, every: everyStart } = hint
       ? await guardHintStarts(rawSlots, {
-        today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN, every: plan.summary,
+        today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN, every: plan.summary, perTech: plan.openTimes === true,
       })
       : { ranked: rawSlots };
     // A compareTechs request asks for the hour on every route instead of the
     // single-route verdict (a cost for a route the booking may not use).
-    const picked = hint && pickedStart && compareTechs !== true
+    const picked = hint && pickedStart && compareTechs !== true && !plan.openTimes
       ? await scorePickedHour({
         rawSlots, from: plan.verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
@@ -404,22 +434,21 @@ router.post('/', async (req, res) => {
     // Every service in the booking must be one the technician performs: a
     // row picks the tech explicitly, past the auto matcher's capability
     // check, so an unqualified tech is never listed (either finder path).
-    let pickedByTech = hint && compareTechs === true && pickedStart && !technicianId && !useArrivalWindows
+    let pickedByTech = hint && compareTechs === true && pickedStart && !technicianId && !useArrivalWindows && !plan.openTimes
       ? await scorePickedHourByTech({
         rawSlots, from: plan.verdictDate, today, sameDayFloorMin, pickedStart, pickedEnd, spanMin, excluded,
       })
       : undefined;
     if (pickedByTech?.length) {
-      const wanted = [...new Set([serviceType, ...(Array.isArray(serviceTypes) ? serviceTypes : [])]
-        .filter((t) => typeof t === 'string' && t.trim()))];
-      if (wanted.length) {
-        const inactive = await require('../services/technician-capabilities').inactiveCapabilitiesForServices(
-          db, pickedByTech.map((v) => v.technician.id), wanted.map((service_type) => ({ service_type })),
-        );
-        const unqualified = new Set(inactive.map((row) => String(row.technician_id)));
-        pickedByTech = pickedByTech.filter((v) => !unqualified.has(String(v.technician.id)));
-      }
+      const unqualified = await techsLackingServices(pickedByTech.map((v) => v.technician.id), { serviceType, serviceTypes });
+      pickedByTech = pickedByTech.filter((v) => !unqualified.has(String(v.technician.id)));
     }
+    // The open-times list across every route: its rows book their technician
+    // the same way (tech pick), so the same check applies to each hour.
+    const lacking = plan.openTimes && !technicianId && everyStart?.length
+      ? await techsLackingServices(everyStart.map((s) => s.technician?.id), { serviceType, serviceTypes })
+      : new Set();
+    const every = lacking.size ? everyStart.filter((s) => !lacking.has(String(s.technician?.id))) : everyStart;
 
     // The engine's per-date refusal counts feed the summary's day status
     // only; they are not part of any response contract.
@@ -431,8 +460,9 @@ router.post('/', async (req, res) => {
     // A summary also answers the best-times rows (find-time-hints.js
     // buildBestRows), with the picked verdict's drive numbers priced the
     // same way as the chips.
+    // The open-times list ranks by rain the same way (find-time-hints.js buildOpenTimes).
     const rainPlan = await bookingRainPlan({
-      bestRows, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys, serviceId, moveAlone,
+      bestRows: bestRows === true || plan.openTimes === true, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys, serviceId, moveAlone,
     }, db);
     const built = await buildHintSummary(plan, every, {
       rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate, pickedEnd,

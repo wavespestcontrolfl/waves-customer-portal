@@ -247,6 +247,28 @@ async function main() {
       page.locator("#data-states"),
     );
 
+    const tableControls = page.locator("#table-controls");
+    const tableSearch = tableControls.getByRole("searchbox", { name: "Example directory search" });
+    await tableControls.getByRole("button", { name: "Next page", exact: true }).click();
+    await tableControls.getByText("Page 2 of 3", { exact: true }).waitFor();
+    await tableSearch.fill("customer 62");
+    await tableControls.getByText("1–1 of 1 results", { exact: true }).waitFor();
+    assert.equal(await tableControls.getByRole("button", { name: "Next page", exact: true }).isDisabled(), true);
+    await tableControls.getByRole("button", { name: "Reset filters", exact: true }).click();
+    const columnsButton = tableControls.getByRole("button", { name: "Columns", exact: true });
+    await columnsButton.click();
+    const columnDialog = page.getByRole("dialog", { name: "Example directory columns", exact: true });
+    await columnDialog.getByRole("checkbox", { name: "Property", exact: true }).uncheck();
+    assert.equal(await columnDialog.getByRole("checkbox", { name: "Customer", exact: true }).isDisabled(), true);
+    await page.keyboard.press("Escape");
+    await columnDialog.waitFor({ state: "hidden" });
+    assert.equal(await columnsButton.evaluate((node) => node === document.activeElement), true);
+    assert.equal(await tableControls.locator('td[data-label="Property"]').count(), 0);
+    await columnsButton.click();
+    await page.getByRole("button", { name: "Show all", exact: true }).click();
+    await page.getByRole("button", { name: "Done", exact: true }).click();
+    await screenshot(page, `${name}-table-controls`, tableControls);
+
     const draftSection = page.locator("#draft-ownership");
     await page
       .getByRole("textbox", { name: "Draft title" })

@@ -190,8 +190,9 @@ suite('email division against real Postgres', () => {
     const customerId = await makeCustomer();
     const visitId = await makeVisit(customerId);
     await trx('service_products').insert([
-      // Exact row from server/data/pricing.csv — the Gentrol name matches,
-      // but the recorded chemistry is not hydroprene.
+      // The Gentrol Complete EC3 name with the chemistry pricing.csv used to
+      // carry by mistake (before 2026-10-25) — the name matches, but the
+      // recorded chemistry is not lambda-cyhalothrin or hydroprene.
       { id: randomUUID(), service_record_id: visitId, product_name: 'ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator', active_ingredient: 'Nylar (pyriproxyfen) + Permethrin + Tetramethrin', applied_at: new Date('2026-09-10T10:00:00Z') },
       { id: randomUUID(), service_record_id: visitId, product_name: 'Gentrol IGR', active_ingredient: 'hydroprene', applied_at: new Date('2026-09-10T10:05:00Z') },
       // No active ingredient recorded — the name is the only evidence left.

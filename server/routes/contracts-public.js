@@ -19,11 +19,24 @@ const { ANNUAL_TEMPLATE_KEY: ANNUAL_TERMITE_TEMPLATE_KEY } = require('../service
 // does not load the service for every other contract).
 const COMMERCIAL_AGREEMENT_TEMPLATE_KEY = 'service_agreement.commercial_pest';
 
-// The public payload of a contract. A consumer notice issued from the estimate page
-// (services/estimate-consumer-notice.js marks its snapshot) also carries fromEstimate: true, so the
-// signing page can offer "Back to your estimate". The estimate id and token never leave the server.
+// A signature pad's PNG is tens of KB; the byte cap keeps a hostile body from parking megabytes on the row. The pixel
+// bounds follow what the signing page's pad really exports (DrawnSignaturePad: at most 1200px wide, 150px ×
+// devicePixelRatio tall, well under a megapixel), not the WDO pad's wider defaults, so a decode stays small.
+const DRAWN_SIGNATURE_LIMITS = Object.freeze({
+  maxBytes: 512 * 1024,
+  maxLabel: '512KB',
+  maxWidth: 1600,
+  maxHeight: 1000,
+  maxPixels: 1200 * 1000,
+});
+
+// The public payload of a contract. A consumer notice or a residential service agreement issued from
+// the estimate page (services/estimate-consumer-notice.js and services/estimate-service-agreement.js
+// mark their snapshots) also carries fromEstimate: true, so the signing page can offer "Back to your
+// estimate". The estimate id and token never leave the server.
+const FROM_ESTIMATE_SOURCES = new Set(['estimate_consumer_notice', 'estimate_service_agreement']);
 function publicContract(row) {
-  const fromEstimate = row.document_variables_snapshot?.estimate?.source === 'estimate_consumer_notice';
+  const fromEstimate = FROM_ESTIMATE_SOURCES.has(row.document_variables_snapshot?.estimate?.source);
   return { ...serializeContract(row, { includeAudit: false }), ...(fromEstimate ? { fromEstimate: true } : {}) };
 }
 
@@ -35,6 +48,22 @@ const publicLimiter = rateLimit({
 });
 
 router.use(publicLimiter);
+
+// A drawn signature costs an image decode, so each signing link gets its own small budget of drawing attempts. Only a
+// body that carries a drawing on a well-formed link is counted: a typed-only signature is not, and a malformed link
+// keeps its plain 404.
+function hasDrawnSignature(req) {
+  return req.body?.signatureImage != null && String(req.body.signatureImage).trim() !== '';
+}
+const drawnSignatureLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => !hasDrawnSignature(req) || !publicTokenHash(req.params.token),
+  keyGenerator: (req) => `contract-sign-drawn:${publicTokenHash(req.params.token)}`,
+  message: { error: 'Too many signing attempts on this link. Please wait a few minutes and sign again.' },
+});
 
 function contractQuery(conn = db) {
   return conn('customer_contracts as cc')
@@ -132,7 +161,7 @@ router.get('/:token', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/:token/sign', async (req, res, next) => {
+router.post('/:token/sign', drawnSignatureLimiter, async (req, res, next) => {
   try {
     const signedName = String(req.body?.signedName || '').trim();
     const initials = String(req.body?.initials || '').trim().slice(0, 20);
@@ -148,6 +177,29 @@ router.post('/:token/sign', async (req, res, next) => {
     const now = new Date();
     const tokenHash = publicTokenHash(req.params.token);
     if (!tokenHash) return res.status(404).json({ error: 'Contract not found' });
+
+    // Optional drawn signature from the page's signature pad. The typed name above stays the signature of
+    // record; the image is additional evidence stamped into the executed PDF. Validated before any lock (type,
+    // size, dimensions, magic bytes, visible ink) so a blank or malformed pad never reaches the row. It is decoded
+    // only for a link that is live (sent or viewed, not expired) whose consent box is ticked: an unknown link
+    // answers the same 404 first, and any other request skips the decode and gets the locked path's own refusal
+    // below, exactly as a typed-only request does. The decode itself waits on a small process-wide budget.
+    let signatureImage = null;
+    let drawingNotChecked = false;
+    if (hasDrawnSignature(req)) {
+      const peek = await db('customer_contracts')
+        .where({ share_token_hash: tokenHash })
+        .first('id', 'status', 'contract_type', 'share_token_expires_at');
+      if (!peek) return res.status(404).json({ error: 'Contract not found' });
+      const consented = peek.contract_type === 'autopay_authorization' ? agreeAuthorization : agreeDocumentTerms;
+      if (!isExpired(peek) && ['sent', 'viewed'].includes(peek.status) && consented) {
+        const parsed = await require('../services/signature-image').parseSignatureImage(req.body.signatureImage, DRAWN_SIGNATURE_LIMITS);
+        if (!parsed.ok) return res.status(parsed.status).json({ error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) });
+        signatureImage = parsed.image;
+      } else {
+        drawingNotChecked = true;
+      }
+    }
 
     let response;
     await db.transaction(async (trx) => {
@@ -244,6 +296,12 @@ router.post('/:token/sign', async (req, res, next) => {
         response = { status: 410, body: { error: 'Contract is no longer available for this customer.' } };
         return;
       }
+      // The drawing was not checked because the link was not signable when the request arrived. If it is signable
+      // now (a re-send landed in between), refuse rather than record the signature without the drawing the signer made.
+      if (drawingNotChecked) {
+        response = { status: 409, body: { error: 'This contract was just updated — please reload the page and sign again.' } };
+        return;
+      }
 
       const signed = await trx('customer_contracts')
         .where({ id: contract.id, share_token_hash: tokenHash })
@@ -256,6 +314,7 @@ router.post('/:token/sign', async (req, res, next) => {
           signed_at: now,
           signed_name: signedName,
           recipient_initials: initials,
+          ...(signatureImage ? { signature_image: signatureImage } : {}),
           signer_ip: req.ip || null,
           signer_user_agent: req.get('user-agent') || null,
           share_token_hash: null,
@@ -270,6 +329,7 @@ router.post('/:token/sign', async (req, res, next) => {
       await insertEvent(trx, contract, 'signed', req, {
         signedName,
         initials,
+        drawnSignature: Boolean(signatureImage),
         agreeElectronic,
         agreementType: isAutopayAuthorization ? 'autopay_authorization' : 'document_terms',
         ...(isAutopayAuthorization ? { agreeAuthorization } : { agreeDocumentTerms }),

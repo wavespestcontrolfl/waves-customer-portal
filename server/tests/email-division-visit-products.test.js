@@ -22,7 +22,7 @@ async function readOne(row) {
 }
 
 describe('readVisitProducts source scope: a recorded active ingredient wins over the product name', () => {
-  test('"ZOECON 10578 Gentrol Complete EC3" (pyriproxyfen + permethrin + tetramethrin) never gets the Gentrol IGR label phrase or fact-gentrol-igr-hydroprene', async () => {
+  test('"ZOECON 10578 Gentrol Complete EC3" recorded with a different chemistry (pyriproxyfen + permethrin + tetramethrin, the old wrong pricing.csv entry) gets no label at all', async () => {
     const { products } = await readVisitProducts('sr-1', { conn: stubConn([
       { product_name: 'ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator', active_ingredient: 'Nylar (pyriproxyfen) + Permethrin + Tetramethrin' },
     ]) });
@@ -67,6 +67,9 @@ describe('readVisitProducts wording comes from the product\'s own data, never a 
     // (the phrase is rendered for roach visits too).
     ['Taurus SC', 'fipronil', 'a non-repellent insecticide that target pests cannot detect, so they touch, ingest and spread it'],
     ['Gentrol IGR', '(S)-Hydroprene 9.0%', 'an insect growth regulator: cockroaches exposed to it become adults that cannot reproduce'],
+    // The catalog row since 2026-10-25; the lambda-cyhalothrin in its recorded chemistry puts it in the
+    // contact family, and the label phrase still wins in either family.
+    ['Gentrol Complete EC3', 'Lambda-cyhalothrin 1.5% + (S)-Hydroprene 1.5%', 'an insecticide combined with an insect growth regulator: cockroaches exposed to the growth regulator become adults that cannot reproduce'],
   ])('%s (%s) -> %j', async (productName, activeIngredient, phrase) => {
     expect((await readOne({ product_name: productName, active_ingredient: activeIngredient })).phrase).toBe(phrase);
   });
@@ -106,6 +109,7 @@ describe('classifyProduct', () => {
     ['Demand CS', 'lambda-cyhalothrin', 'contact_residual'],
     ['Delta Dust', 'deltamethrin', 'contact_residual'],
     ['Gentrol IGR', 'hydroprene', 'igr'],
+    ['Gentrol Complete EC3', 'Lambda-cyhalothrin 1.5% + (S)-Hydroprene 1.5%', 'contact_residual'], // lambda-cyhalothrin ranks first; its label phrase names both halves
     ['Celsius WG', 'thiencarbazone + iodosulfuron + dicamba', 'herbicide'],
     ['Sedgehammer', 'halosulfuron', 'herbicide'],
     ['Artavia 2 SC', 'azoxystrobin', 'fungicide'],
@@ -363,6 +367,9 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
     ['Talak 7.9 F', 'bifenthrin', 'fact-bifenthrin-talak-label', 'Talak 7.9 F label (EPA 91234-145)', true],
     ['Bifen IT', 'Bifenthrin 7.9%', 'fact-bifenthrin-talak-label', 'Talak 7.9 F label (EPA 91234-145)', true],
     ['Gentrol IGR', 'hydroprene', 'fact-gentrol-igr-hydroprene', 'Gentrol IGR Concentrate label', true],
+    ['Gentrol Complete EC3', 'Lambda-cyhalothrin 1.5% + (S)-Hydroprene 1.5%', 'fact-gentrol-complete-ec3', 'Gentrol Complete EC3 label (EPA 89459-119)', true],
+    ['Gentrol Complete EC3', '', 'fact-gentrol-complete-ec3', 'Gentrol Complete EC3 label (EPA 89459-119)', true], // name only: the igr family reaches the same label
+    ['Gentrol Complete EC3', 'Lambda-cyhalothrin', 'fact-gentrol-complete-ec3', 'Gentrol Complete EC3 label (EPA 89459-119)', true],
     ['Taurus SC', 'fipronil', 'fact-taurus-sc-non-repellent', 'Control Solutions, Taurus SC product page', true],
     ['Bifen XTS', 'bifenthrin + zeta-cypermethrin', null, null, true], // different registration
     ['Artavia 2 SC', 'azoxystrobin', null, null, true],

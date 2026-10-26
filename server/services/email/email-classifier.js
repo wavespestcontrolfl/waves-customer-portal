@@ -44,7 +44,7 @@ async function classifyEmailContent(email) {
     laneId: 'email_classify',
     maxTokens: 512,
     jsonMode: true,
-    text: `You are an email classifier for Waves Pest Control & Lawn Care, a family-owned pest control company in Southwest Florida.
+    text: `You are an email classifier for Waves Pest Control, a family-owned pest control and lawn care company in Southwest Florida.
 
 Classify this email into exactly ONE category and extract relevant entities.
 

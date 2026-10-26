@@ -21,6 +21,7 @@ const featureGates = require('../config/feature-gates');
 // loaded under many partial feature-gates mocks, and a missing reader must read
 // as "gate off" (today's behavior) rather than throw.
 const techWorkDaysLive = () => typeof featureGates.techWorkDaysLive === 'function' && featureGates.techWorkDaysLive();
+const techJobTypeChecksLive = () => typeof featureGates.techJobTypeChecksLive === 'function' && featureGates.techJobTypeChecksLive();
 
 const EMPLOYMENT_STATUSES = Object.freeze(['prospective', 'active', 'inactive']);
 const NOT_ASSIGNABLE = 'TECH_NOT_ASSIGNABLE';
@@ -146,6 +147,41 @@ async function offDayWarningsFor(technicianId, dates, { conn = db } = {}) {
 async function offDayWarningFor(technicianId, dateStr, { conn = db } = {}) {
   const [line] = await offDayWarningsFor(technicianId, [dateStr], { conn });
   return line || null;
+}
+
+/**
+ * Warning lines an office path adds when it puts a technician on work whose job
+ * type the technician is set to Off for in the Team tab ("Tech One is set to Off
+ * for Lawn, tree & shrub work."), one line per distinct category (GATE_TECH_JOB_TYPE_CHECKS).
+ * `services` is the visit's rows: { service_type, service_id?, service_key? };
+ * the category comes from the service library first, then the name
+ * (technician-capabilities.categoriesForServices). Same shape as offDayWarningsFor:
+ * [] when the gate is off, nothing is chosen, or the read fails (an advisory line
+ * never blocks a save). Needs-review and qualified never warn (owner 2026-09-05:
+ * every hire may treat every service); only Off does. Office paths warn, never block.
+ */
+async function capabilityOffWarningsFor(technicianId, services, { conn = db } = {}) {
+  const rows = (Array.isArray(services) ? services : [services]).filter((row) => row && (row.service_type || row.service_id || row.service_key));
+  if (!techJobTypeChecksLive() || !technicianId || !rows.length) return [];
+  try {
+    const { categoriesForServices, CATEGORY_LABELS } = require('./technician-capabilities');
+    const read = async (c) => {
+      const categories = [...new Set(await categoriesForServices(c, rows))].filter(Boolean);
+      if (!categories.length) return { off: [], tech: null };
+      const off = await c('technician_capabilities')
+        .where({ technician_id: technicianId, active: false }).whereIn('service_category', categories)
+        .pluck('service_category');
+      if (!off.length) return { off: [], tech: null };
+      return { off, tech: await c('technicians').where({ id: technicianId }).first('name') };
+    };
+    const { off, tech } = conn.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction((sp) => read(sp))
+      : await read(conn);
+    const name = (tech && tech.name) || 'This technician';
+    return [...new Set(off)].map((category) => `${name} is set to Off for ${CATEGORY_LABELS[category] || category} work.`);
+  } catch {
+    return [];
+  }
 }
 
 function reasonFor(tech) {
@@ -314,4 +350,5 @@ module.exports = {
   offDayWarning,
   offDayWarningFor,
   offDayWarningsFor,
+  capabilityOffWarningsFor,
 };

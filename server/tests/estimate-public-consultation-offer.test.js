@@ -79,6 +79,7 @@ jest.mock('../config/feature-gates', () => ({
   leadInspectionLinkLive: () => process.env.GATE_LEAD_INSPECTION_LINK === 'true',
   commercialProposalSignLive: () => false,
   estimateConsumerNoticeLive: () => false,
+  estimateServiceAgreementLive: () => false,
 }));
 
 const mockComputeConsultationSlotsForLead = jest.fn();

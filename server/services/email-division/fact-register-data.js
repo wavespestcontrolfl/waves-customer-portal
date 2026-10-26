@@ -212,6 +212,17 @@ const FACTS = [
     content: 'Gentrol IGR Concentrate (hydroprene) is an insect growth regulator: per the label, a synthetic juvenile hormone look-alike that disrupts the normal growth and development of cockroaches, drain flies, fruit flies, bedbugs and stored product pests, and cockroaches and bedbugs exposed to it become adults incapable of reproducing. The label states continuous protection for 4 months and the manufacturer page states 120 days of control. Neither source states how long until results are visible, and neither says it makes already-mature adults sterile, so copy must not state a number of days to results or claim it sterilises adults.',
   },
   {
+    slug: 'fact-gentrol-complete-ec3',
+    title: 'Gentrol Complete EC3 (lambda-cyhalothrin + hydroprene): exposed roaches become adults that cannot reproduce',
+    tags: ['products', 'gentrol', 'igr', 'cockroaches', 'label'],
+    sourceUrls: [
+      'https://www3.epa.gov/pesticides/chem_search/ppls/089459-00119-20260204.pdf',
+      'https://www.zoecon.com/-/media/project/oneweb/zoecon/files/product-labels/sds/gentrol-complete-ec3-sds.pdf',
+    ],
+    quote: 'EPA-accepted label (accepted 2026-02-04), "EPA Reg. No. 89459-119", "Alternate brand name: Gentrol® Complete EC3". Active ingredients "Lambda-cyhalothrin 1.5%" and "S-Hydroprene 1.5%". "RF2296 LH EC contains a combination of an insecticide [adulticide] and IGR for kill of listed adult insects". "German cockroaches and bed bugs exposed to the IGR will become adults incapable of reproducing." "For indoor use only." "LET TREATED SURFACES DRY BEFORE ALLOWING HUMANS AND PETS TO CONTACT SURFACES."',
+    content: 'Gentrol Complete EC3 (EPA Reg. No. 89459-119; lambda-cyhalothrin 1.5% and S-hydroprene 1.5%) is the Gentrol product Waves applies. Per its label it combines an insecticide for listed adult insects with an insect growth regulator (IGR), and German cockroaches and bed bugs exposed to the IGR become adults incapable of reproducing. It is for indoor use only, and the label says to let treated surfaces dry before allowing humans and pets to contact them. This is a different label from Gentrol IGR Concentrate (hydroprene only), so that product\u2019s facts do not apply to it. Copy must not claim it sterilises adults already mature, and must not state a number of days or months until results or of control.',
+  },
+  {
     slug: 'fact-flea-vacuuming-after-treatment',
     title: 'Fleas: why vacuuming continues after treatment',
     tags: ['fleas', 'vacuuming', 'prep'],

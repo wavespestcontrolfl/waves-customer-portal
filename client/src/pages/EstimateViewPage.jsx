@@ -81,6 +81,7 @@ import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import { FieldDocumentBody, FieldMasthead } from '../components/FieldDocument';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
 import ConsumerNoticeSign, { ConsumerNoticeHint, CONSUMER_NOTICE_HINT } from '../components/estimate/ConsumerNoticeSign';
+import ServiceAgreementSign from '../components/estimate/ServiceAgreementSign';
 import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
 import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } from '@estimate-copy-claims';
 import { estimateCopyFor } from '../lib/estimate-copy';
@@ -9719,6 +9720,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
+          {/* Residential service agreement(s) (GATE_ESTIMATE_SERVICE_AGREEMENT): only when /data carries
+              cta.serviceAgreements — absent with the gate off, so the accepted page is unchanged. */}
+          <ServiceAgreementSign token={token} serviceAgreements={cta?.serviceAgreements} />
           {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={readOnlyPreview} /> : null}
           <AppShowcaseCard />
           <EstimateAddServiceRequestCard

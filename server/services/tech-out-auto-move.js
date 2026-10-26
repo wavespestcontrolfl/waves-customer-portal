@@ -218,7 +218,7 @@ function compareCandidates(a, b) {
  */
 async function rankCandidates(stop, crew, date) {
   if (!crew.length) return [];
-  const inactive = await inactiveCapabilitiesForServices(db, crew.map((c) => c.id), [{ service_type: stop.service_type }]);
+  const inactive = await inactiveCapabilitiesForServices(db, crew.map((c) => c.id), [{ service_type: stop.service_type, service_id: stop.service_id, service_key: stop.service_key_snapshot }]);
   const inactiveIds = new Set(inactive.map((r) => r.technician_id));
 
   const ranked = [];
@@ -440,6 +440,7 @@ function readStop(jobId) {
     .where('scheduled_services.id', jobId)
     .first(
       'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
+      'scheduled_services.service_id', 'scheduled_services.service_key_snapshot',
       'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.estimated_duration_minutes', 'scheduled_services.visit_id',
       'scheduled_services.technician_id', 'scheduled_services.scheduled_date',

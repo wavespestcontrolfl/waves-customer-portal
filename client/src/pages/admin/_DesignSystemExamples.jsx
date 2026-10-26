@@ -2,7 +2,8 @@ import React, { useId, useRef, useState } from 'react';
 import {
   ActionFeedback, Badge, Button, Checkbox, Dialog, DialogBody, DialogFooter,
   DialogHeader, DialogTitle, Field, Input, Select, Sheet, SheetBody, SheetHeader,
-  Table, THead, TBody, TR, TH, TD, Tabs, TabList, Tab, TabPanel, Textarea, UiSurface,
+  Table, THead, TBody, TR, TH, TD, TableToolbar, TablePagination, TableColumnPicker,
+  Tabs, TabList, Tab, TabPanel, Textarea, UiSurface,
 } from '../../components/ui';
 import AdminCommandHeader from '../../components/admin/AdminCommandHeader';
 import { FileText } from 'lucide-react';
@@ -91,6 +92,42 @@ export function DataStatesExample() {
         </Table>
       </>}
     </div>
+  </div>;
+}
+
+const DIRECTORY_COLUMNS = [{ id: 'name', label: 'Customer', required: true }, { id: 'property', label: 'Property' }];
+const DIRECTORY_RECORDS = Array.from({ length: 62 }, (_, index) => ({
+  id: index, name: `Example customer ${String(index + 1).padStart(2, '0')}`,
+  property: `${index + 1} Demonstration Street`,
+}));
+
+export function TableControlsExample() {
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState('asc');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [columns, setColumns] = useState(['name', 'property']);
+  const results = DIRECTORY_RECORDS.filter((record) => `${record.name} ${record.property}`.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => (sort === 'asc' ? 1 : -1) * a.name.localeCompare(b.name));
+  const changeSearch = (value) => { setSearch(value); setPage(1); };
+  return <div className="space-y-3">
+    <TableToolbar label="Example directory" search={search} onSearchChange={changeSearch}
+      searchPlaceholder="Search fictional records" onReset={() => changeSearch('')} canReset={Boolean(search)}>
+      <Field label="Sort" className="w-44"><Select value={sort} onChange={(event) => { setSort(event.target.value); setPage(1); }}>
+        <option value="asc">Name A–Z</option><option value="desc">Name Z–A</option>
+      </Select></Field>
+      <TableColumnPicker label="Example directory" columns={DIRECTORY_COLUMNS} visibleColumns={columns} onChange={setColumns} />
+    </TableToolbar>
+    <Table layout="records" aria-label="Example directory records">
+      <THead><TR><TH scope="col">Customer</TH>{columns.includes('property') && <TH scope="col">Property</TH>}</TR></THead>
+      <TBody>{results.slice((page - 1) * pageSize, page * pageSize).map((record) => <TR key={record.id}>
+        <TD>{record.name}</TD>{columns.includes('property') && <TD data-label="Property">{record.property}</TD>}
+      </TR>)}</TBody>
+    </Table>
+    {!results.length && <p className="text-ui-body">No fictional records match this search.</p>}
+    <TablePagination label="Example directory" page={page} totalPages={Math.ceil(results.length / pageSize)}
+      total={results.length} pageSize={pageSize} onPageChange={setPage}
+      onPageSizeChange={(size) => { setPageSize(size); setPage(1); }} />
   </div>;
 }
 

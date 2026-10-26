@@ -1097,6 +1097,29 @@ router.post('/sms', async (req, res) => {
       });
     }
 
+    // Visit tech relay (GATE_CUSTOMER_TEXT_TO_VISIT_TECH, census M3): a known
+    // customer's text to an office line during their visit today also reaches
+    // that visit's technician as a tech-home card + push
+    // (services/visit-tech-relay.js). Registered here, before any consuming
+    // branch (reschedule reply, lead intake) returns, so "please call first,
+    // the dog is out" reaches the technician even when a reschedule offer
+    // consumes it (Codex #6760 r1); started on response finish. A known caller
+    // record covers the service-contact and second phones too; the relay
+    // itself resolves the number to its ONE customer across every phone slot
+    // (a shared number relays nothing). The AI customer-chat line stays AI-only
+    // (Codex #6760 security review). The office path is unchanged; nothing is
+    // sent to the customer.
+    if (numberConfig.type !== 'tech_line' && !isAiNumber && (customer || knownCallerRecord) && (Body || inboundMedia.length)
+      && !smsReaction && !courtesyOnly && !staffSender && !detectSmsOptCommand(Body || '').action
+      && require('../config/feature-gates').customerTextToVisitTechLive?.()) {
+      const relayInput = { from: From, body: Body, mediaCount: inboundMedia.length };
+      res.once('finish', () => {
+        const relay = require('../services/visit-tech-relay');
+        void relay.relayCustomerTextToVisitTech(relayInput)
+          .catch((err) => logger.warn(`[visit-tech-relay] relay failed (${relay.errorTag(err)})`));
+      });
+    }
+
     // The same post-ack kick covers both consumed replies and the ordinary
     // path. A failed or interrupted kick is recovered from the persisted row.
     if (Body && customer && !isAiNumber) {

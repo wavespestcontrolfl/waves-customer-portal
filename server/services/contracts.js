@@ -167,6 +167,9 @@ function serializeContract(row, options = {}) {
     signedName: row.signed_name,
     recipientInitials: row.recipient_initials,
     ...(options.includeAudit === false ? {} : {
+      // Whether the signer also drew a signature (stamped into the executed PDF). The image itself
+      // stays on the row: it is evidence, not something any payload carries.
+      hasDrawnSignature: Boolean(row.signature_image),
       signerIp: row.signer_ip,
       signerUserAgent: row.signer_user_agent,
       // Countersignature is a staff record step (A-14), read only by the

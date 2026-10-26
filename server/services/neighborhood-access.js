@@ -238,6 +238,17 @@ function parcelMatchesProperty(parcel, property) {
   return /^\d{5}$/.test(zip) && zip === situsZip;
 }
 
+// The county's lot carries this home's house number and full street but
+// another ZIP (or ours is blank): the ZIP is the only disagreement. Never
+// linked by itself: a pin dropped in another town can sit on the same number
+// and street (owner ruling 2026-10-26). The Gate codes page lists it for an
+// office pick. Returns { situsZip, county, subdivision } or null.
+function zipOnlyMismatch(parcel, property) {
+  const situsZip = String(parcel.situsZip || '').slice(0, 5);
+  if (!/^\d{5}$/.test(situsZip) || !parcelMatchesProperty(parcel, { ...property, zip: situsZip })) return null;
+  return { situsZip, county: parcel.county || null, subdivision: parcel.platName || parcel.subdivision || null };
+}
+
 // Sarasota's parcel roll gives a plat's NUMBER ("3491"; "0000" = none), and
 // the plat layer holds its name. Behind GATE_NEIGHBORHOOD_NAMING the caller
 // swaps that name in: returns the parcel with `platName` (a raw plat name,
@@ -320,7 +331,7 @@ async function resolvePropertyNeighborhood(property, { conn = db, lookup = looku
 
   const parcel = await lookup(lat, lng);
   if (!parcel) return { status: 'no_parcel', wrote: false };
-  if (!parcelMatchesProperty(parcel, property)) return { status: 'situs_mismatch', wrote: false };
+  if (!parcelMatchesProperty(parcel, property)) return { status: 'situs_mismatch', wrote: false, zipOnly: zipOnlyMismatch(parcel, property) };
   const claiming = onlyUnchecked || recheck;
   const claimable = (q) => {
     if (!claiming) return q;

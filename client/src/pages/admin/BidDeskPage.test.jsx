@@ -63,6 +63,158 @@ it("filters decided bids and hides earlier mail", async () => {
   expect(screen.queryByText("Sample Ridge Residences")).toBeNull();
 });
 
+it("dark-ships the shared controls and preserves the preview while opening a bid", async () => {
+  route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }) });
+  const legacy = renderPage();
+  await screen.findByText("Sample Ridge Residences");
+  expect(screen.queryByRole("searchbox", { name: "Bid Desk search" })).toBeNull();
+  expect(screen.queryByLabelText("Bid Desk rows per page")).toBeNull();
+  legacy.unmount();
+
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: bid(), emails: [] }),
+  });
+  renderPage("/?tableControls=1");
+  expect(await screen.findByRole("searchbox", { name: "Bid Desk search" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Status")).toHaveValue("open");
+  expect(screen.getByLabelText("Earlier mail")).toHaveValue("show");
+  expect(screen.getByLabelText("Sort")).toHaveValue("workflow");
+  expect(screen.getByLabelText("Bid Desk rows per page")).toHaveValue("100");
+
+  fireEvent.click(screen.getByRole("button", { name: "Open Sample Ridge Residences" }));
+  expect(await screen.findByLabelText("Due date (Eastern time)")).toBeInTheDocument();
+  expect(screen.getByRole("searchbox", { name: "Bid Desk search" })).toBeInTheDocument();
+});
+
+it("searches the known loaded bid text and applies the preview filters", async () => {
+  const searchable = bid({
+    id: "searchable", project_title: "Harbor Library", gc_or_agency: "Coastal Builders", source: "sam_gov",
+    solicitation_number: "SOL-7788", location: "Sarasota Civic Campus",
+  });
+  route({ "GET /admin/bid-desk/": () => reply({ bids: [searchable, ...LIST] }) });
+  renderPage("/?tableControls=1");
+  const search = await screen.findByRole("searchbox", { name: "Bid Desk search" });
+  for (const query of ["harbor library", "coastal builders", "pat sample", "sam.gov", "sol-7788", "sarasota civic"]) {
+    fireEvent.change(search, { target: { value: query } });
+    expect(screen.getByText("Harbor Library")).toBeInTheDocument();
+  }
+
+  fireEvent.change(search, { target: { value: "" } });
+  fireEvent.change(screen.getByLabelText("Earlier mail"), { target: { value: "hide" } });
+  expect(screen.queryByText("Earlier Mall")).toBeNull();
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "decided" } });
+  expect(screen.getByText("Decided Plaza")).toBeInTheDocument();
+  expect(screen.queryByText("Sample Ridge Residences")).toBeNull();
+});
+
+it("sorts the loaded bids while keeping unknown due dates last", async () => {
+  const sortable = [
+    bid({ id: "z", project_title: "Zulu Project", gc_or_agency: "Able Buyer", due_at: null }),
+    bid({ id: "a", project_title: "Alpha Project", gc_or_agency: "Zulu Buyer", due_at: "2026-12-20T12:00:00.000Z" }),
+    bid({ id: "b", project_title: "Beta Project", gc_or_agency: "Middle Buyer", due_at: "2026-11-10T12:00:00.000Z" }),
+  ];
+  route({ "GET /admin/bid-desk/": () => reply({ bids: sortable }) });
+  renderPage("/?tableControls=1");
+  await screen.findByText("Zulu Project");
+  const rowOrder = () => screen.getAllByRole("button", { name: /^Open / }).map((button) => button.textContent);
+  expect(rowOrder()).toEqual(["Zulu Project", "Alpha Project", "Beta Project"]);
+
+  fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "due" } });
+  expect(rowOrder()).toEqual(["Beta Project", "Alpha Project", "Zulu Project"]);
+  fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "project" } });
+  expect(rowOrder()).toEqual(["Alpha Project", "Beta Project", "Zulu Project"]);
+  fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "buyer" } });
+  expect(rowOrder()).toEqual(["Zulu Project", "Beta Project", "Alpha Project"]);
+});
+
+it("resets paging when search or page size changes", async () => {
+  const many = Array.from({ length: 101 }, (_, index) => bid({
+    id: `p${index + 1}`,
+    project_title: `Project ${String(index + 1).padStart(3, "0")}`,
+  }));
+  route({ "GET /admin/bid-desk/": () => reply({ bids: many }) });
+  renderPage("/?tableControls=1");
+  await screen.findByText("Project 001");
+  fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+  expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
+  expect(screen.getByText("Project 101")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByRole("searchbox", { name: "Bid Desk search" }), { target: { value: "Project 101" } });
+  expect(screen.getByText("Page 1 of 1")).toBeInTheDocument();
+  expect(screen.getByText("Project 101")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByRole("searchbox", { name: "Bid Desk search" }), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+  expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "project" } });
+  expect(screen.getByText("Page 1 of 2")).toBeInTheDocument();
+  expect(screen.getByText("Project 001")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "all" } });
+  expect(screen.getByText("Page 1 of 2")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+  fireEvent.change(screen.getByLabelText("Bid Desk rows per page"), { target: { value: "500" } });
+  expect(screen.getByText("Page 1 of 1")).toBeInTheDocument();
+  expect(screen.getByText("Project 001")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Reset filters" }));
+  expect(screen.getByLabelText("Status")).toHaveValue("open");
+  expect(screen.getByLabelText("Sort")).toHaveValue("project");
+  expect(screen.getByLabelText("Bid Desk rows per page")).toHaveValue("500");
+});
+
+it("clamps the page after a reload returns fewer loaded bids", async () => {
+  const many = Array.from({ length: 101 }, (_, index) => bid({ id: `p${index + 1}`, project_title: `Project ${String(index + 1).padStart(3, "0")}` }));
+  let listLoads = 0;
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: listLoads++ === 0 ? many : [many[0]] }),
+    "POST /admin/bid-desk/from-email": () => reply({ created: false, bid_id: "p1" }),
+    "GET /admin/bid-desk/p1": () => reply({ bid: many[0], emails: [] }),
+  });
+  renderPage("/?tableControls=1");
+  await screen.findByText("Project 001");
+  fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+  expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("Mark an email as a bid"), { target: { value: "mail-1" } });
+  fireEvent.click(screen.getByRole("button", { name: "Mark as bid" }));
+  await waitFor(() => expect(listLoads).toBe(2));
+  expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument();
+  expect(screen.getAllByText("Project 001").length).toBeGreaterThan(0);
+});
+
+it("keeps the project action column and lets the other columns be hidden", async () => {
+  route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }) });
+  renderPage("/?tableControls=1");
+  await screen.findByText("Sample Ridge Residences");
+  const table = screen.getByRole("table");
+  expect(table).toHaveClass("min-[1101px]:min-w-[var(--bid-desk-table-min-width)]");
+  expect(table.style.getPropertyValue("--bid-desk-table-min-width")).toBe("1100px");
+  fireEvent.click(screen.getByRole("button", { name: "Columns" }));
+  expect(screen.getByLabelText("Project / action")).toBeChecked();
+  expect(screen.getByLabelText("Project / action")).toBeDisabled();
+  fireEvent.click(screen.getByLabelText("Buyer"));
+  fireEvent.click(screen.getByLabelText("Due"));
+  fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+  expect(screen.getByRole("columnheader", { name: "Project" })).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "Buyer" })).toBeNull();
+  expect(screen.queryByRole("columnheader", { name: "Due" })).toBeNull();
+  expect(screen.getByRole("columnheader", { name: "Source" })).toBeInTheDocument();
+  expect(screen.queryByText("Fixture Build Co")).toBeNull();
+  expect(screen.getAllByRole("button", { name: /^Open / })).not.toHaveLength(0);
+  expect(table.style.getPropertyValue("--bid-desk-table-min-width")).toBe("680px");
+});
+
+it("warns that the capped response contains only the first 500 loaded bids", async () => {
+  const capped = Array.from({ length: 500 }, (_, index) => bid({ id: `c${index}`, project_title: `Capped ${index}` }));
+  route({ "GET /admin/bid-desk/": () => reply({ bids: capped }) });
+  renderPage("/?tableControls=1");
+  expect(await screen.findByText("Only the first 500 bids are loaded. Search and filters apply to this set.")).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("1–100 of 500 loaded bids");
+});
+
 it("says so when the gate is off", async () => {
   route({ "GET /admin/bid-desk/": () => reply({ error: "Not found" }, { ok: false, status: 404 }) });
   renderPage();
