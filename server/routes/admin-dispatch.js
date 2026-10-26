@@ -24,6 +24,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { techMoveRefusal } = require('../services/scheduling/tech-move-permission');
 const { applyAssignable } = require('../services/technician-eligibility');
+const { seriesNoticeNameVars } = require('../services/placement-service-name');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
 
@@ -5899,7 +5900,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // uses), never a direct customers.phone text: a primary who opted out,
       // has no phone, or routes appointment texts to an authorized service
       // contact gets exactly what the single-visit notice would do.
-      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start', 'visit_id');
+      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start', 'visit_id', 'service_type');
       const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
       // The text quotes the slot the series move RECORDED for the anchor —
       // date and arrival window. A replayed/retried pass whose anchor was
@@ -5958,12 +5959,19 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           // Visit-aware (app property scope, PR 3): the anchor visit's NON-primary
           // saved property owns notify-primary for the series notice.
           const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
+          // The placement text names the anchor's service (owner 2026-10-26:
+          // a customer with a pest series and a mosquito series read the
+          // mosquito placement as her pest visit moving). Same customer-facing
+          // label the reminders use; "visit" when the visit has no clean name.
+          // The series-moved copy has no {service_name}, so it is not looked up.
+          const nameVars = await seriesNoticeNameVars(notice.templateKey, serviceId, svc.service_type);
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
             return renderRequiredTemplate(notice.templateKey, {
               first_name: firstName,
               start_date: displayDate,
               window_text: windowText,
+              ...nameVars,
             }, {
               workflow: 'dispatch_series_reschedule',
               entity_type: 'scheduled_service',

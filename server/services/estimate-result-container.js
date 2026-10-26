@@ -122,9 +122,9 @@ const containerPricesAnything = (container, collectors, setupOpts) => collectors
 
 // What a discarded duplicate hands to the line retained in its place, as groups of fields that move
 // together when the retained line lacks the first one: its own persisted cost, the usage-table
-// multipliers, the visit count. The CURRENT container's raw line also hands over a stored bermuda
+// multipliers, the visit count, the quoted pre-slab product. The CURRENT container's raw line also hands over a stored bermuda
 // removal cost (an older container's is stale and never transfers).
-const OLDER_TRANSFER = [['explicitCogsCost'], ['cogsServiceTypes', 'cogsServiceTypeFixedMultipliers'], ['visitsPerYear']];
+const OLDER_TRANSFER = [['explicitCogsCost'], ['cogsServiceTypes', 'cogsServiceTypeFixedMultipliers'], ['visitsPerYear'], ['preSlabQuote']];
 const CURRENT_TRANSFER = [...OLDER_TRANSFER, ['bermudaRemovalStored']];
 function transferMetadata(retained, line, groups) {
   for (const [lead, ...rest] of groups) {

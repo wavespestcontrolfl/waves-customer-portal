@@ -184,10 +184,14 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     const [, tightenBefore, tightenAfter] = tighten._SWAPS
       .find(([key]) => key === migration.TEMPLATE.template_key);
     expect(tightenBefore).toBe(brandAfter);
+    // 2026-10-26 (owner): the placement text names the service. Chained the
+    // same way, and the variable list gains service_name with the body.
+    const namesService = require('../models/migrations/20261026160000_placement_text_names_service');
+    expect(namesService._BEFORE).toBe(tightenAfter);
     const row = await trx('sms_templates').where({ template_key: migration.TEMPLATE.template_key }).first();
-    expect(row.body).toBe(tightenAfter);
+    expect(row.body).toBe(namesService._AFTER);
     expect(swept).not.toBe(migration.TEMPLATE.body);
-    expect(row.variables).toEqual(['first_name', 'start_date', 'window_text']);
+    expect(row.variables).toEqual(['first_name', 'start_date', 'window_text', 'service_name']);
     await trx('sms_templates').where({ id: row.id }).update({ body: 'Administrator test edit' });
     await migration.up(trx);
     expect((await trx('sms_templates').where({ id: row.id }).first()).body).toBe('Administrator test edit');
