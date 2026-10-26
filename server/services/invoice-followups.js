@@ -2853,53 +2853,69 @@ async function releaseFromAutopayHold(invoiceId) {
 // charges some invoices (an annual-prepay invoice staff created after a visit), so such a hold
 // never ends. A hold older than this with no charge activity since it began is released.
 const AUTOPAY_HOLD_TIMEOUT_DAYS = 3;
-const AUTOPAY_HOLD_SWEEP_LIMIT = 500;
+const AUTOPAY_HOLD_SWEEP_PAGE = 500;
 const AUTOPAY_HOLD_SHADOW_ACTION = 'invoice_followup.autopay_hold_timeout_shadow';
 
 /**
  * Release Auto Pay holds that Auto Pay never acted on. Selects `autopay_hold` sequences whose hold
  * began (updated_at: every hold writer, and handleAutopayFailure's counter bump, stamps it) more
- * than AUTOPAY_HOLD_TIMEOUT_DAYS ago with no stripe_invoice_charge_attempts row for the invoice and
- * no payments row (any status) for the customer created since. Terminal, non-schedulable,
+ * than AUTOPAY_HOLD_TIMEOUT_DAYS ago with no stripe_invoice_charge_attempts row for the invoice,
+ * no payments row (any status) for the customer created since, and no failed payments row for the
+ * customer still on the Auto Pay retry ladder (next_retry_at set). Terminal, non-schedulable,
  * payer-billed and payment-plan invoices are skipped, and so is an invoice whose linked visit is still
- * open (Auto Pay charges when the visit closes). 'true' releases through the existing
+ * open (Auto Pay charges when the visit closes). Every held row is read, in id-keyset pages, so rows
+ * the skips pass over never hide the rows behind them. 'true' releases through the existing
  * releaseFromAutopayHold; 'shadow' writes at most one audit_log row per invoice per ET day and
  * changes nothing; off returns before any query.
  */
-async function releaseStaleAutopayHolds({ now = new Date() } = {}) {
+async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_HOLD_SWEEP_PAGE } = {}) {
   const mode = require('../config/feature-gates').autopayHoldTimeoutMode();
   if (mode !== 'shadow' && mode !== 'true') return { mode: 'off', candidates: 0, released: 0, recorded: 0 };
 
   const cutoff = new Date(now.getTime() - AUTOPAY_HOLD_TIMEOUT_DAYS * 86400000);
-  const rows = await db('invoice_followup_sequences as s')
-    .where('s.status', 'autopay_hold')
-    .where('s.updated_at', '<', cutoff)
-    .whereNotExists(function noChargeAttempt() {
-      this.select(db.raw('1')).from('stripe_invoice_charge_attempts as a')
-        .whereRaw('a.invoice_id = s.invoice_id')
-        .whereRaw('a.created_at >= s.updated_at');
-    })
-    .whereNotExists(function noPayment() {
-      this.select(db.raw('1')).from('payments as p')
-        .whereRaw('p.customer_id = s.customer_id')
-        .whereRaw('p.created_at >= s.updated_at');
-    })
-    .orderBy('s.updated_at', 'asc')
-    .limit(AUTOPAY_HOLD_SWEEP_LIMIT)
-    .select('s.id', 's.invoice_id', 's.updated_at');
-
   const due = [];
-  for (const row of rows) {
-    const invoice = await db('invoices').where({ id: row.invoice_id }).first();
-    if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) continue;
-    if (await activePaymentPlan(db, row.invoice_id)) continue;
-    // Auto Pay charges when a visit closes: an invoice sent before its visit (an upfront invoice) is
-    // waiting for that charge while the linked visit is still open.
-    if (invoice.scheduled_service_id) {
-      const visit = await db('scheduled_services').where({ id: invoice.scheduled_service_id }).first('status');
-      if (visit && !TERMINAL_SCHEDULED_SERVICE_STATUSES.includes(visit.status)) continue;
+  let afterId = null;
+  for (;;) {
+    const page = db('invoice_followup_sequences as s')
+      .where('s.status', 'autopay_hold')
+      .where('s.updated_at', '<', cutoff)
+      .whereNotExists(function noChargeAttempt() {
+        this.select(db.raw('1')).from('stripe_invoice_charge_attempts as a')
+          .whereRaw('a.invoice_id = s.invoice_id')
+          .whereRaw('a.created_at >= s.updated_at');
+      })
+      .whereNotExists(function noPayment() {
+        this.select(db.raw('1')).from('payments as p')
+          .whereRaw('p.customer_id = s.customer_id')
+          .whereRaw('p.created_at >= s.updated_at');
+      })
+      // Auto Pay still owes a retry on a failed charge (billing-cron's ladder): it is still acting.
+      .whereNotExists(function noPendingRetry() {
+        this.select(db.raw('1')).from('payments as r')
+          .whereRaw('r.customer_id = s.customer_id')
+          .where('r.status', 'failed')
+          .whereNotNull('r.next_retry_at');
+      })
+      .orderBy('s.id', 'asc')
+      .limit(pageSize)
+      .select('s.id', 's.invoice_id', 's.updated_at');
+    if (afterId) page.where('s.id', '>', afterId);
+    const rows = await page;
+
+    for (const row of rows) {
+      const invoice = await db('invoices').where({ id: row.invoice_id }).first();
+      if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) continue;
+      if (await activePaymentPlan(db, row.invoice_id)) continue;
+      // Auto Pay charges when a visit closes: an invoice sent before its visit (an upfront invoice) is
+      // waiting for that charge while the linked visit is still open.
+      if (invoice.scheduled_service_id) {
+        const visit = await db('scheduled_services').where({ id: invoice.scheduled_service_id }).first('status');
+        if (visit && !TERMINAL_SCHEDULED_SERVICE_STATUSES.includes(visit.status)) continue;
+      }
+      due.push(row);
     }
-    due.push(row);
+    if (rows.length < pageSize) break;
+    afterId = rows[rows.length - 1].id;
   }
 
   let released = 0;

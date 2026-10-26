@@ -49,7 +49,8 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
     await mockPg.raw(`CREATE TABLE stripe_invoice_charge_attempts (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, created_at timestamptz DEFAULT now())`);
     await mockPg.raw(`CREATE TABLE payments (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, status text, created_at timestamptz DEFAULT now())`);
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, status text, next_retry_at timestamptz,
+      created_at timestamptz DEFAULT now())`);
     await mockPg.raw('CREATE TABLE scheduled_services (id uuid PRIMARY KEY, status text)');
     await mockPg.raw('CREATE TABLE payment_plans (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, status text)');
     await mockPg.raw(`CREATE TABLE audit_log (
@@ -73,10 +74,9 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
   });
 
   // One held sequence. heldDaysAgo stamps updated_at, the hold start.
-  async function held({ heldDaysAgo = 4, invoiceStatus = 'sent', status = 'autopay_hold', payerId = null, visitStatus = null } = {}) {
+  async function held({ heldDaysAgo = 4, invoiceStatus = 'sent', status = 'autopay_hold', payerId = null, visitStatus = null, sequenceId = randomUUID() } = {}) {
     const invoiceId = randomUUID();
     const customerId = randomUUID();
-    const sequenceId = randomUUID();
     const heldAt = new Date(Date.now() - heldDaysAgo * DAY);
     let visitId = null;
     if (visitStatus) {
@@ -147,6 +147,41 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       await mockPg('payments').insert({ customer_id: h.customerId, status, created_at: new Date(Date.now() - 1 * DAY) });
       expect(await sweep()).toMatchObject({ candidates: 0 });
       await untouched(h);
+    });
+
+    test('a failed payment still on the Auto Pay retry ladder keeps the hold, even from before the hold', async () => {
+      const h = await held();
+      await mockPg('payments').insert({
+        customer_id: h.customerId, status: 'failed', created_at: new Date(Date.now() - 9 * DAY), next_retry_at: new Date(Date.now() + 1 * DAY),
+      });
+      expect(await sweep()).toMatchObject({ candidates: 0, released: 0 });
+      await untouched(h);
+    });
+
+    test('a failed payment whose retries ended does not keep the hold', async () => {
+      const h = await held();
+      await mockPg('payments').insert({ customer_id: h.customerId, status: 'failed', created_at: new Date(Date.now() - 9 * DAY), next_retry_at: null });
+      expect(await sweep()).toMatchObject({ candidates: 1, released: 1 });
+      expect((await seqOf(h.invoiceId)).status).toBe('active');
+    });
+
+    test('rows the skips pass over on one page never hide an eligible row on a later page', async () => {
+      const skipped = [];
+      for (const n of [1, 2, 3]) {
+        skipped.push(await held({ visitStatus: 'confirmed', sequenceId: `00000000-0000-4000-8000-00000000000${n}` }));
+      }
+      const last = await held({ sequenceId: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      expect(await sweep({ pageSize: 2 })).toMatchObject({ candidates: 1, released: 1 });
+      expect((await seqOf(last.invoiceId)).status).toBe('active');
+      for (const h of skipped) await untouched(h);
+    });
+
+    test('a page that ends exactly on the page size still reads the next page', async () => {
+      const a = await held({ sequenceId: '00000000-0000-4000-8000-000000000001' });
+      const b = await held({ sequenceId: '00000000-0000-4000-8000-000000000002' });
+      expect(await sweep({ pageSize: 2 })).toMatchObject({ candidates: 2, released: 2 });
+      expect((await seqOf(a.invoiceId)).status).toBe('active');
+      expect((await seqOf(b.invoiceId)).status).toBe('active');
     });
 
     test('another customer\'s payment and another invoice\'s attempt do not keep the hold', async () => {
