@@ -1432,8 +1432,8 @@ once (the same accepted trade the v1→v2 canonical-string bump already made)
 owner 2026-10-25; ships dark).** `GET /api/public/estimates/:token/available-slots`
 and `/find-slots` (and the 409 refresh on `/reserve`) list ONE slot for each
 date and start time instead of one per technician. Of the slots sharing a
-start the list keeps a route-optimal one first, then one with a nearby job,
-then the first in its normal order (the same preference `/book` uses). The
+start the list keeps the one it sorts first (route-optimal, then the
+shortest detour to a nearby job, then the slot id), never by list order. The
 kept slot is a complete slot with its own `techId`, `techFirstName`, signed
 `slotId` and hold fields; nothing is merged from the dropped slot, and
 `/reserve` still holds that slot's technician. The collapse runs before the

@@ -104,23 +104,26 @@ const slot = (over = {}) => ({
 });
 
 describe('collapseSameStartSlots (pure)', () => {
-  test('keeps the first claim when nothing is route-optimal or nearby', () => {
+  test('nothing route-optimal or nearby: the same slot wins in either list order (the slot id breaks the tie)', () => {
     const a = slot({ techId: 'tech-1' });
     const b = slot({ techId: 'tech-2', techFirstName: 'Bravo' });
     expect(collapseSameStartSlots([a, b])).toEqual([a]);
-    expect(collapseSameStartSlots([b, a])).toEqual([b]);
+    expect(collapseSameStartSlots([b, a])).toEqual([a]);
   });
 
-  test('prefers routeOptimal, then nearbyJob, then the first claim', () => {
+  test('the picker\'s own order picks the hour: route-optimal, then the shortest detour', () => {
     const plain = slot({ techId: 'tech-1' });
     const nearby = slot({ techId: 'tech-2', nearbyJob: { detourMinutes: 9 } });
+    const nearer = slot({ techId: 'tech-5', nearbyJob: { detourMinutes: 3 } });
     const optimal = slot({ techId: 'tech-3', routeOptimal: true, nearbyJob: { detourMinutes: 4 } });
     expect(collapseSameStartSlots([plain, nearby])).toEqual([nearby]);
+    expect(collapseSameStartSlots([nearby, nearer, plain])).toEqual([nearer]);
     expect(collapseSameStartSlots([plain, nearby, optimal])).toEqual([optimal]);
     expect(collapseSameStartSlots([optimal, nearby, plain])).toEqual([optimal]);
-    // A later route-optimal slot does not displace an earlier route-optimal one.
+    // Two route-optimal slots: the shorter detour, else the slot id, in either order.
     const optimal2 = slot({ techId: 'tech-4', routeOptimal: true });
     expect(collapseSameStartSlots([optimal, optimal2])).toEqual([optimal]);
+    expect(collapseSameStartSlots([optimal2, optimal])).toEqual([optimal]);
   });
 
   test('the kept slot is the whole original object (own tech, slotId, hold fields); nothing merged', () => {

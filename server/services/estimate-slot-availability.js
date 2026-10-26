@@ -1243,9 +1243,11 @@ function dedupeSlots(slots = []) {
 // ("Tue 9:00" twice), the "Only N openings" badge counted both, and the repeat
 // pushed other times out of the short list. The kept slot is one COMPLETE
 // slot object (its own techId, slotId and hold fields) — nothing is merged
-// from the dropped one, so reserve still holds a real technician. Preference:
-// a route-optimal slot, then one with a nearby job, then the first claim in
-// the list's own order. A slot with no date or no start is left alone.
+// from the dropped one, so reserve still holds a real technician. The best
+// slot of an hour is the one the picker itself sorts first
+// (compareCustomerFacingSlots: route-optimal, then the shortest detour to a
+// nearby job, then the slot id), so the choice never depends on list order.
+// A slot with no date or no start is left alone.
 function collapseSameStartSlots(slots = []) {
   const byStart = new Map();
   const out = [];
@@ -1259,11 +1261,9 @@ function collapseSameStartSlots(slots = []) {
     if (at === undefined) {
       byStart.set(key, out.length);
       out.push(slot);
-      continue;
+    } else if (compareCustomerFacingSlots(slot, out[at]) < 0) {
+      out[at] = slot;
     }
-    const kept = out[at];
-    if (kept.routeOptimal === true) continue;
-    if (slot.routeOptimal === true || (slot.nearbyJob && !kept.nearbyJob)) out[at] = slot;
   }
   return out;
 }
