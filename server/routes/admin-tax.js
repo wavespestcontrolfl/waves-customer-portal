@@ -1764,6 +1764,8 @@ router.get('/export/tax-package', async (req, res, next) => {
     // keyed), not a cost column — the old query filtered a nonexistent
     // `date` column, so this export had been empty since the feature
     // shipped.
+    // Guarded: a suite that mocks feature-gates without this reader keeps today's package.
+    const w2Labor = typeof taxPackageW2LaborLive === 'function' && taxPackageW2LaborLive();
     let laborSummaries = [];
     try {
       // Effective-dated rates: each day costs at the rate in force that day
@@ -1773,11 +1775,15 @@ router.get('/export/tax-package', async (req, res, next) => {
         .orderBy('effective_date', 'asc')
         .select('effective_date', 'loaded_labor_rate')
         .catch(() => []);
-      const rows = await db('time_entry_daily_summary as s')
+      const summaryQuery = db('time_entry_daily_summary as s')
         .leftJoin('technicians as t', 's.technician_id', 't.id')
         .whereBetween('s.work_date', [sd, ed])
         .orderBy('s.work_date', 'desc')
         .select('s.*', 't.name as technician_name');
+      // GATE_TAX_PACKAGE_W2_LABOR: a W-2 hire's time is not the owner's own time,
+      // and the hire's pay goes in w2-payroll.csv instead.
+      if (w2Labor) taxPackageW2.whereNotW2(summaryQuery);
+      const rows = await summaryQuery;
       laborSummaries = rows.map(r => {
         // dateCellStr: node-postgres DATE cells are local-midnight Dates —
         // etDateString(new Date(...)) printed the previous calendar day.
@@ -1799,6 +1805,13 @@ router.get('/export/tax-package', async (req, res, next) => {
         };
       });
     } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
+
+    // GATE_TAX_PACKAGE_W2_LABOR: finalized W-2 pay checks paid in the window, read
+    // before the ZIP starts so a failure is an error response, not a cut stream.
+    let w2Checks = null;
+    if (w2Labor) {
+      try { w2Checks = await taxPackageW2.loadFinalizedW2Checks(db, sd, ed); } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ w2Checks = []; }
+    }
 
     // P&L from the shared builder — identical numbers to GET /pnl and
     // /export/pnl. (The old inline version had $0 revenue via a dead query,
@@ -1832,10 +1845,11 @@ router.get('/export/tax-package', async (req, res, next) => {
     // Renamed so a CPA can't mistake the imputed job-costing figures for a
     // payroll expense schedule (owner labor is not deductible).
     archive.append(csv.laborToCSV(laborSummaries), { name: 'labor-timetracking-informational.csv' });
+    if (w2Checks) archive.append(csv.w2PayrollToCSV(w2Checks), { name: 'w2-payroll.csv' });
     archive.append(csv.pnlToCSV(pnlData), { name: 'pnl.csv' });
     if (homeOffice) archive.append(csv.homeOfficeToCSV(homeOffice, sharedBills.homeOfficeDeduction(homeOffice)), { name: 'home-office.csv' });
     if (sharedBillRows && sharedBillRows.length) archive.append(csv.sharedBillsToCSV(sharedBillRows), { name: 'shared-bills.csv' });
-    archive.append(csv.generateReadme(year, pnlData), { name: 'README.txt' });
+    archive.append(csv.generateReadme(year, pnlData, { w2Labor }), { name: 'README.txt' });
 
     await archive.finalize();
   } catch (err) { next(err); }
@@ -1856,7 +1870,8 @@ const sharedBills = require('../services/tax-shared-bills');
 const taxYears = require('../services/tax-years');
 const returnEngine = require('../services/tax-return-engine');
 const { hasYearConstants, YEARS: TAX_YEAR_CONSTANTS } = require('../services/tax-year-constants');
-const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive } = require('../config/feature-gates');
+const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive, taxPackageW2LaborLive } = require('../config/feature-gates');
+const taxPackageW2 = require('../services/tax-package-w2');
 const worksheets = require('../services/tax-worksheets');
 
 const MAX_STATEMENT_BYTES = 2 * 1024 * 1024;
