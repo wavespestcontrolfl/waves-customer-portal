@@ -6214,6 +6214,131 @@ function priceSanitation(options = {}) {
 }
 
 // ============================================================
+// DEAD RODENT REMOVAL & ODOR TREATMENT (one-time; GATE_DEAD_ANIMAL_REMOVAL)
+// ============================================================
+// Owner approved 2026-10-26. Fixed tier prices from RODENT.deadAnimalRemoval
+// (the owner's add-on cost formula is documented there and in the pricing
+// engine README; it is NOT evaluated here).
+//
+// Input: { tier: 'reachable' | 'attic' | 'in_wall', riding: boolean }
+//   reachable  easy reach (garage, crawl-space opening, under a cabinet, attic floor near the hatch)
+//   attic      attic search (found by smell, insulation moved as needed)
+//   in_wall    inside a wall or ceiling (needs an opening): a CUSTOM QUOTE, never priced here
+//   no tier    not chosen: a CUSTOM QUOTE (there is no default tier)
+// `riding` = the same estimate already has another PRICED rodent one-time line
+// (isDeadAnimalRidingHostLine), so there is no drive and no admin on this line.
+// Only the estimate engine decides it, from its own line list; the engine never
+// reads a client value for it.
+//
+// Gate (NEW QUOTES ONLY): enforced here, the deepest chokepoint, like
+// assertAreaAddOnsEnabled. Off = a 400 failClosed error, never a silent drop.
+// An estimate saved with the line before the gate went off stays a normal
+// estimate: nothing in send, accept, booking or completion calls this pricer.
+function assertDeadAnimalRemovalEnabled() {
+  if (require('../../config/feature-gates').deadAnimalRemovalLive()) return;
+  const err = new Error('Dead Rodent Removal & Odor Treatment is not enabled on this environment (GATE_DEAD_ANIMAL_REMOVAL) - remove the service or flip the gate.');
+  err.name = 'PricingError';
+  err.status = 400;
+  err.statusCode = 400;
+  err.code = 'DEAD_ANIMAL_REMOVAL_GATED';
+  err.isOperational = true;
+  err.failClosed = true;
+  throw err;
+}
+
+// Rodent one-time line keys that count as "the crew is already on site": trapping, exclusion
+// (V1, V2 sections, the alternate sqft-tiered exclusion), wire mesh, bird box, sanitation and
+// the paid rodent inspection. A line counts only when it is PRICED (not a custom or manual
+// quote, price above zero). Nothing recurring (bait), no fee, bond, rider or discount row.
+const DEAD_ANIMAL_RIDING_HOST_SERVICES = new Set([
+  'rodent_trapping',
+  'exclusion',
+  'rodent_exclusion',
+  'exclusion_v2',
+  'rodent_wire_mesh',
+  'rodent_bird_box',
+  'rodent_sanitation',
+  'rodent_inspection',
+]);
+
+function isDeadAnimalRidingHostLine(line) {
+  if (!line || typeof line !== 'object') return false;
+  if (!DEAD_ANIMAL_RIDING_HOST_SERVICES.has(line.service)) return false;
+  if (line.quoteRequired === true || line.requiresCustomQuote === true) return false;
+  const amount = Number(line.price ?? line.total ?? line.subtotal);
+  return Number.isFinite(amount) && amount > 0;
+}
+
+// The tier a request names, or null when none was chosen. An unknown non-empty
+// tier is a typo, not "unchosen": it throws instead of becoming a custom quote.
+function normalizeDeadAnimalTier(rawTier) {
+  if (rawTier === undefined || rawTier === null || rawTier === '') return null;
+  if (typeof rawTier !== 'string' || !RODENT.deadAnimalRemoval.tiers.includes(rawTier)) {
+    throw buildPricingError(`deadAnimalRemoval.tier must be one of: ${RODENT.deadAnimalRemoval.tiers.join(', ')}`, { field: 'deadAnimalRemoval.tier', value: rawTier });
+  }
+  return rawTier;
+}
+
+function priceDeadAnimalRemoval(options = {}) {
+  assertDeadAnimalRemovalEnabled();
+  const cfg = RODENT.deadAnimalRemoval;
+  const tier = normalizeDeadAnimalTier(options.tier);
+  const base = {
+    service: 'rodent_dead_animal_removal',
+    name: 'Dead Rodent Removal & Odor Treatment',
+    tier,
+    oneTime: true,
+  };
+  const customQuote = (reason) => ({
+    ...base,
+    price: null,
+    riding: false,
+    quoteRequired: true,
+    requiresCustomQuote: true,
+    customQuoteReason: reason,
+    requiresManualReview: true,
+    manualReviewReasons: [reason],
+    warnings: [],
+    detail: tier === 'in_wall'
+      ? 'Inside a wall or ceiling - needs an opening, custom quote'
+      : 'Access not chosen - custom quote',
+  });
+  if (tier === null) return customQuote('dead_animal_access_not_chosen');
+  if (tier === 'in_wall') return customQuote('dead_animal_in_wall_custom_quote');
+
+  const tierCfg = cfg[tier];
+  const riding = options.riding === true;
+  const price = riding ? tierCfg.riding : tierCfg.alone;
+  // The cost this price stands for, stated for the pricing audit (it reads costs.total when
+  // no inventory mapping exists). Never used to compute the price. A riding line carries no
+  // drive and no admin.
+  const driveMin = riding ? 0 : GLOBAL.DRIVE_TIME;
+  const adminCost = riding ? 0 : AREA_ADDONS.adminPerJob;
+  const laborCost = (tierCfg.durationMin + driveMin) * GLOBAL.LABOR_RATE / 60;
+  const totalCost = tierCfg.material + laborCost + adminCost;
+  return {
+    ...base,
+    price,
+    riding,
+    pricingBasis: riding ? 'riding' : 'alone',
+    durationMin: tierCfg.durationMin,
+    costs: {
+      material: roundMoney(tierCfg.material),
+      labor: roundMoney(laborCost),
+      admin: adminCost,
+      onSiteMin: tierCfg.durationMin,
+      driveMin,
+      total: roundMoney(totalCost),
+    },
+    margin: Math.round((price - totalCost) / price * 1000) / 1000,
+    manualReviewReasons: [],
+    warnings: [],
+    detail: `${tierCfg.label} - ${tierCfg.durationMin} min on site | `
+      + (riding ? 'Same visit as the other rodent work on this estimate' : 'Own visit'),
+  };
+}
+
+// ============================================================
 // BAIT-STATION SETUP FEE — non-WaveGuard members only (owner 2026-08-29)
 // ============================================================
 // $99 one-time, charged ONLY when the customer has no OTHER WaveGuard
@@ -10172,6 +10297,7 @@ module.exports = {
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
+  priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled, isDeadAnimalRidingHostLine, DEAD_ANIMAL_RIDING_HOST_SERVICES,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,
   estimateRodentWireMeshLinearFeet, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,

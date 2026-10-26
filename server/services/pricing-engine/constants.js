@@ -1436,6 +1436,49 @@ const RODENT = {
     legacyAliases: { medium: 'standard' },
   },
 
+  // ── Dead Rodent Removal & Odor Treatment (one-time; GATE_DEAD_ANIMAL_REMOVAL) ─
+  // Owner approved 2026-10-26. FIXED tier prices, set once from the owner's add-on cost
+  // formula and stored as numbers (the formula is NOT evaluated at quote time):
+  //
+  //   price = ((on-site min + drive min) x $35/h / 60 + material + $8 admin) / 0.40,
+  //           rounded UP to the next price ending in 9
+  //
+  //   reachable  45 min on site, $12 material
+  //     alone:  (45 + 20 drive) x $35/h / 60 = $37.92 + $12 + $8 admin = $57.92 / 0.40 = $144.79 -> $149
+  //     riding: 45 x $35/h / 60 = $26.25 + $12 = $38.25 / 0.40 = $95.63 -> $99 (no drive, no admin)
+  //   attic      90 min on site, $15 material
+  //     alone:  (90 + 20 drive) x $35/h / 60 = $64.17 + $15 + $8 admin = $87.17 / 0.40 = $217.92 -> $219
+  //     riding: 90 x $35/h / 60 = $52.50 + $15 = $67.50 / 0.40 = $168.75 -> $169 (no drive, no admin)
+  //   (drive = GLOBAL.DRIVE_TIME 20 min; labor = GLOBAL.LABOR_RATE $35/h; admin = AREA_ADDONS.adminPerJob $8.)
+  //
+  // "Riding" = the SAME estimate already carries another PRICED rodent one-time line
+  // (trapping, exclusion incl. V2, wire mesh, bird box, sanitation, rodent inspection): the
+  // crew is on site anyway, so no drive and no admin. The engine decides this from its own
+  // line list; a client value is never read. in_wall is not priced (a custom quote: it
+  // needs an opening cut, which is a different job).
+  // `material` is the formula's material cost; it is used ONLY to state the line's cost for
+  // the pricing audit (costs.total), never to compute the price.
+  // DB-tunable via pricing_config.rodent_dead_animal_removal (db-bridge; bounded positive
+  // numbers, a malformed row leaves these defaults).
+  deadAnimalRemoval: {
+    reachable: {
+      alone: r(149),
+      riding: r(99),
+      durationMin: 45,
+      material: 12,
+      label: 'Easy reach',
+    },
+    attic: {
+      alone: r(219),
+      riding: r(169),
+      durationMin: 90,
+      material: 15,
+      label: 'Attic search',
+    },
+    // The access choices the estimator offers, in order. in_wall has no price.
+    tiers: ['reachable', 'attic', 'in_wall'],
+  },
+
   // ── Bundle discount rules (applied in estimate orchestrator) ─
   bundles: {
     trapExclusion: {

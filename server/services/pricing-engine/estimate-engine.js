@@ -107,6 +107,7 @@ const {
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   resolvePalmCount,
   normalizeRoachType, assertFinitePriceFields,
+  priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled, isDeadAnimalRidingHostLine, buildPricingError,
 } = require('./service-pricing');
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, lineFlagsBlockPercentDiscount,
@@ -2250,6 +2251,31 @@ function generateEstimate(input) {
       guaranteeTerm: services.rodentGuaranteeCombo.guaranteeTerm || 12,
     });
     lineItems.push(result);
+  }
+
+  // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL, NEW QUOTES
+  // ONLY). Priced LAST among the rodent one-time lines on purpose: "riding" (no
+  // drive, no admin) means this same estimate already carries another PRICED
+  // rodent one-time line, and the engine decides that from its own line list.
+  // A `riding` (or any other) key on the request is never read. The gate is
+  // enforced BEFORE the commercial hand-off so a commercial property cannot
+  // swallow the input silently; a malformed envelope throws, never skips.
+  // Commercial property: always a manual quote (no scopedOneTime opt-in, and the
+  // key is not in COMMERCIAL_SCOPED_ONETIME_SERVICES).
+  if (services.deadAnimalRemoval) {
+    assertDeadAnimalRemovalEnabled();
+    const deadAnimalInput = services.deadAnimalRemoval;
+    if (deadAnimalInput !== true && Object.prototype.toString.call(deadAnimalInput) !== '[object Object]') {
+      throw buildPricingError('deadAnimalRemoval must be an object like { tier }', { field: 'deadAnimalRemoval' });
+    }
+    if (!useCommercialManualQuote(deadAnimalInput, 'pest_control')) {
+      const result = priceDeadAnimalRemoval({
+        tier: deadAnimalInput === true ? undefined : deadAnimalInput.tier,
+        riding: lineItems.some(isDeadAnimalRidingHostLine),
+      });
+      (result.manualReviewReasons || []).forEach(addManualReviewReason);
+      lineItems.push(result);
+    }
   }
 
   // Commercial re-marking for scoped one-time lines (GATE_COMMERCIAL_ONETIME_
