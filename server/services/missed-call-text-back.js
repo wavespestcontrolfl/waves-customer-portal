@@ -46,8 +46,8 @@
  *   missed_call_text_outcome     — 'sent' or 'skipped:<reason>'
  *
  * One text per phone number EVER — a row in the lane's own
- * missed_call_text_claims (phone PRIMARY KEY; the voicemail_sms_claims /
- * dropped_call_sms_claims contract). Owner ruling 2026-09-27: this text and
+ * missed_call_text_claims (phone PRIMARY KEY; the voicemail_sms_claims
+ * contract). Owner ruling 2026-09-27: this text and
  * the voicemail quote-link text stay separate lanes — this one skips anyone
  * the voicemail lane has claimed or texted (or who left a voicemail), and
  * the voicemail lane still answers a voicemail left after this text. The

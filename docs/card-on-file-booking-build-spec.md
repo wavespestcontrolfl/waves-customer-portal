@@ -58,7 +58,7 @@ consent checkbox at card entry is the authorization artifact.
 | Card-hold completion charge + no-show fee + recap path + fee settlement as paid refundable invoice | Built (behind `ONE_TIME_CARD_HOLD`) | `estimate-card-holds.js`, `admin-dispatch.js` (~5027–5049) |
 | Recurring card-on-file at accept, Auto Pay by default (dark: `RECURRING_CARD_ON_FILE`) | **Restored** (PR #2680, `e8f0cd6118`) — PR #2668 (squash `ae2f2c5127`) was reverted by PR #2671 (`068f64e`), then restored in code behind the flag | `server/services/recurring-card-on-file.js` |
 | Card-expiry warning cron (60-day lookahead) + pre-charge reminders (monthly mode only) | Live, SMS legs gated | `server/services/autopay-notifications.js`, `GATE_AUTOPAY_CUSTOMER_SMS` |
-| Deposit-abandonment recovery SMS (2–72h window, fail-closed) | Built, dark (`GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS`) — **pattern to copy**; no card-hold equivalent exists | `estimate-deposits.js` (`assessDepositFollowUpEligibility`), `estimate-follow-up.js` |
+| Deposit-abandonment recovery SMS (2–72h window, fail-closed) | Built dark, then removed 2026-10-25 (`GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS`, never on); the card-step email (`GATE_PAYMENT_STEP_FOLLOWUP`) replaced it | `estimate-deposits.js` (`assessDepositFollowUpEligibility`, now unused by the cron) |
 | AI call-pipeline booking dedup (Call SID marker, appointment idempotency key, advisory lock, confirmation-SMS content dedup, known-caller re-confirmation guard) | Live | `server/services/call-recording-processor.js` (`findExistingCallAppointment` ~1732, booking ~5883+) |
 | Standalone Autopay Authorization contract doc (signing enables autopay + records consent) | Live — **exception tool, not a flow step** | `server/routes/contracts-public.js` |
 

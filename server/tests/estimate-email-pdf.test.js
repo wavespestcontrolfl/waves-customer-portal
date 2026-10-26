@@ -25,10 +25,6 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(async () => null) }));
 jest.mock('../services/estimate-service-lines', () => ({ inferEstimateServiceInterest: jest.fn(() => '') }));
-jest.mock('../services/estimate-deposits', () => ({
-  assessDepositFollowUpEligibility: jest.fn(async () => ({ eligible: false })),
-  DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
-}));
 jest.mock('../services/estimate-conversion-guard', () => ({ customerConvertedSince: jest.fn(async () => ({ converted: false })) }));
 jest.mock('../services/estimate-lead-linkage', () => ({ leadIdForEstimate: jest.fn(async () => null) }));
 jest.mock('../routes/estimate-public', () => ({

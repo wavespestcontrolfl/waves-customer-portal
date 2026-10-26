@@ -2490,59 +2490,6 @@ describe('outboundPriorContactCustomerId (owner ruling 2026-09-26: knownCaller.i
   });
 });
 
-// Codex pre-push r6 P1 on PR #5012: the dropped-call "sorry we got cut off"
-// text is an independent send path from the booking-confirmation leg — it
-// never consulted the disclaimed-number hold (callback_number_needed: the
-// caller said the dialed/ANI number isn't theirs and gave no callback of
-// their own), so the text could still go to that exact number. This was a
-// PRE-EXISTING gap on BOTH directions, not outbound-specific — the fix
-// applies unconditionally at the one shared send site. The actual send
-// decision only runs inside the full processRecording pipeline (transcription,
-// extraction, DB), which this suite does not execute live, so this pins the
-// source shape: the check exists, sits between the no-ANI check and the
-// real send branch (never after — a held number must never dispatch), and
-// is not gated behind any direction check of its own (the surrounding
-// smsAni ternary already runs both directions in the SAME block).
-describe('dropped-call text honors the disclaimed-number hold, both directions (codex pre-push r6 P1)', () => {
-  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-  const blockStart = src.indexOf('if (droppedMidIntake && leadId) {');
-  const noAniIdx = src.indexOf("smsOutcome = { sent: false, skipped: 'no_usable_ani' };", blockStart);
-  const holdIdx = src.indexOf('genuineNewProspect && callbackNumberNeededHoldActive', blockStart);
-  const realSendIdx = src.indexOf('sendDroppedCallAddressRequest({', blockStart);
-
-  test('the block, the no-ANI check, the hold check, and the real send all exist, in that order', () => {
-    expect(blockStart).toBeGreaterThan(-1);
-    expect(noAniIdx).toBeGreaterThan(blockStart);
-    expect(holdIdx).toBeGreaterThan(noAniIdx);
-    expect(realSendIdx).toBeGreaterThan(holdIdx);
-  });
-
-  test('the hold check is not wrapped in its own isOutboundCall/direction branch — it applies to whichever direction reached this shared block', () => {
-    const between = src.slice(noAniIdx, holdIdx);
-    expect(between).not.toContain('isOutboundCall');
-  });
-
-  test('a held number is skipped with an explicit callback_number_needed code, never a silent fall-through to the real send', () => {
-    expect(src).toContain("smsOutcome = { sent: false, skipped: 'callback_number_needed' };");
-  });
-});
-
-// Owner 2026-09-30: a caller who said no to texts on THIS call gets no
-// dropped-call text. Read from the live V2 extraction (the row may not be
-// saved yet); the sender itself checks every earlier call with the number.
-describe('dropped-call text honors a "no texts" said on the call itself', () => {
-  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-  const blockStart = src.indexOf('if (droppedMidIntake && leadId) {');
-  const declinedIdx = src.indexOf('genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true', blockStart);
-  const realSendIdx = src.indexOf('sendDroppedCallAddressRequest({', blockStart);
-
-  test('the decline check sits before the real send and skips with said_no_texts', () => {
-    expect(declinedIdx).toBeGreaterThan(blockStart);
-    expect(realSendIdx).toBeGreaterThan(declinedIdx);
-    expect(src.slice(declinedIdx, realSendIdx)).toContain("smsOutcome = { sent: false, skipped: 'said_no_texts' };");
-  });
-});
-
 // codex #4919 round-9: the callStartedAt(call) anchoring at the extraction,
 // canAutoRoute, and callDateET call sites was removed with the
 // provider-timestamp/call-timeline work it was introduced alongside — this

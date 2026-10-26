@@ -1,7 +1,4 @@
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn(),
-}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -10,7 +7,6 @@ jest.mock('../services/logger', () => ({
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { isEnabled } = require('../config/feature-gates');
 const { checkInboundBlock } = require('../middleware/spam-block');
 
 function makeDb({ manualBlock = null } = {}) {
@@ -48,9 +44,8 @@ beforeEach(() => {
 });
 
 describe('spam-block Marchex Clean Call integration', () => {
-  test('gate off: BLOCK verdict shadow-logs, records a marchex_shadow row, and allows the call', async () => {
+  test('BLOCK verdict shadow-logs, records a marchex_shadow row, and allows the call', async () => {
     const { inserts } = makeDb();
-    isEnabled.mockReturnValue(false);
 
     const result = await checkInboundBlock({ ...CALL, addOns: marchexAddOns('BLOCK') });
 
@@ -71,32 +66,8 @@ describe('spam-block Marchex Clean Call integration', () => {
     ]);
   });
 
-  test('gate on: BLOCK verdict rejects and writes a marchex_auto audit row', async () => {
-    const { inserts } = makeDb();
-    isEnabled.mockImplementation((gate) => gate === 'marchexAutoBlock');
-
-    const result = await checkInboundBlock({ ...CALL, addOns: marchexAddOns('BLOCK') });
-
-    expect(result.blocked).toBe(true);
-    expect(result.blockType).toBe('marchex_auto');
-    expect(result.twiml).toContain('<Reject');
-    expect(inserts).toEqual([
-      {
-        table: 'blocked_call_attempts',
-        row: expect.objectContaining({
-          number: CALL.from,
-          our_endpoint_id: CALL.to,
-          channel: 'voice',
-          block_type: 'marchex_auto',
-          twilio_sid: 'CA_test',
-        }),
-      },
-    ]);
-  });
-
-  test('gate on: PASS verdict allows the call', async () => {
+  test('PASS verdict allows the call', async () => {
     makeDb();
-    isEnabled.mockReturnValue(true);
 
     const result = await checkInboundBlock({ ...CALL, addOns: marchexAddOns('PASS') });
 
@@ -105,20 +76,18 @@ describe('spam-block Marchex Clean Call integration', () => {
 
   test('shallow result nesting (result.recommendation) also parses', async () => {
     makeDb();
-    isEnabled.mockReturnValue(true);
 
     const result = await checkInboundBlock({
       ...CALL,
       addOns: marchexAddOns('BLOCK', { shallow: true }),
     });
 
-    expect(result.blocked).toBe(true);
-    expect(result.blockType).toBe('marchex_auto');
+    expect(result).toEqual({ blocked: false });
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('would block'));
   });
 
   test('malformed AddOns payload fails open', async () => {
     makeDb();
-    isEnabled.mockReturnValue(true);
 
     const result = await checkInboundBlock({ ...CALL, addOns: '{not json' });
 
@@ -128,7 +97,6 @@ describe('spam-block Marchex Clean Call integration', () => {
 
   test('missing AddOns param allows the call', async () => {
     makeDb();
-    isEnabled.mockReturnValue(true);
 
     const result = await checkInboundBlock({ ...CALL });
 
@@ -137,7 +105,6 @@ describe('spam-block Marchex Clean Call integration', () => {
 
   test('sms channel never consults Marchex', async () => {
     const { inserts } = makeDb();
-    isEnabled.mockReturnValue(true);
 
     const result = await checkInboundBlock({
       ...CALL,
@@ -151,7 +118,6 @@ describe('spam-block Marchex Clean Call integration', () => {
 
   test('manual hard_block still wins regardless of Marchex', async () => {
     const { inserts } = makeDb({ manualBlock: { block_type: 'hard_block' } });
-    isEnabled.mockReturnValue(false);
 
     const result = await checkInboundBlock({ ...CALL, addOns: marchexAddOns('PASS') });
 
@@ -168,7 +134,6 @@ describe('spam-block Marchex Clean Call integration', () => {
 
     test('manual block persists the signals JSON on the audit row', async () => {
       const { inserts } = makeDb({ manualBlock: { block_type: 'hard_block' } });
-      isEnabled.mockReturnValue(false);
 
       await checkInboundBlock({ ...CALL, signals: SIGNALS });
 
@@ -178,7 +143,6 @@ describe('spam-block Marchex Clean Call integration', () => {
 
     test('marchex shadow row persists the signals JSON', async () => {
       const { inserts } = makeDb();
-      isEnabled.mockReturnValue(false);
 
       await checkInboundBlock({ ...CALL, addOns: marchexAddOns('BLOCK'), signals: SIGNALS });
 
@@ -189,7 +153,6 @@ describe('spam-block Marchex Clean Call integration', () => {
 
     test('omitted signals store NULL (sms caller passes nothing)', async () => {
       const { inserts } = makeDb({ manualBlock: { block_type: 'hard_block' } });
-      isEnabled.mockReturnValue(false);
 
       await checkInboundBlock({ ...CALL, channel: 'sms' });
 

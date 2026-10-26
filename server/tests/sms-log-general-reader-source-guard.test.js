@@ -391,16 +391,6 @@ const ALLOWLIST = [
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
   {
-    file: 'services/dropped-call-sms.js',
-    snippet: 'const prior = await db(\'sms_log\')',
-    reason: 'message_type restricted to this file\'s own MESSAGE_TYPE constant, disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
-  },
-  {
-    file: 'services/dropped-call-sms.js',
-    snippet: 'const row = await db(\'sms_log\')',
-    reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
-  },
-  {
     file: 'services/intelligence-bar/comms-tools.js',
     snippet: 'const rows = await db(\'sms_log\')',
     reason: 'status filtered to \'scheduled\', which excludes \'sending\' — an unresolved reservation cannot match (list_queued_messages lists future sends only).',

@@ -15290,7 +15290,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   // sendCustomerMessage wraps every provider failure as the
                   // generic code PROVIDER_FAILURE and carries the actionable
                   // Twilio classification (21610, 21614, 20429 …) in
-                  // providerErrorCode — same precedence as dropped-call-sms.js.
+                  // providerErrorCode.
                   errorClass: holdEnqueueFailed
                     ? 'SEND_WINDOW_REQUEUE_FAILED'
                     : (smsResult.providerErrorCode || smsResult.code || 'provider_failure'),

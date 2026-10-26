@@ -625,11 +625,11 @@ async function processDueBatch(now = new Date()) {
       if (!conv.converted && !est.customer_id) {
         // Lead-only estimates (codex 2736 r13): conversion marks the lead
         // won or creates the customer WITHOUT backfilling the estimate, so
-        // the customer-guard alone never sees it — same evidence chain the
-        // click-followup gate runs (lead stamp/status, then phone-matched
-        // customer/booking). Lazy requires keep the module graphs apart.
+        // the customer-guard alone never sees it — so run the lead evidence
+        // chain too (lead stamp/status, then phone-matched customer/booking).
+        // Lazy requires keep the module graphs apart.
         const { leadIdForEstimate } = require('./estimate-lead-linkage');
-        const gate = require('./click-followup-gate');
+        const gate = require('./estimate-conversion-since');
         const leadId = await leadIdForEstimate(est);
         if (leadId) conv = await gate.leadConvertedSince(leadId, est);
         if (!conv.converted && est.customer_phone) {

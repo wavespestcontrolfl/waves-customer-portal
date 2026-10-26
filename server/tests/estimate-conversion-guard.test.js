@@ -41,13 +41,6 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/estimate-service-lines', () => ({
   inferEstimateServiceInterest: jest.fn(() => ''),
 }));
-jest.mock('../services/estimate-deposits', () => ({
-  assessDepositFollowUpEligibility: jest.fn(async () => ({
-    eligible: true,
-    outstandingAmount: 49,
-  })),
-  DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
-}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
