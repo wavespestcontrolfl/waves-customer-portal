@@ -9,7 +9,7 @@ import { UiSurface } from './UiSurface';
 afterEach(cleanup);
 const controllerFor = (overrides = {}) => ({
   available: true, catalogLoading: false, views: [{ id: 'open', name: 'Open projects', state: {} }], error: null,
-  saveView: vi.fn(async () => true), applyView: vi.fn(async () => ({})), removeView: vi.fn(async () => true),
+  refreshViews: vi.fn(async () => true), saveView: vi.fn(async () => true), applyView: vi.fn(async () => ({})), removeView: vi.fn(async () => true),
   ...overrides,
 });
 const example = (controller, onApply) => <UiSurface density="comfortable"><TableSavedViews label="Bids" controller={controller} onApply={onApply} /></UiSurface>;
@@ -19,6 +19,7 @@ it('saves a named view through a labeled form and returns keyboard focus', async
   render(example(controller));
   const trigger = screen.getByRole('button', { name: 'Bids saved views' });
   fireEvent.click(trigger);
+  expect(controller.refreshViews).toHaveBeenCalledTimes(1);
   expect(screen.getByRole('button', { name: 'Save current view' })).toBeDisabled();
   fireEvent.change(screen.getByRole('textbox', { name: 'View name' }), { target: { value: 'Upcoming projects' } });
   fireEvent.submit(screen.getByRole('textbox', { name: 'View name' }).closest('form'));

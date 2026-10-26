@@ -73,6 +73,7 @@ export function TableSavedViews({ label, controller, onApply = controller.applyV
         setMessage('');
         setUnexpectedError('');
         setOpen(true);
+        void controller.refreshViews();
       }}>Views</Button>
     {!open && feedback && <div className="basis-full">{feedback}</div>}
     <Dialog open={open} onClose={() => { if (!pending) setOpen(false); }} size="sm">
