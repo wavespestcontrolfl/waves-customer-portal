@@ -2395,6 +2395,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             allowLive: true,
             ...(actorUserId ? { actorId: actorUserId } : {}),
             overlapAdvisory: true,
+            // The day options came from the staff arrival check, so the move
+            // numbers the day the way it checked (GATE_STAFF_ROUTE_INSERTION).
+            placeInRoute: true,
             sourceSurface: 'quick_move',
             qualityDates: rebookerQualityDates,
             // The intent is recorded WITH the operation (durable): the live
@@ -2453,6 +2456,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // their own visit must not be told about it.
           ...(actorUserId ? { actorId: actorUserId } : {}),
           overlapAdvisory: true,
+          // Same as the series call above (GATE_STAFF_ROUTE_INSERTION).
+          placeInRoute: true,
           excludeServiceIds: [job.id],
           qualityDates: rebookerQualityDates,
           // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_

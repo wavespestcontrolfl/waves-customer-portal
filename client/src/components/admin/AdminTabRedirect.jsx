@@ -12,8 +12,10 @@ export default function AdminTabRedirect({
   const location = useLocation();
   if (tabInHash) {
     const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
-    hash.set(queryKey, tab);
-    return <Navigate to={{ pathname: to, search: location.search, hash: `#${hash}` }} replace />;
+    if (tab) hash.set(queryKey, tab);
+    else hash.delete(queryKey);
+    const nextHash = hash.toString();
+    return <Navigate to={{ pathname: to, search: location.search, hash: nextHash ? `#${nextHash}` : "" }} replace />;
   }
   const params = new URLSearchParams(location.search);
   if (remapQuery?.from && remapQuery?.to) {
@@ -29,8 +31,10 @@ export default function AdminTabRedirect({
   }
   const requestedTab = params.get(queryKey);
 
+  // No `tab`: the destination's default view, which carries no tab param.
   if (!preserveTabs.includes(requestedTab)) {
-    params.set(queryKey, tab);
+    if (tab) params.set(queryKey, tab);
+    else params.delete(queryKey);
   }
 
   const search = params.toString();

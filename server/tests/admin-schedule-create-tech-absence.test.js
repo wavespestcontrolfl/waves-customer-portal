@@ -55,6 +55,7 @@ jest.mock('../services/scheduling/line-technician', () => {
   const actual = jest.requireActual('../services/scheduling/line-technician');
   return { ...actual, recordLinePickShadow: jest.fn(actual.recordLinePickShadow) };
 });
+jest.mock('../services/scheduling/office-auto-technician', () => ({ resolveOfficeAutoTechnician: jest.fn() }));
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),
 }));
@@ -66,6 +67,7 @@ jest.mock('../services/call-booking-catalog', () => ({
 }));
 const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
 const { recordLinePickShadow } = require('../services/scheduling/line-technician');
+const { resolveOfficeAutoTechnician } = require('../services/scheduling/office-auto-technician');
 const logger = require('../services/logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const express = require('express');
@@ -401,5 +403,86 @@ describe('POST / — admin create — technician job-type warning (office paths 
     const res = await post({ ...body, technicianId: undefined });
     expect(res.status).toBe(201);
     expect((res.body.warnings || []).some((w) => /set to Off/.test(w))).toBe(false);
+  });
+});
+
+// GATE_UNASSIGNED_VISIT_GUARD (census H5, owner 2026-10-25): the office modal's Auto choice used
+// to require a tech-matcher that does not exist, so every Auto visit saved with no technician.
+// The resolver itself is covered against Postgres in unassigned-visit-guard.pg.test.js.
+describe('POST / — admin create — Auto technician choice (GATE_UNASSIGNED_VISIT_GUARD)', () => {
+  const body = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    estimatedPrice: 89,
+    assignmentMode: 'auto',
+  };
+  const recurring = { ...body, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, boosterMonths: [11], createInvoice: true };
+  afterEach(() => { delete process.env.GATE_UNASSIGNED_VISIT_GUARD; });
+
+  test('gate off: the resolver is never asked, the visit saves unassigned as before, and the response has no autoAssign', async () => {
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(resolveOfficeAutoTechnician).not.toHaveBeenCalled();
+    expect(inserts[0].technician_id).toBeNull();
+    expect(res).not.toHaveProperty('autoAssign');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Auto-assign failed, leaving unassigned'));
+  });
+
+  test('gate on, Auto resolves a technician: the visit is saved on that technician and the response says so', async () => {
+    process.env.GATE_UNASSIGNED_VISIT_GUARD = 'true';
+    resolveOfficeAutoTechnician.mockResolvedValue({ technicianId: 'tech-no-absence', result: 'assigned', reason: 'only_assignable' });
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(resolveOfficeAutoTechnician).toHaveBeenCalledWith(expect.objectContaining({
+      date: '2099-07-03', windowStart: '10:00', windowEnd: '11:00', durationMinutes: 60, serviceType: 'General Pest Control', customerId: 'cust-1',
+    }));
+    expect(inserts[0].technician_id).toBe('tech-no-absence');
+    expect(res.autoAssign).toEqual({ result: 'assigned', reason: 'only_assignable', technicianId: 'tech-no-absence' });
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('Auto-assign failed'));
+  });
+
+  test('gate on, Auto finds nobody: the visit still saves, unassigned, and the response says why', async () => {
+    process.env.GATE_UNASSIGNED_VISIT_GUARD = 'true';
+    resolveOfficeAutoTechnician.mockResolvedValue({ technicianId: null, result: 'unassigned', reason: 'several_assignable' });
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(inserts[0].technician_id).toBeNull();
+    expect(res.autoAssign).toEqual({ result: 'unassigned', reason: 'several_assignable' });
+  });
+
+  test('gate on, a technician the office chose is never overridden, and "unassigned" on purpose is never resolved', async () => {
+    process.env.GATE_UNASSIGNED_VISIT_GUARD = 'true';
+    for (const mode of ['choose', 'unassigned']) {
+      inserts = [];
+      const { status, body: res } = await post({ ...body, assignmentMode: mode, technicianId: mode === 'choose' ? 'tech-no-absence' : undefined });
+      expect(status).toBe(201);
+      expect(res).not.toHaveProperty('autoAssign');
+      expect(inserts[0].technician_id).toBe(mode === 'choose' ? 'tech-no-absence' : null);
+    }
+    expect(resolveOfficeAutoTechnician).not.toHaveBeenCalled();
+  });
+
+  test('gate on, a recurring series resolves once for the parent and every child copies it', async () => {
+    process.env.GATE_UNASSIGNED_VISIT_GUARD = 'true';
+    resolveOfficeAutoTechnician.mockResolvedValue({ technicianId: 'tech-no-absence', result: 'assigned', reason: 'only_assignable' });
+    const { status, body: res } = await post(recurring);
+    expect(status).toBe(201);
+    expect(resolveOfficeAutoTechnician).toHaveBeenCalledTimes(1);
+    expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', '2099-08-07', '2099-09-04', '2099-11-03']);
+    expect(inserts.every((d) => d.technician_id === 'tech-no-absence')).toBe(true);
+    expect(res.autoAssign.result).toBe('assigned');
+  });
+
+  test('gate on, the Auto technician is marked out on a later series date: the series saves unassigned instead of refusing', async () => {
+    process.env.GATE_UNASSIGNED_VISIT_GUARD = 'true';
+    resolveOfficeAutoTechnician.mockResolvedValue({ technicianId: TECH_ID, result: 'assigned', reason: 'only_assignable' });
+    const { status, body: res } = await post(recurring);
+    expect(status).toBe(201);
+    expect(inserts).toHaveLength(4);
+    expect(inserts.every((d) => d.technician_id === null)).toBe(true);
+    expect(res.autoAssign).toEqual({ result: 'unassigned', reason: 'absent_on_series_date' });
   });
 });

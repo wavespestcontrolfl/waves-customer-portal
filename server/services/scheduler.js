@@ -8747,6 +8747,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:10PM — Unassigned timed visits (census M13, owner 2026-10-25). A
+  // visit with a time and no technician is on no field app; the only earlier
+  // alert fires 30 minutes AFTER its window. One standing Schedule row for
+  // timed visits tomorrow through 3 days out with no technician: rings when a
+  // visit joins, clears itself at zero. Dark behind GATE_UNASSIGNED_VISIT_GUARD
+  // (gate off = no query). runExclusive: a deploy overlap must not run two.
+  // See server/services/unassigned-timed-visits-check.js.
+  // =========================================================================
+  cron.schedule('10 18 * * *', async () => {
+    try {
+      await runExclusive('unassigned-timed-visits', async () => {
+        const result = await require('./unassigned-timed-visits-check').runUnassignedTimedVisitsCheck();
+        if (!result.skipped && result.count > 0) logger.info(`Unassigned timed visits: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Unassigned timed visits check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:40PM — Stale-visit sweep (past-dated open appointments)
   // =========================================================================
   // Runs after the 6PM missed-appointment check on purpose: that check only

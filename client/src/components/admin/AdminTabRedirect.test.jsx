@@ -189,4 +189,18 @@ describe("AdminTabRedirect", () => {
       "/admin/knowledge?entry=entry-123&kbTab=audit&area=base#review",
     );
   });
+
+  it("with no tab, opens the destination's default view: no tab param, other params and the hash kept", () => {
+    expect(renderRedirect({ entry: "/admin/bid-desk?bid=bid-123&tab=stale#checklist", source: "/admin/bid-desk", to: "/admin/bids" }))
+      .toBe("/admin/bids?bid=bid-123#checklist");
+    cleanup();
+    expect(renderRedirect({ entry: "/admin/bid-desk", source: "/admin/bid-desk", to: "/admin/bids" })).toBe("/admin/bids");
+  });
+
+  it("with no tab in hash mode, drops the tab from the hash and keeps the rest", () => {
+    expect(renderRedirect({ entry: "/admin/old?id=x#source=bell&tab=obsolete", source: "/admin/old", to: "/admin/new", tabInHash: true }))
+      .toBe("/admin/new?id=x#source=bell");
+    cleanup();
+    expect(renderRedirect({ entry: "/admin/old#tab=obsolete", source: "/admin/old", to: "/admin/new", tabInHash: true })).toBe("/admin/new");
+  });
 });

@@ -380,6 +380,21 @@ router.put('/entries/:id', requireAdmin, async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /entries/:id/confirm-auto-close — an admin confirms a shift the system
+// closed (GATE_SHIFT_CLOSE_REVIEW) as it stands. Changes no time; clears the
+// "needs review" flag so the technician's pay run line is no longer held.
+// Editing the clock-out (PUT above) clears it too.
+// ---------------------------------------------------------------------------
+router.post('/entries/:id/confirm-auto-close', requireAdmin, async (req, res, next) => {
+  try {
+    const entry = await timeTracking.confirmAutoClose(req.params.id, { reviewed_by: req.technicianId });
+    res.json({ success: true, entry });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /entries/:id — void entry
 // ---------------------------------------------------------------------------
 router.delete('/entries/:id', requireAdmin, async (req, res, next) => {

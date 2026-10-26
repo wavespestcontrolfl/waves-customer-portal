@@ -69,6 +69,7 @@
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
  *   GATE_PAYROLL_TAX_CALENDAR=true (basic payroll layer 2, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Needs GATE_PAYROLL for the finalized pay runs it reads. Puts the amount and due date of each payroll tax deposit and filing on the existing Tax page filing calendar: the monthly federal deposit, Form 941, Florida RT-6, a FUTA over $500 alert (FUTA deposits are out of scope), Form 940, W-2 and W-3, and the Florida new hire report. Due dates move past weekends and legal holidays by the IRS and Florida rules. The 14-day reminder text to the owner is the existing tax deadline alert. A row the owner marks filed or paid is never changed; if a pay run later raises an amount above what the marked rows cover, a new balance row holds the difference, and if the pay checks behind a marked return change, a review row asks the owner to check the figures. Read at call time via payrollTaxCalendarLive(), strict 'true', dark by default; off = the sync returns before any query. The owner makes every deposit and filing himself; sends nothing to a customer or staff member. Rollback = unset.)
+ *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
  *   GATE_CONTACT_LOGIN=true (an on-location contact signs into the customer app with their OWN phone number through the same SMS code login, landing on the account they are a contact for as a CONTACT session: view-only schedule, visit history, technician tracking, service-report documents (never for a contact the report rule withholds from) and their own notification choices (GET/PUT /api/notifications/contact-preferences); every other portal route answers 403 ACCOUNT_HOLDER_ONLY — billing, payments, cards, referrals, credits, requests, chat, property, account deletion, the holder's preferences, push subscriptions. The account holder's own number always wins; a contact number is tried only when no holder row matches, and the contact's session dies at its next refresh once the holder removes them. Per-contact notification choices (service_contact_notification_prefs) only NARROW what the account sends: a purpose the holder turned off stays off. Owner rulings 2026-10-20: view only, no confirm or reschedule; the contact's in-app text-consent checkbox counts as the YES for a pending opt-in ask only, never over a STOP. Read at call time via contactLoginLive(), strict 'true', dark by default; off = a contact number never logs in, an existing contact token is refused (401) and the senders ignore the per-contact table, byte-identical to before. Sends nothing to a customer.)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
@@ -97,6 +98,7 @@
  *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; anything else, including 'true', = off, no resolver call and no query. 'true' is not a value yet: live mode is a separate later change. Never changes a booking, sends nothing to a customer or staff member.)
+ *   GATE_UNASSIGNED_VISIT_GUARD=true (owner 2026-10-25, second technician starts early 2027: an office visit must not silently land with no technician. On, the office create modal's "Auto" technician choice picks a real technician: the one technician assignable that day (active, field-dispatchable, not off that day or absent, not Off for the service category), or, when several qualify, the existing scheduling pick when that is active; otherwise the visit is saved unassigned and the response and modal say so (the old tech-matcher path never existed, so Auto always saved it unassigned). A daily 6:10 PM ET check also reports timed visits tomorrow through 3 days out that have no technician as one standing Schedule bell (rings when a new visit joins, clears at zero). Strict opt-in: exactly 'true', read at call time via unassignedVisitGuardLive(). Ships DARK; off = Auto behaves exactly as before and the check does nothing, no query. Sends nothing to a customer.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
@@ -148,6 +150,7 @@
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
+ *   GATE_ADS_CAPACITY_WORK_DAYS=true (ads capacity counts a technician only on dates they work: absences and, with GATE_TECH_WORK_DAYS, off weekdays; strict 'true', read at call time via adsCapacityWorkDaysLive(); off = every assignable technician every day; changes ad budgets only, sends nothing to a customer)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
@@ -2108,6 +2111,11 @@ const gates = {
   // preview env with copied Google Ads creds + cronJobs open must never
   // mutate live campaign budgets by default.
   adsBudgetLivePush: process.env.GATE_ADS_BUDGET_LIVE_PUSH === 'true',
+
+  // Ads capacity by work day (owner 2026-10-25). Registered for logGateStatus
+  // only; BudgetManager reads adsCapacityWorkDaysLive() at CALL time. Ships
+  // DARK. Kill switch: unset - capacity counts every assignable technician.
+  adsCapacityWorkDays: process.env.GATE_ADS_CAPACITY_WORK_DAYS === 'true',
 
   // Booking "pay per application" — LINKED-ESTIMATE, PEST-ONLY BY DESIGN: prices
   // ONLY a booking explicitly linked to an estimate (estimate_id), and only for
@@ -4108,6 +4116,16 @@ const gates = {
   // never changes neighbours' promises or sends notifications. Call-time
   // kill switch in scheduling/arrival-route.js; off in every environment.
   adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
+  // Staff route insertion (owner 2026-10-25, "go" + "save order"): with
+  // capacity mode off, a staff check of a MOVED visit (another day,
+  // technician or start) tries it at every place in the technician's stored
+  // order instead of after the last numbered stop, keeps every later stop 15
+  // minutes inside its arrival window, and the staff save numbers that day in
+  // the certified order. Never changes a customer's time or sends a message.
+  // Dark in every environment; scheduling/arrival-route.js reads it through
+  // gateEnvValue() at call time. Kill switch: unset. This entry is for
+  // logGateStatus only.
+  staffRouteInsertion: gateEnvValue('GATE_STAFF_ROUTE_INSERTION'),
   // Shared 08:00–18:00 capacity, catalog durations and complete-route booking.
   // Dark in every environment; callers read at operation time. Owner activation.
   schedulingCapacity: gateEnvValue('GATE_SCHEDULING_CAPACITY'),
@@ -4423,6 +4441,11 @@ const gates = {
   // taps "No lunch today". This entry is for logGateStatus; the services read
   // autoLunchLive() at CALL time. Ships DARK: exactly 'true' only. Sends nothing.
   autoLunch: process.env.GATE_AUTO_LUNCH === 'true',
+  // Shift close review (census H8 + M7, owner 2026-10-25): a forced clock-out ends at the
+  // last real activity and is flagged for an admin; the clock-out texts follow the 7 PM
+  // nudge routing. This entry is for logGateStatus; the services read shiftCloseReviewLive()
+  // at CALL time. Ships DARK: exactly 'true' only. Texts only the owner's own phone.
+  shiftCloseReview: process.env.GATE_SHIFT_CLOSE_REVIEW === 'true',
   // Consultation-link lane ("Book with Adam", scope doc
   // lead-inspection-link-scope.md): the /inspection/:token public page, the
   // buildLeadConsultationLink composer/admin builder, and the recurring-lead
@@ -4686,6 +4709,10 @@ const gates = {
   // Service-line map (owner 2026-10-25), SHADOW ONLY. Registered for logGateStatus only;
   // consumers read serviceLineMapMode() at CALL time. Kill switch: unset.
   serviceLineMapShadow: String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow',
+
+  // Unassigned-visit guard (owner 2026-10-25). Ships DARK: exactly 'true'. Registered for
+  // logGateStatus only; consumers read unassignedVisitGuardLive() at CALL time. Kill switch: unset.
+  unassignedVisitGuard: process.env.GATE_UNASSIGNED_VISIT_GUARD === 'true',
 
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
@@ -6377,6 +6404,14 @@ function multiTechConfirmLive() {
   return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
 }
 
+// GATE_ADS_CAPACITY_WORK_DAYS read at CALL time - strict `=== 'true'`. The one
+// reader for BudgetManager.getTechCountForArea: on, a dated capacity count skips
+// a technician on a date they are absent or do not work; off, every assignable
+// technician counts every day (byte-identical to before).
+function adsCapacityWorkDaysLive() {
+  return process.env.GATE_ADS_CAPACITY_WORK_DAYS === 'true';
+}
+
 // GATE_TECH_WORK_DAYS read at CALL time - strict `=== 'true'`. The one reader for
 // technicians.work_days (services/technician-eligibility.js): on, a technician
 // is skipped by slot offers and automatic placement on a day they do not work;
@@ -6400,6 +6435,13 @@ function techJobTypeChecksLive() {
 // query. Live mode is a separate later change. Unset is the kill, no redeploy.
 function serviceLineMapMode() {
   return String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow' ? 'shadow' : 'off';
+}
+
+// GATE_UNASSIGNED_VISIT_GUARD read at CALL time - strict `=== 'true'`. On: the office create
+// modal's Auto technician choice resolves a real technician (or says it could not), and the
+// daily 6:10 PM ET check reports timed unassigned visits in the next 3 days. Off = byte-identical.
+function unassignedVisitGuardLive() {
+  return process.env.GATE_UNASSIGNED_VISIT_GUARD === 'true';
 }
 
 // Fresh annual contracts require the term-aware cancellation path. Read both
@@ -7038,6 +7080,13 @@ function pinParkedCheckLive() {
 // `=== 'true'`, dark in every environment; unsetting it is the kill switch.
 function autoLunchLive() {
   return process.env.GATE_AUTO_LUNCH === 'true';
+}
+
+// Shift close review (services/time-tracking.js, time-tracking-crons.js,
+// payroll-runs.js), read at CALL time. Strict `=== 'true'`, dark in every
+// environment; unsetting it is the kill switch.
+function shiftCloseReviewLive() {
+  return process.env.GATE_SHIFT_CLOSE_REVIEW === 'true';
 }
 
 // GATE_TRUCK_KIT read at CALL time — strict `=== 'true'`, dark by default
@@ -7697,12 +7746,16 @@ module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
+// GATE_ADS_CAPACITY_WORK_DAYS reader, on its own line so gate PRs never conflict.
+module.exports.adsCapacityWorkDaysLive = adsCapacityWorkDaysLive;
 // GATE_TECH_WORK_DAYS reader, on its own line so gate PRs never conflict.
 module.exports.techWorkDaysLive = techWorkDaysLive;
 // GATE_TECH_JOB_TYPE_CHECKS reader, on its own line so gate PRs never conflict.
 module.exports.techJobTypeChecksLive = techJobTypeChecksLive;
 // GATE_SERVICE_LINE_MAP reader, on its own line so gate PRs never conflict.
 module.exports.serviceLineMapMode = serviceLineMapMode;
+// GATE_UNASSIGNED_VISIT_GUARD reader, on its own line so gate PRs never conflict.
+module.exports.unassignedVisitGuardLive = unassignedVisitGuardLive;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
 module.exports.autoDispatchDayRulesLive = autoDispatchDayRulesLive;
 module.exports.autoDispatchKeepTechLive = autoDispatchKeepTechLive;
@@ -8286,3 +8339,5 @@ module.exports.planRateLedgerReconcileLive = planRateLedgerReconcileLive;
 module.exports.leadDraftPropertyLookupLive = leadDraftPropertyLookupLive;
 // GATE_ESTIMATE_CONSUMER_NOTICE reader, on its own line so gate PRs never conflict.
 module.exports.estimateConsumerNoticeLive = estimateConsumerNoticeLive;
+// GATE_SHIFT_CLOSE_REVIEW reader, on its own line so gate PRs never conflict.
+module.exports.shiftCloseReviewLive = shiftCloseReviewLive;
