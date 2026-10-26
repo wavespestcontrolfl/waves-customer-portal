@@ -85,7 +85,9 @@ async function resolveTexts(conn, sids) {
     .select('m.twilio_sid', 'm.created_at', 'c.customer_id',
       conn.raw("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, '')) as phone"));
   for (const row of canonical) add(String(row.twilio_sid), row, row.phone);
-  const legacy = await conn('sms_log').where('direction', 'inbound').whereIn('twilio_sid', sids)
+  // The shared reservation filter (sms-log-general-reader-source-guard): an inbound row by its own sid is never a
+  // send reservation, so it changes nothing here; it keeps this reader on the one definition.
+  const legacy = await excludeUnresolvedSendReservations(conn('sms_log').where('direction', 'inbound').whereIn('twilio_sid', sids))
     .select('twilio_sid', 'created_at', 'customer_id', 'from_phone');
   for (const row of legacy) add(String(row.twilio_sid), row, row.from_phone);
   return found;
