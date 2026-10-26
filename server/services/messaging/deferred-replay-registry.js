@@ -1547,6 +1547,12 @@ const REGISTRY = {
     async recheck(meta) {
       // A contract signed/voided/expired overnight must not be reminded.
       try {
+        // The Mark accepted consumer notice (GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND): a text held overnight is not
+        // sent once the kill switch is thrown.
+        if (meta.origin_entry_point === 'manual_accept_consumer_notice'
+          && !require('../../config/feature-gates').manualAcceptConsumerNoticeSendLive()) {
+          return { eligible: false, reason: 'gate-off' };
+        }
         if (!meta.contract_id) return { eligible: true };
         const contract = await db('customer_contracts')
           .where({ id: meta.contract_id })
