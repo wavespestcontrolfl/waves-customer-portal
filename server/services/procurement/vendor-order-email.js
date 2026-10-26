@@ -115,6 +115,12 @@ function claimable(row, now = Date.now()) {
   return row.status === 'sending' && !row.send_attempted_at
     && !!row.claimed_at && new Date(row.claimed_at).getTime() < now - STALE_UNATTEMPTED_MS;
 }
+// A 'sending' row whose claim crashed before the attempt stamp, and is stale: nothing reached
+// SendGrid, so a new claim may take it over (claimable). The Restock tab offers the button again
+// for it; an ATTEMPTED send stays blocked until a person checks it (Codex #6866 r1 P2).
+function retryableEmail(row, now = Date.now()) {
+  return !!row && row.status === 'sending' && claimable(row, now);
+}
 const CLAIMABLE_SQL = `(${TABLE}.status IN ('pending', 'failed', 'dismissed') OR (${TABLE}.status = 'sending' AND ${TABLE}.send_attempted_at IS NULL AND ${TABLE}.claimed_at < ?))`;
 
 // The order bot and this email must never both buy a request: the bot claims
@@ -397,6 +403,7 @@ async function sendOrderEmail(requestId, { actor, actorId, version } = {}, deps 
 
 module.exports = {
   findEmailOrderOut,
+  retryableEmail,
   buildSiteOneOrderEmail,
   previewOrderEmail,
   sendOrderEmail,

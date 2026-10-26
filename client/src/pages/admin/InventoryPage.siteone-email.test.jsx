@@ -165,4 +165,12 @@ describe('Email order to SiteOne', () => {
     expect(await screen.findByText(/Email to SiteOne may have gone out/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Email order to SiteOne' })).not.toBeInTheDocument();
   });
+
+  it('a stale claim that never started offers the button again (Codex #6866 r1 P2)', async () => {
+    installFetch({ requests: [{ ...OPEN_REQUEST, emailOrder: { status: 'sending', po: 'WAVES-20000000', sentAt: null, retryable: true } }] });
+    mount();
+    expect(await screen.findByText(/An earlier email to SiteOne never started/)).toBeInTheDocument();
+    expect(screen.queryByText(/may have gone out/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Email order to SiteOne' })).toBeInTheDocument();
+  });
 });

@@ -3343,10 +3343,16 @@ function RestockStatusCell({
           {emailOrder.po}
         </div>
       )}
-      {emailOrder?.status === "sending" && (
+      {emailOrder?.status === "sending" && !emailOrder.retryable && (
         <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
           Email to SiteOne may have gone out · PO {emailOrder.po}. Check SendGrid
           or SiteOne before sending again.
+        </div>
+      )}
+      {emailOrder?.status === "sending" && emailOrder.retryable && (
+        <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
+          An earlier email to SiteOne never started · PO {emailOrder.po}. You
+          can send it again.
         </div>
       )}
       {canAuthor && request.status === "open" && order?.status !== "placing" && (
@@ -3362,7 +3368,7 @@ function RestockStatusCell({
       {canAuthor &&
         onEmailOrder &&
         request.status === "open" &&
-        !emailOrder &&
+        (!emailOrder || emailOrder.retryable) &&
         order?.status !== "placing" && (
           <Button
             onClick={() => onEmailOrder(request)}
