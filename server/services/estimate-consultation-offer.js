@@ -278,6 +278,8 @@ module.exports = {
   // The one rule for "the lead this estimate belongs to" (also read by the
   // email division's payload builders).
   linkedLeadIdFor,
+  // The one "same property" rule (also the commercial first visit's signed-premises check, commercial-first-visit.js).
+  sameProperty,
   PROBE_BUDGET_MS,
   FINAL_CHECK_SNAPSHOT,
   _test: { sameProperty, linkedLeadIdFor, finalEligibility, PROBE_BUDGET_MS, MAX_PROBES_IN_FLIGHT, probesInFlight: () => probesInFlight },

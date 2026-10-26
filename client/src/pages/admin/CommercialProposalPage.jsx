@@ -377,6 +377,7 @@ function CommercialProposalEditor() {
       label: program.label || '',
       frequencyPerYear: program.frequencyPerYear ?? 4,
       pricePerApplication: program.pricePerApplication ?? 0,
+      visitMinutes: program.visitMinutes ?? '',
       taxable: program.taxable === true,
       note: program.note || '',
       inclusionsText: (program.inclusions || []).join('\n'),
@@ -795,6 +796,8 @@ function CommercialProposalEditor() {
         // different promised cadence (codex 1A-ii r1).
         frequencyPerYear: Number(p.frequencyPerYear),
         pricePerApplication: Number(p.pricePerApplication) || 0,
+        // UNROUNDED like the frequency: a fractional or out-of-range entry reaches the server's 400.
+        ...(String(p.visitMinutes ?? '').trim() !== '' ? { visitMinutes: Number(p.visitMinutes) } : {}),
         taxable: p.taxable === true,
         note: p.note.trim() || null,
         inclusions: p.inclusionsText.split('\n').map((s) => s.trim()).filter(Boolean),
@@ -1382,6 +1385,13 @@ function CommercialProposalEditor() {
                       value={p.pricePerApplication} disabled={!!locked}
                       onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, pricePerApplication: e.target.value } : it))); }}
                     />
+                    <Input
+                      size="sm" className="w-20 shrink-0" type="number" min="5" max="480" step="5"
+                      title="Visit length in minutes (sizes the first visit a customer books online; over 90, the office books it)" placeholder="min"
+                      aria-label="Visit length in minutes"
+                      value={p.visitMinutes ?? ''} disabled={!!locked}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, visitMinutes: e.target.value } : it))); }}
+                    />
                     <div className="flex items-center gap-1 shrink-0" title="Taxable program">
                       <Switch checked={p.taxable} disabled={!!locked}
                         onChange={(v) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v } : it))); }} />
@@ -1426,7 +1436,7 @@ function CommercialProposalEditor() {
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { id: crypto.randomUUID(), service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [] }]); }}>
+                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { id: crypto.randomUUID(), service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, visitMinutes: '', taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [] }]); }}>
                   <Plus size={14} /> Add program
                 </Button>
               )}

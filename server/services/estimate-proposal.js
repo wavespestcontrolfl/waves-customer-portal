@@ -294,6 +294,9 @@ function normalizeProgram(raw = {}) {
   // payload — a caller-supplied annual that disagrees with its own factors
   // would let the rendered per-visit math contradict the billed total.
   const annual = roundMoney(pricePerApplication * frequencyPerYear);
+  // The builder's visit length in minutes (services/commercial-first-visit.js sizes a self-booked first visit and its
+  // series from it). Absent when unset, so a proposal saved before the field normalizes exactly as before.
+  const visitMinutes = cleanBoundedInt(raw.visitMinutes, { min: 5, max: 480 });
   return {
     // A stable id (same shape as a line's) so an editor save can carry a program's identity by identity, never by position.
     ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
@@ -303,6 +306,7 @@ function normalizeProgram(raw = {}) {
     frequencyPerYear,
     pricePerApplication,
     annual,
+    ...(visitMinutes ? { visitMinutes } : {}),
     taxable: raw.taxable === true,
     note: cleanString(raw.note, 300),
     inclusions: cleanStringList(raw.inclusions, { maxItems: 12, maxLen: 200 }),
