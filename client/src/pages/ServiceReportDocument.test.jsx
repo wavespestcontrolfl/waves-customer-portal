@@ -55,7 +55,10 @@ const BASE_DATA = {
 
 describe('ServiceReportDocument (PDF work-order layout)', () => {
   it('renders the record identity, EPA facts, and label safety', () => {
-    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(container.querySelector('.waves-field-document.service-report-v1')).not.toBeNull();
+    expect(container.querySelector('.field-document-masthead img')).toHaveAttribute('src', '/waves-logo.png');
+    expect(container.querySelector('.field-info-grid')).not.toBeNull();
     expect(screen.getByText('SERVICE REPORT')).toBeInTheDocument();
     expect(screen.getByText('Test Customer')).toBeInTheDocument();
     expect(screen.getByText('499-561')).toBeInTheDocument();

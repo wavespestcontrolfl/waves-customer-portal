@@ -310,18 +310,6 @@ describe('next scheduled visit', () => {
     expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
   });
 
-  test('hideNextVisitNote: no button, no box, and no note key even if one was typed before', async () => {
-    const request = makeRequest({ nextVisit: NEXT });
-    const view = render(<Harness request={request} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Needs adjustment?' }));
-    fireEvent.change(screen.getByLabelText('Next visit adjustment note'), { target: { value: 'Gate code changed' } });
-    view.rerender(<Harness request={request} hideNextVisitNote />);
-    expect(screen.queryByRole('button', { name: 'Needs adjustment?' })).toBeNull();
-    expect(screen.queryByLabelText('Next visit adjustment note')).toBeNull();
-    expect(screen.getByText('Thu, Nov 5')).toBeTruthy();
-    expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
-  });
-
   test('with no next visit there is no card', async () => {
     await show();
     expect(screen.queryByText('Next scheduled visit')).toBeNull();

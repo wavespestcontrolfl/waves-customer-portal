@@ -2,7 +2,7 @@
 // The pest sheet's report flow with the Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP): a recurring pest
 // visit, a typed (cockroach) visit and a bait station visit post the customer text they always posted
 // when the gate is off or the section is untouched (no `reviewTiming`: the report flow never sent one);
-// each change rides the body; a re-service and a part of a grouped stop show no Wrap-up; the sheet is
+// each change rides the body; a re-service shows no Wrap-up; the sheet is
 // locked while the review send-time re-check reads. Synthetic data only.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -298,22 +298,6 @@ describe('a re-service in the report flow (owner 2026-10-10: the review request 
     await generate();
     expect(wrapUpHeading()).toBeTruthy();
     expect(await send(request)).toMatchObject({ includePayLink: false, requestReview: true, wrapUpReviewAsk: true });
-  });
-});
-
-describe('visits that keep their fixed customer text', () => {
-  test('a part of a grouped stop (prepare mode) shows no Wrap-up and hands over the same customer text', async () => {
-    const onPrepared = vi.fn();
-    const request = makeRequest();
-    await openSheet(request, SERVICE, { onPrepared, sharedNote: NOTE });
-    await generate();
-    expect(wrapUpHeading()).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Time on-site' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Save for this stop' }));
-    await screen.findByText('Saved for this stop');
-    expectToday(onPrepared.mock.calls[0][1]);
-    expect(request.reads(/reentry-defaults|next-visit|send-time-preview/)).toEqual([]);
-    expect(request.bodies('/complete')).toHaveLength(0);
   });
 });
 

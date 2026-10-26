@@ -815,7 +815,7 @@ async function ensureTable() {
       { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ discount: 0.15, note: '15% off one-time services for recurring customers' }) },
       { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 199, multiplier: 2.2 }) },
       { config_key: 'onetime_lawn', name: 'One-Time Lawn Treatment', category: 'one_time', sort_order: 4, data: JSON.stringify({ floor: 115, fungicide_floor: 115, recurringPerAppMultiplier: 1.50, treatment_multipliers: { fert: 1.00, fertilization: 1.00, weed: 1.12, pest: 1.30, fungicide: 1.38 } }) },
-      { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 156, STANDARD: 177, LARGE: 198, XL: 219, ESTATE: 251, ACRE_CLASS: 282, OVER_ACRE: 282, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 42, stationAddOn: 75, dunkAddOn: 15 }) },
+      { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 199, STANDARD: 212, LARGE: 230, XL: 255, ESTATE: 278, ACRE_CLASS: 309, OVER_ACRE: 309, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 26, floor: 199, stationAddOn: 75, dunkAddOn: 15 }) },
       { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 6, data: JSON.stringify({
         per_lf_dirt: 10,
         per_lf_concrete: 14,

@@ -414,6 +414,15 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     }
   } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
 
+  // 3b. GATE_TECH_STAFF_GUARDS (census M6): the booking is confirmed, so the office notice that a
+  // technician tapped it before review is done. Best effort and never a core leg; a no-op when none
+  // was raised (and with the gate off none ever is).
+  try {
+    if (require('../config/feature-gates').techStaffGuardsLive()) {
+      await require('./tech-unreviewed-booking-alert').closeForVisit(svc.id, db);
+    }
+  } catch (e) { logger.warn(`[${routeTag}] unreviewed-booking notice close failed for ${svc.id}: ${e.message}`); }
+
   // 4. Card-on-file request (Codex #2771 r2): the AI booking path skips
   // the card funnel for pending outbound-review rows, and without this the
   // confirmed visit would never get one. The office just re-confirmed the

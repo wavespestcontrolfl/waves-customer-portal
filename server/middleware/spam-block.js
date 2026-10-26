@@ -16,14 +16,13 @@
  * here but not yet writable from any UI surface.
  *
  * Voice calls with no manual block also consult the Marchex Clean Call
- * verdict (Twilio Marketplace `AddOns` webhook param). Enforcement is
- * gated by GATE_MARCHEX_AUTO_BLOCK; with the gate off, BLOCK verdicts are
- * shadow-logged so accuracy can be judged before any caller is rejected.
+ * verdict (Twilio Marketplace `AddOns` webhook param). A Marchex BLOCK never
+ * rejects a call: it is shadow-logged as a 'marchex_shadow' row, and the
+ * after-call spam classifier reads it as vendor risk.
  */
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { isEnabled } = require('../config/feature-gates');
 
 // Match the call log's mixed stored phone formats with toE164's full-country
 // identity. Recovery queries use this same key for block checks and grouping.
@@ -126,46 +125,28 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns, signals
         logger.info(`[spam-block] Marchex verdict for voice from ${maskPhone(from)}: ${marchex.recommendation || 'n/a'} (sid=${twilioSid || 'n/a'})`);
       }
       if (marchex && marchex.recommendation === 'BLOCK') {
-        if (!isEnabled('marchexAutoBlock')) {
-          // Shadow mode — surface the verdict AND persist it as a
-          // 'marchex_shadow' row so accuracy can be judged from the DB (not just
-          // ephemeral logs) before the gate ever rejects a real caller. A later
-          // report cross-references these would-block numbers against
-          // leads/customers for a true false-positive rate. The call itself is
-          // still allowed through. Best-effort; a write failure never blocks.
-          logger.info(`[spam-block] Marchex would block voice from ${maskPhone(from)} → ${maskPhone(to)} (shadow; sid=${twilioSid || 'n/a'}; reason=${marchex.reason || 'n/a'})`);
-          if (recordAttempt) {
-            try {
-              await db('blocked_call_attempts').insert({
-                number: from,
-                our_endpoint_id: to || null,
-                channel,
-                block_type: 'marchex_shadow',
-                twilio_sid: twilioSid || null,
-                signals: signalsJson,
-              });
-            } catch (err) {
-              logger.error(`[spam-block] Shadow audit insert failed: ${err.message}`);
-            }
-          }
-          return { blocked: false };
-        }
+        // Shadow only — surface the verdict AND persist it as a
+        // 'marchex_shadow' row so accuracy can be judged from the DB (not just
+        // ephemeral logs). A later report cross-references these would-block
+        // numbers against leads/customers for a true false-positive rate. The
+        // call itself is always allowed through. Best-effort; a write failure
+        // never blocks.
+        logger.info(`[spam-block] Marchex would block voice from ${maskPhone(from)} → ${maskPhone(to)} (shadow; sid=${twilioSid || 'n/a'}; reason=${marchex.reason || 'n/a'})`);
         if (recordAttempt) {
           try {
             await db('blocked_call_attempts').insert({
               number: from,
               our_endpoint_id: to || null,
               channel,
-              block_type: 'marchex_auto',
+              block_type: 'marchex_shadow',
               twilio_sid: twilioSid || null,
               signals: signalsJson,
             });
           } catch (err) {
-            logger.error(`[spam-block] Audit insert failed: ${err.message}`);
+            logger.error(`[spam-block] Shadow audit insert failed: ${err.message}`);
           }
         }
-        logger.info(`[spam-block] Marchex auto-blocked voice from ${maskPhone(from)} → ${maskPhone(to)} (sid=${twilioSid || 'n/a'}; reason=${marchex.reason || 'n/a'})`);
-        return { blocked: true, twiml: TWIML_HARD_BLOCK_VOICE, blockType: 'marchex_auto' };
+        return { blocked: false };
       }
     }
     return { blocked: false };

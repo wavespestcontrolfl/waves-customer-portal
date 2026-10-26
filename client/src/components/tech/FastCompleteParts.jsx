@@ -7,7 +7,7 @@
 // /complete submit lives in hooks/useFastCompleteSubmit.js. The amount entry,
 // "+ Other product" picker wiring, stale-visit check and footer are shared
 // by every sheet that takes products.
-import React, { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
@@ -169,48 +169,6 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
 // withheld in all three cases.
 export function detailsHandler(ctx, onViewDetails) {
   return ctx?.loading || ctx?.loadError || ctx?.blockedReason ? undefined : onViewDetails;
-}
-
-// Work in flight inside a part of a stop (a voice clip, a report being written, an analysis, a save): the container
-// reads it so it never closes or unmounts a part mid-request. Outside a container the default context is a no-op.
-export const PartBusyContext = createContext(() => {});
-// Every call reports under its OWN key (this hook instance + its source), so two parts, or two sources of one part, can
-// never clear each other's entry however their work overlaps.
-export function usePartBusy(source, busy) {
-  const report = useContext(PartBusyContext);
-  const instance = useId();
-  useEffect(() => {
-    const key = `${instance}:${source}`;
-    report(key, busy);
-    return () => report(key, false);
-  }, [report, instance, source, busy]);
-}
-
-// A part's requests, with every write counted: while any non-GET request is in flight the part reports busy (so the
-// container cannot close or unmount it mid-write). One place covers every present and future write of the sheet,
-// whichever control sends it. Outside a container (`enabled` false) the request is returned as it is.
-export function useWriteTracking(request, enabled) {
-  const [writes, setWrites] = useState(0);
-  usePartBusy('writes', writes > 0);
-  return useMemo(() => (enabled ? async (path, options) => {
-    if (String(options?.method || 'GET').toUpperCase() === 'GET') return request(path, options);
-    setWrites((n) => n + 1);
-    try { return await request(path, options); } finally { setWrites((n) => n - 1); }
-  } : request), [request, enabled]);
-}
-
-// A sheet used as one PART of a stop (GATE_COMBO_FAST_COMPLETE; the sheets' `embedded` prop): no overlay, no portal, no
-// dialog of its own. The container owns the one frame, the one scroll and the header; the part's header is hidden, its
-// body flows with the page and its footer (its own action button) stays at the end of the part (tech-workflow.css).
-export function EmbeddedPartFrame({ dialogRef, titleId, hiddenProps, overlay, dialogClassName, children }) {
-  return (
-    <>
-      <section ref={dialogRef} aria-labelledby={titleId} className={cn('tech-visit-embedded-part', dialogClassName)} {...hiddenProps}>
-        {children}
-      </section>
-      {overlay}
-    </>
-  );
 }
 
 // `fullFormOffered` (the pest sheet, owner 2026-10-08): false hides the Full
@@ -629,13 +587,6 @@ export function useProductPicker({ products, waiting = null, waitingNote = null,
 // a phone or beside an extra action (`children`, e.g. "Check stock").
 // `reasonInButton` (the lawn sheet): a short reason is the disabled button's
 // own label instead of a line above it.
-// Prepare mode (a part of a grouped stop): the action saves the part for the
-// stop instead of completing the visit.
-const preparedLabel = (submission, label) => {
-  if (!submission.preparing) return label;
-  return submission.prepared ? 'Update for this stop' : 'Save for this stop';
-};
-
 export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false, isAction = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
@@ -644,7 +595,6 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
       {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
-      {submission.prepared && <p className="tech-visit-muted" role="status">Saved for this stop</p>}
       <div className="tech-visit-actions">
         {children}
         <Button
@@ -653,7 +603,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
           loading={submission.submitting}
           disabled={submission.recovering || submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : (isAction ? label : preparedLabel(submission, label))}
+          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
         </Button>
       </div>
     </footer>
@@ -771,20 +721,11 @@ function noteMaxHeight(el) {
   return Math.ceil(line * NOTE_MAX_LINES + px(style.paddingTop) + px(style.paddingBottom) + px(style.borderTopWidth) + px(style.borderBottomWidth));
 }
 
-// A part of a grouped stop (GATE_COMBO_FAST_COMPLETE) reads the stop's one note in place of its own: the form with
-// its `note` replaced by `sharedNote`. Without a shared note (undefined or null) the form is returned as it is.
-export function useSharedNoteForm(ownForm, sharedNote) {
-  return useMemo(() => (sharedNote == null ? ownForm : { ...ownForm, note: String(sharedNote) }), [ownForm, sharedNote]);
-}
-
-// `shared` (a part of a grouped stop): the stop's one note box lives in the container, so this one
-// shows neither its text box nor its mic, only what sits inside it (the note-box photos).
-export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false, shared = false }) {
+export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false }) {
   const noteId = useId();
   const noteRef = useRef(null);
   const maxHeight = useCallback(() => noteMaxHeight(noteRef.current), []);
   useAutoGrowTextarea(noteRef, note, maxHeight);
-  if (shared) return children ? <section className="tech-visit-choice-section">{children}</section> : null;
   const text = (
     <Textarea
       ref={noteRef}

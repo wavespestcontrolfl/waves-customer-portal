@@ -1,5 +1,40 @@
 # Customer Document Pages — Style Guide
 
+## Field document standard (owner approved 2026-10-25)
+
+The authored document body uses the approved **Field** design: white paper,
+blue left rail, navy masthead rule, gold reference accent, ruled metadata and
+tables, and quiet continuation/footer treatment. Apply this to service and
+project reports, proposals, invoices/receipts, account statements, agreements,
+prep guides, treatment records, annual-plan summaries and warranties.
+
+- React: `FIELD_DOCUMENT` in `client/src/theme-doc.js` and the shared
+  `components/FieldDocument.jsx` / `field-document.css` boundary. Use
+  `FieldDocument` for standalone browser/PDF documents and `FieldDocumentBody`
+  inside an existing customer page.
+- PDFKit: `server/services/pdf/pdf-tokens.js` and `field-pdf.js` own the
+  masthead, section rules, page accent and footer.
+- Screen prose remains 16px, metadata 14px and sections 18px. Print uses a
+  separate paper scale: 10pt prose, 9pt metadata and 11pt sections. Do not use
+  the paper scale for screen text.
+- Payment, signing, sharing and navigation controls retain the existing
+  customer components. Keep them outside the document body when appropriate;
+  `.waves-field-no-print` removes interactive controls from paper output.
+  `.field-document-scroll` expands long terms for printing.
+- Render existing records and approved snapshots. Do not rewrite signed
+  artifacts, pricing or legal terms for presentation. The unsigned service
+  report PDF cache version changes when its layout changes; existing estimate
+  render pins remain authoritative.
+- Preserve official WDO and permit/certificate forms. Product labels and SDS
+  pages remain source documents, with Field used for authored covers only.
+- Annual-plan PDFs summarize the current saved term. Current amount is not a
+  proposed renewal price, and a provisional installation date or inferred
+  cancellation deadline must not become a document fact.
+
+The following shared customer-page rules continue to govern the surrounding
+application and transaction controls. Field overrides glass-card treatment
+inside the authored document body only.
+
 The tokened document surfaces — `/estimate/:token`, `/report/*`, `/prep`,
 `/receipt`, `/pay`, `/pay/statement/:token`, `/contract`, `/service-outlines`,
 `/lawn-care/what-is-included` — share one design system with a single source

@@ -1,5 +1,6 @@
 const { Buffer } = require('node:buffer');
 const logger = require('../logger');
+const { fieldBrowserFooterTemplate } = require('../pdf/pdf-tokens');
 const { collectRenderedImageUrls } = require('./rendered-image-urls');
 const {
   launchBrowser,
@@ -80,8 +81,7 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
             left: '0.5in',
           },
           displayHeaderFooter: true,
-          footerTemplate:
-            '<div style="font-size:8px;width:100%;text-align:center;color:#999;">Waves Pest Control &middot; Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
+          footerTemplate: fieldBrowserFooterTemplate('Waves Pest Control · Service report'),
           headerTemplate: '<div></div>',
         },
       }),

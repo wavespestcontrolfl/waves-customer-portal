@@ -67,7 +67,6 @@ const staticGets = (user) => ({
   '/api/admin/users': { users: [] },
   '/api/admin/communications/stats': { sms: 0, calls: 0, email: 0 },
   '/api/admin/communications/conversations': { conversations: [], total: 0 },
-  '/api/admin/communications/ai-auto-reply-status': { enabled: false },
   '/api/admin/communications/link-library': { links: [] },
   '/api/admin/kpi-targets': { targets: {} },
   '/api/admin/revenue/settings': { settings: {} },

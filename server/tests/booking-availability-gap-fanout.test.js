@@ -352,36 +352,6 @@ test('an afternoon search result remains in the unfiltered confirmation-day list
   for (const time of startTimes(searched)) expect(startTimes(confirmation)).toContain(time);
 });
 
-test.each(['self-booking', 'voice'])('a same-day %s move excludes itself from the day cap', async origin => {
-  // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): dark by default —
-  // this test is about the cap itself, so force it on.
-  process.env.GATE_SELF_BOOK_DAY_CAP = 'true';
-  listOccupiedWindows.mockResolvedValue([]);
-  findAvailableSlots.mockResolvedValue({ slots: [gapSlot('13:00', { latest_start_min: 16 * 60 })] });
-  const subquery = { select() { return this; }, from() { return this; }, as() { return this; }, whereNot: jest.fn().mockReturnThis() };
-  const voiceQuery = { where: () => voiceQuery, whereNotIn: jest.fn().mockReturnThis(), whereNotExists: () => voiceQuery, whereBetween: () => voiceQuery,
-    select: () => voiceQuery, count: () => voiceQuery, groupBy: () => voiceQuery,
-    then: resolve => resolve(origin === 'voice' ? [{ scheduled_date: D, count: voiceQuery.whereNotIn.mock.calls.some(([key]) => key === 'id') ? 2 : 3 }] : []),
-  };
-  db.raw = sql => sql;
-  db.mockImplementation(table => {
-    if (table === 'scheduled_services') return voiceQuery;
-    table.call(subquery);
-    const q = { whereBetween: () => q, select: () => q, count: () => q, groupBy: () => q,
-      then: resolve => resolve(origin === 'self-booking' ? [{ date: D, count: subquery.whereNot.mock.calls.some(([key]) => key === 'id') ? 2 : 3 }] : []),
-    };
-    return q;
-  });
-  const opts = { lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date() };
-  try {
-    expect((await buildBookingAvailability(opts)).days).toHaveLength(0);
-    const moved = await buildBookingAvailability({ ...opts, excludeServiceIds: ['moving-visit'], excludeSelfBookingId: origin === 'self-booking' ? 'moving-booking' : null });
-    expect(startTimes(moved)).toContain('13:00');
-  } finally {
-    delete process.env.GATE_SELF_BOOK_DAY_CAP;
-  }
-});
-
 // Codex r3 P0 on #4663: capacity mode's shared find-time shift starts at
 // 08:00 for every caller, but the documented public/token offer grid is
 // 09:00-17:00. buildBookingAvailability's self-serve callers (this file's

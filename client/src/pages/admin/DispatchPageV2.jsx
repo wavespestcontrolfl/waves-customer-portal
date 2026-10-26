@@ -94,10 +94,6 @@ import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import { reportFlowFields, stationMapKnownOff, stationMapKnownOn } from "../../lib/pest-fast-complete";
 import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
-import FastCompleteComboSheet from '../../components/tech/FastCompleteComboSheet';
-import { comboMembersFor } from '../../lib/combo-fast-complete';
-import { comboDraftId, operatorScope } from '../../lib/visit-closeout-packet';
-import { deleteVisitCompletionDraft } from '../../lib/completion-resume-store';
 import {
   mergePostPaymentService,
   fastCompleteSheetFor,
@@ -354,14 +350,14 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
             <span className="u-nums text-16 font-medium text-ink-primary">
               {serviceCount}
             </span>{" "}
-            <span className="text-13 text-ink-secondary">
+            <span className="text-14 text-ink-secondary">
               job{serviceCount === 1 ? "" : "s"} today
             </span>
             {completedCount > 0 && (
               <>
                 {" "}
                 <span className="text-zinc-300 mx-1">·</span>{" "}
-                <span className="u-nums text-13 text-ink-secondary">
+                <span className="u-nums text-14 text-ink-secondary">
                   {completedCount} done
                 </span>{" "}
               </>
@@ -369,7 +365,7 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
           </div>{" "}
           <button
             onClick={() => setSnap(snap === "peek" ? "full" : "peek")}
-            className="text-12 u-label text-ink-secondary min-h-11 px-3 u-focus-ring"
+            className="border-0 bg-transparent text-14 font-medium text-ink-secondary min-h-11 px-3 u-focus-ring"
           >
             {snap === "peek" ? "Expand" : "Collapse"}
           </button>{" "}
@@ -529,8 +525,6 @@ export default function DispatchPageV2({
   // cache write can leave it missing or stale), as fastCompleteOperatorOf reads.
   const verifiedRole = (outlet?.user?.id ? outlet.user : getAdminUser())?.role || null;
   const [closingVisitId, setClosingVisitId] = useState(null);
-  // A stop of one regular pest visit and one lawn visit, on the one-screen container (GATE_COMBO_FAST_COMPLETE).
-  const [comboStop, setComboStop] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
   // report opens right here in the schedule — the same interaction as the
@@ -995,12 +989,8 @@ export default function DispatchPageV2({
   // visit or leaves for another screen (move, cancel, billing, edit, checkout,
   // treatment plan, book next) closes it too, so it never completes a stale row.
   const fastSheetBehindDetails = !!(detailService && (pestFastService || treeShrubFastService
-    || lawnReserviceFastService || lawnFastService || assessmentFastService || comboStop));
+    || lawnReserviceFastService || lawnFastService || assessmentFastService));
   const closeFastSheetsBehindDetails = () => {
-    // The combo container keeps its parts' forms on the device for a reload; the visit changed, so those forms must not
-    // come back as ready when the stop is reopened.
-    if (comboStop) void deleteVisitCompletionDraft(comboDraftId(comboStop.visitId), operatorScope(fastCompleteOperatorId));
-    setComboStop(null);
     setPestFastService(null);
     setTreeShrubFastService(null);
     setLawnReserviceFastService(null);
@@ -1014,8 +1004,7 @@ export default function DispatchPageV2({
       void fetchSchedule(date, { silent: true });
     }
   };
-  // The props a Fast Complete sheet is opened with, for a schedule row: one builder per sheet, shared by the sheet opened
-  // on its own and by the same sheet as a part of a pest + lawn stop (FastCompleteComboSheet).
+  // The props a Fast Complete sheet is opened with, for a schedule row: one builder per sheet.
   // `a || b` over a row's snake_case and camelCase spellings, as the sheets were always given them.
   const pickOf = (row, ...keys) => keys.reduce((found, key) => found || row[key], undefined);
   const lawnSheetService = (row) => ({
@@ -1092,13 +1081,6 @@ export default function DispatchPageV2({
       setCompletingService(service);
       return;
     }
-    // A grouped stop that is exactly one regular pest visit and one lawn visit (the gate rides the row): the short screen,
-    // before the long visit closeout below. Anything else, or the sheet's own "Full form", falls through unchanged.
-    const comboPair = comboMembersFor(service, fullForm ? null : data?.services);
-    if (comboPair) {
-      setComboStop({ visitId: service.visitId, row: service, ...comboPair });
-      return;
-    }
     if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutEnabled === true || service.visitCloseoutPacket)) {
       setClosingVisitId(service.visitId);
       return;
@@ -1130,7 +1112,7 @@ export default function DispatchPageV2({
       return;
     }
     setCompletingService(service);
-  }, [data?.visitCloseout, data?.services, stationMapOff, stationSheetOn]);
+  }, [data?.visitCloseout, stationMapOff, stationSheetOn]);
 
   // Second half of the ?completeService deep-link: once the day's schedule
   // is loaded, open the completion for the pending id through
@@ -1287,16 +1269,16 @@ export default function DispatchPageV2({
   })), [data?.services, readiness]);
   if (loading && !isReferencePanel)
     return (
-      <div className="py-16 text-center text-13 text-ink-secondary">
+      <div className="py-16 text-center text-14 text-ink-secondary">
         Loading schedule…
       </div>
     );
   if (error && !isReferencePanel) {
     if (isRateLimitError(error)) {
       return (
-        <div className="py-16 text-center text-13 text-alert-fg">
+        <div className="py-16 text-center text-14 text-alert-fg">
           Too many requests. Wait a few seconds and{" "}
-          <button onClick={() => fetchSchedule(date)} className="underline">
+          <button onClick={() => fetchSchedule(date)} className="border-0 bg-transparent underline">
             retry
           </button>
           .
@@ -1304,7 +1286,7 @@ export default function DispatchPageV2({
       );
     }
     return (
-      <div className="py-16 text-center text-13 text-alert-fg">
+      <div className="py-16 text-center text-14 text-alert-fg">
         Failed to load schedule: {error?.message || String(error)}
       </div>
     );
@@ -1438,7 +1420,7 @@ export default function DispatchPageV2({
         : formatETDate(dateAtNoonUTC(date), { month: "long", year: "numeric" });
 
   return (
-    <div className="min-h-full bg-surface-page font-sans text-zinc-900">
+    <div className="min-h-full bg-surface-page font-sans text-zinc-900 [&_button]:appearance-none">
       {/* "↻ Sync AI Data" — right-aligned, only visible on non-board sub-tabs,
           and only to an admin (POST /dispatch/sync is owner-only).
           The Schedule h1 + "+ Add Appointment" pill that used to share this
@@ -1465,7 +1447,7 @@ export default function DispatchPageV2({
           <button
             onClick={() => setActiveTab("board")}
             className={cn(
-              "flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors",
+              "flex-1 inline-flex items-center justify-center text-14 font-medium px-3 h-11 rounded-sm border-hairline border-solid u-focus-ring transition-colors",
               activeTab === "board"
                 ? "bg-zinc-900 text-white border-zinc-900"
                 : "bg-white text-ink-secondary border-zinc-300",
@@ -1476,7 +1458,7 @@ export default function DispatchPageV2({
           <button
             onClick={() => setShowMoreSheet(true)}
             className={cn(
-              "flex-1 inline-flex items-center justify-center u-label px-3 h-11 rounded-sm border-hairline u-focus-ring transition-colors",
+              "flex-1 inline-flex items-center justify-center text-14 font-medium px-3 h-11 rounded-sm border-hairline border-solid u-focus-ring transition-colors",
               activeTab !== "board"
                 ? "bg-zinc-900 text-white border-zinc-900"
                 : "bg-white text-ink-secondary border-zinc-300",
@@ -1499,7 +1481,7 @@ export default function DispatchPageV2({
       {statsAvailable && activeTab === "board" && (
         <div className="hidden md:flex justify-center mb-4">
           {" "}
-          <div className="flex gap-3 items-center text-12 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
+          <div className="flex gap-3 items-center text-14 text-ink-secondary bg-white px-3 py-2 rounded-sm border-hairline border-zinc-200 flex-wrap">
             {" "}
             <span>
               <span className="u-nums font-medium text-zinc-900">
@@ -1553,18 +1535,18 @@ export default function DispatchPageV2({
         <button
           type="button"
           onClick={() => shiftDate(-1)}
-          className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-14 md:text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
+          className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-solid border-zinc-300 bg-white text-zinc-700 text-14 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
           title="Previous"
         >
           Prev
         </button>{" "}
-        <span className="u-nums text-14 md:text-13 font-medium text-zinc-900 text-center px-2 md:min-w-[220px]">
+        <span className="u-nums text-14 font-medium text-zinc-900 text-center px-2 md:min-w-[220px]">
           {dateHeader}
         </span>{" "}
         <button
           type="button"
           onClick={() => shiftDate(1)}
-          className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 text-14 md:text-12 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
+          className="w-11 h-11 md:w-8 md:h-8 rounded-sm border-hairline border-solid border-zinc-300 bg-white text-zinc-700 text-14 u-focus-ring hover:bg-zinc-50 inline-flex items-center justify-center flex-shrink-0"
           title="Next"
         >
           Next
@@ -1602,7 +1584,7 @@ export default function DispatchPageV2({
       )}
 
       {syncMsg && (
-        <div className="text-11 text-ink-secondary mb-2">{syncMsg}</div>
+        <div className="text-14 text-ink-secondary mb-2">{syncMsg}</div>
       )}
 
       {/* Mobile day strip — scrollable window of days with a live month
@@ -1626,7 +1608,7 @@ export default function DispatchPageV2({
               if (m.id === "day") setActiveTab("board");
             }}
             className={cn(
-              "inline-flex items-center justify-center u-label px-2 h-11 rounded-sm border-hairline u-focus-ring transition-colors",
+              "inline-flex items-center justify-center text-14 font-medium px-2 h-11 rounded-sm border-hairline border-solid u-focus-ring transition-colors",
               viewMode === m.id
                 ? "bg-zinc-900 text-white border-zinc-900"
                 : "bg-white text-ink-secondary border-zinc-300",
@@ -1811,7 +1793,7 @@ export default function DispatchPageV2({
                   key={t.id}
                   onClick={() => setActiveTab(t.id)}
                   className={cn(
-                    "h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline whitespace-nowrap flex-shrink-0 u-focus-ring transition-colors",
+                    "h-8 px-3 text-14 font-medium rounded-sm border-hairline border-solid whitespace-nowrap flex-shrink-0 u-focus-ring transition-colors",
                     activeTab === t.id
                       ? "bg-zinc-900 text-white border-zinc-900"
                       : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
@@ -1844,12 +1826,12 @@ export default function DispatchPageV2({
             {" "}
             <div className="px-4 pt-3 pb-2 flex items-center justify-between border-b border-hairline border-zinc-200">
               {" "}
-              <span className="u-label text-ink-secondary">
+              <span className="text-14 font-medium text-ink-secondary">
                 Switch tool
               </span>{" "}
               <button
                 onClick={() => setShowMoreSheet(false)}
-                className="inline-flex items-center justify-center h-11 w-11 -mr-3 text-ink-secondary u-focus-ring"
+                className="inline-flex items-center justify-center h-11 w-11 -mr-3 border-0 bg-transparent text-ink-secondary u-focus-ring"
               >
                 ×
               </button>{" "}
@@ -1863,7 +1845,7 @@ export default function DispatchPageV2({
                     setShowMoreSheet(false);
                   }}
                   className={cn(
-                    "w-full flex items-center justify-between px-4 h-12 text-14 text-left u-focus-ring transition-colors",
+                    "w-full flex items-center justify-between px-4 h-12 border-0 text-14 text-left u-focus-ring transition-colors",
                     activeTab === t.id
                       ? "bg-zinc-50 text-zinc-900 font-medium"
                       : "bg-white text-ink-primary hover:bg-zinc-50",
@@ -1872,7 +1854,7 @@ export default function DispatchPageV2({
                   {" "}
                   <span>{t.label}</span>
                   {activeTab === t.id && (
-                    <span className="text-11 u-label text-ink-tertiary">
+                    <span className="text-14 font-medium text-ink-tertiary">
                       Active
                     </span>
                   )}
@@ -1893,7 +1875,7 @@ export default function DispatchPageV2({
       {viewMode === "day" && activeTab === "match" && (
         <Suspense
           fallback={
-            <div className="py-10 text-center text-13 text-ink-secondary">
+            <div className="py-10 text-center text-14 text-ink-secondary">
               Loading…
             </div>
           }
@@ -1904,7 +1886,7 @@ export default function DispatchPageV2({
       {viewMode === "day" && activeTab === "csr" && (
         <Suspense
           fallback={
-            <div className="py-10 text-center text-13 text-ink-secondary">
+            <div className="py-10 text-center text-14 text-ink-secondary">
               Loading…
             </div>
           }
@@ -1915,7 +1897,7 @@ export default function DispatchPageV2({
       {viewMode === "day" && activeTab === "revenue" && (
         <Suspense
           fallback={
-            <div className="py-10 text-center text-13 text-ink-secondary">
+            <div className="py-10 text-center text-14 text-ink-secondary">
               Loading…
             </div>
           }
@@ -1926,7 +1908,7 @@ export default function DispatchPageV2({
       {viewMode === "day" && activeTab === "insights" && (
         <Suspense
           fallback={
-            <div className="py-10 text-center text-13 text-ink-secondary">
+            <div className="py-10 text-center text-14 text-ink-secondary">
               Loading…
             </div>
           }
@@ -1943,7 +1925,7 @@ export default function DispatchPageV2({
             const rp = rainProbability ?? 0;
             const weatherIcon = rp > 40 ? "" : rp > 15 ? "" : "";
             return (
-              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center justify-center gap-2 text-13 font-bold text-zinc-700 overflow-x-auto whitespace-nowrap">
+              <div className="-mx-4 md:-mx-6 mb-3 md:mb-4 bg-white border-y border-hairline border-zinc-200 px-4 md:px-6 py-2 flex items-center justify-center gap-2 text-14 font-medium text-zinc-700 overflow-x-auto whitespace-nowrap">
                 {" "}
                 <span className="text-16" aria-hidden="true">
                   {weatherIcon}
@@ -2090,28 +2072,6 @@ export default function DispatchPageV2({
           setScheduleRefreshKey((value) => value + 1);
           void fetchSchedule(date, { silent: true });
         }}
-      />}
-      {comboStop && <FastCompleteComboSheet
-        key={comboStop.visitId}
-        visitId={comboStop.visitId}
-        pest={{ service: pestSheetService(comboStop.pest), voiceFillEnabled: comboStop.pest.fastCompleteVoiceFillEnabled === true }}
-        lawn={{ service: lawnSheetService(comboStop.lawn) }}
-        request={adminFetch}
-        operatorId={fastCompleteOperatorId}
-        catalog={products}
-        onClose={() => setComboStop(null)}
-        onSaved={() => {
-          setScheduleRefreshKey((value) => value + 1);
-          void fetchSchedule(date, { silent: true });
-        }}
-        onFullForm={() => {
-          const visitId = comboStop.visitId;
-          setComboStop(null);
-          setClosingVisitId(visitId);
-        }}
-        // The live row for the member the tech opened, from the stop's own load.
-        onViewDetails={(rows) => setDetailService(rows.find((row) => row.id === comboStop.row.id))}
-        suspended={!!detailService}
       />}
       {completingService && (
         <CompletionPanel
@@ -2452,7 +2412,7 @@ export default function DispatchPageV2({
               <div className="flex justify-end mb-2">
                 <button
                   type="button"
-                  className="h-9 rounded-full bg-white border border-hairline border-zinc-200 text-13 font-medium text-ink-primary px-4"
+                  className="h-9 rounded-full bg-white border border-hairline border-solid border-zinc-200 text-14 font-medium text-ink-primary px-4"
                   onClick={() => {
                     // Pest-completion parity: appointment actions (cancel /
                     // no-show / reschedule / rain-out / price edit) for the

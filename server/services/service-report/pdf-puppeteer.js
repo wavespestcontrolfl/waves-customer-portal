@@ -1,5 +1,6 @@
 const config = require('../../config');
 const logger = require('../logger');
+const { fieldBrowserFooterTemplate } = require('../pdf/pdf-tokens');
 
 let chromium = null;
 try {
@@ -103,7 +104,7 @@ async function renderReportPdfWithBrowser(url) {
       margin: { top: '0.5in', right: '0.5in', bottom: '0.5in', left: '0.5in' },
       displayHeaderFooter: true,
       headerTemplate: '<div></div>',
-      footerTemplate: '<div style="font-size:8px; width:100%; text-align:center; color:#999;">Waves Pest Control &middot; Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
+      footerTemplate: fieldBrowserFooterTemplate('Waves Pest Control · Service report'),
     });
     // The page's OWN image-load outcomes (codex P2 #3176 r20): the browser
     // fetches its own /data, so its photo URLs can differ from any payload

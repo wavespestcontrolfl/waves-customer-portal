@@ -145,9 +145,42 @@ describe('pricing engine one-time treatment rules', () => {
 
     expect(result.mosquitoTreatableSqFt).toBe(7500);
     expect(result.areaBucket).toBe('SMALL');
-    expect(result.basePrice).toBe(156);
-    expect(result.price).toBe(156);
+    expect(result.basePrice).toBe(199);
+    expect(result.price).toBe(199);
     expect(result.recurringCustomerDiscountRate).toBe(0);
+  });
+
+  test('one-time mosquito: a recurring customer never pays under the $199 minimum (owner 2026-10-25)', () => {
+    const result = priceOneTimeMosquito({ mosquitoTreatableSqFt: 6000 }, { isRecurringCustomer: true });
+
+    expect(result.subtotalBeforeRecurringCustomerDiscount).toBe(199);
+    expect(result.recurringCustomerDiscountRate).toBe(0.15);
+    // 199 x 0.85 = 169 lifts back to the minimum, so the member gets no discount on this visit.
+    expect(result.price).toBe(199);
+    expect(result.selectedFloor).toBe(199);
+    expect(result.floorAppliedAfterDiscount).toBe(true);
+    expect(result.recurringCustomerDiscountAmount).toBe(0);
+
+    // A bigger yard clears the minimum and keeps the full 15%.
+    const bigger = priceOneTimeMosquito({ mosquitoTreatableSqFt: 24000 }, { isRecurringCustomer: true });
+    expect(bigger.subtotalBeforeRecurringCustomerDiscount).toBe(255);
+    expect(bigger.price).toBe(217);
+    expect(bigger.floorAppliedAfterDiscount).toBe(false);
+    expect(bigger.recurringCustomerDiscountAmount).toBe(38);
+  });
+
+  test('one-time mosquito: each extra 5,000 sq ft adds no more than the step before it (owner 2026-10-25)', () => {
+    const at = (sqft) => priceOneTimeMosquito({ mosquitoTreatableSqFt: sqft }).price;
+    const sizes = [7500, 12500, 17500, 22500, 27500, 32500, 37500, 42500];
+    const steps = sizes.slice(1).map((sqft, i) => at(sqft) - at(sizes[i]));
+    expect(at(7500)).toBe(199);
+    expect(steps).toEqual([18, 18, 15, 15, 14, 14, 13]);
+    for (let i = 1; i < steps.length; i++) expect(steps[i]).toBeLessThanOrEqual(steps[i - 1]);
+    // One acre, then the over-acre step ($26 per 10,000 sq ft) stays under the
+    // last in-acre slope (13 per 5,000 sq ft = 26 per 10,000).
+    expect(at(43560)).toBe(309);
+    expect(at(53560) - at(43560)).toBe(26);
+    expect(at(53560) - at(43560)).toBeLessThanOrEqual(2 * steps[steps.length - 1]);
   });
 
   test('one-time mosquito add-ons use $75 stations and $15 dunks', () => {
@@ -157,10 +190,10 @@ describe('pricing engine one-time treatment rules', () => {
     });
 
     expect(result.areaBucket).toBe('STANDARD');
-    expect(result.basePrice).toBe(159);
+    expect(result.basePrice).toBe(201);
     expect(result.stationAddOnTotal).toBe(150);
     expect(result.dunkAddOnTotal).toBe(45);
-    expect(result.price).toBe(354);
+    expect(result.price).toBe(396);
   });
 
   test('one-time mosquito recurring-customer perk is 15%, with no urgency or WaveGuard discount', () => {
@@ -172,9 +205,9 @@ describe('pricing engine one-time treatment rules', () => {
       afterHours: true,
     });
 
-    expect(result.subtotalBeforeRecurringCustomerDiscount).toBe(309);
+    expect(result.subtotalBeforeRecurringCustomerDiscount).toBe(351);
     expect(result.recurringCustomerDiscountRate).toBe(0.15);
-    expect(result.price).toBe(Math.round(309 * 0.85));
+    expect(result.price).toBe(Math.round(351 * 0.85));
   });
 
   test('one-time mosquito does not qualify for WaveGuard but can receive recurring-customer perk', () => {

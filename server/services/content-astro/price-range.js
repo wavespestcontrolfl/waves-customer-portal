@@ -40,7 +40,7 @@ const RODENT_FAMILY = ['rodent_bait_program', 'rodent_trapping', 'rodent_exclusi
 const GENERAL_PEST = ['general_pest_quarterly', 'one_time_pest'];
 const MOSQUITO = ['mosquito_program', 'one_time_mosquito'];
 const LAWN = ['lawn_care_program', 'one_time_lawn'];
-const GERMAN_ROACH = ['german_roach_cleanout', 'german_roach_initial'];
+const GERMAN_ROACH = ['german_roach_cleanout'];
 
 // Canonical service phrase → the feed rows that price exactly that service.
 // Phrases are in normalized form (lowercase, "&" → "and", punctuation and

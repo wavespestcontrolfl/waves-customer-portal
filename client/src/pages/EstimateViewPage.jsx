@@ -78,6 +78,7 @@ const glassAppearanceActive = () => document.documentElement.hasAttribute('data-
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
+import { FieldDocumentBody, FieldMasthead } from '../components/FieldDocument';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
 import ConsumerNoticeSign, { ConsumerNoticeHint, CONSUMER_NOTICE_HINT } from '../components/estimate/ConsumerNoticeSign';
 import ServiceAgreementSign from '../components/estimate/ServiceAgreementSign';
@@ -9777,9 +9778,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             (manager approval, quote-required line) outranks commercial_proposal
             in resolveEstimateQuoteRequirement, and exactly those customers
             still need their itemization (codex #3281 r1). */}
-        {data.proposal?.enabled === true
-          ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
-          : null}
+        {data.proposal?.enabled === true ? (
+          <FieldDocumentBody className="estimate-proposal-document-body">
+            <FieldMasthead />
+            <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
+          </FieldDocumentBody>
+        ) : null}
         {/* "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): only when /data carries
             cta.commercialAgreement — absent with the gate off, so the page is unchanged. */}
         <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} />

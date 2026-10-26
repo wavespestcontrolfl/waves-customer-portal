@@ -100,7 +100,6 @@ describe('llm call ledger', () => {
     mockAnthropicCreate.mockReset();
     process.env = { ...ORIGINAL_ENV, GATE_LLM_CALL_LEDGER: 'true', OPENAI_API_KEY: 'k', GEMINI_API_KEY: 'k', ANTHROPIC_API_KEY: 'k' };
     delete process.env.GATE_LLM_DISPATCH_METRICS;
-    delete process.env.GATE_LLM_CALL_TRACES;
   });
   afterAll(() => { process.env = ORIGINAL_ENV; global.fetch = ORIGINAL_FETCH; });
 

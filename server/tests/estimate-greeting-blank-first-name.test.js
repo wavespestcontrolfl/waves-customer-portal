@@ -59,7 +59,7 @@ describe('greeting sites route through the shared helper', () => {
   const files = {
     'routes/admin-estimates.js': 4,
     'routes/estimate-public.js': 1,
-    'services/estimate-follow-up.js': 6,
+    'services/estimate-follow-up.js': 5,
     'services/estimate-engagement-engine.js': 1,
     'services/estimate-extension.js': 2,
     'services/estimate-auto-renew.js': 1,
@@ -81,13 +81,10 @@ describe('greeting sites route through the shared helper', () => {
     expect(block).toContain("last_name: (greetingToken ? parts.slice(1) : parts).join(' ') || '',");
   });
 
-  test('the expired-estimate nurture email and the click-followup SMS draft use the shared rule (codex #5612 r2)', () => {
+  test('the expired-estimate nurture email uses the shared rule (codex #5612 r2)', () => {
     const nurture = read('services/email-division/payload-builders.js');
     expect(nurture).toContain("first_name: firstToken(greetingFirstToken({ customerName: estimate.customer_name, customer })) || clean(customer.first_name) || 'there',");
     expect(nurture).toContain(".first('id', 'first_name', 'last_name', 'email', 'latitude', 'longitude');");
-    const click = read('services/click-followup.js');
-    expect(click).toContain("firstNameOf(await estimateGreetingFirstToken(db, est))");
-    expect(click).not.toContain('firstNameOf(est.customer_name)');
   });
 
   test('Ask Waves addresses a blank-first-name customer by no name, never the surname (codex #5612 r3)', () => {

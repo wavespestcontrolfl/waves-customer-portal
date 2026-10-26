@@ -59,7 +59,14 @@ environment that carries the row (prod does), **editing
 ## Standing owner rulings (dated — don't relitigate)
 
 - **No pricing floors** (2026-07-17): all floors are DISARMED; margins are
-  report-only. Never re-add a floor or flag "below floor".
+  report-only. Never re-add a floor or flag "below floor". This covers the
+  margin/program floors only. The owner-set one-time list minimums stay
+  live and re-apply after the 15% recurring-customer perk: one-time pest
+  $199 (`ONE_TIME.pest.floor`) and one-time mosquito $199
+  (`ONE_TIME.mosquito.floor`, owner 2026-10-25).
+- **One-time mosquito ladder** (owner 2026-10-25): starts at $199 and each
+  extra 5,000 sq ft adds a little less than the one before. Keep the
+  per-segment slope non-increasing, over-acre step included, when repricing.
 - **Lawn IS WaveGuard-tier-discountable** (2026-07-28): the old
   "lawn non-discountable" rule is DEAD — never re-flag
   `discount-engine.js` lawn eligibility.

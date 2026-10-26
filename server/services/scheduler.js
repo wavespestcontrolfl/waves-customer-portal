@@ -4530,6 +4530,18 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN (offset 8) — GATE_TECH_STAFF_GUARDS: close the "review this booking" notices whose
+  // visit no longer waits for office review (confirmed, cancelled, skipped, completed or gone), by
+  // whatever path. The emitter's own retire; gate off = no query. runExclusive: one sweep at a time.
+  cron.schedule('8,18,28,38,48,58 * * * *', async () => {
+    if (!require('../config/feature-gates').techStaffGuardsLive()) return;
+    try {
+      await runExclusive('tech-unreviewed-booking-close', () => require('./tech-unreviewed-booking-alert').closeResolved());
+    } catch (err) {
+      logger.error(`[tech-unreviewed-booking] close tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips
@@ -6799,27 +6811,6 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Booking abandon recovery job failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // EVERY 30 MIN (:09/:39 — own minutes) — Click-followup action queue (clicked-but-didn't-book)
-  //
-  // Turns human short-link clicks on estimate/booking links (4h–72h old, not
-  // converted, fully suppression-guarded) into PENDING message_drafts for
-  // owner approval in /admin/drafts. DRAFTS ONLY — this job never sends;
-  // the owner's approval in /admin/drafts is the only send path. Gated by
-  // GATE_CLICK_FOLLOWUP (off → shadow-logs candidate counts, writes nothing).
-  // =========================================================================
-  cron.schedule('9,39 * * * *', async () => {
-    try {
-      await runExclusive('click-followup', async () => {
-        const ClickFollowup = require('./click-followup');
-        const result = await ClickFollowup.checkClicks();
-        if (result.drafted > 0) logger.info(`Click-followup: ${result.drafted} draft(s) queued for review`);
-      });
-    } catch (err) {
-      logger.error(`Click-followup job failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

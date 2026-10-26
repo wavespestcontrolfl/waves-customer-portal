@@ -363,13 +363,21 @@ Standalone prices are applied via `priceOneTimePest` / `priceOneTimeLawn` /
 Then × 1.50 standalone multiplier on top of recurring per-app rate. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $115 floor re-applied.
 
 **Mosquito one-time:** based on mosquito treatable area, not gross lot. The
-code-default anchor prices are SMALL at 7,500 sqft $156 · STANDARD at 11,000
-$177 · LARGE at 16,000 $198 · XL at 24,000 $219 · ESTATE at 32,000 $251 ·
-ACRE_CLASS at 43,560 $282. Prices interpolate between anchors in 500-sqft
-steps. OVER_ACRE starts at $282, adds $42 per additional 10,000-sqft increment,
-and requires manual review. Add-ons remain stations × $75 and Bti dunks × $15.
-Urgency and WaveGuard tier discounts do not apply; active recurring customers
-receive the 15% one-time perk. Live database pricing can override these
+code-default anchor prices (owner 2026-10-25) are SMALL at 7,500 sqft $199 ·
+STANDARD at 11,000 $212 · LARGE at 16,000 $230 · XL at 24,000 $255 · ESTATE at
+32,000 $278 · ACRE_CLASS at 43,560 $309. Prices interpolate between anchors in
+500-sqft steps, and each extra 5,000 sqft adds a little less than the one
+before ($18 tapering to $13). OVER_ACRE starts at $309, adds $26 per additional
+10,000-sqft increment, and requires manual review. The curve is sized on spray
+volume: the Bifen I/T label sprays 1 gal per 1,000 sqft, so one 4-gal backpack
+tank covers ~4,000 sqft of foliage, about a 7,500 sqft yard, and bigger yards
+need more tanks but not in proportion. Add-ons remain stations × $75 and Bti
+dunks × $15. Urgency and WaveGuard tier discounts do not apply; active
+recurring customers receive the 15% one-time perk, with the $199 minimum
+(`ONE_TIME.mosquito.floor`, admin-editable as `onetime_mosquito.floor`, 0 = off)
+re-applied after it, as for one-time pest. The hand-scheduled no-lot fallback
+(`services.mosquito_one_time` base price) gets the same minimum for members but
+never above the catalog price. Live database pricing can override these
 defaults.
 
 **Operator price override (per line):** `input.linePriceOverrides` —
@@ -479,7 +487,10 @@ The recurring first-visit cockroach line uses the separate
 `pest_initial_roach` scales in §3. The legacy explicit
 `german_roach_initial` pricer starts at $100 before its urgency and
 recurring-customer modifiers and represents a three-visit compatibility path;
-it is not the active severity-tier cleanout above.
+it is not the active severity-tier cleanout above. Retired from sale
+2026-10-25 (owner): the public price feed and the Intelligence Bar estimate
+tool no longer offer it; the engine keeps it only so stored estimates replay
+as sent.
 
 ---
 

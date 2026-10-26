@@ -99,6 +99,7 @@ const detail = {
         const scenario = { device, errors, consoleErrors, writes, unmatched, overflow: null };
         report.push(scenario);
         page.setDefaultTimeout(15000);
+        page.setDefaultNavigationTimeout(60000);
         await page.addInitScript(() => {
           localStorage.setItem("waves_admin_token", "synthetic-local-token");
           localStorage.setItem(
@@ -155,6 +156,10 @@ const detail = {
             body = { ok: true };
           else if (url.pathname === "/api/admin/communications/agent-draft")
             body = { draft: null };
+          else if (url.pathname === "/api/admin/communications/sender")
+            body = { fromNumber: null };
+          else if (url.pathname === "/api/tech/dictation/availability")
+            body = { available: false };
           else if (url.pathname === "/api/admin/requests")
             body = { requests: [] };
           else if (
@@ -177,6 +182,26 @@ const detail = {
             };
           else if (url.pathname === "/api/admin/customers/customer-a")
             body = detail;
+          else if (
+            url.pathname ===
+            "/api/admin/customers/customer-a/collection-holds"
+          )
+            body = { holds: [] };
+          else if (
+            url.pathname ===
+            "/api/admin/customers/customer-a/contact-notification-prefs"
+          )
+            body = { live: false, contacts: [] };
+          else if (
+            url.pathname === "/api/admin/customers/customer-a/activity"
+          )
+            body = { enabled: false };
+          else if (url.pathname === "/api/admin/customer-geocodes")
+            body = { enabled: false };
+          else if (
+            url.pathname === "/api/admin/customer-geocodes/customer-a"
+          )
+            body = { enabled: false };
           else if (url.pathname.endsWith("/comms"))
             body = {
               comms: [
@@ -262,6 +287,26 @@ const detail = {
           .waitFor();
         await waitForFonts(page);
         await page.screenshot({ path: `${output}/${device}-directory.png` });
+        if (device === "mobile") {
+          const opener = page.getByRole("button", { name: /add customer/i });
+          await opener.click();
+          const form = page.getByRole("dialog", { name: "New customer" });
+          await form.getByLabel("First name", { exact: true }).fill("Avery");
+          await form.getByLabel("Phone number", { exact: true }).fill("9415550100");
+          for (const label of ["First name", "Last name", "Phone number", "Email address", "Address line 1", "Address line 2", "Property label", "City", "State", "ZIP"]) {
+            const control = form.getByLabel(label, { exact: true });
+            assert.ok(await control.evaluate((node) => parseFloat(getComputedStyle(node).fontSize) >= 16));
+            assert.ok(await form.locator("label").filter({ hasText: new RegExp(`^${label}$`) }).isVisible(), `${label} keeps its visible label`);
+          }
+          const nativeButtons = await form.locator("button").evaluateAll((buttons) => buttons.filter((button) => {
+            const style = getComputedStyle(button);
+            return style.appearance !== "none" || (parseFloat(style.borderWidth) > 0 && ["outset", "inset"].includes(style.borderStyle));
+          }).map((button) => button.textContent.trim()));
+          assert.deepEqual(nativeButtons, [], "Customer sheet buttons use the custom flat appearance");
+          await page.screenshot({ path: `${output}/${device}-new-customer.png` });
+          await page.keyboard.press("Escape");
+          await form.waitFor({ state: "hidden" });
+        }
         if (historyScenario) {
           await page.getByRole("searchbox", { name: "Search customers" }).fill("Sample");
           await page.getByRole("button", { name: "Open Zed Sample customer profile" }).waitFor();
@@ -419,13 +464,29 @@ const detail = {
           .waitFor();
         await waitForFonts(page);
         await page.screenshot({ path: `${output}/${device}-overlay.png` });
+        const overlay = page.locator(".c360-panel");
+        const navigationBefore = await overlay.evaluate((node) => ({ scroll: node.scrollTop, top: node.querySelector(".c360-section-navigation").getBoundingClientRect().top }));
+        await overlay.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+        await page.waitForTimeout(100);
+        const navigationAfter = await overlay.evaluate((node) => ({ scroll: node.scrollTop, top: node.querySelector(".c360-section-navigation").getBoundingClientRect().top }));
+        assert.ok(navigationAfter.scroll > navigationBefore.scroll, "The overlay scroll regression exercises a scrolled panel");
+        assert.ok(Math.abs(navigationBefore.top - navigationAfter.top - (navigationAfter.scroll - navigationBefore.scroll)) <= 1, "Overlay tabs move with content beneath the persistent header");
+        const closeOverlay = device === "mobile"
+          ? page.locator(".c360-mobile-actionbar").getByRole("button", { name: "Back", exact: true })
+          : overlay.getByRole("button", { name: "Close", exact: true });
+        assert.ok(await closeOverlay.evaluate((node) => {
+          const rect = node.getBoundingClientRect();
+          return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+        }), "The persistent overlay close control remains reachable after scrolling");
+        await page.screenshot({ path: `${output}/${device}-overlay-scrolled.png` });
+        await overlay.evaluate((node) => { node.scrollTop = 0; });
         await page
           .getByText("Billing paused since", { exact: false })
           .scrollIntoViewIfNeeded();
         await page.screenshot({
           path: `${output}/${device}-billing-review.png`,
         });
-        await page.getByRole("button", { name: "Comms", exact: true }).click();
+        await page.getByRole("tab", { name: "Comms", exact: true }).click();
         await page
           .getByText("Synthetic call summary", { exact: true })
           .waitFor();

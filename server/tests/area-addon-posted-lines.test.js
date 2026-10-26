@@ -470,8 +470,8 @@ describe('the schedule feed when the add-on row lookup fails', () => {
     } finally { spy.mockRestore(); }
     const marker = router._test.AREA_ADDON_LOOKUP_FAILED;
     expect(marker).toMatchObject({ areaAddOnsLookupFailed: true, areaAddOnRowsAttached: false, lawnFastCompleteEnabled: false, fastCompleteReportEnabled: false, treeShrubFastCompleteEnabled: false });
-    // Codex round 52: the two routing shortcuts Tech Home reads are off too, and both schedule payloads forward the marker.
-    expect(marker).toMatchObject({ stationFastCompleteEnabled: false, comboFastCompleteEnabled: false });
+    // Codex round 52: the routing shortcut Tech Home reads is off too, and both schedule payloads forward the marker.
+    expect(marker).toMatchObject({ stationFastCompleteEnabled: false });
     expect(fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8').split('areaAddOnsLookupFailed: projectCompletionContext.areaAddOnsLookupFailed === true,').length - 1).toBe(2);
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     expect(src).toContain('...(addOnVisits.failed ? AREA_ADDON_LOOKUP_FAILED : {}),');

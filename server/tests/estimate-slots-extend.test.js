@@ -580,7 +580,10 @@ describe('capacity slot generation excludes the own hold', () => {
   });
 
   test('findCapacitySlots threads it into the route context', () => {
-    const fn = findTime.slice(findTime.indexOf('async function findCapacitySlots'), findTime.indexOf('async function findCapacitySlots') + 3000);
+    // The whole function, up to the next top-level function (a fixed window broke when the function grew).
+    const start = findTime.indexOf('async function findCapacitySlots');
+    const next = findTime.indexOf('\nasync function ', start + 1);
+    const fn = findTime.slice(start, next > start ? next : start + 8000);
     expect(fn).toContain('excludeEstimateId: opts.excludeEstimateId,');
     expect(fn.indexOf('excludeEstimateId: opts.excludeEstimateId,'))
       .toBeGreaterThan(fn.indexOf('loadArrivalRouteContext({'));

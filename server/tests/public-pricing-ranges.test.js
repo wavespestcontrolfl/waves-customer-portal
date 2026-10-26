@@ -7,7 +7,7 @@ const EXPECTED_KEYS = [
   'general_pest_quarterly',
   'cockroach_treatment',
   'german_roach_cleanout',
-  'german_roach_initial',
+  // No german_roach_initial: retired 2026-10-25 (owner), never published.
   'bed_bug_treatment',
   'mosquito_program',
   'wasp_hornet_removal',
@@ -200,11 +200,6 @@ describe('public pricing ranges', () => {
       { frequency: 'quarterly' },
     ).tiers.map((t) => t.perApp));
     expect(pest.low).toBe(Math.floor(listMin));
-
-    // Nor does the recurring-customer perk: the German roach initial series
-    // is sold inside a recurring plan, but its published price is still list.
-    const roachInitial = payload.services.find((s) => s.key === 'german_roach_initial');
-    expect(roachInitial.low).toBe(sp.priceGermanRoachInitial({ isRecurringCustomer: false }).price);
   });
 
   test('cache serves between syncs and refreshes when a sync applied', () => {

@@ -81,7 +81,9 @@ describe('EstimateProposalDocument', () => {
 
   it('renders the authored commercial proposal as a document', () => {
     const { container } = render(<EstimateProposalDocument data={BASE_DATA} token="tok-123" />);
-    expect(container.querySelector('.estimate-document-v1')).toBeTruthy();
+    expect(container.querySelector('.waves-field-document.estimate-document-v1')).toBeTruthy();
+    expect(container.querySelector('.field-document-masthead img').getAttribute('src')).toBe('/waves-logo.png');
+    expect(container.querySelectorAll('.field-section-heading').length).toBeGreaterThan(0);
     const text = container.textContent;
     expect(text).toContain('Commercial Service Proposal');
     expect(text).toContain('Recurring service plan');

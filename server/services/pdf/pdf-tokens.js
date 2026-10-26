@@ -16,10 +16,12 @@ const PDF_COLORS = {
   body: '#3F4A65', // running copy
   muted: '#475569', // supporting text (slate-600; the one blessed gray)
   blue: '#009CDE', // brand accent
+  gold: '#F0A500', // Field document rule/reference accent
   red: '#C8102E', // overdue / alert (PMS 186 — print/brand red)
   green: '#047857', // paid badge / success
-  rule: '#E7E2D7', // hairlines
-  soft: '#FAF8F3', // warm wash panels
+  rule: '#D5DEE5', // Field document hairlines
+  soft: '#F1F7FA', // Field document section wash
+  warm: '#FAF8F3', // warm callouts / notices
   headerSub: '#B8D4EA', // reversed-out subtitle text on the navy bar
   white: '#FFFFFF',
 };
@@ -49,4 +51,8 @@ const PDF_TYPE = {
   display: 26,
 };
 
-module.exports = { PDF_COLORS, PDF_SPACE, PDF_TYPE };
+function fieldBrowserFooterTemplate(label = 'Waves Pest Control') {
+  return `<div style="box-sizing:border-box;width:100%;margin:0 0.5in;padding:7px 0 0;border-top:1px solid ${PDF_COLORS.rule};font:500 8px/1.2 Arial,sans-serif;color:${PDF_COLORS.muted};display:flex;justify-content:space-between;"><span style="color:${PDF_COLORS.navy};">${label}</span><span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span></div>`;
+}
+
+module.exports = { PDF_COLORS, PDF_SPACE, PDF_TYPE, fieldBrowserFooterTemplate };

@@ -29,7 +29,6 @@
  * loop) is a different surface and stays in the agent files.
  */
 
-const crypto = require('crypto');
 const logger = require('../logger');
 const { PROVIDER, MODEL_CATALOG } = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortFor } = require('./anthropic-wire');
@@ -242,7 +241,7 @@ function providerErrorReason(provider, err) {
 // and fire-and-forget for the same reason recordDispatchOutcome is: the
 // ledger can never slow down or break the call it observes. `base` is the
 // adapter's identity (provider, requested model, ambient lane/prompt-version
-// overrides, the bodies for an opted-in trace); `outcome` is what happened.
+// overrides); `outcome` is what happened.
 // Latency rides a monotonic clock (performance.now), never Date.now: the
 // dispatcher's deadline math uses Date.now and tests pin it.
 const nowMs = () => performance.now();
@@ -266,7 +265,6 @@ function recordLedgerCall(base, outcome) {
       ok: outcome.ok,
       errorCode: outcome.errorCode,
     });
-    metrics.recordTrace(callId, { system: base.system, prompt: base.text, response: outcome.response, laneId: base.laneId });
     return callId;
   } catch (err) {
     logger.debug(`[llm] call ledger skipped: ${err.message}`);
@@ -315,13 +313,13 @@ function usageOf(provider, data) {
 // A leg fails the same way on every provider: the call row and the value the
 // caller gets back agree (recorded AND returned — the cross-provider fallback
 // runs on the same verdict the ledger files). `served` is what the
-// provider told us about the answer (model, id, usage, latency, the text).
+// provider told us about the answer (model, id, usage, latency).
 // A billed leg that failed still spent tokens: its usage rides on the
 // failure so a chain's caller can account for every leg, not only the
 // winner. A usage the provider reported no counts for is not billed.
 const billedUsage = (usage) => (usage && (Number.isFinite(usage.input_tokens) || Number.isFinite(usage.output_tokens)) ? usage : null);
-function failedLeg(base, served, code, response = served.response) {
-  recordLedgerCall(base, { ...served, ok: false, errorCode: code, response });
+function failedLeg(base, served, code) {
+  recordLedgerCall(base, { ...served, ok: false, errorCode: code });
   const usage = billedUsage(served.usage);
   return { ok: false, reason: code, ...(usage ? { usage } : {}) };
 }
@@ -405,7 +403,7 @@ function openAIVerdict(data, out) {
   if (data.status && data.status !== 'completed') {
     // Bounded diagnostics only: a provider error MESSAGE can quote the
     // rejected input, so the reason / error code and response id are
-    // logged and the message never is (the redacted trace keeps the body).
+    // logged and the message never is.
     const detail = (data.incomplete_details || {}).reason || (data.error || {}).code;
     logger.warn(`[llm] OpenAI response ${data.status}${detail ? ` (${detail})` : ''} (${id})`);
     return { code: data.status === 'incomplete' ? 'openai_incomplete' : statusCode('openai', data.status) };
@@ -413,16 +411,16 @@ function openAIVerdict(data, out) {
   const refusal = extractOpenAIRefusal(data);
   if (refusal !== null && !out) {
     // The refusal body can echo customer detail from the prompt — never
-    // logged; the (redacted) trace keeps it for lanes that opt in.
+    // logged.
     logger.warn(`[llm] OpenAI refusal (${id})`);
-    return { code: 'openai_refusal', response: refusal };
+    return { code: 'openai_refusal' };
   }
   return null;
 }
 
 async function callOpenAI({ model, system, text, images = [], documents = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, signal, reasoningEffort = 'low', laneId, promptVersion, policyLabel } = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_key' };
-  const base = { provider: 'openai', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
+  const base = { provider: 'openai', requestedModel: model, laneId, promptVersion, policyLabel };
   const t0 = nowMs();
   try {
     const resp = await fetch(OPENAI_RESPONSES_API, {
@@ -437,13 +435,11 @@ async function callOpenAI({ model, system, text, images = [], documents = [], js
     }
     const data = (await resp.json()) || {};
     // Latency includes the body read; usage is recorded on every billed
-    // outcome (incomplete and empty_json cost tokens too). The text is
-    // extracted before the verdict: the partial output of a
-    // max_output_tokens cut-off is exactly what its trace needs to show.
+    // outcome (incomplete and empty_json cost tokens too).
     const out = extractOpenAIText(data);
-    const served = { servedModel: data.model, providerRef: data.id, usage: usageOf('openai', data), latencyMs: elapsedMs(t0), response: out };
+    const served = { servedModel: data.model, providerRef: data.id, usage: usageOf('openai', data), latencyMs: elapsedMs(t0) };
     const verdict = openAIVerdict(data, out);
-    if (verdict) return failedLeg(base, served, verdict.code, verdict.response);
+    if (verdict) return failedLeg(base, served, verdict.code);
     return settleLeg(base, served, out, jsonMode, { model, usage: served.usage });
   } catch (err) {
     // fetch / body-read failures carry no HTTP status; only the adapter's own
@@ -469,9 +465,7 @@ async function callOpenAI({ model, system, text, images = [], documents = [], js
 async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId, promptVersion, policyLabel } = {}) {
   // `text` is the state, so a lane that opts into traces behaves like the
   // other adapters (the trace writer redacts and caps it).
-  let stateText;
-  try { stateText = typeof state === 'string' ? state : JSON.stringify(state); } catch { stateText = undefined; }
-  const base = { provider: 'typesafe', requestedModel: model, laneId, promptVersion, policyLabel, text: stateText };
+  const base = { provider: 'typesafe', requestedModel: model, laneId, promptVersion, policyLabel };
   // Unlike the text adapters, a missing key or an unpinned model still files a
   // failed ledger row (Codex #5476 r3): this lane is dark and has no user in
   // front of it, so the ledger is the only place a dead credential shows.
@@ -492,7 +486,7 @@ async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId
     const data = (await resp.json()) || {};
     const answers = data.answers && typeof data.answers === 'object' && !Array.isArray(data.answers) ? data.answers : null;
     const text = answers ? JSON.stringify(answers) : '';
-    const served = { servedModel: data.model, usage: usageOf('typesafe', data), latencyMs: elapsedMs(t0), response: text };
+    const served = { servedModel: data.model, usage: usageOf('typesafe', data), latencyMs: elapsedMs(t0) };
     if (!answers || !Object.keys(answers).length) return failedLeg(base, served, 'empty_json');
     const result = {
       ok: true,
@@ -511,29 +505,23 @@ async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId
   }
 }
 
-// What callWorkersAIDecision does with `images`: `present` (any to send),
-// `bad` (an entry that is not a canonical base64 image data URL), `bytes` (the
-// decoded images, for the ledger hashes) and `note` (the ledger stand-in: a
-// count and the sha256 of each image, never the bytes).
+// What callWorkersAIDecision does with `images`: `present` (any to send) and
+// `bad` (an entry that is not a canonical base64 image data URL).
 function clefImagesPlan(images) {
-  if (images == null || (Array.isArray(images) && !images.length)) return { present: false, bad: false, note: null };
+  if (images == null || (Array.isArray(images) && !images.length)) return { present: false, bad: false };
   const list = Array.isArray(images) ? images : [];
-  const hashes = [];
   let bad = !Array.isArray(images);
   for (const image of list) {
     const match = typeof image === 'string' ? CLEF_DATA_URL_RE.exec(image) : null;
     const decoded = match && match[2].length % 4 === 0 ? Buffer.from(match[2], 'base64') : null;
     // Buffer.from silently truncates malformed base64 ("A", "AA="): only a
-    // payload that round-trips byte-for-byte is the image we hash and send,
+    // payload that round-trips byte-for-byte is the image we send,
     // and only when its bytes are the format its MIME names.
     if (!decoded || decoded.toString('base64') !== match[2] || !CLEF_IMAGE_SIGNATURES[match[1]](decoded)) { bad = true; break; }
-    hashes.push(crypto.createHash('sha256').update(decoded).digest('hex'));
   }
-  return { present: true, bad, note: `[images: ${list.length}${hashes.length ? `, sha256 ${hashes.join(',')}` : ''}]` };
+  return { present: true, bad };
 }
-// The ledger text for the call (state, then the image stand-in) and the wire
-// body (`images` only when there are some, so an image-free body is unchanged).
-const clefLedgerText = (stateText, plan) => (plan.note ? `${stateText ?? ''}\n${plan.note}` : stateText);
+// The wire body (`images` only when there are some, so an image-free body is unchanged).
 const clefBody = (plan, images, state, questions) => (plan.present ? { images, state, questions } : { state, questions });
 // The refusal for an image request, checked before any network call: a bad
 // entry, more than four images, or a SERIALIZED body (images + state +
@@ -563,16 +551,13 @@ function clefImagesRefusal(plan, bodyText, images) {
  * exactly. More than 4, a non-data-URL or non-canonical base64 entry
  * (`cloudflare_bad_images`) or a serialized body over 150 KB
  * (`cloudflare_images_too_large`) fails the leg BEFORE any
- * network call. The ledger text never holds image bytes: it carries
- * `[images: n, sha256 <hex>,...]` (sha256 of each decoded image) after the state.
+ * network call.
  * Credentials: CF_WORKERS_AI_TOKEN (a least-privilege "Workers AI - Read"
  * token) or, when unset, the existing CF_API_TOKEN; plus CF_ACCOUNT_ID.
  */
 async function callWorkersAIDecision({ model, state, questions, images, timeoutMs = 15000, laneId, promptVersion, policyLabel } = {}) {
-  let stateText;
-  try { stateText = typeof state === 'string' ? state : JSON.stringify(state); } catch { stateText = undefined; }
   const plan = clefImagesPlan(images);
-  const base = { provider: 'cloudflare', requestedModel: model, laneId, promptVersion, policyLabel, text: clefLedgerText(stateText, plan) };
+  const base = { provider: 'cloudflare', requestedModel: model, laneId, promptVersion, policyLabel };
   const token = process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN;
   const account = process.env.CF_ACCOUNT_ID;
   // Like callTypeSafe, a missing credential or an unknown model files a failed
@@ -601,7 +586,7 @@ async function callWorkersAIDecision({ model, state, questions, images, timeoutM
     const data = envelope.result && typeof envelope.result === 'object' ? envelope.result : {};
     const answers = data.answers && typeof data.answers === 'object' && !Array.isArray(data.answers) ? data.answers : null;
     const text = answers ? JSON.stringify(answers) : '';
-    const served = { servedModel: data.model, usage: usageOf('cloudflare', data), latencyMs: elapsedMs(t0), response: text };
+    const served = { servedModel: data.model, usage: usageOf('cloudflare', data), latencyMs: elapsedMs(t0) };
     if (!answers || !Object.keys(answers).length) return failedLeg(base, served, 'empty_json');
     const result = {
       ok: true,
@@ -678,7 +663,7 @@ function geminiVerdict(data, candidate, maxTokens) {
 async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, thinkingLevel, timeoutMs, signal, laneId, promptVersion, policyLabel } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
-  const base = { provider: 'gemini', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
+  const base = { provider: 'gemini', requestedModel: model, laneId, promptVersion, policyLabel };
   const t0 = nowMs();
   try {
     const resp = await fetch(geminiUrl(model, key), {
@@ -694,7 +679,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
     const data = (await resp.json()) || {};
     const candidate = (data.candidates || [])[0] || {};
     const out = geminiText(data);
-    const served = { servedModel: data.modelVersion, providerRef: data.responseId, usage: usageOf('gemini', data), latencyMs: elapsedMs(t0), response: out };
+    const served = { servedModel: data.modelVersion, providerRef: data.responseId, usage: usageOf('gemini', data), latencyMs: elapsedMs(t0) };
     const code = geminiVerdict(data, candidate, maxTokens);
     if (code) return failedLeg(base, served, code);
     return settleLeg(base, served, out, jsonMode, { model, usage: served.usage });
@@ -791,7 +776,7 @@ function anthropicVerdict(resp, maxTokens) {
 
 async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, signal, anthropicClient, laneId, promptVersion, policyLabel, effort } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
-  const base = { provider: 'anthropic', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
+  const base = { provider: 'anthropic', requestedModel: model, laneId, promptVersion, policyLabel };
   // Ledger latency. With no budget the SDK keeps its default retries, so one
   // row can span several attempts — the row is the CALL as the caller saw it.
   const t0 = nowMs();
@@ -819,7 +804,7 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
       })
       : await client.messages.create(req)) || {};
     const out = anthropicText(resp);
-    const served = { servedModel: resp.model, providerRef: resp.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
+    const served = { servedModel: resp.model, providerRef: resp.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0) };
     const code = anthropicVerdict(resp, req.max_tokens);
     if (code) return failedLeg(base, served, code);
     return settleLeg(base, served, out, jsonMode, { model, usage: served.usage, response: resp });

@@ -235,12 +235,12 @@ describe('mosquito pricing hardening', () => {
     });
     expect(exampleC).toEqual(expect.objectContaining({
       areaBucket: 'LARGE',
-      basePrice: 190,
+      basePrice: 223,
       stationAddOnTotal: 150,
-      subtotalBeforeRecurringCustomerDiscount: 340,
+      subtotalBeforeRecurringCustomerDiscount: 373,
       recurringCustomerDiscountRate: 0.15,
-      price: 289,
-      recurringCustomerDiscountAmount: 51,
+      price: 317,
+      recurringCustomerDiscountAmount: 56,
     }));
 
     const exampleD = priceOneTimeMosquito({ mosquitoTreatableSqFt: 65000 });
@@ -248,9 +248,9 @@ describe('mosquito pricing hardening', () => {
       areaBucket: 'OVER_ACRE',
       overageSqFt: 21440,
       incrementCount: 3,
-      basePrice: 408,
+      basePrice: 387,
       requiresManualReview: true,
-      price: 408,
+      price: 387,
       manualReviewReasons: expect.arrayContaining(['over_acre_mosquito_treatment']),
     }));
 
@@ -266,7 +266,7 @@ describe('mosquito pricing hardening', () => {
       mosquitoLotCategory: 'ACRE',
     });
     expect(derivedAcreFromMissingLot.areaBucket).toBe('SMALL');
-    expect(derivedAcreFromMissingLot.price).toBe(156);
+    expect(derivedAcreFromMissingLot.price).toBe(199);
     expect(derivedAcreFromMissingLot.requiresManualReview).toBe(true);
     expect(derivedAcreFromMissingLot.manualReviewReasons).toContain('missing_mosquito_treatable_area');
   });

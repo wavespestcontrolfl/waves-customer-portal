@@ -32,6 +32,9 @@ jest.mock('../config/twilio-numbers', () => ({
   gbpTracking: { parrish: { number: '+19413840224' } },
   getOutboundNumber: () => '+19412975749',
 }));
+// GATE_TECH_STAFF_GUARDS (census M12): the active technicians' phone set is tested in
+// staff-sender-phones-postgres.test.js; here only the text-back's use of it.
+jest.mock('../services/staff-sender-phones', () => ({ isStaffTechSender: jest.fn(async (phone) => phone === '+19415550142') }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
@@ -267,6 +270,14 @@ jest.setTimeout(30000);
 
   test('a staff forward / Waves-owned caller ID is never texted', async () => {
     const row = call(READY_MINUTES_AGO, { from_phone: '+19415550999' });
+    await database('call_log').insert(row);
+    expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'internal_number' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:internal_number');
+  });
+
+  test('a missed call from an active technician\'s own phone is never texted (M12)', async () => {
+    const row = call(READY_MINUTES_AGO, { from_phone: '+19415550142' });
     await database('call_log').insert(row);
     expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'internal_number' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();

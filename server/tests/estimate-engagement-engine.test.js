@@ -45,7 +45,7 @@ jest.mock('../services/estimate-conversion-guard', () => ({
 jest.mock('../services/estimate-lead-linkage', () => ({
   leadIdForEstimate: jest.fn(async () => null),
 }));
-jest.mock('../services/click-followup-gate', () => ({
+jest.mock('../services/estimate-conversion-since', () => ({
   leadConvertedSince: jest.fn(async () => ({ converted: false })),
   phoneConvertedSince: jest.fn(async () => ({ converted: false })),
 }));
@@ -95,7 +95,7 @@ const { inferEstimateServiceLines } = require('../services/estimate-service-line
 const { customerConvertedSince } = require('../services/estimate-conversion-guard');
 const { sessionsForEstimate } = require('../services/estimate-engagement-sessions');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
-const { leadConvertedSince, phoneConvertedSince } = require('../services/click-followup-gate');
+const { leadConvertedSince, phoneConvertedSince } = require('../services/estimate-conversion-since');
 const followupShared = require('../services/estimate-follow-up')._private;
 const {
   probeGoneQuietConsultation, mintGoneQuietConsultationUrl, goneQuietConsultationStillValid,
@@ -968,7 +968,7 @@ describe('processDueJobs', () => {
 
   test('lead-only estimates run the lead conversion chain before sending (codex 2736 r13)', async () => {
     const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
-    const { leadConvertedSince } = require('../services/click-followup-gate');
+    const { leadConvertedSince } = require('../services/estimate-conversion-since');
     leadIdForEstimate.mockResolvedValue('lead-1');
     leadConvertedSince.mockResolvedValue({ converted: true, reason: 'lead-won' });
     enqueueProcessorHappyPath({ est: baseEstimate({ customer_id: null }) });

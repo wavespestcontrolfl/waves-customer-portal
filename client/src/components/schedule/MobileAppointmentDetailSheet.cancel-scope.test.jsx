@@ -31,6 +31,8 @@ vi.mock('../../lib/cardHoldCancel', () => ({
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import MobileAppointmentDetailSheet from './MobileAppointmentDetailSheet';
 
+window.scrollTo = vi.fn();
+
 const baseService = {
   id: 55,
   customerId: 9,
@@ -76,11 +78,12 @@ describe('MobileAppointmentDetailSheet cancel scope', () => {
     expect(statusCall().scope).toBe('this_only');
   });
 
-  // Opened over a Fast Complete sheet (which drops its own focus trap while suspended) or a schedule row: focus starts
-  // in this sheet, never on the trigger hidden behind it.
-  it('takes focus on open, on its Close button', () => {
+  // Opened over a Fast Complete sheet (which drops its own focus trap while
+  // suspended) or a schedule row: the shared modal contract focuses the
+  // named dialog itself before Tab advances to its first control.
+  it('takes focus on open, on its named dialog', () => {
     render(<MobileAppointmentDetailSheet service={baseService} onClose={() => {}} />);
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+    expect(document.activeElement).toBe(screen.getByRole('dialog', { name: 'Appointment details' }));
   });
 
   // After a move that committed but kept Quick Move open on a warning, this sheet's row is stale: dismissing the
@@ -101,6 +104,22 @@ describe('MobileAppointmentDetailSheet cancel scope', () => {
     expect(onClose).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss Quick Move' }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let Escape close Details from under Quick Move', () => {
+    const onClose = vi.fn();
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    render(
+      <MobileAppointmentDetailSheet
+        service={{ ...baseService, scheduledDate: today }}
+        onClose={onClose}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('Quick Move Appointment'));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText('Quick Move sheet')).toBeTruthy();
   });
 
   it('a technician login gets no Edit or Book next (both save through admin-only routes)', () => {

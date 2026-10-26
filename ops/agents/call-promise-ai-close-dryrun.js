@@ -31,7 +31,6 @@ if (process.env.DATABASE_PUBLIC_URL) {
   if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
 }
 process.env.GATE_LLM_CALL_LEDGER = 'false';
-process.env.GATE_LLM_CALL_TRACES = 'false';
 process.env.GATE_LLM_DISPATCH_METRICS = 'false';
 //
 // Needs the portal's API keys and gates, and the Postgres public URL:

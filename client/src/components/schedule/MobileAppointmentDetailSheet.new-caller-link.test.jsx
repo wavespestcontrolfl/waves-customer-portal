@@ -16,6 +16,8 @@ vi.mock('../../hooks/useCustomerCards', () => ({ useCustomerCards: () => ({ card
 vi.mock('./ScheduleSaveNotice', () => ({ showScheduleSaveNotice: vi.fn() }));
 import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 
+window.scrollTo = vi.fn();
+
 const VISIT = {
   id: 'svc-nc', status: 'pending', serviceType: 'Waves Assessment', serviceTypeDisplay: 'Waves Assessment',
   estimatedPrice: 0, scheduledDate: '2031-03-07', windowStart: '13:00:00', windowEnd: '13:30:00', estimatedDuration: 30,

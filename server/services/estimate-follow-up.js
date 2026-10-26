@@ -5,9 +5,6 @@
  *   - Received an estimate but haven't viewed it (24h)
  *   - Viewed an estimate but haven't accepted (48h, 5d)
  *   - Estimate is about to expire (1-3 days before)
- *   - Started the deposit payment step but never completed it (2-72h after
- *     the last pending PaymentIntent; gated by
- *     GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS — shadow-logs counts until on)
  *   - Reached the save-a-card accept step (Auto Pay card / one-time hold)
  *     but never accepted (2-72h after the last estimate_checkout_events
  *     touch; email-only; gated by GATE_PAYMENT_STEP_FOLLOWUP —
@@ -32,10 +29,6 @@ const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress 
 const { estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY } = require("../constants/email-replay-exclusions");
-const {
-  assessDepositFollowUpEligibility,
-  DEPOSIT_FOLLOWUP_WINDOW,
-} = require("./estimate-deposits");
 const { customerConvertedSince } = require("./estimate-conversion-guard");
 const { openEstimateEmailPdf } = require("./estimate-email-pdf");
 
@@ -724,193 +717,6 @@ async function sendDualChannel(est, { sms, email }) {
     }
   }
   return attempted;
-}
-
-// 5. Deposit started but never completed (2-72h after the last pending
-// PaymentIntent). Highest-intent drop-off: the customer clicked accept and
-// reached the Stripe card form. Gated separately because it's a
-// customer-facing auto-send — until GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS is
-// on, candidates are only counted in the log (shadow, no claims) so the
-// volume can be judged before anything goes out; the gate arms BOTH
-// channels. Dual-channel like the other stages (estimate.deposit_abandoned
-// email + estimate_followup_deposit SMS); a claim requires at least one
-// deliverable leg, so nothing can silently burn the stage.
-async function checkDepositAbandoned(now = new Date()) {
-  let sent = 0;
-  const nowMs = now.getTime();
-  // Window on updated_at, not created_at: the deposit-intent endpoint REUSES
-  // the same PaymentIntent for the same estimate+amount and bumps updated_at
-  // on retry, so updated_at is "last time the customer touched the payment
-  // step". created_at would both exclude a >72h-old intent the customer
-  // retried an hour ago and nudge someone who is actively retrying right now.
-  const latestPendingByEstimate = db("estimate_deposits")
-    .select("estimate_id")
-    .where("status", "pending")
-    .groupBy("estimate_id")
-    .max("updated_at as latest_pending_at")
-    .as("pd");
-  const candidates = await db("estimates")
-    .join(latestPendingByEstimate, "pd.estimate_id", "estimates.id")
-    .whereIn("estimates.status", ["sent", "viewed"])
-    .whereNull("estimates.archived_at")
-    // Channel-aware: email-only estimates are nudgeable too — they started
-    // paying through the tokened estimate page, same audience the deposit
-    // receipt email serves.
-    .where((q) =>
-      q.whereNotNull("estimates.customer_phone").orWhereNotNull("estimates.customer_email"),
-    )
-    .where("pd.latest_pending_at", "<", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.minAgeHours * 3600000))
-    .where("pd.latest_pending_at", ">", new Date(nowMs - DEPOSIT_FOLLOWUP_WINDOW.maxAgeHours * 3600000))
-    .where((q) =>
-      q
-        .where("followup_deposit_abandoned_sent", false)
-        .orWhereNull("followup_deposit_abandoned_sent"),
-    )
-    .select("estimates.*");
-
-  if (!candidates.length) return 0;
-  if (!isEnabled("estimateDepositAbandonmentSms")) {
-    logger.info(
-      `[est-followup] Deposit-abandoned shadow: ${candidates.length} candidate(s), gate off — no sends`,
-    );
-    return 0;
-  }
-
-  for (const est of candidates) {
-    let claimed = false;
-    try {
-      const gate = await safetyGate(est, now);
-      if (gate.skip) {
-        logger.info(
-          `[est-followup] Deposit-abandoned skip ${est.id}: ${gate.reason}`,
-        );
-        continue;
-      }
-      // Fresh, fail-CLOSED eligibility + outstanding-amount resolution from
-      // the deposits service: re-checks the accepted race, an inactive/
-      // expired estimate, quote-required, a now-exempt policy, money already
-      // received (refund-netted, so a partial payment with a pending top-up
-      // remainder stays nudgeable while a covered policy goes silent), and
-      // that a pending intent still exists. Any verification failure skips —
-      // an unprompted SMS is never sent on unverified eligibility.
-      const eligibility = await assessDepositFollowUpEligibility(est.id, now);
-      if (!eligibility.eligible) {
-        logger.info(
-          `[est-followup] Deposit-abandoned skip ${est.id}: ${eligibility.reason || "ineligible"}`,
-        );
-        continue;
-      }
-      const depositAmount = Number(eligibility.outstandingAmount);
-      if (!Number.isFinite(depositAmount) || depositAmount <= 0) {
-        logger.warn(
-          `[est-followup] Deposit-abandoned skip ${est.id}: bad outstanding amount ${eligibility.outstandingAmount}`,
-        );
-        continue;
-      }
-      const firstName = await estimateGreetingFirstName(db, est);
-      // Whole dollars render bare ("$49"); a refund-netted remainder with
-      // cents renders exactly ("$29.50") instead of misquoting via round.
-      const depositAmountText = Number.isInteger(depositAmount)
-        ? String(depositAmount)
-        : depositAmount.toFixed(2);
-      const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_deposit");
-      const smsBody = est.customer_phone
-        ? await renderTemplate("estimate_followup_deposit", {
-          first_name: firstName,
-          deposit_amount: depositAmountText,
-          estimate_url: smsUrl,
-        }, {
-          workflow: "estimate_follow_up",
-          entity_type: "estimate",
-          entity_id: est.id,
-        })
-        : null;
-      if (est.customer_phone && !smsBody) {
-        logger.warn(
-          `[est-followup] estimate_followup_deposit template missing/disabled — continuing without SMS for est ${est.id}`,
-        );
-      }
-      // Portal-wide email opt-out for customer-linked estimates — the
-      // template library only enforces email_suppressions, not
-      // notification_prefs.email_enabled (same gate the welcome sender
-      // applies). Fails CLOSED: an unreadable pref means no email leg this
-      // tick; if that leaves zero legs the stage skips WITHOUT claiming and
-      // retries next tick.
-      let emailAllowed = !!est.customer_email;
-      if (emailAllowed && est.customer_id) {
-        try {
-          const prefs = await db("notification_prefs")
-            .where({ customer_id: est.customer_id })
-            .first("email_enabled");
-          if (prefs?.email_enabled === false) {
-            emailAllowed = false;
-            logger.info(
-              `[est-followup] Deposit-abandoned email leg skipped for est ${est.id} — email disabled in prefs`,
-            );
-          }
-        } catch (err) {
-          emailAllowed = false;
-          logger.warn(
-            `[est-followup] Deposit-abandoned email leg skipped for est ${est.id} — prefs unverifiable: ${err.message}`,
-          );
-        }
-      }
-      // At least one deliverable leg or skip WITHOUT claiming — a claim with
-      // zero legs would permanently mark the stage sent while sending nothing
-      // (the exact silent-skip this stage used to have).
-      const emailLeg = emailAllowed
-        ? {
-          templateKey: "estimate.deposit_abandoned",
-          stage: "deposit_abandoned",
-          payload: estimateEmailPayload(est, firstName, emailUrl, {
-            deposit_amount: depositAmountText,
-          }),
-        }
-        : null;
-      if (!smsBody && !emailLeg) {
-        logger.warn(
-          `[est-followup] Deposit-abandoned skip ${est.id}: no deliverable channel (SMS template off, no email)`,
-        );
-        continue;
-      }
-      if (!(await claimStage(est.id, "followup_deposit_abandoned_sent"))) {
-        logger.info(
-          `[est-followup] Deposit-abandoned skip ${est.id}: lost-claim`,
-        );
-        continue;
-      }
-      claimed = true;
-      const ok = await sendDualChannel(est, {
-        sms: smsBody || undefined,
-        email: emailLeg || undefined,
-      });
-      if (ok) {
-        await db("estimates")
-          .where({ id: est.id })
-          .update({
-            follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
-            last_follow_up_at: db.fn.now(),
-          });
-        sent++;
-        claimed = false;
-      }
-    } catch (e) {
-      logger.error(
-        `[est-followup] Deposit-abandoned send failed: ${e.message}`,
-      );
-    } finally {
-      if (claimed) {
-        try {
-          await releaseStage(est.id, "followup_deposit_abandoned_sent");
-        } catch (e) {
-          logger.error(
-            `[est-followup] Deposit-abandoned release failed: ${e.message}`,
-          );
-        }
-      }
-    }
-  }
-  return sent;
 }
 
 // ── Stage 6: reached the save-a-card step but never accepted ────────────
@@ -1732,13 +1538,6 @@ const EstimateFollowUp = {
       /* columns may not exist */
     }
 
-    // 5. Deposit started but never completed
-    try {
-      sent += await checkDepositAbandoned();
-    } catch {
-      /* columns may not exist */
-    }
-
     // 6. Reached the save-a-card step but never accepted
     try {
       sent += await checkPaymentStepAbandoned();
@@ -1762,7 +1561,6 @@ module.exports._private = {
   withAverageEmail,
   renderTemplate,
   deferredFollowupStillEligible,
-  checkDepositAbandoned,
   checkPaymentStepAbandoned,
   paymentStepStillRequiresCard,
   claimFollowupSend,

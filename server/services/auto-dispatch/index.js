@@ -1109,7 +1109,7 @@ async function evaluateServiceForRun(service, run) {
   if (personPlaced.degraded) run.guardReadDegraded = true;
   if (personPlaced.placed) return logSkip(run, service, personPlaced);
 
-  const prefs = await getCustomerSchedulingPreferences(service.customer_id, service.service_type);
+  const prefs = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, db, { serviceId: service.service_id, serviceKey: service.service_key_snapshot });
   if (config.requirePortalPreferences && !prefs.has_explicit_prefs) {
     return logSkip(run, service, { reason_code: 'NO_PORTAL_PREFERENCES', reason_description: 'Customer has no explicit scheduling preferences' });
   }
@@ -1420,7 +1420,7 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
 // The customer's scheduling preferences as they stand now differ from the
 // ones this move was scored on. A read error throws: the move fails closed.
 async function preferencesChanged(pm) {
-  const now = await getCustomerSchedulingPreferences(pm.service.customer_id, pm.service.service_type);
+  const now = await getCustomerSchedulingPreferences(pm.service.customer_id, pm.service.service_type, db, { serviceId: pm.service.service_id, serviceKey: pm.service.service_key_snapshot });
   return moveCheck.preferencesPrint(now) !== moveCheck.preferencesPrint(pm.prefs);
 }
 

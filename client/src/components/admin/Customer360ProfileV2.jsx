@@ -5935,34 +5935,19 @@ function CustomerWorkspaceNavigation({
 function CustomerOverlayNavigation({
   activeTab,
   setActiveTab,
-  activeTabButtonRef,
+  profileContentId,
 }) {
   return (
     <>
       {/* ZONE 3 — TAB BAR */}
-      {/* shrink-0: this is an overflow-x scroll container, so its flex
-            auto-minimum-size is 0 — without it the column flex collapses the
-            bar to ~0px on mobile (tall content), hiding every section tab. */}
-      <div className="flex shrink-0 bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
-        {CUSTOMER_360_SECTIONS.filter(
+      <Customer360Sections
+        active={activeTab}
+        onChange={setActiveTab}
+        contentId={profileContentId}
+        sections={CUSTOMER_360_SECTIONS.filter(
           (section) => section.key !== "estimates",
-        ).map((t) => (
-          <button data-ui-text-action
-            key={t.key}
-            ref={activeTab === t.key ? activeTabButtonRef : null}
-            aria-pressed={activeTab === t.key}
-            onClick={() => setActiveTab(t.key)}
-            className={cn(
-              "h-11 px-4 text-ui-label ui-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
-              activeTab === t.key
-                ? "text-zinc-900 border-zinc-900"
-                : "text-ink-secondary border-transparent hover:text-zinc-900",
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+        )}
+      />
     </>
   );
 }
@@ -9966,7 +9951,6 @@ function CustomerWorkspacePresentation({
 
 function CustomerOverlayPresentation({
   panelRef,
-  activeTabButtonRef,
   headerProps,
   activeTab,
   profileContentId,
@@ -9994,9 +9978,18 @@ function CustomerOverlayPresentation({
         <CustomerOverlayNavigation
           activeTab={activeTab}
           setActiveTab={setActiveTab}
-          activeTabButtonRef={activeTabButtonRef}
+          profileContentId={profileContentId}
         />
-        <div className="c360-tab-content p-6 flex-1" id={profileContentId}>
+        <div
+          className="c360-tab-content p-6 flex-1"
+          id={profileContentId}
+          role="tabpanel"
+          aria-label={
+            CUSTOMER_360_SECTIONS.find(
+              (section) => section.key === activeTab,
+            )?.label
+          }
+        >
           <CustomerProfileActionError error={profileActionErr} />
           {activeTab === "overview" && sections.overview}
           {activeTab === "billing" && sections.billing}
@@ -10709,7 +10702,6 @@ function useCustomerProfileNavigation({
   const [refundPayment, setRefundPayment] = useState(null);
   const [removePaymentMethod, setRemovePaymentMethod] = useState(null);
   const panelRef = useRef(null);
-  const activeTabButtonRef = useRef(null);
   const [headerPast, setHeaderPast] = useState(false);
   const tabsAnchorRef = useRef(null);
   const profileContentId = useId();
@@ -10752,13 +10744,6 @@ function useCustomerProfileNavigation({
     setActiveTab(next);
     return true;
   };
-  useEffect(() => {
-    if (!loading)
-      activeTabButtonRef.current?.scrollIntoView?.({
-        block: "nearest",
-        inline: "nearest",
-      });
-  }, [loading, activeTab]);
   // Every sub-modal owns Escape while it is open (ui/Dialog and the
   // hand-rolled modals each close themselves through useModalFocus); the
   // profile only closes when nothing sits above it — otherwise one keypress
@@ -10857,7 +10842,6 @@ function useCustomerProfileNavigation({
     timelineSearch,
     setTimelineSearch,
     panelRef,
-    activeTabButtonRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -11208,7 +11192,6 @@ export default function Customer360ProfileV2({
     timelineSearch,
     setTimelineSearch,
     panelRef,
-    activeTabButtonRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -11576,7 +11559,6 @@ export default function Customer360ProfileV2({
   return (
     <Presentation
       panelRef={panelRef}
-      activeTabButtonRef={activeTabButtonRef}
       headerPast={headerPast}
       headerProps={{
         c,

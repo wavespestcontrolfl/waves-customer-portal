@@ -92,7 +92,7 @@ it('notifies the overlay parent when the first service address becomes primary',
   ), { status: 200, headers: { 'Content-Type': 'application/json' } }));
 
   render(<Customer360ProfileV2 customerId="fixture" onClose={() => {}} onCustomerMutation={onCustomerMutation} />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Property', exact: true }));
+  fireEvent.click(await screen.findByRole('tab', { name: 'Property', exact: true }));
   await screen.findByText('No service address on file.');
   expect(onCustomerMutation).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Add service address' }));

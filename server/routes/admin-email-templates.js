@@ -1249,37 +1249,24 @@ router.put('/versions/:id', async (req, res, next) => {
 // Read the booking audience without enqueueing, claiming, or sending. Content
 // fixtures remain independent of this optional check against a persisted visit.
 async function onboardingAudiencePreview(templateKey, scheduledServiceId) {
-  if (!['app_intro', 'welcome.new_recurring'].includes(templateKey)) return null;
+  if (templateKey !== 'app_intro') return null;
   const service = await db('scheduled_services').where({ id: scheduledServiceId }).first();
   const customer = service && await db('customers').where({ id: service.customer_id }).first();
   if (!service || !customer) {
     const error = new Error('Appointment not found'); error.status = 404; throw error;
   }
-  if (templateKey === 'app_intro') {
-    const intro = require('../services/recurring-app-intro-email');
-    const eligibility = await intro.appIntroEligibility(service);
-    return {
-      scheduledServiceId, templateKey,
-      applies: true,
-      // The parent template change already shares the corrected first-visit
-      // reader. This comparison isolates the recurring/member gate expansion.
-      before: eligibility.eligible && service.is_recurring === true && ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(customer.waveguard_tier),
-      after: eligibility.eligible,
-      gateEnabled: intro.isEnabled(),
-      reason: eligibility.reason,
-      note: 'Current first-visit rules apply to both audiences. Recipient validation, suppression and the once-per-customer send ledger still apply at delivery.',
-    };
-  }
-  const welcome = require('../services/new-recurring-welcome-sms');
-  const eligibility = await welcome.oneTimeWelcomeEligibility(service, customer);
+  const intro = require('../services/recurring-app-intro-email');
+  const eligibility = await intro.appIntroEligibility(service);
   return {
     scheduledServiceId, templateKey,
-    applies: service.is_recurring === false,
-    before: false,
+    applies: true,
+    // The parent template change already shares the corrected first-visit
+    // reader. This comparison isolates the recurring/member gate expansion.
+    before: eligibility.eligible && service.is_recurring === true && ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(customer.waveguard_tier),
     after: eligibility.eligible,
-    gateEnabled: welcome.oneTimeWelcomeEmailEnabled(),
+    gateEnabled: intro.isEnabled(),
     reason: eligibility.reason,
-    note: 'Only the one-time email addition is evaluated here. Existing recurring and SMS eligibility is unchanged. Email preferences, suppression and queue/send guards still apply.',
+    note: 'Current first-visit rules apply to both audiences. Recipient validation, suppression and the once-per-customer send ledger still apply at delivery.',
   };
 }
 

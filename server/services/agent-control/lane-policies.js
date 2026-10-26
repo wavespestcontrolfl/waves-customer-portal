@@ -46,7 +46,6 @@ const DEFAULT_RUNTIME = Object.freeze({
   eval_family: null,
   maturity: null,
   workflow_id: null,
-  trace: false,
   // null = no cap yet (cost arrives in a later PR)
   budget: Object.freeze({ max_steps: 50, max_tool_calls: 100, max_retries: 2, max_cost_usd: null }),
 });
@@ -70,9 +69,6 @@ const LANE_RUNTIME = {
   // M2 (Codex r20): both return text the comms client installs into the editable body; sending is the operator's separate action.
   sms_tone: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   sms_suggest: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
-  // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity (two switchboard lanes since #3769 b21f45aeb).
-  response_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
-  response_drafter_high_stakes: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
   'sms-commitment-fulfillment': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'sms-commitment-fulfillment', ...LONG_BATCH },
   // Thread close runs inside SMS intake and the fulfillment revalidation, so it owns no job of its own (no workflow_id).
@@ -87,10 +83,6 @@ const LANE_RUNTIME = {
   // closed and asserted exhaustively by agent-control-run-index.test.js).
   'email-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0' },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  // GATE_REVIEW_DAY0_CONTEXT: classifies a Day-0 review-ask topic from a
-  // customer's texts + completion notes and stores it on review_sequences —
-  // no customer-visible output of its own, so internal_write like sms_intent.
-  review_topic: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // test answers to foreign-language texts, stored in sms_translation_trials and never sent
   sms_translation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
   // Its verdict authorizes an automatic customer send (tech-voice review asks).
@@ -169,7 +161,7 @@ const LANE_RUNTIME = {
   // is the other relay implementation the comment above already covers.
   voice_relay_collections: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
   // Optional manual replay judge: no business writes; ordinary call ledger
-  // and traces remain available. Event cadence avoids expected silence alarms.
+  // remains available. Event cadence avoids expected silence alarms.
   voice_relay_judge: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
 
   // ── Photos & property ──

@@ -6728,7 +6728,11 @@ function priceOneTimeMosquito(property, options = {}) {
   const discounted = applyOneTimeRecurringCustomerDiscount(subtotalBeforeRecurringCustomerDiscount, {
     isRecurringCustomer: !!options.isRecurringCustomer,
   });
-  const price = discounted.price;
+  // The $199 list minimum (owner 2026-10-25) binds after the recurring-customer
+  // perk, the same order as one-time pest: a member's small-yard visit is
+  // $199, not $169. 0 = no minimum.
+  const selectedFloor = Math.max(0, Number(ONE_TIME.mosquito.floor) || 0);
+  const price = applyOneTimeFloor(discounted.price, selectedFloor);
   const detailParts = [];
   if (stationCount > 0) detailParts.push(`${stationCount} mosquito station${stationCount === 1 ? '' : 's'} (+$${Math.round(stationAddOnTotal)})`);
   if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOnTotal)})`);
@@ -6768,7 +6772,10 @@ function priceOneTimeMosquito(property, options = {}) {
     dunkAddOnTotal,
     subtotalBeforeRecurringCustomerDiscount,
     recurringCustomerDiscountRate: discounted.rate,
-    recurringCustomerDiscountAmount: discounted.amount,
+    // The discount the customer actually gets once the minimum binds.
+    recurringCustomerDiscountAmount: Math.max(0, Math.round(subtotalBeforeRecurringCustomerDiscount) - price),
+    selectedFloor,
+    floorAppliedAfterDiscount: price > discounted.price,
     requiresManualReview: manualReviewReasons.length > 0,
     manualReviewReasons,
     warnings,

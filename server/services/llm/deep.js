@@ -38,8 +38,7 @@ function stripThinkingBlocks(response) {
 }
 
 // Both legs (Opus, then the OpenAI backup) share one agent-control chain id
-// in the call ledger; the Anthropic leg records through ledgerCall (request
-// bodies handed over for a trace, should the lane opt in), the OpenAI leg
+// in the call ledger; the Anthropic leg records through ledgerCall, the OpenAI leg
 // records inside callOpenAI.
 // `laneId` labels the call-ledger rows of BOTH legs — the option
 // dispatchWithFallback's payload takes — and never reaches the wire.
@@ -121,9 +120,7 @@ async function createDeepMessageInChain(client, params, effort) {
   const startedAt = Date.now();
   let response;
   try {
-    response = await ledgerCall('anthropic', model, () => client.messages.create(wireParams(params, model, effort)), {
-      trace: { system: systemText(params.system) || null, prompt: messageText(params.messages) || null },
-    });
+    response = await ledgerCall('anthropic', model, () => client.messages.create(wireParams(params, model, effort)));
   } catch (err) {
     // Same remaining-budget guard as the refusal path below. Without it, an
     // Anthropic request that THROWS after consuming its budget (e.g. its own

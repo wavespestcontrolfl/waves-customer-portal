@@ -285,6 +285,7 @@ function validatePestPricingConfig(snapshot = constants) {
   }
   if (!isNonNegativeNumber(onetimeMosquito.stationAddOn)) errors.push('ONE_TIME.mosquito.stationAddOn must be non-negative');
   if (!isNonNegativeNumber(onetimeMosquito.dunkAddOn)) errors.push('ONE_TIME.mosquito.dunkAddOn must be non-negative');
+  if (!isNonNegativeNumber(onetimeMosquito.floor)) errors.push('ONE_TIME.mosquito.floor must be non-negative');
 
   const germanRoach = SPECIALTY.germanRoach || {};
   const germanRoachTiers = germanRoach.tiers || {};
@@ -1808,6 +1809,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
       if (config.onetime_mosquito.dunkAddOn != null) {
         next.dunkAddOn = r(Number(config.onetime_mosquito.dunkAddOn));
+      }
+      // List minimum after the recurring-customer perk (owner 2026-10-25);
+      // 0 turns it off. A row without the key keeps the in-code default.
+      if (config.onetime_mosquito.floor != null) {
+        next.floor = r(Number(config.onetime_mosquito.floor));
       }
       constants.ONE_TIME.mosquito = next;
     }

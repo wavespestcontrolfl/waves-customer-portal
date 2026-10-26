@@ -2,10 +2,9 @@
 // No live API calls: global fetch is mocked.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockRecordCall = jest.fn(() => 42);
-const mockRecordTrace = jest.fn();
 jest.mock('../services/llm-dispatch-metrics', () => {
   const actual = jest.requireActual('../services/llm-dispatch-metrics');
-  return { ...actual, recordCall: (...a) => mockRecordCall(...a), recordTrace: (...a) => mockRecordTrace(...a), recordDispatch: jest.fn() };
+  return { ...actual, recordCall: (...a) => mockRecordCall(...a), recordDispatch: jest.fn() };
 });
 
 const { callTypeSafe, dispatch, TYPESAFE_SYSTEMONE_API } = require('../services/llm/call');
@@ -26,7 +25,6 @@ describe('callTypeSafe', () => {
     process.env.TYPESAFE_API_KEY = 'test-key';
     global.fetch = jest.fn().mockResolvedValue(okResponse());
     mockRecordCall.mockClear();
-    mockRecordTrace.mockClear();
   });
   afterAll(() => {
     global.fetch = originalFetch;
@@ -59,8 +57,6 @@ describe('callTypeSafe', () => {
       ok: true,
       usage: { input_tokens: 120, output_tokens: 7 },
     });
-    // an opted-in trace sees the state as the prompt text
-    expect(mockRecordTrace).toHaveBeenCalledWith(42, expect.objectContaining({ prompt: JSON.stringify(STATE), response: JSON.stringify(ANSWERS), laneId: 'typed_decisions' }));
   });
 
   test.each([[401], [422], [429], [529]])('HTTP %i -> typesafe_%i, ledgered as a failed call', async (status) => {
