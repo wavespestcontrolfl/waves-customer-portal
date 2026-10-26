@@ -21,6 +21,7 @@ const { isBotUserAgent } = require('../utils/bot-ua');
 const { shouldRecord } = require('../services/customer-page-views');
 const {
   WAVES_SUPPORT_PHONE_TEL,
+  WAVES_SUPPORT_SMS_TEL,
 } = require('../constants/business');
 
 // Accept lowercase alphanum + hyphen only, 3-80 chars. Keeps the route from matching
@@ -106,14 +107,14 @@ function genericErrorPage() {
   return messagePage({
     title: 'Something went wrong',
     heading: 'Something went wrong',
-    body: 'Try again in a minute, or email us.',
+    body: 'Try again in a minute, or text us.',
     ctas: [SUPPORT_CTAS[1]],
   });
 }
 
 const SUPPORT_CTAS = [
   { href: WAVES_SUPPORT_PHONE_TEL, label: 'Call Waves' },
-  { href: 'mailto:contact@wavespestcontrol.com', label: 'Email Waves' },
+  { href: WAVES_SUPPORT_SMS_TEL, label: 'Text Waves' },
 ];
 
 // Glass UI (owner 2026-10-24): same frosted-card-over-scene treatment the
