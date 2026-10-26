@@ -198,6 +198,9 @@ async function mistingLayoutDocBlock(estimate, { knex = db } = {}) {
     return {
       mistingLayout: {
         imageUrl,
+        // Stable per save (each save writes a new picture key) and safe to publish: the emailed-PDF fingerprint
+        // reads this instead of the expiring signed link, so replacing a layout invalidates a rendered attachment.
+        revision: crypto.createHash('sha256').update(row.snapshot_s3_key).digest('hex').slice(0, 16),
         address: row.address || null,
         counts: {
           nozzles: Number(row.nozzle_count),

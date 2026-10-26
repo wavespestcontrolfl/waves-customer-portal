@@ -142,6 +142,7 @@ describe('GET /:token/data — misting layout section (GATE_MISTING_LAYOUT_DESIG
       expect(body.error).toBeUndefined();
       expect(body.mistingLayout).toEqual({
         imageUrl: 'https://signed.example/layout.png',
+        revision: expect.stringMatching(/^[0-9a-f]{16}$/),
         address: '123 Trust Ln, Bradenton, FL 34203',
         counts: { nozzles: 14, eave: 10, fence: 4, risers: 2, linearFt: 131.5, zones: 1, pump: true },
       });

@@ -157,6 +157,12 @@ function documentInputProjection(payload) {
     // flag edited while an attachment renders or waits must invalidate it. Absent (null) with the
     // gate off or on a non-lawn estimate.
     lawnLimits: payload?.lawnLimits ?? null,
+    // The saved misting layout sketch (GATE_MISTING_LAYOUT_DESIGNER): saving a new layout does not touch the
+    // estimate row, so its revision must invalidate a rendered attachment. The signed imageUrl expires and
+    // changes on every read, so it stays out. Null when the document has no layout section.
+    mistingLayout: payload?.mistingLayout
+      ? pick(payload.mistingLayout, ['revision', 'address', 'counts'])
+      : null,
   };
 }
 

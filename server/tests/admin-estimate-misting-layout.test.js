@@ -312,6 +312,7 @@ describe('document block (the estimate PDF section)', () => {
     expect(block).toEqual({
       mistingLayout: {
         imageUrl: 'https://signed.example/layout.png',
+        revision: expect.stringMatching(/^[0-9a-f]{16}$/),
         address: '500 Example Court, Venice, FL',
         counts: { nozzles: 2, eave: 2, fence: 0, risers: 1, linearFt: expect.any(Number), zones: 1, pump: true },
       },

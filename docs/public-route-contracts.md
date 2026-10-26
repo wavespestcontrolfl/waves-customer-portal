@@ -5675,9 +5675,11 @@ declined or expired estimate. Only the browser-rendered estimate PDF (`EstimateP
 prints it, on its own last page; the interactive estimate page ignores it.
 `/data?mode=pdf` (the document render pass only; never a normal page load) may carry an
 optional top-level `mistingLayout` block (GATE_MISTING_LAYOUT_DESIGNER, dark): `{ imageUrl,
-address|null, counts: { nozzles, eave, fence, risers, linearFt, zones, pump } }`, the
+revision, address|null, counts: { nozzles, eave, fence, risers, linearFt, zones, pump } }`, the
 staff-drawn concept sketch saved for this estimate (`services/misting-layouts.js`).
-`imageUrl` is a signed S3 link that lasts 20 minutes (the render pin lasts 15); counts are
+`imageUrl` is a signed S3 link that lasts 20 minutes (the render pin lasts 15); `revision` is a
+16-hex-character tag that changes on every save (a hash of the picture key, never the key), which the
+emailed-PDF fingerprint reads in place of the expiring link; counts are
 numbers and `pump` is a boolean. No prices and no customer data beyond the property
 address the document already prints. The key is ABSENT unless BOTH `GATE_MOSQUITO_MISTING`
 and `GATE_MISTING_LAYOUT_DESIGNER` are on, a layout is saved for the estimate, and the
