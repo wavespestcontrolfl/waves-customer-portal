@@ -7621,7 +7621,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             throw err;
           }
           // The billing lane likewise (Codex #4365 P2): lawnPlanProgramApplies
-          // lets an explicit per_visit / one_time lane defeat the tier, so a
+          // lets an explicit one_time lane defeat the tier (per_visit does not, owner 2026-10-26), so a
           // billing_mode edit that committed between the plan build and this
           // customer share lock would stamp attribution the current lane
           // denies (or omit attribution it now allows). Same retryable shape;
@@ -8368,7 +8368,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // carrier is still the visit's measured carrier (Codex #4113 P2).
             // The legacy (gate-off) writer keeps its attribution rules but
             // shares the program predicate with the lawn_protocol_* stamp: a
-            // per_visit / one_time customer's lingering tier is not a program
+            // one_time customer's lingering tier is not a program
             // there either (Codex #4365 r6 P2).
             plan: waveguardPlan && !(lawnLedgerVisit ? lawnPlanAttributesVisit(waveguardPlan) : lawnPlanProgramApplies(waveguardPlan))
               ? { ...waveguardPlan, protocol: null } : waveguardPlan,
@@ -8543,7 +8543,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           scheduledServiceUpdate.field_confirmed_at = svc.field_confirmed_at || new Date();
         }
         // The closeout stamp follows the same program-attribution predicate
-        // as the ledger (Codex #4365 r2 P2): a per_visit / one_time customer
+        // as the ledger (Codex #4365 r2 P2): a one_time customer
         // keeping a legacy tier is a WaveGuard closeout for the completion
         // lockouts, but the calendar-resolved plan is not a protocol the
         // technician was assigned. Stamping it would mint a COMPLETE
