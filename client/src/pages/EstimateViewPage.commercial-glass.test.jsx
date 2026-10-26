@@ -118,20 +118,17 @@ describe('authored commercial proposal page', () => {
     });
   });
 
-  it('puts only the authored proposal inside Field presentation', async () => {
+  it('keeps the on-page proposal glass: the Field layout is the PDF only (owner 2026-10-26)', async () => {
     await renderProposal({ canSign: true, state: 'none' });
-    const documentBody = document.querySelector('.estimate-proposal-document-body');
-    expect(documentBody).not.toBeNull();
-    const masthead = documentBody.querySelector('.field-document-masthead');
-    expect(masthead).not.toBeNull();
-    expect(masthead).not.toHaveAttribute('data-g-nav');
-    expect(masthead).not.toHaveAttribute('data-glass');
-    expect(masthead).not.toHaveStyle({ position: 'sticky' });
-    expect(masthead).not.toHaveStyle({ borderRadius: '999px' });
-    expect(documentBody).toContainElement(screen.getByTestId('proposal-detail-card'));
-    expect(documentBody).not.toContainElement(screen.getByTestId('proposal-next-steps'));
-    expect(documentBody).not.toContainElement(screen.getByTestId('commercial-agreement-sign'));
-    expect(documentBody).not.toContainElement(screen.getByLabelText('Ask Waves about this estimate'));
+    expect(document.querySelector('.waves-field-document, .waves-field-document-body, .field-document-masthead')).toBeNull();
+    expect(screen.getByTestId('proposal-detail-card')).toHaveAttribute('data-glass', 'card');
+  });
+
+  it('the What happens next card is glass UI: a real heading and the gold call button', async () => {
+    await renderProposal({ canSign: true, state: 'none' });
+    const nextSteps = screen.getByTestId('proposal-next-steps');
+    expect(within(nextSteps).getByRole('heading', { level: 2, name: 'What happens next' })).toBeInTheDocument();
+    expect(within(nextSteps).getByRole('link', { name: 'Call (941) 297-5749' })).toHaveAttribute('data-glass-accent');
   });
 
   it('the signed and call-us agreement cards are glass too', async () => {
