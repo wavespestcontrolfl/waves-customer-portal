@@ -19,11 +19,12 @@
 //      series is seeded from the visit at the proposal's cadence, and the
 //      office gets one alert.
 //
-// Scope (v1): an authored proposal whose recurring itemization is pest
-// service programs only, every program on ONE whole cadence (12, 6, 4, 3, 2 or
-// 1 visits a year), with no building line items and no corrective work, and a
-// year of visits that equals the quoted annual price. Anything else keeps the
-// office flow: the page says the team follows up, exactly as before.
+// Scope (v1): an authored proposal that does not bill by invoice, whose
+// recurring itemization is pest service programs only, every program on ONE
+// whole cadence (12, 6, 4, 3, 2 or 1 visits a year), with no building line
+// items and no corrective work, and a year of visits that equals the quoted
+// annual price. Anything else keeps the office flow: the page says the team
+// follows up, exactly as before.
 //
 // Commercial visits stay unlinked from the residential catalog (the rule
 // slot-reservation.js cadenceCatalogKeyForProfile already applies, codex
@@ -41,8 +42,10 @@ const SERVICE_KEY = 'pest_control';
 const BOOKING_SOURCE = 'commercial_proposal_first_visit';
 const ACCEPT_SOURCE = 'customer_first_visit_booking';
 const DEFAULT_VISIT_MINUTES = 60;
+// The /book commit's bounds (routes/booking.js MIN_CALLBACK_DURATION_MINUTES and MAX_BOOKING_DURATION_MINUTES): a
+// shorter visit books the minimum, and a longer one stays with the office (the commit would book 60 minutes).
 const MIN_VISIT_MINUTES = 15;
-const MAX_VISIT_MINUTES = 240;
+const MAX_VISIT_MINUTES = 90;
 // Statuses that no longer hold a visit (the booking replay check's dead set, plus the spellings other writers use).
 const DEAD_VISIT_STATUSES = ['cancelled', 'canceled', 'skipped', 'rescheduled', 'no_show'];
 // Whole cadences only: the seeder's patternFromVisitsPerYear buckets (24 a year would read as monthly).
@@ -72,7 +75,8 @@ function engineOnSiteMinutes(estimateData = {}) {
 
 // The visit length: the builder's per-program visit minutes when every
 // program carries one (one visit does every program, so they add up), else
-// the estimator's on-site minutes rounded up to 5, else an hour.
+// the estimator's on-site minutes rounded up to 5, else an hour; never below
+// the commit's minimum. Over MAX_VISIT_MINUTES the plan is null (firstVisitPlan).
 function visitMinutesFor(programs, estimateData) {
   const authored = programs.map((program) => Number(program.visitMinutes));
   let minutes;
@@ -82,11 +86,14 @@ function visitMinutesFor(programs, estimateData) {
     const engine = engineOnSiteMinutes(estimateData);
     minutes = engine ? Math.ceil(engine / 5) * 5 : DEFAULT_VISIT_MINUTES;
   }
-  return Math.min(MAX_VISIT_MINUTES, Math.max(MIN_VISIT_MINUTES, minutes));
+  return Math.max(MIN_VISIT_MINUTES, minutes);
 }
 
 // The visit the signer may book, or null (the office books it). Pure.
 function firstVisitPlan(estimate = {}) {
+  // An invoice-mode proposal bills its first period when it is marked won (proposal-win.js), so a completion invoice
+  // on the first visit would bill that visit twice: the office keeps it.
+  if (estimate.bill_by_invoice === true) return null;
   const { normalizeProposal, computeProposalTotals } = require('./estimate-proposal');
   const proposal = normalizeProposal(estimate);
   if (proposal.enabled !== true || proposal.synthesized === true) return null;
@@ -106,11 +113,13 @@ function firstVisitPlan(estimate = {}) {
   // Every visit bills the same amount, and a year of visits is the quoted annual price; anything the programs do not
   // explain stays with the office.
   if (!(pricePerVisit > 0) || totals.oneTime > 0 || roundMoney(pricePerVisit * visitsPerYear) !== totals.annualRecurring) return null;
+  const durationMinutes = visitMinutesFor(programs, parseEstimateData(estimate.estimate_data ?? estimate.estimateData));
+  if (durationMinutes > MAX_VISIT_MINUTES) return null;
   return {
     visitsPerYear,
     pattern,
     pricePerVisit,
-    durationMinutes: visitMinutesFor(programs, parseEstimateData(estimate.estimate_data ?? estimate.estimateData)),
+    durationMinutes,
     serviceType: SERVICE_TYPE,
     serviceKey: SERVICE_KEY,
   };
@@ -176,7 +185,7 @@ async function firstVisitCtaFor(estimate, { open = false, picker = false, conn =
 async function firstVisitOnlineFor(estimateId, conn = db) {
   try {
     if (!live() || !estimateId) return false;
-    const estimate = await conn('estimates').where({ id: estimateId }).first('id', 'customer_id', 'estimate_data');
+    const estimate = await conn('estimates').where({ id: estimateId }).first('id', 'customer_id', 'estimate_data', 'bill_by_invoice');
     if (!estimate?.customer_id || !firstVisitPlan(estimate)) return false;
     return !(await linkedFirstVisit(estimate.id, conn));
   } catch (err) {
@@ -473,6 +482,8 @@ module.exports = {
   ACCEPT_SOURCE,
   ALERT_LABEL,
   PATTERN_FOR_VISITS,
+  MIN_VISIT_MINUTES,
+  MAX_VISIT_MINUTES,
   firstVisitPlan,
   visitMinutesFor,
   engineOnSiteMinutes,

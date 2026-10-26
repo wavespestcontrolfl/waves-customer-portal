@@ -121,10 +121,21 @@ describe('firstVisitPlan', () => {
     expect(two).toMatchObject({ pattern: 'quarterly', pricePerVisit: 150, durationMinutes: 55 });
   });
 
-  test('no estimator minutes and no builder length: one hour; out-of-range lengths clamp to 15-240', () => {
+  test('no estimator minutes and no builder length: one hour; a short visit books the commit minimum', () => {
     expect(firstVisitVisitPlan({ engineMinutes: 0 }).durationMinutes).toBe(60);
     expect(firstVisit.visitMinutesFor([{ visitMinutes: 5 }], {})).toBe(15);
-    expect(firstVisit.visitMinutesFor([{ visitMinutes: 400 }], {})).toBe(240);
+  });
+
+  test('a visit longer than the /book commit books (90 minutes) stays with the office', () => {
+    expect(firstVisitVisitPlan({ programs: [{ service: 'pest', label: 'A', frequencyPerYear: 12, pricePerApplication: 200, visitMinutes: 90 }] }).durationMinutes).toBe(90);
+    expect(firstVisitVisitPlan({ programs: [{ service: 'pest', label: 'A', frequencyPerYear: 12, pricePerApplication: 200, visitMinutes: 95 }] })).toBeNull();
+    expect(firstVisitVisitPlan({ engineMinutes: 120 })).toBeNull();
+  });
+
+  test('the bounds are the /book commit\'s own (routes/booking.js)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+    expect(src).toContain(`const MAX_BOOKING_DURATION_MINUTES = ${firstVisit.MAX_VISIT_MINUTES};`);
+    expect(src).toContain(`const MIN_CALLBACK_DURATION_MINUTES = ${firstVisit.MIN_VISIT_MINUTES};`);
   });
 
   test.each([
@@ -137,6 +148,8 @@ describe('firstVisitPlan', () => {
     ['corrective work', { proposal: { correctiveWork: [{ description: 'Seal gaps', amount: 150 }] } }],
     ['building line items', { programs: [], proposal: { buildings: [{ name: 'Main', lineItems: [{ description: 'Pest', quantity: 1, unitPrice: 300, frequency: 'quarterly' }] }] } }],
     ['a proposal that is not enabled', { proposal: { enabled: false } }],
+    // Invoice mode bills the first period at the win; a completion invoice would bill the first visit twice.
+    ['a proposal billed by invoice', { bill_by_invoice: true }],
   ])('%s keeps the office flow (no plan)', (_label, options) => {
     expect(firstVisitVisitPlan(options)).toBeNull();
   });

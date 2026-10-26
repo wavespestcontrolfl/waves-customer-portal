@@ -1387,7 +1387,7 @@ function CommercialProposalEditor() {
                     />
                     <Input
                       size="sm" className="w-20 shrink-0" type="number" min="5" max="480" step="5"
-                      title="Visit length in minutes (sizes the first visit a customer books online)" placeholder="min"
+                      title="Visit length in minutes (sizes the first visit a customer books online; over 90, the office books it)" placeholder="min"
                       aria-label="Visit length in minutes"
                       value={p.visitMinutes ?? ''} disabled={!!locked}
                       onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, visitMinutes: e.target.value } : it))); }}
