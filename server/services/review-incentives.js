@@ -233,12 +233,13 @@ async function resolveTechnicianForReviewRequest(request, conn = db) {
 // GATE_REVIEW_BONUS_ASK_FIRST (census M8, second technician): the latest visit
 // before a review is not always the visit that earned it. A pest + lawn
 // customer can see both technicians in one week, and two visits on one date tie.
-// The review ask the customer acted on names the visit: the latest ask clicked
-// through to Google before the review (redirected_at, the immutable first-click
-// claim), else the latest ask delivered before it. An ask is delivered by email
-// (sent_at) or by text (sms_sent_at; the completion-SMS and composer asks stamp
-// only that one). Same 45 days as the rest of the resolver. Nothing found: the
-// caller falls through to today's order.
+// The review ask that reached the customer names the visit: the latest ask
+// DELIVERED in the 45 days before the review, by email (sent_at) or by text
+// (sms_sent_at; the completion-SMS and composer asks stamp only that one).
+// A click on the ask link (redirected_at) is not used: nothing proves the
+// customer made it, and an undelivered ask's link can be opened by anyone who
+// holds it (Codex #6755 security review). Nothing found: the caller falls
+// through to today's order.
 async function reviewAskTechnician(review, conn, reviewDate) {
   const reviewAt = asDate(reviewDate);
   const since = new Date(reviewAt.getTime() - 45 * DAY_MS);
@@ -252,19 +253,15 @@ async function reviewAskTechnician(review, conn, reviewDate) {
     .where('created_at', '<=', reviewAt);
   let best = null;
   for (const ask of asks) {
-    const clickedAt = inSpan(ask.redirected_at);
-    const deliveredAt = [inSpan(ask.sent_at), inSpan(ask.sms_sent_at)].filter(Boolean).sort((a, b) => b - a)[0];
-    const clicked = !!clickedAt;
-    const at = clickedAt || deliveredAt;
-    if (!at) continue;
-    if (!best || (clicked && !best.clicked) || (clicked === best.clicked && at > best.at)) best = { ask, clicked, at };
+    const at = [inSpan(ask.sent_at), inSpan(ask.sms_sent_at)].filter(Boolean).sort((a, b) => b - a)[0];
+    if (at && (!best || at > best.at)) best = { ask, at };
   }
   if (!best) return null;
   return {
     technicianId: best.ask.technician_id,
     serviceRecordId: best.ask.service_record_id || null,
     reviewRequestId: best.ask.id,
-    method: best.clicked ? 'clicked_review_request' : 'sent_review_request',
+    method: 'delivered_review_request',
   };
 }
 

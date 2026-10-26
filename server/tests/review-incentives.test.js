@@ -1180,9 +1180,9 @@ describe('review incentives', () => {
   });
 });
 
-// GATE_REVIEW_BONUS_ASK_FIRST (census M8, second technician): the review ask the
-// customer acted on names the technician, before the latest visit does.
-describe('review bonus attribution: the ask the customer acted on (GATE_REVIEW_BONUS_ASK_FIRST)', () => {
+// GATE_REVIEW_BONUS_ASK_FIRST (census M8, second technician): the review ask that
+// reached the customer names the technician, before the latest visit does.
+describe('review bonus attribution: the ask that reached the customer (GATE_REVIEW_BONUS_ASK_FIRST)', () => {
   const policy = {
     enabled: true,
     amountCents: 500,
@@ -1240,11 +1240,10 @@ describe('review bonus attribution: the ask the customer acted on (GATE_REVIEW_B
     expect(await payout(conn)).toMatchObject({ technician_id: 'tech-owner', service_record_id: 'lawn-wednesday' });
   });
 
-  test('gate on: the ask the customer clicked through to Google before the review wins, even over a later ask', async () => {
+  test('gate on: the latest ask delivered before the review wins over a later visit that sent none', async () => {
     process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
     const conn = week({ requests: [
-      ask('ask-pest', 'tech-hire', 'pest-monday', { createdAt: '2026-05-25T18:00:00Z', sentAt: '2026-05-25T20:00:00Z', redirectedAt: '2026-05-29T15:50:00Z' }),
-      ask('ask-lawn', 'tech-owner', 'lawn-wednesday', { createdAt: '2026-05-27T18:00:00Z', sentAt: '2026-05-27T20:00:00Z' }),
+      ask('ask-pest', 'tech-hire', 'pest-monday', { createdAt: '2026-05-25T18:00:00Z', sentAt: '2026-05-25T20:00:00Z' }),
     ] });
 
     expect(await payout(conn)).toMatchObject({
@@ -1255,7 +1254,21 @@ describe('review bonus attribution: the ask the customer acted on (GATE_REVIEW_B
     });
   });
 
-  test('gate on: no click, a TEXT-only ask (sms_sent_at, no sent_at) delivered before the review wins', async () => {
+  test('gate on: a click on an ask link proves nothing (Codex security review): an undelivered ask never counts, and a click never outranks a later delivered ask', async () => {
+    process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
+    const undelivered = week({ requests: [
+      ask('ask-held', 'tech-hire', 'pest-monday', { createdAt: '2026-05-25T18:00:00Z', redirectedAt: '2026-05-28T15:00:00Z' }),
+    ] });
+    expect(await payout(undelivered)).toMatchObject({ technician_id: 'tech-owner', service_record_id: 'lawn-wednesday' });
+
+    const later = week({ requests: [
+      ask('ask-pest', 'tech-hire', 'pest-monday', { createdAt: '2026-05-25T18:00:00Z', sentAt: '2026-05-25T20:00:00Z', redirectedAt: '2026-05-29T15:50:00Z' }),
+      ask('ask-lawn', 'tech-owner', 'lawn-wednesday', { createdAt: '2026-05-27T18:00:00Z', smsSentAt: '2026-05-27T20:00:00Z' }),
+    ] });
+    expect(await payout(later)).toMatchObject({ technician_id: 'tech-owner', review_request_id: 'ask-lawn' });
+  });
+
+  test('gate on: a TEXT-only ask (sms_sent_at, no sent_at) delivered before the review wins', async () => {
     process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
     const conn = week({ requests: [
       ask('ask-email-older', 'tech-owner', null, { createdAt: '2026-05-10T18:00:00Z', sentAt: '2026-05-10T20:00:00Z' }),
@@ -1274,7 +1287,7 @@ describe('review bonus attribution: the ask the customer acted on (GATE_REVIEW_B
     expect(await payout(conn)).toMatchObject({ technician_id: 'tech-hire', review_request_id: 'ask-pest' });
   });
 
-  test('gate on: a click or a delivery AFTER the review, or an undelivered ask, does not count; today\'s order decides', async () => {
+  test('gate on: a delivery AFTER the review, or an undelivered ask, does not count; today\'s order decides', async () => {
     process.env.GATE_REVIEW_BONUS_ASK_FIRST = 'true';
     const conn = week({ requests: [
       ask('ask-late', 'tech-hire', 'pest-monday', { createdAt: '2026-05-29T17:00:00Z', smsSentAt: '2026-05-29T18:00:00Z', redirectedAt: '2026-05-29T19:00:00Z' }),
