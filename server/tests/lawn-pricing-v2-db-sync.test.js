@@ -112,4 +112,25 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
       effectiveDiscount: 0.10,
     });
   });
+
+  test('DB-loaded lawn size table passes the cost-plus basis check, so GATE_LAWN_COST_PLUS_LIST can price', () => {
+    const { resolveLawnCostPlusBasis } = require('../services/pricing-engine/lawn-cost-plus-knobs');
+    // One column per sold cadence: a 5-wide row (the retired basic slot)
+    // made every lawn quote throw once the gate was on.
+    for (const rows of Object.values(constants.LAWN_BRACKETS)) {
+      expect(rows.every((row) => row.length === constants.LAWN_FREQS.length + 1)).toBe(true);
+    }
+    expect(resolveLawnCostPlusBasis().error).toBeNull();
+
+    const prior = process.env.GATE_LAWN_COST_PLUS_LIST;
+    process.env.GATE_LAWN_COST_PLUS_LIST = 'true';
+    try {
+      const lawn = PricingEngine.priceLawnCare(property(), { track: 'st_augustine', lawnFreq: 9 });
+      // The cost-plus list never sits under the market table ($576/yr here).
+      expect(lawn.annual).toBeGreaterThanOrEqual(576);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_LAWN_COST_PLUS_LIST;
+      else process.env.GATE_LAWN_COST_PLUS_LIST = prior;
+    }
+  });
 });
