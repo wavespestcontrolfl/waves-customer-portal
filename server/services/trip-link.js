@@ -358,14 +358,24 @@ async function linkDay(conn, etDay, { technicianIds = null, dryRun = false, now 
   return summary;
 }
 
-/** The nightly run: yesterday (ET). Gate off = nothing is read and nothing is written. */
+/**
+ * The nightly run: yesterday (ET), then the day before again. A trip-data event can reach us up to 12 hours late
+ * (bouncie-truck-stops.js), so at 01:40 yesterday may still miss a few; a day later they are all in. A re-run replaces
+ * a day, so linking it twice is safe. Gate off = nothing is read and nothing is written.
+ */
 async function runTripLinkNightly({ now = new Date(), conn = db } = {}) {
   if (!tripLinkLive()) return { skipped: 'gated' };
   const day = etDateString(addETDays(now, -1));
   const summary = await linkDay(conn, day, { now });
-  logger.info(`${LOG} done`, { day, technicians: summary.technicians, legs: summary.legs, trips: summary.trips, errors: summary.errors });
-  if (summary.errors) throw new Error(`${LOG} ${summary.errors} technician-day(s) failed for ${day}`);
-  return summary;
+  const relinkDay = etDateString(addETDays(now, -2));
+  const relinked = await linkDay(conn, relinkDay, { now });
+  logger.info(`${LOG} done`, {
+    day, technicians: summary.technicians, legs: summary.legs, trips: summary.trips, errors: summary.errors,
+    relinked: { day: relinkDay, legs: relinked.legs, trips: relinked.trips, errors: relinked.errors },
+  });
+  const errors = summary.errors + relinked.errors;
+  if (errors) throw new Error(`${LOG} ${errors} technician-day(s) failed for ${day} and ${relinkDay}`);
+  return { ...summary, relinked: { day: relinkDay, technicians: relinked.technicians, legs: relinked.legs, trips: relinked.trips, errors: relinked.errors } };
 }
 
 module.exports = {

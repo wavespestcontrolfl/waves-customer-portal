@@ -303,14 +303,20 @@ describeDb('trip link (PostgreSQL)', () => {
     expect(await counts()).toEqual({ legs: 3, links: 4 });
   });
 
-  test('the nightly run: gate off reads and writes nothing, gate on links yesterday', async () => {
+  test('the nightly run: gate off reads and writes nothing, gate on links yesterday and the day before again', async () => {
     await fixture();
     const now = new Date('2026-10-09T05:40:00Z'); // 01:40 ET on Oct 9
     expect(await tripLink.runTripLinkNightly({ now, conn: mockPg })).toEqual({ skipped: 'gated' });
     expect(await counts()).toEqual({ legs: 0, links: 0 });
     process.env.GATE_TRIP_LINK = 'true';
     const result = await tripLink.runTripLinkNightly({ now, conn: mockPg });
-    expect(result).toMatchObject({ day: DAY, trips: 4 });
+    expect(result).toMatchObject({ day: DAY, trips: 4, relinked: { day: '2026-10-07', trips: 0, errors: 0 } });
+    expect(await counts()).toEqual({ legs: 3, links: 4 });
+    // A trip event that reached us late: the next night links the fixture day again, as the day before yesterday.
+    await mockPg('visit_gps_legs').del();
+    await mockPg('trip_links').del();
+    const nextNight = await tripLink.runTripLinkNightly({ now: new Date('2026-10-10T05:40:00Z'), conn: mockPg });
+    expect(nextNight).toMatchObject({ day: '2026-10-09', trips: 0, relinked: { day: DAY, trips: 4, errors: 0 } });
     expect(await counts()).toEqual({ legs: 3, links: 4 });
   });
 
