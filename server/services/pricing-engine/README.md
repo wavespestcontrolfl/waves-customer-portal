@@ -487,7 +487,10 @@ The recurring first-visit cockroach line uses the separate
 `pest_initial_roach` scales in §3. The legacy explicit
 `german_roach_initial` pricer starts at $100 before its urgency and
 recurring-customer modifiers and represents a three-visit compatibility path;
-it is not the active severity-tier cleanout above.
+it is not the active severity-tier cleanout above. Retired from sale
+2026-10-25 (owner): the public price feed and the Intelligence Bar estimate
+tool no longer offer it; the engine keeps it only so stored estimates replay
+as sent.
 
 ---
 

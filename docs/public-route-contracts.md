@@ -5042,6 +5042,12 @@ price list in ~/mosquito-misting-scope-20260924.md §4.3 (dealer cost
 unknown); the gate stays off until the owner launches the service, so the
 public payload is byte-identical today. The gate also feeds the payload's
 cache signature and the blog price-card exclusion like the other gated rows.
+German roach initial row retired (2026-10-25, owner "retire"): the payload no
+longer carries `german_roach_initial` (the legacy $100 "German Roach Initial
+Service (3-Visit)"). German roach work publishes only as
+`german_roach_cleanout`; the engine still prices the legacy series so stored
+estimates replay as sent. The Astro JSON-LD offer map and its fallback
+snapshot drop the key in the paired astro PR.
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public

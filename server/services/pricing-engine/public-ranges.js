@@ -183,17 +183,10 @@ function buildRows() {
     notes: 'Multi-visit program; visits vary by severity.',
   }));
 
-  add('german_roach_initial', () => rangeRow({
-    key: 'german_roach_initial',
-    name: 'German Roach Initial Service (3-Visit)',
-    unit: 'per program',
-    // Agent-selectable initial series at list price; the pricer applies the
-    // recurring-customer perk internally, so it is never swept.
-    values: sweepValues([false],
-      (isRecurringCustomer) => sp.priceGermanRoachInitial({ isRecurringCustomer }),
-      (r) => r.price),
-    notes: 'One program price covering the 3-visit initial series for German roach activity within a recurring plan; heavy infestations use the cleanout program.',
-  }));
+  // No german_roach_initial row (owner 2026-10-25, "retire"): the legacy
+  // $100 three-visit initial series is no longer sold. German roach work is
+  // the cleanout above, or the first-visit cockroach line on a recurring plan.
+  // The engine still prices it so stored estimates replay as sent.
 
   add('bed_bug_treatment', () => rangeRow({
     key: 'bed_bug_treatment',
