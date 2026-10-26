@@ -576,4 +576,22 @@ describe('runBidKitProductListSync', () => {
     expect(await run()).toEqual({ changed: false });
     expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(expect.anything(), [`bid-kit:product-list:${ITEM}`], 'signed_off', expect.any(Object));
   });
+  test('an archived product list item: its open bell is closed and nothing is built', async () => {
+    store.listItems.mockResolvedValue([]);
+    episodes.openAdminAlertKeys.mockResolvedValue([`bid-kit:product-list:${ID(499)}`]);
+    expect(await run()).toEqual({ skipped: 'no_item' });
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(expect.anything(), [`bid-kit:product-list:${ID(499)}`], 'archived', expect.any(Object));
+    expect(files.putFile).not.toHaveBeenCalled();
+  });
+  test('the bell of an older, archived item is closed; the live item keeps its own', async () => {
+    store.listItems.mockResolvedValue([itemRow({ attested_at: null })]);
+    episodes.openAdminAlertKeys.mockResolvedValue([`bid-kit:product-list:${ID(499)}`, `bid-kit:product-list:${ITEM}`]);
+    expect(await run()).toEqual({ changed: false });
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(expect.anything(), [`bid-kit:product-list:${ID(499)}`], 'archived', expect.any(Object));
+  });
+  test('a failed stale-bell read never blocks the run', async () => {
+    episodes.openAdminAlertKeys.mockRejectedValueOnce(new Error('read failed'));
+    expect(await run()).toEqual({ changed: false });
+  });
 });

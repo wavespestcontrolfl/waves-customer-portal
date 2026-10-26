@@ -94,3 +94,9 @@ test('a failed expiry sweep does not stop the product list rebuild, and a failed
   expect(runBidKitProductListSync).toHaveBeenCalledTimes(1);
   expect(logger.error).toHaveBeenCalledWith('Bid kit product list sync failed: rebuild failed');
 });
+
+test('a rebuild that returns { failed } is rethrown inside runExclusive (so job health records a failed run), never thrown out of the tick', async () => {
+  runBidKitProductListSync.mockResolvedValueOnce({ failed: true });
+  await expect(complianceTick()).resolves.toBeUndefined();
+  expect(logger.error).toHaveBeenCalledWith('Bid kit product list sync failed: the run failed (see the [bid-kit] warning above)');
+});

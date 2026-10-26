@@ -300,6 +300,16 @@ function alertFor(itemId, { diff, decision, previous, unmatched = [] }) {
 
 const refOf = (key) => crypto.createHash('sha256').update(String(key || '')).digest('hex').slice(0, 16);
 
+// Bells of a product list item that is no longer the live one (archived, or replaced by a new item) have nothing left to ask.
+// Prefix read, like the expiry sweep's stale-bell close. Returns how many it closed.
+async function closeStaleBells(liveItemId) {
+  const open = await episodes.openAdminAlertKeys(db, KEY_PREFIX);
+  const stale = (open || []).filter((key) => !liveItemId || key !== keyFor(liveItemId));
+  if (!stale.length) return 0;
+  await episodes.closeAdminAlertKeys(db, stale, 'archived', { resolution: 'Cleared: the product list item was archived' });
+  return stale.length;
+}
+
 async function closeBell(itemId, reason, resolution) {
   return episodes.closeAdminAlertKeys(db, [keyFor(itemId)], reason, { resolution });
 }
@@ -431,6 +441,11 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
   if (!bidKitLive() || !bidKitProductListSyncLive()) return { skipped: 'gate_off' };
   try {
     let item = (await store.listItems()).find((row) => row.kind === 'document' && row.item_key === ITEM_KEY);
+    try {
+      await closeStaleBells(item ? item.id : null);
+    } catch (err) {
+      logger.warn(`[bid-kit] closing stale product list bells failed: ${errorTag(err)}`);
+    }
     if (!item) return { skipped: 'no_item' };
     // The owner signed the open version off by hand: its bell has done its job.
     if (item.attested_at && (await episodes.openAdminAlertKeys(db, keyFor(item.id))).includes(keyFor(item.id))) {
@@ -460,5 +475,5 @@ async function runBidKitProductListSync({ now = new Date() } = {}) {
 
 module.exports = {
   runBidKitProductListSync, readProductRows, readProductList, foldUnlinked, unmatchedSentence, sortRows, snapshotOf, fingerprintOf, diffSnapshots, listIsComplete, decideSignOff,
-  siteOnePurchased, alertFor, detailFor, isPesticideCategory, keyFor, KEY_PREFIX, AUTO_SIGN_OFF, PESTICIDE_CATEGORIES,
+  siteOnePurchased, alertFor, detailFor, closeStaleBells, isPesticideCategory, keyFor, KEY_PREFIX, AUTO_SIGN_OFF, PESTICIDE_CATEGORIES,
 };

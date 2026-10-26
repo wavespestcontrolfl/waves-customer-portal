@@ -7947,7 +7947,10 @@ function initScheduledJobs() {
     // returns before any query. runExclusive: a deploy overlap must not build and store two files.
     try {
       await runExclusive('bid-kit-product-list', async () => {
-        await require('./bid-kit-product-list').runBidKitProductListSync();
+        const result = await require('./bid-kit-product-list').runBidKitProductListSync();
+        // The job logs and returns { failed } instead of throwing; cron-lock records a failed run only when the body throws,
+        // so a swallowed failure is rethrown here to reach job health.
+        if (result && result.failed) throw new Error('the run failed (see the [bid-kit] warning above)');
       });
     } catch (err) {
       logger.error(`Bid kit product list sync failed: ${err.message}`);
