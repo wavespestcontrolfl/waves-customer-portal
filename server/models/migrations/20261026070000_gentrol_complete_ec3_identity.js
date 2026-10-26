@@ -13,12 +13,13 @@
 // Only this one catalog row changes, and only while it still has name "Gentrol IGR" and
 // EPA 2724-351 (an admin edit made first wins, and a re-run is a no-op). category stays 'igr'
 // and product_type stays as is: protocol matching and the visit email read the category.
+// target_pests changes only from the exact 20260803200000 seed (see setTargetsWhenExactly).
 // The one other thing keyed by this row's NAME is services.default_products (a JSON list of
 // catalog names, looked up by exact name): the old name there would no longer resolve, so the
 // same entry is renamed in the same change, and the old name is added as a product alias
 // (see addOldNameAlias) so exact-name lookups of "Gentrol IGR" still find the row.
 // service_products (the past visit lines), vendor_pricing, existing aliases, stock and
-// movements are NOT touched.
+// movements are NOT touched (the added alias also stays on rollback).
 
 // Production id of the row: f5646e16-cf4a-4a0e-880c-e8ea0a706c19. Matched by name + EPA number
 // instead, so a dev or preview database seeded with a different id follows the same rule.
@@ -108,10 +109,21 @@ async function addOldNameAlias(knex, productId) {
   return true;
 }
 
-// Removes only the alias up() adds: this name, no vendor, still pointing at this product.
-async function removeOldNameAlias(knex, productId) {
-  if (!productId || !(await knex.schema.hasTable('product_aliases'))) return;
-  await knex('product_aliases').where({ product_id: productId, alias_name: OLD_NAME }).whereNull('vendor_id').del();
+// The prefill the completion form copies into a visit's targets (SchedulePage reads
+// products_catalog.target_pests). 20260803200000 left this row on both cockroach species;
+// the Complete EC3 label lists German cockroaches only ("Cockroaches, German"; American
+// cockroaches appear nowhere on it). Written only when the value is exactly that seed, in
+// either order (jsonb array equality is order-sensitive), so an admin-customized value stays.
+const SEED_TARGETS = ['German cockroaches', 'American cockroaches'];
+const EC3_TARGETS = ['German cockroaches'];
+
+async function setTargetsWhenExactly(knex, productId, fromLists, toList) {
+  if (!productId || !(await knex.schema.hasColumn('products_catalog', 'target_pests'))) return 0;
+  const clause = fromLists.map(() => 'target_pests = ?::jsonb').join(' OR ');
+  return knex('products_catalog')
+    .where({ id: productId })
+    .whereRaw(`(${clause})`, fromLists.map((list) => JSON.stringify(list)))
+    .update({ target_pests: JSON.stringify(toList), updated_at: knex.fn.now() });
 }
 
 exports.up = async function up(knex) {
@@ -126,29 +138,35 @@ exports.up = async function up(knex) {
     });
 
   if (!updated) {
-    console.log('[20261026060000] Gentrol row not changed: it no longer has the name "Gentrol IGR" with EPA 2724-351 (already corrected, or edited by hand). No-op.');
+    console.log('[20261026070000] Gentrol row not changed: it no longer has the name "Gentrol IGR" with EPA 2724-351 (already corrected, or edited by hand). No-op.');
     return;
   }
 
   const renamed = await renameDefaultProduct(knex, OLD_NAME, NEW_NAME);
   const row = await knex('products_catalog').where({ name: NEW_NAME, epa_reg_number: NEW_EPA }).first('id');
   const aliased = await addOldNameAlias(knex, row && row.id);
-  console.log(`[20261026060000] Gentrol IGR is now Gentrol Complete EC3 (EPA 89459-119); ${renamed} service library row(s) renamed in default_products; old-name alias ${aliased ? 'added' : 'not added (one already exists)'}.`);
+  const retargeted = await setTargetsWhenExactly(
+    knex, row && row.id, [SEED_TARGETS, [...SEED_TARGETS].reverse()], EC3_TARGETS,
+  );
+  console.log(`[20261026070000] Gentrol IGR is now Gentrol Complete EC3 (EPA 89459-119); ${renamed} service library row(s) renamed in default_products; old-name alias ${aliased ? 'added' : 'not added (one already exists)'}; target_pests ${retargeted ? 'set to German cockroaches' : 'left as is'}.`);
 };
 
 // Restores every column up() changed, only while the row still holds the new identity.
+// The "Gentrol IGR" alias stays: it may predate this migration, and an alias for the old
+// name on a row named "Gentrol IGR" is harmless after a rollback.
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
   const current = await knex('products_catalog').where({ name: NEW_NAME, epa_reg_number: NEW_EPA }).first('id');
-  await removeOldNameAlias(knex, current && current.id);
+  // The seed comes back only from exactly the value up() wrote.
+  await setTargetsWhenExactly(knex, current && current.id, [EC3_TARGETS], SEED_TARGETS);
 
   const reverted = await knex('products_catalog')
     .where({ name: NEW_NAME, epa_reg_number: NEW_EPA })
     .update({ ...OLD, updated_at: knex.fn.now() });
 
   if (!reverted) {
-    console.log('[20261026060000] down: the Gentrol row no longer holds the Complete EC3 identity. No-op.');
+    console.log('[20261026070000] down: the Gentrol row no longer holds the Complete EC3 identity. No-op.');
     return;
   }
   await renameDefaultProduct(knex, NEW_NAME, OLD_NAME);

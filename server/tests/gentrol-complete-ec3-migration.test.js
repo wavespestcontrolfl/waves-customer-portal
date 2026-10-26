@@ -1,17 +1,17 @@
 const fs = require('fs');
 const path = require('path');
 
-const migration = require('../models/migrations/20261026060000_gentrol_is_complete_ec3.js');
+const migration = require('../models/migrations/20261026070000_gentrol_complete_ec3_identity.js');
 
 const MIGRATIONS = path.join(__dirname, '../models/migrations');
 
 // A small in-memory knex stand-in: products_catalog and product_aliases are arrays of rows;
 // where / whereNull filter them; update, insert, del, first and select act on the matches.
 // Every call is also recorded, and the services rename is a recorded raw statement.
-function fakeKnex({ product = true, aliases = [] } = {}) {
+function fakeKnex({ product = true, aliases = [], targets = ['German cockroaches', 'American cockroaches'] } = {}) {
   const calls = { where: [], update: [], insert: [], del: [], raw: [], tables: [] };
   const db = {
-    products_catalog: product ? [{ id: 'p-1', name: 'Gentrol IGR', epa_reg_number: '2724-351' }] : [],
+    products_catalog: product ? [{ id: 'p-1', name: 'Gentrol IGR', epa_reg_number: '2724-351', target_pests: targets }] : [],
     product_aliases: aliases.map((alias, i) => ({ id: `a-${i}`, vendor_id: null, ...alias })),
   };
   const knex = (table) => {
@@ -20,10 +20,12 @@ function fakeKnex({ product = true, aliases = [] } = {}) {
     let matched = rows.slice();
     const builder = {
       where(cond) { calls.where.push({ table, cond }); matched = matched.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return builder; },
+      // Only the shape the migration uses: "(target_pests = ?::jsonb OR ...)" with JSON bindings.
+      whereRaw(sql, bindings) { matched = matched.filter((r) => bindings.some((b) => JSON.stringify(r.target_pests) === b)); return builder; },
       whereNull(col) { matched = matched.filter((r) => r[col] == null); return builder; },
       select() { return Promise.resolve(matched.map((r) => ({ ...r }))); },
       first() { return Promise.resolve(matched[0] ? { ...matched[0] } : undefined); },
-      update(values) { calls.update.push({ table, values }); matched.forEach((r) => Object.assign(r, values)); return Promise.resolve(matched.length); },
+      update(values) { calls.update.push({ table, values }); matched.forEach((r) => Object.assign(r, values, typeof values.target_pests === 'string' ? { target_pests: JSON.parse(values.target_pests) } : {})); return Promise.resolve(matched.length); },
       insert(values) { calls.insert.push({ table, values }); rows.push({ id: `new-${rows.length}`, ...values }); return Promise.resolve([1]); },
       del() { calls.del.push({ table, ids: matched.map((r) => r.id) }); db[table] = rows.filter((r) => !matched.includes(r)); return Promise.resolve(matched.length); },
     };
@@ -35,7 +37,7 @@ function fakeKnex({ product = true, aliases = [] } = {}) {
   return { knex, calls, db };
 }
 
-describe('20261026060000 Gentrol is Complete EC3', () => {
+describe('20261026070000 Gentrol Complete EC3 identity', () => {
   let log;
   beforeEach(() => { log = jest.spyOn(console, 'log').mockImplementation(() => {}); });
   afterEach(() => { log.mockRestore(); });
@@ -58,7 +60,8 @@ describe('20261026060000 Gentrol is Complete EC3', () => {
     const { knex, calls } = fakeKnex();
     await migration.up(knex);
     expect(calls.where[0]).toEqual({ table: 'products_catalog', cond: { name: 'Gentrol IGR', epa_reg_number: '2724-351' } });
-    const catalogUpdates = calls.update.filter((u) => u.table === 'products_catalog');
+    // The identity update, then the seed-only target_pests write.
+    const catalogUpdates = calls.update.filter((u) => u.table === 'products_catalog' && !('target_pests' in u.values));
     expect(catalogUpdates).toHaveLength(1);
     expect(catalogUpdates[0].values).toMatchObject({
       name: 'Gentrol Complete EC3',
@@ -116,7 +119,7 @@ describe('20261026060000 Gentrol is Complete EC3', () => {
     const { knex, calls, db } = fakeKnex();
     Object.assign(db.products_catalog[0], { name: 'Gentrol Complete EC3', epa_reg_number: '89459-119' });
     await migration.down(knex);
-    const catalogUpdate = calls.update.find((u) => u.table === 'products_catalog');
+    const catalogUpdate = calls.update.find((u) => u.table === 'products_catalog' && 'name' in u.values);
     expect(catalogUpdate.values).toMatchObject({
       name: 'Gentrol IGR', epa_reg_number: '2724-351', default_rate: '1', moa_group: 'Group 7A', formulation: 'concentrate',
       label_source_note: migration.OLD.label_source_note,
@@ -127,19 +130,53 @@ describe('20261026060000 Gentrol is Complete EC3', () => {
     expect(calls.raw[0].bindings).toEqual(['Gentrol Complete EC3', 'Gentrol IGR', 'Gentrol Complete EC3']);
   });
 
-  test('down deletes only the vendor-less old-name alias that points at this product', async () => {
+  test('down leaves the alias in place (it may predate the migration, and is harmless on a row named Gentrol IGR)', async () => {
     const { knex, calls, db } = fakeKnex({
       aliases: [
         { product_id: 'p-1', alias_name: 'Gentrol IGR' },
-        { product_id: 'p-1', alias_name: 'Gentrol IGR', vendor_id: 'v-1' },
-        { product_id: 'p-9', alias_name: 'Gentrol IGR' },
         { product_id: 'p-1', alias_name: 'Zoecon 10578' },
       ],
     });
     Object.assign(db.products_catalog[0], { name: 'Gentrol Complete EC3', epa_reg_number: '89459-119' });
     await migration.down(knex);
-    expect(calls.del).toEqual([{ table: 'product_aliases', ids: ['a-0'] }]);
-    expect(db.product_aliases.map((a) => a.id)).toEqual(['a-1', 'a-2', 'a-3']);
+    expect(calls.del).toEqual([]);
+    expect(db.product_aliases.map((a) => a.alias_name)).toEqual(['Gentrol IGR', 'Zoecon 10578']);
+    expect(db.products_catalog[0].name).toBe('Gentrol IGR');
+  });
+
+  test.each([
+    ['the seed', ['German cockroaches', 'American cockroaches']],
+    ['the seed in the other order', ['American cockroaches', 'German cockroaches']],
+  ])('up sets target_pests to German cockroaches only when it is exactly %s', async (_label, targets) => {
+    const { knex, db } = fakeKnex({ targets });
+    await migration.up(knex);
+    expect(db.products_catalog[0].target_pests).toEqual(['German cockroaches']);
+  });
+
+  test.each([
+    ['an admin-customized list', ['German cockroaches', 'Drain flies']],
+    ['a superset of the seed', ['German cockroaches', 'American cockroaches', 'Drain flies']],
+    ['an empty list', []],
+    ['null', null],
+  ])('up leaves target_pests untouched when it is %s', async (_label, targets) => {
+    const { knex, db } = fakeKnex({ targets });
+    await migration.up(knex);
+    expect(db.products_catalog[0].name).toBe('Gentrol Complete EC3');
+    expect(db.products_catalog[0].target_pests).toEqual(targets);
+  });
+
+  test('down restores the seed targets only from exactly German cockroaches', async () => {
+    for (const [targets, expected] of [
+      [['German cockroaches'], ['German cockroaches', 'American cockroaches']],
+      [['German cockroaches', 'Drain flies'], ['German cockroaches', 'Drain flies']],
+      [['German cockroaches', 'American cockroaches'], ['German cockroaches', 'American cockroaches']],
+    ]) {
+      const { knex, db } = fakeKnex({ targets });
+      Object.assign(db.products_catalog[0], { name: 'Gentrol Complete EC3', epa_reg_number: '89459-119' });
+      await migration.down(knex);
+      expect(db.products_catalog[0].target_pests).toEqual(expected);
+      expect(db.products_catalog[0].name).toBe('Gentrol IGR');
+    }
   });
 
   test('down is a no-op (rows and aliases) when the row no longer holds the new identity', async () => {
@@ -147,12 +184,12 @@ describe('20261026060000 Gentrol is Complete EC3', () => {
     await migration.down(knex);
     expect(calls.del).toEqual([]);
     expect(calls.raw).toEqual([]);
-    expect(db.products_catalog[0]).toEqual({ id: 'p-1', name: 'Gentrol IGR', epa_reg_number: '2724-351' });
+    expect(db.products_catalog[0]).toMatchObject({ id: 'p-1', name: 'Gentrol IGR', epa_reg_number: '2724-351' });
     expect(db.product_aliases).toHaveLength(1);
   });
 
   test('the SQL carries no literal ? (a raw ? is a knex binding) and never touches past visit lines', async () => {
-    const source = fs.readFileSync(path.join(MIGRATIONS, '20261026060000_gentrol_is_complete_ec3.js'), 'utf8');
+    const source = fs.readFileSync(path.join(MIGRATIONS, '20261026070000_gentrol_complete_ec3_identity.js'), 'utf8');
     for (const forbidden of ['service_products', 'vendor_pricing', 'inventory']) {
       expect(source).not.toMatch(new RegExp(`(?:knex\\(|FROM|UPDATE|INTO)\\s*['"\`]?${forbidden}`, 'i'));
     }
