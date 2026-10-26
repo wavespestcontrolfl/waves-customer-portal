@@ -2091,6 +2091,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     serviceTypes: editServices.map((item) => item.name),
     serviceKeys: editServices.map((item) => item.key || ""),
     bestRows: true,
+    // The open-times box (GATE_OPEN_TIMES_BOX): this form can change the
+    // technician, so the list ranks every technician's route.
+    openTimes: true,
+    techPick: true,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
   // The form as it opened: a save that leaves the visit's slot alone (a
@@ -5976,6 +5980,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               />{" "}
               <AvailabilityStrip
                 bestRows
+                techPick
                 availability={availability}
                 currentDate={form.scheduledDate}
                 currentStart={form.windowStart}
@@ -5984,12 +5989,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   // Same adoption rule as the create modal's chips: an
                   // unassigned visit takes the technician the hour was
                   // scored for; an assigned visit's technician never changes.
+                  // The open-times box's row names its technician (tech
+                  // pick, owner 2026-10-25): taking it books that person.
                   setForm((f) => ({
                     ...f,
                     scheduledDate: slot.date,
                     windowStart: slot.start,
                     windowEnd: slot.end,
-                    technicianId: !f.technicianId && slot.technicianId
+                    technicianId: (slot.pickTech || !f.technicianId) && slot.technicianId
                       ? slot.technicianId
                       : f.technicianId,
                   }))
@@ -9320,6 +9327,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     // The same two best-times rows as New Appointment (owner 2026-10-08).
     // The server reads what the visit books from its own rows (serviceId).
     bestRows: true,
+    // The open-times box (GATE_OPEN_TIMES_BOX), on this visit's own route.
+    openTimes: true,
   });
 
   // One POST path for the suggested and custom pickers. A 409
