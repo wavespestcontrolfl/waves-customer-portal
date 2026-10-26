@@ -312,6 +312,17 @@ router.post('/sms', async (req, res) => {
       return res.type('text/xml').send('<Response></Response>');
     }
 
+    // GATE_TECH_STAFF_GUARDS (census M12): a text from an ACTIVE technician's own cell to an office
+    // line is staff, not an "Unknown" customer thread: no inbox thread, no lead intake, no AI reply,
+    // no new-prospect bell. A number that is also on a customer record never gets here (the set
+    // leaves it out), a compliance keyword (STOP/START/HELP) keeps its normal handling, and a
+    // technician line keeps its own conversation. The SID claim above already dedupes redelivery.
+    if (await require('../services/staff-sender-phones').isStaffTechSender(From)
+      && !TWILIO_NUMBERS.isTechLine(To) && !detectSmsOptCommand(Body || '').action) {
+      logger.info(`[sms] inbound from an active technician's phone ${maskPhone(From)} — staff sender, no customer thread`);
+      return res.type('text/xml').send('<Response></Response>');
+    }
+
     // Eligibility gates passed — attach the body to the entry reservation
     // (codex #3413 r27/r29). A DURABLE row (round-17): a crash from here
     // on is replayed by the queue worker — the recovery for a message

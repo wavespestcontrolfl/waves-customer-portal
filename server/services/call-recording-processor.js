@@ -27,6 +27,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const staffSenderPhones = require('./staff-sender-phones');
 const { isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
@@ -1672,7 +1673,7 @@ function isUsableContactPhone(value) {
 function firstExternalPhone(...candidates) {
   for (const c of candidates) {
     const v = c && String(c).trim();
-    if (v && !TWILIO_NUMBERS.isInternalNumber(v) && isUsableContactPhone(v)) return v;
+    if (v && !TWILIO_NUMBERS.isInternalNumber(v) && !staffSenderPhones.isStaffTechPhone(v) && isUsableContactPhone(v)) return v;
   }
   return null;
 }
@@ -11246,13 +11247,16 @@ const CallRecordingProcessor = {
     // null, but the customer it touched, the lead, and the timeline entry
     // would already carry the call.
     const explicitUnlink = !!customerLinkOverride && !customerLinkOverride.customer_id;
+    // GATE_TECH_STAFF_GUARDS (census M12): load the active technicians' phones so an inbound call
+    // from a technician's own cell reads as staff below (no-op with the gate off).
+    await staffSenderPhones.refresh();
     const contactPhone = resolveCallContactPhone(call);
     // Forwarding-masked call: the inbound leg recorded one of our own internal
     // numbers (a tracking number, or the staff cell it forwarded to) as the caller,
     // so there's no recoverable external contact. We still transcribe/extract + log
     // the call, but won't key a lead/customer on the masked number (that's what
     // created the phantom "collapsed" leads).
-    if (!contactPhone && !isOutboundCall(call) && TWILIO_NUMBERS.isInternalNumber(call.from_phone)) {
+    if (!contactPhone && !isOutboundCall(call) && (TWILIO_NUMBERS.isInternalNumber(call.from_phone) || staffSenderPhones.isStaffTechPhone(call.from_phone))) {
       logger.warn(`[call-proc] ${maskSid(callSid)}: caller ID is an internal Waves number (${maskPhone(call.from_phone)}) — forwarding-masked; no lead/customer will be keyed on it`);
     }
 

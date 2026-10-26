@@ -262,6 +262,22 @@ async function guardAdvance(trx, req, svc) {
   }
 }
 
+// GATE_TECH_STAFF_GUARDS (census M6): the dispatch-implies-confirm rule above assumed one
+// owner-operator. With a second technician, his field tap must NOT approve a booking the office has
+// not reviewed (price and service unreviewed, lead converted, card-on-file skipped). Only an admin
+// login still confirms by tapping. For a technician the tap is refused with the 409 the shared
+// writer's OUTBOUND_REVIEW_UNCONFIRMED branch below also uses, and the office gets ONE notice per
+// visit. Returns true when the response was sent. Gate off, or an admin: false (today's behavior).
+async function refuseUnreviewedBookingForTech(req, res, svc, tap) {
+  if (!require('../config/feature-gates').techStaffGuardsLive() || req.techRole === 'admin') return false;
+  await require('../services/tech-unreviewed-booking-alert').raiseForVisit(svc, tap);
+  res.status(409).json({
+    error: 'The office has not reviewed this booking yet. Ask the office to confirm it, then tap again.',
+    code: 'outbound_review_unconfirmed',
+  });
+  return true;
+}
+
 // Shared 403/409 translations for the phase errors above plus the shared
 // writer's typed conflicts. Returns true if the response was sent.
 function respondToTransitionConflict(res, err, fromStatus) {
@@ -419,6 +435,7 @@ router.post('/:id/en-route', async (req, res, next) => {
     // file. The shared-writer guard still blocks every other caller; the
     // admin surfaces keep their explicit review flow.
     const autoConfirmReview = isPendingOutboundReviewBooking(svc);
+    if (autoConfirmReview && await refuseUnreviewedBookingForTech(req, res, svc, 'En Route')) return undefined;
 
     // 1. Admin-side status flip via transitionJobStatus. Same
     // migration pattern as PRs #328 / #329 / #330. The trx + atomic
@@ -550,6 +567,7 @@ router.post('/:id/on-site', async (req, res, next) => {
     // Arrival without a prior En Route tap (geofence or manual) must not
     // dead-end on the review popup either.
     const autoConfirmReview = isPendingOutboundReviewBooking(svc);
+    if (autoConfirmReview && await refuseUnreviewedBookingForTech(req, res, svc, 'On Site')) return undefined;
 
     if (fromStatus !== 'on_site') {
       const arrivedAt = new Date();

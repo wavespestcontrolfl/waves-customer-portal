@@ -108,6 +108,7 @@ const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const staffSenderPhones = require('./staff-sender-phones');
 const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { autoTextHoldReason, deliveredTexts } = require('./messaging/auto-text-holds');
@@ -541,7 +542,8 @@ async function precheckRow(row, now) {
   if (!phone) return { ok: false, outcome: 'skipped:bad_phone', reason: 'bad_phone' };
   // A Waves line or a staff forward / CSR cell calling in is never a lead
   // (same exclusion as outbound-voicemail-sms.js).
-  if (TWILIO_NUMBERS.isInternalNumber(phone)) return { ok: false, outcome: 'skipped:internal_number', reason: 'internal_number' };
+  // GATE_TECH_STAFF_GUARDS (census M12): an active technician's own cell is staff, never a lead.
+  if (TWILIO_NUMBERS.isInternalNumber(phone) || await staffSenderPhones.isStaffTechSender(phone)) return { ok: false, outcome: 'skipped:internal_number', reason: 'internal_number' };
   // A caller who failed the press-1 screen is not texted (owner ruling 2026-10-24).
   if (failedPreconnectScreen(row) && isEnabled(SKIP_FAILED_SCREEN_GATE) === true) {
     return { ok: false, outcome: 'skipped:screen_failed', reason: 'screen_failed' };
