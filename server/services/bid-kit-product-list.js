@@ -37,7 +37,10 @@ const CATEGORY = 'system';
 const KEY_PREFIX = 'bid-kit:product-list:';
 const keyFor = (itemId) => `${KEY_PREFIX}${itemId}`;
 const AUTO_SIGN_OFF = 'siteone_purchases';
-const WINDOW_SQL = "now() - interval '365 days'";
+// The 12 months are counted on the VISIT date (service_records.service_date, an Eastern calendar day), never on when the
+// service_products row was written: editing an old recap deletes and reinserts its lines with a fresh created_at. applied_at is no
+// better (it defaults to the insert time), so the visit date is the one date that is reliably the visit's.
+const WINDOW_SQL = "sr.service_date > ((now() AT TIME ZONE 'America/New_York')::date - 365)";
 const MAX_NAMED = 2; // names in the bell's one sentence; the rest go to its full text
 
 // A category that must carry an EPA registration number (a row here with the "N/A" placeholder makes the list incomplete).
@@ -90,16 +93,18 @@ function foldUnlinked(linked, unlinked, catalog) {
 async function readProductList(conn = db) {
   const linked = await conn('service_products as sp')
     .join('products_catalog as p', 'p.id', 'sp.product_id')
-    .whereRaw(`sp.created_at > ${WINDOW_SQL}`)
+    .join('service_records as sr', 'sr.id', 'sp.service_record_id')
+    .whereRaw(WINDOW_SQL)
     .groupBy('p.id', 'p.name', 'p.category', 'p.active_ingredient', 'p.epa_reg_number', 'p.label_url', 'p.sds_url')
     .select('p.id as product_id', 'p.name', 'p.category', 'p.active_ingredient', 'p.epa_reg_number', 'p.label_url', 'p.sds_url')
     .count('sp.id as uses');
-  const unlinked = await conn('service_products')
-    .whereNull('product_id')
-    .whereRaw(`created_at > ${WINDOW_SQL}`)
-    .groupBy('product_name')
-    .select('product_name')
-    .count('id as uses');
+  const unlinked = await conn('service_products as sp')
+    .join('service_records as sr', 'sr.id', 'sp.service_record_id')
+    .whereNull('sp.product_id')
+    .whereRaw(WINDOW_SQL)
+    .groupBy('sp.product_name')
+    .select('sp.product_name')
+    .count('sp.id as uses');
   const catalog = unlinked.length ? await conn('products_catalog').select(CATALOG_COLUMNS) : [];
   return foldUnlinked(linked, unlinked, catalog);
 }

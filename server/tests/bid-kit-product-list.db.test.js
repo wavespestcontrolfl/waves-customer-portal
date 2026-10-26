@@ -54,7 +54,8 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
   });
   beforeEach(async () => {
     mockPg = await database.transaction();
-    record = null;
+    customerId = null;
+    visits = new Map();
     mockSent.length = 0;
     for (const fn of Object.values(episodes)) fn.mockReset();
     episodes.raiseAdminAlertWithReopen.mockImplementation(async () => ({ id: randomUUID(), deduped: false, rang: true }));
@@ -74,15 +75,26 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
     name: `${name} ${tag}`, category: 'Insecticide', active_ingredient: 'synthetic ingredient', epa_reg_number: '100-200',
     label_url: 'https://labels.example.test/x.pdf', sds_url: 'https://sds.example.test/x.pdf', ...over,
   }).returning('*'))[0];
-  let record;
-  const apply = async (product, { daysAgo = 10 } = {}) => {
-    if (!record) {
-      const customer = (await mockPg('customers').insert({ first_name: 'Fixture', last_name: 'Customer', phone: `+1555${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}` }).returning('id'))[0];
-      record = (await mockPg('service_records').insert({ customer_id: customer.id, service_date: '2026-10-01', service_type: 'Fixture visit' }).returning('id'))[0];
+  // One visit per age (service_date = that many days before today, Eastern): the window counts the VISIT date, so a line's own
+  // created_at (rewritten when an old recap is edited) can say anything. writtenDaysAgo sets that created_at.
+  let customerId;
+  let visits;
+  const visit = async (daysAgo) => {
+    if (!customerId) {
+      customerId = (await mockPg('customers').insert({ first_name: 'Fixture', last_name: 'Customer', phone: `+1555${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}` }).returning('id'))[0].id;
     }
+    if (!visits.has(daysAgo)) {
+      visits.set(daysAgo, (await mockPg('service_records').insert({
+        customer_id: customerId, service_type: 'Fixture visit',
+        service_date: mockPg.raw("(now() AT TIME ZONE 'America/New_York')::date - ?::int", [daysAgo]),
+      }).returning('id'))[0]);
+    }
+    return visits.get(daysAgo);
+  };
+  const apply = async (product, { daysAgo = 10, writtenDaysAgo = 0 } = {}) => {
     await mockPg('service_products').insert({
-      service_record_id: record.id, product_id: product.id, product_name: product.name,
-      created_at: mockPg.raw(`now() - interval '${daysAgo} days'`),
+      service_record_id: (await visit(daysAgo)).id, product_id: product.id, product_name: product.name,
+      created_at: mockPg.raw(`now() - interval '${writtenDaysAgo} days'`),
     });
   };
   let line = 0;
@@ -106,6 +118,23 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
     expect(Number(rows[0].uses)).toBe(2);
   });
 
+  test('the 12 months are counted on the visit date: a line rewritten today for an old visit stays out, a recent visit stays in whenever its line was written', async () => {
+    const reinserted = await catalogRow('Reinserted'); // an old recap was edited: fresh created_at, old service_date
+    const recentVisit = await catalogRow('Recent visit'); // a recent visit whose line carries an old created_at
+    const edge = await catalogRow('Edge in');
+    const justOut = await catalogRow('Edge out');
+    await apply(reinserted, { daysAgo: 500, writtenDaysAgo: 0 });
+    await apply(recentVisit, { daysAgo: 5, writtenDaysAgo: 500 });
+    await apply(edge, { daysAgo: 364 });
+    await apply(justOut, { daysAgo: 365 });
+    const unlinkedAt = async (name, daysAgo) => mockPg('service_products').insert({ service_record_id: (await visit(daysAgo)).id, product_id: null, product_name: name });
+    await unlinkedAt(`Old free text ${tag}`, 500); // written today, visit long ago
+    await unlinkedAt(`Recent free text ${tag}`, 5);
+    const list = await lib.readProductList();
+    expect(mine(list.rows).map((r) => r.name)).toEqual([`Edge in ${tag}`, `Recent visit ${tag}`]);
+    expect(list.unmatched.map((u) => u.name).filter((n) => n.endsWith(tag))).toEqual([`Recent free text ${tag}`]);
+  });
+
   test('visit lines with no catalog id fold into the one exact catalog match (inactive when it is the only one) and the rest are named, not printed', async () => {
     const linked = await catalogRow('Taurus');
     const inactiveOnly = await catalogRow('Retired', { active: false });
@@ -113,7 +142,7 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
     await catalogRow('Twin');
     await apply(linked);
     const unlinked = async (name, daysAgo = 10) => mockPg('service_products').insert({
-      service_record_id: record.id, product_id: null, product_name: name, created_at: mockPg.raw(`now() - interval '${daysAgo} days'`),
+      service_record_id: (await visit(daysAgo)).id, product_id: null, product_name: name,
     });
     await unlinked(`taurus  ${tag.toUpperCase()}`); await unlinked(`Taurus-${tag}`);
     await unlinked(`Retired ${tag}`);

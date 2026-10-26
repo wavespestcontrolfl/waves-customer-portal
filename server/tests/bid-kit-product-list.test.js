@@ -2,12 +2,24 @@
 // table, the PDF, and the run itself. The database, the store, the file storage and the bell service are stand-ins here (the SQL
 // runs in bid-kit-product-list.db.test.js); every bell spec goes through the real notification rules. Synthetic products only.
 const mockTables = { 'service_products as sp': [], service_products: [], products_catalog: [], purchase_receipt_lines: [] };
+// Every query the job builds, with the builder calls it made, so a test can check what each one joined and filtered on.
+const mockQueries = [];
 jest.mock('../models/db', () => {
   const chain = (table) => {
+    const calls = [];
     const node = new Proxy({}, {
-      get: (_target, prop) => (prop === 'then'
-        ? (resolve, reject) => Promise.resolve(mockTables[table]).then(resolve, reject)
-        : () => node),
+      get: (_target, prop) => {
+        if (prop === 'then') {
+          return (resolve, reject) => {
+            mockQueries.push({ table, calls });
+            // The same table serves two queries: the one that joins the catalog is the linked one; the other is the unlinked lines.
+            const linked = calls.some((c) => c.method === 'join' && String(c.args[0]).startsWith('products_catalog'));
+            const key = table === 'service_products as sp' && !linked ? 'service_products' : table;
+            return Promise.resolve(mockTables[key]).then(resolve, reject);
+          };
+        }
+        return (...args) => { calls.push({ method: prop, args }); return node; };
+      },
     });
     return node;
   };
@@ -576,6 +588,19 @@ describe('runBidKitProductListSync', () => {
   test('a category change on an unchanged product rebuilds the list and is reported', async () => {
     setList([rowsBefore[0], { ...rowsBefore[1], category: 'Herbicide' }]);
     expect(await run()).toMatchObject({ changed: true });
+  });
+  test('both product queries count the 12 months on the visit date of the service record, never on when the line was written', async () => {
+    mockQueries.length = 0;
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: 1 }];
+    await run();
+    const lines = mockQueries.filter((q) => q.table === 'service_products as sp');
+    expect(lines).toHaveLength(2);
+    for (const query of lines) {
+      expect(query.calls.some((c) => c.method === 'join' && c.args[0] === 'service_records as sr' && c.args[1] === 'sr.id' && c.args[2] === 'sp.service_record_id')).toBe(true);
+      const filter = query.calls.find((c) => c.method === 'whereRaw').args[0];
+      expect(filter).toMatch(/sr\.service_date > \(\(now\(\) AT TIME ZONE 'America\/New_York'\)::date - 365\)/);
+      expect(filter).not.toMatch(/created_at|applied_at/);
+    }
   });
   test('a sign-off by the owner closes the open bell on the next run', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue([`bid-kit:product-list:${ITEM}`]);
