@@ -342,6 +342,19 @@ jest.setTimeout(30000);
         expect(await bellBody('shipped-key')).toContain('Taurus SC ×1 on');
       });
 
+      test('two shipped lines of one product and one delivered unit: a full sweep (alert, then closer) keeps the bell open; a second unit closes it', async () => {
+        await delivered(1);
+        await shipped('shipped-key', {
+          body_text: `Order #\n${ORDER}\nTrack package: ${LINK}shipped-key\n\n* ${TITLE}\n  Quantity: 1\n\n* ${TITLE}\n  Quantity: 1\n`,
+        });
+        expect(await alerted()).toEqual(['shipped-key']);
+        expect(await closeDeliveredUndeliveredBells()).toBe(0);
+        expect((await alertBells('shipped-key'))[0].done_at).toBeNull();
+        await delivered(1, { lineNo: 2 });
+        expect(await closeDeliveredUndeliveredBells()).toBe(1);
+        expect((await alertBells('shipped-key'))[0].done_at).not.toBeNull();
+      });
+
       test('an unauthenticated Delivered email proves nothing', async () => {
         await delivered(2, { auth: 'dkim=pass header.i=@evil.example; spf=fail' });
         await shippedItems('shipped-key', 2);

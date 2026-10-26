@@ -204,6 +204,21 @@ async function stockedItems(items, conn) {
   return stocked;
 }
 
+// The ONE evaluation of a Shipped email's whole item list, used by the alert
+// pass and the closer alike: its stocked items and, for each, the quantity
+// no Delivered line has covered (deliveredElsewhere's single-shipment gate
+// and shared budget run over ALL of them together).
+async function evaluateShipment(conn, parsed) {
+  const stocked = await stockedItems(parsed.items, conn);
+  const missing = stocked.length
+    ? await deliveredElsewhere(conn, {
+      orderNumber: parsed.orderNumber, shipmentId: parsed.shipmentId,
+      wanted: stocked.map(({ item, product }) => ({ productId: product.id, title: item.title, quantity: item.quantity })),
+    })
+    : [];
+  return { stocked, missing };
+}
+
 async function ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, promised, trx }) {
   const what = stocked.map(({ item, product, remaining }) => {
     const quantity = remaining || item.quantity;
@@ -239,10 +254,7 @@ async function alertIfUndelivered(email, { notifyAdmin, now, since }, conn) {
     if (await shipmentSettled(trx, parsed.shipmentId)) return null;
     // Its Delivered email may carry another shipment id: items that email
     // already covers are not undelivered.
-    const missing = await deliveredElsewhere(trx, {
-      orderNumber: parsed.orderNumber, shipmentId: parsed.shipmentId,
-      wanted: stocked.map(({ item, product }) => ({ productId: product.id, title: item.title, quantity: item.quantity })),
-    });
+    const { missing } = await evaluateShipment(trx, parsed);
     const owed = stocked.map((row, index) => ({ ...row, missing: missing[index], remaining: row.item.quantity ? missing[index] : undefined }))
       .filter((row) => row.missing > 0);
     if (!owed.length) return null;
@@ -284,10 +296,10 @@ const UNDELIVERED_CLOSER = 'purchase-receipts';
 
 /**
  * Closes "Amazon delivery not confirmed" bells whose shipment turned out to
- * be delivered: every item its no_delivery_email lines hold is now covered
- * by a Delivered-email line for the same order and item under another
- * shipment id (a late or differently keyed Delivered email). A bell with any
- * item still missing stays open. Failure is the caller's to log.
+ * be delivered. It re-reads the bell's Shipped email and runs the alert
+ * pass's own evaluation (evaluateShipment) over the whole item list; the
+ * bell closes only when nothing is missing. A bell with any item still
+ * missing stays open. Failure is the caller's to log.
  */
 async function closeDeliveredUndeliveredBells(conn = db) {
   const { openToCloser, doneColumns } = require('../notification-service')._private;
@@ -300,12 +312,15 @@ async function closeDeliveredUndeliveredBells(conn = db) {
     if (!bell.shipment_id) continue;
     const held = await conn('purchase_receipt_lines')
       .where({ vendor: VENDOR, shipment_key: bell.shipment_id, status: 'no_delivery_email' })
-      .select('order_number', 'product_id', 'raw_title', 'quantity');
-    if (!held.length) continue;
-    const missing = await deliveredElsewhere(conn, {
-      orderNumber: held[0].order_number, shipmentId: bell.shipment_id,
-      wanted: held.map((row) => ({ productId: row.product_id, title: row.raw_title, quantity: Number(row.quantity) || null })),
-    });
+      .first('email_id');
+    if (!held?.email_id) continue;
+    // Judge the WHOLE shipment from its own Shipped email, exactly as the alert pass does.
+    const email = await conn('emails')
+      .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html').where({ id: held.email_id }).first();
+    const parsed = email && parseAmazonShippedEmail(email);
+    if (parsed?.shipmentId !== bell.shipment_id) continue;
+    const { stocked, missing } = await evaluateShipment(conn, parsed);
+    if (!stocked.length) continue;
     if (missing.every((left) => left <= 0)) closable.push(bell.id);
   }
   if (!closable.length) return 0;
@@ -316,4 +331,4 @@ async function closeDeliveredUndeliveredBells(conn = db) {
   return closable.length;
 }
 
-module.exports = { alertUndeliveredShipments, alertAfter, deliveredElsewhere, closeDeliveredUndeliveredBells };
+module.exports = { alertUndeliveredShipments, alertAfter, deliveredElsewhere, evaluateShipment, closeDeliveredUndeliveredBells };
