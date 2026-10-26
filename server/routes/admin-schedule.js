@@ -7167,6 +7167,8 @@ router.get('/', async (req, res, next) => {
       newCustomerPhoneMatch: isEnabled('newApptPhoneMatch'),
       // GATE_NEW_CALLER_BOOKING: New Appointment's Book saves a new caller's visit by address, no customer yet.
       newCallerBooking: isEnabled('newCallerBooking'),
+      // GATE_BOARD_OPEN_TIMES: a drag on the Dispatch day or week grid lights the hours that fit the visit.
+      boardOpenTimes: isEnabled('boardOpenTimes'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,

@@ -29,6 +29,7 @@
  *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_QUIET_OVERDUE_LIST=true (owner 2026-10-24: one standing Billing bell listing open self-pay invoices no reminder reaches (paused with no end, stopped, finished, Auto Pay hold 7+ days, never set up); weekday 11:47 ET cron; admin only, sends nothing to a customer)
+ *   GATE_UNBILLED_VISITS_LIST=true (owner 2026-10-25, Air Jobs Plan step 3: one standing Billing bell listing visits done in the last 30 days with no invoice, read from the Billing recovery page's own list; replaces the c02 check on the owner's MacBook Air; daily 07:23 ET cron; admin only, sends nothing to a customer)
  *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_INVOICE_EDITS=true (the Intelligence Bar's invoice edit write tools, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan, edit-type Invoices page actions: edit_invoice (title, notes and due date only: PUT /admin/invoices/:id; line items and the tax rate stay on the Invoices page), archive_invoice and unarchive_invoice (POST /:id/archive, /:id/unarchive) and unvoid_invoice (POST /:id/unvoid), each on its own confirm card (admin only, never owner-direct) by running the Invoices page's own handler in process. None sends a message, moves money, charges a card or refunds. Needs GATE_IB_PLATFORM. Read at call time via ibInvoiceEditsLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses with gate_off, changing nothing.)
  *   GATE_IB_SET_BILL_TO=true (the Intelligence Bar's set_customer_bill_to write tool, owner ruling 2026-10-21 "BUILD" on IB gap #9: an admin can set ONE self-pay customer's Bill-To payer on a confirm card (never owner-direct), by running the customer page's own save handler (PUT /admin/customers/:id with only payerId) in process. Future billing only: offered only when the customer has no open invoice without a payer and no open checkout, so no invoice moves and nothing is cancelled; sends nothing. Changing or removing an existing payer stays on the customer page. Needs GATE_IB_PLATFORM. Read at call time via ibSetBillToLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
@@ -59,6 +60,8 @@
  *   GATE_NEIGHBORHOOD_UNPLACED=true (Customers → Gate codes lists homes the directory cannot place — the county's lot at the pin matches the home's number and street but not its ZIP, or the customer saved a gate code on a home with no neighborhood — with a one-tap office link to the county's community; Add entry gets an "I have not seen this work" box that files Needs confirm with no date and demotes nothing; owner ruling 2026-10-26. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodUnplacedLive(), dark by default; off = the list route answers 404 and the box is ignored. Staff only, nothing links by itself, no bell, nothing sent to a customer.)
  *   GATE_HIRED_PACKET=true (owner ruling 2026-10-25, D7: the "Hired" button on the Staff page. On a prospective placeholder row an admin enters the hire's name, email, first day and pay, and one click makes the row an active staff account and emails the hire a set-password link (works 7 days) with a pointer to the Onboarding card. A "Resend link" action appears while the hire has not set a password yet. It never changes a customer; it sends ONE staff email per click. Strict opt-in: exactly 'true' in every environment, read at call time via hiredPacketLive(). Ships DARK; off = no button, both endpoints answer 404 before any database work and the Staff list is unchanged. The manual steps (rename, email, Active, Forgot password) still work.)
  *   GATE_STAFF_DOC_PREFILL=true (owner ruling 2026-10-25: a NEW staff form record opens with fields filled from the staff record, for the Vehicle Use & Commuting Agreement: assigned vehicle, home address and start date from the technicians row. The signer checks each value and saves; a typed value always wins. Never a checkbox, never a typed signature. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffDocPrefillLive(). Ships DARK; off = GET /versions/:id/prefill answers 404 { enabled: false } before any query and the form opens empty. Reads only; sends nothing to anyone.)
+ *   GATE_REVIEW_BONUS_ASK_FIRST=true (census M8, second technician, 2026-10-25: a Google review bonus goes to the technician on the review ask that reached the customer, the latest ask delivered by email or text in the 45 days before the review (a click on the link is not used: nothing proves the customer made it); then today's order (latest service record, latest completed visit, latest ask). Changes who a NEW bonus row names; existing payout rows are never re-attributed. Read at call time via reviewBonusAskFirstLive(), strict 'true', dark by default; off = today's order byte for byte; rollback = unset. Bonus pay, so the owner flips it. Sends nothing.)
+ *   GATE_CALLBACK_SOURCE_TECH=true (census M9, second technician, 2026-10-25: on the admin dashboard leaderboard a callback counts against the technician whose visit it corrects, not the one who did the callback. Source = the latest earlier regular record of the same customer and service category with a technician, within 60 days (services/callback-credit.js); none found = the callback's own technician, as today. Jobs, revenue and margins do not move. Reads only, owner-only screen. Read at call time via callbackSourceTechLive(), strict 'true', dark by default; off = no extra query and the same leaderboard; rollback = unset. Sends nothing.)
  *   GATE_CUSTOMER_TEXT_TO_VISIT_TECH=true (census M3, second technician, 2026-10-25: a known customer's text to an office line, while one of their visits today is en route, on site or its technician's next open stop, also reaches that visit's technician as a tech-home text card + one push (services/visit-tech-relay.js). An admin technician (the owner) gets no copy: the office bell already reaches the owner. The office inbox, bell and owner forward are unchanged; STOP/START/HELP keywords, reactions, courtesy-only texts and staff senders are not relayed. Read at call time via customerTextToVisitTechLive(), strict 'true', dark by default; off = no extra read; rollback = unset. Sends nothing to a customer.)
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer.)
@@ -3872,6 +3875,17 @@ const gates = {
   // strip as before. This entry is for logGateStatus only.
   openTimesBox: gateEnvValue('GATE_OPEN_TIMES_BOX'),
 
+  // Board open times (owner 2026-10-26, "start step 4"): while a visit is
+  // dragged on the Dispatch day or week grid, the hours that fit it light up
+  // with what each adds to the day's driving, amber over 30 min, the best one
+  // tagged. The open-times search for the board's own days (the day grid:
+  // every technician; the week grid: the visit's own technician). Display
+  // only: the drop saves as before. The admin schedule day view carries it to
+  // Dispatch as boardOpenTimes; the find-time route allows the open-times
+  // search under it too. Needs GATE_BEST_TIME_HINTS. Dark in every
+  // environment. Kill switch: unset, and a drag lights nothing.
+  boardOpenTimes: gateEnvValue('GATE_BOARD_OPEN_TIMES'),
+
   // New Appointment address-first best times (owner 2026-10-24, replacing the
   // 2026-10-21 Dispatch "Find a time" drawer): office staff on a call with a
   // NEW caller open New Appointment, pick the address in its New customer
@@ -4383,6 +4397,12 @@ const gates = {
   // Staff form prefill from the staff record (owner 2026-10-25). Default off; reads at
   // call time via staffDocPrefillLive(). Reads only; sends nothing.
   staffDocPrefill: gateEnvValue('GATE_STAFF_DOC_PREFILL'),
+  // Review bonus goes to the technician on the review ask the customer acted on
+  // (census M8). Default off; reads at call time via reviewBonusAskFirstLive().
+  reviewBonusAskFirst: gateEnvValue('GATE_REVIEW_BONUS_ASK_FIRST'),
+  // Leaderboard callbacks count against the technician whose visit they correct
+  // (census M9). Default off; reads at call time via callbackSourceTechLive().
+  callbackSourceTech: gateEnvValue('GATE_CALLBACK_SOURCE_TECH'),
   // A customer's text during their visit also reaches the visit's technician
   // (census M3). Default off; reads at call time via customerTextToVisitTechLive().
   customerTextToVisitTech: gateEnvValue('GATE_CUSTOMER_TEXT_TO_VISIT_TECH'),
@@ -5758,6 +5778,18 @@ function staffDocPrefillLive() {
   return process.env.GATE_STAFF_DOC_PREFILL === 'true';
 }
 
+// Review bonus attribution (services/review-incentives.js resolveTechnicianForGoogleReview),
+// read at CALL time. Strict `=== 'true'`, dark in every environment. Bonus pay: the owner flips it.
+function reviewBonusAskFirstLive() {
+  return process.env.GATE_REVIEW_BONUS_ASK_FIRST === 'true';
+}
+
+// Leaderboard callback credit (routes/admin-dashboard.js, services/callback-credit.js),
+// read at CALL time. Strict `=== 'true'`, dark in every environment. Reads only.
+function callbackSourceTechLive() {
+  return process.env.GATE_CALLBACK_SOURCE_TECH === 'true';
+}
+
 // Visit tech relay (routes/twilio-webhook.js -> services/visit-tech-relay.js), read at
 // CALL time. Strict `=== 'true'`, dark in every environment. Sends nothing to a customer.
 function customerTextToVisitTechLive() {
@@ -6939,6 +6971,11 @@ function leadDraftPropertyLookupLive() {
 // GATE_QUIET_OVERDUE_LIST read at CALL time (so a flip needs no redeploy); strict 'true'.
 function quietOverdueListLive() {
   return process.env.GATE_QUIET_OVERDUE_LIST === 'true';
+}
+
+// GATE_UNBILLED_VISITS_LIST read at CALL time (so a flip needs no redeploy); strict 'true'.
+function unbilledVisitsListLive() {
+  return process.env.GATE_UNBILLED_VISITS_LIST === 'true';
 }
 
 // ADMIN_BODY_GUARD_ALL read at CALL time — ships LIVE: on unless set to
@@ -8323,6 +8360,8 @@ module.exports.newsletterClickBoundLive = newsletterClickBoundLive;
 module.exports.billToNoVisitInvoicesLive = billToNoVisitInvoicesLive;
 // GATE_QUIET_OVERDUE_LIST reader, on its own line so gate PRs never conflict.
 module.exports.quietOverdueListLive = quietOverdueListLive;
+// GATE_UNBILLED_VISITS_LIST reader, on its own line so gate PRs never conflict.
+module.exports.unbilledVisitsListLive = unbilledVisitsListLive;
 // GATE_ESTIMATE_LAWN_LIMITS reader, on its own line so gate PRs never conflict.
 module.exports.estimateLawnLimitsLive = estimateLawnLimitsLive;
 // GATE_LAWN_RECLAIMED_HALF_N reader, on its own line so gate PRs never conflict.
@@ -8381,5 +8420,9 @@ module.exports.estimateSlotOnePerHourLive = estimateSlotOnePerHourLive;
 module.exports.techStaffGuardsLive = techStaffGuardsLive;
 // GATE_TAX_PACKAGE_W2_LABOR reader, on its own line so gate PRs never conflict.
 module.exports.taxPackageW2LaborLive = taxPackageW2LaborLive;
+// GATE_REVIEW_BONUS_ASK_FIRST reader, on its own line so gate PRs never conflict.
+module.exports.reviewBonusAskFirstLive = reviewBonusAskFirstLive;
+// GATE_CALLBACK_SOURCE_TECH reader, on its own line so gate PRs never conflict.
+module.exports.callbackSourceTechLive = callbackSourceTechLive;
 // GATE_CUSTOMER_TEXT_TO_VISIT_TECH reader, on its own line so gate PRs never conflict.
 module.exports.customerTextToVisitTechLive = customerTextToVisitTechLive;

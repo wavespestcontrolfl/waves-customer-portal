@@ -193,130 +193,139 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
 }
 
 /**
+ * The Billing recovery list: completed-but-uninvoiced visits from the last
+ * `days` days, split into one-click-billable leaks (monthly_rate = 0,
+ * per-visit billed) and needs-review (monthly_rate > 0, verify they aren't
+ * billed via the monthly cadence). GET /leaks serves it to the page, and the
+ * daily unbilled-visits bell (services/unbilled-visits-list.js) reads this same
+ * function, so the bell and the page can never disagree. Read-only.
+ */
+async function listUninvoicedLeaks(days) {
+  // Column-guarded per-app awareness — pre-migration environments keep the
+  // exact legacy query shape.
+  let perAppAware = false;
+  try {
+    perAppAware = await db.schema.hasColumn('customers', 'billing_mode');
+  } catch { /* keep legacy */ }
+  let selfPayAware = false;
+  try {
+    selfPayAware = await db.schema.hasColumn('scheduled_services', 'self_pay_override');
+  } catch { /* keep legacy */ }
+  const rows = await uninvoicedLeakQuery(days, { perAppAware, selfPayAware })
+    .select(
+      'ss.id as scheduled_service_id',
+      'sr.id as service_record_id',
+      'ss.service_type',
+      'ss.estimated_price',
+      'ss.prepaid_amount',
+      'ss.prepaid_method',
+      'ss.annual_prepay_term_id',
+      'ss.scheduled_date',
+      'ss.completed_at',
+      // Sibling first-application coverage (siblingCoverageStatus).
+      'ss.source_estimate_id',
+      'ss.first_application_invoice_id',
+      'ss.primary_line_price',
+      'c.id as customer_id',
+      'c.first_name',
+      'c.last_name',
+      'c.monthly_rate',
+      'c.waveguard_tier',
+      ...(perAppAware ? ['c.billing_mode', 'c.per_application_fee'] : []),
+      // A voided invoice puts its visit back in this queue (HAS_INVOICE_SQL
+      // skips void), and the void often had a replacement elsewhere (another
+      // row, a combined or prepay invoice). Name it so the operator checks.
+      db.raw(`(SELECT i.invoice_number FROM invoices i
+        WHERE (i.service_record_id = sr.id OR i.scheduled_service_id = ss.id) AND i.status = 'void'
+        ORDER BY i.updated_at DESC NULLS LAST, i.created_at DESC LIMIT 1) AS voided_invoice_number`),
+      // Set only on a visit back from a stale disposition (filter above).
+      'd.disposition as stale_disposition',
+      'di.invoice_number as stale_disposition_invoice_number',
+      'di.status as stale_disposition_invoice_status',
+    )
+    .orderBy('ss.completed_at', 'desc');
+
+  // A discounted annual-prepay slice is intentionally < the undiscounted
+  // estimated_price, so a LIVE-covered annual visit passes the "not fully
+  // prepaid" filter and would otherwise surface here as a recovery candidate —
+  // a manual double-bill trap. Drop live-covered visits using the SAME gate the
+  // completion path uses (fail-closed; a stale stamp is NOT treated as covered).
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  const coveredFlags = await Promise.all(
+    rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(r)),
+  );
+  const prepayActiveRows = rows.filter((_, i) => !coveredFlags[i]);
+  // A visit billed on its trip's combined first-application invoice has no
+  // invoice of its own, so the leak query lists it — and Bill refuses it
+  // (billing-recovery-bill.js siblingCoverageRefusal). Drop only a
+  // DEFINITIVE 'covered' verdict. A needs-review one (combined invoice
+  // voided or refunded) or a lookup error stays listed — the money may
+  // still be owed, and hiding it could read as handled; Bill refuses those
+  // with the reason. Leak rows exclude callbacks by construction.
+  const siblingStatuses = await Promise.all(
+    prepayActiveRows.map((r) => siblingCoverageStatus(r, db, { trustRowStamp: true })),
+  );
+  const activeRows = prepayActiveRows.filter((_, i) => siblingStatuses[i] !== 'covered');
+
+  const shape = (r) => ({
+    scheduled_service_id: r.scheduled_service_id,
+    service_record_id: r.service_record_id,
+    customer_id: r.customer_id,
+    customer: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+    service_type: r.service_type,
+    price: effectivePrice(r),
+    prepaid: parseFloat(r.prepaid_amount || 0),
+    completed_at: r.completed_at,
+    monthly_rate: parseFloat(r.monthly_rate || 0),
+    waveguard_tier: r.waveguard_tier || null,
+    billing_mode: r.billing_mode || null,
+    billable: !!r.service_record_id, // cannot invoice without a service record
+    // 'completed_no_service_record' = status-only completion; the
+    // completion flow must run before Bill works.
+    leak_kind: r.service_record_id ? 'uninvoiced' : 'completed_no_service_record',
+    // Dispatch-day deep link target for status-only rows (date-only string).
+    scheduled_date: dueDateFromVisit({ service_date: r.scheduled_date }) || null,
+    voided_invoice_number: r.voided_invoice_number || null,
+    // A visit an operator marked billed elsewhere whose covering invoice
+    // has since died (void / refunded / cancelled).
+    billed_elsewhere_invoice_number: r.stale_disposition === 'billed_elsewhere' ? (r.stale_disposition_invoice_number || null) : null,
+    billed_elsewhere_invoice_status: r.stale_disposition === 'billed_elsewhere' ? (r.stale_disposition_invoice_status || null) : null,
+  });
+
+  // Recurring (monthly_rate>0), partially-prepaid, ambiguous-type
+  // (inspection/rodent — could be paid or free), or per-application
+  // (autopay-active by design — a human confirms completion billing really
+  // did miss it before re-billing) visits need a human eye before billing —
+  // they aren't safe one-click leaks.
+  const isReview = (r) => parseFloat(r.monthly_rate || 0) > 0
+    || parseFloat(r.prepaid_amount || 0) > 0
+    || r.billing_mode === 'per_application'
+    || isReviewServiceType(r.service_type);
+  const leaks = activeRows.filter((r) => !isReview(r)).map(shape);
+  const needsReview = activeRows.filter(isReview).map(shape);
+  const sum = (arr) => Math.round(arr.reduce((s, r) => s + r.price, 0) * 100) / 100;
+
+  return {
+    window_days: days,
+    summary: {
+      leak_visits: leaks.length,
+      leak_customers: new Set(leaks.map((r) => r.customer_id)).size,
+      leak_dollars: sum(leaks),
+      review_visits: needsReview.length,
+      review_dollars: sum(needsReview),
+    },
+    leaks,
+    needs_review: needsReview,
+  };
+}
+
+/**
  * GET /api/admin/billing-recovery/leaks?days=90
- * Completed-but-uninvoiced visits split into one-click-billable leaks
- * (monthly_rate = 0, per-visit billed) and needs-review (monthly_rate > 0,
- * verify they aren't billed via the monthly cadence).
+ * The list above, for the Billing recovery page.
  */
 router.get('/leaks', async (req, res) => {
   try {
-    const days = clampDays(req.query.days);
-    // Column-guarded per-app awareness — pre-migration environments keep the
-    // exact legacy query shape.
-    let perAppAware = false;
-    try {
-      perAppAware = await db.schema.hasColumn('customers', 'billing_mode');
-    } catch { /* keep legacy */ }
-    let selfPayAware = false;
-    try {
-      selfPayAware = await db.schema.hasColumn('scheduled_services', 'self_pay_override');
-    } catch { /* keep legacy */ }
-    const rows = await uninvoicedLeakQuery(days, { perAppAware, selfPayAware })
-      .select(
-        'ss.id as scheduled_service_id',
-        'sr.id as service_record_id',
-        'ss.service_type',
-        'ss.estimated_price',
-        'ss.prepaid_amount',
-        'ss.prepaid_method',
-        'ss.annual_prepay_term_id',
-        'ss.scheduled_date',
-        'ss.completed_at',
-        // Sibling first-application coverage (siblingCoverageStatus).
-        'ss.source_estimate_id',
-        'ss.first_application_invoice_id',
-        'ss.primary_line_price',
-        'c.id as customer_id',
-        'c.first_name',
-        'c.last_name',
-        'c.monthly_rate',
-        'c.waveguard_tier',
-        ...(perAppAware ? ['c.billing_mode', 'c.per_application_fee'] : []),
-        // A voided invoice puts its visit back in this queue (HAS_INVOICE_SQL
-        // skips void), and the void often had a replacement elsewhere (another
-        // row, a combined or prepay invoice). Name it so the operator checks.
-        db.raw(`(SELECT i.invoice_number FROM invoices i
-          WHERE (i.service_record_id = sr.id OR i.scheduled_service_id = ss.id) AND i.status = 'void'
-          ORDER BY i.updated_at DESC NULLS LAST, i.created_at DESC LIMIT 1) AS voided_invoice_number`),
-        // Set only on a visit back from a stale disposition (filter above).
-        'd.disposition as stale_disposition',
-        'di.invoice_number as stale_disposition_invoice_number',
-        'di.status as stale_disposition_invoice_status',
-      )
-      .orderBy('ss.completed_at', 'desc');
-
-    // A discounted annual-prepay slice is intentionally < the undiscounted
-    // estimated_price, so a LIVE-covered annual visit passes the "not fully
-    // prepaid" filter and would otherwise surface here as a recovery candidate —
-    // a manual double-bill trap. Drop live-covered visits using the SAME gate the
-    // completion path uses (fail-closed; a stale stamp is NOT treated as covered).
-    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-    const coveredFlags = await Promise.all(
-      rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(r)),
-    );
-    const prepayActiveRows = rows.filter((_, i) => !coveredFlags[i]);
-    // A visit billed on its trip's combined first-application invoice has no
-    // invoice of its own, so the leak query lists it — and Bill refuses it
-    // (billing-recovery-bill.js siblingCoverageRefusal). Drop only a
-    // DEFINITIVE 'covered' verdict. A needs-review one (combined invoice
-    // voided or refunded) or a lookup error stays listed — the money may
-    // still be owed, and hiding it could read as handled; Bill refuses those
-    // with the reason. Leak rows exclude callbacks by construction.
-    const siblingStatuses = await Promise.all(
-      prepayActiveRows.map((r) => siblingCoverageStatus(r, db, { trustRowStamp: true })),
-    );
-    const activeRows = prepayActiveRows.filter((_, i) => siblingStatuses[i] !== 'covered');
-
-    const shape = (r) => ({
-      scheduled_service_id: r.scheduled_service_id,
-      service_record_id: r.service_record_id,
-      customer_id: r.customer_id,
-      customer: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      service_type: r.service_type,
-      price: effectivePrice(r),
-      prepaid: parseFloat(r.prepaid_amount || 0),
-      completed_at: r.completed_at,
-      monthly_rate: parseFloat(r.monthly_rate || 0),
-      waveguard_tier: r.waveguard_tier || null,
-      billing_mode: r.billing_mode || null,
-      billable: !!r.service_record_id, // cannot invoice without a service record
-      // 'completed_no_service_record' = status-only completion; the
-      // completion flow must run before Bill works.
-      leak_kind: r.service_record_id ? 'uninvoiced' : 'completed_no_service_record',
-      // Dispatch-day deep link target for status-only rows (date-only string).
-      scheduled_date: dueDateFromVisit({ service_date: r.scheduled_date }) || null,
-      voided_invoice_number: r.voided_invoice_number || null,
-      // A visit an operator marked billed elsewhere whose covering invoice
-      // has since died (void / refunded / cancelled).
-      billed_elsewhere_invoice_number: r.stale_disposition === 'billed_elsewhere' ? (r.stale_disposition_invoice_number || null) : null,
-      billed_elsewhere_invoice_status: r.stale_disposition === 'billed_elsewhere' ? (r.stale_disposition_invoice_status || null) : null,
-    });
-
-    // Recurring (monthly_rate>0), partially-prepaid, ambiguous-type
-    // (inspection/rodent — could be paid or free), or per-application
-    // (autopay-active by design — a human confirms completion billing really
-    // did miss it before re-billing) visits need a human eye before billing —
-    // they aren't safe one-click leaks.
-    const isReview = (r) => parseFloat(r.monthly_rate || 0) > 0
-      || parseFloat(r.prepaid_amount || 0) > 0
-      || r.billing_mode === 'per_application'
-      || isReviewServiceType(r.service_type);
-    const leaks = activeRows.filter((r) => !isReview(r)).map(shape);
-    const needsReview = activeRows.filter(isReview).map(shape);
-    const sum = (arr) => Math.round(arr.reduce((s, r) => s + r.price, 0) * 100) / 100;
-
-    res.json({
-      window_days: days,
-      summary: {
-        leak_visits: leaks.length,
-        leak_customers: new Set(leaks.map((r) => r.customer_id)).size,
-        leak_dollars: sum(leaks),
-        review_visits: needsReview.length,
-        review_dollars: sum(needsReview),
-      },
-      leaks,
-      needs_review: needsReview,
-    });
+    res.json(await listUninvoicedLeaks(clampDays(req.query.days)));
   } catch (err) {
     logger.error(`[billing-recovery] leaks query failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to load uninvoiced visits' });
@@ -578,3 +587,5 @@ router.post('/:scheduledServiceId/billed-elsewhere', requireAdmin, async (req, r
 });
 
 module.exports = router;
+// The daily unbilled-visits bell (services/unbilled-visits-list.js) reads the page's own list.
+module.exports.listUninvoicedLeaks = listUninvoicedLeaks;
