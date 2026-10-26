@@ -224,6 +224,102 @@ describe('MistingLayoutDesigner', () => {
     expect(nozzleCount()).toBe(total);
   });
 
+  describe('manual edits belong to the current lines', () => {
+    const cleared = () => screen.queryByTestId('layout-edits-cleared');
+
+    // Draws the 200 css px eave line, then deletes its first corner and adds one nozzle mid-gap.
+    async function drawAndEdit() {
+      const utils = await open();
+      const { frame } = utils;
+      tap(frame, 100, 100);
+      tap(frame, 300, 100);
+      fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+      const base = nozzleCount();
+      fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+      tap(frame, 100, 100); // delete
+      const xs = screen.getAllByTestId('layout-nozzle').map((n) => Number(n.getAttribute('cx'))).sort((a, b) => a - b);
+      tap(frame, (xs[2] + xs[3]) / 2 / 2, 100); // add
+      expect(nozzleCount()).toBe(base); // -1 +1
+      return { ...utils, base, afterEdits: screen.getAllByTestId('layout-nozzle').map((n) => n.getAttribute('cx')).sort() };
+    }
+
+    it('keeps the edits when the lines do not change, and the counts reflect them', async () => {
+      const { frame, base, afterEdits } = await drawAndEdit();
+      // switching tools and finishing nothing leaves the geometry, so the overlay stays
+      fireEvent.click(screen.getByRole('button', { name: 'Fence line' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+      expect(cleared()).not.toBeInTheDocument();
+      expect(screen.getAllByTestId('layout-nozzle').map((n) => n.getAttribute('cx')).sort()).toEqual(afterEdits);
+      expect(countsText()).toContain(`Nozzles: ${base}`);
+    });
+
+    it('drawing another line re-places the nozzles, clears the edits and says so', async () => {
+      const { frame } = await drawAndEdit();
+      const fresh = placeNozzles([{ kind: 'eave', points: EAVE_POINTS }], { lat: LAT, zoom: ZOOM }).totals.count;
+      fireEvent.click(screen.getByRole('button', { name: 'Fence line' }));
+      tap(frame, 100, 300);
+      expect(cleared()).toHaveTextContent('Changing the lines re-places the nozzles. Your 2 manual edits were cleared.');
+      // eave line back to its automatic nozzles, plus the first fence point
+      expect(nozzleCount()).toBe(fresh + 1);
+    });
+
+    it('Undo on the notice puts back the previous lines and edits in one step', async () => {
+      const { frame, base, afterEdits } = await drawAndEdit();
+      fireEvent.click(screen.getByRole('button', { name: 'Fence line' }));
+      tap(frame, 100, 300);
+      tap(frame, 300, 300);
+      fireEvent.click(screen.getByRole('button', { name: 'Undo and restore the previous lines and edits' }));
+      expect(cleared()).not.toBeInTheDocument();
+      expect(screen.queryAllByTestId('layout-nozzle').filter((n) => n.dataset.kind === 'fence')).toHaveLength(0);
+      expect(nozzleCount()).toBe(base);
+      expect(screen.getAllByTestId('layout-nozzle').map((n) => n.getAttribute('cx')).sort()).toEqual(afterEdits);
+    });
+
+    it('clears on Undo of a line and on Clear, and a new edit or Dismiss hides the notice', async () => {
+      const { frame } = await drawAndEdit();
+      fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+      expect(cleared()).toHaveTextContent('Your 2 manual edits were cleared.');
+      expect(nozzleCount()).toBe(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Undo and restore the previous lines and edits' }));
+      expect(nozzleCount()).toBeGreaterThan(0);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+      expect(cleared()).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss notice' }));
+      expect(cleared()).not.toBeInTheDocument();
+
+      // no edits, no notice: drawing then closing a loop says nothing
+      fireEvent.click(screen.getByRole('button', { name: 'Eave line' }));
+      [[100, 100], [300, 100], [300, 250]].forEach(([x, y]) => tap(frame, x, y));
+      tap(frame, 100, 100);
+      expect(cleared()).not.toBeInTheDocument();
+    });
+
+    it('a new manual edit hides the notice', async () => {
+      const { frame } = await drawAndEdit();
+      fireEvent.click(screen.getByRole('button', { name: 'Fence line' }));
+      tap(frame, 100, 300);
+      tap(frame, 300, 300);
+      fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+      expect(cleared()).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+      tap(frame, 100, 300); // delete the fence's first corner
+      expect(cleared()).not.toBeInTheDocument();
+    });
+
+    it('says "edit was" for a single edit', async () => {
+      const { frame } = await open();
+      tap(frame, 100, 100);
+      tap(frame, 300, 100);
+      fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+      tap(frame, 100, 100);
+      fireEvent.click(screen.getByRole('button', { name: 'Fence line' }));
+      tap(frame, 100, 300);
+      expect(cleared()).toHaveTextContent('Your 1 manual edit was cleared.');
+    });
+  });
+
   it('warns when the count is above the estimator limit', async () => {
     const { frame } = await open({ limits: { minNozzles: 2, maxNozzles: 3 } });
     tap(frame, 100, 100);

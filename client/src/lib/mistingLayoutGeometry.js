@@ -225,8 +225,8 @@ export function computeTotals(lineStats, nozzles) {
 /**
  * Staff edits on top of the automatic placement: delete, move, add.
  * `edits` = { removed: string[] of nozzle keys, moved: { [key]: {x, y} }, added: nozzle objects }.
- * The automatic nozzle keys are stable while a line is unchanged, so an edit survives
- * a redraw of the line it belongs to; an edit whose key no longer exists is ignored.
+ * Keys are unique within one placement only. Edits are valid for the lines they were made on;
+ * when the lines change, placement is redone and the caller discards the edits.
  */
 export function applyNozzleEdits(nozzles, edits = {}) {
   const removed = new Set(edits.removed || []);

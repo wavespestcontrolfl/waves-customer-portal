@@ -161,13 +161,11 @@ describe('placeNozzles', () => {
     }
   });
 
-  it('gives each nozzle a stable key', () => {
-    const a = placeNozzles([line('eave', [[0, 0], [25, 0]], 'a')], opts);
-    const b = placeNozzles([line('eave', [[0, 0], [25, 0], [25, 12]], 'a')], opts);
+  it('gives each nozzle a unique, repeatable key within one placement', () => {
+    const lines = [line('eave', [[0, 0], [25, 0]], 'a')];
+    const a = placeNozzles(lines, opts);
     expect(a.nozzles.map((n) => n.key)).toEqual(['a:v0', 'a:s0:1', 'a:s0:2', 'a:v1']);
-    // appending a point leaves every earlier key in place
-    const keysB = b.nozzles.map((n) => n.key);
-    a.nozzles.forEach((n) => expect(keysB).toContain(n.key));
+    expect(placeNozzles(lines, opts).nozzles.map((n) => n.key)).toEqual(a.nozzles.map((n) => n.key));
   });
 });
 

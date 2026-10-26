@@ -62,6 +62,10 @@ function geocodeInBrowser(address) {
   });
 }
 
+const NO_EDITS = Object.freeze({ removed: [], moved: {}, added: [] });
+const editCount = (e) => e.removed.length + Object.keys(e.moved).length + e.added.length;
+const geometryKey = (lines, draft) => JSON.stringify([lines, draft && draft.points.length > 0 ? draft : null]);
+
 const coord = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
 export default function MistingLayoutDesigner({ address, lat, lng, limits, onUseCounts, onClose }) {
@@ -69,7 +73,11 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
   const [lines, setLines] = useState([]);
   const [draft, setDraft] = useState(null); // { id, kind, points }
   const [mode, setMode] = useState('eave');
-  const [edits, setEdits] = useState({ removed: [], moved: {}, added: [] });
+  // Manual edits are an overlay on the CURRENT line geometry only. Any change to the lines
+  // re-runs auto-placement and clears the overlay (applyGeometry), keeping one snapshot so
+  // the notice's Undo can put the previous lines and edits back in a single step.
+  const [edits, setEdits] = useState(NO_EDITS);
+  const [notice, setNotice] = useState(null); // { count, snapshot: { lines, draft, edits } }
   const frameRef = useRef(null);
   const gestureRef = useRef(null);
   const idRef = useRef(0);
@@ -104,14 +112,7 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
     () => (ready ? placeNozzles(allLines, { lat: mapState.center.lat, zoom: mapState.zoom }) : null),
     [ready, allLines, mapState],
   );
-  const nozzles = useMemo(() => {
-    if (!placed) return [];
-    const lineIds = new Set(allLines.map((l) => String(l.id)));
-    return applyNozzleEdits(placed.nozzles, {
-      ...edits,
-      added: edits.added.filter((a) => lineIds.has(a.lineId)),
-    });
-  }, [placed, edits, allLines]);
+  const nozzles = useMemo(() => (placed ? applyNozzleEdits(placed.nozzles, edits) : []), [placed, edits]);
   const totals = useMemo(() => computeTotals(placed ? placed.lines : [], nozzles), [placed, nozzles]);
 
   // ── Pointer handling ───────────────────────────────────────────────────────
@@ -125,11 +126,35 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
     };
   };
 
+  // The one door for changes to the lines. A change that alters the geometry re-places the
+  // nozzles, so it clears the manual edits and leaves a notice with a one-step Undo.
+  const applyGeometry = (nextLines, nextDraft) => {
+    if (geometryKey(nextLines, nextDraft) !== geometryKey(lines, draft) && editCount(edits) > 0) {
+      setNotice({ count: editCount(edits), snapshot: { lines, draft, edits } });
+      setEdits(NO_EDITS);
+    }
+    setLines(nextLines);
+    setDraft(nextDraft);
+  };
+
+  const restoreSnapshot = () => {
+    if (!notice) return;
+    setLines(notice.snapshot.lines);
+    setDraft(notice.snapshot.draft);
+    setEdits(notice.snapshot.edits);
+    setNotice(null);
+  };
+
+  // A manual edit starts a new overlay state, so an old restore point no longer applies.
+  const editOverlay = (update) => {
+    setNotice(null);
+    setEdits(update);
+  };
+
   const finishDraft = (extraPoint) => {
     if (!draft) return;
     const points = extraPoint ? [...draft.points, extraPoint] : draft.points;
-    if (points.length >= 2) setLines((prev) => [...prev, { ...draft, points }]);
-    setDraft(null);
+    applyGeometry(points.length >= 2 ? [...lines, { ...draft, points }] : lines, null);
   };
 
   const addDraftPoint = (p, scale) => {
@@ -148,19 +173,21 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
       return;
     }
     if (last && Math.hypot(last.x - p.x, last.y - p.y) <= VERTEX_HIT_CSS_PX * scale) return;
-    setDraft({ ...current, points: [...pts, { x: p.x, y: p.y }] });
+    applyGeometry(lines, { ...current, points: [...pts, { x: p.x, y: p.y }] });
   };
 
   const deleteNozzle = (n) => {
-    setEdits((prev) => (n.manual
-      ? { ...prev, added: prev.added.filter((a) => a.key !== n.key) }
-      : { ...prev, removed: [...prev.removed, n.key] }));
+    editOverlay((prev) => {
+      if (n.manual) return { ...prev, added: prev.added.filter((a) => a.key !== n.key) };
+      const { [n.key]: _moved, ...moved } = prev.moved;
+      return { ...prev, moved, removed: [...prev.removed, n.key] };
+    });
   };
 
   const moveNozzle = (n, p) => {
     const x = Math.max(0, Math.min(MAP_WIDTH, p.x));
     const y = Math.max(0, Math.min(MAP_HEIGHT, p.y));
-    setEdits((prev) => (n.manual
+    editOverlay((prev) => (n.manual
       ? { ...prev, added: prev.added.map((a) => (a.key === n.key ? { ...a, x, y } : a)) }
       : { ...prev, moved: { ...prev.moved, [n.key]: { x, y } } }));
   };
@@ -168,7 +195,7 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
   const addNozzleOnLine = (p, scale) => {
     const hit = nearestPointOnLines(allLines, p, LINE_HIT_CSS_PX * scale);
     if (!hit) return;
-    setEdits((prev) => ({
+    editOverlay((prev) => ({
       ...prev,
       added: [...prev.added, {
         key: nextId('m'),
@@ -235,16 +262,15 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
   const undo = () => {
     if (draft && draft.points.length > 0) {
       const points = draft.points.slice(0, -1);
-      setDraft(points.length ? { ...draft, points } : null);
+      applyGeometry(lines, points.length ? { ...draft, points } : null);
     } else if (lines.length > 0) {
-      setLines((prev) => prev.slice(0, -1));
+      applyGeometry(lines.slice(0, -1), null);
     }
   };
 
   const clearAll = () => {
-    setLines([]);
-    setDraft(null);
-    setEdits({ removed: [], moved: {}, added: [] });
+    applyGeometry([], null);
+    setEdits(NO_EDITS);
   };
 
   const useCounts = () => {
@@ -310,7 +336,7 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
                 Finish line
               </Button>
               <Button variant="secondary" onClick={undo} disabled={!hasContent}>Undo</Button>
-              <Button variant="secondary" onClick={clearAll} disabled={!hasContent && edits.added.length === 0 && edits.removed.length === 0}>
+              <Button variant="secondary" onClick={clearAll} disabled={!hasContent && editCount(edits) === 0}>
                 Clear
               </Button>
             </div>
@@ -364,6 +390,15 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
                 <span className="inline-block px-2 py-1 rounded-xs bg-black/70 text-white text-14">{CONCEPT_LABEL}</span>
               </div>
             </div>
+            {notice && (
+              <div role="status" data-testid="layout-edits-cleared" className="mt-3 px-3 py-2 rounded-xs border-hairline border-zinc-300 bg-zinc-50 text-14 text-zinc-900 flex flex-wrap items-center gap-2">
+                <span>
+                  Changing the lines re-places the nozzles. Your {notice.count} manual {notice.count === 1 ? 'edit was' : 'edits were'} cleared.
+                </span>
+                <Button variant="secondary" aria-label="Undo and restore the previous lines and edits" onClick={restoreSnapshot}>Undo</Button>
+                <button type="button" aria-label="Dismiss notice" className="text-zinc-600 px-2 min-h-11" onClick={() => setNotice(null)}>×</button>
+              </div>
+            )}
             <div aria-live="polite" data-testid="layout-counts" className="mt-3 text-14 text-zinc-900">
               <div className="font-medium">
                 Nozzles: {totals.count} <span className="font-normal text-zinc-600">(eave {totals.eaveCount}, fence {totals.fenceCount})</span>
