@@ -670,17 +670,23 @@ function withChipValues(days, rows, hourly) {
 }
 
 // The open-times box's day rows: every hour that fits, each with its
-// technician. For a booking the rain ranking reads (GATE_BOOKING_RAIN_RANK),
+// technician and its drive numbers priced on real roads
+// (GATE_BEST_TIMES_ROAD_TIMES; owner 2026-10-26 — the list showed only
+// straight-line estimates). For a booking the rain ranking reads (GATE_BOOKING_RAIN_RANK),
 // each hour also carries its rain tier (rain-fit.js rainTier: 0 sorts
 // first), so the box's Best order puts an outdoor job's wet hours after its
-// dry ones, as the best-times rows do. The forecast lookup fails open: no
-// tiers, drive order only.
+// dry ones, as the best-times rows do. Both lookups fail open: no tiers,
+// drive order only; or the model's numbers, marked as estimates.
 async function buildOpenTimes(days, { today, lat, lng, serviceTypes = [], rainSpan = null, deps = {} }) {
   const fit = bookingRainFit(serviceTypes);
-  const hourly = rankingNeedsForecast(fit, days, today, null)
-    ? await (deps.hourlyRain || boundedHourlyRain)(lat, lng, true).catch(() => null) : null;
+  const priceOnRoads = deps.priceOpenTimesOnRoads || require('./hint-road-times').priceOpenTimesOnRoads;
+  const [hourly, priced] = await Promise.all([
+    rankingNeedsForecast(fit, days, today, null)
+      ? (deps.hourlyRain || boundedHourlyRain)(lat, lng, true).catch(() => null) : null,
+    priceOnRoads(days),
+  ]);
   const tierOf = rainTierOf(fit, hourly, today, rainSpan);
-  return days.map((day) => ({
+  return priced.map((day) => ({
     ...day,
     hours: day.hours.map((h) => ({ ...h, rain_tier: tierOf ? tierOf({ ...h, date: day.date }) : null })),
   }));

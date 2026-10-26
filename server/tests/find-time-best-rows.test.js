@@ -17,7 +17,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { GAP_LEGS } = require('../services/scheduling/find-time');
 const { pickBestRows, buildBestRows, rainForWindow, buildHintSummary } = require('../services/scheduling/find-time-hints');
-const { priceChipsOnRoads, _test } = require('../services/scheduling/hint-road-times');
+const { priceChipsOnRoads, priceOpenTimesOnRoads, _test } = require('../services/scheduling/hint-road-times');
 
 const PREV = { lat: 27.4208, lng: -82.4929 };
 const NEXT = { lat: 27.4111, lng: -82.4045 };
@@ -149,6 +149,54 @@ describe('priceChipsOnRoads', () => {
     const [out] = await priceChipsOnRoads([chip], { travelFactory: travel.factory });
     expect(out).toMatchObject({ drive_in_minutes: null, detour_minutes: null, drive_source: 'estimate' });
     expect(travel.calls).toEqual([]);
+  });
+});
+
+describe('priceOpenTimesOnRoads (owner 2026-10-26: the list was straight-line only)', () => {
+  const ENV = process.env.GATE_BEST_TIMES_ROAD_TIMES;
+  afterEach(() => {
+    if (ENV === undefined) delete process.env.GATE_BEST_TIMES_ROAD_TIMES;
+    else process.env.GATE_BEST_TIMES_ROAD_TIMES = ENV;
+    _test.roadCache.clear();
+  });
+  const OTHER = { lat: 27.5, lng: -82.3 };
+  const listDays = () => [
+    day('2026-10-08', [hour('2026-10-08', '12:00', 34, 19), hour('2026-10-08', '13:00', 34, 19)]),
+    day('2026-10-09', [hour('2026-10-09', '12:00', 30, 18, {
+      [GAP_LEGS]: { prev: PREV, next: OTHER, newStop: NEW, prevEndMin: 12 * 60, prevIsHome: false, durationMinutes: 30 },
+    })]),
+  ];
+
+  test('every gap on the list is priced once; its hours share the Google numbers', async () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    const preloaded = [];
+    const factory = () => ({
+      preload: async (legs) => { preloaded.push(...legs); },
+      lookup: (leg) => {
+        if (leg.from === PREV && leg.to === NEW) return { minutes: 21, source: 'google_traffic' };
+        if (leg.from === NEW && leg.to === NEXT) return { minutes: 28, source: 'google_traffic' };
+        if (leg.from === PREV && leg.to === NEXT) return { minutes: 15, source: 'google_traffic' };
+        return { minutes: 99, source: 'conservative_model' };
+      },
+    });
+    const [oct8, oct9] = await priceOpenTimesOnRoads(listDays(), { travelFactory: factory });
+    expect(oct8.hours.map((h) => [h.start_time, h.drive_in_minutes, h.detour_minutes, h.drive_source])).toEqual([
+      ['12:00', 21, 34, 'google'], ['13:00', 21, 34, 'google'],
+    ]);
+    // Oct 9's gap ends at another stop Google did not answer: the model's numbers, marked.
+    expect(oct9.hours[0]).toMatchObject({ drive_in_minutes: 18, detour_minutes: 30, drive_source: 'estimate' });
+    // Two gaps, three legs each: the 1 PM hour asked Google nothing of its own.
+    expect(preloaded).toHaveLength(6);
+  });
+
+  test('gate off: every hour is marked an estimate and Google is never asked', async () => {
+    delete process.env.GATE_BEST_TIMES_ROAD_TIMES;
+    const factory = jest.fn();
+    const out = await priceOpenTimesOnRoads(listDays(), { travelFactory: factory });
+    expect(out.flatMap((d) => d.hours.map((h) => [h.detour_minutes, h.drive_source]))).toEqual([
+      [34, 'estimate'], [34, 'estimate'], [30, 'estimate'],
+    ]);
+    expect(factory).not.toHaveBeenCalled();
   });
 });
 

@@ -56,7 +56,10 @@ jest.mock('../services/rain-out', () => ({
   ...jest.requireActual('../services/rain-out'),
   loadOccupancy: jest.fn(),
 }));
-jest.mock('../services/scheduling/hint-road-times', () => ({ priceChipsOnRoads: jest.fn(async (chips) => chips) }));
+jest.mock('../services/scheduling/hint-road-times', () => ({
+  priceChipsOnRoads: jest.fn(async (chips) => chips),
+  priceOpenTimesOnRoads: jest.fn(async (days) => days),
+}));
 jest.mock('../services/technician-capabilities', () => ({ inactiveCapabilitiesForServices: jest.fn(async () => []) }));
 
 const express = require('express');
@@ -64,7 +67,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { loadOccupancy } = require('../services/rain-out');
 const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
 const { getHourlyRainOutlook } = require('../services/weather-forecast');
-const { priceChipsOnRoads } = require('../services/scheduling/hint-road-times');
+const { priceChipsOnRoads, priceOpenTimesOnRoads } = require('../services/scheduling/hint-road-times');
 const { inactiveCapabilitiesForServices } = require('../services/technician-capabilities');
 const { buildOpenTimes, OPEN_TIMES_MAX_DAYS } = require('../services/scheduling/find-time-hints');
 const findTimeRouter = require('../routes/admin-schedule-find-time');
@@ -165,6 +168,9 @@ test('gate on: four weeks, every technician, no picked verdict, no best-times ro
   expect(body.picked).toBeUndefined();
   expect(checkArrivalPlacement).not.toHaveBeenCalled();
   expect(priceChipsOnRoads).not.toHaveBeenCalled();
+  // The whole list goes to the road pricing, not a handful of chips.
+  expect(priceOpenTimesOnRoads).toHaveBeenCalledTimes(1);
+  expect(priceOpenTimesOnRoads.mock.calls[0][0]).toHaveLength(28);
   // A neutral booking needs no forecast.
   expect(getHourlyRainOutlook).not.toHaveBeenCalled();
   expect(sep1.hours[0].rain_tier).toBeNull();

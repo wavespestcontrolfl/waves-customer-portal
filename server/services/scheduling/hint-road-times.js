@@ -147,4 +147,52 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now() 
   }
 }
 
-module.exports = { priceChipsOnRoads, _test: { roadCache, chipLegs } };
+// The open-times list's own spend (owner 2026-10-26, "make it as accurate as
+// possible, raise the limits if you have to"): four weeks of route gaps, not
+// a handful of chips, so more requests in flight and a longer deadline than
+// the chips' — still on the picker's allowance (hintTravelBudget).
+const OPEN_TIMES_TRAVEL = { maxRequests: 240, maxElements: 600, budgetMs: 6000, workers: 12 };
+
+function openTimesTravel() {
+  const RouteOptimizer = require('../route-optimizer');
+  return RouteOptimizer.createSchedulingTravel({ ...OPEN_TIMES_TRAVEL, sharedBudget: RouteOptimizer.hintTravelBudget });
+}
+
+// The route gap an hour sits in: same day, technician and neighbours.
+function gapKey(date, hour) {
+  const g = hour[GAP_LEGS];
+  if (!g || !g.prev || !g.next || !g.newStop) return null;
+  return `${date}|${hour.technician?.id ?? ''}|${pinKey(g.prev)}|${pinKey(g.next)}|${g.prevEndMin}`;
+}
+
+/**
+ * The open-times list's day rows (GATE_OPEN_TIMES_BOX) priced on real roads:
+ * every gap on the list, so Best ranks every date on Google's numbers rather
+ * than on the straight-line model. A gap's hours share its neighbours — the
+ * same drive in and the same drive the van makes anyway; only the drive out
+ * leaves later — so the gap's first hour is priced and its numbers given to
+ * the rest. Every hour carries drive_source: 'google', or 'estimate' when the
+ * gate is off or a leg did not come back. Never throws.
+ */
+async function priceOpenTimesOnRoads(days, { travelFactory = openTimesTravel, now } = {}) {
+  const firstOfGap = new Map();
+  for (const day of days || []) {
+    for (const hour of day.hours || []) {
+      const key = gapKey(day.date, hour);
+      if (key && !firstOfGap.has(key)) firstOfGap.set(key, { ...hour, date: day.date });
+    }
+  }
+  const keys = [...firstOfGap.keys()];
+  const priced = await priceChipsOnRoads([...firstOfGap.values()], { travelFactory, now });
+  const byGap = new Map(keys.map((key, i) => [key, priced[i]]));
+  return (days || []).map((day) => ({
+    ...day,
+    hours: (day.hours || []).map((hour) => {
+      const p = byGap.get(gapKey(day.date, hour));
+      if (p?.drive_source !== 'google') return { ...hour, drive_source: 'estimate' };
+      return { ...hour, drive_in_minutes: p.drive_in_minutes, detour_minutes: p.detour_minutes, drive_source: 'google' };
+    }),
+  }));
+}
+
+module.exports = { priceChipsOnRoads, priceOpenTimesOnRoads, _test: { roadCache, chipLegs } };
