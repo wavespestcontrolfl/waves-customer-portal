@@ -287,6 +287,9 @@ async function sendManualAcceptConsumerNotice({ estimateId, conn = db }) {
       contractId = issued.contractId;
     }
 
+    // The kill switch is read once more right before anything goes out: a send that waited on reads while the gate
+    // was turned off sends nothing (a notice issued in between stays open, unsent, as one issued from the page).
+    if (!manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off', contractId };
     const { deliverDocumentRequestChannels } = require('./document-contract-delivery');
     // 'system': the send window holds a late text until 8 AM instead of sending it at night.
     const delivery = await deliverDocumentRequestChannels(contractId, { actorType: 'system' }, {

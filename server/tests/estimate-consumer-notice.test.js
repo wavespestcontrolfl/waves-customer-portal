@@ -441,6 +441,14 @@ describe('sendManualAcceptConsumerNotice', () => {
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
+  test('the gate turned off while the reads were pending: nothing is sent', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    findConsumerNotice.mockImplementation(async () => { delete process.env.GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND; return null; });
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database })).toEqual({ skipped: 'gate_off', contractId: 'contract-open' });
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
   test('an open notice from any source is resent, not issued again', async () => {
     const { database, state } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
     const result = await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database });
