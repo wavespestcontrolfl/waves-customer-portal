@@ -1,4 +1,4 @@
-import { AlertTriangle, HelpCircle } from 'lucide-react';
+import { AlertTriangle, CloudRain, HelpCircle } from 'lucide-react';
 import { cn } from '../ui';
 
 export default function DispatchReadinessStrip({ readiness, onOpen, compact = false, iconOnly = false, className }) {
@@ -6,7 +6,9 @@ export default function DispatchReadinessStrip({ readiness, onOpen, compact = fa
   const issues = readiness.issues || [];
   const hasHold = issues.some(issue => issue.status === 'hold');
   const label = issues.length ? issues.map(issue => issue.label).join(' · ') : 'View Job Card';
-  const Icon = hasHold ? AlertTriangle : HelpCircle;
+  // A rain caution (GATE_SPRAY_RAIN_RULES) stays monochrome like any non-hold: red is for holds only.
+  const hasCaution = issues.some(issue => issue.status === 'caution');
+  const Icon = hasHold ? AlertTriangle : (hasCaution ? CloudRain : HelpCircle);
   return (
     <button
       type="button"

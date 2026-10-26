@@ -15,6 +15,7 @@ import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
 import { elapsedSince } from '../../lib/on-site-time';
 import { isMlUnit } from '../../lib/measure-units';
 import { normalizeApplicationMethod } from '../../lib/product-rate-prefill';
+import { accessLinesOf } from '../../lib/schedule-access';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import DictationButton from './DictationButton';
 import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
@@ -194,6 +195,29 @@ const contactLinksOf = (contact) => CONTACT_LINKS
   .map((link) => ({ ...link, value: String(contact?.[link.key] ?? '').trim() }))
   .filter((link) => link.value);
 
+// The stop's gate and access codes in large digits under the contact lines
+// (GATE_SCHEDULE_ACCESS_CODES, owner ruling 2026-10-26): the lines the day
+// feed carries on the row (lib/schedule-access.js), the same ones the tech
+// app's stop brief shows. A neighborhood code says so; one nobody has
+// confirmed yet is amber and says "confirm on site". No codes = no block.
+export function SheetAccessCodes({ service }) {
+  const lines = accessLinesOf(service);
+  if (!lines.length) return null;
+  return (
+    <div className={cn('tech-visit-access', lines.some((l) => l.unconfirmed) && 'is-unconfirmed')} aria-label="Access codes">
+      {lines.map((line) => (
+        <p key={line.key} className="tech-visit-access-line">
+          <span className="tech-visit-access-label">{line.label}</span>
+          <span className={line.codeLike ? 'tech-visit-access-code' : 'tech-visit-access-text'}>{line.value}</span>
+          {line.neighborhood && (
+            <span className={cn('tech-visit-access-tag', line.unconfirmed && 'is-warn')}>{line.unconfirmed ? 'confirm on site' : 'neighborhood'}</span>
+          )}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 export function SheetHeader({ titleId, title, service, visit, contact, done, locked, dictationPending, submitting, onFullForm, onViewDetails, onClose, fullFormOffered = true }) {
   const address = liveAddressLine(visit?.address);
   const contactLinks = contactLinksOf(contact);
@@ -210,6 +234,7 @@ export function SheetHeader({ titleId, title, service, visit, contact, done, loc
             {contactLinks.map((link) => <a key={link.key} href={link.href(link.value)}>{link.label(link.value)}</a>)}
           </p>
         )}
+        {!done && <SheetAccessCodes service={service} />}
       </div>
       {/* Details and Full form share one group that wraps (stacks) on a narrow
           phone, so neither is clipped beside the title and the close button. */}

@@ -61,6 +61,7 @@ import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complet
 import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
 import { onSiteTimeOf } from '../../lib/on-site-time';
 import { completionBillingFacts, wrapUpSheetFields } from '../../lib/completion-billing-facts';
+import { accessSheetFields } from '../../lib/schedule-access';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import TechRecapCapture from './TechRecapCapture';
@@ -441,7 +442,10 @@ export default function TechHomePage({ section = 'today' }) {
           rainChance: next.rainChance,
           services: scheduleRowsFromResponse(result.data).filter((s) => String(serviceTechnicianId(s)) === String(techId)),
         } });
-        return;
+        // The fresh rows, for a caller that needs one visit's current row
+        // (Details → Access after a gate code change). Every other path
+        // answers nothing.
+        return next.rows;
       }
       console.error('Failed to fetch schedule:', result.kind, result.message || '');
       // Offline fallback: the last good route this tech loaded today, read
@@ -999,6 +1003,8 @@ export default function TechHomePage({ section = 'today' }) {
           service={{
             // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(fastCompleteService),
+            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            ...accessSheetFields(fastCompleteService),
             id: fastCompleteService.id,
             customerName: fastCompleteService.customer_name || fastCompleteService.customerName,
             serviceType: fastCompleteService.service_type || fastCompleteService.serviceType,
@@ -1080,6 +1086,8 @@ export default function TechHomePage({ section = 'today' }) {
             customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
             onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
             ...completionBillingFacts(treeShrubFastService),
+            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            ...accessSheetFields(treeShrubFastService),
             // The visit the tech tapped, checked against the live context
             // (same fields the pest sheet routes with).
             routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
@@ -1114,6 +1122,8 @@ export default function TechHomePage({ section = 'today' }) {
           service={{
             // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(lawnReserviceFastService),
+            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            ...accessSheetFields(lawnReserviceFastService),
             id: lawnReserviceFastService.id,
             customerName: lawnReserviceFastService.customer_name || lawnReserviceFastService.customerName,
             serviceType: lawnReserviceFastService.service_type || lawnReserviceFastService.serviceType,
@@ -1165,6 +1175,14 @@ export default function TechHomePage({ section = 'today' }) {
           onCancelled={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
           onRescheduled={() => { closeFastSheetsBehindDetails(); fetchSchedule(); }}
           onBillingChanged={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
+          // GATE_SCHEDULE_ACCESS_CODES: after Wrong code or Add gate code in
+          // Details → Access, reload the route and hand the section this
+          // visit's fresh row (null when the reload did not bring it back).
+          onAccessChanged={async () => {
+            const visitId = detailService?.id;
+            const rows = await fetchSchedule();
+            return (rows || []).find((r) => String(r.id) === String(visitId)) || null;
+          }}
           // Complete from the details sheet: back to the fast sheet behind it,
           // entries intact, or into this visit's own sheet when none is open.
           onCompleteService={(svc) => {

@@ -6523,6 +6523,9 @@ router.get('/', async (req, res, next) => {
     // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
     let gateActionVisits = new Set();
     const neighborhoodTechActions = require('../config/feature-gates').neighborhoodTechActionsLive();
+    // GATE_SCHEDULE_ACCESS_CODES: the office schedule draws each row's gate
+    // lines (propertyAlerts) only while this is on; read once per request.
+    const scheduleAccessCodes = require('../config/feature-gates').scheduleAccessCodesLive();
     try {
       if (require('../config/feature-gates').neighborhoodAccessLive()) {
         const neighborhoodAccess = require('../services/neighborhood-access');
@@ -7003,6 +7006,7 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        ...(scheduleAccessCodes ? { scheduleAccessEnabled: true } : {}),
         ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
@@ -8351,6 +8355,13 @@ async function assertNoCallBookingConflict(guard) {
   const conflict = await callBookingDuplicateConflict(guard);
   if (conflict) throw Object.assign(new Error('The phone agent already booked this visit for this customer.'), { callBookingConflict: conflict });
 }
+
+// New Appointment stop order (GATE_NEW_APPT_STOP_ORDER), read at call time. A
+// partial test mock of the gates module reads as off.
+const newApptStopOrderLive = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.gateEnvValue === 'function' && !!gates.gateEnvValue('GATE_NEW_APPT_STOP_ORDER');
+};
 
 router.post('/', requireAdmin, scheduleCreateHandler);
 async function scheduleCreateHandler(req, res, next) {
@@ -9992,6 +10003,17 @@ async function scheduleCreateHandler(req, res, next) {
           database: trx,
           customerId,
         });
+      }
+
+      // New Appointment stop order (GATE_NEW_APPT_STOP_ORDER, owner 2026-10-26
+      // "OK GO"): like a staff move, number the booked visit's technician day
+      // in the order the route check certifies, so the board and the tech app
+      // list it in its place, not last. The staff writer is a no-op unless
+      // GATE_STAFF_ROUTE_INSERTION is on, runs under a savepoint and never
+      // fails the booking; an unassigned, untimed or shared visit stays as it
+      // was. Recurring children and boosters keep today's behavior.
+      if (newApptStopOrderLive()) {
+        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment' });
       }
     });
 

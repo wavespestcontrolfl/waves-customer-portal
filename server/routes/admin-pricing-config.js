@@ -1396,6 +1396,10 @@ function mistingAvailability() {
   const { MOSQUITO_MISTING: M } = require('../services/pricing-engine/constants');
   return {
     enabled: require('../config/feature-gates').mosquitoMistingLive(),
+    // GATE_MISTING_LAYOUT_DESIGNER (strict true, needs the misting gate): the key is absent unless on, so off is byte-identical.
+    ...(require('../config/feature-gates').mosquitoMistingLive()
+      && require('../config/feature-gates').mistingLayoutDesignerLive()
+      ? { layoutDesigner: true } : {}),
     tiers: Object.entries(M.tiers).map(([key, tier]) => ({ key, label: tier.label })),
     solutions: Object.entries(M.refills).map(([key, refill]) => ({ key, label: refill.label })),
     limits: {

@@ -39,6 +39,7 @@ import { describeCardRequestState, describeCardRequestResult, canSendCardRequest
 import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 import { directionsHref } from '../../lib/directionsHref';
 import { showScheduleSaveNotice } from './ScheduleSaveNotice';
+import { ScheduleAccessSection } from './ScheduleAccess';
 import { useUiDensity } from '../ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -150,6 +151,9 @@ export default function MobileAppointmentDetailSheet({
   // address offers Link customer; onCustomerLinked refetches the day.
   newCallerBooking = false,
   onCustomerLinked,
+  // GATE_SCHEDULE_ACCESS_CODES: after Wrong code or Add gate code, refetch the
+  // day and resolve to this visit's fresh row (or null) for the Access section.
+  onAccessChanged,
 }) {
   const [note, setNote] = useState(service?.notes || '');
   const [showOutcome, setShowOutcome] = useState(false);
@@ -969,6 +973,10 @@ export default function MobileAppointmentDetailSheet({
             </div>
           </section>
         )}
+
+        {/* Access — the stop's gate and access codes (GATE_SCHEDULE_ACCESS_CODES,
+            owner ruling 2026-10-26), with Wrong code and Add gate code. */}
+        <ScheduleAccessSection service={service} variant="sheet" actions onChanged={onAccessChanged} />
 
         {/* Appointment note — editable */}
         <section className="mt-8">

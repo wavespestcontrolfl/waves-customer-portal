@@ -74,3 +74,35 @@ describe('Fast Complete shared parts', () => {
     expect(screen.queryByText(/label max/)).toBeNull();
   });
 });
+
+// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): the stop's codes in the
+// Complete service header, from the day row's gate lines.
+describe('SheetHeader access codes', () => {
+  afterEach(cleanup);
+  const service = {
+    serviceType: 'Pest Control',
+    scheduleAccessEnabled: true,
+    propertyAlerts: [
+      { type: 'gate', text: 'Gate: #2424 (neighborhood, confirm on site)' },
+      { type: 'gate', text: 'Lockbox: 2468' },
+      { type: 'pet', text: '1 dog' },
+    ],
+  };
+  const header = (props) => <Parts.SheetHeader titleId="t" title="Complete service" visit={{}} onClose={() => {}} {...props} />;
+
+  it('shows the codes under the contact lines, amber while a neighborhood code is unconfirmed', () => {
+    render(header({ service }));
+    const block = screen.getByLabelText('Access codes');
+    expect(block.className).toContain('is-unconfirmed');
+    expect(block.textContent).toBe('Gate#2424confirm on siteLockbox2468');
+  });
+
+  it('shows nothing once the visit is saved, while the gate is off, or with no code', () => {
+    const { rerender } = render(header({ service, done: true }));
+    expect(screen.queryByLabelText('Access codes')).toBeNull();
+    rerender(header({ service: { ...service, scheduleAccessEnabled: undefined } }));
+    expect(screen.queryByLabelText('Access codes')).toBeNull();
+    rerender(header({ service: { ...service, propertyAlerts: [{ type: 'pet', text: '1 dog' }] } }));
+    expect(screen.queryByLabelText('Access codes')).toBeNull();
+  });
+});
