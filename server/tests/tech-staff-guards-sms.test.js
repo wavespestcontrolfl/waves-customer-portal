@@ -203,6 +203,26 @@ describe('an inbound text from an active technician\'s phone', () => {
     expect(sendSMS.mock.calls[0][2]).toEqual({ messageType: 'internal_alert' });
   });
 
+  test.each([
+    ['a domain tracking number', () => numbers.domainTracking[0].number],
+    ['the van-wrap tracking number', () => numbers.tracking.vanWrap.number],
+  ])('to %s: no new-lead bell, but the office still hears it through the owner forward', async (_label, toNumber) => {
+    asStaff();
+    const { triggerNotification } = require('../services/notification-triggers');
+    await receive(TEXT, { to: toNumber(), sid: `SM-synthetic-staff-${_label.length}` });
+    expect(triggerNotification.mock.calls.filter((c) => c[0] === 'new_lead')).toHaveLength(0);
+    expect(sendSMS).toHaveBeenCalledTimes(1);
+    expect(sendSMS.mock.calls[0][0]).toBe('+12025550199');
+    expect(sendSMS.mock.calls[0][2]).toEqual({ messageType: 'internal_alert' });
+  });
+
+  test('control: a stranger texting a tracking number gets the new-lead bell and no owner forward, as today', async () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    await receive(TEXT, { to: numbers.tracking.vanWrap.number, sid: 'SM-synthetic-stranger-van' });
+    expect(triggerNotification.mock.calls.filter((c) => c[0] === 'new_lead')).toHaveLength(1);
+    expect(sendSMS).not.toHaveBeenCalled();
+  });
+
   test('skips the customer and lead side: no screen, estimator draft, agent, auto-reply or new-prospect bell', async () => {
     asStaff();
     process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';

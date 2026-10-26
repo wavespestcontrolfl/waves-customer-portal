@@ -1481,7 +1481,9 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
     }
 
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    // A staff text to a tracking line gets this forward: the tracking-line bell above skips staff
+    // senders (GATE_TECH_STAFF_GUARDS), and the office must still hear about it.
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && (!isTrackingLeadInbound || staffSender) && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
         const mediaText = inboundMedia.length
