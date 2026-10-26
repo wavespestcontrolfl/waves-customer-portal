@@ -58,23 +58,18 @@ function namesItem(row, item) {
   return !!row.peer && item.peers.has(row.peer);
 }
 
-// The newest time among the witness rows that name this item.
-function latestFor(rows, item) {
-  let best = null;
-  for (const row of rows) if (namesItem(row, item)) best = later(best, asDate(row.at));
-  return best;
+// On a SHARED phone (see sharedPhoneItems) the phone says nothing about WHO was
+// reached, so a witness names the item only by customer id: the same id, or, for
+// a subject that has none (an unknown sender), a witness that has none either.
+function ownMatch(row, item) {
+  if (item.customerId) return !!row.customer_id && String(row.customer_id) === item.customerId;
+  return !row.customer_id && !!row.peer && item.peers.has(row.peer);
 }
 
-// The newest time among rows that share the item's phone but belong to ANOTHER
-// customer (two different ids): never contact for this item, but the Messages
-// reader matches by phone alone and may have counted them as answering the text.
-function latestCrossedFor(rows, item) {
+// The newest time among the witness rows that name this item.
+function latestFor(rows, item, matches = namesItem) {
   let best = null;
-  for (const row of rows) {
-    const crossed = !!item.customerId && !!row.customer_id && String(row.customer_id) !== item.customerId
-      && !!row.peer && item.peers.has(row.peer);
-    if (crossed) best = later(best, asDate(row.at));
-  }
+  for (const row of rows) if (matches(row, item)) best = later(best, asDate(row.at));
   return best;
 }
 
@@ -150,6 +145,59 @@ function identify(item, lookups) {
   return { item, customerId, peers, anchor, email: found.email || null };
 }
 
+// How far back a text or call row ties a customer to a phone when judging whether
+// the phone is shared.
+const SHARED_PHONE_LOOKBACK_DAYS = 365;
+
+// The sms items whose phone is SHARED: some other customer (a different non-null
+// customer id) is tied to one of the item's phone identities, by a live customers
+// row with that phone, or by a text or call row on it carrying a customer id (or a
+// thread of that customer). A subject with no customer id (an unknown sender) is
+// shared when two different customers are tied to it. The schema lets different
+// people share a phone, and the Messages reader judges a conversation by phone
+// alone, so for a shared phone its verdict is not used (textAnswered).
+async function sharedPhoneItems(conn, smsIdents, since) {
+  const peers = unique(smsIdents.flatMap((i) => [...i.peers]));
+  if (!peers.length) return new Set();
+  const tied = new Map(); // peer -> Set(customer ids)
+  const tie = (rows) => rows.forEach((r) => {
+    if (!r.customer_id || !r.peer) return;
+    if (!tied.has(r.peer)) tied.set(r.peer, new Set());
+    tied.get(r.peer).add(String(r.customer_id));
+  });
+  const lookback = new Date(since.getTime() - SHARED_PHONE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const onPeer = (sql) => `${phoneIdentitySql(sql)} = ANY(?)`;
+  const logPeer = (alias) => `(CASE WHEN ${alias}.direction = 'inbound' THEN ${alias}.from_phone ELSE ${alias}.to_phone END)`;
+  tie(await conn('customers').whereNull('deleted_at').whereRaw(onPeer('customers.phone'), [peers])
+    .select('id as customer_id', conn.raw(`${phoneIdentitySql('customers.phone')} as peer`)));
+  tie(await conn('sms_log as sl').whereNotNull('sl.customer_id').where('sl.created_at', '>', lookback).whereRaw(onPeer(logPeer('sl')), [peers])
+    .distinct('sl.customer_id', conn.raw(`${phoneIdentitySql(logPeer('sl'))} as peer`)));
+  tie(await conn('call_log as cl').whereNotNull('cl.customer_id').where('cl.created_at', '>', lookback).whereRaw(onPeer(logPeer('cl')), [peers])
+    .distinct('cl.customer_id', conn.raw(`${phoneIdentitySql(logPeer('cl'))} as peer`)));
+  tie(await conn('conversations as cv').whereNotNull('cv.customer_id').whereRaw(onPeer('cv.contact_phone'), [peers])
+    .select('cv.customer_id', conn.raw(`${phoneIdentitySql('cv.contact_phone')} as peer`)));
+  const shared = new Set();
+  for (const ident of smsIdents) {
+    const ids = new Set([...ident.peers].flatMap((peer) => [...(tied.get(peer) || [])]));
+    if (ident.customerId ? [...ids].some((id) => id !== ident.customerId) : ids.size >= 2) shared.add(ident);
+  }
+  return shared;
+}
+
+// A person's reply to a customer on a SHARED phone, by customer id: the replies the
+// Messages reader accepts as sent (sent or delivered), not only delivered ones, so
+// a reply still on its way answers the customer it went to. Newest per customer / phone.
+async function ownReplyRows(conn, { customerIds, peers, since }) {
+  const { withoutProactiveDraft } = require('./call-commitments');
+  const textPeer = phoneIdentitySql('os.to_phone');
+  return whereIdentity(
+    excludeUnresolvedSendReservations(conn('sms_log as os').where('os.direction', 'outbound'), 'os')
+      .whereRaw(operatorReplySql('os')).whereIn('os.status', ['sent', 'delivered'])
+      .modify(withoutProactiveDraft).where('os.created_at', '>', since),
+    'os.customer_id', textPeer, customerIds, peers,
+  ).select('os.customer_id', conn.raw(`${textPeer} as peer`)).max('os.created_at as at').groupByRaw('1, 2');
+}
+
 // What a person did, newest per customer / phone, after `since`: texts, calls
 // they placed and spoke on, and calls in that a human answered.
 async function personWitnesses(conn, { customerIds, peers, since }) {
@@ -221,7 +269,7 @@ async function attachEmailReplies(conn, idents, bundles) {
  *   email {emailId, customerId}; lead {customerId, phone}.
  * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>}} deps
  * @returns {Promise<Map<string, object>>} notification id -> bundle
- *   { anchor, pending (sms), textAt, backAt, inAt, crossedAt, visitAt, quote, replyAt };
+ *   { anchor, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt };
  *   an item whose subject cannot be identified is absent (never judged).
  */
 async function loadContactBundles(items, { conn, bookedVisits }) {
@@ -260,16 +308,20 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
   }
 
   const { textRows, backRows, inRows } = await personWitnesses(conn, { customerIds, peers, since });
+  const shared = smsIdents.length ? await sharedPhoneItems(conn, smsIdents, since) : new Set();
+  const replyRows = shared.size ? await ownReplyRows(conn, { customerIds, peers, since }) : [];
   const visits = await bookedVisits(customerIds);
   for (const ident of idents) {
     const { item, customerId } = ident;
+    // A shared phone: this customer's own evidence by customer id only (ownMatch).
+    const own = shared.has(ident);
     const bundle = {
       anchor: ident.anchor,
+      shared: item.kind === 'sms' ? own : null,
       pending: item.kind === 'sms' ? [...ident.peers].some((peer) => pendingPeers.has(peer)) : null,
-      textAt: latestFor(textRows, ident),
-      backAt: latestFor(backRows, ident),
-      inAt: latestFor(inRows, ident),
-      crossedAt: [textRows, backRows, inRows].reduce((best, rows) => later(best, latestCrossedFor(rows, ident)), null),
+      textAt: own ? latestFor(replyRows, ident, ownMatch) : latestFor(textRows, ident),
+      backAt: latestFor(backRows, ident, own ? ownMatch : namesItem),
+      inAt: latestFor(inRows, ident, own ? ownMatch : namesItem),
       visitAt: customerId ? asDate(visits.get(customerId)) : null,
       quote: false,
       replyAt: null,

@@ -545,20 +545,81 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect(await get(ownRow.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
     });
 
-    test('a text on a shared phone: another customer\'s reply to the number is not an answer for this customer\'s thread; their own reply, or a courtesy text, still closes it', async () => {
+    test('a text on a SHARED phone is judged only by this customer\'s own evidence: the Messages reader\'s phone-level verdict is not used (a reply to B, even one still "sent", leaves A open; a reply to A, sent or delivered, closes A)', async () => {
       gate('true');
       const t0 = mins(new Date(), -240);
+      // Two customers rows on one number.
       const shared = '+15555558083';
       const a = await customerWith(shared);
       const b = await customerWith(shared);
       const crossed = await text({ customer: a, phone: shared, at: t0 });
-      await staffText(b, shared, mins(t0, 10));
+      await staffText(b, shared, mins(t0, 10), { status: 'sent' });
       await sweep();
       expect((await get(crossed.row.id)).done_at).toBeNull();
-      // A's own reply (by customer id) names A.
-      await staffText(a, shared, mins(t0, 20));
+      await staffText(b, shared, mins(t0, 11));
+      await staffCall(b, shared, mins(t0, 12));
+      await sweep();
+      expect((await get(crossed.row.id)).done_at).toBeNull();
+      // A reply to A that is still "sent" answers A.
+      await staffText(a, shared, mins(t0, 20), { status: 'sent' });
       await sweep();
       expect(await get(crossed.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+
+      // A delivered reply, and a person's call with A, also answer A.
+      const a2 = await customerWith('+15555558084');
+      const b2 = await customerWith('+15555558084');
+      const a3 = await customerWith('+15555558085');
+      const b3 = await customerWith('+15555558085');
+      const delivered = await text({ customer: a2, phone: a2.phone, at: t0 });
+      const called = await text({ customer: a3, phone: a3.phone, at: t0 });
+      const waiting = await text({ customer: b3, phone: b3.phone, at: t0 });
+      await staffText(a2, a2.phone, mins(t0, 10));
+      await staffCall(a3, a3.phone, mins(t0, 10));
+      await sweep();
+      expect(await get(delivered.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+      expect(await get(called.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by a call' });
+      // The call was with A: B's thread on the same number is not answered by it.
+      expect((await get(waiting.row.id)).done_at).toBeNull();
+      expect(b2.id).not.toBe(a2.id);
+    });
+
+    test('a phone is shared by what is tied to it, not only by customers rows: a text or call row carrying another customer id ties them; an unshared phone keeps the reader\'s verdict (a courtesy text still closes)', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -240);
+      const a = await customerWith('+15555558086');
+      const other = await customerWith('+15555558087');
+      // One earlier text on A's number filed under another customer ties the two.
+      await staffText(other, a.phone, mins(t0, -600));
+      const tiedBell = await text({ customer: a, phone: a.phone, at: t0 });
+      // A reply with no customer id on a shared phone is not this customer's own evidence.
+      await staffText(null, a.phone, mins(t0, 10));
+      await sweep();
+      expect((await get(tiedBell.row.id)).done_at).toBeNull();
+
+      // An unshared phone, a courtesy text after a note that asked nothing: as before.
+      const alone = await customerWith('+15555558088');
+      await insert('sms_log', { direction: 'outbound', from_phone: BIZ, to_phone: alone.phone, customer_id: alone.id, message_body: 'Your visit is complete.',
+        message_type: 'service_complete', status: 'delivered', twilio_sid: sid('SMO'), created_at: mins(t0, -60) });
+      const courtesy = await text({ customer: alone, phone: alone.phone, at: t0, body: 'Thank you!' });
+      await sweep();
+      expect(await get(courtesy.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered, or no reply needed' });
+    });
+
+    test('an unknown sender on a shared phone stays open unless a witness with no customer id answers it', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -240);
+      const phone = '+15555558089';
+      const c1 = await customerWith(phone);
+      await customerWith(phone);
+      const unknown = await text({ phone, at: t0, known: false });
+      // A reply filed under one of the customers is not an answer for an unidentified sender.
+      await staffText(c1, phone, mins(t0, 10));
+      await sweep();
+      expect((await get(unknown.row.id)).done_at).toBeNull();
+      // A reply that carries no customer id names the number: it answers.
+      await staffText(null, phone, mins(t0, 20), { status: 'sent' });
+      await sweep();
+      expect(await get(unknown.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
     });
 
     test('an email from a customer: a person\'s reply in its thread closes it; a forward to someone else, a reply on another thread and an earlier reply do not', async () => {

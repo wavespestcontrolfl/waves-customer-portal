@@ -609,15 +609,21 @@ const contactAfter = (c, at) => !!at && new Date(at).getTime() > c.anchor.getTim
 // the reason only names which, from the same witnesses (the reader also counts
 // the texting assistant's reply as an answer, which has no witness of its own
 // here, hence the plain last reason).
+// A SHARED phone (another customer is tied to the number) is the exception: the
+// reader judges by phone alone and cannot say whom a reply reached, so its verdict
+// is not used. The bell closes only on this customer's own evidence by customer id
+// (a person's reply to them, a person's call with them), loaded as textAt / backAt /
+// inAt; nothing else, and never "no reply needed".
 function textAnswered(s) {
   const c = s.contact;
-  if (!c || c.pending !== false) return null;
+  if (!c) return null;
+  if (c.shared) {
+    if (contactAfter(c, c.textAt)) return 'Answered by text';
+    return contactAfter(c, c.backAt) || contactAfter(c, c.inAt) ? 'Answered by a call' : null;
+  }
+  if (c.pending !== false) return null;
   if (contactAfter(c, c.textAt)) return 'Answered by text';
   if (contactAfter(c, c.backAt) || contactAfter(c, c.inAt)) return 'Answered by a call';
-  // The reader matches by phone alone: a person's text or call to ANOTHER customer
-  // who shares this number may be what it counted. Nothing of this customer's
-  // answers it, so it is not judged.
-  if (contactAfter(c, c.crossedAt)) return null;
   return 'Answered, or no reply needed';
 }
 

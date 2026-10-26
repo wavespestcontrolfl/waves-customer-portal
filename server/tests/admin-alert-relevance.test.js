@@ -1177,10 +1177,11 @@ describe('customer-contact classes', () => {
       expect((await verdictFor(smsThread(), { pending: false, inAt: at(10) })).reason).toBe('Answered by a call');
       // A courtesy text, or one the assistant answered: the reader says nothing is waiting and no person witness is named.
       expect((await verdictFor(smsThread(), { pending: false })).reason).toBe('Answered, or no reply needed');
-      // Another customer's text on a shared phone may be what the reader counted: not judged unless this customer's own witness answers.
-      expect((await verdictFor(smsThread(), { pending: false, crossedAt: at(10) })).reason).toBeNull();
-      expect((await verdictFor(smsThread(), { pending: false, crossedAt: at(-10) })).reason).toBe('Answered, or no reply needed');
-      expect((await verdictFor(smsThread(), { pending: false, crossedAt: at(10), textAt: at(12) })).reason).toBe('Answered by text');
+      // A shared phone: the reader's verdict is not used, only this customer's own evidence.
+      expect((await verdictFor(smsThread(), { shared: true, pending: false })).reason).toBeNull();
+      expect((await verdictFor(smsThread(), { shared: true, pending: true, textAt: at(10) })).reason).toBe('Answered by text');
+      expect((await verdictFor(smsThread(), { shared: true, pending: false, backAt: at(10) })).reason).toBe('Answered by a call');
+      expect((await verdictFor(smsThread(), { shared: true, pending: false, textAt: at(-10), backAt: at(-10) })).reason).toBeNull();
       // A person's text or call from BEFORE the text never names the answer.
       expect((await verdictFor(smsThread(), { pending: false, textAt: at(-30), backAt: at(-30) })).reason).toBe('Answered, or no reply needed');
       // An unknown sender is judged the same way, by the number its sid names.
