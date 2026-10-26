@@ -42,6 +42,7 @@ const APPROVED_CATALOG_PRODUCTS = [
   { name: 'Advion Ant Bait Gel', epaReg: '100-1498' },
   { name: 'Advion WDG Granular', epaReg: '100-1483' },
   { name: 'Gentrol IGR', epaReg: '2724-351' },
+  { name: 'Gentrol Complete EC3', epaReg: '89459-119' }, // same entry: the catalog row since 2026-10-25
   { name: 'Tekko Pro IGR', epaReg: '53883-335' },
   { name: 'Delta Dust', epaReg: '432-772' },
   { name: 'LESCO 90/10 Nonionic Surfactant', epaReg: null }, // adjuvant, not a pesticide
@@ -178,11 +179,27 @@ describe('reportProductCopyFor — public shape', () => {
     ['Advion Ant Bait Gel', '100-1498'],
     ['Advion WDG Granular', '100-1483'],
     ['Gentrol IGR', '2724-351'],
+    ['Gentrol Complete EC3', '89459-119'],
     ['Tekko Pro IGR', '53883-335'],
   ])('narrow product %s carries no also_labeled_for key at all (owner ruling 2026-09-29)', (name, epaReg) => {
     const copy = reportProductCopyFor({ epaReg, name, city: 'Bradenton' });
     expect(copy).not.toBeNull();
     expect(copy).not.toHaveProperty('also_labeled_for');
+  });
+
+  it('Gentrol IGR and Gentrol Complete EC3 share one entry, by either registration or either name', () => {
+    // The catalog row became Gentrol Complete EC3 (EPA 89459-119) on 2026-10-25; visit lines recorded
+    // earlier keep 2724-351 and 'Gentrol IGR'. Neither may lose its copy.
+    const entry = findReportProductCopyEntry({ epaReg: '2724-351', name: 'Gentrol IGR' });
+    expect(entry).not.toBeNull();
+    expect(findReportProductCopyEntry({ epaReg: '89459-119', name: 'Gentrol Complete EC3' })).toBe(entry);
+    expect(findReportProductCopyEntry({ epaReg: null, name: 'Gentrol Complete EC3' })).toBe(entry);
+    expect(findReportProductCopyEntry({ epaReg: null, name: 'Gentrol IGR' })).toBe(entry);
+    // A registration is authoritative: the EC3 name never borrows the entry under another registration.
+    expect(findReportProductCopyEntry({ epaReg: '1-1', name: 'Gentrol Complete EC3' })).toBeNull();
+    // The label names German cockroaches only, never cockroaches as a group.
+    expect(entry.labelPests).toContain('German cockroaches');
+    expect(entry.labelPests).not.toContain('cockroaches');
   });
 
   it.each([
