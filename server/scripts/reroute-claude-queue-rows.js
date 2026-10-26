@@ -25,7 +25,7 @@ const EXECUTE = process.argv.includes('--execute');
     console.log(`  ${name}: ${n}`);
     for (const s of result.samples[name]) console.log(`    e.g. ${s.id}  ${s.title}`);
   }
-  if (EXECUTE) console.log(`Moved ${result.moved} row(s).`);
+  if (EXECUTE) console.log(`Moved ${result.moved} row(s); ${result.changedSinceRead} skipped because the row changed since it was read.`);
 })()
   .then(() => db.destroy())
   .catch(async (err) => {

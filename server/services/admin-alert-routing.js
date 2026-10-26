@@ -121,12 +121,13 @@ const SAMPLE = 5;
 // The one-time mover: open (done_at empty) admin rows the routing above would send to Claude, written
 // before the gate went on. Visibility only: it sets the same fields a new row gets and leaves read state,
 // done state, title, body and link alone, so nothing rings. A row already off the bell (feed 'activity')
-// is stamped for Claude without moving. Dry run by default. Refuses when the gate is off.
+// is stamped for Claude without moving. A row whose metadata changed between the read and the write is skipped
+// (`changedSinceRead`). Dry run by default. Refuses when the gate is off.
 async function rerouteOpenRows(conn, { execute = false } = {}) {
   if (!claudeQueueEnabled()) throw new Error('GATE_ALERT_CLAUDE_QUEUE is off: the mover only runs while the gate is on');
   const byClass = {};
   const samples = {};
-  const patches = new Map(); // JSON patch -> ids
+  const planned = []; // { id, patch, snapshot }: the metadata each row was classified with
   let scanned = 0;
   let after = null;
   // Cheap SQL pre-filter (an ops job stamp, or a category a fault class uses); classifyClaudeQueue decides.
@@ -147,25 +148,27 @@ async function rerouteOpenRows(conn, { execute = false } = {}) {
       byClass[verdict.className] = (byClass[verdict.className] || 0) + 1;
       (samples[verdict.className] = samples[verdict.className] || []);
       if (samples[verdict.className].length < SAMPLE) samples[verdict.className].push({ id: row.id, title: String(row.title).slice(0, 80) });
-      const patch = JSON.stringify(claudeQueuePatch(verdict));
-      patches.set(patch, [...(patches.get(patch) || []), row.id]);
+      planned.push({ id: row.id, patch: JSON.stringify(claudeQueuePatch(verdict)), snapshot: JSON.stringify(row.metadata ?? null) });
     }
     if (page.length < PAGE) break;
     after = page[page.length - 1].id;
   }
-  const total = [...patches.values()].reduce((n, ids) => n + ids.length, 0);
+  const total = planned.length;
   let moved = 0;
   if (execute && total) {
     await conn.transaction(async (trx) => {
-      for (const [patch, ids] of patches) {
-        // Fenced like the read: a row closed or stamped since is left alone.
-        moved += await trx('notifications').whereIn('id', ids).whereNull('done_at')
-          .whereRaw("COALESCE(metadata->>'claudeQueue', '') = ''")
+      for (const { id, patch, snapshot } of planned) {
+        // Fenced on the exact metadata the row was classified with (the relevance sweep's sameVersion idea), not
+        // on a row lock an emitter could wait behind. A refresh since the read (a reminder that became an owner
+        // ask, a changed class) changes the metadata, so the row is skipped and counted, never patched blind.
+        moved += await trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at')
+          .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [snapshot])
           .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [patch]) });
       }
     });
   }
-  return { execute, scanned, matched: total, moved, byClass, samples };
+  const changedSinceRead = execute ? total - moved : 0;
+  return { execute, scanned, matched: total, moved, changedSinceRead, byClass, samples };
 }
 
 module.exports = {

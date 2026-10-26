@@ -701,6 +701,9 @@ const NotificationService = {
           // by an emission that no longer routes (a Claude-to-person transition) is a change, never an identical repeat.
           const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
             && (existingMeta[k] ?? null) !== (useMeta[k] ?? null))
+            // A routed emission also changes the row when the assignment or its severity moves under the same class
+            // (an opsKind fyi -> ask reminder with identical text): who and severity are compared, only when routed.
+            || (Boolean(useMeta.claudeQueue) && ['claudeQueue', 'who', 'severity'].some((k) => (existingMeta[k] ?? null) !== (useMeta[k] ?? null)))
             || (existingMeta.claudeQueue ?? null) !== (useMeta.claudeQueue ?? null);
           // Ring-only-on-change stamps are content too (admin-alerts-ring-v2
           // follow-up): count/newCount growing, or itemKeys naming a

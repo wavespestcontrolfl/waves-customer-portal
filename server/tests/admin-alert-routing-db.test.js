@@ -135,6 +135,24 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
     expect(repeat).toMatchObject({ id: first.id, deduped: true });
   });
 
+  test('a reminder whose opsKind changes with identical text refreshes its severity: fyi -> ask lists in needs-me, ask -> fyi drops out', async () => {
+    const opts = { refreshOnDedupe: true };
+    const first = await macRow('sev-up', { opsKind: 'fyi' }, opts);
+    expect((await get(first.id)).metadata).toMatchObject({ severity: 'fyi', claudeQueue: 'ops-job' });
+    const { listNeedsMe } = require('../services/needs-me');
+    expect((await listNeedsMe({ who: 'claude', limit: 500 })).items.map((i) => i.id)).not.toContain(first.id);
+    const up = await macRow('sev-up', { opsKind: 'ask' }, opts);
+    expect(up).toMatchObject({ id: first.id, refreshed: true });
+    expect((await get(first.id)).metadata).toMatchObject({ severity: 'needs-you', feed: 'activity', who: 'claude', claudeQueue: 'ops-job' });
+    expect((await listNeedsMe({ who: 'claude', limit: 500 })).items.find((i) => i.id === first.id)).toMatchObject({ severity: 'needs-you', who: 'claude' });
+
+    const second = await macRow('sev-down', { opsKind: 'ask' }, opts);
+    const down = await macRow('sev-down', { opsKind: 'fyi' }, opts);
+    expect(down).toMatchObject({ id: second.id, refreshed: true });
+    expect((await get(second.id)).metadata).toMatchObject({ severity: 'fyi', claudeQueue: 'ops-job' });
+    expect((await listNeedsMe({ who: 'claude', limit: 500 })).items.map((i) => i.id)).not.toContain(second.id);
+  }, 30000);
+
   test('a feed the emitter set itself is not cleared by a later refresh of a never-routed row', async () => {
     const opts = { refreshOnDedupe: true, ringOnRefresh: () => false };
     const row = await NotificationService.notifyAdmin('system', 'Own feed row', 'Body.', {
@@ -210,6 +228,7 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
 
         const live = await routing.rerouteOpenRows(trx, { execute: true });
         expect(live.moved).toBe(live.matched);
+        expect(live.changedSinceRead).toBe(0);
         const c = await read(canary.id);
         expect(c.metadata).toMatchObject({ feed: 'activity', who: 'claude', severity: 'broken', claudeQueue: 'sms-draft-canary', dedupeKey: `sms-draft-canary:${RUN}` });
         expect(c.read_at).not.toBeNull();
@@ -224,6 +243,31 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
         expect(again.byClass['sms-draft-canary']).toBeUndefined();
         throw ROLLBACK;
       })).rejects.toBe(ROLLBACK);
+    });
+
+    test('a row whose metadata changes between the read and the write is not patched, and is counted', async () => {
+      // Committed rows and a connection wrapper that lets an emitter refresh land between the mover's read and its write.
+      await db('notifications').whereRaw("starts_with(metadata->>'dedupeKey', ?)", [RUN]).del();
+      const mk = (name, meta) => db('notifications').insert({
+        recipient_type: 'admin', category: 'system', title: `Race ${name}`, body: 'Body.', link: '/admin',
+        metadata: JSON.stringify({ dedupeKey: key(name), opsJob: 'race-job', opsKind: 'ask', ...meta }),
+      }).returning('*').then(([r]) => r);
+      const turned = await mk('race-turned', {});
+      const steady = await mk('race-steady', {});
+      const racing = Object.assign((table) => db(table), {
+        transaction: async (fn) => {
+          // The emitter's refresh: the reminder became an owner ask.
+          await db('notifications').where({ id: turned.id }).update({ metadata: db.raw("metadata || '{\"opsWho\":\"person\"}'::jsonb") });
+          return db.transaction(fn);
+        },
+      });
+      const out = await routing.rerouteOpenRows(racing, { execute: true });
+      expect(out.matched).toBeGreaterThanOrEqual(2);
+      expect(out.changedSinceRead).toBe(1);
+      expect(out.moved).toBe(out.matched - 1);
+      expect((await get(turned.id)).metadata).not.toHaveProperty('claudeQueue');
+      expect((await get(turned.id)).metadata.feed).toBeUndefined();
+      expect((await get(steady.id)).metadata).toMatchObject({ feed: 'activity', who: 'claude', claudeQueue: 'ops-job' });
     });
 
     test('refuses to run while the gate is off', async () => {
