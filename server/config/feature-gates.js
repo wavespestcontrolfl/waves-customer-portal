@@ -1916,15 +1916,16 @@ const gates = {
   // sends, changes and holds nothing. Off unless exactly 'true'.
   smsReplyOutcomes: process.env.GATE_SMS_REPLY_OUTCOMES === 'true',
 
-  // SMS prompt patches and the auto-promote loop (owner rulings 2026-09-27 "the texting AI should
-  // improve with NO human approval steps" and 2026-10-24 "do all"): with mode 'true' the
-  // real-answers drafter appends the ONE active learned-rules block (sms_prompt_patches) and
-  // stamps that patch's own prompt_version tag. In 'observe' or 'true' a daily tick turns the
-  // newest eligible pathology proposal into ONE guarded candidate rule, grades the drafter with it
-  // on the sealed exam (exam-only; real LLM API calls, a week apart at most) and records the
-  // decision; nothing activates. Unset/anything else = off: nothing runs and the drafter stays
-  // unpatched. No active patch = prompt and version byte-identical to today. Read at call time
-  // through smsPromptAutopromoteMode(); this entry is on in both non-off modes (logGateStatus only).
+  // SMS prompt auto-promote (owner rulings 2026-09-27 and 2026-10-24): the texting drafter's
+  // prompt improves with no human approval step. A pathology proposal becomes ONE candidate
+  // rule block, the sealed exam grades the drafter with it against the current prompt, a
+  // candidate that clears the bar goes live under its own prompt_version tag, and a daily
+  // monitor retires it when live drafts or customer replies get worse. This deliberately
+  // replaces the old "proposals never auto-apply" rule of sms-pathology-ledger.js. Modes:
+  // unset/anything else = off (nothing runs); 'observe' = candidates, exams and decisions are
+  // recorded and NOTHING activates; 'true' = activation and rollback. Exam runs spend real LLM
+  // API calls. Read at call time through smsPromptAutopromoteMode(); this entry is on in both
+  // non-off modes (logGateStatus only).
   get smsPromptAutopromote() { return smsPromptAutopromoteMode() !== 'off'; },
 
   // Lead Auto-Bridge — when a website lead comes in during business hours,
@@ -7867,10 +7868,9 @@ function smsCourtesyAfterTemplateLive() {
   return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
 }
 
-// GATE_SMS_PROMPT_AUTOPROMOTE read at CALL time: 'true' = the active prompt patch applies and the
-// loop records candidates, exams and decisions; 'observe' = the loop records, the drafter stays
-// unpatched; unset or anything else = off. The canonical reader for sms-prompt-patch.js and the
-// cron.
+// GATE_SMS_PROMPT_AUTOPROMOTE read at CALL time: 'true' = candidates, exams, activation and
+// rollback; 'observe' = candidates, exams and recorded decisions only, nothing activates;
+// unset or anything else = off. The canonical reader for sms-prompt-patch.js and the cron.
 function smsPromptAutopromoteMode() {
   const raw = String(process.env.GATE_SMS_PROMPT_AUTOPROMOTE || '').trim().toLowerCase();
   if (raw === 'true') return 'true';

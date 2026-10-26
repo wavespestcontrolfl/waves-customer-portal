@@ -2,7 +2,7 @@
  * SMS prompt auto-promote wiring in server/services/scheduler.js (GATE_SMS_PROMPT_AUTOPROMOTE):
  *  - the drafter's active-patch snapshot starts BEFORE the cronJobs early return, so a process with
  *    crons disabled still drafts with the live patch and its version tag;
- *  - the daily tick (6:12) returns before taking a lock when the gate is off.
+ *  - the daily tick (6:12) and the rollback monitor (6:42) return before taking a lock when the gate is off.
  * Mock baseline copied from scheduler-bid-kit-expiry-cron.test.js.
  */
 jest.mock('../utils/scheduled-cron', () => ({
@@ -31,7 +31,7 @@ jest.mock('../services/intelligence-bar/threads', () => ({ purgeExpiredThreads: 
 jest.mock('../services/intelligence-bar/tasks', () => ({ purgeExpiredTasks: jest.fn().mockResolvedValue(1) }));
 jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUpSweep: jest.fn() }));
 jest.mock('../services/sms-prompt-patch', () => ({ startPatchRefresh: jest.fn() }));
-jest.mock('../services/sms-prompt-autopromote', () => ({ runAutopromoteTick: jest.fn() }));
+jest.mock('../services/sms-prompt-autopromote', () => ({ runAutopromoteTick: jest.fn(), runRollbackMonitor: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
@@ -59,17 +59,23 @@ test('the snapshot loads with crons disabled, and not at all with the gate off',
   expect(patchLib.startPatchRefresh).not.toHaveBeenCalled();
 });
 
-test('gate off: the tick returns before taking a lock; gate on: it runs under its own lock', async () => {
+test('gate off: both crons return before taking a lock; gate on: each runs under its own lock', async () => {
   isEnabled.mockImplementation((name) => name === 'cronJobs');
   initScheduledJobs();
   await job('12 6 * * *')();
+  await job('42 6 * * *')();
   expect(runExclusive).not.toHaveBeenCalledWith('sms-prompt-autopromote', expect.any(Function));
+  expect(runExclusive).not.toHaveBeenCalledWith('sms-prompt-rollback', expect.any(Function));
   expect(autopromote.runAutopromoteTick).not.toHaveBeenCalled();
+  expect(autopromote.runRollbackMonitor).not.toHaveBeenCalled();
 
   cron.schedule.mockClear();
   isEnabled.mockImplementation((name) => name === 'cronJobs' || name === 'smsPromptAutopromote');
   initScheduledJobs();
   await job('12 6 * * *')();
+  await job('42 6 * * *')();
   expect(autopromote.runAutopromoteTick).toHaveBeenCalledTimes(1);
+  expect(autopromote.runRollbackMonitor).toHaveBeenCalledTimes(1);
   expect(runExclusive).toHaveBeenCalledWith('sms-prompt-autopromote', expect.any(Function));
+  expect(runExclusive).toHaveBeenCalledWith('sms-prompt-rollback', expect.any(Function));
 });

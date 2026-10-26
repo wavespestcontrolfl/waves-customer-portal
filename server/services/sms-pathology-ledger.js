@@ -15,18 +15,19 @@
  *   PROPOSER (weekly, Sunday): for cells that accumulated enough NEW
  *   evidence, drafts ONE harness-patch proposal (what to change, where,
  *   concrete wording, how the sealed exam would validate it) and PARKS it
- *   as a pending card in the Agents hub + bell. Proposals NEVER auto-apply:
- *   a prompt/facts change is a PROMPT_VERSION bump a human ships —
- *   "accepted" records the owner's go-ahead for a build lane, nothing more.
- *   (Hands-off rule note: green-auto does not apply here BY DESIGN — every
- *   proposal is an exception because every proposal changes generation.)
+ *   as a pending card in the Agents hub + bell. Proposals never auto-apply
+ *   by THIS module: a prompt/facts change is a PROMPT_VERSION bump a human
+ *   ships — "accepted" records the owner's go-ahead for a build lane, nothing
+ *   more. (Hands-off rule note: green-auto does not apply here BY DESIGN —
+ *   every proposal is an exception because every proposal changes generation.)
  *
- *   READ, never written, by sms-prompt-autopromote.js while
- *   GATE_SMS_PROMPT_AUTOPROMOTE is 'observe' or 'true' (owner 2026-09-27 "the
- *   texting AI should improve with NO human approval steps", 2026-10-24 "do
- *   all"): a pending prompt_discipline proposal can become ONE guarded candidate
- *   rule that the sealed exam grades, with the decision recorded. Nothing
- *   activates and a proposal's status never changes.
+ *   SUPERSEDED for one narrow case (owner 2026-09-27 "the texting AI should
+ *   improve with NO human approval steps", 2026-10-24 "do all"): while
+ *   GATE_SMS_PROMPT_AUTOPROMOTE is 'observe' or 'true', sms-prompt-autopromote.js
+ *   may turn a pending prompt_discipline proposal into ONE guarded rule, exam it
+ *   on the sealed exam, put it live under its own prompt_version tag ('true'
+ *   only), and roll it back by itself. It reads this table and never changes a
+ *   proposal's status; gate off, the rule above holds for everything.
  *
  * The taxonomy is fixed and enum-validated — the classifier picks from the
  * list or falls to 'other', so cells stay countable across months instead
