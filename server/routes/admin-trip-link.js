@@ -19,13 +19,16 @@ const STATUSES = ['matched', 'no_vehicle', 'no_destination', 'no_stop', 'ambiguo
 const dayNumber = (day) => Date.parse(`${day}T00:00:00Z`) / 86400000;
 const num = (value) => (value == null ? null : Number(value));
 
-// One row per PHYSICAL visit: grouped members share one leg, so they are one visit here.
+// One row per PHYSICAL visit: grouped members share one leg (the same status and leg values), so they are one visit
+// here, and its stamped minutes run from the group's earliest arrival to its latest completion (the matching window's
+// rule).
 const VISITS_SQL = `
-  SELECT DISTINCT ON (g.leg_group_key) g.status, g.gps_on_site_minutes, g.drive_minutes, g.drive_miles,
-         EXTRACT(EPOCH FROM (s.completed_at - s.arrived_at)) / 60 AS stamped_minutes
+  SELECT g.leg_group_key, min(g.status) AS status, min(g.gps_on_site_minutes) AS gps_on_site_minutes,
+         min(g.drive_minutes) AS drive_minutes, min(g.drive_miles) AS drive_miles,
+         EXTRACT(EPOCH FROM (max(s.completed_at) - min(s.arrived_at))) / 60 AS stamped_minutes
     FROM visit_gps_legs g JOIN scheduled_services s ON s.id = g.scheduled_service_id
    WHERE g.service_date BETWEEN ?::date AND ?::date
-   ORDER BY g.leg_group_key, g.scheduled_service_id`;
+   GROUP BY g.leg_group_key`;
 
 router.get('/summary', async (req, res) => {
   const from = validCalendarDate(req.query.from);

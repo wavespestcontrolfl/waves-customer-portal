@@ -459,8 +459,9 @@ describeDb('trip link (PostgreSQL)', () => {
     expect(status).toBe(200);
     expect(body).toMatchObject({ from: DAY, to: DAY, days: 1, services: 6, visits: 5, matched_pct: 40 });
     expect(body.by_status).toEqual({ matched: 2, no_vehicle: 1, no_destination: 1, no_stop: 1, ambiguous: 0 });
-    // Visit A: 30 GPS minutes, stamped 26 (14:22 to 14:48), 20 drive minutes, 5.2 miles. Visit B: 20, 16, 15, 3.
-    expect(body.medians).toEqual({ gps_on_site_minutes: 25, stamped_on_site_minutes: 21, drive_minutes: 17.5, drive_miles: 4.1 });
+    // Visit A: 30 GPS minutes, stamped 27 (the group's earliest arrival 14:22 to its latest completion 14:49), 20 drive
+    // minutes, 5.2 miles. Visit B: 20, 16, 15, 3.
+    expect(body.medians).toEqual({ gps_on_site_minutes: 25, stamped_on_site_minutes: 21.5, drive_minutes: 17.5, drive_miles: 4.1 });
     expect(body.trips_by_suggested_purpose).toEqual([{ key: 'business', trips: 3, miles: 10.3 }, { key: 'unclassified', trips: 1, miles: 6 }]);
     expect(body.trips_by_ends_at_kind).toEqual([
       { key: 'visit', trips: 2, miles: 8.2 }, { key: 'home', trips: 1, miles: 6 }, { key: 'supplier', trips: 1, miles: 2.1 },
