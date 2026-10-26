@@ -11,6 +11,13 @@ function restockMeta(raw) {
 // link, and the customer a job-card request came from are the office's. A
 // technician's list (officeDetail false) carries the product, the stock and
 // the request state only.
+// The SiteOne order email row an office list carries, and which statuses the Restock tab shows.
+// (ordered_quantity is added as a db.raw float8 at query time: a module-load db.raw would break every
+// test that mocks models/db and wires raw up later.)
+const EMAIL_COLUMNS = ['voe.status as email_status', 'voe.po as email_po', 'voe.sent_at as email_sent_at', 'voe.packages as email_packages',
+  'voe.item_number as email_item_number', 'voe.send_attempted_at as email_send_attempted_at', 'voe.claimed_at as email_claimed_at'];
+const EMAIL_SHOWN = new Set(['sent', 'sending']);
+
 async function listRestockRequests({ status = 'active', limit = 100, showSpend = false, officeDetail = true, requestId, productId } = {}) {
     if (requestId && require('joi').string().guid().validate(requestId).error) throw Object.assign(new Error('Invalid restock request id'), { statusCode: 400, isOperational: true });
     if (productId && require('joi').string().guid().validate(productId).error) throw Object.assign(new Error('Invalid product id'), { statusCode: 400, isOperational: true });
@@ -42,6 +49,9 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
       )
       .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
+      // The order email to SiteOne (GATE_SITEONE_EMAIL_ORDER; the table ships with its migration):
+      // office lists carry its row so a sent email is never hidden. float8 = a JS number or null.
+      .modify((q) => { if (officeDetail) q.leftJoin('vendor_order_emails as voe', 'voe.restock_request_id', 'prr.id').select([...EMAIL_COLUMNS, db.raw('voe.ordered_quantity::float8 as email_ordered_quantity')]); })
       .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
       .orderByRaw('prr.needed_by asc nulls last')
       .orderBy('prr.created_at', 'desc')
@@ -58,6 +68,8 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
     // spend: a single-product order total IS the unit cost — owner-only,
     // like every other cost field on this router (Codex r1 P2).
     return {
+      // Whether the Restock tab offers "Email order to SiteOne" (the gate; the button is admin-only).
+      siteOneEmailOrder: require('../config/feature-gates').siteOneEmailOrderLive(),
       requests: rows.map((row) => ({
         id: row.id,
         productId: row.product_id,
@@ -80,6 +92,18 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         // | failed | needs_review, with the vendor number, total and the
         // parked reason so the tab explains why a request still needs a hand.
         order: hasOrders ? restockOrderView(row, showSpend, officeDetail) : null,
+        // The email to SiteOne for this request (sent, or sent-or-in-flight
+        // and awaiting a person's check); null = none.
+        // Only office lists join the email row, so email_status is absent elsewhere.
+        emailOrder: EMAIL_SHOWN.has(row.email_status) ? {
+          status: row.email_status, po: row.email_po, sentAt: row.email_sent_at,
+          packages: row.email_packages, itemNumber: row.email_item_number,
+          // What those packages hold, in the request's unit: the tab's Receive default (a request for
+          // 301 lb emails 7 x 50 lb), also while the send is unconfirmed (Codex #6866 r2 P2).
+          orderedQuantity: row.email_ordered_quantity,
+          // sent | sending | retryable (a stale claim that never attempted its send): what the tab shows.
+          state: require('./procurement/vendor-order-email').emailOrderState({ status: row.email_status, send_attempted_at: row.email_send_attempted_at, claimed_at: row.email_claimed_at }),
+        } : null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,

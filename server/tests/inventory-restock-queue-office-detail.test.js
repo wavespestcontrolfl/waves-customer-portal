@@ -13,9 +13,16 @@ const ROW = {
 
 jest.mock('../models/db', () => {
   const chain = {};
-  ['leftJoin', 'select', 'orderByRaw', 'orderBy', 'limit', 'where', 'whereIn', 'orWhereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+  ['select', 'orderByRaw', 'orderBy', 'limit', 'where', 'whereIn', 'orWhereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+  // Like Postgres: the email_* columns exist only when the query joined vendor_order_emails.
+  let joinedEmails = false;
+  chain.leftJoin = jest.fn((table) => { if (String(table).startsWith('vendor_order_emails')) joinedEmails = true; return chain; });
   chain.modify = jest.fn((fn) => { fn(chain); return chain; });
-  chain.then = (resolve, reject) => Promise.resolve([global.__restockRow]).then(resolve, reject);
+  chain.then = (resolve, reject) => {
+    const row = joinedEmails ? global.__restockRow : Object.fromEntries(Object.entries(global.__restockRow).filter(([k]) => !k.startsWith('email_')));
+    joinedEmails = false;
+    return Promise.resolve([row]).then(resolve, reject);
+  };
   const db = jest.fn(() => chain);
   db.schema = { hasTable: jest.fn(async () => true) };
   db.raw = jest.fn((sql) => sql);
@@ -36,6 +43,41 @@ describe('restock list office detail', () => {
       vendor: null, vendorSku: null, vendorProductUrl: null, customerName: null, address: null, city: null,
     });
     expect(requests[0].order).toMatchObject({ status: 'placed', adapter: null, externalOrderNumber: null, amountCents: null });
+  });
+
+  // GATE_SITEONE_EMAIL_ORDER: the owner's list says whether the tab offers the
+  // button and carries a sent (or unconfirmed) email; a technician's list has neither.
+  test('the owner list carries the email-order flag and the email; a technician list carries the flag but never the email', async () => {
+    global.__restockRow = { ...ROW, email_status: 'sent', email_po: 'WAVES-R1', email_sent_at: '2026-10-27T15:00:00Z', email_packages: 6, email_item_number: '098604', email_ordered_quantity: 350 }; // float8 cast: a number
+    delete process.env.GATE_SITEONE_EMAIL_ORDER;
+    const off = await listRestockRequests({ status: 'open', showSpend: true });
+    expect(off.siteOneEmailOrder).toBe(false);
+    process.env.GATE_SITEONE_EMAIL_ORDER = 'true';
+    try {
+      const owner = await listRestockRequests({ status: 'open', showSpend: true });
+      expect(owner.siteOneEmailOrder).toBe(true);
+      expect(owner.requests[0].emailOrder).toEqual({ status: 'sent', po: 'WAVES-R1', sentAt: '2026-10-27T15:00:00Z', packages: 6, itemNumber: '098604', orderedQuantity: 350, state: 'sent' });
+      const tech = await listRestockRequests({ status: 'open', officeDetail: false });
+      expect(tech.siteOneEmailOrder).toBe(true); // the gate state only; the button is admin-only in the tab
+      expect(tech.requests[0].emailOrder).toBeNull();
+    } finally { delete process.env.GATE_SITEONE_EMAIL_ORDER; }
+  });
+
+  test('a sending email reads retryable only when its claim never attempted the send and is stale (Codex #6866 r1 P2)', async () => {
+    const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000).toISOString();
+    const read = async (row) => {
+      global.__restockRow = { ...ROW, email_status: 'sending', email_po: 'WAVES-R1', ...row };
+      return (await listRestockRequests({ status: 'open', showSpend: true })).requests[0].emailOrder;
+    };
+    expect(await read({ email_send_attempted_at: null, email_claimed_at: minutesAgo(11) })).toMatchObject({ status: 'sending', state: 'retryable' });
+    expect(await read({ email_send_attempted_at: null, email_claimed_at: minutesAgo(2) })).toMatchObject({ status: 'sending', state: 'sending' });
+    expect(await read({ email_send_attempted_at: minutesAgo(11), email_claimed_at: minutesAgo(11) })).toMatchObject({ status: 'sending', state: 'sending' });
+  });
+
+  test('a failed or pending email row is not shown', async () => {
+    global.__restockRow = { ...ROW, email_status: 'failed', email_po: 'WAVES-R1' };
+    const { requests } = await listRestockRequests({ status: 'open', showSpend: true });
+    expect(requests[0].emailOrder).toBeNull();
   });
 
   test('the office list keeps them (default)', async () => {

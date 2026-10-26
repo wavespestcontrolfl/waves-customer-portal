@@ -315,13 +315,18 @@ async function assertNoLiveAutoOrder(trx, productId) {
  *     would raise a fresh request and order AGAIN on top of an order that
  *     may already be on its way. Receive stays open (the stock arrived);
  *     mark ordered stays open (it is already ordered).
+ *   - an order email out (vendor_order_emails sent, or sending with the
+ *     outcome unknown) → 'cancel' refuses for the same reason, read before
+ *     the automatic order row because an emailed request has none.
  * Call under the request row lock. Throws { statusCode: 409, code:
- * 'auto_order_placing' | 'auto_order_out' }.
+ * 'auto_order_placing' | 'auto_order_out' | 'email_order_out' }.
  */
 async function assertManualActionAllowed(trx, requestId, action) {
   const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id', 'status', 'placed_at', 'external_order_number', 'evidence');
-  if (!row) return {};
   const refuse = (code, message) => { const err = new Error(message); err.statusCode = 409; err.code = code; throw err; };
+  const emailed = action === 'cancel' && await emailOrderOutFor(trx, requestId);
+  if (emailed) refuse('email_order_out', `SiteOne was emailed an order for this request (PO ${emailed.po})${emailed.status === 'sending' ? ', and the email may have gone out' : ''}. Receive it when it arrives. To cancel it, tell SiteOne first, then mark the email row dismissed.`);
+  if (!row) return {};
   if (row.status === 'placing') refuse('auto_order_placing', 'An automatic order for this request is being placed right now — wait for it to place or park (Restock tab), then act.');
   if (action === 'cancel' && row.placed_at && !meta(row.evidence).revokedAt) {
     refuse('auto_order_out', `An automatic order for this request${row.external_order_number ? ` (#${row.external_order_number})` : ''} may already have gone out. Receive it when it arrives, or cancel it with the vendor and record the revoke (ops/agents/auto-order-revoke.js --order=${row.id}) — only then cancel the request.`);
@@ -565,7 +570,10 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
     // request is still open: staff who ordered by hand and marked it ordered
     // must not be told again (hook r27 P1). Dispatched rows (placed_at set)
     // carry reconciliation bells, re-rung in any live state.
-    .whereRaw("(vo.placed_at IS NOT NULL OR prr.status = 'open')")
+    // ...and never once the order was EMAILED to the vendor (sent, or sending with the outcome
+    // unknown): the request may stay open after an ambiguous send, and "order manually" on top
+    // of it would buy twice (pre-push audit P1 on a76c029245).
+    .whereRaw("(vo.placed_at IS NOT NULL OR (prr.status = 'open' AND NOT EXISTS (SELECT 1 FROM vendor_order_emails voe WHERE voe.restock_request_id = prr.id AND voe.status IN ('sending', 'sent'))))")
     .whereRaw("jsonb_exists(vo.evidence, 'bell')")
     .whereRaw("NULLIF(vo.evidence->>'bellAt', '') IS NULL")
     .select('vo.id', 'vo.evidence', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name');
@@ -752,6 +760,14 @@ async function prefetchVendorLogin(conn, requestId, registry, deadAdapters = nul
 // rung by a gated sweep) — retired in the claim transaction, and when the
 // claim CANCELS the request: a bell telling staff to buy a need that is gone
 // is an unnecessary purchase (Codex r20 P1, r24 P1).
+// An order EMAILED to the vendor for this request (vendor_order_emails, GATE_SITEONE_EMAIL_ORDER):
+// sent, or sending with the outcome unknown. The vendor has the order, or may: nothing may claim
+// it for the bot, tell staff to order it by hand, or cancel the request. The one read for the
+// claim, the bells, the manual cancel guard and the reorder sweep's stand-down. null = none.
+function emailOrderOutFor(conn, requestId) {
+  return conn('vendor_order_emails').where({ restock_request_id: requestId }).whereIn('status', ['sending', 'sent']).first('po', 'status');
+}
+
 function retireRequestBell(trx, requestId) {
   return require('../notification-service')._private.openToCloser(trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]), 'procurement').update(require('../notification-service')._private.doneColumns({ by: 'procurement', resolution: 'The reorder request was handled by the system', keepExisting: true, conn: trx }));
 }
@@ -876,6 +892,11 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) return { skipped: 'not_found' };
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
+  // An order EMAILED to the vendor (vendor_order_emails, GATE_SITEONE_EMAIL_ORDER) for this
+  // request — sent, or sending with the outcome unknown — means the vendor has the order
+  // (or may): never claim it for the bot as well. The email claim takes this same request
+  // row lock, so the two cannot both pass.
+  if (await emailOrderOutFor(trx, requestId)) return { skipped: 'email_order' };
   const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, login });
   if (resolved.skipped) return resolved;
   const { vendor, adapterKey, m, credentials = null } = resolved;
@@ -1310,6 +1331,8 @@ async function bellUndispatchable(conn, requestId, notify) {
   // ledger bell says do-not-reorder; a gate closed since must not hand the
   // office an "order manually" bell beside it (hook r27 P0/P1).
   if (await findLiveAutoOrder(conn, request.product_id)) return { autoOrderLive: true };
+  // The order was emailed to the vendor (sent, or sending with the outcome unknown): same stand-down.
+  if (await emailOrderOutFor(conn, requestId)) return { emailOrderOut: true };
   const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
   if (!product) return { bellLost: true };
   // notifyAdmin resolves null when it could not persist the row: a null
@@ -1332,6 +1355,11 @@ async function bellUndispatchable(conn, requestId, notify) {
   if (await findLiveAutoOrder(conn, request.product_id)) {
     await retireRequestBell(conn, requestId);
     return { autoOrderLive: true };
+  }
+  // An order email claimed meanwhile retired the bells that existed then — retire this one too.
+  if (await emailOrderOutFor(conn, requestId)) {
+    await retireRequestBell(conn, requestId);
+    return { emailOrderOut: true };
   }
   return { belled: true };
 }
@@ -1487,6 +1515,7 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
 module.exports = {
   RECEIVED_SETTLES_SQL,
   settleRequestLedgerBells,
+  retireRequestBell,
   cancelAtClaim,
   findLiveAutoOrder,
   landedAfterReceiveFor,
@@ -1502,6 +1531,7 @@ module.exports = {
   vendorOrderQuantity,
   assertNoLiveAutoOrder,
   assertManualActionAllowed,
+  emailOrderOutFor,
   orderedQuantityFor,
   AUTO_ORDER_GATE: GATE,
   _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },

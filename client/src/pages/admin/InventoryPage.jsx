@@ -23,6 +23,8 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProductLabelReview from "../../components/admin/ProductLabelReview";
+import SiteOneEmailOrderDialog from "../../components/admin/SiteOneEmailOrderDialog";
+import { etDateString } from "../../lib/timezone";
 import {
   ActionFeedback,
   Badge,
@@ -2972,6 +2974,11 @@ function RestockRequestsTab({
   const loadSequence = useRef(0);
   const [receivingId, setReceivingId] = useState("");
   const [receiveDrafts, setReceiveDrafts] = useState({});
+  // GATE_SITEONE_EMAIL_ORDER: the server tells an admin whether the tab
+  // offers "Email order to SiteOne"; emailOrderFor is the request whose
+  // preview dialog is open.
+  const [emailOrderEnabled, setEmailOrderEnabled] = useState(false);
+  const [emailOrderFor, setEmailOrderFor] = useState(null);
   // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
   // server presigns for 1 h; the cell drops the links a little before that
   // and offers Refresh, so a tab left open can always re-request fresh URLs.
@@ -3020,7 +3027,10 @@ function RestockRequestsTab({
     setLoading(true);
     try {
       const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(queueStatus)}${requestId ? `&requestId=${encodeURIComponent(requestId)}` : ""}`);
-      if (sequence === loadSequence.current) setRequests(data.requests || []);
+      if (sequence === loadSequence.current) {
+        setRequests(data.requests || []);
+        setEmailOrderEnabled(!!data.siteOneEmailOrder);
+      }
     } catch (err) {
       if (sequence === loadSequence.current)
         showToast(`Failed to load restock requests: ${err.message}`);
@@ -3185,6 +3195,7 @@ function RestockRequestsTab({
                       canAuthor={canAuthor}
                       evidence={evidence[request.id]}
                       loadEvidence={loadEvidence}
+                      onEmailOrder={emailOrderEnabled ? setEmailOrderFor : null}
                     />
                     <RestockActionCell
                       request={request}
@@ -3200,6 +3211,22 @@ function RestockRequestsTab({
             </TBody>
           </Table>
         </div>
+      )}
+      {emailOrderFor && (
+        <SiteOneEmailOrderDialog
+          request={emailOrderFor}
+          onClose={() => setEmailOrderFor(null)}
+          onSent={async (result) => {
+            setEmailOrderFor(null);
+            showToast(
+              result.requestMarked === false
+                ? "Email sent to SiteOne, but the request was not marked ordered. Use Mark Ordered."
+                : "Order emailed to SiteOne",
+            );
+            await load();
+            onUpdate && onUpdate();
+          }}
+        />
       )}
     </Card>
   );
@@ -3242,15 +3269,55 @@ function autoOrderSummary(order) {
 
 // Restock tab — the request's status pill, its automatic-order outcome and
 // the Mark Ordered action, in one cell.
+// The SiteOne order email states a Restock row shows (the server's emailOrder.state; no email =
+// "none"). Only "none" and "retryable" (a stale claim that never started) offer the button.
+const EMAIL_ORDER_STATES = {
+  none: { canSend: true, render: () => null },
+  retryable: {
+    canSend: true,
+    render: (e) => (
+      <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
+        An earlier email to SiteOne never started · PO {e.po}. You can send it
+        again.
+      </div>
+    ),
+  },
+  sending: {
+    canSend: false,
+    render: (e) => (
+      <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
+        Email to SiteOne may have gone out · PO {e.po}. Check SendGrid or
+        SiteOne before sending again.
+      </div>
+    ),
+  },
+  sent: {
+    canSend: false,
+    render: (e) => (
+      <div className="mt-[6px] text-ui-body u-nums">
+        Emailed to SiteOne {etDateString(new Date(e.sentAt))} · PO {e.po}
+      </div>
+    ),
+  },
+};
+
+// The one call site passes every prop, so none needs a default.
 function RestockStatusCell({
   request,
   receivingId,
   runAction,
-  canAuthor = false,
-  evidence = null,
-  loadEvidence = null,
+  canAuthor,
+  evidence,
+  loadEvidence,
+  onEmailOrder,
 }) {
   const order = request.order;
+  const emailOrder = request.emailOrder;
+  const emailState = EMAIL_ORDER_STATES[emailOrder?.state ?? "none"];
+  // Mark Ordered and Email order share one eligibility: an owner, an open
+  // request, and no bot claim placing.
+  const canAct =
+    canAuthor && request.status === "open" && order?.status !== "placing";
   const summary = order ? autoOrderSummary(order) : null;
   // Links show only while their presigned URLs are live; an expired or empty
   // fetch falls back to the button, and live links keep a Refresh beside them.
@@ -3307,7 +3374,8 @@ function RestockStatusCell({
           )}
         </div>
       )}
-      {canAuthor && request.status === "open" && order?.status !== "placing" && (
+      {emailState.render(emailOrder)}
+      {canAct && (
         <Button
           onClick={() => runAction(request, "mark_ordered")}
           disabled={receivingId === request.id}
@@ -3317,6 +3385,16 @@ function RestockStatusCell({
           Mark Ordered
         </Button>
       )}
+      {canAct && onEmailOrder && emailState.canSend && (
+          <Button
+            onClick={() => onEmailOrder(request)}
+            disabled={receivingId === request.id}
+            variant="secondary"
+            className="mt-[8px] block"
+          >
+            Email order to SiteOne
+          </Button>
+        )}
     </TD>
   );
 }
@@ -3332,7 +3410,7 @@ function RestockActionCell({
   setReceiveDrafts,
   receivingId,
   runAction,
-  canAuthor = false,
+  canAuthor,
 }) {
   const setDraft = (patch) =>
     setReceiveDrafts((prev) => ({
@@ -3364,7 +3442,8 @@ function RestockActionCell({
         <span className="text-ink-secondary">Closed</span>
       </TD>
     );
-  const orderOut = !!request.order?.placedAt && !request.order?.revokedAt;
+  // placedAt set means the order exists, so revokedAt needs no ?.
+  const orderOut = !!request.order?.placedAt && !request.order.revokedAt;
   return (
     <TD>
       <div className="grid gap-[6px] min-w-[220px]">
@@ -3373,6 +3452,7 @@ function RestockActionCell({
             value={
               draft.quantity ??
               request.order?.orderedQuantity ??
+              request.emailOrder?.orderedQuantity ??
               request.requestedQuantity ??
               ""
             }
