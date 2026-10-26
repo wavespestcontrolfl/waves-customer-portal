@@ -6,14 +6,20 @@
 // everywhere on the staff screens.
 //
 // Rules (concept layout only, final placement is set at the design visit):
-//   1. One nozzle at every vertex (corner) of every line.
-//   2. Along each segment, nozzles at an even spacing no larger than the nominal
-//      spacing (10 ft): a segment of L ft gets ceil(L / spacing) - 1 interior
-//      nozzles, so no gap on a single segment exceeds the spacing.
-//   3. Two nozzles never sit closer than the minimum spacing (3 ft): corners are
-//      placed first, then interior nozzles, and a candidate within the minimum of
-//      an accepted nozzle is dropped. This is what merges the repeated first and
-//      last vertex of a closed loop, and two lines that touch at a corner.
+//   1. Anchors first: one nozzle at every vertex of every line. A vertex within the
+//      minimum spacing (3 ft) of an anchor already placed merges into it (the first one
+//      kept), so a closed loop's repeated first and last vertex, and two lines that touch,
+//      share one nozzle.
+//   2. Then each line is walked as stretches between consecutive anchors, and each stretch
+//      of L ft gets ceil(L / spacing) - 1 evenly spaced interior nozzles, so no gap along a
+//      line exceeds the spacing (10 ft) by construction. Interior points of one stretch are
+//      at least spacing / 2 from each other and from its anchors.
+//   3. If an interior point would land within the minimum spacing of a nozzle that already
+//      exists (a line crossing mid-segment), the stretch is split at that nozzle, which
+//      becomes an anchor of this line too, and both halves are refilled. Nothing is dropped
+//      after the fact, so the maximum gap and the minimum spacing both hold.
+//      (The minimum spacing is capped at half the nominal spacing; that is what makes the
+//      refill never crowd its own anchors.)
 //
 // Kinds: 'eave' and 'fence'. Both get nozzles; totals are kept apart.
 
@@ -77,7 +83,8 @@ export function polylineFeet(points, lat, zoom, samePointFt = SAME_POINT_FT) {
  * @returns {{
  *   nozzles: Array<{key: string, x: number, y: number, kind: string, lineIndex: number, lineId: string,
  *                   segmentIndex: number, vertexIndex: number|null, corner: boolean}>,
- *   lines: Array<{id: string, kind: string, closed: boolean, lengthFt: number, nozzleCount: number}>,
+ *   lines: Array<{id: string, kind: string, closed: boolean, lengthFt: number, nozzleCount: number,
+ *                 keys: string[] (nozzle keys in walking order along the line)}>,
  *   totals: {count: number, eaveCount: number, fenceCount: number, linearFt: number, eaveFt: number, fenceFt: number},
  * }}
  */
@@ -90,7 +97,7 @@ export function placeNozzles(lines, options = {}) {
   }
   const ftPerPx = feetPerPixel(lat, zoom);
   const spacingPx = spacingFt / ftPerPx;
-  const minPx = minSpacingFt / ftPerPx;
+  const minPx = Math.min(minSpacingFt, spacingFt / 2) / ftPerPx;
   const samePx = SAME_POINT_FT / ftPerPx;
 
   const cleaned = (Array.isArray(lines) ? lines : []).map((line, lineIndex) => ({
@@ -99,58 +106,82 @@ export function placeNozzles(lines, options = {}) {
     points: cleanPoints(line && line.points, samePx),
   }));
 
-  const corners = [];
-  const interiors = [];
+  const placed = [];
+  const tooClose = (p) => placed.find((n) => distance(n, p) < minPx - EPS) || null;
+
+  // 1. Anchors: every vertex of every line, merging near-duplicates into the first one kept.
+  const vertexAnchor = cleaned.map((line, lineIndex) => line.points.map((pt, i) => {
+    const near = tooClose(pt);
+    if (near) return near;
+    const anchor = {
+      key: `${line.id}:v${i}`,
+      x: pt.x,
+      y: pt.y,
+      kind: line.kind,
+      lineIndex,
+      lineId: line.id,
+      // The last vertex closes the final segment; every other vertex opens one.
+      segmentIndex: Math.min(i, Math.max(line.points.length - 2, 0)),
+      vertexIndex: i,
+      corner: true,
+    };
+    placed.push(anchor);
+    return anchor;
+  }));
+
+  // 2 and 3. Fill one stretch between two nozzles. Returns the nozzles strictly between them,
+  // in order (new interior nozzles, and existing ones the stretch was split at).
+  const fillStretch = (a, b, meta, seen) => {
+    const len = distance(a, b);
+    const gaps = Math.max(1, Math.ceil(len / spacingPx - EPS));
+    const candidates = [];
+    for (let k = 1; k < gaps; k += 1) {
+      candidates.push({ x: a.x + ((b.x - a.x) * k) / gaps, y: a.y + ((b.y - a.y) * k) / gaps });
+    }
+    for (let c = 0; c < candidates.length; c += 1) {
+      const blocker = tooClose(candidates[c]);
+      if (blocker && !seen.has(blocker) && blocker !== a && blocker !== b) {
+        const nextSeen = new Set(seen).add(blocker);
+        return [...fillStretch(a, blocker, meta, nextSeen), blocker, ...fillStretch(blocker, b, meta, nextSeen)];
+      }
+    }
+    // No blocker (or a degenerate one already used to split this stretch): place the points.
+    return candidates.map((pt) => {
+      meta.count += 1;
+      const nozzle = {
+        key: `${meta.line.id}:s${meta.segment}:${meta.count}`,
+        x: pt.x,
+        y: pt.y,
+        kind: meta.line.kind,
+        lineIndex: meta.lineIndex,
+        lineId: meta.line.id,
+        segmentIndex: meta.segment,
+        vertexIndex: null,
+        corner: false,
+      };
+      placed.push(nozzle);
+      return nozzle;
+    });
+  };
+
   const lineStats = cleaned.map((line, lineIndex) => {
     const pts = line.points;
+    const anchors = vertexAnchor[lineIndex];
     let px = 0;
-    for (let i = 0; i < pts.length; i += 1) {
-      corners.push({
-        key: `${line.id}:v${i}`,
-        x: pts[i].x,
-        y: pts[i].y,
-        kind: line.kind,
-        lineIndex,
-        lineId: line.id,
-        // The last vertex closes the final segment; every other vertex opens one.
-        segmentIndex: Math.min(i, Math.max(pts.length - 2, 0)),
-        vertexIndex: i,
-        corner: true,
-      });
-    }
+    // Nozzles along the line in walking order (a shared anchor can appear twice on a loop).
+    const sequence = anchors.length ? [anchors[0]] : [];
     for (let i = 0; i + 1 < pts.length; i += 1) {
-      const a = pts[i];
-      const b = pts[i + 1];
-      const len = distance(a, b);
-      px += len;
-      // ceil with a tolerance so a segment of exactly the spacing is one gap.
-      const gaps = Math.max(1, Math.ceil(len / spacingPx - EPS));
-      for (let k = 1; k < gaps; k += 1) {
-        const t = k / gaps;
-        interiors.push({
-          key: `${line.id}:s${i}:${k}`,
-          x: a.x + (b.x - a.x) * t,
-          y: a.y + (b.y - a.y) * t,
-          kind: line.kind,
-          lineIndex,
-          lineId: line.id,
-          segmentIndex: i,
-          vertexIndex: null,
-          corner: false,
-        });
-      }
+      px += distance(pts[i], pts[i + 1]);
+      if (anchors[i] === anchors[i + 1]) continue;
+      const meta = { line, lineIndex, segment: i, count: 0 };
+      sequence.push(...fillStretch(anchors[i], anchors[i + 1], meta, new Set()), anchors[i + 1]);
     }
     // A loop is a line whose last vertex is back on its first (within the minimum spacing).
     const closed = pts.length >= 4 && distance(pts[0], pts[pts.length - 1]) <= Math.max(minPx, samePx);
-    return { id: line.id, kind: line.kind, closed, lengthFt: px * ftPerPx, nozzleCount: 0 };
+    return { id: line.id, kind: line.kind, closed, lengthFt: px * ftPerPx, nozzleCount: 0, keys: sequence.map((n) => n.key) };
   });
 
-  // Corners first, then interior points; a candidate too close to an accepted one is dropped.
-  const accepted = [];
-  [...corners, ...interiors].forEach((candidate) => {
-    const crowded = accepted.some((n) => distance(n, candidate) < minPx - EPS);
-    if (!crowded) accepted.push(candidate);
-  });
+  const accepted = placed;
   // Stable order: by line, then along the line.
   accepted.sort((a, b) => a.lineIndex - b.lineIndex
     || a.segmentIndex - b.segmentIndex

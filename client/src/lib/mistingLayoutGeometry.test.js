@@ -146,12 +146,14 @@ describe('placeNozzles', () => {
     expect(r.lines.map((l) => l.nozzleCount)).toEqual([4, 3]);
   });
 
-  it('drops an interior nozzle that lands within the minimum of another line', () => {
-    // a fence line crosses within 1 ft of where the eave line's midpoint nozzle goes
-    const eave = line('eave', [[0, 0], [20, 0]], 'e'); // interior nozzle at 10 ft
-    const fence = line('fence', [[10, 1], [10, 40]], 'f'); // corner 1 ft off it
+  it('splits a stretch at a nozzle of another line that crosses within the minimum spacing', () => {
+    // a fence line starts 1 ft off where the eave line's midpoint nozzle would go
+    const eave = line('eave', [[0, 0], [20, 0]], 'e'); // midpoint nozzle would be at 10 ft
+    const fence = line('fence', [[10, 1], [10, 40]], 'f');
     const r = placeNozzles([eave, fence], opts);
-    expect(r.totals.eaveCount).toBe(2); // the eave midpoint is dropped
+    // the eave walks through the fence corner (10.05 ft each way), so each half needs a nozzle
+    expect(r.lines[0].keys).toContain('f:v0');
+    expect(r.totals.eaveCount).toBe(4);
     for (let i = 0; i < r.nozzles.length; i += 1) {
       for (let j = i + 1; j < r.nozzles.length; j += 1) {
         expect(ftBetween(r.nozzles[i], r.nozzles[j])).toBeGreaterThanOrEqual(MIN_SPACING_FT - 1e-6);
@@ -166,6 +168,86 @@ describe('placeNozzles', () => {
     // appending a point leaves every earlier key in place
     const keysB = b.nozzles.map((n) => n.key);
     a.nozzles.forEach((n) => expect(keysB).toContain(n.key));
+  });
+});
+
+// Seeded generator so a failure reproduces.
+function mulberry32(seed) {
+  let a = seed;
+  return () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function assertInvariants(lines, result, spacingFt = NOMINAL_SPACING_FT, minFt = MIN_SPACING_FT) {
+  const byKey = new Map(result.nozzles.map((n) => [n.key, n]));
+  expect(byKey.size).toBe(result.nozzles.length); // keys are unique
+  // every pair of nozzles keeps the minimum spacing
+  for (let i = 0; i < result.nozzles.length; i += 1) {
+    for (let j = i + 1; j < result.nozzles.length; j += 1) {
+      expect(ftBetween(result.nozzles[i], result.nozzles[j])).toBeGreaterThanOrEqual(minFt - 1e-6);
+    }
+  }
+  // every consecutive gap along each line is within the spacing
+  result.lines.forEach((l, li) => {
+    l.keys.forEach((key) => expect(byKey.has(key)).toBe(true));
+    for (let i = 1; i < l.keys.length; i += 1) {
+      expect(ftBetween(byKey.get(l.keys[i - 1]), byKey.get(l.keys[i]))).toBeLessThanOrEqual(spacingFt + 1e-6);
+    }
+    expect(l.nozzleCount).toBe(result.nozzles.filter((n) => n.lineIndex === li).length);
+  });
+}
+
+describe('placement invariants (seeded random lines)', () => {
+  it('keeps every gap along a line within the spacing and every pair of nozzles at the minimum', () => {
+    for (let seed = 1; seed <= 400; seed += 1) {
+      const rand = mulberry32(seed);
+      const span = [12, 30, 60][seed % 3]; // small areas force crossings and merges
+      const lineCount = 1 + Math.floor(rand() * 4);
+      const lines = [];
+      for (let l = 0; l < lineCount; l += 1) {
+        const n = 2 + Math.floor(rand() * 6);
+        const pts = [];
+        for (let i = 0; i < n; i += 1) pts.push([rand() * span, rand() * span]);
+        if (rand() < 0.25) pts.push(pts[0]); // some closed loops
+        if (rand() < 0.2 && lines.length) pts[0] = [lines[0].fx, lines[0].fy]; // some touch another line
+        const built = line(rand() < 0.5 ? 'eave' : 'fence', pts, `l${l}`);
+        built.fx = pts[pts.length - 1][0];
+        built.fy = pts[pts.length - 1][1];
+        lines.push(built);
+      }
+      const result = placeNozzles(lines, opts);
+      try {
+        assertInvariants(lines, result);
+      } catch (err) {
+        err.message = `seed ${seed}: ${err.message}`;
+        throw err;
+      }
+    }
+  });
+
+  it('holds for a custom spacing and minimum', () => {
+    const rand = mulberry32(99);
+    for (let r = 0; r < 100; r += 1) {
+      const lines = [0, 1, 2].map((l) => line('eave', Array.from({ length: 4 }, () => [rand() * 40, rand() * 40]), `c${l}`));
+      const result = placeNozzles(lines, { ...opts, spacingFt: 6, minSpacingFt: 2 });
+      assertInvariants(lines, result, 6, 2);
+    }
+  });
+
+  it('splits at a nozzle where lines cross mid-segment instead of dropping it', () => {
+    // fence crosses the middle of a 20 ft eave run, 1 ft from the eave's midpoint nozzle
+    const eave = line('eave', [[0, 0], [20, 0]], 'e');
+    const fence = line('fence', [[10, 1], [10, 30]], 'f');
+    const result = placeNozzles([eave, fence], opts);
+    assertInvariants([eave, fence], result);
+    // the fence corner at (10, 1) sits in the eave's path: the eave walks through it
+    const eaveKeys = result.lines[0].keys;
+    expect(eaveKeys).toContain('f:v0');
+    expect(result.totals.eaveCount).toBe(4);
   });
 });
 
