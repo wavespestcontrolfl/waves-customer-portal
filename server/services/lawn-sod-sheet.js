@@ -417,12 +417,12 @@ async function assertNoProductUnderLock(trx, { svc, technicianNotes }) {
  * completion, the visit applied the swap bag, and the sheet context rebuilt NOW on the transaction (as a sod-aware
  * sheet) still makes that swap. A failed read is `[]` (the ledger is secondary; it never fails the visit).
  */
-async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts, allowGrouped }) {
+async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts }) {
   if (lawnFast == null || !featureGates.lawnNewSodNoteLive()) return [];
   const applied = new Set((Array.isArray(appliedProducts) ? appliedProducts : []).map((row) => lowerId(row?.product_id)).filter(Boolean));
   if (!applied.size) return [];
   try {
-    const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex: trx, sodAware: true, allowGrouped });
+    const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex: trx, sodAware: true });
     const items = ctx?.ok && ctx.eligible && Array.isArray(ctx.plannedProducts?.items) ? ctx.plannedProducts.items : [];
     return items.filter((item) => item?.sodSwap?.forProductId && applied.has(lowerId(item.productId))).map((item) => {
       const original = items.find((other) => !other.sodSwap && lowerId(other.productId) === item.sodSwap.forProductId);

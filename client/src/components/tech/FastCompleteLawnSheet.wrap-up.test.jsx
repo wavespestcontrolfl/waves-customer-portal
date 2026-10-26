@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 // The regular lawn Fast Complete sheet with the Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP): gate
 // off it is as it was (no section, no extra reads, the four customer-text flags); gate on and
-// untouched it posts the same four flags; each change rides the /complete body; a part of a
-// grouped stop (prepare mode) shows no Wrap-up and keeps the fixed flags. Synthetic data only.
+// untouched it posts the same four flags; each change rides the /complete body. Synthetic data only.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -175,21 +174,6 @@ describe('gate on', () => {
   test('the Time on-site clock still shows once, from the shared component', async () => {
     await openSheet({ props: { service: { ...SERVICE, onSiteAt: new Date(Date.now() - 5 * 60 * 1000).toISOString() } } });
     expect(screen.getAllByRole('heading', { name: 'Time on-site' })).toHaveLength(1);
-  });
-});
-
-describe('prepare mode (a part of a grouped stop)', () => {
-  test('shows no Wrap-up, reads nothing for it, and hands over the four flags', async () => {
-    const onPrepared = vi.fn();
-    await openSheet({ props: { operatorId: 'op-1', sharedNote: 'Synthetic stop note', onPrepared } });
-    expect(screen.queryByRole('heading', { name: 'Wrap-up' })).toBeNull();
-    await confirmAssessment();
-    fireEvent.click(completeButton());
-    await screen.findByText('Saved for this stop');
-    expect(onPrepared.mock.calls[0][1]).toMatchObject(FOUR_FLAGS);
-    for (const key of WRAP_UP_KEYS) expect(onPrepared.mock.calls[0][1]).not.toHaveProperty(key);
-    expect(reads(/reentry-defaults|next-visit|send-time-preview/)).toEqual([]);
-    expect(completeCalls()).toHaveLength(0);
   });
 });
 

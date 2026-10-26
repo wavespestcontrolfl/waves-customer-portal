@@ -17,8 +17,7 @@ import { stationSheetProgram } from './station-checks';
 const TERMINAL_SERVICE_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
 
 // A re-service: the pest re-service itself, or a free callback booked under a regular service key. Neither gets a
-// pay link or a review ask. `visit` carries { serviceKey, isCallback } (the sheet's context visit, or a schedule
-// row built the same way by lib/combo-fast-complete.js).
+// pay link or a review ask. `visit` carries { serviceKey, isCallback } (the sheet's context visit).
 export const isReserviceVisit = (visit) => visit?.serviceKey === 'pest_re_service' || visit?.isCallback === true;
 
 // Pest control services get the lightweight ServiceRecapModal instead of the

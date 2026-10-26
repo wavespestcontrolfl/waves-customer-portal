@@ -4944,7 +4944,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           expectedVisit,
           lawnFast,
           products,
-          packetContext,
           technicianNotes,
           propertyServiceArea,
           actor: completionInput.actor,
@@ -8406,7 +8405,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ? { ...waveguardPlan, protocol: null } : waveguardPlan,
             serviceProducts: insertedServiceProducts,
             // GATE_LAWN_NEW_SOD_NOTE: the new-sod bag swap as a substitution, so the ledger ties the swap bag to the bag it replaced.
-            visitSubstitutions: await require('./lawn-sod-sheet').sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts: insertedServiceProducts, allowGrouped: { packetContext } }),
+            visitSubstitutions: await require('./lawn-sod-sheet').sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts: insertedServiceProducts }),
             completionInput: {
               ...(lawnProtocolCompletion || {}),
               // Under a consumer gate the writer receives the validated visit
@@ -8447,7 +8446,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // GATE_LAWN_NEW_SOD_REPORT_CARD: what the new-sod holds kept off this visit, frozen for the report's New sod card
         // (lawn-sod-report-card.js). Secondary and savepointed; never fails the visit.
         await require('./lawn-sod-report-card').freezeNewSodCard(trx, {
-          svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts: insertedServiceProducts, allowGrouped: { packetContext },
+          svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts: insertedServiceProducts,
         });
 
         if (inventoryDeductions.length) {
