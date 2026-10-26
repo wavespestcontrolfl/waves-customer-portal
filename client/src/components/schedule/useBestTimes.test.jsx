@@ -427,3 +427,18 @@ it('open times: a closed picker forgets its list, so reopening searches the sche
   await waitFor(() => expect(searches(fetch)).toHaveLength(2));
   await waitFor(() => expect(result.current.availability?.openTimes?.from).toBeTruthy());
 });
+
+it('open times: a far day whose lookup failed is marked unchecked, never shown as a day with no open times', async () => {
+  const today = etDateString();
+  const far = addDays(today, 40);
+  const fetch = vi.fn(async (url, init) => {
+    if (String(url).endsWith('/find-time/ui')) return { ok: true, json: async () => ({ ok: true, openTimes: true }) };
+    const body = JSON.parse(init.body);
+    if (body.dateFrom === far) return { ok: false, status: 502, json: async () => ({ error: 'upstream' }) };
+    return { ok: true, json: async () => listOf(body) };
+  });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({ date: far, serviceId: 'fixture', technicianId: 'tech', openTimes: true }));
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBe(today));
+  expect(result.current.availability.days.find((day) => day.date === far)).toEqual({ date: far, status: 'unchecked', hours: [] });
+});

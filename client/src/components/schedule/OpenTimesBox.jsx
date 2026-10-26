@@ -67,6 +67,8 @@ export function openTimesRows(days, { mode, band, techId, focusDate }) {
   const options = (day) => (day.closed ? [] : day.hours.filter((hour) => (!techId || String(hour.technicianId) === String(techId)) && inBand(hour, band)));
   if (focusDate) {
     const day = days.find((d) => d.date === focusDate);
+    // A far day whose lookup failed was never checked: it is not a day with no open times.
+    if (day?.status === 'unchecked') return { rows: [], empty: 'Could not check this day' };
     const rows = day ? [...options(day)].sort(mode === 'soonest' ? bySoonestHour : byBestHour) : [];
     return { rows, empty: 'No open times this day' };
   }
