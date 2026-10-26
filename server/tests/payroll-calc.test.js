@@ -180,3 +180,75 @@ describe('computePaycheck: refuses to guess', () => {
     expect(() => paycheck(overrides)).toThrow(message);
   });
 });
+
+describe('computePaycheck: paid time off and holidays (GATE_PAYROLL_TIME_OFF)', () => {
+  // 10 hours of paid time off at $21.00 and 8 hours of holiday: hours not worked,
+  // paid at the straight rate. Minutes arrive like regularMinutes.
+  const OFF = { hourlyRate: '21.00', regularMinutes: '1800.00' };
+
+  test('pays time off and holiday at the straight rate and sums all four into gross', () => {
+    const result = paycheck({ ...OFF, overtimeMinutes: '120.00', ptoMinutes: '600.00', holidayMinutes: '480.00' });
+    expect(result.regularPayCents).toBe(63000);
+    expect(result.overtimePayCents).toBe(6300);
+    expect(result.ptoPayCents).toBe(21000);
+    expect(result.holidayPayCents).toBe(16800);
+    expect(result.grossPayCents).toBe(63000 + 6300 + 21000 + 16800);
+  });
+
+  test('time off never counts toward overtime: 40 h worked plus a 10 h holiday has no overtime pay', () => {
+    const result = paycheck({ hourlyRate: '22.00', regularMinutes: '2400.00', overtimeMinutes: '0.00', holidayMinutes: '600.00' });
+    expect(result.overtimePayCents).toBe(0);
+    expect(result.overtimePremiumCents).toBe(0);
+    expect(result.holidayPayCents).toBe(22000);
+    expect(result.grossPayCents).toBe(88000 + 22000);
+  });
+
+  test('a week of time off alone is a paycheck', () => {
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '0.00', ptoMinutes: '2400.00' });
+    expect(result.grossPayCents).toBe(84000);
+    expect(result.ptoPayCents).toBe(84000);
+  });
+
+  test('rounds each line half-up to the cent like regular pay', () => {
+    // 0.01 h (0.6 min = 60 hundredths) at $21.00 is 0.21 cents; 2.5 min at $21.00 is 87.5 cents.
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '0', ptoMinutes: '2.50', holidayMinutes: '0.60' });
+    expect(result.ptoPayCents).toBe(88);
+    expect(result.holidayPayCents).toBe(21);
+  });
+
+  test('taxes and withholding run on the full gross', () => {
+    const withOff = paycheck({ ...OFF, ptoMinutes: '600.00', holidayMinutes: '480.00' });
+    const asWorked = paycheck({ hourlyRate: '21.00', regularMinutes: '2880.00' });
+    expect(withOff.grossPayCents).toBe(asWorked.grossPayCents);
+    for (const key of ['federalIncomeTaxCents', 'socialSecurityEmployeeCents', 'medicareEmployeeCents', 'netPayCents', 'futaCents', 'floridaReemploymentCents']) {
+      expect(withOff[key]).toBe(asWorked[key]);
+    }
+    expect(withOff.taxableWages).toEqual(asWorked.taxableWages);
+    expect(withOff.withholdingWorksheet).toEqual(asWorked.withholdingWorksheet);
+  });
+
+  test('the $7,000 FUTA and RT-6 cap counts time off pay in the check', () => {
+    // $6,800 paid: only $200 of this $840 check (all time off) is under the $7,000 base.
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '0.00', ptoMinutes: '2400.00', ytdGrossWages: '6800.00' });
+    expect(result.taxableWages.futaCents).toBe(20000);
+    expect(result.futaCents).toBe(120);
+    expect(result.floridaReemploymentCents).toBe(540);
+  });
+
+  test('output is identical when neither figure is passed, and carries no time-off keys', () => {
+    const plain = paycheck();
+    expect(plain).not.toHaveProperty('ptoPayCents');
+    expect(plain).not.toHaveProperty('holidayPayCents');
+    expect(JSON.stringify(paycheck({ regularMinutes: '2400.00', overtimeMinutes: '0.00' }))).toBe(JSON.stringify(plain));
+    // Passing zero is a caller that opted in: same numbers, two extra keys.
+    const zero = paycheck({ ptoMinutes: 0, holidayMinutes: 0 });
+    const { ptoPayCents, holidayPayCents, ...rest } = zero;
+    expect([ptoPayCents, holidayPayCents]).toEqual([0, 0]);
+    expect(rest).toEqual(plain);
+  });
+
+  test('a mistyped figure is refused, never read as zero', () => {
+    expect(() => paycheck({ ptoMinutes: '-5' })).toThrow(/Paid time off minutes/);
+    expect(() => paycheck({ holidayMinutes: 'abc' })).toThrow(/Holiday minutes/);
+  });
+});
