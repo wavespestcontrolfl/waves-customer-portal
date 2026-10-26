@@ -1916,6 +1916,16 @@ const gates = {
   // sends, changes and holds nothing. Off unless exactly 'true'.
   smsReplyOutcomes: process.env.GATE_SMS_REPLY_OUTCOMES === 'true',
 
+  // SMS prompt patches (owner rulings 2026-09-27 "the texting AI should improve with NO human
+  // approval steps" and 2026-10-24 "do all"): with mode 'true' the real-answers drafter appends
+  // the ONE active learned-rules block (sms_prompt_patches) and stamps that patch's own
+  // prompt_version tag; the sealed exam can draft with a candidate block that the live drafter
+  // never sees. Modes: unset/anything else = off; 'observe' = record-only, the drafter stays
+  // unpatched; 'true' = the active patch applies. No active patch = prompt and version
+  // byte-identical to today. Read at call time through smsPromptAutopromoteMode(); this entry is
+  // on in both non-off modes (logGateStatus only).
+  get smsPromptAutopromote() { return smsPromptAutopromoteMode() !== 'off'; },
+
   // Lead Auto-Bridge — when a website lead comes in during business hours,
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.
@@ -7856,6 +7866,15 @@ function smsCourtesyAfterTemplateLive() {
   return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
 }
 
+// GATE_SMS_PROMPT_AUTOPROMOTE read at CALL time: 'true' = the active prompt patch applies;
+// 'observe' = record-only, the drafter stays unpatched; unset or anything else = off. The
+// canonical reader for sms-prompt-patch.js.
+function smsPromptAutopromoteMode() {
+  const raw = String(process.env.GATE_SMS_PROMPT_AUTOPROMOTE || '').trim().toLowerCase();
+  if (raw === 'true') return 'true';
+  return raw === 'observe' ? 'observe' : 'off';
+}
+
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
@@ -8559,3 +8578,5 @@ module.exports.reviewBonusAskFirstLive = reviewBonusAskFirstLive;
 module.exports.callbackSourceTechLive = callbackSourceTechLive;
 // GATE_CUSTOMER_TEXT_TO_VISIT_TECH reader, on its own line so gate PRs never conflict.
 module.exports.customerTextToVisitTechLive = customerTextToVisitTechLive;
+// Own line so concurrent gate PRs appending to the shared list never conflict with this one.
+module.exports.smsPromptAutopromoteMode = smsPromptAutopromoteMode;
