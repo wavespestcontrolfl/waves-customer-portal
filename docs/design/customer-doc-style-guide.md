@@ -49,6 +49,14 @@ when the reader is embedded in the admin Staff page. Issued wording, version
 hashes, review dates, citations, acknowledgments and completed-record evidence
 remain unchanged; uploaded originals retain their existing format.
 
+Payroll stubs and tank-mix references use the same text-only staff masthead
+inside their printable document bodies. Hours, pay and withholding values,
+product quantities, eligibility rules and safety directions stay authoritative.
+Staff estimate printing uses the canonical customer proposal projection from
+the verified staff preview route; unsent drafts carry an explicit internal
+draft marker. Print controls remain outside the paper, and the staff preview
+stays inert before and after printing.
+
 The tokened document surfaces — `/estimate/:token`, `/report/*`, `/prep`,
 `/receipt`, `/pay`, `/pay/statement/:token`, `/contract`, `/service-outlines`,
 `/lawn-care/what-is-included` — share one design system with a single source

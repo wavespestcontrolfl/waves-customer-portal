@@ -1,0 +1,37 @@
+.protocol-print-sheet {
+  display: none;
+}
+
+.protocol-tank-document .protocol-tank-meta,
+.protocol-tank-document .protocol-tank-meta *,
+.protocol-tank-print-document .protocol-tank-meta,
+.protocol-tank-print-document .protocol-tank-meta * {
+  font-size: var(--field-meta-size) !important;
+}
+
+.protocol-tank-product-heading h3 {
+  margin: 0;
+  font: inherit;
+}
+
+@media print {
+  body:has(> .protocol-print-sheet) > :not(.protocol-print-sheet) {
+    display: none !important;
+  }
+
+  body > .protocol-print-sheet {
+    display: block !important;
+  }
+
+  .protocol-print-sheet a::after {
+    content: " (" attr(href) ")";
+    overflow-wrap: anywhere;
+  }
+
+  .protocol-tank-product-heading,
+  .protocol-tank-product dl > div,
+  .protocol-tank-product > .protocol-tank-meta {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
