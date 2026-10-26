@@ -78,6 +78,10 @@ const {
 } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { customerOnAutopay } = require('./autopay-eligibility');
+// pg returns a DATE column as a JS Date: String(date).slice(0, 10) gives
+// "Mon May 31", not "2027-05-31" (the license check compared weekday
+// names). dateOnlyString reads both a Date and an ISO string.
+const { dateOnlyString } = require('../utils/datetime-et');
 const { typedFollowupObligationForCompletedSource, FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
 
 const FACT_STATES = Object.freeze(['not_required', 'pending', 'done', 'failed', 'unknown']);
@@ -574,7 +578,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.lane = lane;
   let duesCollected = false;
   if (lane?.mode === 'monthly_membership' && inputs.autopayActive === false && customerId) {
-    const visitDay = visit.scheduled_date ? new Date(`${String(visit.scheduled_date).slice(0, 10)}T12:00:00Z`) : now;
+    const visitDay = visit.scheduled_date ? new Date(`${dateOnlyString(visit.scheduled_date)}T12:00:00Z`) : now;
     const duesProbe = await probe('monthly dues collected', unavailable, () => monthlyDuesCollected(knex, customerId, visitDay, { excludeScheduledServiceId: serviceId }));
     duesCollected = duesProbe.error ? false : Boolean(duesProbe.value);
     inputs.duesLookupFailed = Boolean(duesProbe.error);
@@ -1207,7 +1211,7 @@ function deriveCloseoutFacts(inputs) {
   else if (inputs.followupChild) {
     followUp = fact('done', 'followup_child_scheduled', {
       childServiceId: inputs.followupChild.id, childStatus: inputs.followupChild.status,
-      childScheduledDate: inputs.followupChild.scheduled_date ? String(inputs.followupChild.scheduled_date).slice(0, 10) : null,
+      childScheduledDate: inputs.followupChild.scheduled_date ? dateOnlyString(inputs.followupChild.scheduled_date) : null,
       frozen: obligation.frozen === true,
     });
   } else if (inputs.followupChildLookupFailed) followUp = fact('unknown', 'followup_child_lookup_failed', { required: true });
@@ -1243,9 +1247,9 @@ function deriveCloseoutFacts(inputs) {
     const categoryProblem = licenseCategoryProblem(requiredAll, categories);
     // Judge expiry at the day the work was RECORDED (service_records.service_date);
     // the scheduled day is only a fallback for records without one.
-    const visitDay = (record?.service_date ? String(record.service_date).slice(0, 10) : null)
-      || (visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null);
-    const expiry = tech.license_expiry ? String(tech.license_expiry).slice(0, 10) : null;
+    const visitDay = (record?.service_date ? dateOnlyString(record.service_date) : null)
+      || (visit.scheduled_date ? dateOnlyString(visit.scheduled_date) : null);
+    const expiry = tech.license_expiry ? dateOnlyString(tech.license_expiry) : null;
     const evidence = {
       technicianId: tech.id, hasLicense: Boolean(tech.fl_applicator_license), licenseExpiry: expiry, requiredCategory: required,
       ...multiCategoryEvidence(requiredAll),
@@ -1345,7 +1349,7 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
     asOf: derived.asOf,
     visit: {
       status: visit.status || null,
-      scheduledDate: visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null,
+      scheduledDate: visit.scheduled_date ? dateOnlyString(visit.scheduled_date) : null,
       completedAt: isoOrNull(visit.completed_at),
       customerId: visit.customer_id || null,
       propertyId: visit.property_id || null,
