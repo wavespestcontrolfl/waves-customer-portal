@@ -1,0 +1,219 @@
+// @vitest-environment jsdom
+import React from 'react';
+import '@testing-library/jest-dom/vitest';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { placeNozzles } from '../../lib/mistingLayoutGeometry';
+
+const loadBestMapImage = vi.hoisted(() => vi.fn());
+vi.mock('../tech/treatmentZoneSpray', async (importOriginal) => ({
+  ...(await importOriginal()),
+  loadBestMapImage,
+}));
+vi.stubEnv('VITE_GOOGLE_MAPS_API_KEY', 'test-key');
+
+const { default: MistingLayoutDesigner, CONCEPT_LABEL } = await import('./MistingLayoutDesigner');
+
+const LAT = 26.95;
+const LNG = -82.4;
+const ZOOM = 20;
+
+// The frame is 640 css px wide for a 1280 px map, so one css px is two map px.
+const RECT = { left: 0, top: 0, width: 640, height: 480, right: 640, bottom: 480, x: 0, y: 0 };
+
+// jsdom has no PointerEvent; the designer reads clientX, clientY and pointerId off it.
+if (!window.PointerEvent) {
+  window.PointerEvent = class PointerEvent extends MouseEvent {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 1;
+    }
+  };
+}
+
+beforeEach(() => {
+  loadBestMapImage.mockReset();
+  loadBestMapImage.mockResolvedValue({ image: {}, url: 'https://maps.example/test.png', zoom: ZOOM });
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(() => RECT);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  delete window.google;
+});
+
+async function open(props = {}) {
+  const onUseCounts = vi.fn();
+  const onClose = vi.fn();
+  render(<MistingLayoutDesigner address="500 Example Court, Venice, FL" lat={LAT} lng={LNG} onUseCounts={onUseCounts} onClose={onClose} {...props} />);
+  const frame = await screen.findByTestId('layout-map');
+  return { frame, onUseCounts, onClose };
+}
+
+const tap = (frame, x, y) => {
+  fireEvent.pointerDown(frame, { clientX: x, clientY: y, pointerId: 1, button: 0 });
+  fireEvent.pointerUp(frame, { clientX: x, clientY: y, pointerId: 1, button: 0 });
+};
+
+const countsText = () => screen.getByTestId('layout-counts').textContent;
+const nozzleCount = () => screen.queryAllByTestId('layout-nozzle').length;
+
+// A 400 map px (200 css px) line, drawn left to right.
+const EAVE_POINTS = [{ x: 200, y: 200 }, { x: 600, y: 200 }];
+const expected = placeNozzles([{ kind: 'eave', points: EAVE_POINTS }], { lat: LAT, zoom: ZOOM });
+
+describe('MistingLayoutDesigner', () => {
+  it('loads the satellite photo for the property and labels the layout as a concept', async () => {
+    await open();
+    expect(loadBestMapImage).toHaveBeenCalledWith(LAT, LNG, 'test-key', expect.any(Array));
+    expect(screen.getByRole('img', { name: /Satellite view of 500 Example Court/ })).toHaveAttribute('src', 'https://maps.example/test.png');
+    expect(screen.getByText(CONCEPT_LABEL)).toBeInTheDocument();
+    expect(CONCEPT_LABEL).toBe('Concept layout — final placement at the design visit and install.');
+    expect(countsText()).toContain('Nozzles: 0');
+    expect(screen.getByRole('button', { name: 'Use counts' })).toBeDisabled();
+  });
+
+  it('shows the error when the photo cannot load', async () => {
+    loadBestMapImage.mockRejectedValue(new Error('The satellite photo failed to load.'));
+    render(<MistingLayoutDesigner address="x" lat={LAT} lng={LNG} onClose={() => {}} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('The satellite photo failed to load.');
+    expect(screen.queryByRole('button', { name: 'Use counts' })).not.toBeInTheDocument();
+  });
+
+  it('says what to do when the property has no location and the browser cannot geocode it', async () => {
+    render(<MistingLayoutDesigner address="500 Example Court" onClose={() => {}} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/No location for this property/);
+    expect(loadBestMapImage).not.toHaveBeenCalled();
+  });
+
+  it('geocodes the address in the browser when no coordinates are passed', async () => {
+    window.google = {
+      maps: {
+        Geocoder: class {
+          geocode(_req, cb) { cb([{ geometry: { location: { lat: () => LAT, lng: () => LNG } } }], 'OK'); }
+        },
+      },
+    };
+    render(<MistingLayoutDesigner address="500 Example Court" onClose={() => {}} />);
+    await screen.findByTestId('layout-map');
+    expect(loadBestMapImage).toHaveBeenCalledWith(LAT, LNG, 'test-key', expect.any(Array));
+  });
+
+  it('places nozzles live as an eave line is drawn and writes the count on Use counts', async () => {
+    const { frame, onUseCounts, onClose } = await open();
+    tap(frame, 100, 100);
+    expect(nozzleCount()).toBe(1);
+    tap(frame, 300, 100);
+    expect(nozzleCount()).toBe(expected.totals.count);
+    fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+    expect(nozzleCount()).toBe(expected.totals.count);
+    expect(countsText()).toContain(`Nozzles: ${expected.totals.count}`);
+    expect(countsText()).toContain(`eave ${expected.totals.count}, fence 0`);
+    expect(countsText()).toMatch(/Line: \d+ ft/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use counts' }));
+    expect(onUseCounts).toHaveBeenCalledWith(expected.totals.count);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('ends a line when the last point is tapped again, and keeps fence nozzles apart from eave nozzles', async () => {
+    const { frame } = await open();
+    tap(frame, 100, 100);
+    tap(frame, 300, 100);
+    tap(frame, 300, 100); // double tap on the last point finishes the eave line
+    fireEvent.click(screen.getByRole('button', { name: 'Fence line' }));
+    tap(frame, 100, 300);
+    tap(frame, 300, 300);
+    tap(frame, 300, 300);
+    expect(screen.getAllByTestId('layout-nozzle').filter((n) => n.dataset.kind === 'eave')).toHaveLength(expected.totals.count);
+    expect(screen.getAllByTestId('layout-nozzle').filter((n) => n.dataset.kind === 'fence')).toHaveLength(expected.totals.count);
+    expect(countsText()).toContain(`Nozzles: ${expected.totals.count * 2}`);
+    expect(countsText()).toContain(`fence ${expected.totals.count}`);
+  });
+
+  it('closes a loop when the first point is tapped again', async () => {
+    const { frame } = await open();
+    [[100, 100], [300, 100], [300, 250]].forEach(([x, y]) => tap(frame, x, y));
+    tap(frame, 100, 100);
+    const closed = placeNozzles([{
+      kind: 'eave',
+      points: [{ x: 200, y: 200 }, { x: 600, y: 200 }, { x: 600, y: 500 }, { x: 200, y: 200 }],
+    }], { lat: LAT, zoom: ZOOM });
+    expect(nozzleCount()).toBe(closed.totals.count);
+    expect(screen.getByRole('button', { name: 'Finish line' })).toBeDisabled(); // nothing left in progress
+  });
+
+  it('undoes the last point, then the last line, and clears everything', async () => {
+    const { frame } = await open();
+    tap(frame, 100, 100);
+    tap(frame, 300, 100);
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    expect(nozzleCount()).toBe(1);
+    tap(frame, 300, 100);
+    fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    expect(nozzleCount()).toBe(0);
+    tap(frame, 100, 100);
+    tap(frame, 300, 100);
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(nozzleCount()).toBe(0);
+    expect(countsText()).toContain('Nozzles: 0');
+  });
+
+  it('deletes a nozzle on tap, adds one on a line tap, and moves one by dragging', async () => {
+    const { frame, onUseCounts } = await open();
+    tap(frame, 100, 100);
+    tap(frame, 300, 100);
+    fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+    const total = expected.totals.count;
+    fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+
+    // delete: the first corner is at css (100, 100)
+    tap(frame, 100, 100);
+    expect(nozzleCount()).toBe(total - 1);
+
+    // add: a tap on the line midway between two neighbouring nozzles
+    const xs = screen.getAllByTestId('layout-nozzle').map((n) => Number(n.getAttribute('cx'))).sort((a, b) => a - b);
+    const wanted = (xs[2] + xs[3]) / 2;
+    tap(frame, wanted / 2, 101);
+    expect(nozzleCount()).toBe(total);
+    const added = screen.getAllByTestId('layout-nozzle').find((n) => Math.abs(Number(n.getAttribute('cx')) - wanted) < 1);
+    expect(added).toBeTruthy();
+
+    // a tap on empty photo, away from every line, does nothing
+    tap(frame, 400, 400);
+    expect(nozzleCount()).toBe(total);
+
+    // drag the last corner (css 300, 100) to (320, 140)
+    fireEvent.pointerDown(frame, { clientX: 300, clientY: 100, pointerId: 2, button: 0 });
+    fireEvent.pointerMove(frame, { clientX: 310, clientY: 120, pointerId: 2 });
+    fireEvent.pointerMove(frame, { clientX: 320, clientY: 140, pointerId: 2 });
+    fireEvent.pointerUp(frame, { clientX: 320, clientY: 140, pointerId: 2, button: 0 });
+    expect(nozzleCount()).toBe(total); // a drag moves, never deletes
+    const moved = screen.getAllByTestId('layout-nozzle').find((n) => Math.abs(Number(n.getAttribute('cx')) - 640) < 1);
+    expect(moved).toBeTruthy();
+    expect(Number(moved.getAttribute('cy'))).toBeCloseTo(280, 0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use counts' }));
+    expect(onUseCounts).toHaveBeenCalledWith(total);
+  });
+
+  it('warns when the count is above the estimator limit', async () => {
+    const { frame } = await open({ limits: { minNozzles: 2, maxNozzles: 3 } });
+    tap(frame, 100, 100);
+    tap(frame, 300, 100);
+    fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+    expect(within(screen.getByTestId('layout-counts')).getByRole('status')).toHaveTextContent(/up to 3 nozzles/);
+  });
+
+  it('closes without writing anything on Cancel', async () => {
+    const { frame, onUseCounts, onClose } = await open();
+    tap(frame, 100, 100);
+    tap(frame, 300, 100);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalled();
+    expect(onUseCounts).not.toHaveBeenCalled();
+    await waitFor(() => expect(true).toBe(true));
+  });
+});

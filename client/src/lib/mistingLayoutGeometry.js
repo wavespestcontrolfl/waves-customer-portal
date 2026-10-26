@@ -1,0 +1,249 @@
+// Mosquito misting layout designer: nozzle placement geometry (GATE_MISTING_LAYOUT_DESIGNER).
+//
+// React-free and DOM-free so it is unit-testable. Lines live in the Static Maps
+// physical pixel space the Treatment Zone Mapper uses (treatmentZoneSpray.js);
+// feet come from that module's pxToFeet(px, lat, zoom), so the scale is the same
+// everywhere on the staff screens.
+//
+// Rules (concept layout only, final placement is set at the design visit):
+//   1. One nozzle at every vertex (corner) of every line.
+//   2. Along each segment, nozzles at an even spacing no larger than the nominal
+//      spacing (10 ft): a segment of L ft gets ceil(L / spacing) - 1 interior
+//      nozzles, so no gap on a single segment exceeds the spacing.
+//   3. Two nozzles never sit closer than the minimum spacing (3 ft): corners are
+//      placed first, then interior nozzles, and a candidate within the minimum of
+//      an accepted nozzle is dropped. This is what merges the repeated first and
+//      last vertex of a closed loop, and two lines that touch at a corner.
+//
+// Kinds: 'eave' and 'fence'. Both get nozzles; totals are kept apart.
+
+import { pxToFeet } from '../components/tech/treatmentZoneSpray';
+
+export const LINE_KINDS = Object.freeze(['eave', 'fence']);
+export const NOMINAL_SPACING_FT = 10;
+export const MIN_SPACING_FT = 3;
+// Consecutive vertices closer than this are one vertex (a double tap), not a
+// segment. Well under the minimum spacing.
+const SAME_POINT_FT = 0.25;
+const EPS = 1e-9;
+
+function distance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function feetPerPixel(lat, zoom) {
+  return pxToFeet(1, lat, zoom);
+}
+
+function validPoint(p) {
+  return p && Number.isFinite(p.x) && Number.isFinite(p.y);
+}
+
+// Drops invalid points and consecutive duplicates. Returns the surviving points
+// with the index they had in the input, so a caller can map back if it needs to.
+function cleanPoints(points, samePointPx) {
+  const out = [];
+  (Array.isArray(points) ? points : []).forEach((p) => {
+    if (!validPoint(p)) return;
+    const last = out[out.length - 1];
+    if (last && distance(last, p) <= samePointPx) return;
+    out.push({ x: p.x, y: p.y });
+  });
+  return out;
+}
+
+function lineKind(line) {
+  return line && line.kind === 'fence' ? 'fence' : 'eave';
+}
+
+function lineId(line, index) {
+  return line && line.id !== undefined && line.id !== null ? String(line.id) : String(index);
+}
+
+/** Length of a cleaned polyline in feet. */
+export function polylineFeet(points, lat, zoom, samePointFt = SAME_POINT_FT) {
+  const ftPerPx = feetPerPixel(lat, zoom);
+  const pts = cleanPoints(points, samePointFt / ftPerPx);
+  let px = 0;
+  for (let i = 1; i < pts.length; i += 1) px += distance(pts[i - 1], pts[i]);
+  return px * ftPerPx;
+}
+
+/**
+ * Place nozzles on a set of lines.
+ *
+ * @param {Array<{id?: string|number, kind: 'eave'|'fence', points: Array<{x:number,y:number}>}>} lines
+ * @param {{lat: number, zoom: number, spacingFt?: number, minSpacingFt?: number}} options
+ * @returns {{
+ *   nozzles: Array<{key: string, x: number, y: number, kind: string, lineIndex: number, lineId: string,
+ *                   segmentIndex: number, vertexIndex: number|null, corner: boolean}>,
+ *   lines: Array<{id: string, kind: string, closed: boolean, lengthFt: number, nozzleCount: number}>,
+ *   totals: {count: number, eaveCount: number, fenceCount: number, linearFt: number, eaveFt: number, fenceFt: number},
+ * }}
+ */
+export function placeNozzles(lines, options = {}) {
+  const { lat, zoom } = options;
+  const spacingFt = Number(options.spacingFt) > 0 ? Number(options.spacingFt) : NOMINAL_SPACING_FT;
+  const minSpacingFt = Number(options.minSpacingFt) >= 0 ? Number(options.minSpacingFt) : MIN_SPACING_FT;
+  if (!Number.isFinite(lat) || !Number.isFinite(zoom)) {
+    throw new Error('placeNozzles needs the map latitude and zoom to convert pixels to feet.');
+  }
+  const ftPerPx = feetPerPixel(lat, zoom);
+  const spacingPx = spacingFt / ftPerPx;
+  const minPx = minSpacingFt / ftPerPx;
+  const samePx = SAME_POINT_FT / ftPerPx;
+
+  const cleaned = (Array.isArray(lines) ? lines : []).map((line, lineIndex) => ({
+    id: lineId(line, lineIndex),
+    kind: lineKind(line),
+    points: cleanPoints(line && line.points, samePx),
+  }));
+
+  const corners = [];
+  const interiors = [];
+  const lineStats = cleaned.map((line, lineIndex) => {
+    const pts = line.points;
+    let px = 0;
+    for (let i = 0; i < pts.length; i += 1) {
+      corners.push({
+        key: `${line.id}:v${i}`,
+        x: pts[i].x,
+        y: pts[i].y,
+        kind: line.kind,
+        lineIndex,
+        lineId: line.id,
+        // The last vertex closes the final segment; every other vertex opens one.
+        segmentIndex: Math.min(i, Math.max(pts.length - 2, 0)),
+        vertexIndex: i,
+        corner: true,
+      });
+    }
+    for (let i = 0; i + 1 < pts.length; i += 1) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      const len = distance(a, b);
+      px += len;
+      // ceil with a tolerance so a segment of exactly the spacing is one gap.
+      const gaps = Math.max(1, Math.ceil(len / spacingPx - EPS));
+      for (let k = 1; k < gaps; k += 1) {
+        const t = k / gaps;
+        interiors.push({
+          key: `${line.id}:s${i}:${k}`,
+          x: a.x + (b.x - a.x) * t,
+          y: a.y + (b.y - a.y) * t,
+          kind: line.kind,
+          lineIndex,
+          lineId: line.id,
+          segmentIndex: i,
+          vertexIndex: null,
+          corner: false,
+        });
+      }
+    }
+    // A loop is a line whose last vertex is back on its first (within the minimum spacing).
+    const closed = pts.length >= 4 && distance(pts[0], pts[pts.length - 1]) <= Math.max(minPx, samePx);
+    return { id: line.id, kind: line.kind, closed, lengthFt: px * ftPerPx, nozzleCount: 0 };
+  });
+
+  // Corners first, then interior points; a candidate too close to an accepted one is dropped.
+  const accepted = [];
+  [...corners, ...interiors].forEach((candidate) => {
+    const crowded = accepted.some((n) => distance(n, candidate) < minPx - EPS);
+    if (!crowded) accepted.push(candidate);
+  });
+  // Stable order: by line, then along the line.
+  accepted.sort((a, b) => a.lineIndex - b.lineIndex
+    || a.segmentIndex - b.segmentIndex
+    || alongSegment(cleaned, a) - alongSegment(cleaned, b));
+
+  accepted.forEach((n) => { lineStats[n.lineIndex].nozzleCount += 1; });
+  return { nozzles: accepted, lines: lineStats, totals: computeTotals(lineStats, accepted) };
+}
+
+// Position of a nozzle along its segment, for ordering only.
+function alongSegment(cleaned, n) {
+  const pts = cleaned[n.lineIndex].points;
+  const a = pts[n.segmentIndex];
+  return a ? distance(a, n) : 0;
+}
+
+/** Counts and feet per kind. `lineStats` is placeNozzles().lines, `nozzles` the final set (after any edits). */
+export function computeTotals(lineStats, nozzles) {
+  let eaveFt = 0;
+  let fenceFt = 0;
+  (lineStats || []).forEach((l) => {
+    if (l.kind === 'fence') fenceFt += l.lengthFt;
+    else eaveFt += l.lengthFt;
+  });
+  let eaveCount = 0;
+  let fenceCount = 0;
+  (nozzles || []).forEach((n) => {
+    if (n.kind === 'fence') fenceCount += 1;
+    else eaveCount += 1;
+  });
+  return {
+    count: eaveCount + fenceCount,
+    eaveCount,
+    fenceCount,
+    linearFt: eaveFt + fenceFt,
+    eaveFt,
+    fenceFt,
+  };
+}
+
+/**
+ * Staff edits on top of the automatic placement: delete, move, add.
+ * `edits` = { removed: string[] of nozzle keys, moved: { [key]: {x, y} }, added: nozzle objects }.
+ * The automatic nozzle keys are stable while a line is unchanged, so an edit survives
+ * a redraw of the line it belongs to; an edit whose key no longer exists is ignored.
+ */
+export function applyNozzleEdits(nozzles, edits = {}) {
+  const removed = new Set(edits.removed || []);
+  const moved = edits.moved || {};
+  const out = [];
+  (nozzles || []).forEach((n) => {
+    if (removed.has(n.key)) return;
+    const m = moved[n.key];
+    out.push(m && validPoint(m) ? { ...n, x: m.x, y: m.y, edited: true } : n);
+  });
+  (edits.added || []).forEach((n) => {
+    if (!removed.has(n.key) && validPoint(n)) out.push({ ...n, edited: true });
+  });
+  return out;
+}
+
+/** Closest point on any line to `p` within `thresholdPx`, or null. */
+export function nearestPointOnLines(lines, p, thresholdPx) {
+  let best = null;
+  (Array.isArray(lines) ? lines : []).forEach((line, lineIndex) => {
+    const pts = cleanPoints(line && line.points, 0);
+    for (let i = 0; i + 1 < pts.length; i += 1) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len2 = dx * dx + dy * dy;
+      const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
+      const q = { x: a.x + dx * t, y: a.y + dy * t };
+      const d = distance(p, q);
+      if (d <= thresholdPx && (!best || d < best.distance)) {
+        best = { x: q.x, y: q.y, distance: d, lineIndex, lineId: lineId(line, lineIndex), segmentIndex: i, kind: lineKind(line) };
+      }
+    }
+  });
+  return best;
+}
+
+/** Index of the nozzle nearest `p` within `thresholdPx`, or -1. */
+export function nearestNozzleIndex(nozzles, p, thresholdPx) {
+  let bestIndex = -1;
+  let bestDistance = Infinity;
+  (nozzles || []).forEach((n, i) => {
+    const d = distance(n, p);
+    if (d <= thresholdPx && d < bestDistance) {
+      bestDistance = d;
+      bestIndex = i;
+    }
+  });
+  return bestIndex;
+}

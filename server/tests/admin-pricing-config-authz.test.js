@@ -215,6 +215,49 @@ test('misting availability follows the gate at request time and carries labels a
   }
 });
 
+// GATE_MISTING_LAYOUT_DESIGNER (strict true, needs GATE_MOSQUITO_MISTING): the layoutDesigner key exists only when both are on.
+test('misting layoutDesigner flag needs both gates, strict true, and is absent otherwise', async () => {
+  const keys = ['GATE_MOSQUITO_MISTING', 'GATE_MISTING_LAYOUT_DESIGNER'];
+  const prior = keys.map((key) => process.env[key]);
+  mockPricingConfigRow = { config_key: 'mosquito_misting_pricing', data: { plan: { monthly: 59 } } };
+  try {
+    await withServer(async (baseUrl) => {
+      const read = async (misting, designer) => {
+        for (const [key, value] of [['GATE_MOSQUITO_MISTING', misting], ['GATE_MISTING_LAYOUT_DESIGNER', designer]]) {
+          if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
+        const res = await call(baseUrl, 'GET', '/mosquito_misting_pricing', { role: 'admin' });
+        expect(res.status).toBe(200);
+        return res.json.misting;
+      };
+      // Dark by default: the block has no layoutDesigner key at all.
+      expect('layoutDesigner' in await read('true', undefined)).toBe(false);
+      expect('layoutDesigner' in await read('true', 'false')).toBe(false);
+      // Strict true: 1 and on do not turn it on.
+      expect('layoutDesigner' in await read('true', '1')).toBe(false);
+      expect('layoutDesigner' in await read('true', 'on')).toBe(false);
+      // The designer needs the misting system itself.
+      expect('layoutDesigner' in await read('false', 'true')).toBe(false);
+      expect('layoutDesigner' in await read(undefined, 'true')).toBe(false);
+      // Both on.
+      const on = await read('true', 'true');
+      expect(on.layoutDesigner).toBe(true);
+      expect(on.enabled).toBe(true);
+      // The rest of the block is the same with the designer on or off.
+      const { layoutDesigner, ...rest } = on;
+      expect(rest).toEqual(await read('true', undefined));
+      // Another key never gets the block.
+      mockPricingConfigRow = { config_key: 'termite_install', data: {} };
+      const other = await call(baseUrl, 'GET', '/termite_install', { role: 'admin' });
+      expect(other.json.misting).toBeUndefined();
+    });
+  } finally {
+    keys.forEach((key, i) => {
+      if (prior[i] === undefined) delete process.env[key]; else process.env[key] = prior[i];
+    });
+  }
+});
+
 test('annual availability follows both prerequisite gates at request time', async () => {
   const keys = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
   const prior = keys.map((key) => process.env[key]);
