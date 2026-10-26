@@ -115,14 +115,37 @@ function firstVisitPlan(estimate = {}) {
   if (!(pricePerVisit > 0) || totals.oneTime > 0 || roundMoney(pricePerVisit * visitsPerYear) !== totals.annualRecurring) return null;
   const durationMinutes = visitMinutesFor(programs, parseEstimateData(estimate.estimate_data ?? estimate.estimateData));
   if (durationMinutes > MAX_VISIT_MINUTES) return null;
+  // The tax the quote shows for one visit, rounded per application as computeProposalTotals rounds it.
+  const taxPerVisit = roundMoney(programs.reduce(
+    (sum, program) => sum + (program.taxable ? roundMoney(program.pricePerApplication * totals.taxRate) : 0), 0,
+  ));
   return {
     visitsPerYear,
     pattern,
     pricePerVisit,
+    taxPerVisit,
     durationMinutes,
     serviceType: SERVICE_TYPE,
     serviceKey: SERVICE_KEY,
   };
+}
+
+// Whether the visit's completion invoice charges the tax the quote shows for a visit. The completion mint
+// (admin-schedule.js mintOrReuseScheduledServiceInvoice) passes no rate, so the customer's tax setup decides it
+// (property type, county rate, a verified exemption, a tax-exempt payer); InvoiceService.previewInvoiceTotals is that
+// same decision as a dry run. A quote taxed any other way (mixed program flags, another rate, an exempt customer)
+// stays with the office (Codex #6869 P1). Fails closed. It is not re-run inside the booking transaction: the mint
+// reads the customer's tax setup again at completion, so no lock taken here could hold it.
+async function completionTaxMatches(plan, customerId, conn = db) {
+  try {
+    const preview = await require('./invoice').previewInvoiceTotals({
+      customerId, amount: plan.pricePerVisit, title: SERVICE_TYPE, database: conn,
+    });
+    return roundMoney(preview?.tax_amount) === plan.taxPerVisit;
+  } catch (err) {
+    logger.warn(`[commercial-first-visit] tax check skipped for customer ${customerId}: ${err.code || 'error'}`);
+    return false;
+  }
 }
 
 // The estimate's live first visit (any visit linked to it that still holds a booking), or undefined.
@@ -170,6 +193,7 @@ async function firstVisitCtaFor(estimate, { open = false, picker = false, conn =
     const visit = await linkedFirstVisit(estimate.id, conn);
     if (visit) return { state: 'booked', visit: publicVisit(visit) };
     if (!open || !estimate.customer_id) return null;
+    if (!(await completionTaxMatches(plan, estimate.customer_id, conn))) return null;
     const agreement = require('./commercial-proposal-agreement');
     const { state } = await agreement.agreementStateForEstimate(estimate.id, conn);
     if (state !== 'signed') return { state: 'after_signing' };
@@ -188,7 +212,8 @@ async function firstVisitOnlineFor(estimateId, conn = db) {
   try {
     if (!live() || !estimateId) return false;
     const estimate = await conn('estimates').where({ id: estimateId }).first('id', 'customer_id', 'estimate_data', 'bill_by_invoice');
-    if (!estimate?.customer_id || !firstVisitPlan(estimate)) return false;
+    const plan = estimate?.customer_id ? firstVisitPlan(estimate) : null;
+    if (!plan || !(await completionTaxMatches(plan, estimate.customer_id, conn))) return false;
     return !(await linkedFirstVisit(estimate.id, conn));
   } catch (err) {
     logger.warn(`[commercial-first-visit] online check skipped for estimate ${estimateId}: ${err.code || 'error'}`);
@@ -215,7 +240,7 @@ async function bookingContext(estimate, { conn = db } = {}) {
   const visit = await linkedFirstVisit(estimate.id, conn);
   if (visit) return { refusal: { ...refusal(409, 'already_booked', 'Your first visit is already booked.'), visit: publicVisit(visit) } };
   const customer = await loadCustomer(estimate.customer_id, conn);
-  if (!customer) return { refusal: refusal(409, 'call_us', CALL_US) };
+  if (!customer || !(await completionTaxMatches(plan, customer.id, conn))) return { refusal: refusal(409, 'call_us', CALL_US) };
   const booking = require('../routes/booking')._internals;
   const location = await booking.customerBookingLocation(customer);
   if (!location) return { refusal: refusal(409, 'call_us', CALL_US) };
@@ -291,8 +316,8 @@ function estimateGuardFor(estimate, { openFor }) {
       if (!fresh || String(fresh.customer_id || '') !== String(estimate.customer_id) || !openFor(fresh)) return 'ineligible';
       const plan = firstVisitPlan(fresh);
       const was = firstVisitPlan(estimate);
-      if (!plan || !was || plan.pricePerVisit !== was.pricePerVisit || plan.durationMinutes !== was.durationMinutes
-        || plan.pattern !== was.pattern) return 'ineligible';
+      if (!plan || !was || plan.pricePerVisit !== was.pricePerVisit || plan.taxPerVisit !== was.taxPerVisit
+        || plan.durationMinutes !== was.durationMinutes || plan.pattern !== was.pattern) return 'ineligible';
       // The quote on this read is still the one the customer signed (no edit landed since the caller's check).
       return (await require('./commercial-proposal-agreement').signedQuoteMatches(fresh, trx)) ? 'ok' : 'ineligible';
     },
@@ -491,6 +516,7 @@ module.exports = {
   MIN_VISIT_MINUTES,
   MAX_VISIT_MINUTES,
   firstVisitPlan,
+  completionTaxMatches,
   visitMinutesFor,
   engineOnSiteMinutes,
   linkedFirstVisit,

@@ -704,6 +704,29 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(typeof revalidate.mock.calls[0][0]).toBe('function');
     });
 
+    // Codex #6869 P1: the offer was built at customerBookingLocation's fallback for a customer with no saved pin, so
+    // the commit re-derives that fallback (and stamps it on the visit) instead of failing its own location fence.
+    test('a customer with no saved pin books at the canonical fallback its offer used, stamped on the visit', async () => {
+      loadedCustomer = { ...CUST, latitude: null, longitude: null };
+      fencedCustomer = { ...loadedCustomer };
+      const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
+      try {
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG } }))).rejects.toThrow(SENTINEL);
+        expect(capturedScheduledInsert).toMatchObject({ lat: LAT, lng: LNG, estimated_price: 81.67, service_address_line1: CUST.address_line1 });
+      } finally { geocodeSpy.mockRestore(); }
+    });
+
+    test('the fence still holds: a fallback that moved since the offer refuses', async () => {
+      loadedCustomer = { ...CUST, latitude: null, longitude: null };
+      fencedCustomer = { ...loadedCustomer };
+      const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: 27.5, lng: -82.4 });
+      try {
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG } })))
+          .resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+        expect(capturedScheduledInsert).toBeUndefined();
+      } finally { geocodeSpy.mockRestore(); }
+    });
+
     test('a guard with no re-check function fails closed', async () => {
       await expect(createSelfBooking(firstVisitPayload({ estimateGuard: { estimateId: EST_ID } })))
         .resolves.toMatchObject({ ok: false, status: 409, code: 'ESTIMATE_CHANGED' });

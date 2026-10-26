@@ -33,6 +33,9 @@ jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn() 
 jest.mock('../services/customer-account-ownership', () => ({ lockCustomerAccountRows: jest.fn() }));
 const mockNotifyAdmin = jest.fn();
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
+// The completion mint's tax, as a dry run (InvoiceService.previewInvoiceTotals); 7% unless a test says otherwise.
+const mockPreview = jest.fn();
+jest.mock('../services/invoice', () => ({ previewInvoiceTotals: (...args) => mockPreview(...args) }));
 
 const db = require('../models/db');
 const firstVisit = require('../services/commercial-first-visit');
@@ -101,6 +104,7 @@ beforeEach(() => {
   mockSeeder.checkActiveSeriesLocked.mockReset().mockResolvedValue({ matches: [], guardError: null });
   mockSeeder.seedFollowUpsForParent.mockReset().mockResolvedValue({ insertedCount: 11 });
   mockNotifyAdmin.mockReset().mockResolvedValue({ id: 'n1' });
+  mockPreview.mockReset().mockImplementation(async ({ amount }) => ({ tax_amount: Math.round(amount * 0.07 * 100) / 100 }));
 });
 afterAll(() => {
   if (ORIGINAL_GATE === undefined) delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
@@ -110,7 +114,7 @@ afterAll(() => {
 describe('firstVisitPlan', () => {
   test('one monthly pest program: per-visit price, monthly pattern, the estimator minutes rounded up to 5', () => {
     expect(firstVisitVisitPlan()).toEqual({
-      visitsPerYear: 12, pattern: 'monthly', pricePerVisit: 81.67, durationMinutes: 55,
+      visitsPerYear: 12, pattern: 'monthly', pricePerVisit: 81.67, taxPerVisit: 5.72, durationMinutes: 55,
       serviceType: 'Commercial Pest Control', serviceKey: 'pest_control',
     });
   });
@@ -122,6 +126,14 @@ describe('firstVisitPlan', () => {
       { service: 'pest', label: 'Exterior', frequencyPerYear: 4, pricePerApplication: 60, visitMinutes: 25 },
     ] });
     expect(two).toMatchObject({ pattern: 'quarterly', pricePerVisit: 150, durationMinutes: 55 });
+  });
+
+  test('the per-visit tax is the quote\'s own: taxable programs only, rounded per application', () => {
+    expect(firstVisitVisitPlan({ programs: [
+      { service: 'pest', label: 'Interior', frequencyPerYear: 4, pricePerApplication: 100, taxable: true },
+      { service: 'pest', label: 'Exterior', frequencyPerYear: 4, pricePerApplication: 100 },
+    ] }).taxPerVisit).toBe(7);
+    expect(firstVisitVisitPlan({ proposal: { taxRate: 0 } }).taxPerVisit).toBe(0);
   });
 
   test('no estimator minutes and no builder length: one hour; a short visit books the commit minimum', () => {
@@ -360,6 +372,7 @@ describe('the in-transaction estimate guard', () => {
     ['moved to another customer', proposalEstimate({ customer_id: 'someone-else' })],
     ['a new price', proposalEstimate({ programs: [{ service: 'pest', label: 'Interior', frequencyPerYear: 12, pricePerApplication: 90 }] })],
     ['a new visit length', proposalEstimate({ programs: [{ service: 'pest', label: 'Interior', frequencyPerYear: 12, pricePerApplication: 81.67, visitMinutes: 30 }] })],
+    ['a new tax rate', proposalEstimate({ proposal: { taxRate: 0.065 } })],
   ])('%s: ineligible', async (_label, fresh) => {
     expect(await guard().revalidate(trxWith({ estimates: fresh }))).toBe('ineligible');
   });
@@ -376,6 +389,45 @@ describe('the in-transaction estimate guard', () => {
     const trx = trxWith({ estimates: proposalEstimate() });
     expect(await guard().revalidate(trx)).toBe('ineligible');
     expect(trx).not.toHaveBeenCalled();
+  });
+});
+
+// Codex #6869 P1: the completion mint bills the visit price at the customer's own tax setup, so only a quote taxed the
+// same way books online; anything else is the office's.
+describe('completion tax parity', () => {
+  const MIXED = [
+    { service: 'pest', label: 'Interior', frequencyPerYear: 4, pricePerApplication: 100, taxable: true },
+    { service: 'pest', label: 'Exterior', frequencyPerYear: 4, pricePerApplication: 100 },
+  ];
+
+  test('the dry run is the mint\'s own: the visit price under the commercial service type, for this customer', async () => {
+    expect(await firstVisit.completionTaxMatches(firstVisitVisitPlan(), CUSTOMER_ID)).toBe(true);
+    expect(mockPreview).toHaveBeenCalledWith(expect.objectContaining({ customerId: CUSTOMER_ID, amount: 81.67, title: 'Commercial Pest Control' }));
+  });
+
+  test('mixed taxable programs (quote $207 a visit, the mint would bill $214): no picker, and the booking refuses', async () => {
+    const estimate = proposalEstimate({ programs: MIXED });
+    expect(await firstVisit.completionTaxMatches(firstVisit.firstVisitPlan(estimate), CUSTOMER_ID)).toBe(false);
+    expect(await firstVisit.firstVisitCtaFor(estimate, { open: true, picker: true })).toBeNull();
+    await expect(firstVisit.firstVisitAvailability(estimate)).resolves.toMatchObject({ ok: false, status: 409, code: 'call_us' });
+    expect(mockBooking.buildBookingAvailability).not.toHaveBeenCalled();
+  });
+
+  test('a taxed quote for a customer the mint does not tax (exempt, residential): the office books it', async () => {
+    mockPreview.mockResolvedValue({ tax_amount: 0 });
+    expect(await firstVisit.firstVisitCtaFor(proposalEstimate(), { open: true, picker: true })).toBeNull();
+    expect(await firstVisit.firstVisitOnlineFor(ESTIMATE_ID)).toBe(false);
+  });
+
+  test('an untaxed quote for a customer the mint does not tax books online', async () => {
+    mockPreview.mockResolvedValue({ tax_amount: 0 });
+    expect(await firstVisit.firstVisitCtaFor(proposalEstimate({ proposal: { taxRate: 0 } }), { open: true, picker: true }))
+      .toEqual({ state: 'pick', durationMinutes: 55 });
+  });
+
+  test('a failed dry run fails closed', async () => {
+    mockPreview.mockRejectedValue(new Error('boom'));
+    expect(await firstVisit.completionTaxMatches(firstVisitVisitPlan(), CUSTOMER_ID)).toBe(false);
   });
 });
 

@@ -3574,8 +3574,12 @@ async function createSelfBooking(payload = {}) {
       // that same fallback when the legacy profile has no saved pin. The
       // assessment caller already supplies expectedLocation from its own
       // resolved/fenced property flow, so it must not trigger a second,
-      // potentially divergent geocode here.
-      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false;
+      // potentially divergent geocode here. A paid internal visit
+      // (commercial-first-visit.js) offers its times at
+      // customerBookingLocation, which is this same fallback, so it resolves
+      // here too and its expectedLocation fence checks the re-derived pin
+      // (Codex #6869 P1).
+      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false || !!paidInternalVisit;
       const preloadedBookingLocation = shouldResolveMissingBookingLocation
         ? await preloadBookingLocation(preFenceCustomer)
         : null;
