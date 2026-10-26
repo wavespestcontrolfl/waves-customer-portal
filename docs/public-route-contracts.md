@@ -6137,7 +6137,9 @@ is set, and the self-serve notice window):
     series policy until it has a placement disclosure. Success copy keeps
     the unchanged-commitment caveat. The confirmation SMS uses the separate
     `appointment_recurring_placement_confirmed` template when the recorded
-    operation has deferred placement, including on retries; it states the
+    operation has deferred placement, including on retries; it names the
+    anchor visit's service (the reminders' label, or "visit" when there is no
+    clean name) and states the
     ±3-day placement and unchanged-commitment caveat. Authentication is unchanged. Untimed
     reminder windows are preclosed atomically until placement. Gate off
     preserves legacy conflict checks; already-recorded due dates remain
