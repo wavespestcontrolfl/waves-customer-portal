@@ -439,7 +439,7 @@ const SERVICE_DETAILS_COPY = {
       rows: [
         ['Visits', 'The count on your estimate, timed to turf growth, pest season, weather, and local fertilizer rules — not a fixed monthly date'],
         ['Built for your grass', 'St. Augustine, Bermuda, Zoysia, and Bahia each run their own product track. We confirm the grass before anything goes down, because a product that helps one grass can injure another', { lawnTracks: true }],
-        ['Every visit', 'Inspect first. Then turf-specific fertilization, weed and sedge control, and insect or disease treatment when the evidence supports it'],
+        ['Every visit', 'Inspect first. Then the month’s step for your turf (a feeding, a weed barrier, micronutrients or an insect pass), plus weed, insect or disease treatment when the evidence supports it'],
         ['Covered insects', 'Chinch bugs, sod webworms, armyworms, white grubs, mole crickets — checked every visit, treated on evidence. Fire ants only when your proposal includes them'],
         ['Disease', 'Scouted every visit. Fungicide is applied when disease is present or the risk is documented, on comprehensive plans; fertilization-only and weed-only plans quote it separately'],
         ['Re-service', 'Covered issues are re-serviced at no charge while your plan is active. Report a concern any time. Grass lost to a plant virus (sugarcane mosaic virus) is not covered, because no treatment cures it'],
@@ -467,7 +467,7 @@ const SERVICE_DETAILS_COPY = {
         oneTimeHeading: 'Before your service',
         treatmentOnly: true,
         bullets: [
-          'Mow at least 24 hours before if mowing is due. Don’t mow the day of. Why: we need leaf surface to treat, and fresh cuts bleed product.',
+          'Mow at least 2 days before if mowing is due, and wait 2 days after. Why: weed sprays need leaf surface to soak in, and their labels ask for two uncut days on each side.',
           'Sprinklers off the night before a treatment visit. Why: we treat a dry lawn; wet grass dilutes liquids and granules stick to the blade instead of reaching the soil. Plugging and top dressing are the exceptions: follow their own watering steps below.',
           'Clear the lawn: toys, hoses, furniture, pet bowls, pet waste. Unlock gates. Pets and kids inside during the application.',
           'Tell us what changed: new sod, a new dog, a sprinkler repair, a brown patch that showed up this week. Text a photo. Why: the visit starts from your lawn’s history, and a change we don’t know about is a diagnosis we get wrong.',
@@ -485,8 +485,8 @@ const SERVICE_DETAILS_COPY = {
           { scope: 'one_time', text: 'Your service report tells you which of these applies. They change with the product, so we will not print one rule for every job.' },
         ],
         bullets: [
-          'Watering. The report says one of: water in today (granular fertilizer, most insect granules), keep dry for the stated hours (liquid weed control, fungicide), or resume your normal schedule. Don’t run the sprinklers after a visit unless the report says to.',
-          'Mowing. Wait 1–2 days after liquid applications, longer if the report says so. Never mow a wet application.',
+          'Watering. The report says one of: water in today (granular fertilizer, most insect granules), keep dry for the stated hours (liquid weed control, fungicide), or resume your normal schedule. A weed barrier needs about ½ inch of rain or irrigation within 14 days to activate; your regular watering counts.',
+          'Mowing. Wait 2 days after a weed spray and 1 day after other liquid applications, longer if the report says so. Never mow a wet application.',
           'Kids and pets. Off the lawn until the treated area is dry for liquids; until watered in for granules. Dogs that graze grass or lick paws are the main exposure route. If you have a grazer, tell us.',
           'What “working” looks like. Weeds yellow and wilt over 1–2 weeks; stubborn perennials may need a second pass. Insect damage stops spreading, but dead turf does not regrow. It fills in by runners, plugs, or sod.',
           { scope: 'recurring', text: 'Call us right away if the lawn yellows in streaks or stripes within days of a visit, or damage is spreading. That’s an immediate look, not wait-and-see. No waiting period for a re-service.' },
@@ -502,7 +502,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         heading: 'Mowing heights (UF/IFAS starting points)',
-        paragraphs: ['Standard St. Augustine (Floratam, Palmetto, Raleigh) 3.5–4"; dwarf St. Augustine (Seville, Captiva) 2–2.5"; Bermuda 1–2"; Zoysia 1.75–2.5"; Bahia 3–4". Never remove more than a third of the blade in one mowing. Keep blades sharp. Scalping looks like pest damage and invites Bermuda and weeds.'],
+        paragraphs: ['Standard St. Augustine (Floratam, Palmetto, Raleigh) 3.5–4"; dwarf St. Augustine (Seville, Captiva) 2–2.5"; Bermuda 1–2"; Zoysia 1.5–2"; Bahia 3–4". Never remove more than a third of the blade in one mowing. Keep blades sharp. Scalping looks like pest damage and invites Bermuda and weeds.'],
       },
       {
         heading: 'Bermuda removal from St. Augustine (Recognition + Fusilade II)',
@@ -596,7 +596,7 @@ const SERVICE_DETAILS_COPY = {
       {
         heading: 'Summer fertilizer rules (June 1 – September 30; North Port from April 1)',
         scope: 'recurring',
-        paragraphs: ['Manatee, Sarasota, and Charlotte counties and the City of Bradenton restrict nitrogen and phosphorus lawn fertilizer from June 1 through September 30. The City of North Port starts earlier: April 1 through September 30. Your address decides which ordinance applies. Summer visits still run the full inspection, insect and disease work, weed control, and iron and micronutrients to hold color. Your lawn is not skipped, and we won’t break the ordinance for you.'],
+        paragraphs: ['Manatee, Sarasota, and Charlotte counties and the City of Bradenton restrict nitrogen and phosphorus lawn fertilizer from June 1 through September 30. The City of North Port starts earlier: April 1 through September 30. Your address decides which ordinance applies. Summer visits still run the full inspection, insect and disease work, and weed control where label limits allow, with micronutrients for color where your ordinance allows them. Your lawn is not skipped, and we won’t break the ordinance for you.'],
       },
     ],
     included: [
@@ -685,7 +685,7 @@ const SERVICE_DETAILS_COPY = {
       {
         scope: 'recurring',
         q: 'Do you spray insecticide every visit?',
-        a: 'No. Treatments follow evidence, and when insecticide is applied the report names the pest or the evidence.',
+        a: 'No. Treatments follow evidence, and when insecticide is applied the report names the pest or the evidence. The one planned exception is May, peak chinch bug season: one insect pass on hot, sunny turf where it fits the property.',
       },
       {
         scope: 'recurring',
@@ -721,7 +721,7 @@ const SERVICE_DETAILS_COPY = {
     // program's flagship products, generated 2026-07-11 (gemini-3-pro-image;
     // no manufacturer photography, no copied trade dress). Products chosen
     // from the lawn protocols: Arena 50 WDG (insecticide rotation), LESCO
-    // granular fert + Chelated AM+Micros (summer iron/micros), Celsius WG
+    // granular fert, Celsius WG
     // (primary post-emergent, unified St. Augustine protocol).
     productImages: {
       heading: 'A few of the products doing the work',
@@ -729,7 +729,6 @@ const SERVICE_DETAILS_COPY = {
         { file: 'product-lesco-fertilizer-bag.png', caption: 'LESCO® professional turf fertilizer' },
         { file: 'product-celsius-wg.png', product: 'Celsius', caption: 'Celsius® WG — post-emergent herbicide' },
         { file: 'product-arena-50-wdg.png', product: 'Arena', caption: 'Arena® 50 WDG — turf insecticide' },
-        { file: 'product-lesco-am-micros.png', caption: 'LESCO® Chelated AM + Micros — summer iron & micronutrients' },
       ],
       note: 'Stylized product illustrations — product selection follows your turf, the season, and the label, and your service report names the exact products applied at your home.',
     },
