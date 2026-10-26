@@ -97,6 +97,10 @@ function firstVisitPlan(estimate = {}) {
   const { normalizeProposal, computeProposalTotals } = require('./estimate-proposal');
   const proposal = normalizeProposal(estimate);
   if (proposal.enabled !== true || proposal.synthesized === true) return null;
+  // The win (estimate-manual-acceptance.js winCommercialProposal) refuses a proposal outside invoice mode whose
+  // structured payment terms are anything but Auto Pay, so only those proposals book online.
+  const paymentTerms = proposal.commercialTerms?.paymentTerms;
+  if (paymentTerms && paymentTerms !== 'autopay') return null;
   const programs = proposal.programs || [];
   if (!programs.length) return null;
   if ((proposal.buildings || []).some((building) => (building.lineItems || []).length)) return null;
@@ -124,6 +128,9 @@ function firstVisitPlan(estimate = {}) {
     pattern,
     pricePerVisit,
     taxPerVisit,
+    // The win marks the customer commercial for a taxable proposal (proposal-win.js
+    // flagProposalCustomerCommercialIfTaxable, the same first-invoice rule), before any completion invoice exists.
+    flagsCommercial: require('./proposal-win').buildProposalFirstInvoice(proposal).taxableSubtotal > 0,
     durationMinutes,
     serviceType: SERVICE_TYPE,
     serviceKey: SERVICE_KEY,
@@ -133,13 +140,14 @@ function firstVisitPlan(estimate = {}) {
 // Whether the visit's completion invoice charges the tax the quote shows for a visit. The completion mint
 // (admin-schedule.js mintOrReuseScheduledServiceInvoice) passes no rate, so the customer's tax setup decides it
 // (property type, county rate, a verified exemption, a tax-exempt payer); InvoiceService.previewInvoiceTotals is that
-// same decision as a dry run. A quote taxed any other way (mixed program flags, another rate, an exempt customer)
-// stays with the office (Codex #6869 P1). Fails closed. It is not re-run inside the booking transaction: the mint
-// reads the customer's tax setup again at completion, so no lock taken here could hold it.
+// same decision as a dry run, taken as of after the win (a taxable proposal's win marks the customer commercial
+// first). A quote taxed any other way (mixed program flags, another rate, an exempt customer) stays with the office
+// (Codex #6869 P1). Fails closed. It is not re-run inside the booking transaction: the mint reads the customer's tax
+// setup again at completion, so no lock taken here could hold it.
 async function completionTaxMatches(plan, customerId, conn = db) {
   try {
     const preview = await require('./invoice').previewInvoiceTotals({
-      customerId, amount: plan.pricePerVisit, title: SERVICE_TYPE, database: conn,
+      customerId, amount: plan.pricePerVisit, title: SERVICE_TYPE, database: conn, assumeCommercial: plan.flagsCommercial === true,
     });
     return roundMoney(preview?.tax_amount) === plan.taxPerVisit;
   } catch (err) {
@@ -300,10 +308,28 @@ function findSlot(availability, date, time) {
   return (slots || []).find((slot) => String(slot.start_time || '').slice(0, 5) === time) || null;
 }
 
+// The route's call-side verdict (estimate-public.js firstVisitEstimate), re-run inside the booking transaction with the
+// verdict HELD through the insert: the estimate row under a share lock, then the linked lead and the call row locked
+// (the repo-wide estimates, leads, call_log order; createSelfBooking has already locked the customer, estimate and lead
+// rows it needs in that order). A call-side rejection or linkage correction landing during the availability lookup
+// refuses here instead of booking (pre-push audit P0, AGENTS.md: the commit re-checks the preflight read).
+async function callSideBlockedUnderLock(trx, row) {
+  const data = parseEstimateData(row.estimate_data);
+  const engine = data?.estimatorEngine;
+  if (engine && (engine.linkage_invalidated_at || engine.invalidation_pending_at)) return true;
+  if (data?.lead_id && ['sid', 'stamp'].includes(data?.lead_linkage)) {
+    await trx('leads').where({ id: String(data.lead_id) }).forUpdate().first('id');
+  }
+  const { staleCallLinkageReason } = require('./admin-estimate-persistence');
+  if (await staleCallLinkageReason(trx, data, { lockCallRow: true, estimateStatus: row.status })) return true;
+  const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+  return !!(await callSideBlockForEstimateData(trx, data, { estimateStatus: row.status }));
+}
+
 // The booking transaction's re-check, on its own connection, under the per-estimate lock createSelfBooking takes:
 // 'ineligible' when the gate was turned off, 'booked' when a first visit landed since the caller's read,
-// 'ineligible' when the estimate is no longer open, its plan changed, or its quote is no longer the signed one, else
-// 'ok'. `openFor(row)` is the route's open-estimate verdict.
+// 'ineligible' when the estimate is no longer open, its call-side verdict now blocks it, its plan changed, or its quote
+// is no longer the signed one, else 'ok'. `openFor(row)` is the route's open-estimate verdict.
 function estimateGuardFor(estimate, { openFor }) {
   return {
     estimateId: estimate.id,
@@ -312,8 +338,9 @@ function estimateGuardFor(estimate, { openFor }) {
       // nothing.
       if (!live()) return 'ineligible';
       if (await linkedFirstVisit(estimate.id, trx)) return 'booked';
-      const fresh = await trx('estimates').where({ id: estimate.id }).first();
+      const fresh = await trx('estimates').where({ id: estimate.id }).forShare().first();
       if (!fresh || String(fresh.customer_id || '') !== String(estimate.customer_id) || !openFor(fresh)) return 'ineligible';
+      if (await callSideBlockedUnderLock(trx, fresh)) return 'ineligible';
       const plan = firstVisitPlan(fresh);
       const was = firstVisitPlan(estimate);
       if (!plan || !was || plan.pricePerVisit !== was.pricePerVisit || plan.taxPerVisit !== was.taxPerVisit

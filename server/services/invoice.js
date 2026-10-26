@@ -7419,6 +7419,10 @@ const InvoiceService = {
     // Intelligence Bar create_invoice only: the caller's explicit taxRate, resolved as create() resolves one (residential or
     // payer-exempt = 0; a verified exemption zeroes it for a self-pay invoice). undefined = the calculator, as before.
     taxRate = undefined,
+    // Commercial first visit only (commercial-first-visit.js): the customer is marked commercial before this invoice
+    // exists (a taxable proposal's win, proposal-win.js flagProposalCustomerCommercialIfTaxable), so the preview taxes
+    // it as commercial, through TaxCalculator's own isCommercial option. Default false: the row decides, as before.
+    assumeCommercial = false,
     database = db,
   }) {
     const cust =
@@ -7486,7 +7490,7 @@ const InvoiceService = {
       previewPayerBilled = !!resolved.payerId;
     } catch { /* preview proceeds with the normal tax calc */ }
 
-    const isCommercial =
+    const isCommercial = assumeCommercial === true ||
       cust.property_type === "commercial" || cust.property_type === "business";
     let rate, taxAmount;
     if (!isCommercial || payerTaxExempt) {
@@ -7511,7 +7515,7 @@ const InvoiceService = {
           customerId,
           serviceType || title,
           subtotal,
-          { database, skipCustomerExemption: previewPayerBilled },
+          { database, skipCustomerExemption: previewPayerBilled, ...(assumeCommercial === true ? { isCommercial: true } : {}) },
         );
         rate = taxResult.rate;
         taxAmount = taxResult.amount;

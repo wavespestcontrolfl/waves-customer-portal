@@ -36,6 +36,11 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) =>
 // The completion mint's tax, as a dry run (InvoiceService.previewInvoiceTotals); 7% unless a test says otherwise.
 const mockPreview = jest.fn();
 jest.mock('../services/invoice', () => ({ previewInvoiceTotals: (...args) => mockPreview(...args) }));
+// The call-side verdicts the guard re-runs under lock; clear unless a test says otherwise.
+const mockCallSideBlock = jest.fn();
+jest.mock('../utils/estimate-claim-sql', () => ({ callSideBlockForEstimateData: (...args) => mockCallSideBlock(...args) }));
+const mockStaleLinkage = jest.fn();
+jest.mock('../services/admin-estimate-persistence', () => ({ staleCallLinkageReason: (...args) => mockStaleLinkage(...args) }));
 
 const db = require('../models/db');
 const firstVisit = require('../services/commercial-first-visit');
@@ -67,7 +72,7 @@ let rows;
 function chain(table) {
   const calls = [];
   const c = {};
-  for (const m of ['where', 'whereNull', 'whereNotIn', 'orderBy', 'forUpdate', 'select']) {
+  for (const m of ['where', 'whereNull', 'whereNotIn', 'orderBy', 'forUpdate', 'forShare', 'select']) {
     c[m] = jest.fn((...args) => { calls.push([m, ...args]); return c; });
   }
   c.first = jest.fn(async () => {
@@ -105,6 +110,8 @@ beforeEach(() => {
   mockSeeder.seedFollowUpsForParent.mockReset().mockResolvedValue({ insertedCount: 11 });
   mockNotifyAdmin.mockReset().mockResolvedValue({ id: 'n1' });
   mockPreview.mockReset().mockImplementation(async ({ amount }) => ({ tax_amount: Math.round(amount * 0.07 * 100) / 100 }));
+  mockCallSideBlock.mockReset().mockResolvedValue(null);
+  mockStaleLinkage.mockReset().mockResolvedValue(null);
 });
 afterAll(() => {
   if (ORIGINAL_GATE === undefined) delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
@@ -114,7 +121,7 @@ afterAll(() => {
 describe('firstVisitPlan', () => {
   test('one monthly pest program: per-visit price, monthly pattern, the estimator minutes rounded up to 5', () => {
     expect(firstVisitVisitPlan()).toEqual({
-      visitsPerYear: 12, pattern: 'monthly', pricePerVisit: 81.67, taxPerVisit: 5.72, durationMinutes: 55,
+      visitsPerYear: 12, pattern: 'monthly', pricePerVisit: 81.67, taxPerVisit: 5.72, flagsCommercial: true, durationMinutes: 55,
       serviceType: 'Commercial Pest Control', serviceKey: 'pest_control',
     });
   });
@@ -134,6 +141,12 @@ describe('firstVisitPlan', () => {
       { service: 'pest', label: 'Exterior', frequencyPerYear: 4, pricePerApplication: 100 },
     ] }).taxPerVisit).toBe(7);
     expect(firstVisitVisitPlan({ proposal: { taxRate: 0 } }).taxPerVisit).toBe(0);
+  });
+
+  test('payment terms: Auto Pay or none books online; any other structured term (the win refuses it) is the office\'s', () => {
+    expect(firstVisitVisitPlan({ proposal: { commercialTerms: { paymentTerms: 'autopay' } } })).not.toBeNull();
+    expect(firstVisitVisitPlan({ proposal: { commercialTerms: { paymentTerms: 'net_30' } } })).toBeNull();
+    expect(firstVisitVisitPlan({ proposal: { commercialTerms: { paymentTerms: 'due_on_receipt' } } })).toBeNull();
   });
 
   test('no estimator minutes and no builder length: one hour; a short visit books the commit minimum', () => {
@@ -384,6 +397,39 @@ describe('the in-transaction estimate guard', () => {
     expect(mockSignedQuoteMatches).toHaveBeenCalledWith(expect.objectContaining({ id: ESTIMATE_ID }), trx);
   });
 
+  // Pre-push audit P0: the route's call-side verdict, re-run on the held estimate row with the lead and call rows locked.
+  test('a call-side block or a stale call linkage that landed since the route read: ineligible', async () => {
+    mockCallSideBlock.mockResolvedValueOnce('call_rejected');
+    expect(await guard().revalidate(trxWith({ estimates: proposalEstimate() }))).toBe('ineligible');
+    mockStaleLinkage.mockResolvedValueOnce('call_linkage_changed');
+    expect(await guard().revalidate(trxWith({ estimates: proposalEstimate() }))).toBe('ineligible');
+  });
+
+  test('an estimate-side linkage marker: ineligible, before any call read', async () => {
+    const marked = proposalEstimate();
+    marked.estimate_data = { ...marked.estimate_data, estimatorEngine: { callLogId: 'call-1', linkage_invalidated_at: '2026-10-26T12:00:00Z' } };
+    expect(await guard().revalidate(trxWith({ estimates: marked }))).toBe('ineligible');
+    expect(mockStaleLinkage).not.toHaveBeenCalled();
+  });
+
+  test('the verdict is held: estimate under a share lock, then the linked lead, then the call row', async () => {
+    const linked = proposalEstimate();
+    linked.estimate_data = { ...linked.estimate_data, lead_id: 'lead-1', lead_linkage: 'sid', estimatorEngine: { callLogId: 'call-1' } };
+    const chains = {};
+    const trx = jest.fn((table) => {
+      const c = chain(table);
+      c.first = jest.fn(async () => (table === 'estimates' ? linked : undefined));
+      (chains[table] ||= []).push(c);
+      return c;
+    });
+    expect(await guard().revalidate(trx)).toBe('ok');
+    expect(chains.estimates[0].forShare).toHaveBeenCalled();
+    expect(chains.leads[0].where).toHaveBeenCalledWith({ id: 'lead-1' });
+    expect(chains.leads[0].forUpdate).toHaveBeenCalled();
+    expect(mockStaleLinkage).toHaveBeenCalledWith(trx, expect.objectContaining({ lead_id: 'lead-1' }), expect.objectContaining({ lockCallRow: true }));
+    expect(mockCallSideBlock).toHaveBeenCalledWith(trx, expect.objectContaining({ lead_id: 'lead-1' }), expect.anything());
+  });
+
   test('the gate turned off while the booking waited: ineligible, before any read', async () => {
     delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
     const trx = trxWith({ estimates: proposalEstimate() });
@@ -423,6 +469,15 @@ describe('completion tax parity', () => {
     mockPreview.mockResolvedValue({ tax_amount: 0 });
     expect(await firstVisit.firstVisitCtaFor(proposalEstimate({ proposal: { taxRate: 0 } }), { open: true, picker: true }))
       .toEqual({ state: 'pick', durationMinutes: 55 });
+  });
+
+  test('the dry run is taken as of after the win: a taxable proposal marks the customer commercial first', async () => {
+    await firstVisit.completionTaxMatches(firstVisitVisitPlan(), CUSTOMER_ID);
+    expect(mockPreview).toHaveBeenLastCalledWith(expect.objectContaining({ assumeCommercial: true }));
+    const untaxed = firstVisitVisitPlan({ programs: [{ service: 'pest', label: 'Interior', frequencyPerYear: 12, pricePerApplication: 81.67 }] });
+    expect(untaxed.flagsCommercial).toBe(false);
+    await firstVisit.completionTaxMatches(untaxed, CUSTOMER_ID);
+    expect(mockPreview).toHaveBeenLastCalledWith(expect.objectContaining({ assumeCommercial: false }));
   });
 
   test('a failed dry run fails closed', async () => {
