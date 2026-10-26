@@ -225,7 +225,7 @@ const LEGACY_README_ITEMS = [
 ];
 // GATE_TAX_PACKAGE_W2_LABOR on: the informational file holds only technicians who are
 // not W-2 employees, and w2-payroll.csv carries the W-2 pay.
-const W2_README_ITEMS = [
+const W2_README_HEAD = [
   `  6. labor-timetracking-informational.csv`,
   `                          — The owner's own time-tracking detail (technicians`,
   `                            who are not W-2 employees), INFORMATIONAL ONLY.`,
@@ -240,12 +240,30 @@ const W2_README_ITEMS = [
   `                            totals row. The wages (Schedule C line 26) and the`,
   `                            employer taxes (line 23) are deductible. The`,
   `                            totals match the portal's W-2 and W-3 figures.`,
+];
+const W2_README_PNL_NOT_READING = [
   `                            The P&L does not read pay runs yet: payroll`,
   `                            payments sorted into expense categories from the`,
   `                            bank feed appear in expenses.csv and pnl.csv, so`,
   `                            compare them with this file so nothing is counted`,
   `                            twice or missed.`,
+];
+// GATE_PNL_PAY_RUN_WAGES also on: the P&L reads the same pay runs.
+const W2_README_PNL_READING = [
+  `                            The P&L and pnl.csv count these wages and`,
+  `                            employer taxes from the same pay runs. Bank`,
+  `                            payroll payments are booked in the "Payroll`,
+  `                            (counted from pay runs)" category, which the P&L`,
+  `                            leaves out, so nothing counts twice.`,
+  `                            expenses.csv still lists them.`,
+];
+const W2_README_TAIL = [
   `  8. pnl.csv              — Profit & Loss statement`,
+];
+const w2ReadmeItems = (payRunWages) => [
+  ...W2_README_HEAD,
+  ...(payRunWages ? W2_README_PNL_READING : W2_README_PNL_NOT_READING),
+  ...W2_README_TAIL,
 ];
 
 // W-2 pay checks for the CPA (GATE_TAX_PACKAGE_W2_LABOR). `checks` are finalized
@@ -294,7 +312,7 @@ function w2PayrollToCSV(checks) {
   return lines.join('\n');
 }
 
-function generateReadme(year, pnlData, { w2Labor = false } = {}) {
+function generateReadme(year, pnlData, { w2Labor = false, payRunWages = false } = {}) {
   const now = etDateString();
   const lines = [
     `Waves Pest Control — ${year} Tax Package`,
@@ -312,7 +330,7 @@ function generateReadme(year, pnlData, { w2Labor = false } = {}) {
     `  5. depreciation.csv     — Equipment depreciation schedule (the`,
     `                            'Depreciation (This Period)' column foots to the`,
     `                            P&L's depreciation line)`,
-    ...(w2Labor ? W2_README_ITEMS : LEGACY_README_ITEMS),
+    ...(w2Labor ? w2ReadmeItems(payRunWages) : LEGACY_README_ITEMS),
     ``,
     `Summary for ${year}:`,
   ];

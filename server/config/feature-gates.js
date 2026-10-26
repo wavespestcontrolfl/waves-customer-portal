@@ -69,6 +69,7 @@
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer.)
  *   GATE_TRUCK_CLOCK_IN=shadow (owner 2026-10-25, "this works": the rule is that a technician's shift starts by itself from the truck's GPS; THIS RELEASE ONLY RECORDS what that rule would do. The first of two triggers each Eastern work day wins: the truck's first GPS arrival at one of that technician's visits, or the start of the truck's first trip of the day (no earlier trip-start of a different trip for that truck in bouncie_webhook_log that Eastern day) within 200 m of the office. It notes whether the technician has no active shift and has a completed Vehicle Use & Commuting Agreement. Training days stay by hand (a trainee rides in the trainer's truck). Read at call time via truckClockInMode(): exactly 'shadow' (trimmed, any case) = decide and record one truck_clock_in_shadow row a day, never write time_entries; anything else, including 'true', = off, no code path runs. 'true' is not a value yet: live clock-in is a separate later change. Clock-out, the 9 PM reminder and the 11 PM close are unchanged. Sends nothing to a customer or staff member.)
+ *   GATE_SPRAY_RAIN_RULES=shadow|true (owner 2026-10-26, plan page "Visit-Day Rain Rule", D1 = A and D2 = A: the visit-day spray check judges each product's label rain rule (server/config/label-rain-rules.js: "Do not make applications during rain" on the start hour, a label's dry-before-rain advice as a caution only, water-in products not judged) and, for a tank spray whose label has no rain rule, the Waves rule for its service (reschedule-rules.js serviceSensitivity). One odds table for every rain number: caution above reschedule-rules caution_if_rain_prob_above (60%), hold above reschedule_if_rain_prob_above (80%). A caution keeps the dose on the card; only a hold withholds it. Dispatch chips name the source ("Rain hold · label", "Rain caution · Waves rule"). `shadow` = the live check is unchanged and the new verdict of each visit-day readiness / card build is upserted to spray_rain_rule_shadow (peak per visit per day). Off = byte-identical to today. Canonical CALL-TIME reader sprayRainRulesMode(). Kill switch: unset.)
  *   GATE_SATELLITE_PALM_COUNT_TYPED=true (owner 2026-10-24 "ok go", follow-up B to #6562: a never-sent estimate whose Tree & Shrub line priced a palm count read from the satellite image (palmCountFromLookup) is sent only after an admin types the palm count from the aerial photo in Review and send. Acknowledging the AI review is no longer enough; a typed count other than the priced one refuses the send with PALM_COUNT_MISMATCH, so the quote is rebuilt with the real count. Read at call time via satellitePalmCountTypedLive(), strict 'true', dark by default; off = the one-click acknowledgment as before. Never sends, never changes a price.)
  *   GATE_TRUCK_KIT=true (truck check, docs/tool-inventory-tracker-scope.md PR 1: a technician whose truck is an equipment row (category vehicle, assigned to them) gets a Truck check in the field workspace listing every equipment row kept on that truck (assigned_vehicle_id, set on Equipment → Assets) and a Today card once the last check is 7 or more days old; a check writes one equipment_checks row, a missing or damaged item opens a maintenance alert (tool_missing / tool_damaged, resolved on Equipment → Maintenance with Found / Lost or Repaired / Retired) and the check rings one office bell per truck that closes itself when every tool alert on the truck is resolved; with kit keys on rows and checklist items (PR 2) the Schedule readiness strip and the technician's Today page say which required tool a truck lacks. Read at call time via truckKitLive(), strict 'true', dark by default; off = GET and POST /api/tech/truck-check answer 404 { enabled: false }, the readiness poll reads nothing from the kit, nothing renders, nothing is written. Never contacts a customer, never changes an item's status by itself.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
@@ -81,6 +82,7 @@
  *   GATE_PAYROLL_TAX_CALENDAR=true (basic payroll layer 2, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Needs GATE_PAYROLL for the finalized pay runs it reads. Puts the amount and due date of each payroll tax deposit and filing on the existing Tax page filing calendar: the monthly federal deposit, Form 941, Florida RT-6, a FUTA over $500 alert (FUTA deposits are out of scope), Form 940, W-2 and W-3, and the Florida new hire report. Due dates move past weekends and legal holidays by the IRS and Florida rules. The 14-day reminder text to the owner is the existing tax deadline alert. A row the owner marks filed or paid is never changed; if a pay run later raises an amount above what the marked rows cover, a new balance row holds the difference, and if the pay checks behind a marked return change, a review row asks the owner to check the figures. Read at call time via payrollTaxCalendarLive(), strict 'true', dark by default; off = the sync returns before any query. The owner makes every deposit and filing himself; sends nothing to a customer or staff member. Rollback = unset.)
  *   GATE_PAYROLL_FORM_FIGURES=true (basic payroll layer 3a, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Needs GATE_PAYROLL for the finalized pay runs it reads. Adds a Tax forms section to the Payroll tab and GET /api/admin/payroll/forms: the line-by-line figures to type onto Form 941 and the Florida RT-6 (one quarter), Form 940, and each employee's W-2 with the W-3 totals (one year), added up from finalized, not-voided pay checks by pay date, with a copy button on each amount. Rates come from the payroll calculator. Shows numbers to an admin only: no PDF is filled in, no SSN, EIN or bank number is held (those fields read "Enter from your records"), and nothing is filed, paid or sent. Read at call time via payrollFormFiguresLive(), strict 'true', dark by default; off = the route answers 404 and the section does not render. Rollback = unset.)
  *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
+ *   GATE_PNL_PAY_RUN_WAGES=true (census M11, owner 2026-10-26, choice B "from the payroll the portal already runs": the P&L and the Schedule C draft count W-2 wages and employer payroll taxes from FINALIZED pay runs (payroll_checks.status 'finalized', by pay_date): wages = gross, employer taxes = employer Social Security + employer Medicare + FUTA + Florida reemployment. Bank payroll payments (net pay, the federal deposit, FUTA, RT-6) go in the expense category "Payroll (counted from pay runs)" (expense_categories.counted_from_pay_runs), which both leave out so nothing counts twice. P&L labor line = wages + employer taxes, plus a payroll block in the P&L JSON; Schedule C line 26 = wages, line 23 = employer taxes plus the other Taxes and licenses rows; the CPA README says so when GATE_TAX_PACKAGE_W2_LABOR is also on. Read at call time via pnlPayRunWagesLive(), strict 'true', dark by default; off = every output is byte for byte today's; rollback = unset. Changes report figures only; sends, files and pays nothing.)
  *   GATE_TECH_STAFF_GUARDS=true (census M12 + M6, owner 2026-10-25: (M12) an inbound text or call FROM the phone of an ACTIVE technician (technicians.employment_status 'active') is staff, like the env staff phones: a text to an office line stays in the office inbox (unread, with the owner's usual unknown-sender text forward) but gets no spam screen, estimator draft or new-prospect bell; a call keys no customer or lead and gets no missed-call text-back; a number that is also on a customer record stays a customer. Outbound sends and the owner phone set are unchanged. (M6) a technician's En Route or On Site tap on a booking the office has not reviewed no longer approves it: the tap answers 409 and ONE office notification per visit rings (Schedule, needs-you); an admin login still auto-confirms. Read at call time via techStaffGuardsLive(), strict 'true', dark by default; off = today's behavior byte for byte; rollback = unset. Sends nothing to a customer.)
  *   GATE_TAX_PACKAGE_W2_LABOR=true (census A8, owner 2026-10-25: the CPA tax package stops calling every technician's tracked time the owner's own non-deductible time. labor-timetracking-informational.csv keeps only technicians who are NOT W-2 employees (technicians.employment_type not 'w2'), and a new w2-payroll.csv lists one row per FINALIZED pay check (payroll_checks.status 'finalized') whose pay date falls in the package window: employee, week, pay date, regular and overtime hours, gross wages, the taxes withheld, the employer taxes and net pay, with a totals row; the README lists it (wages are Schedule C line 26, employer taxes line 23). Read at call time via taxPackageW2LaborLive(), strict 'true', dark by default; off = the package is byte for byte today's; rollback = unset. Changes a file for the CPA only; sends, files and pays nothing.)
  *   GATE_MISTING_LAYOUT_DESIGNER=true (mosquito misting satellite-map layout designer, step 1, owner 2026-10-26 "build staff version": the staff estimator shows a Design on map button beside the misting Nozzles input; it opens a modal over the property's satellite photo where staff draw eave and fence lines, nozzles are placed at every corner and about every 10 ft, and Use counts writes the nozzle total into the Nozzles input. Step 3 saves the layout per estimate (admin-estimate-misting-layout routes, misting_layouts) and adds a Proposed misting layout section to the estimate document. Staff drawing screen; no customer message, no price changes beyond the nozzle count staff already type. Needs GATE_MOSQUITO_MISTING also on. Ships DARK: strict true only. Off = the misting block of GET /admin/pricing-config/mosquito_misting_pricing, the layout routes (404), the estimate document and the estimator are byte-identical.)
@@ -3913,6 +3915,17 @@ const gates = {
   // only.
   newApptRouteTimes: gateEnvValue('GATE_NEW_APPT_ROUTE_TIMES'),
 
+  // New Appointment stop order (owner 2026-10-26, "OK GO"): after a New
+  // Appointment save (POST /api/admin/schedule), the booked visit's technician
+  // day is numbered in the order the route check certifies (placeMovedVisit,
+  // like a staff move), so the board and the tech app list the visit in its
+  // place instead of last. Needs
+  // GATE_STAFF_ROUTE_INSERTION and GATE_ADMIN_ARRIVAL_WINDOWS. Never changes a
+  // time or sends a message. The create route reads it through gateEnvValue()
+  // at call time. Dark in every environment. Kill switch: unset. This entry is
+  // for logGateStatus only.
+  newApptStopOrder: gateEnvValue('GATE_NEW_APPT_STOP_ORDER'),
+
   // New Appointment address-first best times (owner 2026-10-24, replacing the
   // 2026-10-21 Dispatch "Find a time" drawer): office staff on a call with a
   // NEW caller open New Appointment, pick the address in its New customer
@@ -4454,6 +4467,11 @@ const gates = {
   // logGateStatus; the tax package route reads taxPackageW2LaborLive() at CALL time. Ships DARK:
   // exactly 'true' only.
   taxPackageW2Labor: process.env.GATE_TAX_PACKAGE_W2_LABOR === 'true',
+  // P&L and Schedule C wages from pay runs (census M11, owner 2026-10-26): finalized pay checks supply
+  // wages and employer payroll taxes; the bank payroll category is left out. This entry is for
+  // logGateStatus; pnl-report.js and tax-return-engine.js read pnlPayRunWagesLive() at CALL time.
+  // Ships DARK: exactly 'true' only.
+  pnlPayRunWages: process.env.GATE_PNL_PAY_RUN_WAGES === 'true',
   // Misting layout designer (step 1, owner 2026-10-26): the staff estimator's Design on map button. This
   // entry is for logGateStatus; admin-pricing-config reads mistingLayoutDesignerLive() at CALL time.
   // Ships DARK: exactly 'true' only.
@@ -6142,6 +6160,12 @@ function photoPrivacyMode() {
 // covered visit's price when a term is created and only logs a visit the
 // check would hold; 'true' also holds it. Any other value is off: nothing is
 // recorded or read. Unset is the kill, no redeploy.
+// GATE_SPRAY_RAIN_RULES read at CALL time: 'shadow' or 'true', anything else is off.
+function sprayRainRulesMode() {
+  const value = String(process.env.GATE_SPRAY_RAIN_RULES || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 function prepayMintPriceHoldMode() {
   const value = String(process.env.GATE_PREPAY_MINT_PRICE_HOLD || '').trim().toLowerCase();
   return value === 'shadow' || value === 'true' ? value : 'off';
@@ -7222,6 +7246,13 @@ function taxPackageW2LaborLive() {
   return process.env.GATE_TAX_PACKAGE_W2_LABOR === 'true';
 }
 
+// P&L and Schedule C wages from finalized pay runs (services/pnl-report.js, tax-return-engine.js,
+// pay-run-books.js), read at CALL time. Strict `=== 'true'`, dark in every environment; unsetting
+// it is the kill switch.
+function pnlPayRunWagesLive() {
+  return process.env.GATE_PNL_PAY_RUN_WAGES === 'true';
+}
+
 // Misting layout designer (routes/admin-pricing-config.js misting block), read at CALL time. Strict
 // `=== 'true'`, dark in every environment; unsetting it is the kill switch. Needs GATE_MOSQUITO_MISTING.
 function mistingLayoutDesignerLive() {
@@ -8083,6 +8114,7 @@ module.exports.lawnWaterInRainLive = lawnWaterInRainLive;
 module.exports.onSiteCallerDemoteLive = onSiteCallerDemoteLive;
 // GATE_PREPAY_MINT_PRICE_HOLD reader, on its own line so gate PRs never conflict.
 module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
+module.exports.sprayRainRulesMode = sprayRainRulesMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
@@ -8517,6 +8549,8 @@ module.exports.estimateSlotOnePerHourLive = estimateSlotOnePerHourLive;
 module.exports.techStaffGuardsLive = techStaffGuardsLive;
 // GATE_TAX_PACKAGE_W2_LABOR reader, on its own line so gate PRs never conflict.
 module.exports.taxPackageW2LaborLive = taxPackageW2LaborLive;
+// GATE_PNL_PAY_RUN_WAGES reader, on its own line so gate PRs never conflict.
+module.exports.pnlPayRunWagesLive = pnlPayRunWagesLive;
 // GATE_MISTING_LAYOUT_DESIGNER reader, on its own line so gate PRs never conflict.
 module.exports.mistingLayoutDesignerLive = mistingLayoutDesignerLive;
 // GATE_REVIEW_BONUS_ASK_FIRST reader, on its own line so gate PRs never conflict.

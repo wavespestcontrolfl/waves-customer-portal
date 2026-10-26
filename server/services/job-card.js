@@ -20,7 +20,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, sprayRainRulesMode } = require('../config/feature-gates');
+const { labelRainRuleFor } = require('../config/label-rain-rules');
+const RESCHEDULE_RULES = require('../config/reschedule-rules');
 const { treeShrubFieldGuide } = require('./tree-shrub-field-guide');
 const { resolveCatalogProductForName } = require('./completion-product-defaults');
 const { reviewedWeather, checkReviewedWeatherSources } = require('./product-label-weather');
@@ -29,7 +31,7 @@ const { getHourlyRainOutlook } = require('./weather-forecast');
 // visit is 'pest' there, so the history filter must agree.
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { SEVERITY_RANK } = require('./service-report/pressure-trend');
-const { addETDays, etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
+const { addETDays, etDateString, etCalendarDayOf, parseETDateTime, formatETTime } = require('../utils/datetime-et');
 const contextAggregator = require('./context-aggregator');
 
 const { redactAccessCodes } = contextAggregator;
@@ -55,6 +57,10 @@ const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } 
 // day feed's current-conditions call uses (routes/admin-schedule.js).
 const SPRAY_WINDOW_HOURS = 4;
 const RAIN_HOLD_PCT = 50;
+// GATE_SPRAY_RAIN_RULES (owner 2026-10-26, D1 = A): one odds table for every rain number, the weather
+// rebooker's own. A caution keeps the dose on the card; only a hold withholds it.
+const RAIN_CAUTION_ABOVE_PCT = RESCHEDULE_RULES.weather.rain.caution_if_rain_prob_above;
+const RAIN_HOLD_ABOVE_PCT = RESCHEDULE_RULES.weather.rain.reschedule_if_rain_prob_above;
 const MAX_PARAGRAPH_WORDS = 60;
 
 function jobCardEnabled() {
@@ -737,6 +743,20 @@ function paragraphForVisit(facts) {
 
 // ── Spray check ─────────────────────────────────────────────────────────────
 
+// The Waves rain rule of a product (GATE_SPRAY_RAIN_RULES, owner 2026-10-26, D2 = A), for a tank spray whose label
+// has no rain rule: the weather rebooker's own classifier and table (reschedule-rules.js serviceSensitivity), the
+// strictest among the services whose lines name the product on the visit (a Tree & Shrub add-on's product on a pest
+// visit takes the add-on's 3 h, not the visit's 2 h). Null when none needs rain-free time (granular lawn, interior pest).
+function wavesRainRule(serviceTypes) {
+  let strictest = null;
+  for (const serviceType of serviceTypes) {
+    const key = require('./forecast-analyzer').classifyServiceType(serviceType);
+    const sensitivity = RESCHEDULE_RULES.serviceSensitivity[key];
+    if (sensitivity?.needs_rain_free && sensitivity.rain_free_hours > (strictest?.hours ?? 0)) strictest = { key, hours: sensitivity.rain_free_hours };
+  }
+  return strictest;
+}
+
 function productLimits(product) {
   const num = (v) => (v == null || v === '' ? null : Number(v));
   return {
@@ -761,7 +781,15 @@ function maxOrNull(values) {
   return known.length ? Math.max(...known) : null;
 }
 
-function buildSprayCheck({ products = [], hourly = null, now = new Date(), labelSources = {} } = {}) {
+// Temperature and wind, judged over the spray window against the label limits: any known hour past one holds.
+const LIMIT_CHECKS = [
+  { limit: 'minTempF', key: 'temperatureF', kind: 'temperature', breaks: (v, l) => v < l, reason: (l) => `under ${l}°F` },
+  { limit: 'maxTempF', key: 'temperatureF', kind: 'temperature', breaks: (v, l) => v > l, reason: (l) => `over ${l}°F` },
+  { limit: 'maxWindMph', key: 'windMph', kind: 'wind', breaks: (v, l) => v > l, reason: (l) => `wind over ${l} mph` },
+];
+const CONDITIONAL_REVIEW = 'Conditional label restrictions need review';
+
+function buildSprayCheck({ products = [], hourly = null, now = new Date(), labelSources = {}, rainRules = null } = {}) {
   const start = now.getTime();
   const window = Array.isArray(hourly)
     ? hourly.filter((h) => {
@@ -799,50 +827,99 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     return cursor >= end;
   };
 
+  // A check reads one forecast value over its rows and tiers the readings it has. A known reading past a hold
+  // tier holds even when another hour is missing; a caution or a pass needs every hour (`complete`, each row
+  // read), except label advice, whose gap is not "unknown".
+  const windowComplete = covers(window, SPRAY_WINDOW_HOURS);
+  const limitChecks = (limits) => LIMIT_CHECKS.filter((c) => limits[c.limit] != null).map((c) => ({
+    rows: window, complete: windowComplete, key: c.key, label: c.kind, kind: c.kind, source: 'product limit',
+    tier: (known) => (known.some((v) => c.breaks(v, limits[c.limit])) ? 'hold' : null),
+    reason: () => c.reason(limits[c.limit]),
+  }));
+  // Rain tiers the highest chance it reads: above holdAbove holds, above cautionAbove is a caution.
+  const rainCheck = ({ hours, rows = hoursAhead(hours), complete = covers(rows, hours), label = `rain ${hours} h`, holdAbove = RAIN_HOLD_ABOVE_PCT, cautionAbove = RAIN_CAUTION_ABOVE_PCT, text, ...rest }) => ({
+    ...rest, rows, complete, label, key: 'rainChance', kind: 'rain',
+    tier: (known) => {
+      const pct = maxOrNull(known);
+      if (pct > holdAbove) return 'hold';
+      return pct > cautionAbove ? 'caution' : null;
+    },
+    reason: (known) => text(maxOrNull(known)),
+  });
+  // Today's checks: the catalog (or reviewed label) limits, a rain-free interval holding at RAIN_HOLD_PCT.
+  const todayChecks = (limits) => [
+    ...limitChecks(limits),
+    limits.rainFreeHours != null && rainCheck({ hours: limits.rainFreeHours, holdAbove: RAIN_HOLD_PCT - 1, cautionAbove: Infinity, text: () => `rain likely inside ${limits.rainFreeHours} h` }),
+  ].filter(Boolean);
+
+  // GATE_SPRAY_RAIN_RULES (rainRules = { waves: { [productId]: rule } }, sprayRainRulesMode()): the verified
+  // limits, the product's label rain rule (config/label-rain-rules.js), else the Waves rule of its service for
+  // a tank spray, all rain on one odds table (D1 = A). A caution keeps the dose; a hold withholds it, as before.
+  const startRow = (Array.isArray(hourly) ? hourly : []).find((h) => {
+    const t = Date.parse(h.startTime);
+    return Number.isFinite(t) && t <= start && start < t + 3600000;
+  });
+  const startAt = startRow ? formatETTime(new Date(startRow.startTime)).replace(':00', '').toLowerCase() : null;
+  const rainRuleChecks = (product, limits) => {
+    const rule = labelRainRuleFor(product);
+    const dry = rule?.dryBeforeRain?.hours;
+    // A label with rain wording (watering in included) or a catalog interval leaves no room for the Waves rule.
+    const waves = !rule && limits.rainFreeHours == null && isTankMixable(product) ? rainRules.waves[product.id] : null;
+    return [
+      ...limitChecks(limits),
+      // "Do not make applications during rain": the hour the work starts (now, once the window opened).
+      rule?.duringRain && rainCheck({ rows: startRow ? [startRow] : [], complete: Boolean(startRow), label: 'rain', source: 'label', at: startAt, text: (pct) => `rain ${pct}% at ${startAt} — label: no spraying during rain` }),
+      dry && rainCheck({ hours: dry, source: 'label advice', holdAbove: Infinity, gapIsUnknown: false, text: (pct) => `rain ${pct}% within ${dry} h — label advises ${dry} h to dry` }),
+      limits.rainFreeHours != null && rainCheck({ hours: limits.rainFreeHours, source: 'product limit', text: (pct) => `rain ${pct}% inside ${limits.rainFreeHours} h` }),
+      waves && rainCheck({ hours: waves.hours, source: 'Waves rule', text: (pct) => `rain ${pct}% inside ${waves.hours} h — Waves rule` }),
+    ].filter(Boolean);
+  };
+
+  const judge = (productId, checks, review) => {
+    const tiers = { hold: [], caution: [] };
+    const missing = [];
+    for (const check of checks) {
+      const known = check.rows.map((h) => h[check.key]).filter((v) => v != null);
+      const tier = check.tier(known);
+      if (tier) tiers[tier].push({ ...check, reason: check.reason(known) });
+      const gap = !check.complete || known.length < check.rows.length;
+      if (tier !== 'hold' && gap && check.gapIsUnknown !== false && !missing.includes(check.label)) missing.push(check.label);
+    }
+    // The rain rules name the check that fired; today's verdicts keep their shape.
+    const fired = (verdict, list) => ({
+      productId, verdict, reason: list.map((c) => c.reason).join(', '),
+      ...(rainRules ? { kind: list[0].kind, source: list[0].source, at: list[0].at || null } : {}),
+    });
+    if (tiers.hold.length) return fired('hold', tiers.hold);
+    if (missing.length) return { productId, verdict: 'unknown', reason: `No ${missing.join(' / ')} forecast` };
+    if (review?.unresolved) return { productId, verdict: 'unknown', reason: CONDITIONAL_REVIEW };
+    return tiers.caution.length ? fired('caution', tiers.caution) : { productId, verdict: 'ok', reason: null };
+  };
+
   const verdicts = products.map((product) => {
     const review = reviewedWeather(product, labelSources[product.id]);
     if (review && !review.verified) return { productId: product.id, verdict: 'unknown', reason: review.reason };
     const limits = review?.limits || productLimits(product);
-    const hasLimits = [limits.minTempF, limits.maxTempF, limits.maxWindMph, limits.rainFreeHours].some((v) => v != null);
-    if (!hasLimits) return { productId: product.id, verdict: 'unknown', reason: review?.unresolved ? 'Conditional label restrictions need review' : 'No limit on file' };
-    // The catalog contract: unverified label values are not judged against.
-    if (!review && !product.label_verified_at) return { productId: product.id, verdict: 'unknown', reason: 'Label limits not yet verified' };
+    // The catalog contract: unverified label values are not judged against. Today such a product reads
+    // unknown; the rain rules skip the values and let the label or Waves rule judge rain in their place.
+    const verified = Boolean(review || product.label_verified_at);
+    const checks = rainRules ? rainRuleChecks(product, verified ? limits : {}) : todayChecks(limits);
+    if (!checks.length) {
+      // Nothing to judge. The rain rules read a water-in product, a non-spray or a service with no rain rule as ok.
+      if (review?.unresolved) return { productId: product.id, verdict: 'unknown', reason: CONDITIONAL_REVIEW };
+      return rainRules ? { productId: product.id, verdict: 'ok', reason: null } : { productId: product.id, verdict: 'unknown', reason: 'No limit on file' };
+    }
+    if (!rainRules && !verified) return { productId: product.id, verdict: 'unknown', reason: 'Label limits not yet verified' };
     if (!window.length) return { productId: product.id, verdict: 'unknown', reason: 'No forecast' };
-    const reasons = [];
-    const missing = [];
-    // A limit can only pass when EVERY hour it is judged over carries the
-    // measurement; a null reading is "unknown", never a pass.
-    // A known breach in any hour is a Hold even when another hour's reading
-    // is missing; a limit only PASSES when every hour of the interval is
-    // present and carries the measurement.
-    const judge = ({ rows, hours, key, label, limit, floor, reason }) => {
-      const breach = floor != null ? (v) => v < floor : (v) => v > limit;
-      if (rows.some((h) => h[key] != null && breach(h[key]))) { reasons.push(reason); return; }
-      if (!covers(rows, hours) || rows.some((h) => h[key] == null)) { if (!missing.includes(label)) missing.push(label); }
-    };
-    if (limits.minTempF != null) {
-      judge({ rows: window, hours: SPRAY_WINDOW_HOURS, key: 'temperatureF', label: 'temperature', floor: limits.minTempF, reason: `under ${limits.minTempF}°F` });
-    }
-    if (limits.maxTempF != null) {
-      judge({ rows: window, hours: SPRAY_WINDOW_HOURS, key: 'temperatureF', label: 'temperature', limit: limits.maxTempF, reason: `over ${limits.maxTempF}°F` });
-    }
-    if (limits.maxWindMph != null) {
-      judge({ rows: window, hours: SPRAY_WINDOW_HOURS, key: 'windMph', label: 'wind', limit: limits.maxWindMph, reason: `wind over ${limits.maxWindMph} mph` });
-    }
-    if (limits.rainFreeHours != null) {
-      const label = `rain ${limits.rainFreeHours} h`;
-      judge({ rows: hoursAhead(limits.rainFreeHours), hours: limits.rainFreeHours, key: 'rainChance', label, limit: RAIN_HOLD_PCT - 1, reason: `rain likely inside ${limits.rainFreeHours} h` });
-    }
-    if (reasons.length) return { productId: product.id, verdict: 'hold', reason: reasons.join(', ') };
-    if (missing.length) return { productId: product.id, verdict: 'unknown', reason: `No ${missing.join(' / ')} forecast` };
-    if (review?.unresolved) return { productId: product.id, verdict: 'unknown', reason: 'Conditional label restrictions need review' };
-    return { productId: product.id, verdict: 'ok', reason: null };
+    return judge(product.id, checks, review);
   });
 
   return {
     windowHours: SPRAY_WINDOW_HOURS,
     forecast: summary,
     hold: verdicts.some((v) => v.verdict === 'hold'),
+    // Only when the rain rules ran, so the off path's response is unchanged.
+    ...(rainRules ? { rainRules: true } : {}),
     verdicts,
   };
 }
@@ -1639,12 +1716,41 @@ async function forecastAt({ coords, scheduledDate, now = new Date(), deps = {} }
 
 // A schedule strip reports exceptions from the card's existing evidence. No
 // amounts, access information, customer text, or vendor prices leave this view.
+// The strip's one weather chip. Without the rain rules (GATE_SPRAY_RAIN_RULES), today's labels exactly.
+// With them the chip names the rule that fired, and "Weather unknown" means a forecast is missing.
+function rainChipLabel(verdict) {
+  if (verdict.kind !== 'rain') return 'Weather hold';
+  if (verdict.verdict === 'hold') {
+    if (verdict.source === 'label') return 'Rain hold · label';
+    return verdict.source === 'Waves rule' ? 'Rain hold · Waves rule' : 'Rain hold';
+  }
+  if (verdict.source === 'label') return `Rain likely ${verdict.at} · label: no spraying in rain`;
+  if (verdict.source === 'label advice') return 'Rain caution · label advice';
+  return verdict.source === 'Waves rule' ? 'Rain caution · Waves rule' : 'Rain caution';
+}
+
+function weatherIssue(sprayCheck, isToday) {
+  if (!sprayCheck.rainRules) {
+    if (sprayCheck.hold) return { kind: 'weather', status: 'hold', label: 'Weather hold' };
+    if (!isToday) return { kind: 'weather', status: 'unknown', label: 'Weather on visit day' };
+    if (sprayCheck.verdicts.some(v => v.verdict !== 'ok')) return { kind: 'weather', status: 'unknown', label: 'Weather unknown' };
+    return null;
+  }
+  const hold = sprayCheck.verdicts.find((v) => v.verdict === 'hold');
+  if (hold) return { kind: 'weather', status: 'hold', label: rainChipLabel(hold) };
+  if (!isToday) return { kind: 'weather', status: 'unknown', label: 'Weather on visit day' };
+  if (sprayCheck.verdicts.some((v) => v.verdict === 'unknown')) return { kind: 'weather', status: 'unknown', label: 'Weather unknown' };
+  const caution = sprayCheck.verdicts.find((v) => v.verdict === 'caution');
+  return caution ? { kind: 'weather', status: 'caution', label: rainChipLabel(caution) } : null;
+}
+
 function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now }) {
   const issues = [];
   if (!lines.length) issues.push({ kind: 'protocol', status: 'unknown', label: 'No products resolved' });
-  else if (sprayCheck.hold) issues.push({ kind: 'weather', status: 'hold', label: 'Weather hold' });
-  else if (!isToday) issues.push({ kind: 'weather', status: 'unknown', label: 'Weather on visit day' });
-  else if (sprayCheck.verdicts.some(v => v.verdict !== 'ok')) issues.push({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
+  else {
+    const weather = weatherIssue(sprayCheck, isToday);
+    if (weather) issues.push(weather);
+  }
 
   const selected = mergeProductLines(lines).filter(line => line.selected !== false);
   const stock = selected.map(stockForLine);
@@ -1690,7 +1796,24 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   // Limits are judged from the appointment start (now once the window has
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
   const labelSources = await checkReviewedWeatherSources(products);
-  const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources });
+  // GATE_SPRAY_RAIN_RULES: 'true' judges with the rain rules; 'shadow' keeps today's check live and
+  // records what the rain rules would show (spray_rain_rule_shadow), never awaited, never fatal. A
+  // product's Waves rule comes from the services whose lines name it (an add-on's line is its add-on's).
+  const rainMode = sprayRainRulesMode();
+  const rainRules = rainMode === 'off' ? null : {
+    waves: Object.fromEntries(products.map((p) => [p.id, wavesRainRule(lines.filter((l) => l.product.id === p.id).map((l) => l.source || facts.serviceType))])),
+  };
+  const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules: rainMode === 'true' ? rainRules : null });
+  if (rainMode === 'shadow' && isToday && lines.length) {
+    const shadow = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
+    Promise.resolve()
+      .then(() => (deps.recordSprayRainShadow || require('./spray-rain-rule-shadow').recordSprayRainShadow)({
+        dbh, facts, products, hourly, serviceInstant,
+        live: { hold: sprayCheck.hold, issue: weatherIssue(sprayCheck, isToday) },
+        shadow: { verdicts: shadow.verdicts, issue: weatherIssue(shadow, isToday) },
+      }))
+      .catch((err) => logger.warn(`[job-card] rain rule shadow not recorded: ${err.message}`));
+  }
   if (readinessOnly) {
     const readiness = dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
     // Truck kit (GATE_TRUCK_KIT, docs/tool-inventory-tracker-scope.md PR 2): a
@@ -1716,7 +1839,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
       const row = resolveCatalogProductForName(name, catalog, { exactOnly: true })
         || fieldGuideLineProduct(name, products);
       const verdict = sprayCheck.verdicts.find(item => item.productId === row?.id);
-      if (blocks.length || !row?.label_verified_at || !verdict || verdict.verdict !== 'ok') {
+      if (blocks.length || !row?.label_verified_at || !verdict || !['ok', 'caution'].includes(verdict.verdict)) {
         product.mix = null;
         product.summary = 'Mix withheld · see product checks';
       }
@@ -1800,7 +1923,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // not the primary lawn plan (an off-protocol / blackout block of the lawn
   // plan says nothing about a pest or tree & shrub mix), and a line the
   // protocol lists as "if needed" is withheld exactly as the card does.
-  const { line: addonLine, treatment, primaryIsLawn, lawnAddon } = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
+  const { line: addonLine, treatment, primaryIsLawn, lawnAddon, owners } = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
   // A lawn visit's plan governs the search too: its blocks withhold the dose
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
@@ -1884,7 +2007,11 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     sprayCheck = { verdict: 'unknown', reason: 'No property pin on file — no forecast' };
   } else {
     const labelSources = await checkReviewedWeatherSources([product]);
-    const sprayVerdict = buildSprayCheck({ products: [product], hourly, labelSources, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
+    // The Waves rule of the services whose lines name the product, as on the card: a lawn plan's
+    // product is the visit's, and so is a product no line names.
+    const services = planned || !owners.length ? [svc.service_type, ...owners] : owners;
+    const rainRules = sprayRainRulesMode() === 'true' ? { waves: { [product.id]: wavesRainRule(services) } } : null;
+    const sprayVerdict = buildSprayCheck({ products: [product], hourly, labelSources, rainRules, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
     sprayCheck = { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason };
   }
   // Withhold reasons in guard order — the first that applies wins; the
@@ -1975,7 +2102,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // on the appointment's service type) — the search must not dose lawn
   // products off the catalog past the plan's guards.
   const lawnAddon = addons.find((a) => a.programKey === 'lawn')?.addon || null;
-  const found = (line) => ({ line, treatment, primaryIsLawn, lawnAddon });
+  const found = (line, owners = []) => ({ line, treatment, primaryIsLawn, lawnAddon, owners });
   const candidates = [
     ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null }] : []),
     ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),
@@ -1986,15 +2113,16 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // accept the wrong formulation ("Headway G" for Headway) and skip the
   // lawn plan on that false line.
   const catalog = await loadCatalog(dbh);
-  let conditional = null;
-  for (const c of candidates) {
-    const { lines } = resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null });
-    const hit = lines.find((l) => l.product.id === product.id);
-    if (!hit) continue;
-    if (hit.selected !== false) return found({ addon: c.addon, selected: true, rate: lineRate(hit.raw), governed: Boolean(hit.governed) });
-    conditional = conditional || { addon: c.addon, selected: false, rate: null, ...(hit.labelHold ? { labelHold: hit.labelHold } : {}) };
-  }
-  return found(conditional);
+  // Every candidate whose lines name the product owns its rain rule (GATE_SPRAY_RAIN_RULES, `owners`); the
+  // first selected line governs the dose, else the first "if needed" one.
+  const hits = candidates
+    .map((c) => ({ c, hit: resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null }).lines.find((l) => l.product.id === product.id) }))
+    .filter(({ hit }) => hit);
+  const owners = hits.map(({ c }) => c.name);
+  const selected = hits.find(({ hit }) => hit.selected !== false);
+  if (selected) return found({ addon: selected.c.addon, selected: true, rate: lineRate(selected.hit.raw), governed: Boolean(selected.hit.governed) }, owners);
+  const [conditional] = hits;
+  return found(conditional ? { addon: conditional.c.addon, selected: false, rate: null, ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}) } : null, owners);
 }
 
 // The protocol band clipped to the verified label band, on one unit.
@@ -2074,5 +2202,5 @@ module.exports = {
   resolveVisitProducts,
   mergeProductLines,
   resolveVisitLines,
-  _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };
