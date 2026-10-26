@@ -2839,14 +2839,19 @@ async function releaseFromAutopayHold(invoiceId) {
   // overwrite that stop with an active cadence and dun a restored draft.
   // A lost release is safe: the sequence stays held/stopped and the next
   // legitimate transition owns it.
-  await db('invoice_followup_sequences').where({ id: seq.id, status: 'autopay_hold' }).update({
+  await db('invoice_followup_sequences').where({ id: seq.id, status: 'autopay_hold' }).update(autopayReleaseFields(seq, invoice));
+}
+
+// The fields an Auto Pay hold release writes (releaseFromAutopayHold, and the timeout's guarded release).
+function autopayReleaseFields(seq, invoice) {
+  return {
     updated_at: db.fn.now(),
     status: 'active',
     is_autopay_held: false,
     // A shifted anchor (delivered-invoice due-date edit while held) wins so
     // the re-armed step lands on the same timeline fireStep progression uses.
     next_touch_at: computeNextTouchAt(seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at, seq.step_index),
-  });
+  };
 }
 
 // GATE_AUTOPAY_HOLD_TIMEOUT. A hold is released only by an Auto Pay failure, and Auto Pay never
@@ -2857,20 +2862,78 @@ const AUTOPAY_HOLD_SWEEP_PAGE = 500;
 const AUTOPAY_HOLD_SHADOW_ACTION = 'invoice_followup.autopay_hold_timeout_shadow';
 
 /**
- * Release Auto Pay holds that Auto Pay never acted on. Selects `autopay_hold` sequences whose hold
- * began (updated_at: every hold writer, and handleAutopayFailure's counter bump, stamps it) more
- * than AUTOPAY_HOLD_TIMEOUT_DAYS ago with no stripe_invoice_charge_attempts row for the invoice at
- * all (any age, any state: an attempt means Auto Pay acted, and an unresolved one still needs its
- * reconciliation), no payments row (any status) for the customer created since the hold began, and
- * no failed payments row for the customer still on the Auto Pay retry ladder (next_retry_at set).
- * A customer the customer-level reminder engine owns (an open customer_dunning_schedules row) or
- * covers (GATE_DUNNING_CUSTOMER_SCHEDULE live for them) is skipped: that engine holds the whole set
- * while the customer is on Auto Pay and can promote a released row back into its hold. Terminal,
- * non-schedulable, payer-billed and payment-plan invoices are skipped, and so is an invoice whose
- * linked visit is still open (Auto Pay charges when the visit closes). Every held row is read, in
- * id-keyset pages, so rows the skips pass over never hide the rows behind them. 'true' releases
- * through the existing releaseFromAutopayHold; 'shadow' writes at most one audit_log row per
- * invoice per ET day and changes nothing; off returns before any query.
+ * The SQL half of the timeout rule, on a builder over `invoice_followup_sequences as s`. The sweep's
+ * select finds candidates with it, and the release applies it again inside its UPDATE, so a failure
+ * bump, payment, retry, plan, visit or schedule that lands in between keeps the hold.
+ * - the hold began (updated_at: every hold writer, and handleAutopayFailure's counter bump, stamps it)
+ *   before the cutoff;
+ * - no stripe_invoice_charge_attempts row for the invoice at all (any age, any state: an attempt means
+ *   Auto Pay acted, and an unresolved one still needs its reconciliation);
+ * - no payments row (any status) for the customer created since the hold began, and no failed one still
+ *   on billing-cron's retry ladder (next_retry_at set);
+ * - no active payment plan for the invoice;
+ * - no linked visit that is still open (Auto Pay charges when the visit closes: an invoice sent before
+ *   its visit is waiting for that charge);
+ * - no open customer-level schedule for the customer (that engine owns its reminders).
+ */
+function staleAutopayHoldClause(query, cutoff) {
+  return query
+    .where('s.status', 'autopay_hold')
+    .where('s.updated_at', '<', cutoff)
+    .whereNotExists(function noChargeAttempt() {
+      this.select(db.raw('1')).from('stripe_invoice_charge_attempts as a')
+        .whereRaw('a.invoice_id = s.invoice_id');
+    })
+    .whereNotExists(function noPayment() {
+      this.select(db.raw('1')).from('payments as p')
+        .whereRaw('p.customer_id = s.customer_id')
+        .whereRaw('p.created_at >= s.updated_at');
+    })
+    .whereNotExists(function noPendingRetry() {
+      this.select(db.raw('1')).from('payments as r')
+        .whereRaw('r.customer_id = s.customer_id')
+        .where('r.status', 'failed')
+        .whereNotNull('r.next_retry_at');
+    })
+    .whereNotExists(function noActivePaymentPlan() {
+      this.select(db.raw('1')).from('payment_plans as pp')
+        .whereRaw('pp.invoice_id = s.invoice_id')
+        .where('pp.status', 'active');
+    })
+    .whereNotExists(function noOpenVisit() {
+      this.select(db.raw('1')).from('invoices as vi')
+        .join('scheduled_services as v', 'v.id', 'vi.scheduled_service_id')
+        .whereRaw('vi.id = s.invoice_id')
+        .where(function openVisit() {
+          this.whereNotIn('v.status', TERMINAL_SCHEDULED_SERVICE_STATUSES).orWhereNull('v.status');
+        });
+    })
+    .where(notOwnedByCustomerSchedule);
+}
+
+// The timeout's release: releaseFromAutopayHold's fields, written only while the row is still the hold
+// the sweep observed (the same updated_at, to the microsecond, compared as text so no JS Date rounding
+// enters) and the whole SQL rule still holds in the same statement. Returns whether it released.
+async function releaseStaleAutopayHold(row, cutoff) {
+  const seq = await db('invoice_followup_sequences').where({ id: row.id }).first('anchor_at', 'step_index');
+  const invoice = await db('invoices').where({ id: row.invoice_id }).first();
+  if (!seq || !invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) return false;
+  const count = await staleAutopayHoldClause(db('invoice_followup_sequences as s'), cutoff)
+    .where('s.id', row.id)
+    .whereRaw('s.updated_at = ?::timestamptz', [row.hold_stamp])
+    .update(autopayReleaseFields(seq, invoice));
+  return count > 0;
+}
+
+/**
+ * Release Auto Pay holds that Auto Pay never acted on: `autopay_hold` sequences that meet
+ * staleAutopayHoldClause, on an invoice that is not terminal, not payer-billed and still schedulable,
+ * for a customer the live customer-level engine does not cover (GATE_DUNNING_CUSTOMER_SCHEDULE live for
+ * them: that engine holds the whole set while the customer is on Auto Pay and can promote a released
+ * row back into its hold). Every held row is read, in id-keyset pages, so rows the skips pass over
+ * never hide the rows behind them. 'true' releases each through releaseStaleAutopayHold; 'shadow'
+ * writes at most one audit_log row per invoice per ET day and changes nothing; off returns before any
+ * query.
  */
 async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_HOLD_SWEEP_PAGE } = {}) {
   const mode = require('../config/feature-gates').autopayHoldTimeoutMode();
@@ -2884,29 +2947,10 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
   const due = [];
   let afterId = null;
   for (;;) {
-    const page = db('invoice_followup_sequences as s')
-      .where('s.status', 'autopay_hold')
-      .where('s.updated_at', '<', cutoff)
-      .whereNotExists(function noChargeAttempt() {
-        this.select(db.raw('1')).from('stripe_invoice_charge_attempts as a')
-          .whereRaw('a.invoice_id = s.invoice_id');
-      })
-      .whereNotExists(function noPayment() {
-        this.select(db.raw('1')).from('payments as p')
-          .whereRaw('p.customer_id = s.customer_id')
-          .whereRaw('p.created_at >= s.updated_at');
-      })
-      // Auto Pay still owes a retry on a failed charge (billing-cron's ladder): it is still acting.
-      .whereNotExists(function noPendingRetry() {
-        this.select(db.raw('1')).from('payments as r')
-          .whereRaw('r.customer_id = s.customer_id')
-          .where('r.status', 'failed')
-          .whereNotNull('r.next_retry_at');
-      })
-      .where(notOwnedByCustomerSchedule)
+    const page = staleAutopayHoldClause(db('invoice_followup_sequences as s'), cutoff)
       .orderBy('s.id', 'asc')
       .limit(pageSize)
-      .select('s.id', 's.invoice_id', 's.customer_id', 's.updated_at');
+      .select('s.id', 's.invoice_id', 's.customer_id', 's.updated_at', db.raw('s.updated_at::text as hold_stamp'));
     if (afterId) page.where('s.id', '>', afterId);
     const rows = await page;
 
@@ -2914,13 +2958,6 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
       if (coveredByCustomerEngine(row.customer_id)) continue;
       const invoice = await db('invoices').where({ id: row.invoice_id }).first();
       if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) continue;
-      if (await activePaymentPlan(db, row.invoice_id)) continue;
-      // Auto Pay charges when a visit closes: an invoice sent before its visit (an upfront invoice) is
-      // waiting for that charge while the linked visit is still open.
-      if (invoice.scheduled_service_id) {
-        const visit = await db('scheduled_services').where({ id: invoice.scheduled_service_id }).first('status');
-        if (visit && !TERMINAL_SCHEDULED_SERVICE_STATUSES.includes(visit.status)) continue;
-      }
       due.push(row);
     }
     if (rows.length < pageSize) break;
@@ -2931,10 +2968,9 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
   let recorded = 0;
   if (mode === 'true') {
     for (const row of due) {
-      await releaseFromAutopayHold(row.invoice_id);
-      released += 1;
+      if (await releaseStaleAutopayHold(row, cutoff)) released += 1;
     }
-    logger.info(`[invoice-followups] autopay hold timeout: released ${released} stale hold(s)`);
+    logger.info(`[invoice-followups] autopay hold timeout: released ${released} of ${due.length} stale hold(s)`);
   } else {
     const { recordAuditEvent } = require('./audit-log');
     const etDay = etDateString(now);
@@ -3789,6 +3825,6 @@ module.exports = {
   // customer-dunning PostgreSQL concurrency suite drives them directly).
   _test: {
     canSystemResume, isSystemStopStamp, holdTouchUntilNextDay, fireStep, notOwnedByCustomerSchedule, notOwnedOrMicrodepositCandidate,
-    reviveLegacyFinishedSequences, reviveReopenedLowStepSequences,
+    reviveLegacyFinishedSequences, reviveReopenedLowStepSequences, releaseStaleAutopayHold,
   },
 };

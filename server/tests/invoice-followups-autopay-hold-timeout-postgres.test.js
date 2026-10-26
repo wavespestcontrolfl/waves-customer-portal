@@ -290,6 +290,73 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       expect((await seqOf(h.invoiceId)).status).toBe('autopay_hold');
     });
 
+    test('a hold stamped to the microsecond is released (the stamp is compared as text, not a JS Date)', async () => {
+      const h = await held();
+      await mockPg.raw("UPDATE invoice_followup_sequences SET updated_at = now() - interval '4 days' + interval '123 microseconds' WHERE id = ?", [h.sequenceId]);
+      expect(await sweep()).toMatchObject({ candidates: 1, released: 1 });
+      expect((await seqOf(h.invoiceId)).status).toBe('active');
+    });
+
+    describe('the release re-checks the rule at the write', () => {
+      let releaseOne;
+      beforeAll(() => { ({ releaseStaleAutopayHold: releaseOne } = require('../services/invoice-followups')._test); });
+      const observed = (h) => mockPg('invoice_followup_sequences as s').where('s.id', h.sequenceId)
+        .first('s.id', 's.invoice_id', 's.customer_id', 's.updated_at', mockPg.raw('s.updated_at::text as hold_stamp'));
+      const cutoffNow = () => new Date(Date.now() - TIMEOUT_DAYS * DAY);
+
+      test('an unchanged hold is released', async () => {
+        const h = await held();
+        expect(await releaseOne(await observed(h), cutoffNow())).toBe(true);
+        expect((await seqOf(h.invoiceId)).status).toBe('active');
+      });
+
+      test('an Auto Pay failure bump after the read keeps the hold', async () => {
+        const h = await held();
+        const row = await observed(h);
+        await mockPg('invoice_followup_sequences').where({ id: h.sequenceId }).update({ updated_at: mockPg.fn.now(), autopay_failures_observed: 1 });
+        expect(await releaseOne(row, cutoffNow())).toBe(false);
+        expect((await seqOf(h.invoiceId)).status).toBe('autopay_hold');
+      });
+
+      test('any other write to the hold after the read keeps it, even one that leaves it old', async () => {
+        const h = await held();
+        const row = await observed(h);
+        await mockPg('invoice_followup_sequences').where({ id: h.sequenceId }).update({ updated_at: new Date(h.heldAt.getTime() - 3600000) });
+        expect(await releaseOne(row, cutoffNow())).toBe(false);
+        expect((await seqOf(h.invoiceId)).status).toBe('autopay_hold');
+      });
+
+      test('a retry armed after the read keeps the hold', async () => {
+        const h = await held();
+        const row = await observed(h);
+        await mockPg('payments').insert({
+          customer_id: h.customerId, status: 'failed', created_at: new Date(Date.now() - 9 * DAY), next_retry_at: new Date(Date.now() + DAY),
+        });
+        expect(await releaseOne(row, cutoffNow())).toBe(false);
+        await untouched(h);
+      });
+
+      test('a charge attempt, payment plan or customer schedule after the read keeps the hold', async () => {
+        const a = await held();
+        const b = await held();
+        const c = await held();
+        const rows = [await observed(a), await observed(b), await observed(c)];
+        await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: a.invoiceId });
+        await mockPg('payment_plans').insert({ invoice_id: b.invoiceId, status: 'active' });
+        await mockPg('customer_dunning_schedules').insert({ customer_id: c.customerId, status: 'active' });
+        for (const row of rows) expect(await releaseOne(row, cutoffNow())).toBe(false);
+        for (const h of [a, b, c]) await untouched(h);
+      });
+
+      test('an invoice paid after the read is not released', async () => {
+        const h = await held();
+        const row = await observed(h);
+        await mockPg('invoices').where({ id: h.invoiceId }).update({ status: 'paid' });
+        expect(await releaseOne(row, cutoffNow())).toBe(false);
+        await untouched(h);
+      });
+    });
+
     test('a second run releases nothing more', async () => {
       await held();
       await sweep();
