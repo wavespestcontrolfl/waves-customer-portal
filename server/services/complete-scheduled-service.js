@@ -6021,6 +6021,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (resumedStructuredNotes.reviewFirstAskLock?.forcedOn === true) {
         requestReview = true;
         completionReviewDelayMinutes = undefined;
+      } else if (reviewFirstAskLock?.forcedOn) {
+        // The committed record decides. It holds no kept-on marker (the gate was off then, or the customer
+        // was asked since), so this run's preflight override is undone: the posted choice and the posted
+        // timing stand, as for any committed retry.
+        requestReview = requestReviewPosted;
+        reviewFirstAskLock = null;
+        try {
+          completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
+        } catch {
+          // A chosen time that has passed by now means "due now", as the committed-retry catch above does.
+          completionReviewDelayMinutes = 0;
+        }
       }
       durableCompletionCommitted = true;
       // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming

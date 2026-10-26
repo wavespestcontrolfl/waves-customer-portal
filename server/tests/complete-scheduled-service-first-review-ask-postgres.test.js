@@ -235,4 +235,50 @@ postgres('the first review ask lock', () => {
     expect(out.notes.reviewFirstAskLock.forcedOn).toBe(true);
     expect(out.notes.reviewTiming).toBeNull();
   });
+
+  // A committed completion handed back for a resume (side_effects_pending), retried under the same key and body.
+  async function runThenResume({ firstGate, resumeGate, askedBefore = false, extra }) {
+    const f = await seedVisit();
+    const key = randomUUID();
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const input = () => ({ serviceId: f.serviceId, idempotencyKey: key,
+      actor: { techRole: 'admin', technicianId: f.techId, technician: null },
+      body: { visitOutcome: 'completed', products: [], areasServiced: ['Outside'], technicianNotes: 'Treated the entry points.',
+        sendCompletionSms: true, includePayLink: true, ...extra } });
+    try {
+      if (firstGate) process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true'; else delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
+      const first = await completeScheduledService(input());
+      expect(first.status).toBe(200);
+      if (askedBefore) {
+        await mockPg('review_requests').insert({ customer_id: f.customerId, token: randomUUID().replace(/-/g, ''), status: 'sent', sms_sent_at: new Date() });
+      }
+      await mockPg('service_completion_attempts').where({ service_id: f.serviceId, idempotency_key: key }).update({ status: 'side_effects_pending' });
+      ReviewService.enrollPostService.mockClear();
+      if (resumeGate) process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true'; else delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
+      const second = await completeScheduledService(input());
+      expect(second.status).toBe(200);
+      const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first('structured_notes');
+      const notes = typeof record.structured_notes === 'string' ? JSON.parse(record.structured_notes) : record.structured_notes;
+      return { asks: ReviewService.enrollPostService.mock.calls.length, notes };
+    } finally { await cleanup(f); }
+  }
+
+  test('a committed retry: the record saved "no ask" with the gate off, the gate is on at the retry: still no ask', async () => {
+    const out = await runThenResume({ firstGate: false, resumeGate: true, extra: OFF });
+    expect(out.asks).toBe(0);
+    expect(out.notes.requestReview).toBe(false);
+    expect(out.notes.reviewFirstAskLock).toBeUndefined();
+  });
+
+  test('a committed retry: the record kept the ask on; the customer was asked since, the retry still asks', async () => {
+    const out = await runThenResume({ firstGate: true, resumeGate: true, askedBefore: true, extra: OFF });
+    expect(out.asks).toBe(1);
+    expect(out.notes.reviewFirstAskLock.forcedOn).toBe(true);
+  });
+
+  test('a committed retry: the record saved the complaint reason, the retry sends no ask', async () => {
+    const out = await runThenResume({ firstGate: true, resumeGate: true, extra: COMPLAINT });
+    expect(out.asks).toBe(0);
+    expect(out.notes.reviewFirstAskLock).toEqual({ neverAsked: true, forcedOn: false, optOutReason: 'complaint_on_site' });
+  });
 });

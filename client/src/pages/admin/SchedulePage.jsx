@@ -67,6 +67,7 @@ import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/sche
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import {
   MAX_REVIEW_DELAY_MS,
+  COMPLAINT_ON_SITE_REASON,
   FIRST_ASK_OPT_OUT_PROMPT,
   REVIEW_TIMING_DEFAULT,
   REVIEW_TIMING_OPTIONS,
@@ -14195,7 +14196,15 @@ export function CompletionPanel({
       // the submit guard would trust it (codex #4140 r24 P1). Unknown reads
       // as fail-closed; re-enabling the controls re-fetches.
       setReviewSendPreview(null);
-      return undefined;
+      if (oneTimeRecapOnly) return undefined;
+      // One read still names the first ask (GATE_REVIEW_FIRST_ASK_LOCK), so a box restored off from a
+      // draft knows the server will keep that ask on. No poll, and the timing preview stays unknown.
+      let gone = false;
+      fetchReviewSendPreview().then((data) => {
+        const firstAsk = firstReviewAskFrom(data);
+        if (!gone && firstAsk !== null) setReviewFirstAsk(firstAsk);
+      });
+      return () => { gone = true; };
     }
     let cancelled = false;
     const load = () => fetchReviewSendPreview().then((data) => {
@@ -15253,6 +15262,9 @@ export function CompletionPanel({
         sendSms,
         includePayLink,
         requestReview,
+        // The confirmed "Complaint on site" reason (GATE_REVIEW_FIRST_ASK_LOCK): without it a restored
+        // draft's box re-arms on.
+        reviewOptOutReason,
         clientPestRating,
         // Tells restore whether a null rating was a deliberate clear or an
         // untouched picker (pre-2026-09-24 drafts never set it).
@@ -15397,6 +15409,7 @@ export function CompletionPanel({
     sendSms,
     includePayLink,
     requestReview,
+    reviewOptOutReason,
     clientPestRating,
     clientPestRatingDefault,
     reviewTiming,
@@ -15559,6 +15572,7 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
+    setReviewOptOutReason(savedDraft.reviewOptOutReason === COMPLAINT_ON_SITE_REASON ? COMPLAINT_ON_SITE_REASON : null);
     // An untouched picker (legacy drafts stored null for it) keeps whatever
     // is showing now — including the first-visit 5; a tap or a deliberate
     // clear is restored and locks out the late prefill.

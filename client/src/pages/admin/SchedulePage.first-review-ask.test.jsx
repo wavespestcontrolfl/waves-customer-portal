@@ -120,6 +120,65 @@ describe.each([[1024, 'desktop'], [390, 'phone']])('the review box at %i px (%s)
   });
 });
 
+describe('a saved draft (autosave and restore)', () => {
+  const draftKey = `waves_completion_draft_${service.id}`;
+  const restore = async () => {
+    const onSubmit = await renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    return onSubmit;
+  };
+  beforeEach(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 }); });
+
+  it('the confirmed reason is saved with the draft and restored: the box stays off and the submit carries it', async () => {
+    stubFetch({ ...PREVIEW, firstReviewAsk: true });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await renderPanel();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'First review ask' }));
+    fireEvent.change(screen.getByPlaceholderText('Notes about this service...'), { target: { value: 'Draft note' } });
+    await waitFor(() => expect(JSON.parse(localStorage.getItem(draftKey) || '{}')).toMatchObject({ requestReview: false, reviewOptOutReason: 'complaint_on_site' }), { timeout: 3000 });
+    cleanup();
+    const onSubmit = await restore();
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(false));
+    const body = await submit(onSubmit);
+    expect(body.requestReview).toBe(false);
+    expect(body.reviewOptOutReason).toBe('complaint_on_site');
+  });
+
+  it('a draft restored with the box off and no reason reads the verdict, shows "First review ask" and re-arms it on', async () => {
+    localStorage.setItem(draftKey, JSON.stringify({ serviceId: service.id, notes: 'Older draft', requestReview: false }));
+    stubFetch({ ...PREVIEW, firstReviewAsk: true });
+    const onSubmit = await restore();
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(true));
+    const body = await submit(onSubmit);
+    expect(body.requestReview).toBe(true);
+    expect(body).not.toHaveProperty('reviewOptOutReason');
+  });
+
+  it('a first read that failed does not hide the first ask: the off box reads the verdict once more', async () => {
+    localStorage.setItem(draftKey, JSON.stringify({ serviceId: service.id, notes: 'Older draft', requestReview: false }));
+    let previewReads = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (!String(url).includes('/admin/reviews/send-time-preview')) return { ok: true, json: async () => ({ customer: {}, actions: [], available: false }) };
+      previewReads += 1;
+      return previewReads === 1 ? { ok: false, json: async () => null } : { ok: true, json: async () => ({ ...PREVIEW, firstReviewAsk: true }) };
+    }));
+    const onSubmit = await restore();
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(true));
+    expect(previewReads).toBeGreaterThanOrEqual(2);
+    expect((await submit(onSubmit)).requestReview).toBe(true);
+  });
+
+  it('a draft restored with the box off, for a customer asked before, stays off as today', async () => {
+    localStorage.setItem(draftKey, JSON.stringify({ serviceId: service.id, notes: 'Older draft', requestReview: false }));
+    stubFetch({ ...PREVIEW, firstReviewAsk: false });
+    const onSubmit = await restore();
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('send-time-preview'))).toBe(true));
+    expect(screen.getByRole('checkbox', { name: 'Send review request' }).checked).toBe(false);
+    const body = await submit(onSubmit);
+    expect(body.requestReview).toBe(false);
+  });
+});
+
 describe('the preview read names the visit', () => {
   it('asks the server about this visit so it can say whether the customer was never asked', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
