@@ -99,6 +99,7 @@ const detail = {
         const scenario = { device, errors, consoleErrors, writes, unmatched, overflow: null };
         report.push(scenario);
         page.setDefaultTimeout(15000);
+        page.setDefaultNavigationTimeout(60000);
         await page.addInitScript(() => {
           localStorage.setItem("waves_admin_token", "synthetic-local-token");
           localStorage.setItem(
@@ -463,6 +464,22 @@ const detail = {
           .waitFor();
         await waitForFonts(page);
         await page.screenshot({ path: `${output}/${device}-overlay.png` });
+        const overlay = page.locator(".c360-panel");
+        const navigationBefore = await overlay.evaluate((node) => ({ scroll: node.scrollTop, top: node.querySelector(".c360-section-navigation").getBoundingClientRect().top }));
+        await overlay.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+        await page.waitForTimeout(100);
+        const navigationAfter = await overlay.evaluate((node) => ({ scroll: node.scrollTop, top: node.querySelector(".c360-section-navigation").getBoundingClientRect().top }));
+        assert.ok(navigationAfter.scroll > navigationBefore.scroll, "The overlay scroll regression exercises a scrolled panel");
+        assert.ok(Math.abs(navigationBefore.top - navigationAfter.top - (navigationAfter.scroll - navigationBefore.scroll)) <= 1, "Overlay tabs move with content beneath the persistent header");
+        const closeOverlay = device === "mobile"
+          ? page.locator(".c360-mobile-actionbar").getByRole("button", { name: "Back", exact: true })
+          : overlay.getByRole("button", { name: "Close", exact: true });
+        assert.ok(await closeOverlay.evaluate((node) => {
+          const rect = node.getBoundingClientRect();
+          return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+        }), "The persistent overlay close control remains reachable after scrolling");
+        await page.screenshot({ path: `${output}/${device}-overlay-scrolled.png` });
+        await overlay.evaluate((node) => { node.scrollTop = 0; });
         await page
           .getByText("Billing paused since", { exact: false })
           .scrollIntoViewIfNeeded();
