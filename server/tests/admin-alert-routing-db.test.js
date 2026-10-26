@@ -261,10 +261,11 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
           return db.transaction(fn);
         },
       });
-      const out = await routing.rerouteOpenRows(racing, { execute: true });
-      expect(out.matched).toBeGreaterThanOrEqual(2);
+      // Scoped to this test's two rows: the run commits, so it must never touch other rows in the database.
+      const out = await routing.rerouteOpenRows(racing, { execute: true, onlyIds: [turned.id, steady.id] });
+      expect(out.matched).toBe(2);
       expect(out.changedSinceRead).toBe(1);
-      expect(out.moved).toBe(out.matched - 1);
+      expect(out.moved).toBe(1);
       expect((await get(turned.id)).metadata).not.toHaveProperty('claudeQueue');
       expect((await get(turned.id)).metadata.feed).toBeUndefined();
       expect((await get(steady.id)).metadata).toMatchObject({ feed: 'activity', who: 'claude', claudeQueue: 'ops-job' });

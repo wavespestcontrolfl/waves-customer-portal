@@ -123,7 +123,8 @@ const SAMPLE = 5;
 // done state, title, body and link alone, so nothing rings. A row already off the bell (feed 'activity')
 // is stamped for Claude without moving. A row whose metadata changed between the read and the write is skipped
 // (`changedSinceRead`). Dry run by default. Refuses when the gate is off.
-async function rerouteOpenRows(conn, { execute = false } = {}) {
+// `onlyIds` narrows the scan to the given rows (tests use it so a run never touches other rows in a shared database).
+async function rerouteOpenRows(conn, { execute = false, onlyIds = null } = {}) {
   if (!claudeQueueEnabled()) throw new Error('GATE_ALERT_CLAUDE_QUEUE is off: the mover only runs while the gate is on');
   const byClass = {};
   const samples = {};
@@ -140,6 +141,7 @@ async function rerouteOpenRows(conn, { execute = false } = {}) {
       .orderBy('id', 'asc').limit(PAGE)
       .select('id', 'category', 'title', 'metadata');
     if (after) query.where('id', '>', after);
+    if (Array.isArray(onlyIds)) query.whereIn('id', onlyIds);
     const page = await query;
     for (const row of page) {
       scanned += 1;
