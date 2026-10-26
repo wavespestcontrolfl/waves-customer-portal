@@ -8,8 +8,9 @@
  * misses go through the Quick Move sheet's soft No-show reason; the
  * negative assertion stays so the terminal button never quietly returns.)
  */
+import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('./MobileCustomerDetailSheet', () => ({ default: () => null }));
 vi.mock('./RainOutSheet', () => ({ default: () => null }));
@@ -22,6 +23,9 @@ vi.mock('../../lib/cardHoldCancel', () => ({
 }));
 
 import MobileAppointmentDetailSheet from './MobileAppointmentDetailSheet';
+import useLockBodyScroll from '../../hooks/useLockBodyScroll';
+
+window.scrollTo = vi.fn();
 
 const baseService = {
   id: 55,
@@ -42,6 +46,138 @@ function renderSheet(status) {
     />,
   );
 }
+
+function FocusHarness() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={(event) => {
+          event.currentTarget.focus({ preventScroll: true });
+          setOpen(true);
+        }}
+      >
+        Open appointment
+      </button>
+      {open && (
+        <MobileAppointmentDetailSheet
+          service={{ ...baseService, status: 'completed' }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+function SiblingBodyLock() {
+  useLockBodyScroll(true);
+  return null;
+}
+
+function StackedOverlayHarness() {
+  const [open, setOpen] = useState(true);
+  if (!open) return null;
+  return (
+    <>
+      <SiblingBodyLock />
+      <MobileAppointmentDetailSheet
+        service={{ ...baseService, status: 'completed' }}
+        onClose={() => setOpen(false)}
+      />
+    </>
+  );
+}
+
+describe('MobileAppointmentDetailSheet modal behavior', () => {
+  it('names and contains focus, locks scroll, closes on Escape, and restores its opener', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    render(<FocusHarness />);
+    const opener = screen.getByRole('button', { name: 'Open appointment' });
+
+    fireEvent.click(opener);
+    const dialog = screen.getByRole('dialog', { name: 'Appointment details' });
+    await waitFor(() => expect(document.activeElement).toBe(dialog));
+    expect(document.body.style.overflow).toBe('hidden');
+
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Appointment details' })).toBeNull());
+    expect(document.activeElement).toBe(opener);
+    expect(document.body.style.overflow).toBe('');
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+
+  it('keeps a dirty note open on Escape while saving and after a failed save', async () => {
+    let resolveNote;
+    const noteResponse = new Promise((resolve) => { resolveNote = resolve; });
+    const fetchMock = vi.fn(async (url, options = {}) => {
+      if (options.method === 'PATCH' && String(url).endsWith('/note')) return noteResponse;
+      return { ok: true, json: async () => ({}) };
+    });
+    const alertMock = vi.fn();
+    const onClose = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('alert', alertMock);
+    render(
+      <MobileAppointmentDetailSheet
+        service={{ ...baseService, status: 'completed' }}
+        onClose={onClose}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Appointment note' }), {
+      target: { value: 'Keep this draft' },
+    });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(true));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === 'PATCH')).toHaveLength(1);
+
+    await act(async () => {
+      resolveNote({ ok: false, json: async () => ({ error: 'offline' }) });
+      await noteResponse;
+    });
+    await waitFor(() => expect(alertMock).toHaveBeenCalledWith('Failed to save note: offline'));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'Appointment details' })).toBeTruthy();
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+
+  it('restores body scroll styles when Details and an underlying locked overlay close together', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    vi.stubGlobal('scrollTo', vi.fn());
+    Object.assign(document.body.style, {
+      position: 'relative',
+      top: '3px',
+      left: '2px',
+      right: '1px',
+      width: '90%',
+      overflow: 'auto',
+    });
+
+    render(<StackedOverlayHarness />);
+    expect(document.body.style.position).toBe('fixed');
+    expect(document.body.style.overflow).toBe('hidden');
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Appointment details' })).toBeNull());
+    expect(document.body.style.position).toBe('relative');
+    expect(document.body.style.top).toBe('3px');
+    expect(document.body.style.left).toBe('2px');
+    expect(document.body.style.right).toBe('1px');
+    expect(document.body.style.width).toBe('90%');
+    expect(document.body.style.overflow).toBe('auto');
+
+    document.body.removeAttribute('style');
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+});
 
 describe('MobileAppointmentDetailSheet terminal-action gating', () => {
   it('offers Cancel while the visit is active — and never the removed terminal no-show', () => {
