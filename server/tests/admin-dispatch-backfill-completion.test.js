@@ -2660,7 +2660,7 @@ describe('completion route wiring (source contracts)', () => {
     expect(costingSource).toMatch(/if \(!minutes && !hasAllocatedLabor && untrustedLifecycleSpan\) \{\s*\n\s*const explicit = Number\(explicitLaborMinutes\);\s*\n\s*if \(Number\.isFinite\(explicit\) && explicit > 0\) minutes = Math\.round\(explicit\);\s*\n\s*\}/);
     expect(costingSource).toMatch(/if \(!minutes && !hasAllocatedLabor && !untrustedLifecycleSpan && startTime && endTime\) \{/);
     // calculateJobCost threads the options through to calcLaborCost.
-    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes \},\s*\n\s*\);/);
+    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes, estimatedLaborMinutes \},\s*\n\s*\);/);
   });
 
   test('job costing runs on RESUMED retries too — a released mint failure cannot finalize with financials missing (Codex P2, fix round 13)', () => {

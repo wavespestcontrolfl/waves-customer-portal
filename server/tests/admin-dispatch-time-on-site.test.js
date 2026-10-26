@@ -1604,7 +1604,7 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
   // entry span. Same durable-policy shape as the backfill marker above it.
   test('calculateJobCost re-derives overrideLaborMinutes from the persisted marker + corrected column', () => {
     expect(costingSource).toMatch(/if \(recordNotes\.timeOnSiteAdjusted === true && overrideLaborMinutes == null\) \{\s*\n\s*const correctedMinutes = Number\(svc\.service_time_minutes\);\s*\n\s*if \(Number\.isFinite\(correctedMinutes\) && correctedMinutes > 0\) \{\s*\n\s*overrideLaborMinutes = correctedMinutes;/);
-    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes \},/);
+    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes, estimatedLaborMinutes \},/);
     // The override is checked BEFORE the direct job-entries lookup.
     const overrideAt = costingSource.indexOf('const override = Number(overrideLaborMinutes);');
     const entriesAt = costingSource.indexOf("await db('time_entries')");

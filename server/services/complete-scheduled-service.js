@@ -153,11 +153,12 @@ const {
 const { finiteDate, positiveMinutesBetween, buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { minutesFromElapsed } = require('../utils/duration-minutes');
 const {
-  INVENTORY_UNITS,
   baseQuantityUnit,
   convertInventoryQuantity,
-  normalizeInventoryUnit,
 } = require('../services/inventory-units');
+// Shared with job-costing's application-history fallback, so both price a
+// recorded amount the same way.
+const { calculateInventoryCost } = require('../services/inventory-cost');
 
 async function renderTemplate(templateKey, vars, context = {}) {
   try {
@@ -1575,38 +1576,6 @@ function tankCleanoutWarnings(cleanout, selectedCalibration) {
     }];
   }
   return [];
-}
-
-function calculateInventoryCost({ product, deductedAmount, inventoryUnit, amount, amountUnit }) {
-  const costPerUnit = product?.cost_per_unit != null ? Number(product.cost_per_unit) : null;
-  if (costPerUnit != null && Number.isFinite(costPerUnit) && costPerUnit >= 0) {
-    const costUnit = product.cost_unit || inventoryUnit;
-    const costQuantity = convertInventoryQuantity(deductedAmount, inventoryUnit, costUnit);
-    if (costQuantity != null) {
-      return {
-        unitCost: costPerUnit,
-        costUsed: Number((costQuantity * costPerUnit).toFixed(4)),
-      };
-    }
-  }
-
-  const bestPrice = product?.best_price != null ? Number(product.best_price) : null;
-  const unitSizeOz = product?.unit_size_oz != null ? Number(product.unit_size_oz) : null;
-  const amountUnitDef = INVENTORY_UNITS[normalizeInventoryUnit(amountUnit)];
-  const canonicalOzUnit = amountUnitDef?.dimension === 'volume' ? 'fl_oz' : 'oz';
-  const usedOz = convertInventoryQuantity(amount, amountUnit, canonicalOzUnit);
-  if (
-    bestPrice != null && Number.isFinite(bestPrice) && bestPrice >= 0
-    && unitSizeOz != null && Number.isFinite(unitSizeOz) && unitSizeOz > 0
-    && usedOz != null
-  ) {
-    return {
-      unitCost: Number((bestPrice / unitSizeOz).toFixed(4)),
-      costUsed: Number(((usedOz / unitSizeOz) * bestPrice).toFixed(4)),
-    };
-  }
-
-  return { unitCost: null, costUsed: null };
 }
 
 async function deductProductInventory(trx, {
