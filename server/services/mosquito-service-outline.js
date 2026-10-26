@@ -4,7 +4,7 @@
 // packet shape, so the composer, the send route and the public page take it as they take a lawn packet.
 //
 // Each fact is an owner ruling, the mosquito protocol, the Service Details guide, a fact-register source or an approved
-// service-report tip; the words are the reviewed draft 2 (mosquito-draft, after the Fable review). The ten library tips
+// service-report tip; the words are the reviewed draft 2 (mosquito-draft, after the Fable review). The nine library tips
 // are read by id at build time (the builder owns their words; GATE_TECH_TIP_SOURCES picks the sourced or the plain
 // wording, and a sourced-only tip drops with its tile when the gate is off). No rate, price, visit count, cadence or
 // terms; product names only in the product list, read from the catalog. Bti dunks and mosquito stations are estimate
@@ -154,10 +154,11 @@ const MOSQUITO_COPY = Object.freeze({
   ]),
   questionsTitle: 'Common Questions',
   questionsBody: 'The questions we hear most, answered straight.',
+  // No bug-zapper tile: its library tip (mq_skip_zapper) says "killed", and customer copy never says kill or die
+  // (owner 2026-10-01).
   questionTiles: Object.freeze([
     tile('decide', 'Isn\'t my pest control enough for mosquitoes?', 'No. Pest control treats the house; mosquitoes rest in leaves and breed in water, which a house treatment does not reach.'),
     tipTile('area', 'Where do my mosquitoes come from?', 'mq_few_blocks'),
-    tipTile('insects', 'Will a bug zapper help?', 'mq_skip_zapper'),
   ]),
   // The lawn outline's label tiles; its EPA tile names fertilizers and wetting agents, so the mosquito one says less.
   safetyTiles: Object.freeze([

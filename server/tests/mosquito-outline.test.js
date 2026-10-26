@@ -156,7 +156,7 @@ describe('the Mosquito packet', () => {
     expect(tileTitles(result, 'after_treatment')).toEqual(['Don\'t rinse the shrubs', 'Rain']);
     expect(tileTitles(result, 'your_part')).toEqual(['Flush bromeliads weekly', 'Check the ribbed downspout pipe', 'Thin the thick hedges', 'Run a fan where you sit', 'On service day']);
     expect(tileTitles(result, 'what_to_expect')).toEqual(['Fewer mosquitoes, not zero', 'Rain brings new hatches', 'Weather can change a visit', 'If we also care for your shrubs']);
-    expect(tileTitles(result, 'common_questions')).toEqual(['Isn\'t my pest control enough for mosquitoes?', 'Where do my mosquitoes come from?', 'Will a bug zapper help?']);
+    expect(tileTitles(result, 'common_questions')).toEqual(['Isn\'t my pest control enough for mosquitoes?', 'Where do my mosquitoes come from?']);
     expect(tileTitles(result, 'safety')).toEqual(['Label directions', 'Stay off until dry', 'Follow your report', 'EPA numbers', 'Bees and blooms', 'Edible plants and water']);
     expect(tileTitles(result, 'after_visit')).toEqual(['A service report', 'Reminders', 'Your customer portal', 'Arrival record']);
     const text = Object.fromEntries(section(result, 'after_treatment').visual.items.map((i) => [i.title, i.text]));
@@ -196,7 +196,6 @@ describe('the library tips are read by id', () => {
     expect(text('your_part', 'Thin the thick hedges')).toBe(tipCopy('mq_thin_hedges', true));
     expect(text('your_part', 'Run a fan where you sit')).toBe(tipCopy('mq_lanai_fan', true));
     expect(text('common_questions', 'Where do my mosquitoes come from?')).toBe(tipCopy('mq_few_blocks', true));
-    expect(text('common_questions', 'Will a bug zapper help?')).toBe(tipCopy('mq_skip_zapper', true));
   });
 
   test('gate off: the plain words, and a sourced-only tip’s tile drops', async () => {
@@ -215,7 +214,7 @@ describe('the library tips are read by id', () => {
       ...mosquito.MOSQUITO_COPY.seasons.map((s) => s.atHomeTip),
       ...[...mosquito.MOSQUITO_COPY.problemTiles, ...mosquito.MOSQUITO_COPY.yourPartTips, ...mosquito.MOSQUITO_COPY.questionTiles].map((t) => t.tipId).filter(Boolean),
     ];
-    expect(ids).toHaveLength(10);
+    expect(ids).toHaveLength(9);
     for (const id of ids) expect({ id, copy: tipCopy(id, true) }).toEqual({ id, copy: expect.any(String) });
   });
 });
@@ -358,6 +357,8 @@ describe('the owner’s rulings and the customer-copy checks hold in every state
     const words = allText(result).join(' ');
     // No price, visit count, cadence, terms or guarantee (the estimate and agreement carry those).
     expect(words).not.toMatch(/\bfree\b|guarantee|unlimited|\$\d|\b\d+\s*(visits|weeks)\b|every \d+ days|monthly|roughly every|annual/i);
+    // Owner 2026-10-01: never die, dead, dying or kill in customer copy (the zapper tip says "killed", so its tile is out).
+    expect(words).not.toMatch(/\b(kill|kills|killed|killing|die|dies|dead|dying)\b/i);
     // GATE_MOSQUITO_MISTING is off: the page never says mist or fog.
     expect(words).not.toMatch(/\bmist|\bfog/i);
     // Left off the product list on purpose: Tekko Trio (indoor-only), Bifen I/T, Talstar P, Cyzmic, Altosid; no rate or % figure.
