@@ -16,7 +16,7 @@
 // never cleared by a line change, and are merged into the object this hook returns.
 import { useMemo, useRef, useState } from 'react';
 import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../../tech/treatmentZoneSpray';
-import { aimArrowLength, effectiveAim, headingFromVector, normalizeAim } from '../../../lib/mistingLayoutAim';
+import { aimHandle, effectiveAim, headingFromVector, normalizeAim } from '../../../lib/mistingLayoutAim';
 import { applyRiserEdits, nozzleLines, placeBedRisers } from '../../../lib/mistingLayoutBeds';
 import { layoutForExport } from '../../../lib/mistingLayoutPersist';
 import {
@@ -122,13 +122,13 @@ export default function useMistingLayoutState(mapState, initial = null) {
     () => new Map(layoutForExport(allLines, nozzles).nozzles.map((n) => [n.key, n.number])),
     [allLines, nozzles],
   );
-  // The aim each nozzle is drawn with: its manual aim, else the default for where it stands, and its arrow's length.
+  // The aim each nozzle is drawn with: its manual aim, else the default for where it stands, and its arrow and handle.
   const aims = useMemo(() => {
     if (!ready) return new Map();
     const map = { lat: mapState.center.lat, zoom: mapState.zoom };
     return new Map(nozzles.map((n) => {
       const aim = effectiveAim(n, allLines, extras.zones, map);
-      return [n.key, { ...aim, tipPx: aimArrowLength(n, aim.heading, nozzles) }];
+      return [n.key, { ...aim, ...aimHandle(n, aim.heading, nozzles) }]; // lengthPx, tip: what is drawn and what a press grabs
     }));
   }, [ready, mapState, nozzles, allLines, extras.zones]);
   // Each riser carries a nozzle, so it sprays too: the same default aim (away from the house, along its line near water).

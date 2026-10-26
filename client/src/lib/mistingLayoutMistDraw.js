@@ -24,12 +24,6 @@ export const MIST_HALF_SPREAD_RAD = 0.45;
 const HEAD_LENGTH = 10;
 const HEAD_HALF_WIDTH = 7;
 
-/** The arrow's tip in map pixels; `lengthPx` is the arrow's length (aimArrowLength), full length by default. */
-export function aimTip(nozzle, heading, lengthPx = AIM_ARROW_PX) {
-  const v = aimVector(heading);
-  return { x: nozzle.x + v.x * lengthPx, y: nozzle.y + v.y * lengthPx };
-}
-
 /**
  * The layered glow of a traced eave or fence line, bottom to top, as the Treatment Zone Mapper draws its trace:
  * a wide soft blue, a white core and a narrow strong blue. `color` is a CSS color string.

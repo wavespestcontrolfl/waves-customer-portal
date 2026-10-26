@@ -4,7 +4,7 @@
 // consumes the model built here: numbered nozzles in walking order with their spray aim, risers with theirs, and the scale bar.
 // The picture is the plain drawing; its title, counts, legend and concept note belong to the estimate document's card.
 import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../components/tech/treatmentZoneSpray';
-import { aimArrowLength, aimReachPx, effectiveAim } from './mistingLayoutAim';
+import { aimHandle, aimReachPx, effectiveAim } from './mistingLayoutAim';
 import { insideAnyZone, zoneKindDef } from './mistingLayoutExtras';
 
 // Sketch canvas: the satellite photo at its native size, filling the frame, with the drawing over it. The photo's
@@ -103,7 +103,7 @@ export function buildSketchModel(layout) {
       aimHeading: aim.heading,
       nearWater: aim.nearWater,
       reachPx: aimReachPx(aim, layout.lat, layout.zoom),
-      arrowPx: aimArrowLength(n, aim.heading, numbered),
+      arrowPx: aimHandle(n, aim.heading, numbered).lengthPx,
     };
   });
   // A riser carries a nozzle, so it sprays too: the same default aim, along the bed line it stands on when it has one.

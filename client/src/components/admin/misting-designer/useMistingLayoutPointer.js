@@ -15,7 +15,6 @@
 import { useRef } from 'react';
 import { MAP_HEIGHT, MAP_WIDTH } from '../../tech/treatmentZoneSpray';
 import { hitNozzleIndex, nozzleHitRadiusPx } from '../../../lib/mistingLayoutGeometry';
-import { aimTip } from '../../../lib/mistingLayoutMistDraw';
 
 const DRAG_START_CSS_PX = 5;
 
@@ -34,7 +33,7 @@ function grabTip(layout, p, mapState) {
   if (!layout.directions) return null;
   const tips = layout.nozzles.flatMap((n) => {
     const aim = layout.aims.get(n.key);
-    return aim ? [{ ...aimTip(n, aim.heading, aim.tipPx), handleOf: n }] : [];
+    return aim ? [{ x: aim.tip.x, y: aim.tip.y, handleOf: n }] : [];
   });
   const radius = Math.max(nozzleHitRadiusPx(mapState.center.lat, mapState.zoom, p.scale), TIP_HIT_CSS_PX * p.scale);
   const idx = hitNozzleIndex(tips, p, radius);

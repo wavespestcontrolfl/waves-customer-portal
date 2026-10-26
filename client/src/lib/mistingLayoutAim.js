@@ -24,6 +24,10 @@ export const WATER_ZONE_KINDS = Object.freeze(['water', 'pool']);
 // its head still shows.
 export const AIM_ARROW_PX = 40;
 export const AIM_ARROW_MIN_PX = 26;
+// Near the photo's edge the arrow is shortened until its tip, and the whole handle ring around it, is inside the frame:
+// no shorter than the minimum below (a head just beyond the dot).
+export const AIM_HANDLE_INSET_PX = 16;
+export const AIM_ARROW_FRAME_MIN_PX = 20;
 const FORWARD_COS = Math.cos(Math.PI / 4); // a neighbour within 45 degrees of the aim is "ahead"
 
 
@@ -167,6 +171,48 @@ export function aimArrowLength(nozzle, heading, nozzles) {
     nearest = Math.min(nearest, d);
   });
   return Math.max(AIM_ARROW_MIN_PX, Math.min(AIM_ARROW_PX, nearest / 2));
+}
+
+// How far along the unit vector `v` from `p` a point stays inside the frame less the handle inset: negative when `p` is
+// already past the inset on the side `v` points to.
+function roomAlong(p, v) {
+  let room = Infinity;
+  const axis = (pos, dir, size) => {
+    if (dir > EPS) room = Math.min(room, (size - AIM_HANDLE_INSET_PX - pos) / dir);
+    else if (dir < -EPS) room = Math.min(room, (AIM_HANDLE_INSET_PX - pos) / dir);
+  };
+  axis(p.x, v.x, MAP_WIDTH);
+  axis(p.y, v.y, MAP_HEIGHT);
+  return room;
+}
+
+const clampIn = (p) => ({
+  x: Math.max(AIM_HANDLE_INSET_PX, Math.min(MAP_WIDTH - AIM_HANDLE_INSET_PX, p.x)),
+  y: Math.max(AIM_HANDLE_INSET_PX, Math.min(MAP_HEIGHT - AIM_HANDLE_INSET_PX, p.y)),
+});
+
+/**
+ * The arrow and its drag handle for one nozzle: the one place that says where the tip is, so what is drawn and what a
+ * press can grab are the same point. Returns { lengthPx, tip: {x, y} }.
+ *
+ * The arrow is aimArrowLength long (shorter when it points at a neighbour). A nozzle near the edge of the photo that
+ * points outward would put its tip outside the frame, where it is clipped and cannot be pressed, so the arrow is
+ * shortened along its heading until the tip, with the room for its handle ring (AIM_HANDLE_INSET_PX), is inside, never
+ * below AIM_ARROW_FRAME_MIN_PX. If even that does not fit (the nozzle is within the inset of the edge it points at),
+ * the arrow keeps that minimum and the handle sits at the nearest in-frame point to where the tip would be. Where the
+ * nozzle stands within the inset of an edge the arrow runs alongside, the handle is moved in sideways the same way. Dragging the
+ * handle still aims by the direction from the nozzle to the pointer, so aiming outward works from there.
+ */
+export function aimHandle(nozzle, heading, nozzles) {
+  const v = aimVector(heading);
+  const wanted = aimArrowLength(nozzle, heading, nozzles);
+  const room = roomAlong(nozzle, v);
+  const at = (t) => ({ x: nozzle.x + v.x * t, y: nozzle.y + v.y * t });
+  // The handle is always clamped in, so a nozzle within the inset of an edge that the arrow runs ALONG (a heading of 0 or
+  // 90 degrees beside it) still shows its whole ring; where the arrow has room the clamp changes nothing.
+  if (room >= wanted) return { lengthPx: wanted, tip: clampIn(at(wanted)) };
+  if (room >= AIM_ARROW_FRAME_MIN_PX) return { lengthPx: room, tip: clampIn(at(room)) };
+  return { lengthPx: AIM_ARROW_FRAME_MIN_PX, tip: clampIn(at(AIM_ARROW_FRAME_MIN_PX)) };
 }
 
 /** How far the mist travels, in map pixels. */

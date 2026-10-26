@@ -277,6 +277,62 @@ describe('a plain photo', () => {
   });
 });
 
+describe('near the edge of the photo', () => {
+  // A square house whose west wall sits 6 map px from the photo's left edge, so those nozzles point west, off the photo.
+  async function westWall() {
+    const frame = await open();
+    [[3, 150], [3, 250], [150, 250], [150, 150], [3, 150]].forEach(([x, y]) => tap(frame, x, y));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+    return frame;
+  }
+  const ringOf = (a) => { const c = a.querySelector('circle'); return [Number(c.getAttribute('cx')), Number(c.getAttribute('cy'))]; };
+  // A nozzle on the west wall (map x = 6, between the corners) pointing west.
+  const westIndex = () => screen.getAllByTestId('layout-nozzle').findIndex((n, i) => Number(n.getAttribute('cx')) === 6 && Math.abs(heading(arrows()[i]) - 270) < 1e-6);
+
+  it('keeps the handle of a nozzle that points off the photo inside it, where the ring is whole and a press reaches it', async () => {
+    const frame = await westWall();
+    const i = westIndex();
+    expect(i).toBeGreaterThanOrEqual(0);
+    const arrow = arrows()[i];
+    expect(heading(arrow)).toBeCloseTo(270, 5); // pointing west, past the edge
+    const [rx, ry] = ringOf(arrow);
+    expect(rx).toBeGreaterThanOrEqual(16);
+    expect(ry).toBeGreaterThanOrEqual(16);
+    // Every arrow of the layout has its ring inside the frame, with room for the whole ring.
+    arrows().forEach((a) => {
+      const [x, y] = ringOf(a);
+      expect(x).toBeGreaterThanOrEqual(16 - 1e-6);
+      expect(x).toBeLessThanOrEqual(1280 - 16 + 1e-6);
+      expect(y).toBeGreaterThanOrEqual(16 - 1e-6);
+      expect(y).toBeLessThanOrEqual(960 - 16 + 1e-6);
+    });
+    // A press on the ring selects that nozzle for Reset aim, and deletes nothing.
+    const count = screen.getAllByTestId('layout-nozzle').length;
+    tap(frame, rx / 2, ry / 2);
+    expect(screen.getAllByTestId('layout-nozzle')).toHaveLength(count);
+    expect(screen.getByTestId('layout-aim-status')).toHaveTextContent('aims 270° (automatic)');
+  });
+
+  it('aims it from there: pulled into the photo it turns, pulled back out past the nozzle it points west again', async () => {
+    const frame = await westWall();
+    const i = westIndex(); // found while it still points west
+    const arrow = () => arrows()[i];
+    const [rx, ry] = ringOf(arrow());
+    // Drag the handle to the south-east of the nozzle: a heading between south and east.
+    drag(frame, { x: rx / 2, y: ry / 2 }, { x: 60, y: 230 });
+    expect(arrow()).toHaveAttribute('data-manual', 'true');
+    expect(heading(arrow())).toBeGreaterThan(90);
+    expect(heading(arrow())).toBeLessThan(180);
+    const [gx, gy] = ringOf(arrow());
+    // Now drag it back out: the pointer left of the nozzle, at the photo's very edge, means west again.
+    const nozzleY = Number(screen.getAllByTestId('layout-nozzle')[i].getAttribute('cy'));
+    drag(frame, { x: gx / 2, y: gy / 2 }, { x: 0.5, y: nozzleY / 2 }, 3);
+    expect(heading(arrow())).toBeGreaterThan(260);
+    expect(heading(arrow())).toBeLessThan(280);
+    expect(arrow()).toHaveAttribute('data-manual', 'true');
+  });
+});
+
 describe('spray modes', () => {
   it('animates by default, shows still wedges with Spray off, and nothing with Directions off too', async () => {
     await drawLine();

@@ -3,7 +3,7 @@
 // "!" mark, so the warning does not rely on color alone. A numbered nozzle is blue; it turns amber when
 // it is flagged or stands near water, and its arrow turns amber with it.
 import { aimVector } from '../../../lib/mistingLayoutAim';
-import { MIST_ARROW, MIST_ARROW_NEAR_WATER, MIST_TRACE_STROKES, aimTip } from '../../../lib/mistingLayoutMistDraw';
+import { MIST_ARROW, MIST_ARROW_NEAR_WATER, MIST_TRACE_STROKES } from '../../../lib/mistingLayoutMistDraw';
 
 export const COPPER = '#b87333';
 const WARN = '#dc2626';
@@ -62,13 +62,16 @@ function WarnMark({ x, y }) {
 export function AimArrow({ nozzle, aim, editing, selected }) {
   const v = aimVector(aim.heading);
   const color = aim.nearWater ? MIST_ARROW_NEAR_WATER : MIST_ARROW;
-  const shaft = aim.tipPx - ARROW_HEAD;
+  const shaft = aim.lengthPx - ARROW_HEAD;
   const ex = nozzle.x + v.x * shaft;
   const ey = nozzle.y + v.y * shaft;
   const sx = nozzle.x + v.x * ARROW_FROM;
   const sy = nozzle.y + v.y * ARROW_FROM;
-  const tip = aimTip(nozzle, aim.heading, aim.tipPx);
-  const head = `${tip.x},${tip.y} ${ex - v.y * 7},${ey + v.x * 7} ${ex + v.y * 7},${ey - v.x * 7}`;
+  // The arrow runs along the heading; the handle ring sits on its tip (aim.tip), which only leaves the arrow's end where
+  // the nozzle is too near the photo's edge for the arrow to fit (lib/mistingLayoutAim aimHandle).
+  const end = { x: nozzle.x + v.x * aim.lengthPx, y: nozzle.y + v.y * aim.lengthPx };
+  const tip = aim.tip;
+  const head = `${end.x},${end.y} ${ex - v.y * 7},${ey + v.x * 7} ${ex + v.y * 7},${ey - v.x * 7}`;
   return (
     <g data-testid="layout-aim" data-heading={aim.heading} data-manual={aim.manual ? 'true' : 'false'} data-near-water={aim.nearWater ? 'true' : 'false'}>
       <line x1={sx} y1={sy} x2={ex} y2={ey} stroke="#000" strokeOpacity="0.55" strokeWidth="6.5" strokeLinecap="round" />

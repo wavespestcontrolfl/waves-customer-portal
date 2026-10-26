@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { pxToFeet } from '../components/tech/treatmentZoneSpray';
+import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../components/tech/treatmentZoneSpray';
 import {
   NEAR_WATER_THROW_FT,
   THROW_FT,
+  AIM_ARROW_FRAME_MIN_PX,
   AIM_ARROW_MIN_PX,
   AIM_ARROW_PX,
+  AIM_HANDLE_INSET_PX,
   aimArrowLength,
+  aimHandle,
   aimReachPx,
   aimVector,
   defaultAim,
@@ -174,5 +177,66 @@ describe('aimArrowLength', () => {
 
   it('follows the nearest nozzle ahead', () => {
     expect(aimArrowLength(me, 90, [me, at(500, 300), at(370, 300), at(420, 300)])).toBe(35);
+  });
+});
+
+describe('aimHandle: the arrow and its drag handle stay inside the photo', () => {
+  const inset = AIM_HANDLE_INSET_PX;
+  const inBox = (p) => p.x >= inset - 1e-9 && p.x <= MAP_WIDTH - inset + 1e-9 && p.y >= inset - 1e-9 && p.y <= MAP_HEIGHT - inset + 1e-9;
+  const at = (x, y) => ({ x, y });
+
+  it('is the arrow\'s full length, ending on the heading, when there is room', () => {
+    const me = at(640, 480);
+    [0, 90, 180, 270, 37].forEach((h) => {
+      const handle = aimHandle(me, h, [me]);
+      expect(handle.lengthPx).toBe(AIM_ARROW_PX);
+      expect(handle.tip.x).toBeCloseTo(640 + Math.sin((h * Math.PI) / 180) * AIM_ARROW_PX, 9);
+      expect(handle.tip.y).toBeCloseTo(480 - Math.cos((h * Math.PI) / 180) * AIM_ARROW_PX, 9);
+    });
+    // And it keeps the neighbour rule: halfway to a nozzle ahead, no shorter than the minimum.
+    expect(aimHandle(me, 90, [me, at(684, 480)]).lengthPx).toBe(AIM_ARROW_MIN_PX);
+  });
+
+  it('a nozzle at x = 5 pointing west keeps a handle inside the frame that a press can reach', () => {
+    const me = at(5, 400);
+    const handle = aimHandle(me, 270, [me]);
+    expect(handle.tip.x).toBeGreaterThanOrEqual(0);
+    expect(inBox(handle.tip)).toBe(true);
+    expect(handle.lengthPx).toBe(AIM_ARROW_FRAME_MIN_PX);
+    // Within the reach of a press even at the smallest rendered size (24 map px at 640 px wide).
+    expect(Math.hypot(handle.tip.x - me.x, handle.tip.y - me.y)).toBeLessThanOrEqual(24);
+  });
+
+  it('shortens the arrow along its heading to fit, down to the minimum, at each edge', () => {
+    // 30 px from the edge: room for 30 - 16 = 14 only, below the minimum, so the minimum, handle pulled in.
+    // 50 px from the edge: room for 34, a shortened arrow on the heading.
+    const cases = [
+      { me: at(50, 480), heading: 270, along: (t) => at(50 - t, 480) },
+      { me: at(MAP_WIDTH - 50, 480), heading: 90, along: (t) => at(MAP_WIDTH - 50 + t, 480) },
+      { me: at(640, 50), heading: 0, along: (t) => at(640, 50 - t) },
+      { me: at(640, MAP_HEIGHT - 50), heading: 180, along: (t) => at(640, MAP_HEIGHT - 50 + t) },
+    ];
+    cases.forEach(({ me, heading, along }) => {
+      const handle = aimHandle(me, heading, [me]);
+      expect(handle.lengthPx).toBeCloseTo(34, 9);
+      expect(handle.tip.x).toBeCloseTo(along(34).x, 9);
+      expect(handle.tip.y).toBeCloseTo(along(34).y, 9);
+      expect(inBox(handle.tip)).toBe(true);
+    });
+  });
+
+  it('every edge and corner: the handle is in the frame whichever way the nozzle points', () => {
+    const spots = [at(0, 0), at(MAP_WIDTH, 0), at(0, MAP_HEIGHT), at(MAP_WIDTH, MAP_HEIGHT), at(5, 480), at(MAP_WIDTH - 5, 480), at(640, 5), at(640, MAP_HEIGHT - 5), at(20, 20), at(MAP_WIDTH - 20, MAP_HEIGHT - 20)];
+    spots.forEach((me) => {
+      for (let h = 0; h < 360; h += 15) {
+        const handle = aimHandle(me, h, [me]);
+        expect(inBox(handle.tip)).toBe(true);
+        expect(handle.lengthPx).toBeGreaterThanOrEqual(AIM_ARROW_FRAME_MIN_PX);
+        expect(handle.lengthPx).toBeLessThanOrEqual(AIM_ARROW_PX);
+      }
+    });
+    // A nozzle by the edge that points INTO the photo keeps its full arrow.
+    expect(aimHandle(at(5, 480), 90, [at(5, 480)]).lengthPx).toBe(AIM_ARROW_PX);
+    expect(aimHandle(at(MAP_WIDTH - 5, 480), 270, [at(MAP_WIDTH - 5, 480)]).lengthPx).toBe(AIM_ARROW_PX);
   });
 });
