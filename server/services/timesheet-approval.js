@@ -458,9 +458,15 @@ async function getPendingWeeks(weekStart) {
     ));
     if (!hasWorkedTime) continue;
 
+    // Automatic clock-outs no admin has edited or confirmed yet
+    // (GATE_SHIFT_CLOSE_REVIEW); the key is absent when there are none.
+    const autoClosePending = snapshot.entries.filter(entry => (
+      entry.auto_closed_at && !entry.auto_close_reviewed_at
+    )).length;
     results.push({
       ...weekly,
       tech_name: tech.name || 'Inactive technician',
+      ...(autoClosePending ? { auto_close_pending: autoClosePending } : {}),
       review_token: reviewSnapshotToken(snapshot),
     });
   }

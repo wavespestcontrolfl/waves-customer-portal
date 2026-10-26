@@ -11,6 +11,81 @@ const {
   staffWorkDate,
 } = require('../utils/staff-time-work-date');
 const { runExclusive } = require('../utils/cron-lock');
+const { shiftCloseReviewLive } = require('../config/feature-gates');
+const { usableCell } = require('./tech-line');
+const { etDateString, formatETTime } = require('../utils/datetime-et');
+
+const REMINDER_CARD_TYPE = 'tech_clock_out_reminder';
+const AUTO_CLOSE_CARD_TYPE = 'tech_auto_clock_out';
+
+// Log tag for a caught error: never err.message, which can carry a recipient
+// number or the message body.
+function errTag(err) {
+  return err?.code || err?.name || 'error';
+}
+
+/**
+ * One staff notice for a technician (GATE_SHIFT_CLOSE_REVIEW on), the same
+ * routing as the 7 PM open-visit nudge (tech-open-visit-nudge.js): the owner
+ * gets an internal text on their own cell (technicians.phone is the office
+ * line, so it goes to ADAM_PHONE); every other technician gets a Today card
+ * kept until "Got it" plus a best-effort push, and no SMS, because sendSMS
+ * writes a customer-inbox thread for any number that is not an owner phone.
+ * The card row carries a unique dedupe_key, so a re-run never doubles it.
+ * Returns true when something was delivered.
+ */
+async function sendStaffNotice(tech, { type, dedupeKey, headline, message, payload = {} }) {
+  if (tech.phone && TwilioService.isKnownOwnerPhone(tech.phone)) {
+    const cell = usableCell(tech) || usableCell({ id: tech.id, phone: process.env.ADAM_PHONE });
+    if (!cell) return false;
+    await TwilioService.sendSMS(cell, message, { messageType: 'internal_alert', allowOwnerSms: true });
+    return true;
+  }
+  const inserted = await db('tech_notifications')
+    .insert({
+      technician_id: tech.id,
+      type,
+      dedupe_key: dedupeKey,
+      message,
+      payload: JSON.stringify({ headline, ...payload }),
+    })
+    .onConflict('dedupe_key')
+    .ignore()
+    .returning('id');
+  if (!inserted.length) return false;
+  try {
+    const PushService = require('./push-notifications');
+    await PushService.sendToAdminUser(tech.id, {
+      title: headline,
+      body: 'Open Today for details.',
+      url: '/tech',
+      tag: dedupeKey,
+    });
+  } catch (err) {
+    logger.warn(`[time-tracking-cron] push failed for ${tech.id} (card already written): ${errTag(err)}`);
+  }
+  return true;
+}
+
+// The 9 PM reminder with GATE_SHIFT_CLOSE_REVIEW on: owner text or Today card.
+async function remindToClockOut(shift, hoursIn) {
+  if (hoursIn < 8) return;
+  try {
+    const delivered = await sendStaffNotice(
+      { id: shift.technician_id, name: shift.tech_name, phone: shift.tech_phone },
+      {
+        type: REMINDER_CARD_TYPE,
+        dedupeKey: `${REMINDER_CARD_TYPE}:${shift.technician_id}:${etDateString(new Date())}`,
+        headline: 'Clock out when you are done',
+        message: `Hey ${shift.tech_name}, you've been clocked in for ${Math.round(hoursIn)} hours. ` +
+          `Don't forget to clock out when you're done! Your shift will auto-close at 11 PM if still active.`,
+      },
+    );
+    if (delivered) logger.info(`[time-tracking-cron] Sent clock-out reminder to technician ${shift.technician_id}`);
+  } catch (noticeErr) {
+    logger.error(`[time-tracking-cron] Failed to send reminder to technician ${shift.technician_id}: ${errTag(noticeErr)}`);
+  }
+}
 
 /**
  * Initialize all time-tracking cron jobs.
@@ -99,7 +174,7 @@ function initTimeTrackingCrons() {
             `📋 ${pendingCount} tech timesheet${pendingCount === 1 ? '' : 's'} ready to approve for week of ${weekStartStr}. Review: ${link}`,
             { messageType: 'internal_alert', link: '/admin/timetracking' },
           );
-          logger.info(`[time-tracking-cron] Approval SMS sent to Virginia (${pendingCount} pending)`);
+          logger.info(`[time-tracking-cron] Approval SMS sent to the owner (${pendingCount} pending)`);
         } catch (smsErr) {
           logger.error('[time-tracking-cron] Approval SMS failed', { error: smsErr.message });
         }
@@ -123,6 +198,10 @@ function initTimeTrackingCrons() {
 
       for (const shift of activeShifts) {
         const hoursIn = (Date.now() - new Date(shift.clock_in).getTime()) / 3600000;
+        if (shiftCloseReviewLive()) {
+          await remindToClockOut(shift, hoursIn);
+          continue;
+        }
         if (hoursIn >= 8 && shift.tech_phone) {
           try {
             await TwilioService.sendSMS(shift.tech_phone,
@@ -159,13 +238,38 @@ function initTimeTrackingCrons() {
             shiftId: shift.id,
             childNoteSuffix: ' [auto-closed 11PM]',
             shiftNote: 'AUTO CLOCK-OUT: 11 PM cron',
+            autoCloseReason: 'cron_11pm',
           });
           if (!closed) continue;
 
           await timeTracking.computeDailySummary(shift.technician_id, closed.workDate);
 
           // Notify tech
-          if (shift.tech_phone) {
+          if (closed.autoClosed) {
+            // Gate on: the close was marked for review, and the notice goes
+            // to the staff channel (owner text or Today card), not a customer thread.
+            const hours = (closed.duration / 60).toFixed(1);
+            const message = closed.trimmed
+              ? `Hi ${shift.tech_name}, you were still clocked in at 11 PM, so your shift was closed automatically at ` +
+                `${formatETTime(new Date(closed.closedAt))}, your last recorded activity. Total: ${hours} hours. ` +
+                `The office will review it. If this is incorrect, contact admin.`
+              : `Hi ${shift.tech_name}, your shift has been automatically closed at 11 PM. ` +
+                `Total: ${hours} hours. The office will review it. If this is incorrect, contact admin.`;
+            try {
+              await sendStaffNotice(
+                { id: shift.technician_id, name: shift.tech_name, phone: shift.tech_phone },
+                {
+                  type: AUTO_CLOSE_CARD_TYPE,
+                  dedupeKey: `${AUTO_CLOSE_CARD_TYPE}:${shift.id}`,
+                  headline: 'Your shift was closed automatically',
+                  message,
+                  payload: { shift_id: shift.id, hours },
+                },
+              );
+            } catch (noticeErr) {
+              logger.error(`[time-tracking-cron] Failed to send auto-close notice: ${errTag(noticeErr)}`);
+            }
+          } else if (shift.tech_phone) {
             try {
               await TwilioService.sendSMS(shift.tech_phone,
                 `Hi ${shift.tech_name}, your shift has been automatically closed at 11 PM. ` +

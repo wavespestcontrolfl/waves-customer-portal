@@ -14737,7 +14737,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // (assignment updates below take visit row locks).
       const commsPeek = await trx('scheduled_services')
         .where({ id: req.params.id })
-        .first('customer_id', 'recurring_parent_id', 'recurring_ongoing', 'scheduled_date');
+        .first('customer_id', 'recurring_parent_id', 'recurring_ongoing', 'scheduled_date', 'route_order');
       // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
       // occupancy lock, BEFORE the maintenance/comms advisory locks and
       // every row lock this trx takes. Keyed off the TARGET date: the
@@ -17214,6 +17214,16 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             if (!editWarnings.includes(warning)) editWarnings.push(warning);
           }
         }
+      }
+      // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when off):
+      // an edit that moved this visit (another day, start or technician)
+      // numbers its technician's day in the order the save check certified,
+      // unless the office typed a new route number (the form sends the stored
+      // one back on every save).
+      const routeNumberTyped = Number.isInteger(updates.route_order)
+        && updates.route_order !== (commsPeek?.route_order ?? null);
+      if (useArrivalWindows && (scheduleMoveForNotice || assignmentNeedsChange) && !routeNumberTyped) {
+        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id });
       }
       // Every refusal in this handler has passed: only now do the Stripe cancels of the planned session
       // release run (they are external and cannot roll back with a rejected edit).
