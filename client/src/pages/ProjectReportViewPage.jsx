@@ -9,7 +9,6 @@ import { DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import DocumentActionBar from '../components/DocumentActionBar';
-import { FieldDocumentBody, FieldMasthead } from '../components/FieldDocument';
 import CustomerReportHeader, { sharedReportTemplateActive } from '../components/report/CustomerReportHeader';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
@@ -612,9 +611,6 @@ export default function ProjectReportViewPage() {
             documents (owner 2026-07-16); sits tight under the tools card
             like the service report. */}
         {!isPaperDocument && <ProjectAskWaves token={token} />}
-        <FieldDocumentBody className="project-report-document-body">
-          <FieldMasthead />
-          <div className="project-report-field-title">
         {sharedTemplate ? (
           <CustomerReportHeader
             eyebrow={`Project report${reportTitle ? ` · ${reportTitle}` : ''}`}
@@ -653,7 +649,6 @@ export default function ProjectReportViewPage() {
             ) : null}
           </div>
         )}
-          </div>
 
         {/* Summary card — no "Report details" block (owner directive
             2026-07-03): the hero already carries the address, the At-a-glance
@@ -856,7 +851,6 @@ export default function ProjectReportViewPage() {
           </a>.
           {' '}This report is provided for your records.
         </footer>
-        </FieldDocumentBody>
 
       </CustomerColumn>
     </div>

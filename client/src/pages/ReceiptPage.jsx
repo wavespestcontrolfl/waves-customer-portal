@@ -32,10 +32,10 @@
 // - Email forwarding: if the customer forwards the receipt URL,
 //   does the recipient see the same invoice? That's intended (it's
 //   a receipt) but should NOT expose card details.
-import { DOC, DOC_FONT, DOC_EYEBROW, FIELD_DOCUMENT, FS, FW, LH, SP, RADIUS } from '../theme-doc';
+import { CUSTOMER_SURFACE } from '../theme-customer';
+import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
 import DocumentActionBar from '../components/DocumentActionBar';
-import { FieldDocumentBody, FieldMasthead, FieldTitle, FieldFooter } from '../components/FieldDocument';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
 import React, { useState, useEffect, useMemo } from 'react';
@@ -44,6 +44,8 @@ import Icon from '../components/Icon';
 import {
   WavesShell,
   CustomerColumn,
+  BrandCard,
+  SerifHeading,
   HelpPhoneLink,
   PublicStateCard,
 } from '../components/brand';
@@ -83,9 +85,9 @@ function fmtDate(d) {
 }
 
 const subtlePanel = {
-  background: FIELD_DOCUMENT.soft,
-  border: `1px solid ${FIELD_DOCUMENT.rule}`,
-  borderRadius: 0,
+  background: CUSTOMER_SURFACE.page,
+  border: `1px solid ${CUSTOMER_SURFACE.border}`,
+  borderRadius: RADIUS.input,
 };
 
 // The shared uppercase eyebrow spec (DOC_EYEBROW); margin stays a
@@ -312,8 +314,15 @@ export default function ReceiptPage() {
         @media print {
           @page { margin: 0.5in; }
           body { background: #FFFFFF !important; }
-          header:not(.field-document-masthead), footer:not(.field-document-footer), .waves-no-print { display: none !important; }
+          header, footer, .waves-no-print { display: none !important; }
           .waves-print-root { padding: 0 !important; margin: 0 !important; max-width: 100% !important; }
+          .waves-print-card {
+            box-shadow: none !important;
+            border: 1px solid #CCCCCC !important;
+            border-radius: 0 !important;
+            padding: 24px !important;
+            page-break-inside: avoid;
+          }
           .waves-fresh-badge { display: none !important; }
           a { color: #000000 !important; text-decoration: none !important; }
         }
@@ -429,16 +438,31 @@ export default function ReceiptPage() {
           pdfFileName="Waves_Receipt.pdf"
           shareTitle="Waves receipt"
         />
-        <FieldDocumentBody className="waves-receipt-document" style={{ marginBottom: SP.lg }}>
-          <FieldMasthead />
-          <FieldTitle
-            eyebrow={processing ? 'Payment pending' : 'Receipt'}
-            title={heading}
-            reference={`Invoice ${invoice.invoiceNumber}`}
-            subtitle={<>{serviceLabel}{serviceDateLabel ? ` · ${serviceDateLabel}` : ''}</>}
-          />
-
+        <BrandCard className="waves-print-card" padding={24} style={{ marginBottom: SP.lg }}>
           <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            gap: SP.md,
+            alignItems: 'flex-start',
+            flexWrap: 'wrap',
+            marginBottom: SP.lg,
+          }}>
+            <div style={{ display: 'flex', gap: SP.md, alignItems: 'flex-start', minWidth: 0 }}>
+              {/* Status icon tile removed (owner 2026-07-09 — no decorative icons). */}
+              <div style={{ minWidth: 0 }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>
+                  {processing ? 'Payment pending' : 'Receipt'} · Invoice {invoice.invoiceNumber}
+                </div>
+                <SerifHeading style={{ marginBottom: SP.xs }}>{heading}</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.muted, lineHeight: LH.body }}>
+                  {serviceLabel}
+                  {serviceDateLabel ? ` · ${serviceDateLabel}` : ''}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div data-glass-clear="" style={{
             ...subtlePanel,
             padding: SP.md,
             marginBottom: SP.lg,
@@ -459,7 +483,7 @@ export default function ReceiptPage() {
             {/* Document icon tile removed (owner 2026-07-09 — no decorative icons). */}
           </div>
 
-          <div className="field-info-grid" style={{
+          <div style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
             gap: SP.md,
@@ -526,16 +550,16 @@ export default function ReceiptPage() {
 
           {visibleLineItems.length > 0 && (
             <div style={{ marginBottom: SP.lg }}>
-              <div className="field-section-heading">Receipt items</div>
-              <div style={{ border: `1px solid ${FIELD_DOCUMENT.rule}` }}>
-                <div style={{
+              <div style={{ ...eyebrow, marginBottom: SP.xs }}>Receipt items</div>
+              <div style={{ border: `1px solid ${DOC.border}`, borderRadius: RADIUS.input, overflow: 'hidden' }}>
+                <div data-glass-clear="" style={{
                   ...eyebrow,
                   display: 'grid',
                   gridTemplateColumns: '1fr auto auto',
                   gap: '0 16px',
                   padding: '12px',
-                  background: FIELD_DOCUMENT.paper,
-                  borderBottom: `2px solid ${FIELD_DOCUMENT.navy}`,
+                  background: CUSTOMER_SURFACE.page,
+                  borderBottom: `1px solid ${CUSTOMER_SURFACE.border}`,
                 }}>
                   <div>Description</div>
                   <div style={{ textAlign: 'right' }}>Qty</div>
@@ -568,7 +592,7 @@ export default function ReceiptPage() {
             </div>
           )}
 
-          <div style={{ ...subtlePanel, padding: SP.md }}>
+          <div data-glass-clear="" style={{ ...subtlePanel, padding: SP.md }}>
             <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
             {invoice.discountAmount > 0 && (
               <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -603,8 +627,8 @@ export default function ReceiptPage() {
           </div>
 
           {invoice.notes && (
-            <div style={{ marginTop: SP.lg, ...subtlePanel, padding: SP.md }}>
-              <div className="field-section-heading">Notes</div>
+            <div data-glass-clear="" style={{ marginTop: SP.lg, ...subtlePanel, padding: SP.md }}>
+              <div style={{ ...eyebrow, marginBottom: SP.xs }}>Notes</div>
               <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body, whiteSpace: 'pre-wrap' }}>
                 {invoice.notes}
               </p>
@@ -616,8 +640,8 @@ export default function ReceiptPage() {
               customer never sees the written deadline the emailed receipt
               carries (Codex #3178 r28). Server-composed copy, frozen terms. */}
           {invoice.creditMemo && (
-            <div style={{ marginTop: SP.lg, ...subtlePanel, padding: SP.md }}>
-              <div className="field-section-heading">Service credit</div>
+            <div data-glass-clear="" style={{ marginTop: SP.lg, ...subtlePanel, padding: SP.md }}>
+              <div style={{ ...eyebrow, marginBottom: SP.xs }}>Service credit</div>
               <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
                 {invoice.creditMemo}
               </p>
@@ -632,8 +656,7 @@ export default function ReceiptPage() {
               Receipt PDF available after bank payment clears
             </div>
           ) : null}
-          <FieldFooter label="Payment receipt" reference={invoice.invoiceNumber} />
-        </FieldDocumentBody>
+        </BrandCard>
 
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.

@@ -2,19 +2,21 @@
 
 ## Field document standard (owner approved 2026-10-25)
 
-The authored document body uses the approved **Field** design: white paper,
-blue left rail, navy masthead rule, gold reference accent, ruled metadata and
-tables, and quiet continuation/footer treatment. Apply this to service and
-project reports, proposals, invoices/receipts, account statements, agreements,
-prep guides, treatment records, annual-plan summaries, warranties,
-price-change/rate-review notices and service/program outlines. Invoice browser
-printing uses the same Field document boundary as the other customer exports;
-payment controls stay outside the paper output.
+The **Field** design is the layout of the PDFs: white paper, blue left rail,
+navy masthead rule, gold reference accent, ruled metadata and tables, and quiet
+continuation/footer treatment. It applies to every generated customer PDF:
+service and project reports, proposals and estimates, invoices/receipts,
+account statements, agreements, prep guides, treatment records, annual-plan
+summaries, warranties, price-change/rate-review notices and service/program
+outlines.
 
-**Estimates and proposals (owner 2026-10-26):** Field is the PDF only — the
-emailed attachment, the staff download and printing (`EstimateProposalDocument`).
-The `/estimate/:token` page keeps its glass layout, the on-page proposal card
-included: no Field masthead or paper body on the page.
+**Web pages keep their own layout (owner 2026-10-26):** "the glass UI should
+have stayed as glass UI, like it was before"; the Field layout "should have
+been the pdfs". The customer web pages (`/estimate`, `/report`, `/receipt`,
+`/pay`, `/pay/statement`, `/contract`, `/prep`, rate notices, service outlines)
+render no Field masthead or paper body. Field renders only inside the PDF
+documents (`EstimateProposalDocument`, `ServiceReportDocument`, the pdfkit
+builders) and in staff printouts.
 
 - React: `FIELD_DOCUMENT` in `client/src/theme-doc.js` and the shared
   `components/FieldDocument.jsx` / `field-document.css` boundary. Use

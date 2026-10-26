@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ServiceOutlinePage from './ServiceOutlinePage';
@@ -129,34 +129,9 @@ const sectionOf = (title) => screen.getByRole('heading', { level: 2, name: title
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
-  vi.unstubAllGlobals();
 });
 
 describe('ServiceOutlinePage drawn sections', () => {
-  it('renders one printable Field document and leaves estimate/actions outside it', async () => {
-    const print = vi.fn();
-    vi.stubGlobal('print', print);
-    renderWith(v13Content());
-
-    const title = await screen.findByRole('heading', { level: 1, name: 'Your Waves Lawn Care Program Overview' });
-    const documentBody = title.closest('.waves-field-document-body');
-    expect(documentBody).toHaveClass('field-document-scroll', 'service-outline-document');
-    expect(within(documentBody).getAllByText('Waves Pest Control').length).toBeGreaterThan(0);
-    expect(within(documentBody).getByText('Lawn care program outline')).toBeInTheDocument();
-    expect(within(documentBody).getByText(v13Content().intro).tagName).toBe('P');
-
-    const tools = screen.getByRole('region', { name: 'Document tools' });
-    expect(documentBody).not.toContainElement(tools);
-    expect(tools.parentElement).toHaveClass('waves-field-no-print');
-    screen.getAllByRole('link', { name: 'View Estimate' }).forEach((link) => {
-      expect(link.closest('.waves-field-no-print')).not.toBeNull();
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Download PDF' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Print' }));
-    expect(print).toHaveBeenCalledTimes(2);
-  });
-
   it('draws the year as twelve month cells, marks the limited months, and keys the icons', async () => {
     renderWith(v13Content());
     await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
