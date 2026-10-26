@@ -36,6 +36,8 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 import { useState, useEffect, useRef, useId } from "react";
 import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import { useAdminTableViews } from "../../hooks/useAdminTableViews";
+import { useAdminTableScroll } from "../../hooks/useAdminTableScroll";
 import {
   Filter,
   MapPinned,
@@ -80,6 +82,7 @@ import { Select, Textarea,
   Input,
   TableColumnPicker,
   TablePagination,
+  TableSavedViews,
   TableToolbar,
   inputStyles,
   UiSurface,
@@ -89,6 +92,13 @@ import { Select, Textarea,
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { formatETDateOnly } from "../../lib/timezone";
 import { ARCHIVE_BILLING_NOTE, archiveConfirmMessage } from "../../lib/customerArchiveCopy";
+import {
+  ALL_CUSTOMER_TABLE_COLUMNS,
+  CUSTOMER_HEALTH_RISKS,
+  CUSTOMER_TABLE_COLUMNS,
+  CUSTOMER_TABLE_VIEW_DEFAULTS,
+  normalizeCustomerTableViewState,
+} from "./customer-table-view-settings";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -939,6 +949,8 @@ function CustomerDirectoryToolbar({
   workspaceMode,
   visibleColumns,
   onVisibleColumnsChange,
+  savedViewController,
+  onApplySavedView,
   onReset,
 }) {
   const filterButton = (
@@ -1006,6 +1018,13 @@ function CustomerDirectoryToolbar({
             columns={CUSTOMER_TABLE_COLUMNS}
             visibleColumns={visibleColumns}
             onChange={onVisibleColumnsChange}
+          />
+        )}
+        {savedViewController && (
+          <TableSavedViews
+            label="Customers"
+            controller={savedViewController}
+            onApply={onApplySavedView}
           />
         )}
       </TableToolbar>
@@ -1102,28 +1121,28 @@ const SERVER_SORT_KEYS = {
   monthlyRate: "rate",
   lastContactDate: "last_contact",
 };
-const CUSTOMER_TABLE_COLUMNS = [
-  { id: "customer", label: "Customer", required: true },
-  { id: "property", label: "Property" },
-  { id: "tier", label: "WaveGuard Tier" },
-  { id: "nextService", label: "Next service" },
-  { id: "attention", label: "Attention" },
-  { id: "actions", label: "Actions", required: true },
-];
-const ALL_CUSTOMER_TABLE_COLUMNS = CUSTOMER_TABLE_COLUMNS.map((column) => column.id);
-
 function customerDirectoryPageSize(tableControlsActive, selectedPageSize) {
   return tableControlsActive ? selectedPageSize : 500;
 }
 
-function customerTableControlsActive(tableControlsRequested, workspaceMode, view) {
-  return tableControlsRequested && workspaceMode && view === "directory";
+function customerTableMode(searchParams, { view, workspaceMode }) {
+  const tableControlsRequested = searchParams.get("tableControls") !== "0";
+  const workspaceTableControls = tableControlsRequested && workspaceMode;
+  const healthRisk = searchParams.get("healthRisk");
+  return {
+    tableControlsEnabled: workspaceTableControls && view === "directory",
+    savedViewsEnabled: searchParams.get("savedViews") === "1" && workspaceTableControls,
+    explicitHealthRisk: CUSTOMER_HEALTH_RISKS.has(healthRisk) ? healthRisk : null,
+  };
 }
 
-function customerDirectoryPath(customerId, tableControlsParam) {
+function customerDirectoryPath(customerId, currentParams) {
   const params = new URLSearchParams();
   if (customerId) params.set("customerId", customerId);
-  if (tableControlsParam !== null) params.set("tableControls", tableControlsParam);
+  for (const key of ["tableControls", "savedViews"]) {
+    const value = currentParams.get(key);
+    if (value !== null) params.set(key, value);
+  }
   const query = params.toString();
   return `/admin/customers${query ? `?${query}` : ""}`;
 }
@@ -1468,10 +1487,7 @@ function CustomerDirectoryView({
             pageSize={pageSize}
             disabled={loading}
             itemLabel={searchActive ? "exact matches" : "customers"}
-            onPageChange={(nextPage) => {
-              setPage(nextPage);
-              loadCustomers(nextPage);
-            }}
+            onPageChange={setPage}
             onPageSizeChange={setPageSize}
           />
         ) : totalPages > 1 && (
@@ -1484,7 +1500,6 @@ function CustomerDirectoryView({
               onClick={() => {
                 const p = Math.max(1, page - 1);
                 setPage(p);
-                loadCustomers(p);
               }}
             >
               ← Previous
@@ -1499,7 +1514,6 @@ function CustomerDirectoryView({
               onClick={() => {
                 const p = Math.min(totalPages, page + 1);
                 setPage(p);
-                loadCustomers(p);
               }}
             >
               Next →
@@ -1863,6 +1877,7 @@ const CUSTOMER_PAGE_PRESENTATIONS = { true: CustomersWorkspacePage, false: Custo
 // this page (and its panels) mounted across a move between them; those two
 // paths get the query-param analysis below instead of counting as an exit.
 const CUSTOMER_ROUTE_PATHS = new Set(["/admin/customers", "/admin/customers/new"]);
+const CUSTOMER_OVERVIEW_ROUTE = { initialTab: "overview", tabKey: "overview" };
 
 // The query params that select which draft-bearing panel is mounted here:
 // `view` (normalised exactly like the `view` this component derives, a few
@@ -1953,14 +1968,10 @@ export default function CustomersPageV2() {
   const [error, setError] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const feedbackEnabled = searchParams.get("feedback") === "1";
-  const tableControlsRequested = searchParams.get("tableControls") !== "0";
   // Default is Directory on both mobile and desktop (list-first).
   // Explicit ?view=… URLs win — deep-links still work.
-  const rawView = searchParams.get("view");
-  const view = new Map([
-    ["health", "directory"],
-    ["intelligence", isAdmin ? "intelligence" : "directory"],
-  ]).get(rawView) || rawView || "directory";
+  const customerRoute = customerRouteSignature(searchParams, isAdmin);
+  const { view, customerId: selected360Id, workspaceMode } = customerRoute;
 
   // Usage beacon for the view that actually RENDERS. `view` is taken from
   // the URL unvalidated, and an unknown value matches none of the render
@@ -1981,42 +1992,79 @@ export default function CustomersPageV2() {
     CUSTOMER_VIEW_KEYS.has(view) ? view : "",
     [searchParams],
   );
-  const [search, setSearch] = useState("");
-  const [filterStage, setFilterStage] = useState("all");
-  const [filterTier, setFilterTier] = useState("all");
-  const atRiskFromUrl = searchParams.get("healthRisk") === "at_risk";
-  const [healthFilters, setHealthFilters] = useState(() =>
-    atRiskFromUrl ? { healthRisk: "at_risk" } : {},
-  );
-  useEffect(() => {
-    setHealthFilters((current) => ({
-      ...current,
-      healthRisk: atRiskFromUrl ? "at_risk" : "",
-    }));
-  }, [atRiskFromUrl]);
-  const [sortBy, setSortBy] = useState("lastName");
-  const [sortDir, setSortDir] = useState("asc");
   const isNewCustomerRoute = location.pathname === "/admin/customers/new";
   const [showAddModal, setShowAddModal] = useState(isNewCustomerRoute);
   const [quickAddPreset, setQuickAddPreset] = useState(() =>
     isNewCustomerRoute ? quickAddPresetFromSearchParams(searchParams) : null,
   );
-  const [filterHasBalance, setFilterHasBalance] = useState(false);
-  const [filterLastVisited, setFilterLastVisited] = useState("all"); // all | 30 | 90 | 180 | never
-  const [filterCards, setFilterCards] = useState("all"); // all | has | none
   const [pipelineStageMobile, setPipelineStageMobile] = useState("new_lead");
   const [showFilters, setShowFilters] = useState(false);
-  const selected360Id = searchParams.get("customerId") || null;
+  const [savedViewApplication, setSavedViewApplication] = useState(0);
   // Customers defaults to the workspace; ?customer360=overlay is the rollback.
   // Profile sheets on other surfaces keep their current presentation.
-  const workspaceMode = searchParams.get("customer360") !== "overlay";
-  const tableControlsEnabled = customerTableControlsActive(tableControlsRequested, workspaceMode, view);
+  const {
+    tableControlsEnabled,
+    savedViewsEnabled,
+    explicitHealthRisk,
+  } = customerTableMode(searchParams, customerRoute);
+  const customerProfileRoute = customerRoute.comms
+    ? { initialTab: "comms", tabKey: location.key }
+    : CUSTOMER_OVERVIEW_ROUTE;
+  const savedViewController = useAdminTableViews({
+    tableId: "customers",
+    enabled: savedViewsEnabled,
+    defaults: CUSTOMER_TABLE_VIEW_DEFAULTS,
+    normalize: normalizeCustomerTableViewState,
+    initialState: (loaded) => {
+      if (!explicitHealthRisk) return loaded;
+      const changed = loaded.healthFilters.healthRisk !== explicitHealthRisk;
+      return {
+        ...loaded,
+        healthFilters: { ...loaded.healthFilters, healthRisk: explicitHealthRisk },
+        page: changed ? 1 : loaded.page,
+        scrollTop: changed ? 0 : loaded.scrollTop,
+      };
+    },
+  });
+  const { state: tableState, setState: setTableState } = savedViewController;
+  const {
+    search,
+    filterStage,
+    filterTier,
+    healthFilters,
+    sortBy,
+    sortDir,
+    filterHasBalance,
+    filterLastVisited,
+    filterCards,
+    page,
+    pageSize: selectedPageSize,
+    visibleColumns,
+  } = tableState;
+  const setTableField = (field, value, { resetPage = true } = {}) => {
+    setTableState((current) => ({
+      ...current,
+      [field]: typeof value === "function" ? value(current[field]) : value,
+      ...(resetPage ? { page: 1, scrollTop: 0 } : {}),
+    }));
+  };
+  const setSearch = (value) => setTableField("search", value);
+  const setFilterStage = (value) => setTableField("filterStage", value);
+  const setFilterTier = (value) => setTableField("filterTier", value);
+  const setHealthFilters = (value) => setTableField("healthFilters", value);
+  const setFilterHasBalance = (value) => setTableField("filterHasBalance", value);
+  const setFilterLastVisited = (value) => setTableField("filterLastVisited", value);
+  const setFilterCards = (value) => setTableField("filterCards", value);
+  const setVisibleColumns = (value) => setTableField("visibleColumns", value, { resetPage: false });
+  const setPage = (value) => setTableState((current) => ({
+    ...current,
+    page: typeof value === "function" ? value(current.page) : value,
+    scrollTop: 0,
+  }));
+  const setSelectedPageSize = (value) => setTableField("pageSize", value);
   const PagePresentation = CUSTOMER_PAGE_PRESENTATIONS[workspaceMode];
   usePublishIntelligenceBarPageData({ customer_id: selected360Id });
-  const [page, setPage] = useState(1);
-  const [selectedPageSize, setSelectedPageSize] = useState(100);
   const pageSize = customerDirectoryPageSize(tableControlsEnabled, selectedPageSize);
-  const [visibleColumns, setVisibleColumns] = useState(ALL_CUSTOMER_TABLE_COLUMNS);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [approximateCount, setApproximateCount] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -2124,7 +2172,7 @@ export default function CustomersPageV2() {
       // bare directory). Cancelling without creating still goes to the
       // directory.
       navigate(
-        customerDirectoryPath(createdId, searchParams.get("tableControls")),
+        customerDirectoryPath(createdId, searchParams),
         { replace: true },
       );
     }
@@ -2273,8 +2321,8 @@ export default function CustomersPageV2() {
     };
   }, [isAdmin]);
 
-  function loadCustomers(p) {
-    const pg = p || page;
+  function loadCustomers(requestedPage) {
+    const pg = view === "directory" ? (requestedPage ?? page) : 1;
     const seq = loadSeqRef.current + 1;
     loadSeqRef.current = seq;
     if (loadAbortRef.current) loadAbortRef.current.abort();
@@ -2309,7 +2357,6 @@ export default function CustomersPageV2() {
         const responseTotalPages = Math.max(1, Number(data?.totalPages) || 1);
         if (pg > responseTotalPages) {
           setPage(responseTotalPages);
-          loadCustomers(responseTotalPages);
           return;
         }
         hasLoadedRef.current = true;
@@ -2353,41 +2400,99 @@ export default function CustomersPageV2() {
     [],
   );
 
-  // Single debounced effect — one fetch per filter/search/view change.
-  // StrictMode's mount→cleanup→mount double-fire is absorbed by the
-  // setTimeout cleanup, so dev-mode mount no longer stacks duplicate
-  // `/admin/customers` requests.
+  // A recognized URL risk is an explicit deep-link instruction. It overlays
+  // the remembered risk on entry (initialState above) and on later browser
+  // history changes. Initial URL absence leaves the remembered setting alone.
+  const explicitHealthRiskRef = useRef(explicitHealthRisk);
   useEffect(() => {
-    if (view === "pipeline") {
-      loadPipeline();
-      return undefined;
-    }
-    const t = setTimeout(() => {
-      setPage(1);
-      loadCustomers(1);
-    }, 300);
-    return () => clearTimeout(t);
-  }, [
+    const previous = explicitHealthRiskRef.current;
+    explicitHealthRiskRef.current = explicitHealthRisk;
+    // Initial absence leaves remembered state intact. Once a recognized URL
+    // risk has been present, navigating to a bare URL explicitly clears it.
+    if (explicitHealthRisk === previous) return;
+    const nextRisk = explicitHealthRisk || "";
+    if (tableState.healthFilters.healthRisk === nextRisk) return;
+    setTableState((current) => ({
+      ...current,
+      healthFilters: { ...current.healthFilters, healthRisk: nextRisk },
+      page: 1,
+      scrollTop: 0,
+    }));
+  }, [explicitHealthRisk, setTableState, tableState.healthFilters.healthRisk]);
+
+  // The shared controller normalizes every write into fresh object/array
+  // identities. Only request-bearing values belong in this stable key, so a
+  // scroll or column write cannot refetch or reset pagination.
+  const customerQueryKey = JSON.stringify([
     search,
     filterStage,
     filterTier,
     filterCards,
     filterHasBalance,
     filterLastVisited,
-    healthFilters,
+    healthFilters.healthGrade,
+    healthFilters.healthRisk,
+    healthFilters.minHealthScore,
+    healthFilters.maxHealthScore,
+    healthFilters.minChurnProbability,
+    healthFilters.retention,
     sortBy,
     sortDir,
     pageSize,
+    page,
+    tableControlsEnabled,
     view,
+    savedViewController.storageKey,
+    savedViewApplication,
   ]);
 
-  const handleSort = (key) => {
-    if (sortBy === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else {
-      setSortBy(key);
-      setSortDir("asc");
+  const previousCustomerViewRef = useRef(view);
+
+  // Single debounced effect — one fetch per page/filter/search/view change.
+  // StrictMode's mount→cleanup→mount double-fire is absorbed by the
+  // setTimeout cleanup, so dev-mode mount no longer stacks duplicate
+  // `/admin/customers` requests.
+  useEffect(() => {
+    const previousView = previousCustomerViewRef.current;
+    previousCustomerViewRef.current = view;
+    if (view === "pipeline") {
+      loadPipeline();
+      return undefined;
     }
+    // Legacy and overlay Directory reset to page one after a non-directory
+    // view. Do the state transition first so the effect owns the one request.
+    if (view === "directory" && previousView !== "directory"
+      && !tableControlsEnabled && page !== 1) {
+      setPage(1);
+      return undefined;
+    }
+    const t = setTimeout(() => {
+      // Restored Directory state owns its first requested page. Non-directory
+      // views keep their existing single-batch page-one contract.
+      loadCustomers(view === "directory" ? page : 1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [customerQueryKey]);
+
+  const handleSort = (key) => {
+    setTableState((current) => ({
+      ...current,
+      sortBy: key,
+      sortDir: current.sortBy === key && current.sortDir === "asc" ? "desc" : "asc",
+      page: 1,
+      scrollTop: 0,
+    }));
   };
+
+  useAdminTableScroll({
+    enabled: savedViewController.available,
+    active: view === "directory" && !selected360Id && !isNewCustomerRoute,
+    ready: !loading && !error,
+    scope: savedViewController.storageKey,
+    scrollTop: tableState.scrollTop,
+    onScroll: (value) => setTableState((current) => ({ ...current, scrollTop: value })),
+    resetKey: JSON.stringify([customerQueryKey, page]),
+  });
 
   const handleDeleteCustomer = async (customerId, customerName) => {
     if (!window.confirm(archiveConfirmMessage(customerName))) return;
@@ -2479,8 +2584,18 @@ export default function CustomersPageV2() {
       : 0);
 
   const resetTableFilters = () => {
-    setSearch("");
-    setHealthFilters({});
+    setTableState((current) => ({
+      ...current,
+      search: "",
+      healthFilters: {},
+      filterTier: "all",
+      filterStage: "all",
+      filterLastVisited: "all",
+      filterCards: "all",
+      filterHasBalance: false,
+      page: 1,
+      scrollTop: 0,
+    }));
     setSearchParams(
       (current) => {
         const next = new URLSearchParams(current);
@@ -2489,12 +2604,25 @@ export default function CustomersPageV2() {
       },
       { replace: true },
     );
-    setFilterTier("all");
-    setFilterStage("all");
-    setFilterLastVisited("all");
-    setFilterCards("all");
-    setFilterHasBalance(false);
-    setPage(1);
+  };
+
+  const applySavedView = async (id) => {
+    const applied = await savedViewController.applyView(id);
+    if (!applied) return null;
+    setSavedViewApplication((current) => current + 1);
+    const nextRisk = applied.healthFilters.healthRisk || null;
+    if (searchParams.get("healthRisk") !== nextRisk) {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          if (nextRisk) next.set("healthRisk", nextRisk);
+          else next.delete("healthRisk");
+          return next;
+        },
+        { replace: true },
+      );
+    }
+    return applied;
   };
 
   return (
@@ -2512,8 +2640,8 @@ export default function CustomersPageV2() {
       onClose={closeCustomerProfile}
       onCustomerMutation={refreshCustomersAndGeocodeReview}
       onDraftActiveChange={handleProfileDraftActiveChange}
-      initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
-      tabKey={searchParams.get("tab") === "comms" ? location.key : "overview"}
+      initialTab={customerProfileRoute.initialTab}
+      tabKey={customerProfileRoute.tabKey}
       overlays={
         <>
           {/* Filters dialog */}
@@ -2580,13 +2708,19 @@ export default function CustomersPageV2() {
           onFilter={() => setShowFilters(true)}
           sortDir={sortDir}
           onSortDirChange={(nextSortDir) => {
-            setSortBy("lastName");
-            setSortDir(nextSortDir);
-            setPage(1);
+            setTableState((current) => ({
+              ...current,
+              sortBy: "lastName",
+              sortDir: nextSortDir,
+              page: 1,
+              scrollTop: 0,
+            }));
           }}
           workspaceMode={workspaceMode}
           visibleColumns={visibleColumns}
           onVisibleColumnsChange={setVisibleColumns}
+          savedViewController={savedViewController}
+          onApplySavedView={applySavedView}
           onReset={resetTableFilters}
         />
       )}
@@ -2659,10 +2793,7 @@ export default function CustomersPageV2() {
         page={page}
         setPage={setPage}
         pageSize={pageSize}
-        setPageSize={(nextPageSize) => {
-          setSelectedPageSize(nextPageSize);
-          setPage(1);
-        }}
+        setPageSize={setSelectedPageSize}
         tableControlsEnabled={tableControlsEnabled}
         visibleColumns={visibleColumns}
         loading={loading}
