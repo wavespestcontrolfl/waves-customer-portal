@@ -224,7 +224,9 @@ describe('the document input hash covers the lawn limits block', () => {
   });
 
   test('the projection carries the misting layout revision but never its expiring signed link', () => {
+    // The geometry the page animates stays out: every save changes the revision, so the revision already covers it.
     const block = (revision, imageUrl) => ({
+      geometry: { zoom: 20, nozzles: [{ x: 1, y: 2, kind: 'eave', lineIndex: 0 }] },
       imageUrl, revision, address: '1 Sample St', counts: { nozzles: 12, eave: 8, fence: 4, risers: 1, linearFt: 120, zones: 0, pump: true },
     });
     const a = emailPdf.documentInputProjection({ mistingLayout: block('aaaaaaaaaaaaaaaa', 'https://signed/1') });

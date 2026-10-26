@@ -5700,14 +5700,21 @@ to this estimate, already chosen and trimmed to one printed page by
 Fixed owner copy, no prices, no customer data. The key is ABSENT on an accepted,
 declined or expired estimate. Only the browser-rendered estimate PDF (`EstimateProposalDocument`)
 prints it, on its own last page; the interactive estimate page ignores it.
-`/data?mode=pdf` (the document render pass only; never a normal page load) may carry an
-optional top-level `mistingLayout` block (GATE_MISTING_LAYOUT_DESIGNER, dark): `{ imageUrl,
-revision, address|null, counts: { nozzles, eave, fence, risers, linearFt, zones, pump } }`, the
+`/data` (the normal page load and the `?mode=pdf` document render pass alike) may carry an
+optional top-level `mistingLayout` block (GATE_MISTING_LAYOUT_DESIGNER): `{ imageUrl,
+revision, address|null, counts: { nozzles, eave, fence, risers, linearFt, zones, pump }, geometry }`, the
 staff-drawn concept sketch saved for this estimate (`services/misting-layouts.js`).
 `imageUrl` is a signed S3 link that lasts 20 minutes (the render pin lasts 15); `revision` is a
 16-hex-character tag that changes on every save (a hash of the picture key, never the key), which the
 emailed-PDF fingerprint reads in place of the expiring link; counts are
-numbers and `pump` is a boolean. No prices and no customer data beyond the property
+numbers and `pump` is a boolean. `geometry` is what the estimate page animates the spray from, projected
+field by field from the saved layout in the 1280 by 960 map space: `{ center: { lat, lng }, zoom, mapWidth,
+mapHeight, lines: [{ kind: eave|fence|bed, points: [{ x, y }] }], nozzles: [{ x, y, kind: eave|fence,
+lineIndex|null, aim? }], risers: [{ x, y, source?: bed|manual, lineIndex? }], pump: { x, y }|null,
+zones: [{ kind, x, y, radiusFt }] }`. `aim` is a manual compass heading in degrees and is present only for
+a manually aimed nozzle; every other aim is derived on the client. The block holds no S3 key, no staff
+id, no line id and no price. The emailed-PDF fingerprint leaves `geometry` out: every save changes
+`revision`, so the revision already covers it. No prices and no customer data beyond the property
 address the document already prints. The key is ABSENT unless BOTH `GATE_MOSQUITO_MISTING`
 and `GATE_MISTING_LAYOUT_DESIGNER` are on, a layout is saved for the estimate, and the
 estimate carries the misting system by the same reader the accept guards use
@@ -5717,8 +5724,10 @@ never the response. `EstimateProposalDocument` prints it as a "Proposed misting 
 card (in the estimate card, with the counts, a pump notice when nozzles plus risers pass 60 (a Zone Kit)
 or 120 (a second system), a legend and the concept note) in the place of the
 satellite photo, which is then not shown, and counts a sketch that fails to load as a failed image
-(the satellite photo is not counted when a layout is present); the interactive estimate
-page ignores it.
+(the satellite photo is not counted when a layout is present); it ignores `geometry`. The interactive estimate
+page (`EstimateViewPage`, Waves AI card) shows the same card in the place of the satellite photo, with an
+animated blue mist canvas over the picture drawn from `geometry` (paused offscreen and while the tab is hidden, still
+with `prefers-reduced-motion`), and puts the satellite photo back when the picture fails to load.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that
