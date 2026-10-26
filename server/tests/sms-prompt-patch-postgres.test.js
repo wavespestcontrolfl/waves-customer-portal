@@ -216,6 +216,29 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect((await sealed.createExamRun({ providerLeg: 'anthropic', dbi: trx })).baseline_run_id).toBe(plain.id);
     });
 
+    test('a candidate built on another base identity is refused before a run exists (its letter is unique only on its own base)', async () => {
+      await seedItems(2, V12_FACTS);
+      const patch = await insertPatch({ over: { base_version: 'house_voice_v12_real_answers_o' } });
+      const gen = stubDrafting();
+      await expect(sealed.createExamRun({ providerLeg: 'anthropic', promptPatch: asCandidate(patch), dbi: trx })).rejects.toMatchObject({ code: 'PATCH_BASE_MISMATCH' });
+      await expect(sealed.runSealedExam({ providerLeg: 'anthropic', promptPatch: asCandidate(patch), dbi: trx })).rejects.toMatchObject({ code: 'PATCH_BASE_MISMATCH' });
+      expect(Number((await trx('sms_sealed_eval_runs').count('* as n').first()).n)).toBe(0);
+      expect(gen).not.toHaveBeenCalled();
+    });
+
+    test('a candidate run resumed after the base identity moved is retired, never drafted', async () => {
+      await seedItems(2, V12_FACTS);
+      const patch = await insertPatch();
+      const gen = stubDrafting();
+      const run = await sealed.createExamRun({ providerLeg: 'anthropic', promptPatch: asCandidate(patch), dbi: trx });
+      // A prompt bump or a category-gate flip between the sitting and its resume.
+      drafter.currentPromptVersionBase.mockReturnValue('house_voice_v12_real_answers_q');
+      drafter.currentPromptVersion.mockReturnValue('house_voice_v12_real_answers_q');
+      await expect(sealed.runSealedExam({ runId: run.id, dbi: trx })).rejects.toThrow(/another prompt identity/);
+      expect(await trx('sms_sealed_eval_runs').where({ id: run.id }).first()).toMatchObject({ status: 'failed' });
+      expect(gen).not.toHaveBeenCalled();
+    });
+
     test('a resumed candidate run keeps drafting WITH the block (the patch comes from the run row, not the caller)', async () => {
       await seedItems(3, V12_FACTS);
       const patch = await insertPatch();

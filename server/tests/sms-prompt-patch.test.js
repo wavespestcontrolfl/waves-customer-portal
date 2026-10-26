@@ -193,14 +193,18 @@ describe('the drafter prompt and its identity', () => {
     expect(drafter.currentPromptVersion()).toBe(drafter.PROMPT_VERSION);
   });
 
-  test('a live patch stops applying when its examined base changes; an exam-only candidate is not base-gated', () => {
+  test('a patch, live or exam-only, applies only on the base identity it was built on', () => {
     const plain = drafter.buildSystemPromptWithProfile('').system;
     patch.setActivePatchSnapshot({ ...snapshot('C'), baseVersion: 'house_voice_v12_real_answers24_n' });
     expect(drafter.buildSystemPromptWithProfile('').system).toBe(plain);
     expect(drafter.buildSystemPromptWithProfile('').promptPatchVersion).toBeNull();
     expect(drafter.currentPromptVersion()).toBe(drafter.currentPromptVersionBase());
-    const exam = drafter.buildSystemPromptWithProfile('', { promptPatch: { ...snapshot('C'), baseVersion: 'house_voice_v12_real_answers24_n' } });
-    expect(exam.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+C`);
+    // Its letter is unique only on its own base: stamped on another one it could name a different patch.
+    const stale = drafter.buildSystemPromptWithProfile('', { promptPatch: { ...snapshot('C'), baseVersion: 'house_voice_v12_real_answers24_n' } });
+    expect(stale.system).toBe(plain);
+    expect(stale.promptPatchVersion).toBeNull();
+    const own = drafter.buildSystemPromptWithProfile('', { promptPatch: snapshot('C') });
+    expect(own.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+C`);
   });
 
   test('an exam-only candidate applies in any mode and never needs the live snapshot', () => {
@@ -217,7 +221,8 @@ describe('the drafter prompt and its identity', () => {
 
   test('a tag that does not fit the version columns leaves BOTH the block and the version unpatched', () => {
     const none = { block: '', version: null };
-    expect(patch.resolvePromptPatch({ realAnswersOn: true, options: { promptPatch: snapshot('E') }, baseVersion: `house_voice_v12_real_answers26_n+bcml${'x'.repeat(4)}` })).toEqual(none);
-    expect(patch.resolvePromptPatch({ realAnswersOn: false, options: { promptPatch: snapshot('E') }, baseVersion: 'house_voice_v11' })).toEqual(none);
+    const longBase = `house_voice_v12_real_answers26_n+bcml${'x'.repeat(4)}`;
+    expect(patch.resolvePromptPatch({ realAnswersOn: true, options: { promptPatch: { ...snapshot('E'), baseVersion: longBase } }, baseVersion: longBase })).toEqual(none);
+    expect(patch.resolvePromptPatch({ realAnswersOn: false, options: { promptPatch: { ...snapshot('E'), baseVersion: 'house_voice_v11' } }, baseVersion: 'house_voice_v11' })).toEqual(none);
   });
 });

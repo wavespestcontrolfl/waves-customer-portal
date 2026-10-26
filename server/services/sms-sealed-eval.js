@@ -924,6 +924,11 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   // EXAM-ONLY patch (GATE_SMS_PROMPT_AUTOPROMOTE): the run examines the candidate rules on top
   // of the current gates, under the candidate's own identity. The live drafter never sees them.
   const currentVersion = expectedRunVersion(promptPatch);
+  if (!currentVersion) {
+    const err = new Error('the prompt patch was built on another prompt identity, or its tag does not fit the prompt_version columns — examine a new candidate');
+    err.code = 'PATCH_BASE_MISMATCH';
+    throw err;
+  }
 
   const inFlight = await dbi('sms_sealed_eval_runs').where({ status: 'running' }).first('id', 'provider_leg');
   if (inFlight) {
@@ -1162,13 +1167,15 @@ async function loadRunPatch(run, dbi) {
 }
 
 // The prompt version a sitting must keep drafting under: the candidate's identity for an
-// exam-only patch run, else whatever the live drafter stamps now.
+// exam-only patch run, else whatever the live drafter stamps now. null = the candidate cannot be
+// examined on the live prompt: it was built on another base identity (its letter is unique only
+// within that base, so stamping it here could share an identity with a different patch), or its
+// tagged identity would not fit the prompt_version columns.
 function expectedRunVersion(runPatch) {
   const drafter = require('./sms-shadow-drafter');
   if (!runPatch) return drafter.currentPromptVersion();
-  const version = stampPatchVersion(drafter.currentPromptVersionBase(), runPatch.tag);
-  if (!version) throw new Error('prompt patch tag does not fit the prompt_version columns');
-  return version;
+  const base = drafter.currentPromptVersionBase();
+  return runPatch.baseVersion === base ? stampPatchVersion(base, runPatch.tag) : null;
 }
 
 /**
@@ -1196,6 +1203,7 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
     // label; refuse and start a fresh run instead.
     const currentVersion = expectedRunVersion(await loadRunPatch(run, dbi));
     if (run.prompt_version !== currentVersion) {
+      const movedTo = currentVersion || 'another prompt identity';
       // A run stranded 'running' across the prompt-bump deploy must be
       // retired here, not just refused: the one-running unique index blocks
       // every new create while it sits, and resume is the only path the UI
@@ -1206,11 +1214,11 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
           .where({ id: runId, status: 'running' })
           .update({
             status: 'failed',
-            error: `superseded: drafter moved to ${currentVersion} mid-run`,
+            error: `superseded: drafter moved to ${movedTo} mid-run`,
             finished_at: new Date(),
           });
       }
-      throw new Error(`sealed-eval run ${runId} examined ${run.prompt_version} but the drafter is now ${currentVersion} — start a new run`);
+      throw new Error(`sealed-eval run ${runId} examined ${run.prompt_version} but the drafter is now ${movedTo} — start a new run`);
     }
     if (run.status === 'failed') {
       // Terminal-rule arm (see STUCK_TAIL_ABORT_RE): remember whether the

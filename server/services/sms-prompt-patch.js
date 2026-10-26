@@ -192,10 +192,11 @@ function stopPatchRefresh() {
 
 /**
  * What the drafter appends and stamps for ONE draft. `options.promptPatch` undefined (or no
- * options) = the live snapshot; null = no patch; an object { patchNo, tag, text } = an exam-only
- * candidate. Returns { block, version } where version is the patched identity (null = unpatched).
- * The LIVE patch applies only on the base identity it was examined on: after a prompt bump or a
- * category-gate flip the old rule stops at once (the monitor then retires it).
+ * options) = the live snapshot; null = no patch; an object { patchNo, tag, baseVersion, text } =
+ * an exam-only candidate. Returns { block, version } where version is the patched identity
+ * (null = unpatched). A patch, live or exam-only, applies only on the base identity it was built
+ * on: its letter is unique only within that base, so on another base it could stamp the identity
+ * of a different patch. After a prompt bump or a category-gate flip the old rule stops at once.
  */
 function resolvePromptPatch({ realAnswersOn, options, baseVersion }) {
   const none = { block: '', version: null };
@@ -203,7 +204,7 @@ function resolvePromptPatch({ realAnswersOn, options, baseVersion }) {
   const override = options ? options.promptPatch : undefined;
   const patch = override === undefined ? getActivePatch() : override;
   if (!patch || !patch.text) return none;
-  if (override === undefined && patch.baseVersion !== baseVersion) return none;
+  if (patch.baseVersion !== baseVersion) return none;
   const version = stampPatchVersion(baseVersion, patch.tag);
   if (!version) {
     logger.error(`[sms-prompt-patch] patch ${patch.patchNo} would exceed the varchar(${VERSION_COLUMN_MAX}) prompt_version columns on ${baseVersion}; not applied`);
