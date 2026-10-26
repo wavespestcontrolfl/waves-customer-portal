@@ -20375,6 +20375,8 @@ const CallRecordingProcessor = {
                         // The row's own service: a replay can extract a
                         // different one while the appointment stays as booked.
                         serviceType: existing.service_type || serviceType,
+                        serviceId: existing.service_id || null,
+                        serviceKey: existing.service_key_snapshot || null,
                         customerId,
                         excludeServiceIds: [existing.id],
                         excludeCustomerId: null,
@@ -20415,7 +20417,7 @@ const CallRecordingProcessor = {
                       // so an Off saved since cannot receive this visit.
                       if (reuseTechPicked) {
                         await require('./technician-capabilities').assertCapabilitiesActive(trx, reuseTechId,
-                          [{ id: existing.id, service_type: existing.service_type || serviceType }],
+                          [{ id: existing.id, service_type: existing.service_type || serviceType, service_id: existing.service_id || null, service_key: existing.service_key_snapshot || null }],
                           (rowId, why) => Object.assign(new Error(`technician ${reuseTechId} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
                       }
                     } catch (eligErr) {
@@ -20886,6 +20888,7 @@ const CallRecordingProcessor = {
                   lat: propertyLinkage.lat ?? null,
                   lng: propertyLinkage.lng ?? null,
                   serviceType,
+                  serviceId: callBookingCatalogRow?.id || null,
                   customerId,
                 }));
                 try {
@@ -21229,7 +21232,7 @@ const CallRecordingProcessor = {
                     // so an Off saved since cannot receive this visit.
                     if (bookingTechnicianPicked) {
                       await require('./technician-capabilities').assertCapabilitiesActive(trx, insertData.technician_id,
-                        [{ id: null, service_type: serviceType }],
+                        [{ id: null, service_type: serviceType, service_id: callBookingCatalogRow?.id || null }],
                         (rowId, why) => Object.assign(new Error(`technician ${insertData.technician_id} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
                     }
                   } catch (eligErr) {

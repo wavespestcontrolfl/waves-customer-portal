@@ -111,6 +111,8 @@ function chain(row) {
 // technicians: a single active + field-dispatchable row, whatever the where().
 // work_days (GATE_TECH_WORK_DAYS) is whatever the test sets; null = every day.
 let techWorkDays = null;
+// technician_capabilities rows that are Off (GATE_TECH_JOB_TYPE_CHECKS); [] = qualified or needs review.
+let capabilityOffCategories = [];
 function chainTechnician(techId) {
   return chain({ id: techId, name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true, work_days: techWorkDays });
 }
@@ -148,7 +150,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   inserts = [];
   techWorkDays = null;
+  capabilityOffCategories = [];
   delete process.env.GATE_TECH_WORK_DAYS;
+  delete process.env.GATE_TECH_JOB_TYPE_CHECKS;
   findConflictingVisits.mockResolvedValue([]);
   acquireOccupancyLock.mockImplementation(async () => {});
   lockCustomerComms.mockImplementation(async () => {});
@@ -158,6 +162,11 @@ beforeEach(() => {
   trx = jest.fn((table) => {
     if (table === 'technicians') return chainTechnician(TECH_ID);
     if (table === 'technician_absences') return chainTechAbsences(TECH_ID, ABSENCE_DATE);
+    if (table === 'technician_capabilities') {
+      const caps = chain(undefined);
+      caps.pluck = jest.fn().mockResolvedValue(capabilityOffCategories);
+      return caps;
+    }
     const c = chain(table === 'scheduled_services' ? { ...SVC } : (table === 'customers' ? { id: 'cust-1' } : undefined));
     if (table === 'scheduled_services') {
       c.insert = jest.fn((data) => {
@@ -345,6 +354,55 @@ describe('POST / — admin create — service-line map shadow (office_auto)', ()
     await post({ ...body, assignmentMode: 'auto' });
     await settle();
     expect(tables.filter((t) => /^service_line_/.test(t))).toEqual([]);
+  });
+});
+
+// GATE_TECH_JOB_TYPE_CHECKS (owner 2026-10-25): the office may give a technician work
+// they are set to Off for; the create saves the visit and says so in `warnings`.
+describe('POST / — admin create — technician job-type warning (office paths warn, never block)', () => {
+  afterEach(() => { delete process.env.GATE_TECH_JOB_TYPE_CHECKS; });
+  const body = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    technicianId: 'tech-no-absence',
+    estimatedPrice: 89,
+    createInvoice: true,
+  };
+  const OFF_LINE = 'Test Tech is set to Off for General pest work.';
+
+  test('gate on, the technician is Off for the visit\'s category: the visit is saved and one warning comes back', async () => {
+    process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
+    capabilityOffCategories = ['general'];
+    const res = await post(body);
+    expect(res.status).toBe(201);
+    expect(inserts.map((d) => d.technician_id)).toEqual(['tech-no-absence']);
+    expect(res.body.warnings).toContain(OFF_LINE);
+    expect(res.body.warnings.filter((w) => /set to Off/.test(w))).toHaveLength(1);
+  });
+
+  test('gate on, qualified or needs review (no Off row): no warning', async () => {
+    process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
+    const res = await post(body);
+    expect(res.status).toBe(201);
+    expect((res.body.warnings || []).some((w) => /set to Off/.test(w))).toBe(false);
+  });
+
+  test('gate off: an Off category is ignored, no warning', async () => {
+    capabilityOffCategories = ['general'];
+    const res = await post(body);
+    expect(res.status).toBe(201);
+    expect((res.body.warnings || []).some((w) => /set to Off/.test(w))).toBe(false);
+  });
+
+  test('gate on, no technician chosen (Auto): nothing to warn about', async () => {
+    process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
+    capabilityOffCategories = ['general'];
+    const res = await post({ ...body, technicianId: undefined });
+    expect(res.status).toBe(201);
+    expect((res.body.warnings || []).some((w) => /set to Off/.test(w))).toBe(false);
   });
 });
 
