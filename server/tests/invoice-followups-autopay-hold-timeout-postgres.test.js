@@ -39,7 +39,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 } });
     await mockPg.raw(`CREATE TABLE invoices (
-      id uuid PRIMARY KEY, status text, payer_id uuid, scheduled_send_error text,
+      id uuid PRIMARY KEY, status text, payer_id uuid, scheduled_send_error text, scheduled_service_id uuid,
       sent_at timestamptz, sms_sent_at timestamptz, created_at timestamptz DEFAULT now())`);
     await mockPg.raw(`CREATE TABLE invoice_followup_sequences (
       id uuid PRIMARY KEY, invoice_id uuid NOT NULL, customer_id uuid NOT NULL, status text,
@@ -50,6 +50,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, created_at timestamptz DEFAULT now())`);
     await mockPg.raw(`CREATE TABLE payments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, status text, created_at timestamptz DEFAULT now())`);
+    await mockPg.raw('CREATE TABLE scheduled_services (id uuid PRIMARY KEY, status text)');
     await mockPg.raw('CREATE TABLE payment_plans (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, status text)');
     await mockPg.raw(`CREATE TABLE audit_log (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), actor_type text NOT NULL, actor_id uuid, action text NOT NULL,
@@ -67,17 +68,22 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
   });
 
   beforeEach(async () => {
-    await mockPg.raw('TRUNCATE invoices, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, audit_log');
+    await mockPg.raw('TRUNCATE invoices, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, scheduled_services, audit_log');
     delete process.env.GATE_AUTOPAY_HOLD_TIMEOUT;
   });
 
   // One held sequence. heldDaysAgo stamps updated_at, the hold start.
-  async function held({ heldDaysAgo = 4, invoiceStatus = 'sent', status = 'autopay_hold', payerId = null } = {}) {
+  async function held({ heldDaysAgo = 4, invoiceStatus = 'sent', status = 'autopay_hold', payerId = null, visitStatus = null } = {}) {
     const invoiceId = randomUUID();
     const customerId = randomUUID();
     const sequenceId = randomUUID();
     const heldAt = new Date(Date.now() - heldDaysAgo * DAY);
-    await mockPg('invoices').insert({ id: invoiceId, status: invoiceStatus, payer_id: payerId, sent_at: new Date(Date.now() - 20 * DAY) });
+    let visitId = null;
+    if (visitStatus) {
+      visitId = randomUUID();
+      await mockPg('scheduled_services').insert({ id: visitId, status: visitStatus });
+    }
+    await mockPg('invoices').insert({ id: invoiceId, status: invoiceStatus, payer_id: payerId, scheduled_service_id: visitId, sent_at: new Date(Date.now() - 20 * DAY) });
     await mockPg('invoice_followup_sequences').insert({
       id: sequenceId,
       invoice_id: invoiceId,
@@ -180,6 +186,24 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       for (const [i, status] of ['active', 'paused', 'stopped', 'completed'].entries()) {
         expect((await seqOf(rows[i].invoiceId)).status).toBe(status);
       }
+    });
+
+    test.each(['pending', 'confirmed', 'en_route', 'on_site'])('an invoice whose linked visit is still %s is left alone', async (visitStatus) => {
+      const h = await held({ visitStatus });
+      expect(await sweep()).toMatchObject({ candidates: 0, released: 0 });
+      await untouched(h);
+    });
+
+    test.each(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])('an invoice whose linked visit is %s is released', async (visitStatus) => {
+      const h = await held({ visitStatus });
+      expect(await sweep()).toMatchObject({ candidates: 1, released: 1 });
+      expect((await seqOf(h.invoiceId)).status).toBe('active');
+    });
+
+    test('an invoice with no linked visit is released', async () => {
+      const h = await held();
+      expect(await sweep()).toMatchObject({ candidates: 1, released: 1 });
+      expect((await seqOf(h.invoiceId)).status).toBe('active');
     });
 
     test('an Auto Pay failure counter bump (updated_at now) restarts the clock', async () => {

@@ -33,7 +33,6 @@ jest.mock('../services/invoice-followups', () => ({
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled } = require('../config/feature-gates');
 const InvoiceFollowUps = require('../services/invoice-followups');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');

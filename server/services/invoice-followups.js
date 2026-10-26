@@ -34,6 +34,7 @@ const { invoiceAmountDue } = require('./invoice-helpers');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { gates } = require('../config/feature-gates');
+const { TERMINAL_SCHEDULED_SERVICE_STATUSES } = require('./scheduled-service-statuses');
 const StripeService = require('./stripe');
 const { sendMicrodepositVerificationEmail } = require('./microdeposit-verification-email');
 const config = require('../config/invoice-followups');
@@ -2860,7 +2861,8 @@ const AUTOPAY_HOLD_SHADOW_ACTION = 'invoice_followup.autopay_hold_timeout_shadow
  * began (updated_at: every hold writer, and handleAutopayFailure's counter bump, stamps it) more
  * than AUTOPAY_HOLD_TIMEOUT_DAYS ago with no stripe_invoice_charge_attempts row for the invoice and
  * no payments row (any status) for the customer created since. Terminal, non-schedulable,
- * payer-billed and payment-plan invoices are skipped. 'true' releases through the existing
+ * payer-billed and payment-plan invoices are skipped, and so is an invoice whose linked visit is still
+ * open (Auto Pay charges when the visit closes). 'true' releases through the existing
  * releaseFromAutopayHold; 'shadow' writes at most one audit_log row per invoice per ET day and
  * changes nothing; off returns before any query.
  */
@@ -2891,6 +2893,12 @@ async function releaseStaleAutopayHolds({ now = new Date() } = {}) {
     const invoice = await db('invoices').where({ id: row.invoice_id }).first();
     if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) continue;
     if (await activePaymentPlan(db, row.invoice_id)) continue;
+    // Auto Pay charges when a visit closes: an invoice sent before its visit (an upfront invoice) is
+    // waiting for that charge while the linked visit is still open.
+    if (invoice.scheduled_service_id) {
+      const visit = await db('scheduled_services').where({ id: invoice.scheduled_service_id }).first('status');
+      if (visit && !TERMINAL_SCHEDULED_SERVICE_STATUSES.includes(visit.status)) continue;
+    }
     due.push(row);
   }
 
