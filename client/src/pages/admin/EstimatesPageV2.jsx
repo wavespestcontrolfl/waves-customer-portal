@@ -3069,6 +3069,19 @@ function EstimatePipelineViewV2({
                               ),
                               onClick: () => setOutlineTarget(e),
                             },
+                            // GATE_TS_OUTLINE: the server marks an estimate with a Tree & Shrub line.
+                            e.treeShrubOutlineAvailable && {
+                              key: "tree-shrub-outline",
+                              label: "Tree & Shrub service outline",
+                              icon: (
+                                <ClipboardList size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                setOutlineTarget({
+                                  ...e,
+                                  outlineServiceLine: "tree_shrub",
+                                }),
+                            },
                             {
                               key: "proposal",
                               label: "Commercial proposal",
@@ -3847,6 +3860,14 @@ export function MobileEstimateRow({
               label: "Lawn service outline",
               icon: <ClipboardList size={16} strokeWidth={1.75} />,
               onClick: () => onLawnOutline?.(estimate),
+            },
+            // GATE_TS_OUTLINE: the same composer, opened on the Tree & Shrub outline.
+            estimate.treeShrubOutlineAvailable && {
+              key: "tree-shrub-outline",
+              label: "Tree & Shrub service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                onLawnOutline?.({ ...estimate, outlineServiceLine: "tree_shrub" }),
             },
             {
               key: "audit",

@@ -88,6 +88,12 @@ const {
   protocolVersion,
   TEMPLATE_VERSION,
 } = require('../services/lawn-service-outline');
+const {
+  SERVICE_LINE: TREE_SHRUB_LINE,
+  TS_CONTENT_LIBRARY_VERSION,
+  treeShrubOutlineLive,
+  treeShrubProtocolVersion,
+} = require('../services/tree-shrub-service-outline');
 
 // Hard ceiling for limit=all list fetches. The estimates pipeline computes
 // all-time KPIs client-side from this list; if the table ever outgrows this
@@ -4100,7 +4106,10 @@ router.get('/', async (req, res, next) => {
       clickStats = new Map(rows.map((r) => [r.entity_id, r]));
     }
 
+    // The newest outline per estimate and program: Tree & Shrub packets (GATE_TS_OUTLINE) apart; every other packet is lawn.
     let outlineByEstimateId = new Map();
+    const treeShrubOutlineByEstimateId = new Map();
+    const treeShrubOutlinesLive = treeShrubOutlineLive();
     if (ids.length) {
       try {
         const outlineRows = await db('service_outline_packets')
@@ -4109,6 +4118,7 @@ router.get('/', async (req, res, next) => {
           .select(
             'id',
             'estimate_id',
+            'service_line',
             'status',
             'validation_status',
             'turf_type',
@@ -4139,15 +4149,19 @@ router.get('/', async (req, res, next) => {
           outlineEventStats = new Map(eventRows.map((row) => [row.packet_id, row]));
         }
         for (const row of outlineRows) {
-          if (!row.estimate_id || outlineByEstimateId.has(row.estimate_id)) continue;
+          const treeShrub = row.service_line === TREE_SHRUB_LINE;
+          const byEstimate = treeShrub ? treeShrubOutlineByEstimateId : outlineByEstimateId;
+          if (!row.estimate_id || byEstimate.has(row.estimate_id)) continue;
           const stats = outlineEventStats.get(row.id) || {};
+          const currentContentLibraryVersion = treeShrub ? TS_CONTENT_LIBRARY_VERSION : contentLibraryVersion();
+          const currentProtocolVersion = treeShrub ? treeShrubProtocolVersion() : protocolVersion();
           const staleReasons = [
-            row.content_library_version !== contentLibraryVersion() ? 'content library updated' : null,
-            row.protocol_version !== protocolVersion() ? 'protocol updated' : null,
+            row.content_library_version !== currentContentLibraryVersion ? 'content library updated' : null,
+            row.protocol_version !== currentProtocolVersion ? 'protocol updated' : null,
             row.product_registry_version !== PRODUCT_REGISTRY_VERSION ? 'product facts updated' : null,
             row.template_version !== TEMPLATE_VERSION ? 'template updated' : null,
           ].filter(Boolean);
-          outlineByEstimateId.set(row.estimate_id, {
+          byEstimate.set(row.estimate_id, {
             id: row.id,
             status: row.status,
             validationStatus: row.validation_status,
@@ -4166,8 +4180,8 @@ router.get('/', async (req, res, next) => {
             protocolVersion: row.protocol_version,
             productRegistryVersion: row.product_registry_version,
             templateVersion: row.template_version,
-            currentContentLibraryVersion: contentLibraryVersion(),
-            currentProtocolVersion: protocolVersion(),
+            currentContentLibraryVersion,
+            currentProtocolVersion,
             currentProductRegistryVersion: PRODUCT_REGISTRY_VERSION,
             currentTemplateVersion: TEMPLATE_VERSION,
             stale: staleReasons.length > 0,
@@ -4393,6 +4407,11 @@ router.get('/', async (req, res, next) => {
           pricingRisk: pricingRiskById.get(e.id) || null,
           riskTypeNeedsReview: commercialRiskTypeReviewNeeded(estData),
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
+          // GATE_TS_OUTLINE: an estimate with a Tree & Shrub line offers its outline; off = neither key.
+          ...(treeShrubOutlinesLive ? {
+            treeShrubOutlineAvailable: serviceLines.some((line) => line.key === TREE_SHRUB_LINE),
+            treeShrubServiceOutline: treeShrubOutlineByEstimateId.get(e.id) || null,
+          } : {}),
         };
       }),
       // Signals the ESTIMATE_LIST_LIMIT cap was hit, so the client can warn that
