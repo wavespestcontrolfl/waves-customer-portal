@@ -427,8 +427,9 @@ function leadsWonFrom(plan) {
 function messagesFromPlan({ plan, converts }) {
   const messages = [];
   const email = plan.find((s) => s.step === 'membership_email');
+  const noticeSends = plan.some((s) => s.step === 'consumer_notice' && s.sends === true);
   if (!converts) {
-    messages.push({ kind: 'none', will_send: false, text: 'No email or text: a one-time estimate only changes status here' });
+    messages.push({ kind: 'none', will_send: false, text: noticeSends ? 'No membership email: a one-time estimate only changes status here' : 'No email or text: a one-time estimate only changes status here' });
   } else if (!email) {
     messages.push({ kind: 'none', will_send: false, text: 'No "membership started" email for this plan' });
   } else if (email.will_send === true) {
@@ -440,6 +441,13 @@ function messagesFromPlan({ plan, converts }) {
     messages.push({ kind: 'none', will_send: false, text: EMAIL_SKIP_TEXT[email.reason] || 'No "membership started" email' });
   }
   messages.push({ kind: 'none', will_send: false, text: 'No welcome text now (Mark accepted skips it). Booking the first visit later on the calendar may send it' });
+  // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND: a termite estimate whose customer has no signed notice gets it by email and text.
+  if (noticeSends) {
+    messages.push({
+      kind: 'consumer_notice', will_send: true, template: 'consumer_notice.fdacs_13692',
+      text: 'Email and text the Florida consumer notice (FDACS-13692) to sign, right after Confirm. Not sent if it is signed first; a text after 8 PM waits until 8 AM',
+    });
+  }
   return messages;
 }
 
@@ -681,7 +689,7 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     customer_messages: messages,
     notifies_customer: messages.some((m) => m.will_send),
     // The approved email decision rides through delivery.
-    membership_email: messages.some((m) => m.will_send) ? 'send' : 'skip',
+    membership_email: messages.some((m) => m.kind === 'email' && m.will_send) ? 'send' : 'skip',
     // Approval binds the whole effect list (its fingerprint) and the pins.
     effects_key: AcceptEffects.effectsFingerprint(effects),
     pins,

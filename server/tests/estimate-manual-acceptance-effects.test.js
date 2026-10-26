@@ -1560,6 +1560,28 @@ describe('the post-commit plan (pure)', () => {
     ]);
   });
 
+  test('the Florida consumer notice step is planned only with its gate on, after the termite agreement', () => {
+    expect(Effects.planPostCommit({ billingTerm: 'standard', acceptedEstimate: accepted, conversion }).some((s) => s.step === 'consumer_notice')).toBe(false);
+    const plan = Effects.planPostCommit({ billingTerm: 'standard', acceptedEstimate: accepted, conversion, consumerNoticeLive: true, consumerNoticeSends: true });
+    expect(plan.map((s) => s.step).slice(-2)).toEqual(['termite_agreement', 'consumer_notice']);
+    expect(plan.find((s) => s.step === 'consumer_notice')).toEqual({ step: 'consumer_notice', sends: true });
+    const noCustomer = Effects.planPostCommit({ billingTerm: 'standard', acceptedEstimate: { id: 'est-1', customer_id: null }, conversion: null, consumerNoticeLive: true });
+    expect(noCustomer.some((s) => s.step === 'consumer_notice')).toBe(false);
+  });
+
+  test('the consumer notice step hands the accepted estimate to the sender without waiting on it', async () => {
+    const notice = require('../services/estimate-consumer-notice');
+    let release;
+    const send = jest.spyOn(notice, 'sendManualAcceptConsumerNotice').mockImplementation(() => new Promise((r) => { release = r; }));
+    try {
+      await Effects.POST_COMMIT_STEPS.consumer_notice.run({ step: 'consumer_notice' }, { acceptedEstimate: { id: 'est-9', customer_id: 'cust-1' } });
+      expect(send).toHaveBeenCalledWith({ estimateId: 'est-9' });
+      release({ sent: true });
+    } finally {
+      send.mockRestore();
+    }
+  });
+
   test('an annual prepay accept never plans the membership email', () => {
     const plan = Effects.planPostCommit({ billingTerm: 'prepay_annual', acceptedEstimate: accepted, conversion });
     expect(plan.some((s) => s.step === 'membership_email')).toBe(false);
@@ -1626,6 +1648,7 @@ describe('round 7: every post-commit step resolves its target in the dry run and
       tierUpgradeNotification: { title: 'c' }, planRateReviewNotification: { title: 'd' },
     },
     termiteProgram: true,
+    consumerNoticeLive: true,
   };
 
   test('plan-level: every step the plan can list declares resolveTarget and run, and the table has no other step', () => {

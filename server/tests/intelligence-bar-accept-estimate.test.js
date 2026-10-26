@@ -315,6 +315,31 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(await cardFor()).toContain('Billing lane: none → monthly membership dues');
   });
 
+  test('a termite estimate with no signed notice says the card texts and emails the Florida consumer notice, and sends no membership email', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: 1500, estimate_data: { result: { oneTime: { items: [{ service: 'termite_trenching', name: 'Termite Trenching', price: 1500 }] } } } } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'customer', before: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }), after: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }) },
+      { kind: 'one_time_line', name: 'Termite Trenching', amount: 1500, consequence: 'schedule_and_invoice_by_hand' },
+      postCommit([{ step: 'consumer_notice', sends: true }]),
+    ];
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    const lines = labels(card(preview));
+    expect(lines).toEqual(expect.arrayContaining([
+      'Message: No membership email: a one-time estimate only changes status here',
+      'Message: Email and text the Florida consumer notice (FDACS-13692) to sign, right after Confirm. Not sent if it is signed first; a text after 8 PM waits until 8 AM',
+    ]));
+    expect(card(preview).notifies_customer).toBe(true);
+    // The membership email decision stays its own: the notice never turns it on.
+    expect(preview.membership_email).toBe('skip');
+  });
+
+  test('a notice already on file (sends: false) puts nothing about it on the card', async () => {
+    dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep(), { step: 'consumer_notice', sends: false }]) });
+    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    expect(lines.some((l) => /consumer notice/i.test(l))).toBe(false);
+  });
+
   test('an address the email sender would skip is not promised an email', async () => {
     dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep({ will_send: false, reason: 'invalid_address', to: null })]) });
     const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);

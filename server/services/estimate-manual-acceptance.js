@@ -1214,8 +1214,23 @@ async function planPostCommitSteps(trx, ctx, outcome) {
       termiteProgram = require('./termite-program-agreement').collectTermiteFacts(parseEstimateData(acceptedEstimate.estimate_data))?.hasProgram === true;
     } catch { termiteProgram = null; }
   }
+  const consumerNoticeLive = require('../config/feature-gates').manualAcceptConsumerNoticeSendLive();
+  let consumerNoticeSends = null;
+  const noticeCustomerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
+  if (collecting && consumerNoticeLive && noticeCustomerId) {
+    // The card says whether the Florida consumer notice goes out: gate on, a termite line, no signed notice on file.
+    // An unreadable state reads as "sends" so the card never hides a text it might send.
+    try {
+      const notice = require('./estimate-consumer-notice');
+      consumerNoticeSends = notice.estimateNeedsConsumerNotice(acceptedEstimate)
+        // A savepoint, so a failed read never aborts the accept (as the taxability read below).
+        && (trx.isTransaction
+          ? await trx.transaction((sp) => notice.consumerNoticeState(noticeCustomerId, sp))
+          : await notice.consumerNoticeState(noticeCustomerId, trx)) !== 'signed';
+    } catch { consumerNoticeSends = true; }
+  }
   const plan = AcceptEffects.planPostCommit({
-    billingTerm: ctx.billingTerm, acceptedEstimate, conversion, proposalCustomer, emailInputs, termiteProgram,
+    billingTerm: ctx.billingTerm, acceptedEstimate, conversion, proposalCustomer, emailInputs, termiteProgram, consumerNoticeLive, consumerNoticeSends,
   });
   // A carded accept pins each step's concrete target (resolved here, under the
   // locks); the page's own accept has no card and keeps the unpinned plan.

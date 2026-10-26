@@ -13,7 +13,7 @@
  * What commits is never decided twice. planPostCommit() is the ONE pure
  * function that decides the work after the commit (group follow-up transfer,
  * property link, lead won, membership email, welcome text, termite agreement,
- * admin bells); the dry run lists its steps and the real run executes them
+ * Florida consumer notice, admin bells); the dry run lists its steps and the real run executes them
  * (runPostCommit).
  *
  * Effects carry no clocks and no generated ids, so two runs over the same
@@ -647,6 +647,7 @@ function membershipEmailStep({ conversion, billingTerm, emailInputs }) {
 // recipient facts. A step is listed whenever the page attempts it.
 function planPostCommit({
   billingTerm, acceptedEstimate, conversion, proposalCustomer = null, emailInputs = null, termiteProgram = null,
+  consumerNoticeLive = false, consumerNoticeSends = null,
 }) {
   const customerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
   const steps = [
@@ -657,6 +658,9 @@ function planPostCommit({
   if (billingTerm !== 'prepay_annual' && conversion?.membershipEmail) steps.push(membershipEmailStep({ conversion, billingTerm, emailInputs }));
   if (conversion?.welcomeSms) steps.push({ step: 'welcome_sms' });
   if (customerId) steps.push({ step: 'termite_agreement', applies: termiteProgram });
+  // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND (off = no step, the plan unchanged): `sends` is read on a carded
+  // accept (null on the page's own accept, where the step decides when it runs).
+  if (customerId && consumerNoticeLive) steps.push({ step: 'consumer_notice', sends: consumerNoticeSends });
   for (const [bell, field] of BELLS) {
     if (conversion?.[field]) steps.push({ step: 'admin_bell', bell, title: String(conversion[field].title || '') });
   }
@@ -712,6 +716,7 @@ const STEP_LABELS = {
   membership_email: 'The membership email was not sent',
   welcome_sms: 'The welcome text was not sent',
   termite_agreement: 'The termite agreement was not created',
+  consumer_notice: 'The Florida consumer notice was not sent',
   admin_bell: 'The office notification was not posted',
 };
 const SKIPPED_STEP_SUFFIX = ': what it acts on changed after the accept. Complete it by hand.';
@@ -918,6 +923,18 @@ const POST_COMMIT_STEPS = {
       } catch (err) {
         logger.warn(`[estimate-manual-acceptance] termite agreement prep setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
       }
+    },
+  },
+  consumer_notice: {
+    // The estimate and customer the FDACS-13692 is sent for.
+    async resolveTarget(_database, facts) {
+      return { estimate_id: idText(facts.acceptedEstimate.id), customer_id: idText(customerIdOf(facts)) };
+    },
+    async run(_step, ctx) {
+      // Detached like the termite agreement: the send (and its bell on failure) never holds the accept's response.
+      const { sendManualAcceptConsumerNotice } = require('./estimate-consumer-notice');
+      void sendManualAcceptConsumerNotice({ estimateId: ctx.acceptedEstimate.id })
+        .catch((err) => logger.warn(`[estimate-manual-acceptance] consumer notice send failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
     },
   },
   admin_bell: {
