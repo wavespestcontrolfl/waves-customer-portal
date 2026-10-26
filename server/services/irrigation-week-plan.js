@@ -281,11 +281,34 @@ function fullCycleClause(rateTable) {
   return `one full cycle on each turf zone (½ to ¾ inch — about ${m.spray} minutes on spray zones, ${m.rotor} on rotor zones)`;
 }
 
+// Why a run plan carries no per-zone minutes, from the head types the decision
+// froze (decisionInputs.headTypes; the engine's resolveApplicationRate reads
+// drip the same way). Asking for a head type the customer already entered
+// reads as "you lost my settings" (owner 2026-10-26: a mixed spray + rotor
+// system was told "Add your sprinkler head type").
+function minutesMissingNote(headTypes) {
+  const heads = Array.isArray(headTypes) ? headTypes.map((h) => String(h || '').trim().toLowerCase()).filter(Boolean) : [];
+  const turf = heads.filter((h) => h !== 'drip');
+  if (turf.length > 1) {
+    const labels = turf.map((h) => HEAD_LABELS[h] || h);
+    const list = `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+    return `Your system is on file with ${list}, which put down water at very different rates, so this plan gives a time for each kind of zone.`;
+  }
+  if (turf.length === 1) {
+    // One turf type with no published rate (a legacy value outside spray/rotor).
+    return 'Pick In-ground Spray or Rotor under Irrigation in your portal and next week\'s plan comes in minutes for your system.';
+  }
+  if (heads.length) {
+    return 'Your system is on file as drip, which waters beds rather than turf. If your lawn gets sprinkler water, add its head type (spray or rotor) under Irrigation in your portal and next week\'s plan comes in minutes for your system.';
+  }
+  return 'Add your sprinkler head type (spray or rotor) under Irrigation in your portal and next week\'s plan comes in minutes for your system.';
+}
+
 /**
  * Email copy for a decision. Returns null for an 'unavailable' plan so the
  * sender keeps its pre-plan template.
  */
-function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false, omitSensorNote = false, scheduleUnconfirmed = false, rateTable = undefined, waterSaved = null } = {}) {
+function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false, omitSensorNote = false, scheduleUnconfirmed = false, rateTable = undefined, waterSaved = null, headTypes = null } = {}) {
   if (!plan || plan.action === 'unavailable') return null;
   const name = String(firstName || '').trim() || 'there';
   const notes = [];
@@ -361,7 +384,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     // deliberately left them out (events-only), and says so.
     notes.push('Your address changed after your sprinkler settings were saved, so this plan leaves them out. Re-enter each of your zone minutes, watering days and head type (and weekly inches, if you use them) under Irrigation in your portal and next week\'s plan comes in minutes for your system.');
   } else if (plan.action !== 'hold' && plan.minutesPerEvent == null) {
-    notes.push('Add your sprinkler head type (spray or rotor) under Irrigation in your portal and next week\'s plan comes in minutes for your system.');
+    notes.push(minutesMissingNote(headTypes));
   } else if (plan.action !== 'hold' && plan.rateSource === 'system_type_default' && !omitRateNote) {
     // The owner table is not UF's: with the gate on the note says "typical rates" and stops there.
     notes.push(`Minutes assume typical ${HEAD_LABELS[plan.headType] || 'sprinkler'} rates${rateTable === 'owner' ? '' : ' from University of Florida turf guidance'}. If you know your system's actual weekly output, enter Weekly Inches in your portal and we'll tighten this to your numbers.`);

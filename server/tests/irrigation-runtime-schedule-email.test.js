@@ -199,9 +199,17 @@ describe('non-convertible entries → setup_schedule with a specific schedule_as
     expect(ask({ irrigationRunMinutes: 30, wateringDays: ['Mon'], irrigationSystemType: ['drip'] })).toContain('waters beds rather than turf');
   });
 
-  test('nothing beyond the toggle → the general ask (days, minutes, head type)', () => {
+  test('nothing beyond the toggle → the general ask (days, minutes, head type), never claiming a system the flag only defaults to (owner 2026-10-26)', () => {
+    // irrigation_system defaults ON for every new property (20260828000002): on its own it is not knowledge.
     const text = ask({});
-    expect(text).toBe("We have a sprinkler system on file for you, but not how long or how often it runs. Add your watering days, minutes per zone and head type (or your weekly inches, if you know them) under Irrigation in your portal and these check-ins become real recommendations — ease back this week, add a few minutes, or you're right on track.");
+    expect(text).toBe("We don't have a sprinkler schedule for your home yet. If you water with a sprinkler system, add your watering days, minutes per zone and head type (or your weekly inches, if you know them) under Irrigation in your portal and these check-ins become real recommendations — ease back this week, add a few minutes, or you're right on track.");
+    expect(text).not.toContain('on file');
+  });
+
+  test('nothing on file but a technician recorded an in-ground or mixed system → the ask says the system is on file', () => {
+    const general = "We have a sprinkler system on file for you, but not how long or how often it runs. Add your watering days, minutes per zone and head type (or your weekly inches, if you know them) under Irrigation in your portal and these check-ins become real recommendations — ease back this week, add a few minutes, or you're right on track.";
+    expect(ask({ turfIrrigationType: 'in_ground' })).toBe(general);
+    expect(ask({ turfIrrigationType: 'mixed' })).toBe(general);
   });
 
   test('setup_system carries an empty ask (no callout in that template)', () => {
