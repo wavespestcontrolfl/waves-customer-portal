@@ -203,12 +203,14 @@ function signEligibility(estimate) {
 }
 
 // Stable JSON: object keys sorted, builder-only keys dropped (row ids the editor mints, `generated*` provenance
-// of narrative lines), so re-saving the same quote never changes it and any customer-visible change does.
+// of narrative lines, a program's `visitMinutes`: scheduling only, it sizes the first visit and is not part of the
+// quote), so re-saving the same quote never changes it and any customer-visible change does.
+const BUILDER_ONLY_KEYS = new Set(['id', 'visitMinutes']);
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') {
     return Object.keys(value).sort()
-      .filter((key) => key !== 'id' && !key.startsWith('generated'))
+      .filter((key) => !BUILDER_ONLY_KEYS.has(key) && !key.startsWith('generated'))
       .reduce((acc, key) => ({ ...acc, [key]: canonical(value[key]) }), {});
   }
   return value;
@@ -265,6 +267,22 @@ async function agreementCtaFor(estimate, conn = db) {
     logger.warn(`[commercial-agreement] cta skipped for estimate ${estimate?.id}: ${err.code || 'error'}`);
     return null;
   }
+}
+
+// Whether the quote as it stands is the quote the customer signed: the newest signed agreement for this estimate, for
+// this customer, whose frozen fingerprint equals the fingerprint of the proposal now (the sign-time comparison in
+// refuseStaleSignature, against the template version the contract was rendered from). A proposal edited after
+// signing (price, cadence, lines, terms) no longer matches. false when nothing is signed.
+async function signedQuoteMatches(estimate, conn = db) {
+  if (!estimate?.id || !estimate.customer_id) return false;
+  const contract = await estimateAgreementQuery(estimate.id, conn)
+    .whereIn('status', ['signed'])
+    .orderByRaw('signed_at DESC NULLS LAST, created_at DESC')
+    .first('id', 'customer_id', 'document_variables_snapshot', 'document_template_version_id');
+  if (!contract || String(contract.customer_id) !== String(estimate.customer_id)) return false;
+  const signable = signableProposal(estimate);
+  const stored = parseJson(contract.document_variables_snapshot)?.estimate?.fingerprint;
+  return Boolean(signable && stored) && stored === currentFingerprint(estimate, signable, contract.document_template_version_id);
 }
 
 // The admin builder's read: the agreement state, plus why online signing is not offered when the proposal's payment
@@ -633,6 +651,7 @@ module.exports = {
   lockEstimateForSign,
   refuseStaleSignature,
   agreementStateForEstimate,
+  signedQuoteMatches,
   agreementCtaFor,
   newContractRow,
   ensureAgreement,

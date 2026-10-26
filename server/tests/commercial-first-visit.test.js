@@ -18,8 +18,10 @@ const mockBooking = {
 };
 jest.mock('../routes/booking', () => ({ _internals: mockBooking }));
 const mockAgreementState = jest.fn();
+const mockSignedQuoteMatches = jest.fn();
 jest.mock('../services/commercial-proposal-agreement', () => ({
   agreementStateForEstimate: (...args) => mockAgreementState(...args),
+  signedQuoteMatches: (...args) => mockSignedQuoteMatches(...args),
 }));
 const mockAccept = jest.fn();
 jest.mock('../services/estimate-manual-acceptance', () => ({
@@ -94,6 +96,7 @@ beforeEach(() => {
   mockBooking.runSeriesTxWithOwnerRetry.mockImplementation(async (_db, body) => body(jest.fn()));
   mockBooking.lockAndVerifySeriesParentOwner.mockResolvedValue({ id: VISIT_ID, customer_id: CUSTOMER_ID, status: 'confirmed', is_recurring: false });
   mockAgreementState.mockReset().mockResolvedValue({ state: 'signed' });
+  mockSignedQuoteMatches.mockReset().mockResolvedValue(true);
   mockAccept.mockReset().mockResolvedValue({ alreadyAccepted: false });
   mockSeeder.checkActiveSeriesLocked.mockReset().mockResolvedValue({ matches: [], guardError: null });
   mockSeeder.seedFollowUpsForParent.mockReset().mockResolvedValue({ insertedCount: 11 });
@@ -170,6 +173,11 @@ describe('firstVisitCtaFor (/data)', () => {
     expect(await firstVisit.firstVisitCtaFor(proposalEstimate(), { open: true, picker: true })).toEqual({ state: 'pick', durationMinutes: 55 });
   });
 
+  test('signed, but the proposal changed since: no picker (the office books it)', async () => {
+    mockSignedQuoteMatches.mockResolvedValue(false);
+    expect(await firstVisit.firstVisitCtaFor(proposalEstimate(), { open: true, picker: true })).toBeNull();
+  });
+
   test('signed and open in the document render (no picker): nothing', async () => {
     expect(await firstVisit.firstVisitCtaFor(proposalEstimate(), { open: true, picker: false })).toBeNull();
   });
@@ -206,8 +214,8 @@ describe('firstVisitAvailability', () => {
     }));
   });
 
-  test('not signed: the generic 404 refusal and no availability build', async () => {
-    mockAgreementState.mockResolvedValue({ state: 'none' });
+  test('not signed, or signed before a later edit: the generic 404 refusal and no availability build', async () => {
+    mockSignedQuoteMatches.mockResolvedValue(false);
     expect(await firstVisit.firstVisitAvailability(proposalEstimate())).toMatchObject({ ok: false, status: 404 });
     expect(mockBooking.buildBookingAvailability).not.toHaveBeenCalled();
   });
@@ -356,9 +364,18 @@ describe('the in-transaction estimate guard', () => {
     expect(await guard().revalidate(trxWith({ estimates: fresh }))).toBe('ineligible');
   });
 
-  test('the agreement no longer signed: ineligible', async () => {
-    mockAgreementState.mockResolvedValue({ state: 'none' });
-    expect(await guard().revalidate(trxWith({ estimates: proposalEstimate() }))).toBe('ineligible');
+  test('the quote on the fresh read is no longer the signed one: ineligible, checked on the booking transaction', async () => {
+    mockSignedQuoteMatches.mockResolvedValue(false);
+    const trx = trxWith({ estimates: proposalEstimate() });
+    expect(await guard().revalidate(trx)).toBe('ineligible');
+    expect(mockSignedQuoteMatches).toHaveBeenCalledWith(expect.objectContaining({ id: ESTIMATE_ID }), trx);
+  });
+
+  test('the gate turned off while the booking waited: ineligible, before any read', async () => {
+    delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
+    const trx = trxWith({ estimates: proposalEstimate() });
+    expect(await guard().revalidate(trx)).toBe('ineligible');
+    expect(trx).not.toHaveBeenCalled();
   });
 });
 

@@ -19,7 +19,7 @@ const NotificationService = require('../services/notification-service');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   TEMPLATE_KEY, SNAPSHOT_SOURCE, START_DATE_TEXT, ensureAgreement, agreementStateForEstimate, agreementCtaFor, agreementAdminStatus,
-  signEligibility, agreementTermsConflict, AGREEMENT_TERMS, lockEstimateForSign, refuseStaleSignature, handleAgreementSigned,
+  signEligibility, agreementTermsConflict, AGREEMENT_TERMS, lockEstimateForSign, refuseStaleSignature, handleAgreementSigned, signedQuoteMatches,
   AGREEMENT_PAYMENT_TEXT, autopayNextStep, STALE_PROPOSAL_MESSAGE, quoteFingerprint, buildAgreementValues, signableProposal,
 } = require('../services/commercial-proposal-agreement');
 const { requestAutopaySetupLink, billingLaneSupported } = require('../services/autopay-setup-link');
@@ -540,6 +540,46 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
       Object.assign(state.contracts[0], { status: 'signed', signed_at: new Date() });
       await handleAgreementSigned({ contractId: 'contract-1', database });
       expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toContain('Payment: Net 30 by invoice.');
+    });
+  });
+
+  // GATE_COMMERCIAL_FIRST_VISIT books the first visit only under the quote the customer signed.
+  describe('signedQuoteMatches: the quote now is the quote the customer signed', () => {
+    async function signedFor(estimate) {
+      const made = makeDb({ estimate });
+      await ensureAgreement({ estimate, req, database: made.database });
+      Object.assign(made.state.contracts[0], { status: 'signed', signed_at: new Date() });
+      return made;
+    }
+
+    test('unchanged since signing: true', async () => {
+      const estimate = estimateRow();
+      const { database } = await signedFor(estimate);
+      expect(await signedQuoteMatches(estimate, database)).toBe(true);
+    });
+
+    test('a price edited after signing: false', async () => {
+      const estimate = estimateRow();
+      const { database } = await signedFor(estimate);
+      const edited = estimateRow({}, { buildings: [{ name: 'Main building', lineItems: [{ description: 'Quarterly pest service', quantity: 1, unitPrice: 350, frequency: 'quarterly', taxable: true }] }] });
+      expect(await signedQuoteMatches(edited, database)).toBe(false);
+    });
+
+    test('a visit length set after signing is scheduling only: still true, and the fingerprint ignores it', async () => {
+      const programs = [{ service: 'pest', label: 'Interior Pest Control', frequencyPerYear: 12, pricePerApplication: 81.67, taxable: true }];
+      const estimate = estimateRow({}, { buildings: [], programs });
+      const { database } = await signedFor(estimate);
+      const withLength = estimateRow({}, { buildings: [], programs: [{ ...programs[0], visitMinutes: 30 }] });
+      expect(await signedQuoteMatches(withLength, database)).toBe(true);
+    });
+
+    test('nothing signed, or another customer: false', async () => {
+      const estimate = estimateRow();
+      const made = makeDb({ estimate });
+      await ensureAgreement({ estimate, req, database: made.database });
+      expect(await signedQuoteMatches(estimate, made.database)).toBe(false);
+      const { database } = await signedFor(estimate);
+      expect(await signedQuoteMatches({ ...estimate, customer_id: 'cust-2' }, database)).toBe(false);
     });
   });
 

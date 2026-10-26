@@ -170,10 +170,12 @@ async function firstVisitCtaFor(estimate, { open = false, picker = false, conn =
     const visit = await linkedFirstVisit(estimate.id, conn);
     if (visit) return { state: 'booked', visit: publicVisit(visit) };
     if (!open || !estimate.customer_id) return null;
-    const { agreementStateForEstimate } = require('./commercial-proposal-agreement');
-    const { state } = await agreementStateForEstimate(estimate.id, conn);
+    const agreement = require('./commercial-proposal-agreement');
+    const { state } = await agreement.agreementStateForEstimate(estimate.id, conn);
     if (state !== 'signed') return { state: 'after_signing' };
-    return picker ? { state: 'pick', durationMinutes: plan.durationMinutes } : null;
+    // Signed, but the proposal changed since: the office books it (never a visit under terms the customer did not sign).
+    if (!picker || !(await agreement.signedQuoteMatches(estimate, conn))) return null;
+    return { state: 'pick', durationMinutes: plan.durationMinutes };
   } catch (err) {
     logger.warn(`[commercial-first-visit] cta skipped for estimate ${estimate?.id}: ${err.code || 'error'}`);
     return null;
@@ -206,9 +208,10 @@ async function bookingContext(estimate, { conn = db } = {}) {
   if (!live()) return { refusal: refusal(404, 'not_found', 'Estimate not found') };
   const plan = firstVisitPlan(estimate);
   if (!plan || !estimate.customer_id) return { refusal: refusal(404, 'not_found', 'Estimate not found') };
-  const { agreementStateForEstimate } = require('./commercial-proposal-agreement');
-  const { state } = await agreementStateForEstimate(estimate.id, conn);
-  if (state !== 'signed') return { refusal: refusal(404, 'not_found', 'Estimate not found') };
+  // The customer signed THIS quote: an agreement signed before a later edit does not cover it.
+  if (!(await require('./commercial-proposal-agreement').signedQuoteMatches(estimate, conn))) {
+    return { refusal: refusal(404, 'not_found', 'Estimate not found') };
+  }
   const visit = await linkedFirstVisit(estimate.id, conn);
   if (visit) return { refusal: { ...refusal(409, 'already_booked', 'Your first visit is already booked.'), visit: publicVisit(visit) } };
   const customer = await loadCustomer(estimate.customer_id, conn);
@@ -273,12 +276,16 @@ function findSlot(availability, date, time) {
 }
 
 // The booking transaction's re-check, on its own connection, under the per-estimate lock createSelfBooking takes:
-// 'booked' when a first visit landed since the caller's read, 'ineligible' when the estimate is no longer open or
-// signed, else 'ok'. `openFor(row)` is the route's open-estimate verdict.
+// 'ineligible' when the gate was turned off, 'booked' when a first visit landed since the caller's read,
+// 'ineligible' when the estimate is no longer open, its plan changed, or its quote is no longer the signed one, else
+// 'ok'. `openFor(row)` is the route's open-estimate verdict.
 function estimateGuardFor(estimate, { openFor }) {
   return {
     estimateId: estimate.id,
     revalidate: async (trx) => {
+      // The kill switch, read again at the commit boundary: a flip during the availability build or a lock wait books
+      // nothing.
+      if (!live()) return 'ineligible';
       if (await linkedFirstVisit(estimate.id, trx)) return 'booked';
       const fresh = await trx('estimates').where({ id: estimate.id }).first();
       if (!fresh || String(fresh.customer_id || '') !== String(estimate.customer_id) || !openFor(fresh)) return 'ineligible';
@@ -286,9 +293,8 @@ function estimateGuardFor(estimate, { openFor }) {
       const was = firstVisitPlan(estimate);
       if (!plan || !was || plan.pricePerVisit !== was.pricePerVisit || plan.durationMinutes !== was.durationMinutes
         || plan.pattern !== was.pattern) return 'ineligible';
-      const { agreementStateForEstimate } = require('./commercial-proposal-agreement');
-      const { state } = await agreementStateForEstimate(estimate.id, trx);
-      return state === 'signed' ? 'ok' : 'ineligible';
+      // The quote on this read is still the one the customer signed (no edit landed since the caller's check).
+      return (await require('./commercial-proposal-agreement').signedQuoteMatches(fresh, trx)) ? 'ok' : 'ineligible';
     },
   };
 }
