@@ -110,7 +110,26 @@ describe("completionDeepLink (status-only completions)", () => {
   });
 });
 
-describe("BillingRecoveryPage feedback preview", () => {
+describe("BillingRecoveryPage gated feedback and table controls", () => {
+  it.each(["", "?tableControls=0", "?feedback=1"])("keeps queue controls off for %s", async (query) => {
+    mockReads();
+    renderPage(`/admin/billing-recovery${query}`);
+    expect(await screen.findByText("Queue Customer")).toBeInTheDocument();
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+  });
+
+  it.each(["?tableControls=1", "?tableControls=1&feedback=1"])("scopes queue controls for %s", async (query) => {
+    mockReads();
+    renderPage(`/admin/billing-recovery${query}`);
+    const leakSearch = await screen.findByRole("searchbox", { name: "Uninvoiced visits search" });
+    expect(screen.getByRole("searchbox", { name: "Needs review visits search" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Columns" })).not.toBeInTheDocument();
+    fireEvent.change(leakSearch, { target: { value: "no match" } });
+    expect(screen.getByText("No visits match these controls.")).toBeInTheDocument();
+    expect(screen.getByText("Review Customer")).toBeInTheDocument();
+    expect(screen.getByText("AR Customer")).toBeInTheDocument();
+  });
+
   it.each(["", "?feedback=0"])("preserves the combined legacy error and retry behavior for %s", async (query) => {
     const fetchMock = mockReads({ failLeaksOnce: true });
     renderPage(`/admin/billing-recovery${query}`);
@@ -174,7 +193,7 @@ describe("BillingRecoveryPage feedback preview", () => {
 
   it("announces a successful bill and refreshes every billing recovery source", async () => {
     const fetchMock = mockReads();
-    renderPage("/admin/billing-recovery?feedback=1");
+    renderPage("/admin/billing-recovery?feedback=1&tableControls=1");
     fireEvent.click((await screen.findAllByRole("button", { name: "Bill" }))[0]);
     expect(await screen.findByText("Draft invoice created. Review and send it from Invoices.")).toBeInTheDocument();
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/leaks?")).length).toBe(2));
