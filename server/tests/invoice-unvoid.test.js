@@ -56,6 +56,9 @@ function chain({ first, returning, select } = {}) {
 }
 
 const noRow = () => chain({ first: undefined });
+// The one-live-bill guard's read (another invoice that bills the visit) for a
+// conn that does not configure it: none.
+const guardReadNoRow = (table) => (/^invoices/.test(String(table)) ? noRow() : null);
 // schema.hasColumn for the unvoid guard's stamp-column compat check.
 const withSchema = (conn) => Object.assign(conn, { schema: { hasColumn: jest.fn(async () => true) } });
 
@@ -479,6 +482,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(noRow()) // term pre-guard
       .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'confirmed' } })) // fast-fail pass: visit live
       .mockReturnValueOnce(noRow()) // fast-fail pass: bills no other upcoming visit
+      .mockReturnValueOnce(noRow()) // fast-fail pass: no other live invoice bills the visit
       .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft', scheduled_service_id: 'svc-1' })] }))
       .mockReturnValueOnce(noRow()) // TOCTOU term re-check
@@ -602,6 +606,99 @@ describe('InvoiceService.unvoidInvoice', () => {
 // service_record_id. Exercised directly via the test-only seam so a minimal
 // table-dispatch conn covers every branch without driving the whole
 // unvoidInvoice call chain.
+// One visit, one live bill (Billing Recovery audit, owner 2026-10-25): a voided
+// invoice comes back only while nothing else bills its visit.
+describe('assertUnvoidableLinkedVisit — one live bill per visit', () => {
+  const liveVisit = { id: 'svc-1', status: 'completed', is_callback: false, estimated_price: 120 };
+  function makeGuardConn({ other, otherError = null, packetMembers = [] } = {}) {
+    const invoicesQuery = chain({ first: other });
+    if (otherError) invoicesQuery.first = jest.fn(async () => { throw otherError; });
+    let visitReads = 0;
+    const conn = withSchema(jest.fn((table) => {
+      const name = String(table);
+      // 1st: the linked visit; later: no other upcoming visit on this invoice.
+      if (name.startsWith('scheduled_services')) return (visitReads++ === 0 ? chain({ first: liveVisit }) : noRow());
+      if (name.startsWith('invoices')) return invoicesQuery;
+      if (name.startsWith('visit_completion_packet_items')) return chain({ select: packetMembers });
+      throw new Error(`unexpected table ${name}`);
+    }));
+    return { conn, invoicesQuery };
+  }
+  const restoring = { id: 'inv-1', scheduled_service_id: 'svc-1' };
+
+  test('another live invoice on the visit refuses the restore and names it', async () => {
+    const { conn, invoicesQuery } = makeGuardConn({ other: { invoice_number: 'WPC-2026-0602', status: 'sent' } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, restoring)).rejects.toThrow(
+      'Cannot unvoid — this visit already has live invoice WPC-2026-0602 (sent); void that one first, or put any extra charge on a new invoice',
+    );
+    // Dead invoices never count, and the invoice being restored is not "another" one.
+    expect(invoicesQuery.whereNotIn).toHaveBeenCalledWith('status', ['void', 'canceled', 'cancelled']);
+    expect(invoicesQuery.whereNot).toHaveBeenCalledWith('id', 'inv-1');
+  });
+
+  test('a refunded invoice refuses too: a failed refund would bring it back', async () => {
+    const { conn } = makeGuardConn({ other: { invoice_number: 'WPC-2026-0602', status: 'refunded' } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, restoring)).rejects.toThrow(/already has refunded invoice WPC-2026-0602/);
+  });
+
+  // The read matches every way an invoice bills the visit, a "Billed
+  // elsewhere" covering invoice included, under one status rule (refunded counts).
+  test('the read covers direct, record, packet, first-application and "Billed elsewhere" links', async () => {
+    const { conn, invoicesQuery } = makeGuardConn();
+    await InvoiceService._assertUnvoidableLinkedVisit(conn, restoring);
+    const links = [];
+    const sub = (name) => {
+      const q = { ops: [] };
+      ['select', 'from', 'whereIn', 'where', 'whereNotNull'].forEach((m) => { q[m] = (...args) => { q.ops.push([m, ...args]); return q; }; });
+      links.push({ name, q });
+      return q;
+    };
+    const builder = {
+      whereIn: jest.fn(() => builder),
+      orWhereIn: jest.fn((col, fn) => { fn.call(sub(col)); return builder; }),
+    };
+    invoicesQuery.where.mock.calls[0][0].call(builder);
+    expect(builder.whereIn).toHaveBeenCalledWith('scheduled_service_id', ['svc-1']);
+    const froms = links.map(({ name, q }) => [name, q.ops.find(([m]) => m === 'from')?.[1]]);
+    expect(froms).toEqual([
+      ['service_record_id', 'service_records'],
+      ['id', 'visit_completion_packet_items'],
+      ['id', 'visit_billing_dispositions'],
+      ['id', 'scheduled_services'],
+    ]);
+    const elsewhere = links.find(({ q }) => q.ops.some(([m, t]) => m === 'from' && t === 'visit_billing_dispositions')).q;
+    expect(elsewhere.ops).toEqual(expect.arrayContaining([['where', 'disposition', 'billed_elsewhere']]));
+  });
+
+  test('a refunded "Billed elsewhere" covering invoice refuses like any refunded invoice', async () => {
+    const { conn } = makeGuardConn({ other: { invoice_number: 'WPC-2026-0601', status: 'refunded' } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, restoring)).rejects.toThrow(/already has refunded invoice WPC-2026-0601/);
+  });
+
+  test('nothing else bills the visit: the restore proceeds', async () => {
+    const { conn } = makeGuardConn();
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, restoring)).resolves.toBeUndefined();
+  });
+
+  test('an unreadable invoice read refuses (fails closed)', async () => {
+    const { conn } = makeGuardConn({ otherError: new Error('db down') });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, restoring))
+      .rejects.toThrow("Could not verify the visit's other invoices — refusing to unvoid (db down)");
+  });
+
+  test('a combined-visit invoice checks every member it bills', async () => {
+    const { conn, invoicesQuery } = makeGuardConn({
+      packetMembers: [{ scheduled_service_id: 'svc-1' }, { scheduled_service_id: 'svc-2' }],
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { ...restoring, visit_completion_packet_id: 'packet-1' }))
+      .resolves.toBeUndefined();
+    const visitMatch = [];
+    const builder = { whereIn: jest.fn((col, ids) => { visitMatch.push([col, ids]); return builder; }), orWhereIn: jest.fn(() => builder) };
+    invoicesQuery.where.mock.calls[0][0].call(builder);
+    expect(visitMatch[0]).toEqual(['scheduled_service_id', ['svc-1', 'svc-2']]);
+  });
+});
+
 describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
   afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
 
@@ -611,6 +708,7 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
   function makeConn(tables = {}) {
     return withSchema(jest.fn((table) => {
       const key = Object.keys(tables).find((k) => String(table).startsWith(k));
+      if (!key && guardReadNoRow(table)) return guardReadNoRow(table);
       if (!key) throw new Error(`unexpected table ${JSON.stringify(table)}`);
       const spec = tables[key];
       if (spec instanceof Error) {
@@ -696,6 +794,7 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
         // 1st: the owner visit; 2nd: no other upcoming visit on a combined invoice.
         return svcReads === 1 ? chain({ first: { id: 'svc-owner', status: 'confirmed', is_callback: false, estimated_price: 129 } }) : noRow();
       }
+      if (guardReadNoRow(table)) return guardReadNoRow(table);
       throw new Error(`unexpected table ${table}`);
     }));
     await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: 'svc-owner', visit_completion_packet_id: 'packet-1' }))
@@ -740,7 +839,8 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
   test("an itemized anchor-only invoice doesn't add the anchor-group match", async () => {
     const group = { where: jest.fn(), orWhereIn: jest.fn() };
     let svcReads = 0;
-    const conn = withSchema(jest.fn(() => {
+    const conn = withSchema(jest.fn((table) => {
+      if (guardReadNoRow(table)) return guardReadNoRow(table);
       svcReads += 1;
       if (svcReads === 1) return chain({ first: { id: 'anchor', status: 'confirmed', is_callback: false, estimated_price: 129 } });
       const q = noRow();
@@ -769,7 +869,8 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
 
   test('a schema without the stamp column skips the stamp match and restores an ordinary invoice (Codex r9 P2)', async () => {
     let svcReads = 0;
-    const conn = jest.fn(() => {
+    const conn = jest.fn((table) => {
+      if (guardReadNoRow(table)) return guardReadNoRow(table);
       svcReads += 1;
       return chain({ first: { id: 'anchor', status: 'confirmed', is_callback: false, estimated_price: 129 } });
     });
