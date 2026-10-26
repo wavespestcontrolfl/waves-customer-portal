@@ -216,7 +216,7 @@ describe('ensureEstimateServiceAgreement', () => {
       status: 'sent', title: 'Residential Pest Service Agreement', service_name: 'Pest Control',
     });
     expect(row.contract_text_snapshot).toContain('Customer: Pat Owner');
-    expect(row.contract_text_snapshot).toContain('Service address: 12 Test Lane, Bradenton FL 34205');
+    expect(row.contract_text_snapshot).toContain('Service address: 12 Test Lane, Bradenton, FL 34205\n');
     expect(row.contract_text_snapshot).toContain('Service plan: Pest Control\n');
     expect(row.contract_text_snapshot).toMatch(/Start date: November 3, 2026/);
     expect(row.document_variables_snapshot.estimate).toEqual({ id: 'est-1', source: SNAPSHOT_SOURCE, lane: 'pest' });
@@ -235,10 +235,26 @@ describe('ensureEstimateServiceAgreement', () => {
     expect(state.contracts[0].contract_text_snapshot).toContain(`Start: ${START_DATE_TEXT}`);
   });
 
-  test('the account address is used when it exists; the estimate\'s service address stands in when it does not', async () => {
-    const { database, state } = makeDb({ customer: { ...CUSTOMER, address_line1: null, city: null, zip: null } });
-    await ensureEstimateServiceAgreement({ estimate: bundle, lane: 'pest', req, conn: database });
-    expect(state.contracts[0].contract_text_snapshot).toContain('Service address: 12 Test Lane, Bradenton, FL 34205, FL');
+  test('the agreement names the accepted property: the estimate\'s service address as written, even when the account\'s primary is elsewhere', async () => {
+    const elsewhere = { ...bundle, address: '88 Rental Court, Unit 4, Sarasota, FL 34236' };
+    const { database, state } = makeDb({ estimateRow: elsewhere });
+    await ensureEstimateServiceAgreement({ estimate: elsewhere, lane: 'pest', req, conn: database });
+    // As written: no account locality appended, no stray state.
+    expect(state.contracts[0].contract_text_snapshot).toContain('Service address: 88 Rental Court, Unit 4, Sarasota, FL 34236\n');
+    expect(state.contracts[0].document_variables_snapshot.customer.address).toBe('88 Rental Court, Unit 4, Sarasota, FL 34236');
+  });
+
+  test('an estimate with no service address falls back to the account address; with neither, nothing is issued', async () => {
+    const unaddressed = { ...bundle, address: '' };
+    const fallback = makeDb({ estimateRow: unaddressed });
+    await ensureEstimateServiceAgreement({ estimate: unaddressed, lane: 'pest', req, conn: fallback.database });
+    expect(fallback.state.contracts[0].contract_text_snapshot).toContain('Service address: 12 Test Lane, Bradenton FL 34205\n');
+
+    const nowhere = makeDb({ estimateRow: unaddressed, customer: { ...CUSTOMER, address_line1: null, city: null, zip: null } });
+    const result = await ensureEstimateServiceAgreement({ estimate: unaddressed, lane: 'pest', req, conn: nowhere.database });
+    expect(result).toMatchObject({ ok: false, status: 409, code: 'template_unavailable' });
+    expect(nowhere.state.contracts).toEqual([]);
+    expect(nowhere.state.events).toEqual([]);
   });
 
   test('a repeat returns the same open agreement with a fresh link when it reads the same', async () => {

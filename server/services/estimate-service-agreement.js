@@ -199,13 +199,19 @@ async function ensureEstimateServiceAgreement({ estimate, lane, req = {}, conn =
     if (current.state === 'signed') return refusal(409, 'already_signed', 'Your service agreement is already signed. Please reload the page.');
     await lockActiveVersionForIssue(trx, { template, activeVersion: version });
 
-    // The estimate's service address is the agreement's address when the account row has none yet.
-    const addressed = { ...customer, address_line1: customer.address_line1 || locked.address || '' };
-    const context = buildCustomerDocumentContext(addressed, {
+    const context = buildCustomerDocumentContext(customer, {
       service: { name: laneServiceName(locked, lane) },
       agreement: { start_date: await startDateText(trx, locked.id) },
       estimate: { id: locked.id, source: SNAPSHOT_SOURCE, lane },
     });
+    // The agreement names the property the plan was accepted for: the estimate's own service address, complete as
+    // written (an accept at a property other than the account's primary is supported, estimate-converter.js
+    // crossPropertyAccept). The account address is only the fallback. Set after the context is built, because
+    // customerAddress would append the account's locality to an already complete estimate address. With neither, there
+    // is no property to name, and the page says to call.
+    const serviceAddress = String(locked.address || '').trim();
+    if (serviceAddress) context.customer.address = serviceAddress;
+    else if (!String(customer.address_line1 || '').trim()) return refusal(409, 'template_unavailable', CALL_US);
     const rendered = renderDocumentTemplate({ template, version, context });
     if (rendered.unresolvedVariables.length) {
       logger.warn(`[estimate-service-agreement] unresolved variables for estimate ${locked.id}: ${rendered.unresolvedVariables.join(', ')}`);
@@ -238,7 +244,7 @@ async function ensureEstimateServiceAgreement({ estimate, lane, req = {}, conn =
       await addEvent(trx, existing, 'cancelled', { ...meta, reason: 'superseded' }, 'system');
     }
     const [row] = await trx('customer_contracts')
-      .insert(newContractRow({ customer: addressed, template, version, rendered, context, tokenHash: hashContractToken(token), expiresAt, now }))
+      .insert(newContractRow({ customer, template, version, rendered, context, tokenHash: hashContractToken(token), expiresAt, now }))
       .returning('*');
     await addEvent(trx, row, 'created_from_document_template', { ...meta, templateKey: template.template_key, templateVersionId: version.id });
     await addEvent(trx, row, 'share_link_created', { ...meta, expiresAt: expiresAt.toISOString() });
