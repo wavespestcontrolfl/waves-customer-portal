@@ -5851,6 +5851,13 @@ function bidKitLive() {
   return process.env.GATE_BID_KIT === 'true';
 }
 
+// GATE_ANNUAL_PLAN_DOCUMENTS: owner-only informational annual-plan PDFs in
+// Documents. Read at request time; off skips the extra list query and returns
+// 404 for downloads. Existing My Plan/signed-agreement reads stay independent.
+function annualPlanDocumentsLive() {
+  return process.env.GATE_ANNUAL_PLAN_DOCUMENTS === 'true';
+}
+
 // GATE_COMMERCIAL_PROPOSAL_SIGN read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader
 // for "Accept & sign agreement" on an authored commercial proposal: POST /api/estimates/:token/commercial-agreement
 // (services/commercial-proposal-agreement.js), the `cta.commercialAgreement` block on GET /:token/data, the sign hook in
@@ -8241,6 +8248,7 @@ module.exports.lawnReclaimedHalfNLive = lawnReclaimedHalfNLive;
 module.exports.mosquitoMistingLive = mosquitoMistingLive;
 // GATE_BID_KIT reader, on its own line so gate PRs never conflict.
 module.exports.bidKitLive = bidKitLive;
+module.exports.annualPlanDocumentsLive = annualPlanDocumentsLive;
 // GATE_COMMERCIAL_PROPOSAL_SIGN reader, on its own line so gate PRs never conflict.
 module.exports.commercialProposalSignLive = commercialProposalSignLive;
 module.exports.commercialAutopayLive = commercialAutopayLive;
