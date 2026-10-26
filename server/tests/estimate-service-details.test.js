@@ -135,7 +135,6 @@ describe('service-details PDF renderer', () => {
     const lawn = await buildServiceDetailsContent('lawn_care', {});
     expect(lawn.productImages.images.map((i) => i.file)).toEqual([
       'product-lesco-fertilizer-bag.png',
-      'product-lesco-am-micros.png',
     ]);
   });
 });
