@@ -917,7 +917,8 @@ const V13_DETAIL_COPY = Object.freeze({
   // v13 confirms chinch bugs at the edge of the damage (the float test only if unsure). "Spot", not "any": May's one
   // whole-lawn insect pass goes on sunny turf with no count first.
   confirmedTile: Object.freeze({ icon: 'count', title: 'Confirmed before treating', text: 'Chinch bugs and other insects are confirmed where the damage starts before any spot treatment' }),
-  yearBody: 'This month and the next two are open. Tap any month to see what that visit does and one thing to do at home.',
+  // A 9-visit plan skips some months, so the list says each visit follows its month (the v13 outline's own sentence).
+  yearBody: 'Each visit follows the step for the month it falls in. This month and the next two are open. Tap any month to see what a visit then does and one thing to do at home.',
   // One thing to do at home each month, from the v13 visit rules (barrier water-in, holds, storm holds).
   atHome: Object.freeze({
     1: 'Run your normal watering day: that waters in the weed barrier.',
