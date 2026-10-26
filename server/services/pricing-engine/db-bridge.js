@@ -2195,8 +2195,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
           const idx = TIER_INDEX[row.tier];
           if (idx === undefined) continue;
           if (!byTrack[track]) byTrack[track] = new Map();
+          // [sqft, standard 6x, enhanced 9x, premium 12x]: the code-default
+          // row shape. A fifth slot (left from the retired basic tier) failed
+          // the cost-plus basis check, which requires one column per cadence.
           if (!byTrack[track].has(sqft)) {
-            byTrack[track].set(sqft, [sqft, 0, 0, 0, 0]);
+            byTrack[track].set(sqft, [sqft, 0, 0, 0]);
           }
           byTrack[track].get(sqft)[idx + 1] = r(Number(row.monthly_price));
         }
