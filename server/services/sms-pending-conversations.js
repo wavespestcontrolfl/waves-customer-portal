@@ -25,6 +25,43 @@ const NEEDS_REPLY_SINCE = '2026-09-28T09:25:00Z';
 // context (outbound_events joins on it).
 const REPLY_LOOKBACK = "INTERVAL '24 hours'";
 
+// When a call ended, as SQL over a call_log alias: the stamp /call-status
+// writes from Twilio's own event time. Nothing else is trusted as an end: a
+// callback card's customer_leg.ended_at is our receipt time, and a late
+// callback would move it past texts sent after the hangup. A row without the
+// stamp that was inserted when the call began gets insert time plus duration,
+// which is early by the ring time and so only ever leaves a text pending. A
+// row inserted after the call was over (call-timeline.js) says nothing about
+// when the call happened, so without the stamp it has no end (NULL) and
+// answers nothing. The pattern has no "?" and no ":word": db.raw reads either
+// as a binding. Shared with the customer-contact alert witnesses
+// (admin-alert-contact-witnesses.js).
+function callEndedAtSql(alias = 'spoken') {
+  return `COALESCE(
+    CASE WHEN ${alias}.metadata->>'ended_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
+      THEN CAST(${alias}.metadata->>'ended_at' AS timestamptz) END,
+    CASE WHEN ${postCallRowSql(alias)} IS NOT TRUE
+      THEN ${alias}.created_at + make_interval(secs => COALESCE(${alias}.duration_seconds, 0)) END)`;
+}
+
+// A row inserted after the call was over (call-timeline.js createdAfterTheCall).
+function postCallRowSql(alias) {
+  return `(${alias}.metadata->>'source' IN (${[...POST_CALL_ROW_SOURCES].map((source) => `'${source}'`).join(', ')})
+    AND NOT (${alias}.metadata->>'source' = 'status_callback'
+      AND COALESCE(${alias}.metadata->>'inserted_on_status', '') NOT IN ('', ${[...TERMINAL_CALL_STATUSES].map((status) => `'${status}'`).join(', ')})))`;
+}
+
+// When the customer placed the call, as SQL over a call_log alias: the SQL form
+// of call-timeline.js callStartedAt. created_at is the start unless the row was
+// inserted after the call (a status callback on a terminal event, a recording
+// recovery), when the call's own length (the largest positive of
+// duration_seconds and recording_duration_seconds) is backed out of it.
+function callStartedAtSql(alias = 'call_log') {
+  return `(CASE WHEN ${postCallRowSql(alias)} IS TRUE
+    THEN ${alias}.created_at - make_interval(secs => GREATEST(0, COALESCE(${alias}.duration_seconds, 0), COALESCE(${alias}.recording_duration_seconds, 0)))
+    ELSE ${alias}.created_at END)`;
+}
+
 // Shared source for the Messages needs-response badge, filtered inbox, and
 // unanswered-text watcher. The watcher opts into legacy-only rows so a failed
 // canonical write cannot erase historical work; badge IDs remain canonical.
@@ -51,23 +88,7 @@ async function loadPendingSmsConversations({
   const eventEndpoint = phoneIdentitySql(projectedEndpoint);
   const blockedPeer = phoneIdentitySql('b.number');
   const callPeer = phoneIdentitySql("(CASE WHEN spoken.direction = 'outbound' THEN spoken.to_phone ELSE spoken.from_phone END)");
-  // When the call ended: the stamp /call-status writes from Twilio's own
-  // event time. Nothing else is trusted as an end: a callback card's
-  // customer_leg.ended_at is our receipt time, and a late callback would
-  // move it past texts sent after the hangup. A row without the stamp that
-  // was inserted when the call began gets insert time plus duration, which
-  // is early by the ring time and so only ever leaves a text pending. A row
-  // inserted after the call was over (call-timeline.js) says nothing about
-  // when the call happened, so without the stamp it answers no text. The
-  // pattern has no "?" and no ":word": db.raw reads either as a binding.
-  const postCallRow = `(spoken.metadata->>'source' IN (${[...POST_CALL_ROW_SOURCES].map((source) => `'${source}'`).join(', ')})
-    AND NOT (spoken.metadata->>'source' = 'status_callback'
-      AND COALESCE(spoken.metadata->>'inserted_on_status', '') NOT IN ('', ${[...TERMINAL_CALL_STATUSES].map((status) => `'${status}'`).join(', ')})))`;
-  const callEndedAt = `COALESCE(
-    CASE WHEN spoken.metadata->>'ended_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
-      THEN CAST(spoken.metadata->>'ended_at' AS timestamptz) END,
-    CASE WHEN ${postCallRow} IS NOT TRUE
-      THEN spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0)) END)`;
+  const callEndedAt = callEndedAtSql('spoken');
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
   // An uncertain historical STOP must never migrate to a customer's changed
@@ -369,4 +390,4 @@ async function countPendingSmsConversations({
   return result;
 }
 
-module.exports = { loadPendingSmsConversations, countPendingSmsConversations, NEEDS_REPLY_SINCE };
+module.exports = { loadPendingSmsConversations, countPendingSmsConversations, callEndedAtSql, callStartedAtSql, NEEDS_REPLY_SINCE };

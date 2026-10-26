@@ -56,11 +56,28 @@
  * open rows only, so freeing it is the intent: a retirement once the lead was
  * contacted ends the episode, and the next form rings a fresh row.
  *
- * Never applies to customer-initiated contact bells (inbound_sms, inbound_email,
- * missed_call, voicemail_callback, review) or money-owed/failed/refund alerts:
- * a class is only in the table if its category (plus dedupeKey prefix) is
- * listed below. Two customer-contact bells are in it by owner ruling
- * (2026-10-03), each closed only by the record that answers it: the
+ * Customer-initiated contact bells close once a person answers (owner
+ * 2026-10-24: "most of these should close automatically ... text sent, agent
+ * confirms resolved, appt booked, rescheduled"; this replaces the earlier
+ * line that kept them out of the sweep). A text (inbound_sms) closes when the
+ * Messages "needs a reply" reader no longer counts its conversation; a voicemail
+ * callback request, an email and a new lead close when a person
+ * called back and spoke, a person's text reached the customer, a visit was
+ * booked or a quote was handed off, each judged only by what came AFTER the
+ * event the bell is about. Every such fact is a shared witness read in
+ * admin-alert-contact-witnesses.js, and read_at is never evidence. Behind
+ * GATE_ALERT_CONTACT_CLOSE (alertContactCloseMode): off = these classes are not
+ * judged; `shadow` = judged, with what WOULD close recorded in audit_log and
+ * no bell changed; `true` = closed like any other class. Review bells and
+ * money-owed/failed/refund alerts are still never in the table: a class is
+ * only in it if its category (plus dedupeKey prefix or trigger) is listed
+ * below. A missed call (customer_missed_call) is NOT in the table: its one owner
+ * is missed-call-bell.js (retireCalledBackMissedCalls, every 2 minutes), which
+ * judges the same contact facts behind the same gate. A new text from a known
+ * sender rewrites the sender's one thread bell and rings it again (the refresh clears done and the retired stamp). An
+ * unknown sender's text bell (no customer on file) is not judged at all: it
+ * stays a person's to close. Two other customer-contact bells are in it by owner
+ * ruling (2026-10-03), each closed only by the record that answers it: the
  * promise-chaser bell once the promise it chases is closed, and a portal chat
  * hand-off about adding a service once an estimate is handed off to that
  * customer. A self-booked re-service bell (owner 2026-10-05) closes once its
@@ -77,7 +94,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { adminAlertRelevanceLive } = require('../config/feature-gates');
+const { adminAlertRelevanceLive, alertContactCloseMode } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 // The dedupeKey prefix call-last-name-lookup.js gives its suggestion (its
@@ -89,6 +106,10 @@ const SUGGESTION_KEY_PREFIX = 'call-last-name-suggestion:';
 // ringRepeatFormAlert). Repeated, not imported (a route module); a test pins
 // the two together.
 const REPEAT_FORM_PREFIX = 'lead-repeat-form:';
+// The dedupeKey prefix of a known sender's shared thread bell
+// (sms-reply-alert-delivery.js threadBellKey). Repeated, not imported (it pulls
+// in the webhook's delivery code); a test pins the two together.
+const SMS_THREAD_PREFIX = 'sms-thread:';
 
 const RETIRED_BY = 'alert-relevance';
 const PAGE_SIZE = 200;
@@ -109,6 +130,9 @@ const STALE_IN_PROGRESS_STATUSES = new Set(['on_site', 'en_route']);
 
 // notification-service's done helpers, read lazily like candidateQuery's.
 const doneState = () => require('./notification-service')._private;
+// A log line never carries err.message: knex puts the SQL and its bindings there, and the witness
+// queries bind customer phone numbers and email addresses (AGENTS.md: no PII in logs).
+const errSummary = (err) => require('./notification-service').safeErrorSummary(err);
 
 const uuidOrNull = (v) => (typeof v === 'string' && UUID_RE.test(v.trim()) ? v.trim().toLowerCase() : null);
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -170,7 +194,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate, customer };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), contactMode: 'off', contactFailed: false });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The latest valid time per customer across rows (a bad time is skipped).
@@ -187,11 +211,75 @@ function repeatFormCustomerId(meta) {
   return String(meta.dedupeKey || '').startsWith(REPEAT_FORM_PREFIX) ? idTextOrNull(meta.customerId) : null;
 }
 
+// A booking someone made that is still to run or ran: never a child the
+// system generated on its own (the nightly series top-up, a booking's seeded
+// follow-ups — those land on an existing customer's plan whether or not anyone
+// worked the lead), and never one that did not run (cancelled, no-show,
+// skipped). The newest such booking's creation time per customer.
+// The live-booking predicate: not one that did not run, and never a child the
+// system generated on its own. Exported for missed-call-bell.js's SQL form.
+function whereLiveBooking(q) {
+  return q.where((w) => w.whereNull('status').orWhereNotIn('status', VISIT_NEVER_RAN_STATUSES))
+    .whereNull('recurring_parent_id').whereNull('parent_service_id');
+}
+
+async function bookedVisitsByCustomer(conn, customerIds) {
+  if (!customerIds.length) return new Map();
+  const booked = await whereLiveBooking(conn('scheduled_services').whereIn('customer_id', customerIds))
+    .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
+  return new Map(booked.map((r) => [String(r.customer_id), r.latest_created_at]));
+}
+
+// What a customer-contact bell is about, for the witnesses: the text, call or
+// email it names, or the lead's own phone. Nothing here reads the customer's
+// account at large.
+function contactRefs(kind, row, data) {
+  const refs = refsFromRow(row);
+  const payload = parseMeta(refs.meta.payload);
+  const params = linkParams(row.link);
+  if (kind === 'sms') {
+    const key = String(refs.meta.dedupeKey || '');
+    const customerId = key.startsWith(SMS_THREAD_PREFIX) ? uuidOrNull(key.slice(SMS_THREAD_PREFIX.length)) : uuidOrNull(first(payload.threadId, params.get('thread')));
+    // An unknown sender's bell (no customer on file) is not judged: its emitter keeps a row per 4-hour window
+    // and suppresses a second text inside it, so no anchor here can stand for its latest text. It stays a
+    // person's to close; the 30-day retention sweep closes it if nobody does.
+    if (!customerId) return null;
+    return { sid: first(params.get('message'), payload.twilioSid), customerId };
+  }
+  if (kind === 'voice') return { callLogId: uuidOrNull(payload.callLogId), customerId: uuidOrNull(payload.customerId), phone: payload.phone };
+  if (kind === 'email') return { emailId: uuidOrNull(payload.emailId), customerId: uuidOrNull(payload.customerId) };
+  const lead = refs.leadId ? data.leads.get(refs.leadId) : null;
+  return lead ? { customerId: uuidOrNull(lead.customer_id), phone: lead.phone } : null;
+}
+
+// GATE_ALERT_CONTACT_CLOSE on (shadow or true): load the witnesses for the
+// customer-contact rows of this batch. A load that fails is no verdict, never
+// a guess: rows stay unjudged and the re-arm pass leaves them as they are.
+async function loadContact(rows, data, conn) {
+  const items = [];
+  for (const row of rows) {
+    const cls = classify(row);
+    const refs = cls?.contact ? contactRefs(cls.contact, row, data) : null;
+    if (!refs) continue;
+    const bellAt = row.created_at ? new Date(row.created_at) : null;
+    items.push({ id: row.id, kind: cls.contact, bellAt: bellAt && !Number.isNaN(bellAt.getTime()) ? bellAt : null, refs });
+  }
+  if (!items.length) return;
+  try {
+    const { loadContactBundles } = require('./admin-alert-contact-witnesses');
+    data.contact = await loadContactBundles(items, { conn, bookedVisits: (ids) => bookedVisitsByCustomer(conn, ids) });
+  } catch (err) {
+    data.contactFailed = true;
+    logger.warn(`[alert-relevance] customer-contact witnesses failed to load: ${errSummary(err)}`);
+  }
+}
+
 // The live records for a batch of notification rows: one query per table per
 // batch (a lead's estimate is only known once the lead is loaded, so estimates
 // run second). Plain reads — never a lock.
 async function loadSubjects(rows, conn = db) {
   const data = emptyData();
+  data.contactMode = alertContactCloseMode();
   const all = rows.map(refsFromRow);
   const ids = (pick) => [...new Set(all.flatMap(pick))];
   const visitIds = ids((r) => r.visitIds);
@@ -231,8 +319,9 @@ async function loadSubjects(rows, conn = db) {
   }
   if (leadIds.length) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
-      .select('id', 'deleted_at', 'customer_id', 'estimate_id', 'status'));
+      .select('id', 'deleted_at', 'customer_id', 'estimate_id', 'status', 'phone'));
   }
+  if (data.contactMode !== 'off') await loadContact(rows, data, conn);
   // The stale-consent bells' customers: when did each last record a consent
   // at a CURRENT recurring-card text version — the base text or the
   // after-visit variant's (local max-effort review on #5434: an after-visit
@@ -274,16 +363,7 @@ async function loadSubjects(rows, conn = db) {
     data.estimates = byId(await conn('estimates').whereIn('id', estimateIds).select('id', 'sent_at'));
   }
   if (leadCustomerIds.length) {
-    // A booking someone made that is still to run or ran: never a child the
-    // system generated on its own (the nightly series top-up, a booking's
-    // seeded follow-ups — those land on an existing customer's plan whether
-    // or not anyone worked the lead), and never one that did not run
-    // (cancelled, no-show, skipped).
-    const booked = await conn('scheduled_services').whereIn('customer_id', leadCustomerIds)
-      .where((q) => q.whereNull('status').orWhereNotIn('status', VISIT_NEVER_RAN_STATUSES))
-      .whereNull('recurring_parent_id').whereNull('parent_service_id')
-      .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
-    data.leadVisits = new Map(booked.map((r) => [String(r.customer_id), r.latest_created_at]));
+    data.leadVisits = await bookedVisitsByCustomer(conn, leadCustomerIds);
     // Every quote sent to the lead's customer, not only the one the lead
     // points at now: a newer draft can take over leads.estimate_id
     // (draft-builder's writeGuardedLeadEstimateLink) without un-sending it.
@@ -320,6 +400,12 @@ function subjectFor(row, data, todayET) {
     // The latest staff text that reached the bell's customer (loaded for
     // repeat-form alerts only).
     leadContactedAt: repeatCustomer ? data.contacts.get(repeatCustomer) : null,
+    // GATE_ALERT_CONTACT_CLOSE: its mode when the batch was read, and this
+    // row's witnesses (absent = the subject could not be identified, or the
+    // load failed — contactUnknown — and either way nothing is judged).
+    contactMode: data.contactMode,
+    contactUnknown: data.contactFailed,
+    contact: data.contact.get(String(row.id)) || null,
   };
 }
 
@@ -511,6 +597,69 @@ function lastNameSaved(s) {
   return String(s.customer.last_name ?? '').trim() ? 'Last name was saved' : null;
 }
 
+// ---- Customer-contact bells (GATE_ALERT_CONTACT_CLOSE) ---------------------
+// Each rule reads `s.contact`, the witnesses admin-alert-contact-witnesses.js
+// loaded for the row; a row with none (its subject could not be identified, or
+// the load failed) is never judged. Only events AFTER the bundle's anchor count
+// (the text, call or email the bell is about). Reasons are plain words.
+const contactAfter = (c, at) => !!at && new Date(at).getTime() > c.anchor.getTime();
+
+// A text (notification-triggers.js sms_reply): closed once the Messages
+// "needs a reply" reader (loadPendingSmsConversations) no longer counts the
+// sender's conversation. The reader already counts a person's text and a
+// person's call after the text as answers, and a courtesy text as needing none;
+// the reason only names which, from the same witnesses (the reader also counts
+// the texting assistant's reply as an answer, which has no witness of its own
+// here, hence the plain last reason).
+// A SHARED phone (another customer is tied to the number) is the exception: the
+// reader judges by phone alone and cannot say whom a reply reached, so its verdict
+// is not used. The bell closes only on this customer's own evidence by customer id
+// (a person's reply to them, a person's call with them), loaded as textAt / backAt /
+// inAt; nothing else, and never "no reply needed".
+function textAnswered(s) {
+  const c = s.contact;
+  if (!c) return null;
+  if (c.shared) {
+    if (contactAfter(c, c.textAt)) return 'Answered by text';
+    return contactAfter(c, c.backAt) || contactAfter(c, c.inAt) ? 'Answered by a call' : null;
+  }
+  if (c.pending !== false) return null;
+  if (contactAfter(c, c.textAt)) return 'Answered by text';
+  if (contactAfter(c, c.backAt) || contactAfter(c, c.inAt)) return 'Answered by a call';
+  return 'Answered, or no reply needed';
+}
+
+// A voicemail callback request: a person called back and
+// spoke with them, the customer called in and a person answered, a person's
+// text reached them, a visit was booked, or a quote was handed off.
+function callerReached(s) {
+  const c = s.contact;
+  if (!c) return null;
+  if (contactAfter(c, c.backAt)) return 'A person called back';
+  if (contactAfter(c, c.inAt)) return 'A person answered their call';
+  if (contactAfter(c, c.textAt)) return 'Answered by text';
+  if (contactAfter(c, c.visitAt)) return 'A visit was booked';
+  return c.quote ? 'Estimate was sent' : null;
+}
+
+// An email from a customer: a person's reply in its Gmail thread, else the
+// same witnesses as a call (owner 2026-09-28: a text or call back closes an
+// email ask).
+function emailAnswered(s) {
+  const c = s.contact;
+  if (!c) return null;
+  return contactAfter(c, c.replyAt) ? 'Answered by email' : callerReached(s);
+}
+
+// A new lead that a person's text reached or called back, after the bell: the
+// part of the new-lead class the gate controls (its other reasons are
+// newLeadMovedOn's and always on).
+function leadContacted(s) {
+  const c = s.contact;
+  if (!c || !s.lead) return null;
+  return contactAfter(c, c.textAt) || contactAfter(c, c.backAt) ? 'Lead was contacted' : null;
+}
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -528,6 +677,8 @@ const CLASSES = [
     // submission filed as a duplicate, an email follow-up's new draft) is
     // fresh work about a lead already on file, never judged.
     key: 'new_lead', categories: ['new_lead'], match: (meta, row) => meta.triggerKey === 'new_lead' && !!refsFromRow(row).leadId, rule: newLeadMovedOn,
+    // GATE_ALERT_CONTACT_CLOSE: also "Lead was contacted" (a person's text or call back after the bell).
+    contact: 'lead', contactRule: leadContacted,
   },
   { // visit-promises.js alertUnsavedVisitPromiseMarks — one bell per visit,
     // raised again (same key) only while a mark is still unsaved.
@@ -553,15 +704,56 @@ const CLASSES = [
     // Final, like the promise chaser's: a put-back would stand beside that row.
     key: 'lead_repeat_form', categories: ['lead'], prefix: REPEAT_FORM_PREFIX, rule: repeatFormSettled, rearm: false,
   },
+  // Customer-initiated contact bells (owner 2026-10-24), all behind
+  // GATE_ALERT_CONTACT_CLOSE (`contactOnly`: not in the table at all while it is
+  // off) and keyed by the emitter's trigger.
+  { // notification-triggers.js sms_reply. A known sender's texts share ONE row
+    // (sms-thread:<customer>) that a new text rewrites, bumps and rings again,
+    // which also clears the done fields and the retired stamp (notification-
+    // service mergeRefreshMetadata), so a text after a close always rings. An
+    // unknown sender's bell (a row per 4-hour window, sms-reply:<sid>) is NOT
+    // judged (contactRefs returns null): a second text inside the window raises
+    // no new row, so no anchor can stand for its latest text.
+    key: 'inbound_sms', categories: ['inbound_sms'], triggerKey: 'sms_reply', contactOnly: true, contact: 'sms', contactRule: textAnswered,
+  },
+  { // call-recording-processor.js — one bell per voicemail, no dedupe key
+    key: 'voicemail_callback', categories: ['voicemail_callback'], triggerKey: 'customer_voicemail_callback', contactOnly: true, contact: 'voice', contactRule: callerReached,
+  },
+  // Missed calls (customer_missed_call) are NOT here: missed-call-bell.js owns them
+  // (retireCalledBackMissedCalls, every 2 minutes, one owner), and it judges the
+  // contact clauses below behind the same gate. The promise chaser, repeat caller
+  // and Sandy hand-off bells share the category and keep their own owners.
+  { // email-sync.js ringCustomerEmailBell — one bell per email
+    key: 'inbound_email', categories: ['inbound_email'], triggerKey: 'customer_email_received', contactOnly: true, contact: 'email', contactRule: emailAnswered,
+  },
 ];
 
+// One row's verdict. `reason` closes it now (the always-on rule, or the
+// contact rule while the gate is `true`); `would` is what the contact rule
+// says while the gate is `shadow`, recorded and never acted on. A contact rule
+// is silent when the gate is off or its witnesses did not load.
+function judge(cls, s) {
+  const base = cls.rule ? cls.rule(s) : null;
+  if (base) return { reason: base, would: null };
+  if (!cls.contactRule || s.contactMode === 'off') return { reason: null, would: null };
+  const extra = cls.contactRule(s);
+  if (!extra) return { reason: null, would: null };
+  return s.contactMode === 'true' ? { reason: extra, would: null } : { reason: null, would: extra };
+}
+
 // The class a row belongs to, or null. Category first, then the emitter's
-// dedupeKey prefix / extra metadata test.
-function classify(row) {
+// dedupeKey prefix / trigger / extra metadata test. The contact-only classes
+// exist only while GATE_ALERT_CONTACT_CLOSE is shadow or true; the re-arm pass
+// asks for them in every mode (`anyMode`) so a gate switched back off puts
+// back what it closed.
+function classify(row, { anyMode = false } = {}) {
   const meta = parseMeta(row.metadata);
   const dedupeKey = String(meta.dedupeKey || '');
-  return CLASSES.find((c) => c.categories.includes(row.category)
+  const contactLive = anyMode || alertContactCloseMode() !== 'off';
+  return CLASSES.find((c) => (!c.contactOnly || contactLive)
+    && c.categories.includes(row.category)
     && (!c.prefix || dedupeKey.startsWith(c.prefix))
+    && (!c.triggerKey || meta.triggerKey === c.triggerKey)
     && (!c.match || c.match(meta, row))) || null;
 }
 
@@ -583,10 +775,13 @@ function candidateQuery(cursor) {
       .whereRaw("done_at >= now() - interval '7 days'")))
     .whereRaw("metadata->'retired' IS NULL")
     .where((q) => {
+      const contactLive = alertContactCloseMode() !== 'off';
       for (const c of CLASSES) {
+        if (c.contactOnly && !contactLive) continue;
         q.orWhere((cq) => {
           cq.whereIn('category', c.categories);
           if (c.prefix) cq.whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [c.prefix.length, c.prefix]);
+          if (c.triggerKey) cq.whereRaw("metadata->>'triggerKey' = ?", [c.triggerKey]);
         });
       }
     })
@@ -630,7 +825,7 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   const current = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('done_at')
     .first('id', 'category', 'link', 'metadata', 'created_at');
   if (!current || !sameRow(current, row)) return null;
-  const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
+  const reason = judge(cls, subjectFor(current, await loadSubjects([current]), todayET)).reason;
   if (!reason) return null;
   // The stamp's `at` IS the done_at this write stores — an explicit
   // millisecond instant, not NOW() (Postgres keeps microseconds, which a JS
@@ -650,9 +845,9 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
     const latest = await stillOurs(db('notifications')).first('id', 'category', 'link', 'metadata', 'created_at');
     if (!latest) return null;
     const judged = { ...latest, metadata: unretired(latest.metadata) };
-    if (cls.rule(subjectFor(judged, await loadSubjects([judged]), todayET))) return reason;
+    if (judge(cls, subjectFor(judged, await loadSubjects([judged]), todayET)).reason) return reason;
   } catch (err) {
-    logger.warn(`[alert-relevance] notification ${row.id}: the check after retiring failed, putting it back: ${err.message}`);
+    logger.warn(`[alert-relevance] notification ${row.id}: the check after retiring failed, putting it back: ${errSummary(err)}`);
   }
   await stillOurs(db('notifications')).update(undone(doneAt));
   return null;
@@ -682,7 +877,7 @@ async function takeOverPersonDone(row, cls, todayET) {
   const current = await db('notifications').where({ id: row.id, recipient_type: 'admin', done_by: row.done_by })
     .whereNotNull('done_at').first('id', 'category', 'link', 'metadata', 'created_at', db.raw('done_at::text AS done_at_token'));
   if (!current || !sameRow(current, row)) return null;
-  const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
+  const reason = judge(cls, subjectFor(current, await loadSubjects([current]), todayET)).reason;
   if (!reason) return null;
   const exact = (q, by) => sameVersion(q.where({ id: row.id, recipient_type: 'admin', done_by: by })
     .whereRaw('done_at = ?::timestamptz', [current.done_at_token]), current);
@@ -692,9 +887,9 @@ async function takeOverPersonDone(row, cls, todayET) {
   // in between hands the close back to the person (their Reopen returns).
   let stillMovedOn = false;
   try {
-    stillMovedOn = !!cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
+    stillMovedOn = !!judge(cls, subjectFor(current, await loadSubjects([current]), todayET)).reason;
   } catch (err) {
-    logger.warn(`[alert-relevance] notification ${row.id}: the check after a takeover failed, handing it back: ${err.message}`);
+    logger.warn(`[alert-relevance] notification ${row.id}: the check after a takeover failed, handing it back: ${errSummary(err)}`);
   }
   if (!stillMovedOn) {
     await exact(db('notifications'), 'relevance').update({ done_by: row.done_by });
@@ -751,11 +946,15 @@ async function rearmRelevantAgain(now, todayET) {
     const data = await loadSubjects(judged.map((j) => j.bell));
     for (const { row, bell } of judged) {
       try {
-        const cls = classify(bell);
-        if (!cls || cls.rearm === false || cls.rule(subjectFor(bell, data, todayET))) continue;
+        const cls = classify(bell, { anyMode: true });
+        if (!cls || cls.rearm === false) continue;
+        const subject = subjectFor(bell, data, todayET);
+        // Witnesses that failed to load are no verdict: leave the row as it is.
+        if (cls.contact && subject.contactUnknown) continue;
+        if (judge(cls, subject).reason) continue;
         rearmed += await putBack(row);
       } catch (err) {
-        logger.warn(`[alert-relevance] notification ${row.id} not re-armed: ${err.message}`);
+        logger.warn(`[alert-relevance] notification ${row.id} not re-armed: ${errSummary(err)}`);
       }
     }
     if (rows.length < PAGE_SIZE) break;
@@ -769,6 +968,38 @@ async function rearmRelevantAgain(now, todayET) {
 // one starts over. In-process: a restart simply starts over.
 let resumeAfter = null;
 
+// GATE_ALERT_CONTACT_CLOSE=shadow: one audit_log row per bell per class per
+// Eastern day for what the contact rules would close. The bell, its metadata
+// and its read / done state are untouched (the emitters compare metadata on a
+// refresh and the retire's version fence reads it). Advisory: a failed write is
+// logged, never fatal.
+async function recordWouldClose(items, now, todayET) {
+  if (!items.length) return 0;
+  try {
+    const { auditAlertWouldClose } = require('./audit-log');
+    return await auditAlertWouldClose({
+      et_day: todayET,
+      items: items.map(({ row, cls, reason }) => ({ notification_id: row.id, alert_class: cls.key, reason, judged_at: now.toISOString() })),
+    });
+  } catch (err) {
+    logger.warn(`[alert-relevance] could not record ${items.length} would-close verdict(s): ${errSummary(err)}`);
+    return 0;
+  }
+}
+
+// One row of a batch. The batch read is a first pass: only a row that looks
+// moved on pays for the fresh recheck that actually retires it. A shadow
+// verdict (GATE_ALERT_CONTACT_CLOSE=shadow) is only collected: an open row is
+// recorded, a person's own Done is not ours to judge there.
+async function sweepRow(row, cls, subject, { now, todayET, byClass, shadowed }) {
+  const verdict = judge(cls, subject);
+  if (verdict.would) {
+    if (!row.done_at) shadowed.push({ row, cls, reason: verdict.would });
+    return;
+  }
+  if (verdict.reason && await retireIfStillMovedOn(row, cls, todayET, now)) byClass[cls.key] = (byClass[cls.key] || 0) + 1;
+}
+
 async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (!adminAlertRelevanceLive()) return { skipped: true, reason: 'switch_off' };
   const todayET = etDateString(now);
@@ -776,6 +1007,7 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   const rearmed = await rearmRelevantAgain(now, todayET);
   const byClass = {};
   let scanned = 0;
+  let wouldClose = 0;
   let cursor = resumeAfter;
   resumeAfter = null;
   for (let page = 0; page < MAX_PAGES; page += 1) {
@@ -785,23 +1017,23 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
     scanned += rows.length;
     if (rows.length === PAGE_SIZE && page === MAX_PAGES - 1) resumeAfter = cursor;
     const data = await loadSubjects(rows);
+    const shadowed = [];
     for (const row of rows) {
       try {
         const cls = classify(row);
-        // The batch read is a first pass: only a row that looks moved on pays
-        // for the fresh recheck that actually retires it.
-        if (!cls || !cls.rule(subjectFor(row, data, todayET))) continue;
-        if (await retireIfStillMovedOn(row, cls, todayET, now)) byClass[cls.key] = (byClass[cls.key] || 0) + 1;
+        if (cls) await sweepRow(row, cls, subjectFor(row, data, todayET), { now, todayET, byClass, shadowed });
       } catch (err) {
-        logger.warn(`[alert-relevance] notification ${row.id} skipped: ${err.message}`);
+        logger.warn(`[alert-relevance] notification ${row.id} skipped: ${errSummary(err)}`);
       }
     }
+    wouldClose += await recordWouldClose(shadowed, now, todayET);
     if (rows.length < PAGE_SIZE) break;
   }
   const retired = Object.values(byClass).reduce((a, b) => a + b, 0);
   if (retired) logger.info(`[alert-relevance] retired ${retired} of ${scanned} unread alert(s): ${JSON.stringify(byClass)}`);
   if (rearmed) logger.info(`[alert-relevance] put back ${rearmed} alert(s) whose subject is relevant again`);
-  return { skipped: false, scanned, retired, byClass, rearmed };
+  if (wouldClose) logger.info(`[alert-relevance] shadow: recorded ${wouldClose} alert(s) the customer-contact rules would close`);
+  return { skipped: false, scanned, retired, byClass, rearmed, ...(alertContactCloseMode() === 'shadow' ? { wouldClose } : {}) };
 }
 
 module.exports = {
@@ -810,5 +1042,7 @@ module.exports = {
   loadSubjects,
   subjectFor,
   refsFromRow,
+  judge,
+  whereLiveBooking,
   CLASSES,
 };

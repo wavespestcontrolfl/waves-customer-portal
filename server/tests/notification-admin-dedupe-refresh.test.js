@@ -467,6 +467,24 @@ describe('bumpOnRefresh (one standing row per thread)', () => {
     expect(mockRows.notifications[0]).toMatchObject({ read_at: null, done_at: null, done_by: null, resolution: null });
   });
 
+  test('a row the relevance sweep retired comes back with its retired stamp gone, so the sweep judges it again; a quiet refresh leaves a closed row closed, stamp and all', async () => {
+    await text(1);
+    const stamp = { by: 'alert-relevance', reason: 'Answered by text', at: '2026-10-01T14:00:00.000Z' };
+    const retire = () => {
+      const row = mockRows.notifications[0];
+      Object.assign(row, { read_at: new Date(), done_at: new Date(), done_by: 'relevance', resolution: 'Answered by text', metadata: JSON.stringify({ ...JSON.parse(row.metadata), retired: stamp }) });
+    };
+    retire();
+    await text(2, { bumpOnRefresh: true, ringOnRefresh: () => false });
+    expect(mockRows.notifications[0]).toMatchObject({ done_by: 'relevance' });
+    expect(JSON.parse(mockRows.notifications[0].metadata).retired).toEqual(stamp);
+    await text(3, { bumpOnRefresh: true });
+    expect(mockRows.notifications[0]).toMatchObject({ read_at: null, done_at: null, done_by: null, resolution: null });
+    const meta = JSON.parse(mockRows.notifications[0].metadata);
+    expect(meta.retired).toBeUndefined();
+    expect(meta).toMatchObject({ dedupeKey: 'sms-thread:cust-1', payload: { twilioSid: 'SM3' } });
+  });
+
   test('without bumpOnRefresh a refresh keeps the row where it was', async () => {
     await text(1);
     mockRows.notifications[0].created_at = new Date('2026-10-01T14:00:00Z');
