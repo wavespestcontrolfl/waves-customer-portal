@@ -1915,8 +1915,8 @@ describe('Agent Estimate recurring-customer flag control', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGenerateEstimate.mockReturnValue({
-      summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 0, specialtyTotal: 450 },
-      lineItems: [{ service: 'german_roach_initial', total: 450, costs: { total: 200 } }],
+      summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 249, specialtyTotal: 0 },
+      lineItems: [{ service: 'one_time_pest', price: 249, costs: { total: 100 } }],
     });
     mockDuplicateBlock.mockResolvedValue(null);
   });
@@ -1924,7 +1924,7 @@ describe('Agent Estimate recurring-customer flag control', () => {
   test('rejects a model-supplied recurring-customer discount flag', async () => {
     const result = await executeEstimateTool('compute_estimate', {
       homeSqFt: 2000,
-      services: { germanRoachInitial: { isRecurringCustomer: true } },
+      services: { oneTimePest: { isRecurringCustomer: true } },
     });
 
     expect(result.error).toMatch(/cannot set price, cost, discount, margin, or manager-override/i);
@@ -1932,7 +1932,7 @@ describe('Agent Estimate recurring-customer flag control', () => {
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 
-  test('derives the recurring-customer flag from the server-loaded account, not the model', async () => {
+  test('derives recurring status from the server-loaded account, not the model', async () => {
     mockBuildAgentEstimateContext.mockResolvedValueOnce({
       customer_account: {
         recognized: true,
@@ -1945,26 +1945,39 @@ describe('Agent Estimate recurring-customer flag control', () => {
     const result = await executeEstimateTool('compute_estimate', {
       leadId: 'lead-1',
       homeSqFt: 2000,
-      services: { germanRoachInitial: {} },
+      services: { oneTimePest: {} },
     });
 
     expect(result.error).toBeUndefined();
     const engineArg = mockGenerateEstimate.mock.calls[0][0];
-    expect(engineArg.services.germanRoachInitial.isRecurringCustomer).toBe(true);
+    expect(engineArg.priorQualifyingServices).toEqual(['pest_control']);
     // The echoed engine_input must stay clean or the guard rejects the
     // round-trip on the next draft revision.
-    expect(result.engine_input.services.germanRoachInitial.isRecurringCustomer).toBeUndefined();
+    expect(result.engine_input.priorQualifyingServices).toBeUndefined();
   });
 
-  test('a new lead never gets the recurring-customer discount flag', async () => {
+  test('a new lead is never priced as a recurring customer', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { oneTimePest: {} },
+    });
+
+    expect(result.error).toBeUndefined();
+    const engineArg = mockGenerateEstimate.mock.calls[0][0];
+    expect(engineArg.priorQualifyingServices).toBeUndefined();
+  });
+
+  // Owner 2026-10-25 ("retire"): the legacy $100 three-visit German roach
+  // initial series is no longer quotable; the model is told what to quote.
+  test('refuses the retired germanRoachInitial key and names the cleanout', async () => {
     const result = await executeEstimateTool('compute_estimate', {
       homeSqFt: 2000,
       services: { germanRoachInitial: {} },
     });
 
-    expect(result.error).toBeUndefined();
-    const engineArg = mockGenerateEstimate.mock.calls[0][0];
-    expect(engineArg.services.germanRoachInitial.isRecurringCustomer).toBe(false);
+    expect(result.error).toMatch(/germanRoachInitial is retired/);
+    expect(result.error).toMatch(/Quote germanRoach/);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 });
 
