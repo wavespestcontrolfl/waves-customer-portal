@@ -60,8 +60,10 @@ const LABELS = {
     factSlugs: ['fact-bifenthrin-talak-label'],
   },
   gentrol_igr: {
-    // "Gentrol IGR" exactly — Gentrol Complete EC3 (pyriproxyfen +
-    // permethrin + tetramethrin) and Gentrol Point Source are other labels.
+    // "Gentrol IGR" exactly — Gentrol Complete EC3 (its own label below) and
+    // Gentrol Point Source are other labels. This label stays for visit lines
+    // recorded as "Gentrol IGR" before 2026-10-25, when the owner confirmed
+    // the bottle is Gentrol Complete EC3.
     // Label: "Cockroaches and bedbugs exposed to the GENTROL IGR will become
     // adults incapable of reproducing". Never a claim that it sterilises
     // adults. The label's "4 months" protection is an efficacy timeline,
@@ -70,6 +72,19 @@ const LABELS = {
     phrase: 'an insect growth regulator: cockroaches exposed to it become adults that cannot reproduce',
     dryRule: null, notes: [],
     factSlugs: ['fact-gentrol-igr-hydroprene'],
+  },
+  gentrol_complete_ec3: {
+    // "Gentrol Complete EC3" (EPA 89459-119; lambda-cyhalothrin + hydroprene).
+    // Label: "German cockroaches and bed bugs exposed to the IGR will become
+    // adults incapable of reproducing". The insecticide half is named only as
+    // "an insecticide", and the label's claim about the growth regulator is
+    // all it says of the other half. Never a claim that it sterilises adults,
+    // and no efficacy timeline (owner ruling 2026-09-28).
+    name: ['gentrol complete ec3'], ai: ['lambda-cyhalothrin', 'lambda cyhalothrin', 'hydroprene'],
+    source: 'Gentrol Complete EC3 label (EPA 89459-119)',
+    phrase: 'an insecticide combined with an insect growth regulator: cockroaches exposed to the growth regulator become adults that cannot reproduce',
+    dryRule: null, notes: [],
+    factSlugs: ['fact-gentrol-complete-ec3'],
   },
 };
 
@@ -80,8 +95,8 @@ const LABELS = {
 // "you may still see … for a while"), labeled or not.
 const FAMILIES = {
   non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'an insecticide', customerVisible: true, labels: ['taurus_sc'] },
-  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'bifen it', 'talak', 'demand cs', 'delta dust'], phrase: 'an insecticide', customerVisible: true, labels: ['talak'] },
-  igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'an insect growth regulator', customerVisible: true, labels: ['gentrol_igr'] },
+  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'bifen it', 'talak', 'demand cs', 'delta dust'], phrase: 'an insecticide', customerVisible: true, labels: ['talak', 'gentrol_complete_ec3'] },
+  igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'an insect growth regulator', customerVisible: true, labels: ['gentrol_igr', 'gentrol_complete_ec3'] },
   fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', customerVisible: true, labels: [] },
   herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', customerVisible: true, labels: [] },
   // A catalogued pesticide whose recorded category names it as some kind of

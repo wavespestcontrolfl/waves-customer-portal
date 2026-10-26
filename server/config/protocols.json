@@ -1923,7 +1923,7 @@
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Gentrol IGR"
+              "Gentrol Complete EC3"
             ]
           }
         },
@@ -2298,7 +2298,7 @@
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Gentrol IGR"
+              "Gentrol Complete EC3"
             ],
             "completionApplicationMethod": "spot_treatment"
           }
@@ -2314,7 +2314,7 @@
         "notes": "Bait-first, non-repellent approach. Schedule 10-14 day follow-up for confirmed live German roach activity.",
         "completionDefaultProducts": [
           "Alpine WSG",
-          "Gentrol IGR",
+          "Gentrol Complete EC3",
           "Advion Cockroach Gel Bait"
         ]
       },

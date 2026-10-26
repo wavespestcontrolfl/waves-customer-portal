@@ -226,15 +226,24 @@ const REPORT_PRODUCT_COPY = [
   },
   {
     epaReg: '2724-351',
-    names: ['gentrol igr'],
+    // The catalog row is Gentrol Complete EC3 (EPA 89459-119) since the owner's
+    // 2026-10-25 confirmation of the bottle actually applied, so visit lines read
+    // through the catalog carry that registration; lines recorded earlier keep
+    // 2724-351 and the name 'Gentrol IGR'. One entry serves all of them: this
+    // wording is true of the growth regulator in either label, and EC3-specific
+    // wording would need a new owner-approved entry.
+    movedEpaRegs: ['89459-119'],
+    names: ['gentrol igr', 'gentrol complete ec3'],
     mainPests: ['roaches'],
     howItWorks: 'An insect growth regulator: young roaches can’t mature or reproduce, so it breaks the breeding cycle. Results build over the following weeks.',
     // Narrow IGR product (owner ruling 2026-09-29): no line.
     // Pests its current EPA label names, for the writer's "its label lists" fact
-    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 002724-00351-20091201 (2009-12-01).
-    // A growth regulator: the label says exposed cockroaches "become adults incapable of reproducing". Fleas, bed
-    // bugs and pantry pests are never facts here.
-    labelPests: ['cockroaches', 'Drain flies'],
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 089459-00119-20260204 (Gentrol Complete EC3,
+    // accepted 2026-02-04), read in full 2026-10-25: it names German cockroaches (no other cockroach) and, for
+    // the growth regulator, drain flies. Before 2026-10-25 this read the Gentrol IGR Concentrate label
+    // (EPA PPLS 002724-00351-20091201, 'cockroaches'). The label says exposed cockroaches "become adults
+    // incapable of reproducing". Fleas, bed bugs and pantry pests are never facts here.
+    labelPests: ['German cockroaches', 'Drain flies'],
     petsKids: 'Keep people and pets off treated areas until the spray has dried.',
   },
   {

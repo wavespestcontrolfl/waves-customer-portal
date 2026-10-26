@@ -97,6 +97,7 @@ describe('every catalog product name this map claims to know classifies (codex P
     ['Advion Ant Bait Gel', 'ant_bait'],
     ['Advion WDG Granular', null],
     ['Gentrol IGR', 'igr'],
+    ['Gentrol Complete EC3', 'igr'],
     ['Tekko Pro IGR', 'igr'],
     // Deliberately mapped to no class (documented decision, not a gap) —
     // this is the ONE catalog name in the map that is EXPECTED to be null.
@@ -438,6 +439,11 @@ describe('buildWhatToExpect — owner wording rules 2026-10-01', () => {
     expect(gentrol.lines[0]).not.toMatch(/6 months/);
     const tekko = buildWhatToExpect({ products: [{ name: 'Tekko Pro IGR', targets: ['German cockroaches'] }] });
     expect(tekko.lines[0]).toMatch(/with pyriproxyfen and novaluron.*up to 6 months of activity on cockroach nymphs\.$/);
+    // Gentrol Complete EC3 (the catalog row since 2026-10-25) names the growth regulator half and states no
+    // duration: the 4-month sentence is the Gentrol IGR Concentrate label's.
+    const ec3 = buildWhatToExpect({ products: [{ name: 'Gentrol Complete EC3' }] });
+    expect(ec3.lines[0]).toMatch(/^We added an insect growth regulator \(IGR\) with \(S\)-hydroprene\. /);
+    expect(ec3.lines[0]).not.toMatch(/months/);
     // The figure is for cockroach nymphs: a flea visit never brings up roaches.
     const fleas = buildWhatToExpect({ products: [{ name: 'Tekko Pro IGR', targets: ['Fleas'] }] });
     expect(fleas.lines[0]).not.toMatch(/cockroach|6 months/);
