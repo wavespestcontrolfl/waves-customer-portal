@@ -122,6 +122,26 @@ jest.setTimeout(60000);
     expect(await state(before)).toEqual(['supersede', 'A person texted the caller after the call']);
   });
 
+  test('a shared phone never crosses two different customers: a text to another customer on the caller\'s number does not close it; a text with no customer id, or to the same customer, does', async () => {
+    gate('true');
+    const other = randomUUID();
+    await database('customers').insert({ id: other, first_name: 'Sam', last_name: 'Synthetic', phone: CALLER });
+    const row = await bell(await missedCall());
+    await staffText(mins(10), { customer_id: other });
+    expect(await run()).toBe(0);
+    expect(await state(row)).toBeNull();
+    // An unknown caller (the call has no customer) is named by the phone, whoever the text was filed under.
+    const unknownCall = await missedCall({ customer_id: null });
+    const unknown = await bell(unknownCall);
+    expect(await run()).toBe(1);
+    expect(await state(unknown)).toEqual(['supersede', 'A person texted the caller after the call']);
+    expect(await state(row)).toBeNull();
+    // A text that carries no customer id names the phone: it closes the known caller's bell too.
+    await staffText(mins(12), { customer_id: null });
+    expect(await run()).toBe(1);
+    expect(await state(row)).toEqual(['supersede', 'A person texted the caller after the call']);
+  });
+
   test('a call row inserted after the call was over is anchored on the call\'s real start: a text between the call and the delayed insert counts, one before the call does not', async () => {
     gate('true');
     // The status callback inserted this row 10 minutes after the call began (it lasted 10 minutes).

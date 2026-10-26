@@ -511,6 +511,56 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect((await get(missedBell.id)).done_at).toBeNull();
     });
 
+    test('a shared phone never crosses two different customers: a text, call back or reply to B is not contact for A; a witness with no customer id, an unknown subject and the same customer by id still match', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -300);
+      const shared = '+15555558081';
+      const a = await customerWith(shared);
+      const b = await customerWith(shared);
+      const voicemailFor = async (customer, phone, { known = true } = {}) => {
+        const call = await insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: known ? customer.id : null, status: 'no-answer', twilio_call_sid: sid('CAI'), created_at: t0 });
+        return bell({ category: 'voicemail_callback', created_at: mins(t0, 3),
+          metadata: { triggerKey: 'customer_voicemail_callback', payload: { callLogId: call.id, customerId: known ? customer.id : null, phone } } });
+      };
+      const textRow = await voicemailFor(a, shared);
+      const callRow = await voicemailFor(a, shared);
+      const unknownRow = await voicemailFor(a, shared, { known: false });
+      // B's text and B's call back do not close A's bells.
+      await staffText(b, shared, mins(t0, 10));
+      await staffCall(b, shared, mins(t0, 12));
+      await sweep();
+      expect((await get(textRow.id)).done_at).toBeNull();
+      expect((await get(callRow.id)).done_at).toBeNull();
+      // An unknown caller (no customer id on the bell) is named by the phone: B's text is the only thing known about the number.
+      expect(await get(unknownRow.id)).toMatchObject({ done_by: 'relevance', resolution: 'A person called back' });
+      // A text to the number that carries no customer id names the phone; and a text to A by id names A.
+      await staffText(null, shared, mins(t0, 20));
+      await sweep();
+      expect(await get(textRow.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+      expect((await get(callRow.id)).done_by).toBe('relevance');
+      const own = await customerWith('+15555558082');
+      const ownRow = await voicemailFor(own, own.phone);
+      await staffText(own, own.phone, mins(t0, 10));
+      await sweep();
+      expect(await get(ownRow.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+    });
+
+    test('a text on a shared phone: another customer\'s reply to the number is not an answer for this customer\'s thread; their own reply, or a courtesy text, still closes it', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -240);
+      const shared = '+15555558083';
+      const a = await customerWith(shared);
+      const b = await customerWith(shared);
+      const crossed = await text({ customer: a, phone: shared, at: t0 });
+      await staffText(b, shared, mins(t0, 10));
+      await sweep();
+      expect((await get(crossed.row.id)).done_at).toBeNull();
+      // A's own reply (by customer id) names A.
+      await staffText(a, shared, mins(t0, 20));
+      await sweep();
+      expect(await get(crossed.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+    });
+
     test('an email from a customer: a person\'s reply in its thread closes it; a forward to someone else, a reply on another thread and an earlier reply do not', async () => {
       gate('true');
       const t0 = mins(new Date(), -300);

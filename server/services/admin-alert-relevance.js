@@ -614,6 +614,10 @@ function textAnswered(s) {
   if (!c || c.pending !== false) return null;
   if (contactAfter(c, c.textAt)) return 'Answered by text';
   if (contactAfter(c, c.backAt) || contactAfter(c, c.inAt)) return 'Answered by a call';
+  // The reader matches by phone alone: a person's text or call to ANOTHER customer
+  // who shares this number may be what it counted. Nothing of this customer's
+  // answers it, so it is not judged.
+  if (contactAfter(c, c.crossedAt)) return null;
   return 'Answered, or no reply needed';
 }
 

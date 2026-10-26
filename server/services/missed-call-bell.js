@@ -844,7 +844,9 @@ async function supersedeCalls(callLogIds, resolution) {
 // began (callStartedAtSql, the SQL form of call-timeline.js callStartedAt: a row
 // inserted after the call was over is backed out to its real start):
 //  - a person's text reached the caller (operatorReplySql + smsDeliveredSql,
-//    minus a proactive draft), by the call's customer or by the caller's phone;
+//    minus a proactive draft), by the call's customer, or by the caller's phone
+//    only when the text or the call carries no customer id (people can share a
+//    phone: a text to another customer on this number is not contact);
 //  - a visit was booked for the call's customer (the new-lead class's live
 //    top-level booking predicate, whereLiveBooking);
 //  - a quote was handed off to the call's customer (handedOffWithin +
@@ -869,7 +871,8 @@ const CONTACT_CLAUSES = [
           .modify(withoutProactiveDraft)
           .whereRaw(`os.created_at > ${callStartedAtSql('call_log')}`)
           .where((w) => w.whereRaw('os.customer_id = call_log.customer_id')
-            .orWhereRaw(`${callerKey} <> '' AND ${phoneIdentitySql('os.to_phone')} = ${callerKey}`));
+            .orWhereRaw(`${callerKey} <> '' AND ${phoneIdentitySql('os.to_phone')} = ${callerKey}
+              AND (os.customer_id IS NULL OR call_log.customer_id IS NULL)`));
       });
     },
   },

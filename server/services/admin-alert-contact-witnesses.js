@@ -47,19 +47,40 @@ const asDate = (v) => {
 const later = (a, b) => (!b || (a && a.getTime() >= b.getTime()) ? a : b);
 const unique = (list) => [...new Set(list.filter(Boolean))];
 
-// The newest time among grouped witness rows ({customer_id, peer, at}) that
-// name this item by customer or by phone identity.
+// Does a grouped witness row ({customer_id, peer, at}) name this item?
+//  - Both carry a customer id: only the same id does, whatever the phone. The
+//    schema lets different people share a phone, so a text or call to customer B
+//    on a number A also has is never contact for A.
+//  - Either has no customer id (an unknown caller or sender, or an unlinked
+//    text): the phone identity names it.
+function namesItem(row, item) {
+  if (item.customerId && row.customer_id) return String(row.customer_id) === item.customerId;
+  return !!row.peer && item.peers.has(row.peer);
+}
+
+// The newest time among the witness rows that name this item.
 function latestFor(rows, item) {
   let best = null;
+  for (const row of rows) if (namesItem(row, item)) best = later(best, asDate(row.at));
+  return best;
+}
+
+// The newest time among rows that share the item's phone but belong to ANOTHER
+// customer (two different ids): never contact for this item, but the Messages
+// reader matches by phone alone and may have counted them as answering the text.
+function latestCrossedFor(rows, item) {
+  let best = null;
   for (const row of rows) {
-    const byCustomer = !!item.customerId && !!row.customer_id && String(row.customer_id) === item.customerId;
-    const byPhone = !!row.peer && item.peers.has(row.peer);
-    if (byCustomer || byPhone) best = later(best, asDate(row.at));
+    const crossed = !!item.customerId && !!row.customer_id && String(row.customer_id) !== item.customerId
+      && !!row.peer && item.peers.has(row.peer);
+    if (crossed) best = later(best, asDate(row.at));
   }
   return best;
 }
 
-// WHERE (customer_id IN ids OR peer = ANY peers) over the given columns.
+// WHERE (customer_id IN ids OR peer = ANY peers) over the given columns: a
+// prefilter only. namesItem decides which rows name an item (a shared phone
+// never crosses two different customer ids).
 function whereIdentity(query, customerColumn, peerSql, customerIds, peers) {
   return query.where((w) => {
     if (customerIds.length) w.whereIn(customerColumn, customerIds);
@@ -200,7 +221,7 @@ async function attachEmailReplies(conn, idents, bundles) {
  *   email {emailId, customerId}; lead {customerId, phone}.
  * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>}} deps
  * @returns {Promise<Map<string, object>>} notification id -> bundle
- *   { anchor, pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt };
+ *   { anchor, pending (sms), textAt, backAt, inAt, crossedAt, visitAt, quote, replyAt };
  *   an item whose subject cannot be identified is absent (never judged).
  */
 async function loadContactBundles(items, { conn, bookedVisits }) {
@@ -248,6 +269,7 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
       textAt: latestFor(textRows, ident),
       backAt: latestFor(backRows, ident),
       inAt: latestFor(inRows, ident),
+      crossedAt: [textRows, backRows, inRows].reduce((best, rows) => later(best, latestCrossedFor(rows, ident)), null),
       visitAt: customerId ? asDate(visits.get(customerId)) : null,
       quote: false,
       replyAt: null,
