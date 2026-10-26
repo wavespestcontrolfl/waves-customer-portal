@@ -67,10 +67,13 @@ function sample(where, { minutesAgo = 0 } = {}) {
 let devices;
 let deliveredOk;
 let dispatched;
+// A pending promise holds a hand-off in flight (the provider round trip).
+let inFlight;
 function fakePushService() {
   PushService.sendToAdminUser.mockImplementation(async (_technicianId, _notification, { beforeDispatch } = {}) => {
     if (!devices) return { subscriptions: 0, sent: 0 };
     if (beforeDispatch && (await beforeDispatch()) === false) return { subscriptions: devices, sent: 0, superseded: true };
+    if (inFlight) await inFlight;
     dispatched += 1;
     return { subscriptions: devices, sent: deliveredOk ? devices : 0, failed: deliveredOk ? 0 : devices };
   });
@@ -83,6 +86,7 @@ beforeEach(() => {
   devices = 1;
   deliveredOk = true;
   dispatched = 0;
+  inFlight = null;
   fakePushService();
   process.env.GATE_GATE_CODE_PUSH = 'true';
   process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
@@ -158,6 +162,25 @@ test('a delivery no device accepted frees the trip for another try; after three 
   deliveredOk = true;
   await expect(maybePushGateCode(sample(at(0.0009)))).resolves.toEqual({ sent: false, reason: 'already_sent' });
   expect(dispatched).toBe(3);
+});
+
+// Codex pre-push P1 (81d6000e11): a claim refused because another sample's
+// delivery is still in flight is not remembered, so when that delivery
+// fails, this process tries again.
+test('a sample that meets another sample\'s delivery in flight retries once that delivery fails', async () => {
+  let finish;
+  inFlight = new Promise((resolve) => { finish = resolve; });
+  deliveredOk = false;
+  const first = maybePushGateCode(sample(at(0.0009)));
+  await new Promise((resolve) => setImmediate(resolve)); // the first sample now holds the claim
+  await expect(maybePushGateCode(sample(at(0.0008)))).resolves.toEqual({ sent: false, reason: 'already_sent' });
+  finish();
+  await expect(first).resolves.toEqual({ sent: false, reason: 'delivery_failed' });
+
+  inFlight = null;
+  deliveredOk = true;
+  await expect(maybePushGateCode(sample(at(0.0007)))).resolves.toEqual({ sent: true, trigger: 'gate_pin' });
+  expect(dispatched).toBe(2);
 });
 
 test('a failed delivery, then a good one: the code arrives on the next sample', async () => {

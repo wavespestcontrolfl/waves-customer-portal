@@ -74,12 +74,13 @@ async function gateFor(service) {
 }
 
 // Claims the push for this stop and trip, right before the first device
-// hand-off (PushService beforeDispatch, after its device lookup): true when
-// this call recorded it. A trip is taken while it has a sent row that no
-// failed row answers, and for good once it has failed MAX_FAILED_ATTEMPTS
-// times.
+// hand-off (PushService beforeDispatch, after its device lookup):
+//   'claimed'   this call recorded it;
+//   'taken'     a sent row no failed row answers yet: delivered, or still in
+//               flight on another sample, which may still fail and free it;
+//   'exhausted' it failed MAX_FAILED_ATTEMPTS times: no more tries.
 async function claimOnce(service, key, { trigger, distance }) {
-  let claimed = false;
+  let outcome = 'taken';
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['gate_code_push', key]);
     const rows = await trx('audit_log')
@@ -88,7 +89,8 @@ async function claimOnce(service, key, { trigger, distance }) {
       .whereRaw("metadata->>'key' = ?", [key])
       .select('action');
     const failed = rows.filter((row) => row.action === FAILED_ACTION).length;
-    if (rows.length - failed > failed || failed >= MAX_FAILED_ATTEMPTS) return;
+    if (failed >= MAX_FAILED_ATTEMPTS) { outcome = 'exhausted'; return; }
+    if (rows.length - failed > failed) return;
     await recordAuditEvent({
       actor_type: 'system:gate-code-push',
       action: SENT_ACTION,
@@ -98,9 +100,9 @@ async function claimOnce(service, key, { trigger, distance }) {
       critical: true,
       trx,
     });
-    claimed = true;
+    outcome = 'claimed';
   });
-  return claimed;
+  return outcome;
 }
 
 // A delivery no device accepted: answers the claim so a later sample tries again.
@@ -167,7 +169,7 @@ async function maybePushGateCode({ techStatus, point } = {}) {
 
     // Claimed only once a device is about to receive it, so a failed device
     // lookup or a tech with no device never burns the trip.
-    let claimed = false;
+    let claim = null;
     const result = await require('./push-notifications').sendToAdminUser(service.technician_id || techStatus.tech_id, {
       title: lines[0],
       body: lines.slice(1).join(' · '),
@@ -176,13 +178,15 @@ async function maybePushGateCode({ techStatus, point } = {}) {
       priority: 'high',
     }, {
       beforeDispatch: async () => {
-        claimed = await claimOnce(service, key, { trigger, distance });
-        return claimed;
+        claim = await claimOnce(service, key, { trigger, distance });
+        return claim === 'claimed';
       },
     });
     if (!(Number(result?.subscriptions) > 0)) return { sent: false, reason: 'no_device' };
-    if (!claimed) {
-      remember(key);
+    if (claim !== 'claimed') {
+      // Remembered only when no try is left: a trip another sample holds may
+      // still fail and free it (Codex pre-push P1).
+      if (claim === 'exhausted') remember(key);
       return { sent: false, reason: 'already_sent' };
     }
     if (!(Number(result.sent) > 0)) {
