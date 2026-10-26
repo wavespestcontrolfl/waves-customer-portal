@@ -56,22 +56,22 @@ describe('restock list office detail', () => {
     try {
       const owner = await listRestockRequests({ status: 'open', showSpend: true });
       expect(owner.siteOneEmailOrder).toBe(true);
-      expect(owner.requests[0].emailOrder).toEqual({ status: 'sent', po: 'WAVES-R1', sentAt: '2026-10-27T15:00:00Z', packages: 6, itemNumber: '098604', orderedQuantity: 350, retryable: false });
+      expect(owner.requests[0].emailOrder).toEqual({ status: 'sent', po: 'WAVES-R1', sentAt: '2026-10-27T15:00:00Z', packages: 6, itemNumber: '098604', orderedQuantity: 350, state: 'sent' });
       const tech = await listRestockRequests({ status: 'open', officeDetail: false });
       expect(tech.siteOneEmailOrder).toBe(true); // the gate state only; the button is admin-only in the tab
       expect(tech.requests[0].emailOrder).toBeNull();
     } finally { delete process.env.GATE_SITEONE_EMAIL_ORDER; }
   });
 
-  test('a sending email is retryable only when its claim never attempted the send and is stale (Codex #6866 r1 P2)', async () => {
+  test('a sending email reads retryable only when its claim never attempted the send and is stale (Codex #6866 r1 P2)', async () => {
     const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000).toISOString();
     const read = async (row) => {
       global.__restockRow = { ...ROW, email_status: 'sending', email_po: 'WAVES-R1', ...row };
       return (await listRestockRequests({ status: 'open', showSpend: true })).requests[0].emailOrder;
     };
-    expect(await read({ email_send_attempted_at: null, email_claimed_at: minutesAgo(11) })).toMatchObject({ status: 'sending', retryable: true });
-    expect(await read({ email_send_attempted_at: null, email_claimed_at: minutesAgo(2) })).toMatchObject({ status: 'sending', retryable: false });
-    expect(await read({ email_send_attempted_at: minutesAgo(11), email_claimed_at: minutesAgo(11) })).toMatchObject({ status: 'sending', retryable: false });
+    expect(await read({ email_send_attempted_at: null, email_claimed_at: minutesAgo(11) })).toMatchObject({ status: 'sending', state: 'retryable' });
+    expect(await read({ email_send_attempted_at: null, email_claimed_at: minutesAgo(2) })).toMatchObject({ status: 'sending', state: 'sending' });
+    expect(await read({ email_send_attempted_at: minutesAgo(11), email_claimed_at: minutesAgo(11) })).toMatchObject({ status: 'sending', state: 'sending' });
   });
 
   test('a failed or pending email row is not shown', async () => {

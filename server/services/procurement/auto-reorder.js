@@ -143,11 +143,19 @@ async function ringRestockBell({ notify, product, request }) {
 // notifyAdmin resolves NULL when it could not persist the notification
 // (its own catch), so the resolved row is checked like a rejection (Codex
 // r13 P2). The request row stays; the next sweep re-rings it.
+// Both bell paths (a new request's first bell, an open request's re-ring) re-read the request's
+// SiteOne order email right after ringing: an email claim that landed while the bell was being
+// written retired the bells that existed then, not this one, so it is retired here (the
+// dispatcher hand-off's post-ring re-check; pre-push audit P1 on e60861f599, Codex #6866 r4 P2).
+// The claim retires inside its own transaction, so a claim landing after this read retires it.
 async function bellOrWarn(ctx, product, request, bucket) {
   try {
     const row = await ringRestockBell({ notify: ctx.notify, product, request });
     if (!row) throw new Error('notification not persisted');
     ctx.result[bucket].push({ productId: product.id, requestId: request.id });
+    if (await require('./vendor-order-email').findEmailOrderOut(ctx.conn, request.id)) {
+      await require('./order-dispatch').retireRequestBell(ctx.conn, request.id);
+    }
   } catch (notifyErr) {
     logger.error(`[auto-reorder] bell NOT delivered for ${product.name} (request ${request.id}): ${notifyErr.message}`);
     ctx.result.errors.push({ productId: product.id, name: product.name, requestId: request.id, message: `bell: ${notifyErr.message}` });
@@ -237,13 +245,6 @@ async function handleLiveRequest(ctx, p, existing) {
   // owns the request (Codex r31 P2).
   if (!(await settleParkedLedgerBell(ctx, p, request))) return;
   await bellOrWarn(ctx, p, request, 'renotified');
-  // An email claim that landed while the bell was being written retired the bells that existed
-  // then, not this one: retire it too (the dispatcher hand-off's post-ring re-check, pre-push
-  // audit P1 on e60861f599). The claim retires inside its own transaction, so a claim that lands
-  // after this read retires the bell itself.
-  if (await require('./vendor-order-email').findEmailOrderOut(ctx.conn, request.id)) {
-    await require('./order-dispatch').retireRequestBell(ctx.conn, request.id);
-  }
 }
 
 async function settleParkedLedgerBell(ctx, product, request) {

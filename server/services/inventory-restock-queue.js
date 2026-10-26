@@ -101,9 +101,8 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
           // What those packages hold, in the request's unit: the tab's Receive default (a request for
           // 301 lb emails 7 x 50 lb), also while the send is unconfirmed (Codex #6866 r2 P2).
           orderedQuantity: row.email_ordered_quantity,
-          // A claim that crashed before its send was attempted, now stale: nothing reached SendGrid,
-          // and the server takes it over on the next Send. The tab offers the button again.
-          retryable: require('./procurement/vendor-order-email').retryableEmail({ status: row.email_status, send_attempted_at: row.email_send_attempted_at, claimed_at: row.email_claimed_at }),
+          // sent | sending | retryable (a stale claim that never attempted its send): what the tab shows.
+          state: require('./procurement/vendor-order-email').emailOrderState({ status: row.email_status, send_attempted_at: row.email_send_attempted_at, claimed_at: row.email_claimed_at }),
         } : null,
         neededBy: row.needed_by,
         reason: row.reason,

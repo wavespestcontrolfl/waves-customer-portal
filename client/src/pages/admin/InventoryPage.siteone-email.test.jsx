@@ -143,7 +143,7 @@ describe('Email order to SiteOne', () => {
 
   it('a sent email shows on the row with its date and PO and removes the button', async () => {
     installFetch({
-      requests: [{ ...OPEN_REQUEST, status: 'ordered', emailOrder: { status: 'sent', po: 'WAVES-20000000', sentAt: '2026-10-27T15:00:00Z', packages: 6 } }],
+      requests: [{ ...OPEN_REQUEST, status: 'ordered', emailOrder: { status: 'sent', state: 'sent', po: 'WAVES-20000000', sentAt: '2026-10-27T15:00:00Z', packages: 6 } }],
     });
     mount();
     expect(await screen.findByText(/Emailed to SiteOne\s+2026-10-27 · PO\s+WAVES-20000000/)).toBeInTheDocument();
@@ -152,7 +152,7 @@ describe('Email order to SiteOne', () => {
 
   it('Receive defaults to what the emailed packages hold, not the requested amount', async () => {
     installFetch({
-      requests: [{ ...OPEN_REQUEST, status: 'ordered', requestedQuantity: 301, emailOrder: { status: 'sent', po: 'WAVES-20000000', sentAt: '2026-10-27T15:00:00Z', packages: 7, orderedQuantity: 350 } }],
+      requests: [{ ...OPEN_REQUEST, status: 'ordered', requestedQuantity: 301, emailOrder: { status: 'sent', state: 'sent', po: 'WAVES-20000000', sentAt: '2026-10-27T15:00:00Z', packages: 7, orderedQuantity: 350 } }],
     });
     mount();
     await screen.findByText(/Emailed to SiteOne/);
@@ -160,14 +160,14 @@ describe('Email order to SiteOne', () => {
   });
 
   it('an unconfirmed email warns before anyone sends again', async () => {
-    installFetch({ requests: [{ ...OPEN_REQUEST, emailOrder: { status: 'sending', po: 'WAVES-20000000', sentAt: null } }] });
+    installFetch({ requests: [{ ...OPEN_REQUEST, emailOrder: { status: 'sending', state: 'sending', po: 'WAVES-20000000', sentAt: null } }] });
     mount();
     expect(await screen.findByText(/Email to SiteOne may have gone out/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Email order to SiteOne' })).not.toBeInTheDocument();
   });
 
   it('a stale claim that never started offers the button again (Codex #6866 r1 P2)', async () => {
-    installFetch({ requests: [{ ...OPEN_REQUEST, emailOrder: { status: 'sending', po: 'WAVES-20000000', sentAt: null, retryable: true } }] });
+    installFetch({ requests: [{ ...OPEN_REQUEST, emailOrder: { status: 'sending', state: 'retryable', po: 'WAVES-20000000', sentAt: null } }] });
     mount();
     expect(await screen.findByText(/An earlier email to SiteOne never started/)).toBeInTheDocument();
     expect(screen.queryByText(/may have gone out/)).not.toBeInTheDocument();

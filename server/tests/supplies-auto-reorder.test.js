@@ -531,3 +531,19 @@ test('the sweep re-ring retires nothing when no email claim landed', async () =>
   expect(notify).toHaveBeenCalledTimes(1);
   expect(mockState.retiredBells).toEqual([]);
 });
+
+test('an email claim that lands while a NEW request\'s first bell is written gets that bell retired right after (Codex #6866 r4 P2)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/p' };
+  mockState.emailOut = null;
+  mockState.emailOutAfterRing = { po: 'WAVES-REQ1', status: 'sending' }; // the first read is the post-ring one
+  mockState.emailReads = 1; // > 1 on the post-ring read
+  mockState.retiredBells = [];
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(r.created).toHaveLength(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(mockState.retiredBells).toEqual([r.created[0].requestId]);
+  } finally { mockState.emailOutAfterRing = null; mockState.emailReads = 0; }
+});

@@ -3269,17 +3269,55 @@ function autoOrderSummary(order) {
 
 // Restock tab — the request's status pill, its automatic-order outcome and
 // the Mark Ordered action, in one cell.
+// The SiteOne order email states a Restock row shows (the server's emailOrder.state; no email =
+// "none"). Only "none" and "retryable" (a stale claim that never started) offer the button.
+const EMAIL_ORDER_STATES = {
+  none: { canSend: true, render: () => null },
+  retryable: {
+    canSend: true,
+    render: (e) => (
+      <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
+        An earlier email to SiteOne never started · PO {e.po}. You can send it
+        again.
+      </div>
+    ),
+  },
+  sending: {
+    canSend: false,
+    render: (e) => (
+      <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
+        Email to SiteOne may have gone out · PO {e.po}. Check SendGrid or
+        SiteOne before sending again.
+      </div>
+    ),
+  },
+  sent: {
+    canSend: false,
+    render: (e) => (
+      <div className="mt-[6px] text-ui-body u-nums">
+        Emailed to SiteOne {etDateString(new Date(e.sentAt))} · PO {e.po}
+      </div>
+    ),
+  },
+};
+
+// The one call site passes every prop, so none needs a default.
 function RestockStatusCell({
   request,
   receivingId,
   runAction,
-  canAuthor = false,
-  evidence = null,
-  loadEvidence = null,
-  onEmailOrder = null,
+  canAuthor,
+  evidence,
+  loadEvidence,
+  onEmailOrder,
 }) {
   const order = request.order;
   const emailOrder = request.emailOrder;
+  const emailState = EMAIL_ORDER_STATES[emailOrder?.state ?? "none"];
+  // Mark Ordered and Email order share one eligibility: an owner, an open
+  // request, and no bot claim placing.
+  const canAct =
+    canAuthor && request.status === "open" && order?.status !== "placing";
   const summary = order ? autoOrderSummary(order) : null;
   // Links show only while their presigned URLs are live; an expired or empty
   // fetch falls back to the button, and live links keep a Refresh beside them.
@@ -3336,26 +3374,8 @@ function RestockStatusCell({
           )}
         </div>
       )}
-      {emailOrder?.status === "sent" && (
-        <div className="mt-[6px] text-ui-body u-nums">
-          Emailed to SiteOne{" "}
-          {emailOrder.sentAt ? etDateString(new Date(emailOrder.sentAt)) : ""} · PO{" "}
-          {emailOrder.po}
-        </div>
-      )}
-      {emailOrder?.status === "sending" && !emailOrder.retryable && (
-        <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
-          Email to SiteOne may have gone out · PO {emailOrder.po}. Check SendGrid
-          or SiteOne before sending again.
-        </div>
-      )}
-      {emailOrder?.status === "sending" && emailOrder.retryable && (
-        <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
-          An earlier email to SiteOne never started · PO {emailOrder.po}. You
-          can send it again.
-        </div>
-      )}
-      {canAuthor && request.status === "open" && order?.status !== "placing" && (
+      {emailState.render(emailOrder)}
+      {canAct && (
         <Button
           onClick={() => runAction(request, "mark_ordered")}
           disabled={receivingId === request.id}
@@ -3365,11 +3385,7 @@ function RestockStatusCell({
           Mark Ordered
         </Button>
       )}
-      {canAuthor &&
-        onEmailOrder &&
-        request.status === "open" &&
-        (!emailOrder || emailOrder.retryable) &&
-        order?.status !== "placing" && (
+      {canAct && onEmailOrder && emailState.canSend && (
           <Button
             onClick={() => onEmailOrder(request)}
             disabled={receivingId === request.id}
@@ -3394,7 +3410,7 @@ function RestockActionCell({
   setReceiveDrafts,
   receivingId,
   runAction,
-  canAuthor = false,
+  canAuthor,
 }) {
   const setDraft = (patch) =>
     setReceiveDrafts((prev) => ({
@@ -3426,7 +3442,8 @@ function RestockActionCell({
         <span className="text-ink-secondary">Closed</span>
       </TD>
     );
-  const orderOut = !!request.order?.placedAt && !request.order?.revokedAt;
+  // placedAt set means the order exists, so revokedAt needs no ?.
+  const orderOut = !!request.order?.placedAt && !request.order.revokedAt;
   return (
     <TD>
       <div className="grid gap-[6px] min-w-[220px]">

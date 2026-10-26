@@ -115,11 +115,12 @@ function claimable(row, now = Date.now()) {
   return row.status === 'sending' && !row.send_attempted_at
     && !!row.claimed_at && new Date(row.claimed_at).getTime() < now - STALE_UNATTEMPTED_MS;
 }
-// A 'sending' row whose claim crashed before the attempt stamp, and is stale: nothing reached
-// SendGrid, so a new claim may take it over (claimable). The Restock tab offers the button again
-// for it; an ATTEMPTED send stays blocked until a person checks it (Codex #6866 r1 P2).
-function retryableEmail(row, now = Date.now()) {
-  return !!row && row.status === 'sending' && claimable(row, now);
+// The state the Restock tab shows for a sent or sending email row: 'sent', 'sending' (it may have
+// gone out: blocked until a person checks), or 'retryable' (a claim that crashed before its
+// attempt stamp, now stale: nothing reached SendGrid and the next Send takes it over; Codex #6866
+// r1 P2).
+function emailOrderState(row, now = Date.now()) {
+  return row.status === 'sending' && claimable(row, now) ? 'retryable' : row.status;
 }
 // The order settings, checked in this order: the first failing rule refuses.
 const SETTING_REFUSALS = [
@@ -410,7 +411,7 @@ async function sendOrderEmail(requestId, { actor, actorId, version }, deps = {})
 
 module.exports = {
   findEmailOrderOut,
-  retryableEmail,
+  emailOrderState,
   buildSiteOneOrderEmail,
   previewOrderEmail,
   sendOrderEmail,
