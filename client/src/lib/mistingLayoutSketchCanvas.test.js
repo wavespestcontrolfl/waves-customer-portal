@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { MAP_HEIGHT } from '../components/tech/treatmentZoneSpray';
 import { SKETCH_ATTRIBUTION_H, SKETCH_HEIGHT, SKETCH_WIDTH, buildSketchModel } from './mistingLayoutSketch';
 import { MIST_WEDGE_FILL } from './mistingLayoutMistDraw';
@@ -54,7 +54,8 @@ describe('drawSketch', () => {
     const words = texts.join(' | ');
     expect(words).not.toMatch(/Proposed misting layout|Concept layout|Nozzles:|Risers:|Near water|Line:|No-mist zones|Nozzle \(number|Arrow and mist|Example Court|2026/);
     // No glass panels: no rounded box is drawn or clipped to.
-    expect(calls.filter((c) => c[0] === 'arcTo' || c[0] === 'clip')).toHaveLength(0);
+    expect(calls.filter((c) => c[0] === 'arcTo')).toHaveLength(0);
+    expect(calls.filter((c) => c[0] === 'clip')).toHaveLength(1); // the one clip that keeps the marks off the strip
     expect(calls.some((c) => c[0] === 'fillRect')).toBe(true); // the pump square
     expect(calls.filter((c) => c[0] === 'fillRect' && !(c[3] === 28 && c[4] === 28))).toHaveLength(0);
   });
@@ -84,6 +85,36 @@ describe('drawSketch', () => {
       const [at] = fillsOf(lowCalls.calls, t);
       expect(box(at).y1).toBeLessThanOrEqual(attributionTop);
     });
+  });
+
+  it('clips every mark above the strip, so an arrow or wedge from a nozzle near the bottom edge never reaches it', () => {
+    const near = buildSketchModel({
+      lat: 26.95, zoom: 20,
+      lines: [{ id: 'L1', kind: 'eave', points: [{ x: 300, y: 300 }, { x: 900, y: 300 }] }],
+      // A nozzle 26 px above the strip, aimed straight down: its 40 px arrow and 46 px wedge would cross into it.
+      nozzles: [{ x: 600, y: SKETCH_HEIGHT - SKETCH_ATTRIBUTION_H - 26, kind: 'eave', lineIndex: 0, aim: 180 }],
+      risers: [], pump: null, zones: [],
+    });
+    const { ctx, calls } = recordingContext();
+    drawSketch(ctx, near, { map: {} });
+    const rectAt = calls.findIndex((c) => c[0] === 'rect');
+    expect(calls[rectAt]).toEqual(['rect', 0, 0, SKETCH_WIDTH, SKETCH_HEIGHT - SKETCH_ATTRIBUTION_H]);
+    expect(calls[rectAt + 1][0]).toBe('clip');
+    const photoAt = calls.findIndex((c) => c[0] === 'drawImage');
+    expect(photoAt).toBeLessThan(rectAt); // the photo itself is the whole frame, the marks are clipped
+    expect(calls.findIndex((c) => c[0] === 'arc')).toBeGreaterThan(rectAt + 1);
+    expect(calls.findIndex((c) => c[0] === 'lineTo')).toBeGreaterThan(rectAt + 1);
+    expect(calls.slice(rectAt).filter((c) => c[0] === 'restore').length).toBeGreaterThanOrEqual(1);
+    // The last restore comes after the last mark and label, so the clip holds for all of them.
+    const lastText = calls.map((c) => c[0] === 'fillText' || c[0] === 'strokeText').lastIndexOf(true);
+    const clipSave = calls.slice(0, rectAt).map((c) => c[0]).lastIndexOf('save');
+    let depth = 0;
+    let closedAt = -1;
+    calls.slice(clipSave).forEach((c, i) => {
+      if (c[0] === 'save') depth += 1;
+      if (c[0] === 'restore') { depth -= 1; if (depth === 0 && closedAt < 0) closedAt = clipSave + i; }
+    });
+    expect(closedAt).toBeGreaterThan(lastText);
   });
 
   it('draws the pump as one square', () => {

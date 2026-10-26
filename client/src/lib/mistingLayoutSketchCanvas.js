@@ -232,6 +232,12 @@ function drawScaleBar(ctx, model) {
  */
 export function drawSketch(ctx, model, { map }) {
   ctx.drawImage(map, 0, 0, MAP_WIDTH, MAP_HEIGHT);
+  // Everything we draw stays above the photo's bottom strip (Google's attribution), even an arrow or a mist wedge
+  // that reaches past a nozzle near the bottom edge.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, MAP_WIDTH, BOTTOM_LIMIT);
+  ctx.clip();
   model.zones.forEach((z) => drawZone(ctx, z));
   model.lines.forEach((l) => drawLine(ctx, l));
   model.risers.forEach((r) => drawRiser(ctx, r));
@@ -244,6 +250,7 @@ export function drawSketch(ctx, model, { map }) {
   model.nozzles.forEach((n) => drawNozzleNumber(ctx, n));
   drawLabels(ctx, model, [scaleBarRect(model)]);
   drawScaleBar(ctx, model);
+  ctx.restore();
 }
 
 function renderToBlob(model, images) {
