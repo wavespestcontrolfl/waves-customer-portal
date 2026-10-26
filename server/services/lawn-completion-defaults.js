@@ -210,15 +210,18 @@ function completionItem(item, protocolProduct) {
 // track for anyone; that resolution must not become a one-time or commercial
 // visit's protocol — and a partial assignment (window only) must not let the
 // matcher's wildcards adopt the calendar-resolved protocol either.
-// An EXPLICIT non-membership billing lane defeats the tier fallback: a
-// customer reclassified to per_visit / one_time can legitimately keep a
-// legacy Bronze–Platinum tier on the row, and billing-lane already rules
-// that such a lane is authoritative over lingering tier fields (a per_visit
-// / one_time customer is never dues-covered). Attribution follows the same
-// classifier so a nonmember visit's applied products are not recorded as
-// seasonal protocol actuals. per_application and annual_prepay are
-// membership lanes; null / inferred keeps the tier rule.
-const NON_PROGRAM_BILLING_MODES = new Set(['per_visit', 'one_time']);
+// Owner ruling 2026-10-26 ("v13 yes"): a per_visit customer with a WaveGuard
+// tier gets the lawn program like a member (completion defaults, protocol
+// attribution and ledger stamp, the report's program line). That reverses the
+// 2026-09-11 rule (#4365) for per_visit ONLY. An EXPLICIT one_time lane still
+// defeats the tier fallback: a customer reclassified to one_time can keep a
+// legacy Bronze-Platinum tier on the row, and that is not a program, so its
+// applied products are not recorded as seasonal protocol actuals. per_visit,
+// per_application and annual_prepay are program lanes; null / inferred keeps
+// the tier rule. This predicate decides lawn PROGRAM attribution only. Billing
+// coverage (a per_visit customer is never dues-covered) is decided in
+// billing-lane and is unchanged.
+const NON_PROGRAM_BILLING_MODES = new Set(['one_time']);
 
 function lawnPlanProgramApplies(plan) {
   const assigned = plan?.appointmentAssignment || {};

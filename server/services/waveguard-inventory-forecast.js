@@ -60,13 +60,13 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
   // Non-program lanes are excluded BEFORE the limit (Codex #4365 r8 P2): a
   // run of reclassified legacy customers must not consume the window's
   // slots and push real program visits past the cutoff. Same rule as
-  // lawnPlanProgramApplies — an explicit per_visit / one_time lane is not a
-  // program unless the appointment carries a COMPLETE assignment; the
-  // in-loop predicate below remains the authoritative check on the plan.
+  // lawnPlanProgramApplies — an explicit one_time lane is not a
+  // program (per_visit with a tier is, owner 2026-10-26) unless the appointment
+  // carries a COMPLETE assignment; the in-loop predicate below remains the authoritative check on the plan.
   if (billingModeColumnExists) {
     servicesQuery.where(function programLane() {
       this.whereNull('c.billing_mode')
-        .orWhereNotIn('c.billing_mode', ['per_visit', 'one_time'])
+        .orWhereNotIn('c.billing_mode', ['one_time'])
         .orWhere(function completeAssignment() {
           this.whereNotNull('ss.lawn_protocol_key')
             .whereNotNull('ss.lawn_protocol_version')
@@ -139,8 +139,7 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
         continue;
       }
       // The visit was admitted by its customer's tier, but an explicit
-      // per_visit / one_time lane with no complete appointment assignment
-      // means the calendar protocol is not that customer's program — its
+      // one_time lane with no complete appointment assignment means the calendar protocol is not that customer's program — its
       // products are not committed demand (Codex #4365 r7 P2; same predicate
       // as closeout attribution and the lawn_protocol_* stamp). The lane
       // itself is office-only and stays out of the response (r8 P2).
