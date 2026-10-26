@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ServiceOutlinePage from './ServiceOutlinePage';
@@ -266,7 +266,8 @@ describe('ServiceOutlinePage drawn sections', () => {
     await screen.findByRole('heading', { level: 2, name: 'Treatments That May Be Used' });
     expect(screen.getByText('Tree & Shrub Program')).toBeInTheDocument();
     expect(screen.queryByText('Lawn Care Program')).not.toBeInTheDocument();
-    expect(document.title).toBe('Your Tree & Shrub Program Overview | Waves');
+    // The tab title is set in an effect after the packet renders: wait for it (CI ran the check before the effect).
+    await waitFor(() => expect(document.title).toBe('Your Tree & Shrub Program Overview | Waves'));
     const cards = within(sectionOf('Treatments That May Be Used')).getAllByRole('listitem');
     expect(cards.map((card) => card.querySelector('span span').textContent)).toEqual(['Palm fertilizer', 'Shrub fertilizer']);
     expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/);
@@ -276,6 +277,6 @@ describe('ServiceOutlinePage drawn sections', () => {
     renderWith(v13Content());
     await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
     expect(screen.getByText('Lawn Care Program')).toBeInTheDocument();
-    expect(document.title).toBe('Your Lawn Care Program Overview | Waves');
+    await waitFor(() => expect(document.title).toBe('Your Lawn Care Program Overview | Waves'));
   });
 });
