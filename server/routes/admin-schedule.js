@@ -4920,12 +4920,20 @@ async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDa
   }
 }
 
+// A visit whose flag is off for its OWN reason never speaks for the series: an
+// annual-prepay visit (term link or prepaid stamp) and a free callback are
+// written with create_invoice_on_complete=false because that one visit is paid
+// for or free, so a prepay visit that happened to be the newest sibling used to
+// mint the next extension (past the term) uninvoiced.
 async function resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) {
   try {
     const sibling = await conn('scheduled_services')
       .where({ recurring_parent_id: parentId })
       .whereNotIn('status', ['cancelled', 'rescheduled'])
       .whereNotNull('create_invoice_on_complete')
+      .whereNull('annual_prepay_term_id')
+      .whereNull('prepaid_at')
+      .where(function notCallback() { this.whereNull('is_callback').orWhere('is_callback', false); })
       .orderBy('scheduled_date', 'desc')
       .first('create_invoice_on_complete');
     if (sibling && sibling.create_invoice_on_complete != null) {

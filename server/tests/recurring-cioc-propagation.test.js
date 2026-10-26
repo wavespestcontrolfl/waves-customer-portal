@@ -20,8 +20,8 @@ const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'),
 function connWithSibling(siblingResult) {
   return () => {
     const b = {};
-    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'orderBy']) {
-      b[m] = () => b;
+    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'orWhere', 'orderBy']) {
+      b[m] = (arg) => { if (typeof arg === 'function') arg.call(b); return b; };
     }
     b.first = () => (siblingResult instanceof Error
       ? Promise.reject(siblingResult)
@@ -62,6 +62,33 @@ describe('resolveSeriesCreateInvoiceOnComplete', () => {
     await expect(resolveSeriesCreateInvoiceOnComplete(
       connWithSibling(undefined), 10, null,
     )).resolves.toBeUndefined();
+  });
+});
+
+describe('a visit off for its own reason does not set the series flag', () => {
+  test('the sibling lookup skips prepay-linked, prepaid-stamped and callback visits', async () => {
+    const calls = [];
+    const conn = () => {
+      const b = {};
+      for (const m of ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'orderBy']) {
+        b[m] = (...args) => {
+          if (typeof args[0] === 'function') {
+            const inner = { whereNull: (c) => { calls.push(['inner.whereNull', c]); return inner; }, orWhere: (c, v) => { calls.push(['inner.orWhere', c, v]); return inner; } };
+            args[0].call(inner);
+          } else calls.push([m, ...args]);
+          return b;
+        };
+      }
+      b.first = () => Promise.resolve({ create_invoice_on_complete: true });
+      return b;
+    };
+    await expect(resolveSeriesCreateInvoiceOnComplete(conn, 10, { create_invoice_on_complete: false })).resolves.toBe(true);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['whereNull', 'annual_prepay_term_id'],
+      ['whereNull', 'prepaid_at'],
+      ['inner.whereNull', 'is_callback'],
+      ['inner.orWhere', 'is_callback', false],
+    ]));
   });
 });
 
