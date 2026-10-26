@@ -39,6 +39,8 @@ beforeEach(() => {
   loadBestMapImage.mockReset();
   loadBestMapImage.mockResolvedValue({ image: {}, url: 'https://maps.example/test.png', zoom: ZOOM });
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(() => RECT);
+  // jsdom has no canvas; the spray layer draws on one, so give it a context-less canvas.
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
 });
 
 afterEach(() => {

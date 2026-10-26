@@ -190,6 +190,14 @@ describe('PUT', () => {
     expect(Buffer.compare(puts[0].input.Body, PNG)).toBe(0);
   });
 
+  test('stores a manual aim inside the nozzles JSON and hands it back on GET, with no unaimed nozzle gaining one', async () => {
+    const nozzles = [{ x: 100, y: 200, kind: 'eave', lineIndex: 0, aim: 135 }, { x: 400, y: 200, kind: 'eave', lineIndex: 0 }];
+    expect((await put(EST, { body: payload({ nozzles }) })).status).toBe(200);
+    expect(JSON.parse(mockLayouts[0].nozzles)).toEqual([{ x: 100, y: 200, kind: 'eave', lineIndex: 0, aim: 135 }, { x: 400, y: 200, kind: 'eave', lineIndex: 0 }]);
+    expect((await get(EST)).json.layout.nozzles).toEqual(JSON.parse(mockLayouts[0].nozzles));
+    expect((await put(EST, { body: payload({ nozzles: [{ x: 1, y: 1, kind: 'eave', lineIndex: 0, aim: 400 }] }) })).status).toBe(400);
+  });
+
   test('a second save replaces the one row and deletes the old picture only after the row is written', async () => {
     await put(EST);
     const firstKey = mockLayouts[0].snapshot_s3_key;

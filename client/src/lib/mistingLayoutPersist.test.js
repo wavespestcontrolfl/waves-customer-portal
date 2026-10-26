@@ -62,7 +62,7 @@ describe('save then reopen round trip', () => {
       address: null, center: CENTER, zoom: ZOOM, lines, nozzles: placed.nozzles, risers: [], pump: null, zones: [], mapWidth: 1280, mapHeight: 960,
     });
     const restored = restoreLayout(asSaved(payload));
-    expect(restored.edits).toEqual({ removed: [], moved: {}, added: [] });
+    expect(restored.edits).toEqual({ removed: [], moved: {}, added: [], aimed: {} });
     expect(restored.extras).toMatchObject({ risers: [], pump: null, zones: [] });
   });
 
@@ -73,6 +73,68 @@ describe('save then reopen round trip', () => {
     }));
     expect(restored.edits.added.map((n) => [n.x, n.y, n.kind])).toEqual([[10, 20, 'eave'], [30, 40, 'fence']]);
     expect(restored.edits.removed).toEqual([]);
+  });
+});
+
+describe('manual aim', () => {
+  it('survives save then reopen on kept, moved and added nozzles, and only those', () => {
+    const lines = lineSet();
+    const placed = placeNozzles(lines, { lat: LAT, zoom: ZOOM });
+    const [kept, moved, plain] = [placed.nozzles[0], placed.nozzles[2], placed.nozzles[4]];
+    const edits = {
+      removed: [],
+      moved: { [moved.key]: { x: moved.x + 40, y: moved.y + 12 } },
+      aimed: { [kept.key]: 0, [moved.key]: 212.5 },
+      added: [{ key: 'm1', manual: true, aim: 90, x: 400, y: 700, kind: 'fence', lineIndex: 1, lineId: 'L2', segmentIndex: 0, vertexIndex: null, corner: false }],
+    };
+    const finals = applyNozzleEdits(placed.nozzles, edits);
+    const payload = buildLayoutPayload({
+      address: null, center: CENTER, zoom: ZOOM, lines, nozzles: finals, risers: [], pump: null, zones: [], mapWidth: 1280, mapHeight: 960,
+    });
+    // The payload carries an aim only for the three aimed nozzles, 0 included.
+    expect(payload.nozzles.filter((n) => 'aim' in n).map((n) => n.aim).sort((a, b) => a - b)).toEqual([0, 90, 212.5]);
+    expect(payload.nozzles.every((n) => !('aim' in n) || Number.isFinite(n.aim))).toBe(true);
+
+    const restored = restoreLayout(asSaved(payload));
+    const replaced = placeNozzles(restored.lines, { lat: LAT, zoom: ZOOM });
+    const shown = applyNozzleEdits(replaced.nozzles, restored.edits);
+    const at = (n) => `${n.x.toFixed(2)},${n.y.toFixed(2)}`;
+    const aimAt = Object.fromEntries(shown.filter((n) => 'aim' in n).map((n) => [at(n), n.aim]));
+    expect(aimAt).toEqual({
+      [at(kept)]: 0,
+      [`${(moved.x + 40).toFixed(2)},${(moved.y + 12).toFixed(2)}`]: 212.5,
+      '400.00,700.00': 90,
+    });
+    expect(shown.find((n) => at(n) === at(plain))).not.toHaveProperty('aim');
+    expect(restored.edits.aimed).toEqual({ [kept.key]: 0, [moved.key]: 212.5 });
+  });
+
+  it('an unaimed layout reopens with no aims and an unaimed payload has no aim keys', () => {
+    const lines = lineSet();
+    const placed = placeNozzles(lines, { lat: LAT, zoom: ZOOM });
+    const payload = buildLayoutPayload({
+      address: null, center: CENTER, zoom: ZOOM, lines, nozzles: placed.nozzles, risers: [], pump: null, zones: [], mapWidth: 1280, mapHeight: 960,
+    });
+    expect(payload.nozzles.some((n) => 'aim' in n)).toBe(false);
+    expect(restoreLayout(asSaved(payload)).edits.aimed).toEqual({});
+  });
+
+  it('wraps a saved aim into range and ignores junk', () => {
+    const edits = diffNozzleEdits(
+      [{ key: 'a', x: 0, y: 0, kind: 'eave' }, { key: 'b', x: 100, y: 0, kind: 'eave' }],
+      [{ x: 0, y: 0, kind: 'eave', aim: -90 }, { x: 100, y: 0, kind: 'eave', aim: 'north' }],
+      [],
+      () => 'm1',
+    );
+    expect(edits.aimed).toEqual({ a: 270 });
+  });
+
+  it('layoutForExport keeps the key and a manual aim on the numbered nozzle', () => {
+    const out = layoutForExport([{ id: 'L1', kind: 'eave', points: [{ x: 0, y: 0 }, { x: 400, y: 0 }] }], [
+      { key: 'p', x: 300, y: 0, kind: 'eave', lineIndex: 0, aim: 45 },
+      { key: 'q', x: 100, y: 0, kind: 'eave', lineIndex: 0 },
+    ]);
+    expect(out.nozzles.map((n) => [n.number, n.key, n.aim])).toEqual([[1, 'q', undefined], [2, 'p', 45]]);
   });
 });
 

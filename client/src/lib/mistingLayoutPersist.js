@@ -6,6 +6,7 @@
 // designer's usual edit overlay (removed, moved, added). The shown nozzles are then exactly the saved
 // ones, and the overlay follows the step 1 rule: changing the lines re-places the nozzles and clears it.
 import { adminFetch } from '../utils/admin-fetch';
+import { normalizeAim } from './mistingLayoutAim';
 import { nearestPointOnLines, placeNozzles } from './mistingLayoutGeometry';
 import { numberNozzles } from './mistingLayoutSketch';
 
@@ -15,7 +16,8 @@ const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 /**
  * The lines and nozzles as they are stored and drawn: lines with fewer than two points are dropped
  * (a lone draft vertex is not a line), and the nozzles are numbered in walking order with their
- * `lineIndex` pointing into the kept lines (null when their line was dropped).
+ * `lineIndex` pointing into the kept lines (null when their line was dropped). A nozzle keeps its
+ * `key`, and its `aim` only when staff aimed it by hand.
  */
 export function layoutForExport(allLines, nozzles) {
   const remap = new Map();
@@ -25,12 +27,17 @@ export function layoutForExport(allLines, nozzles) {
     remap.set(i, lines.length);
     lines.push({ id: line.id, kind: line.kind, points: line.points.map((p) => ({ x: p.x, y: p.y })) });
   });
-  const prepared = (nozzles || []).map((n) => ({
-    x: n.x,
-    y: n.y,
-    kind: n.kind === 'fence' ? 'fence' : 'eave',
-    lineIndex: remap.has(n.lineIndex) ? remap.get(n.lineIndex) : null,
-  }));
+  const prepared = (nozzles || []).map((n) => {
+    const aim = normalizeAim(n.aim);
+    return {
+      key: n.key,
+      x: n.x,
+      y: n.y,
+      kind: n.kind === 'fence' ? 'fence' : 'eave',
+      lineIndex: remap.has(n.lineIndex) ? remap.get(n.lineIndex) : null,
+      ...(aim === null ? {} : { aim }),
+    };
+  });
   return { lines, nozzles: numberNozzles(prepared, lines) };
 }
 
@@ -44,7 +51,7 @@ export function buildLayoutPayload({ address, center, zoom, lines, nozzles, rise
     mapWidth,
     mapHeight,
     lines: exported.lines,
-    nozzles: exported.nozzles.map(({ x, y, kind, lineIndex }) => ({ x, y, kind, lineIndex })),
+    nozzles: exported.nozzles.map(({ x, y, kind, lineIndex, aim }) => ({ x, y, kind, lineIndex, ...(aim === undefined ? {} : { aim }) })),
     risers: (risers || []).map(({ x, y }) => ({ x, y })),
     pump: pump ? { x: pump.x, y: pump.y } : null,
     zones: (zones || []).map(({ kind, x, y, radiusFt }) => ({ kind, x, y, radiusFt })),
@@ -56,11 +63,19 @@ export function buildLayoutPayload({ address, center, zoom, lines, nozzles, rise
  * Pass 1 keeps every saved nozzle that sits on an automatic one (same kind, same spot). Pass 2 pairs
  * what is left, nearest first, as MOVED nozzles. Whatever is still unpaired is removed (automatic) or
  * added (saved). Whatever the pairing, applyNozzleEdits(auto, overlay) has exactly the saved positions.
+ * A saved manual `aim` goes with its nozzle: into `aimed` for a kept or moved automatic one, onto the
+ * nozzle itself for an added one.
  */
 export function diffNozzleEdits(auto, saved, lines, nextKey) {
   const freeAuto = new Set(auto.map((_, i) => i));
   const freeSaved = new Set(saved.map((_, i) => i));
-  const take = (a, s) => { freeAuto.delete(a); freeSaved.delete(s); };
+  const aimed = {};
+  const take = (a, s) => {
+    freeAuto.delete(a);
+    freeSaved.delete(s);
+    const aim = normalizeAim(saved[s].aim);
+    if (aim !== null) aimed[auto[a].key] = aim;
+  };
 
   saved.forEach((s, si) => {
     let best = -1;
@@ -80,8 +95,8 @@ export function diffNozzleEdits(auto, saved, lines, nextKey) {
   const moved = {};
   pairs.forEach(({ ai, si }) => {
     if (!freeAuto.has(ai) || !freeSaved.has(si)) return;
-    moved[auto[ai].key] = { x: saved[si].x, y: saved[si].y };
     take(ai, si);
+    moved[auto[ai].key] = { x: saved[si].x, y: saved[si].y };
   });
 
   const removed = [...freeAuto].map((ai) => auto[ai].key);
@@ -90,8 +105,10 @@ export function diffNozzleEdits(auto, saved, lines, nextKey) {
     const byIndex = Number.isInteger(s.lineIndex) && lines[s.lineIndex] ? lines[s.lineIndex] : null;
     const near = byIndex ? null : nearestPointOnLines(lines, s, Infinity);
     const line = byIndex || (near ? lines[near.lineIndex] : null);
+    const aim = normalizeAim(s.aim);
     return {
       key: nextKey(),
+      ...(aim === null ? {} : { aim }),
       manual: true,
       x: s.x,
       y: s.y,
@@ -103,7 +120,7 @@ export function diffNozzleEdits(auto, saved, lines, nextKey) {
       corner: false,
     };
   });
-  return { removed, moved, added };
+  return { removed, moved, added, aimed };
 }
 
 /**

@@ -5,10 +5,15 @@
 // lines re-runs auto-placement and clears the overlay (applyGeometry), keeping one snapshot so the
 // notice's Undo can put the previous lines and edits back in a single step.
 //
+// A manual spray direction (aim) is one more manual edit: `aimed` for an automatic nozzle, `aim` on an added
+// one. A line change that re-places the nozzles clears it with the rest, under the same notice and Undo.
+//
 // Risers, the pump and no-mist zones are not part of the lines. They live in useMistingLayoutExtras, are
 // never cleared by a line change, and are merged into the object this hook returns.
 import { useMemo, useRef, useState } from 'react';
 import { MAP_HEIGHT, MAP_WIDTH } from '../../tech/treatmentZoneSpray';
+import { aimArrowLength, effectiveAim, headingFromVector, normalizeAim } from '../../../lib/mistingLayoutAim';
+import { layoutForExport } from '../../../lib/mistingLayoutPersist';
 import {
   applyNozzleEdits,
   computeTotals,
@@ -20,8 +25,11 @@ import useMistingLayoutExtras from './useMistingLayoutExtras';
 const LINE_HIT_CSS_PX = 12;
 const VERTEX_HIT_CSS_PX = 14;
 
-const NO_EDITS = Object.freeze({ removed: [], moved: {}, added: [] });
-export const editCount = (e) => e.removed.length + Object.keys(e.moved).length + e.added.length;
+const NO_EDITS = Object.freeze({ removed: [], moved: {}, added: [], aimed: {} });
+export const editCount = (e) => e.removed.length + Object.keys(e.moved).length + e.added.length + Object.keys(e.aimed || {}).length;
+const prefersReducedMotion = () => {
+  try { return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch { return false; }
+};
 const hasPoints = (draft) => Boolean(draft && draft.points.length > 0);
 const geometryKey = (lines, draft) => JSON.stringify([lines, hasPoints(draft) ? draft : null]);
 const within = (a, b, radius) => Math.hypot(a.x - b.x, a.y - b.y) <= radius;
@@ -34,7 +42,27 @@ function withoutKey(object, key) {
 // Pure edit-overlay updates.
 const deleteFrom = (edits, n) => (n.manual
   ? { ...edits, added: edits.added.filter((a) => a.key !== n.key) }
-  : { ...edits, moved: withoutKey(edits.moved, n.key), removed: [...edits.removed, n.key] });
+  : {
+    ...edits,
+    moved: withoutKey(edits.moved, n.key),
+    aimed: withoutKey(edits.aimed || {}, n.key),
+    removed: [...edits.removed, n.key],
+  });
+
+// A manual aim lives on the added nozzle itself, or in `aimed` for an automatic one.
+function aimIn(edits, n, aim) {
+  if (n.manual) {
+    return { ...edits, added: edits.added.map((a) => (a.key === n.key ? { ...a, aim } : a)) };
+  }
+  return { ...edits, aimed: { ...(edits.aimed || {}), [n.key]: aim } };
+}
+
+function clearAimIn(edits, n) {
+  if (n.manual) {
+    return { ...edits, added: edits.added.map((a) => { const { aim: _aim, ...rest } = a; return a.key === n.key ? rest : a; }) };
+  }
+  return { ...edits, aimed: withoutKey(edits.aimed || {}, n.key) };
+}
 
 function moveIn(edits, n, to) {
   if (!n.manual) {
@@ -55,6 +83,10 @@ export default function useMistingLayoutState(mapState, initial = null) {
   const [edits, setEdits] = useState(initial ? initial.edits : NO_EDITS);
   const [addMiss, setAddMiss] = useState(false); // last Add nozzle tap was off every line
   const [notice, setNotice] = useState(null); // { count, snapshot: { lines, draft, edits } }
+  const [directions, setDirections] = useState(true); // aim arrows on the map
+  const [reducedMotion] = useState(prefersReducedMotion);
+  const [spray, setSpray] = useState(() => !prefersReducedMotion()); // animated mist; off for reduced motion
+  const [aimKey, setAimKey] = useState(null); // the nozzle whose aim was last touched (Reset aim acts on it)
   const idRef = useRef(initial ? initial.idCounter : 0);
   const nextId = (prefix) => {
     idRef.current += 1;
@@ -71,6 +103,22 @@ export default function useMistingLayoutState(mapState, initial = null) {
   const nozzles = useMemo(() => (placed ? applyNozzleEdits(placed.nozzles, edits) : []), [placed, edits]);
   const totals = useMemo(() => computeTotals(placed ? placed.lines : [], nozzles), [placed, nozzles]);
   const extras = useMistingLayoutExtras(mapState, nozzles, initial ? initial.extras : null);
+  // Walking-order numbers, the same ones the saved sketch prints, by nozzle key.
+  const numbers = useMemo(
+    () => new Map(layoutForExport(allLines, nozzles).nozzles.map((n) => [n.key, n.number])),
+    [allLines, nozzles],
+  );
+  // The aim each nozzle is drawn with: its manual aim, else the default for where it stands, and its arrow's length.
+  const aims = useMemo(() => {
+    if (!ready) return new Map();
+    const map = { lat: mapState.center.lat, zoom: mapState.zoom };
+    return new Map(nozzles.map((n) => {
+      const aim = effectiveAim(n, allLines, extras.zones, map);
+      return [n.key, { ...aim, tipPx: aimArrowLength(n, aim.heading, nozzles) }];
+    }));
+  }, [ready, mapState, nozzles, allLines, extras.zones]);
+  const nearWaterCount = useMemo(() => [...aims.values()].filter((a) => a.nearWater).length, [aims]);
+  const aimedNozzle = aimKey ? nozzles.find((n) => n.key === aimKey) || null : null;
 
   // ── Changes to the lines ───────────────────────────────────────────────────
   // The one door for them. A change that alters the geometry re-places the nozzles, so it clears
@@ -128,6 +176,7 @@ export default function useMistingLayoutState(mapState, initial = null) {
   const chooseMode = (next) => {
     if (next !== mode) finishDraft();
     setAddMiss(false);
+    setAimKey(null);
     setMode(next);
   };
 
@@ -144,6 +193,15 @@ export default function useMistingLayoutState(mapState, initial = null) {
     const to = { x: Math.max(0, Math.min(MAP_WIDTH, p.x)), y: Math.max(0, Math.min(MAP_HEIGHT, p.y)) };
     editOverlay((prev) => moveIn(prev, n, to));
   };
+
+  // Turn a nozzle to face the map point `p` (dragging its arrow tip). A tip dropped on the nozzle has no direction.
+  const aimNozzleToward = (n, p) => {
+    setAimKey(n.key);
+    const aim = headingFromVector(p.x - n.x, p.y - n.y);
+    if (aim !== null) editOverlay((prev) => aimIn(prev, n, normalizeAim(aim)));
+  };
+
+  const resetAim = (n) => editOverlay((prev) => clearAimIn(prev, n));
 
   const addNozzleOnLine = (p, scale) => {
     const hit = nearestPointOnLines(allLines, p, LINE_HIT_CSS_PX * scale);
@@ -191,5 +249,17 @@ export default function useMistingLayoutState(mapState, initial = null) {
     deleteNozzle,
     moveNozzle,
     addNozzleOnLine,
+    numbers,
+    aims,
+    nearWaterCount,
+    directions,
+    setDirections,
+    spray,
+    setSpray,
+    reducedMotion,
+    aimedNozzle,
+    selectAim: (n) => setAimKey(n.key),
+    aimNozzleToward,
+    resetAim,
   };
 }

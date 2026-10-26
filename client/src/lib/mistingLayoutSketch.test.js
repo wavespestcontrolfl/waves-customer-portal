@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../components/tech/treatmentZoneSpray';
 import { applyNozzleEdits, placeNozzles } from './mistingLayoutGeometry';
 import {
+  SKETCH_ATTRIBUTION_H,
   SKETCH_CONCEPT,
-  SKETCH_FOOTER_H,
-  SKETCH_HEADER_H,
   SKETCH_HEIGHT,
+  SKETCH_WIDTH,
   buildSketchModel,
   numberNozzles,
   scaleBar,
@@ -113,6 +113,14 @@ describe('text', () => {
     expect(rows[5]).toBe('In a no-mist zone: 2 (aim away or move)');
   });
 
+  it('adds the near-water row after the nozzle row whenever a count is given, 0 included, and never for the saved counts', () => {
+    const base = { nozzleCount: 12, eaveCount: 8, fenceCount: 4, riserCount: 3, hasPump: true, zoneCount: 2, linearFt: 118.6 };
+    expect(legendRows({ ...base, nearWaterCount: 4 })[1]).toBe('Near water: 4');
+    expect(legendRows({ ...base, nearWaterCount: 0 })[1]).toBe('Near water: 0');
+    expect(legendRows({ ...base, nearWaterCount: 4 })).toHaveLength(6);
+    expect(mistingLayoutCountsLine({ nozzles: 5, eave: 5, fence: 0, risers: 0, zones: 1, linearFt: 40, pump: false })).not.toMatch(/near water/i);
+  });
+
   it('prints the saved-counts line without a flagged row, because the server counts carry none', () => {
     const line = mistingLayoutCountsLine({ nozzles: 5, eave: 5, fence: 0, risers: 0, zones: 1, linearFt: 40, pump: false });
     expect(line).not.toMatch(/no-mist zone:/i);
@@ -186,15 +194,55 @@ describe('buildSketchModel', () => {
       expect(some.legend[0]).toBe('Nozzles: 3 (eave 3, fence 0)');
       const none = build([n('a', 100), n('b', 900)]);
       expect(none.legend.some((row) => row.startsWith('In a no-mist zone'))).toBe(false);
-      expect(none.legend).toHaveLength(5);
+      expect(none.legend).toHaveLength(6); // the five counts and Near water
       const noZones = build([n('a', 500)], []);
       expect(noZones.nozzles[0].flagged).toBe(false);
-      expect(noZones.legend).toHaveLength(5);
+      expect(noZones.legend).toHaveLength(6);
     });
   });
 
-  it('keeps the photo at its native size between the header and the footer', () => {
-    expect(SKETCH_HEIGHT).toBe(SKETCH_HEADER_H + MAP_HEIGHT + SKETCH_FOOTER_H);
+  describe('spray aim', () => {
+    const lines = [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 500 }, { x: 900, y: 500 }] }];
+    const build = (nozzles, zones = []) => buildSketchModel({
+      lat: LAT, zoom: ZOOM, lines, nozzles, risers: [], pump: null, zones,
+      totals: { eaveCount: nozzles.length, fenceCount: 0, linearFt: 100 },
+    });
+    const n = (x, extra = {}) => ({ x, y: 500, kind: 'eave', lineIndex: 0, ...extra });
+
+    it('carries each nozzle\'s heading, near-water mark and throw in sketch pixels (10 ft, 5 ft near water)', () => {
+      const pool = { kind: 'pool', x: 150, y: 400, radiusFt: 15, radiusPx: feetToPx(15, LAT, ZOOM) };
+      const model = build([n(150), n(850)], [pool]);
+      const [near, far] = model.nozzles;
+      expect(near.nearWater).toBe(true);
+      expect(far.nearWater).toBe(false);
+      expect(pxToFeet(near.reachPx, LAT, ZOOM)).toBeCloseTo(5, 5);
+      expect(pxToFeet(far.reachPx, LAT, ZOOM)).toBeCloseTo(10, 5);
+      // The nozzles stand on one wall, so the far one aims down the photo; the near one runs along the wall.
+      expect(far.aimHeading).toBeCloseTo(180, 5);
+      expect([90, 270]).toContain(Math.round(near.aimHeading));
+    });
+
+    it('shortens the arrow of a nozzle pointing at the next one, to half the way but no less than the minimum', () => {
+      const pool = { kind: 'pool', x: 600, y: 400, radiusFt: 15, radiusPx: feetToPx(15, LAT, ZOOM) };
+      // Three nozzles 44 px apart along the wall, right of the pool's center: all near water, aimed along the wall to the right.
+      const model = build([n(600), n(644), n(688)], [pool]);
+      expect(model.nozzles.map((m) => Math.round(m.aimHeading))).toEqual([90, 90, 90]);
+      expect(model.nozzles.map((m) => m.arrowPx)).toEqual([26, 26, 40]);
+    });
+
+    it('prefers a manual aim, and counts near-water nozzles in the legend', () => {
+      const pool = { kind: 'water', x: 150, y: 400, radiusFt: 15, radiusPx: feetToPx(15, LAT, ZOOM) };
+      const model = build([n(150, { aim: 45 }), n(850, { aim: 0 })], [pool]);
+      expect(model.nozzles.map((m) => m.aimHeading)).toEqual([45, 0]);
+      expect(model.nozzles[0].nearWater).toBe(true); // the position decides this, not the aim
+      expect(model.legend).toContain('Near water: 1');
+    });
+  });
+
+  it('is the photo at its native size, filling the frame, with the attribution strip left clear', () => {
+    expect(SKETCH_WIDTH).toBe(MAP_WIDTH);
+    expect(SKETCH_HEIGHT).toBe(MAP_HEIGHT);
     expect(MAP_WIDTH).toBe(1280);
+    expect(SKETCH_ATTRIBUTION_H).toBeGreaterThanOrEqual(44);
   });
 });

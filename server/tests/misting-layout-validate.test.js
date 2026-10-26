@@ -41,6 +41,28 @@ describe('validateLayoutPayload', () => {
     expect(out.nozzles.every((n) => n.lineIndex === null)).toBe(true);
   });
 
+  test('keeps an optional manual aim on a nozzle, 0 included, wrapped to two decimals', () => {
+    const out = validateLayoutPayload(valid({
+      nozzles: [
+        { x: 100, y: 200, kind: 'eave', lineIndex: 0, aim: 0 },
+        { x: 400, y: 200, kind: 'eave', lineIndex: 0, aim: 212.456 },
+        { x: 100, y: 600, kind: 'fence', lineIndex: 1, aim: '90' },
+        { x: 200, y: 600, kind: 'fence', lineIndex: 1, aim: null },
+        { x: 300, y: 600, kind: 'fence', lineIndex: 1, aim: 359.999 },
+        { x: 350, y: 600, kind: 'fence', lineIndex: 1 },
+      ],
+    }));
+    expect(out.nozzles.map((n) => n.aim)).toEqual([0, 212.46, 90, undefined, 0, undefined]);
+    expect(Object.keys(out.nozzles[3])).not.toContain('aim');
+    expect(Object.keys(out.nozzles[5])).not.toContain('aim');
+  });
+
+  test('rejects an aim that is not a heading from 0 up to 360', () => {
+    [360, 361, -1, -0.01, NaN, Infinity, 'north', '', [], {}, true].forEach((aim) => {
+      problem({ nozzles: [{ x: 1, y: 1, kind: 'eave', lineIndex: 0, aim }] }, /nozzles\[0\] aim must be a heading/);
+    });
+  });
+
   test('drops a line index that points past the lines', () => {
     const out = validateLayoutPayload(valid({ lines: [], nozzles: [{ x: 1, y: 1, kind: 'eave', lineIndex: 4 }] }));
     expect(out.nozzles[0].lineIndex).toBeNull();

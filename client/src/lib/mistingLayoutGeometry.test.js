@@ -404,6 +404,25 @@ describe('applyNozzleEdits', () => {
     expect(base.find((n) => n.key === 'a:v1').edited).toBeUndefined();
   });
 
+  it('keeps a manual aim with its nozzle, moved or not, and leaves every other nozzle without one', () => {
+    const out = applyNozzleEdits(base, {
+      moved: { 'a:v1': { x: 5, y: 6 } },
+      aimed: { 'a:v1': 135, 'a:v0': 0, 'a:s0:1': 'north', gone: 90 },
+      added: [{ key: 'm1', x: 7, y: 8, kind: 'eave', aim: 270 }],
+    });
+    expect(out.find((n) => n.key === 'a:v1')).toMatchObject({ x: 5, y: 6, aim: 135 });
+    expect(out.find((n) => n.key === 'a:v0').aim).toBe(0); // 0 degrees is an aim, not "no aim"
+    expect(out.find((n) => n.key === 'a:s0:1')).not.toHaveProperty('aim');
+    expect(out.find((n) => n.key === 'm1').aim).toBe(270);
+    expect(out.find((n) => n.key === 'gone')).toBeUndefined();
+    expect(base.find((n) => n.key === 'a:v1')).not.toHaveProperty('aim');
+  });
+
+  it('drops the aim of a removed nozzle with the nozzle', () => {
+    const out = applyNozzleEdits(base, { removed: ['a:v1'], aimed: { 'a:v1': 90 } });
+    expect(out.find((n) => n.key === 'a:v1')).toBeUndefined();
+  });
+
   it('works with no edits', () => {
     expect(applyNozzleEdits(base)).toEqual(base);
     expect(applyNozzleEdits(null)).toEqual([]);

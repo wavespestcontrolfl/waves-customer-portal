@@ -82,6 +82,15 @@ function normalizeLines(raw) {
   });
 }
 
+// Optional manual spray direction, a compass heading in degrees [0, 360). Absent or null means "use the default",
+// which the screens derive; nothing else is accepted, so a stored aim is always a number a screen can draw.
+function aimOf(n, label) {
+  if (n.aim === undefined || n.aim === null) return {};
+  const aim = Number(n.aim);
+  if (!finite(n.aim) || aim < 0 || aim >= 360) throw operationalError(`${label} aim must be a heading from 0 up to 360 degrees`);
+  return { aim: round2(aim) % 360 };
+}
+
 function normalizeNozzles(raw, lineCount) {
   const list = asArray(raw, 'nozzles', MAX_NOZZLES);
   if (list.length === 0) throw operationalError('A layout needs at least one nozzle');
@@ -90,7 +99,7 @@ function normalizeNozzles(raw, lineCount) {
     const kind = lineKind(n.kind, `nozzles[${i}]`);
     const idx = Number(n.lineIndex);
     const lineIndex = Number.isInteger(idx) && idx >= 0 && idx < lineCount ? idx : null;
-    return { ...p, kind, lineIndex };
+    return { ...p, kind, lineIndex, ...aimOf(n, `nozzles[${i}]`) };
   });
 }
 

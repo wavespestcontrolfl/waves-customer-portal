@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import { MAP_HEIGHT } from '../components/tech/treatmentZoneSpray';
-import { SKETCH_CONCEPT, SKETCH_HEADER_H, SKETCH_HEIGHT, SKETCH_WIDTH, buildSketchModel } from './mistingLayoutSketch';
-import { drawSketch } from './mistingLayoutSketchCanvas';
+import { SKETCH_ATTRIBUTION_H, SKETCH_CONCEPT, SKETCH_HEIGHT, SKETCH_WIDTH, buildSketchModel } from './mistingLayoutSketch';
+import { MIST_WEDGE_FILL } from './mistingLayoutMistDraw';
+import { drawSketch, glassPanelRects } from './mistingLayoutSketchCanvas';
 
 // A recording 2D context: every method is a spy, every property just stores what was set.
 function recordingContext() {
@@ -36,14 +37,15 @@ const model = () => buildSketchModel({
 });
 
 describe('drawSketch', () => {
-  it('draws the photo whole between the header and footer, and every label the sketch promises', () => {
+  it('draws the photo across the whole frame, with the logo and every label the sketch promises', () => {
     const { ctx, calls } = recordingContext();
     const map = { name: 'map' };
     const logo = { name: 'logo' };
     drawSketch(ctx, model(), { map, logo });
 
     const images = calls.filter((c) => c[0] === 'drawImage');
-    expect(images.find((c) => c[1] === map)).toEqual(['drawImage', map, 0, SKETCH_HEADER_H, SKETCH_WIDTH, MAP_HEIGHT]);
+    expect(images.find((c) => c[1] === map)).toEqual(['drawImage', map, 0, 0, SKETCH_WIDTH, MAP_HEIGHT]);
+    expect(SKETCH_HEIGHT).toBe(MAP_HEIGHT);
     expect(images.find((c) => c[1] === logo)).toBeTruthy();
 
     const texts = calls.filter((c) => c[0] === 'fillText' || c[0] === 'strokeText').map((c) => c[1]);
@@ -52,6 +54,7 @@ describe('drawSketch', () => {
     expect(texts).toContain('October 26, 2026');
     expect(texts).toContain(SKETCH_CONCEPT);
     expect(texts).toContain('Nozzles: 2 (eave 2, fence 0)');
+    expect(texts).toContain('Near water: 0');
     expect(texts).toContain('Pump');
     expect(texts).toContain('No mist: Pool');
     // Nozzles are numbered 1..N.
@@ -59,22 +62,70 @@ describe('drawSketch', () => {
     expect(texts).toContain('2');
     // The scale bar names its feet.
     expect(texts.some((t) => /^\d+ ft$/.test(t))).toBe(true);
+    // The key under the counts.
+    expect(texts).toContain('Nozzle (number = walking order)');
+    expect(texts).toContain('Arrow and mist = spray direction');
   });
 
-  it('draws one triangle for the riser and one square for the pump, and keeps the photo bottom edge clear', () => {
+  it('keeps every panel off the photo\'s bottom strip where the Google attribution sits, and off each other', () => {
+    const attributionTop = SKETCH_HEIGHT - SKETCH_ATTRIBUTION_H;
+    [true, false].forEach((withLogo) => {
+      const rects = Object.values(glassPanelRects(model(), withLogo));
+      rects.forEach((r) => {
+        expect(r.y + r.h).toBeLessThanOrEqual(attributionTop);
+        expect(r.x).toBeGreaterThanOrEqual(0);
+        expect(r.x + r.w).toBeLessThanOrEqual(SKETCH_WIDTH);
+      });
+      rects.forEach((a, i) => rects.slice(i + 1).forEach((b) => {
+        expect(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h).toBe(false);
+      }));
+    });
+    // The tallest counts panel (every row there can be) still clears the strip.
+    const full = buildSketchModel({
+      lat: 26.95, zoom: 20, address: 'x', lines: [], nozzles: [{ x: 500, y: 500, kind: 'eave', lineIndex: null }],
+      risers: [], pump: null, zones: [{ kind: 'pool', x: 500, y: 500, radiusFt: 15, radiusPx: 60 }], totals: { eaveCount: 1, fenceCount: 0, linearFt: 0 },
+    });
+    expect(full.legend).toHaveLength(7);
+    const counts = glassPanelRects(full, true).counts;
+    expect(counts.y + counts.h).toBeLessThanOrEqual(attributionTop);
+  });
+
+  it('draws nothing over the strip after the photo: every fill and clear of a rectangle ends above it', () => {
     const { ctx, calls } = recordingContext();
     drawSketch(ctx, model(), { map: {}, logo: null });
-    expect(calls.filter((c) => c[0] === 'closePath')).toHaveLength(1);
+    const attributionTop = SKETCH_HEIGHT - SKETCH_ATTRIBUTION_H;
+    const rects = calls.filter((c) => c[0] === 'fillRect' && !(c[3] === 28 && c[4] === 28) && !(c[3] === 18 && c[4] === 18));
+    expect(rects.length).toBeGreaterThan(0);
+    rects.forEach((c) => expect(c[2] + c[4]).toBeLessThanOrEqual(attributionTop));
+  });
+
+  it('draws the pump as one square and the glass panels as rounded boxes', () => {
+    const { ctx, calls } = recordingContext();
+    drawSketch(ctx, model(), { map: {}, logo: null });
     expect(calls.filter((c) => c[0] === 'fillRect' && c[3] === 28 && c[4] === 28)).toHaveLength(1);
-    // After the photo, the only filled rectangles are the pump square and the footer, which starts at the photo's bottom
-    // edge: nothing covers the photo's own strip where Google's attribution sits.
-    const photoBottom = SKETCH_HEADER_H + MAP_HEIGHT;
-    const photoAt = calls.findIndex((c) => c[0] === 'drawImage' && c[3] === SKETCH_HEADER_H);
-    calls.slice(photoAt + 1).filter((c) => c[0] === 'fillRect').forEach((c) => {
-      const isPump = c[3] === 28 && c[4] === 28;
-      expect(isPump || c[2] >= photoBottom).toBe(true);
+    // Four panels: title, counts and key, concept note, scale bar. Each has a body and a border path.
+    expect(calls.filter((c) => c[0] === 'arcTo')).toHaveLength(4 * 2 * 4);
+  });
+
+  it('blurs the photo behind the panels when the canvas can, and tints them when it cannot', () => {
+    const plain = recordingContext();
+    drawSketch(plain.ctx, model(), { map: { name: 'map' }, logo: null });
+    expect(plain.calls.filter((c) => c[0] === 'drawImage')).toHaveLength(1); // no blur: only the photo itself
+
+    const calls = [];
+    const target = { filter: 'none', measureText: (t) => ({ width: String(t).length * 14 }) };
+    const blurring = new Proxy(target, {
+      get(t, prop) {
+        if (prop in t) return t[prop];
+        return (...args) => { calls.push([prop, ...args, t.filter]); };
+      },
+      set(t, prop, value) { t[prop] = value; return true; },
     });
-    expect(SKETCH_HEIGHT).toBeGreaterThan(photoBottom);
+    const map = { name: 'map' };
+    drawSketch(blurring, model(), { map, logo: null });
+    const blurred = calls.filter((c) => c[0] === 'drawImage' && c[1] === map && /blur/.test(c[c.length - 1]));
+    expect(blurred).toHaveLength(4);
+    expect(target.filter).toBe('none'); // left off for everything after
   });
 
   it('draws without a logo', () => {
@@ -115,15 +166,12 @@ describe('drawSketch', () => {
     labels.forEach((a, i) => labels.slice(i + 1).forEach((b) => {
       expect(a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1).toBe(false);
     }));
-  });
-
-  it('keeps the concept note below the legend box', () => {
-    const { ctx, calls } = recordingContext();
-    drawSketch(ctx, model(), { map: {}, logo: null });
-    const legend = calls.find((c) => c[0] === 'strokeRect' && c[1] === 24);
-    const concept = fillsOf(calls, SKETCH_CONCEPT)[0];
-    // Concept text is 26 px on an alphabetic baseline: its top is about 26 px above y.
-    expect(legend[2] + legend[4]).toBeLessThan(concept[3] - 26);
+    // ... nor on a glass panel, nor in the attribution strip.
+    const panels = Object.values(glassPanelRects(crowded, false));
+    labels.forEach((l) => {
+      panels.forEach((r) => expect(l.x0 < r.x + r.w && r.x < l.x1 && l.y0 < r.y + r.h && r.y < l.y1).toBe(false));
+      expect(l.y1).toBeLessThanOrEqual(SKETCH_HEIGHT - SKETCH_ATTRIBUTION_H);
+    });
   });
 
   describe('nozzles inside a no-mist zone', () => {
@@ -161,7 +209,7 @@ describe('drawSketch', () => {
       const discFills = calls
         .map((c, i) => (c[0] === 'arc' && c[3] === 17 && calls[i + 1] && calls[i + 1][0] === 'fill' ? [c[1], calls[i + 1][1]] : null))
         .filter(Boolean);
-      expect(discFills).toEqual([[100, '#000'], [500, '#f59e0b']]);
+      expect(discFills).toEqual([[100, '#0b6fb8'], [500, '#f59e0b']]);
       // The dashed ring and the "!" belong to the flagged nozzle only, so the warning is not color alone.
       const rings = calls.filter((c) => c[0] === 'arc' && c[3] === 24);
       expect(rings).toHaveLength(1);
@@ -174,14 +222,90 @@ describe('drawSketch', () => {
       const { ctx, calls } = recordingContext();
       drawSketch(ctx, flaggedModel(), { map: {}, logo: null });
       expect(fillsOf(calls, 'In a no-mist zone: 1 (aim away or move)')).toHaveLength(1);
-      // six rows still sit above the concept note
-      const legend = calls.find((c) => c[0] === 'strokeRect' && c[1] === 24);
-      expect(legend[2] + legend[4]).toBeLessThan(fillsOf(calls, SKETCH_CONCEPT)[0][3] - 26);
+      expect(fillsOf(calls, 'Near water: 1')).toHaveLength(1); // the nozzle in the pool is within 30 ft of its edge
 
       const clear = recordingContext();
       drawSketch(clear.ctx, model(), { map: {}, logo: null });
       expect(clear.calls.some((c) => c[0] === 'fillText' && String(c[1]).startsWith('In a no-mist zone'))).toBe(false);
       expect(clear.calls.some((c) => c[0] === 'fillText' && c[1] === '!')).toBe(false);
+    });
+  });
+
+  describe('spray direction', () => {
+    // A single wall, so every nozzle faces the same way by default (down the photo, heading 180).
+    const wall = (nozzles, zones = []) => buildSketchModel({
+      lat: 26.95,
+      zoom: 20,
+      address: '500 Example Court, Venice, FL',
+      lines: [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 200 }, { x: 400, y: 200 }] }],
+      nozzles,
+      risers: [],
+      pump: null,
+      zones,
+      totals: { eaveCount: nozzles.length, fenceCount: 0, linearFt: 60 },
+    });
+    const at = (x, extra = {}) => ({ x, y: 200, kind: 'eave', lineIndex: 0, ...extra });
+
+    function styleContext() {
+      const calls = [];
+      const ctx = new Proxy({ measureText: (t) => ({ width: String(t).length * 14 }) }, {
+        get(target, prop) {
+          if (prop in target) return target[prop];
+          if (prop === 'fill') return () => { calls.push(['fill', target.fillStyle]); };
+          return (...args) => { calls.push([prop, ...args]); };
+        },
+        set(target, prop, value) { target[prop] = value; return true; },
+      });
+      return { ctx, calls };
+    }
+    const WEDGE = MIST_WEDGE_FILL;
+    const wedgeRadii = (calls) => calls.flatMap((c, i) => (c[0] === 'arc' && calls[i + 2] && calls[i + 2][0] === 'fill' && calls[i + 2][1] === WEDGE ? [c[3]] : []));
+
+    it('gives every nozzle an arrow and a mist wedge, as long as its throw', () => {
+      const { ctx, calls } = styleContext();
+      const m = wall([at(100), at(250), at(400)]);
+      drawSketch(ctx, m, { map: {}, logo: null });
+      const radii = wedgeRadii(calls);
+      expect(radii).toHaveLength(3);
+      radii.forEach((r) => expect(r).toBeCloseTo(m.nozzles[0].reachPx, 5));
+      // 10 ft of throw in sketch pixels: the same px-to-feet math as the scale bar.
+      expect(m.nozzles[0].reachPx * (m.scale.feet / m.scale.px)).toBeCloseTo(10, 5);
+      // Sky-blue arrowheads: one per nozzle, and one in the key.
+      expect(calls.filter((c) => c[0] === 'fill' && c[1] === '#7dd3fc')).toHaveLength(3 + 1);
+    });
+
+    it('points each arrow along the nozzle\'s aim: the default away from the house, or a manual aim', () => {
+      const { ctx, calls } = styleContext();
+      drawSketch(ctx, wall([at(100), at(400, { aim: 90 })]), { map: {}, logo: null });
+      // Shaft end = nozzle + 30 px (the 40 px arrow less its 10 px head) along the heading.
+      const shaftEnds = calls.filter((c) => c[0] === 'lineTo').map((c) => [Math.round(c[1]), Math.round(c[2])]);
+      expect(shaftEnds).toContainEqual([100, 230]); // default heading 180: straight down the photo
+      expect(shaftEnds).toContainEqual([430, 200]); // manual heading 90: to the right
+    });
+
+    it('draws a near-water nozzle amber with an amber arrow and half the throw, but no zone ring', () => {
+      const { ctx, calls } = styleContext();
+      const pool = { kind: 'pool', x: 100, y: 120, radiusFt: 15, radiusPx: 69 };
+      const m = wall([at(100), at(400)], [pool]);
+      expect(m.nozzles.map((n) => n.nearWater)).toEqual([true, false]);
+      expect(m.nozzles[0].flagged).toBe(false);
+      drawSketch(ctx, m, { map: {}, logo: null });
+      const discFills = calls
+        .map((c, i) => (c[0] === 'arc' && c[3] === 17 && calls[i + 1] && calls[i + 1][0] === 'fill' ? [c[1], calls[i + 1][1]] : null))
+        .filter(Boolean);
+      expect(discFills).toEqual([[100, '#f59e0b'], [400, '#0b6fb8']]);
+      expect(calls.filter((c) => c[0] === 'fill' && c[1] === '#fbbf24').length).toBeGreaterThanOrEqual(1);
+      expect(calls.filter((c) => c[0] === 'arc' && c[3] === 24)).toHaveLength(0);
+      expect(calls.filter((c) => c[0] === 'fillText' && c[1] === '!')).toHaveLength(0);
+      const radii = wedgeRadii(calls);
+      expect(radii[0]).toBeCloseTo(radii[1] / 2, 5);
+    });
+
+    it('lists the near-water count with the other counts', () => {
+      const pool = { kind: 'pool', x: 100, y: 120, radiusFt: 15, radiusPx: 69 };
+      const { ctx, calls } = recordingContext();
+      drawSketch(ctx, wall([at(100), at(400)], [pool]), { map: {}, logo: null });
+      expect(fillsOf(calls, 'Near water: 1')).toHaveLength(1);
     });
   });
 });

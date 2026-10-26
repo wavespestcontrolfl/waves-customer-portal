@@ -11,11 +11,16 @@
 // risers. Step 3: "Save layout" composes the branded sketch PNG and saves it with the geometry on the
 // estimate (needs a saved estimate); reopening the designer on that estimate restores the saved layout.
 //
+// The look is glass: the photo fills the frame and the title, tools, counts, legend and controls float on
+// frosted panels (misting-designer/MistingLayoutGlass). Every nozzle carries a spray direction (lib/mistingLayoutAim):
+// an arrow on the map and, with Spray on, animated mist along it (misting-designer/MistingSprayLayer). In Edit
+// nozzles, dragging an arrow tip aims that nozzle by hand and Reset aim puts it back.
+//
 // The pieces live in ./misting-designer: useMistingMapImage (photo), useMistingLayoutState (lines,
 // edits, notice), useMistingLayoutExtras (risers, pump, zones, flags), useMistingLayoutPointer (taps
 // and drags per tool), useSavedMistingLayout / useMistingLayoutSave (step 3) and MistingLayoutParts /
 // MistingLayoutGraphics / MistingLayoutSaveBar (display).
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Button, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle } from '../ui';
 import { restoreLayout, savedLayoutIsForOtherAddress } from '../../lib/mistingLayoutPersist';
 import useMistingMapImage from './misting-designer/useMistingMapImage';
@@ -26,15 +31,17 @@ import useMistingLayoutState, { editCount } from './misting-designer/useMistingL
 import useMistingLayoutPointer from './misting-designer/useMistingLayoutPointer';
 import {
   CONCEPT_LABEL,
+  ControlPanel,
   CountsPanel,
   EditsClearedNotice,
   ExtrasClearedNotice,
   MapCanvas,
-  Toolbar,
+  ToolHint,
+  ToolPalette,
   limitNote,
   riserLimitNote,
-  toolHint,
 } from './misting-designer/MistingLayoutParts';
+import { GlassLegend, GlassStage, GlassTitle } from './misting-designer/MistingLayoutGlass';
 
 export { CONCEPT_LABEL };
 
@@ -59,7 +66,8 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
   const initial = useMemo(() => (saved ? restoreLayout(saved) : null), [saved]);
   const layout = useMistingLayoutState(mapState, initial);
   const { frameRef, handlers } = useMistingLayoutPointer(layout, mapState);
-  const { ready, mode, totals, notice } = layout;
+  const { ready, totals, notice } = layout;
+  const [panelsShown, setPanelsShown] = useState(true); // Panels off clears the glass off the photo, to trace under it
   const save = useMistingLayoutSave({ estimateId, mapState, address: address || (saved && saved.address) || null, layout, saved });
 
   const useCounts = () => {
@@ -80,12 +88,39 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
                 A layout saved for a different address is not shown. Saving this one replaces it.
               </p>
             )}
-            <Toolbar layout={layout} editsPresent={editCount(layout.edits) > 0} />
-            <p className="text-14 text-zinc-600 mb-3">{toolHint(mode)}</p>
-            {mode === 'add' && layout.addMiss && (
-              <p role="status" className="text-14 text-amber-800 mb-3">Tap on a drawn line to add a nozzle</p>
-            )}
-            <MapCanvas frameRef={frameRef} handlers={handlers} layout={layout} mapUrl={mapState.url} address={address} />
+            <GlassStage
+              frame={(
+                <MapCanvas
+                  frameRef={frameRef}
+                  handlers={handlers}
+                  layout={layout}
+                  mapUrl={mapState.url}
+                  address={address}
+                  map={{ lat: mapState.center.lat, zoom: mapState.zoom }}
+                />
+              )}
+              topLeft={panelsShown ? (
+                <>
+                  <GlassTitle title="Proposed misting layout" note={CONCEPT_LABEL} />
+                  <ToolPalette layout={layout} />
+                </>
+              ) : null}
+              topRight={panelsShown ? (
+                <>
+                  <CountsPanel layout={layout} note={limitNote(totals.count, limits)} riserNote={riserLimitNote(layout.risers.length, limits)} />
+                  <GlassLegend />
+                </>
+              ) : null}
+              bottomLeft={(
+                <ControlPanel
+                  layout={layout}
+                  editsPresent={editCount(layout.edits) > 0}
+                  panelsShown={panelsShown}
+                  onTogglePanels={() => setPanelsShown((shown) => !shown)}
+                />
+              )}
+            />
+            <ToolHint layout={layout} />
             {notice && <EditsClearedNotice notice={notice} onRestore={layout.restoreSnapshot} onDismiss={layout.dismissNotice} />}
             {layout.clearedExtras && (
               <ExtrasClearedNotice
@@ -94,7 +129,6 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
                 onDismiss={layout.dismissClearedExtras}
               />
             )}
-            <CountsPanel layout={layout} note={limitNote(totals.count, limits)} riserNote={riserLimitNote(layout.risers.length, limits)} />
           </>
         )}
       </DialogBody>
@@ -113,7 +147,7 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
 
 function DesignerFrame({ address, onClose, children }) {
   return (
-    <Dialog open onClose={onClose} size="lg" aria-label="Misting layout designer">
+    <Dialog open onClose={onClose} size="lg" className="lg:max-w-5xl" aria-label="Misting layout designer">
       <DialogHeader className="flex items-start justify-between gap-3">
         <div>
           <DialogTitle>Design misting layout</DialogTitle>

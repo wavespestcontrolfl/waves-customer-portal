@@ -3,12 +3,14 @@
 
 /**
  * The legend lines printed on the sketch and shown under it. `flaggedCount` is the nozzles inside a
- * no-mist zone; its row appears only when there are some (the saved server counts carry no such count,
- * so the estimate PDF's counts line leaves it out).
+ * no-mist zone; its row appears only when there are some. `nearWaterCount` is the nozzles within 30 ft of
+ * water or a pool; its row appears whenever a number is given, 0 included. The saved server counts carry
+ * neither, so the estimate PDF's counts line leaves both out.
  */
-export function legendRows({ nozzleCount, eaveCount, fenceCount, riserCount, hasPump, zoneCount, linearFt, flaggedCount = 0 }) {
+export function legendRows({ nozzleCount, eaveCount, fenceCount, riserCount, hasPump, zoneCount, linearFt, flaggedCount = 0, nearWaterCount }) {
   const rows = [
     `Nozzles: ${nozzleCount} (eave ${eaveCount}, fence ${fenceCount})`,
+    ...(Number.isFinite(nearWaterCount) ? [`Near water: ${nearWaterCount}`] : []),
     `Risers: ${riserCount}`,
     `Pump: ${hasPump ? 'placed' : 'not placed'}`,
     `No-mist zones: ${zoneCount}`,

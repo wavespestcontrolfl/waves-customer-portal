@@ -2,7 +2,9 @@
 // Each tool names what it does and nothing else, so a tap never means two things in one tool:
 //   eave / fence   a tap adds a point (or ends the line, or closes the loop)
 //   edit           a tap on a nozzle deletes it, a drag moves it, a tap elsewhere does nothing.
-//                  It never touches risers, the pump or zones.
+//                  The tip of a nozzle's aim arrow is a separate handle: a drag turns the nozzle's
+//                  spray, a tap only selects it for Reset aim (it never deletes). Where a body and a tip
+//                  overlap, the nearer center wins. It never touches risers, the pump or zones.
 //   add            a tap on or near a line adds a nozzle there; it never deletes
 //   riser          a tap within the hit radius of a riser deletes it, a drag moves it, a tap anywhere
 //                  else adds one. This is the one tool where a tap can add or delete, and the radius
@@ -13,6 +15,7 @@
 import { useRef } from 'react';
 import { MAP_HEIGHT, MAP_WIDTH } from '../../tech/treatmentZoneSpray';
 import { hitNozzleIndex, nozzleHitRadiusPx } from '../../../lib/mistingLayoutGeometry';
+import { aimTip } from '../../../lib/mistingLayoutMistDraw';
 
 const DRAG_START_CSS_PX = 5;
 
@@ -24,6 +27,27 @@ function grabFrom(items, p, mapState) {
   return idx < 0 ? null : items[idx];
 }
 
+// The arrow tips under a press, as {x, y, handleOf: nozzle} items. The tip is small, so it gets a larger reach
+// than a nozzle body.
+const TIP_HIT_CSS_PX = 12;
+function grabTip(layout, p, mapState) {
+  if (!layout.directions) return null;
+  const tips = layout.nozzles.flatMap((n) => {
+    const aim = layout.aims.get(n.key);
+    return aim ? [{ ...aimTip(n, aim.heading, aim.tipPx), handleOf: n }] : [];
+  });
+  const radius = Math.max(nozzleHitRadiusPx(mapState.center.lat, mapState.zoom, p.scale), TIP_HIT_CSS_PX * p.scale);
+  const idx = hitNozzleIndex(tips, p, radius);
+  return idx < 0 ? null : tips[idx];
+}
+
+// Where a nozzle body and an arrow tip both lie under the press (a nozzle aimed along its line points at the next
+// one), the one whose center is nearer the press wins; a tie goes to the tip.
+function nearer(p, body, tip) {
+  if (!body || !tip) return body || tip;
+  return Math.hypot(body.x - p.x, body.y - p.y) < Math.hypot(tip.x - p.x, tip.y - p.y) ? body : tip;
+}
+
 const drawTool = { tap: (layout, p) => layout.addDraftPoint(p, p.scale) };
 
 // grab: what a press can pick up. move: a drag of it. pick: a tap on it (no drag). tap: a tap that picked nothing.
@@ -32,9 +56,9 @@ const TOOLS = {
   fence: drawTool,
   add: { tap: (layout, p) => layout.addNozzleOnLine(p, p.scale) },
   edit: {
-    grab: (layout, p, mapState) => grabFrom(layout.nozzles, p, mapState),
-    move: (layout, nozzle, p) => layout.moveNozzle(nozzle, p),
-    pick: (layout, nozzle) => layout.deleteNozzle(nozzle),
+    grab: (layout, p, mapState) => nearer(p, grabFrom(layout.nozzles, p, mapState), grabTip(layout, p, mapState)),
+    move: (layout, item, p) => (item.handleOf ? layout.aimNozzleToward(item.handleOf, p) : layout.moveNozzle(item, p)),
+    pick: (layout, item) => (item.handleOf ? layout.selectAim(item.handleOf) : layout.deleteNozzle(item)),
   },
   riser: {
     grab: (layout, p, mapState) => grabFrom(layout.risers, p, mapState),
