@@ -6948,8 +6948,8 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('45 5 * * *', async () => {
     try {
-      const { runWaveGuardInventoryForecastCheck } = require('./waveguard-inventory-forecast');
-      const result = await runWaveGuardInventoryForecastCheck({ days: 14, limit: 150, source: 'scheduled_daily' });
+      const { runWaveGuardInventoryForecastCheck, DEFAULT_FORECAST_DAYS } = require('./waveguard-inventory-forecast');
+      const result = await runWaveGuardInventoryForecastCheck({ days: DEFAULT_FORECAST_DAYS, limit: 150, source: 'scheduled_daily' });
       if (!result.skipped) {
         logger.info(`[waveguard-inventory-forecast] ok=${result.ok || 0} warning=${result.warning || 0} short=${result.short || 0} unit_mismatch=${result.unit_mismatch || 0} not_tracked=${result.not_tracked || 0} products=${result.productCount || 0}`);
       }
@@ -8746,6 +8746,34 @@ function initScheduledJobs() {
   };
   cron.schedule('47 6 * * *', runPlanRateLedgerReconcileTick, { timezone: 'America/New_York' });
   registerDeployKillRetry('plan-rate-ledger-reconcile', runPlanRateLedgerReconcileTick);
+
+  // =========================================================================
+  // DAILY 1:32AM — Admin alert retention (owner 2026-10-26, "ok go"). Marks done,
+  // never deletes, an admin bell row idle 30 days and an FYI row idle 7 days
+  // (admin-alert-retention.js). GATE_ALERT_RETENTION: unset = no query, `shadow`
+  // = one audit_log summary row and no change, `true` = expire. Minute 32 of the
+  // 1am hour has no other job (#3208 rule). runExclusive: a deploy overlap must
+  // not run two sweeps over the same page of rows. A deploy that kills the run
+  // re-runs it: a second run finds nothing left to expire (shadow writes a
+  // second summary row, nothing else).
+  // =========================================================================
+  const runAdminAlertRetentionTick = async () => {
+    if (require('../config/feature-gates').alertRetentionMode() === 'off') return;
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('admin-alert-retention', async () => {
+        await require('./admin-alert-retention').runAdminAlertRetention();
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('admin-alert-retention', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`admin alert retention tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[alert-retention] sweep tick failed: ${err.message}`);
+    }
+  };
+  cron.schedule('32 1 * * *', runAdminAlertRetentionTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('admin-alert-retention', runAdminAlertRetentionTick);
 
   // =========================================================================
   // DAILY 6:55AM — Lead-to-cash invariants sweep (read-only registry over

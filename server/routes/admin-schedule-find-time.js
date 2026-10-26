@@ -344,6 +344,12 @@ router.post('/', async (req, res) => {
     });
 
     const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();
+    // New Appointment has no visit yet (GATE_NEW_APPT_ROUTE_TIMES, owner
+    // 2026-10-26): its open-times box runs the same route check on a new stop
+    // at the searched address, as customer booking does (find-time.js
+    // findCapacitySlots). Off = the gap check, as before.
+    const newVisitRoute = !serviceId && arrivalWindows === true && plan.openTimes
+      && gateEnvValue('GATE_NEW_APPT_ROUTE_TIMES') && arrivalWindowRoutingEnabled();
     // Arrival checks load the saved appointment too. Request coordinates or
     // an address echo must not make its hint promise a different destination.
     const { target, pendingStamp } = await resolveFindTimeTarget(useArrivalWindows
@@ -400,6 +406,7 @@ router.post('/', async (req, res) => {
       // whole, unless the operator chose to separate this service (alone).
       // GATE_COMBO_ROUTE_CHECK decides; for a visit alone, neither matters.
       ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges, unit: !moveAlone, alone: moveAlone } } : {}),
+      ...(newVisitRoute ? { arrivalWindow: { prospective: { lat: target.lat, lng: target.lng, estimated_duration_minutes: spanMin } } } : {}),
       slotStepMinutes: plan.step,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).

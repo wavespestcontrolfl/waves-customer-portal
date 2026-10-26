@@ -236,13 +236,16 @@ describe('waveguard-plan-engine helpers', () => {
     });
 
     test('matchCatalogProduct resolves the product from lineMeta hints despite de-branded text', () => {
+      // Owner 2026-10-26: no Demand CS on hand, the perimeter is Talak (the Talstar P hint), so a
+      // catalog that still lists Demand CS resolves the Talstar P row.
       const catalog = [
         { id: '1', name: 'Demand CS', cost_per_unit: 5 },
-        { id: '2', name: 'Unrelated Product' },
+        { id: '2', name: 'Talstar P', cost_per_unit: 4 },
+        { id: '3', name: 'Unrelated Product' },
       ];
       const meta = protocols.pest.visits[0].lineMeta['Treated exterior perimeter band'];
       const line = { raw: 'Treated exterior perimeter band', catalogProductHints: meta.catalogProductHints };
-      expect(matchCatalogProduct(line, catalog).name).toBe('Demand CS');
+      expect(matchCatalogProduct(line, catalog).name).toBe('Talstar P');
       expect(meta).toMatchObject({ scope: 'exterior', treatmentApplied: true });
     });
 

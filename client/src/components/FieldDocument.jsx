@@ -65,17 +65,18 @@ export function FieldDocumentBody({ children, className = '', style }) {
   );
 }
 
-export function FieldMasthead({ licenseLine = WAVES_FL_LICENSE_LINE }) {
+export function FieldMasthead({ licenseLine = WAVES_FL_LICENSE_LINE, variant = 'customer' }) {
+  const staff = variant === 'staff';
   return (
     <header className={FIELD_DOCUMENT_CLASSES.masthead}>
       <div className="field-document-brand">
-        <img src="/waves-logo.png" alt="Waves Pest Control" />
+        {!staff && <img src="/waves-logo.png" alt="Waves Pest Control" />}
         <div>
           <div className="field-document-brand-name">Waves Pest Control</div>
-          <div className="field-document-license">{licenseLine}</div>
+          <div className="field-document-license">{staff ? 'Controlled staff document' : licenseLine}</div>
         </div>
       </div>
-      <div className="field-document-contact">
+      {!staff && <div className="field-document-contact">
         <a className="field-document-phone" href={WAVES_SUPPORT_PHONE_TEL}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
         <div>
           <a href={`mailto:${WAVES_EMAIL}`}>{WAVES_EMAIL}</a>
@@ -83,7 +84,7 @@ export function FieldMasthead({ licenseLine = WAVES_FL_LICENSE_LINE }) {
           <a href="https://www.wavespestcontrol.com">wavespestcontrol.com</a>
         </div>
         <div>{WAVES_ADDRESS_LINE}</div>
-      </div>
+      </div>}
     </header>
   );
 }

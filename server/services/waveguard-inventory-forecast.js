@@ -10,6 +10,9 @@ const { lawnPlanProgramApplies } = require('./lawn-completion-defaults');
 const WITHHELD_PLAN_BLOCK_CODES = ['lawn_archived_recipe_unavailable', 'lawn_protocol_unresolved', 'lawn_property_unresolved'];
 
 const ADVISORY_LOCK_KEY = 'waveguard-inventory-forecast-cron';
+// How far ahead the daily check and the forecast pages look by default
+// (owner 2026-10-26: one week, was 14 days).
+const DEFAULT_FORECAST_DAYS = 7;
 let isRunning = false;
 
 function numberOrNull(value) {
@@ -34,8 +37,8 @@ function forecastPriority(status, firstShortDate) {
   return 'low';
 }
 
-async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = db } = {}) {
-  const safeDays = Math.max(1, Math.min(90, Number(days || 14)));
+async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, limit = 150, knex = db } = {}) {
+  const safeDays = Math.max(1, Math.min(90, Number(days || DEFAULT_FORECAST_DAYS)));
   const safeLimit = Math.max(1, Math.min(300, Number(limit || 150)));
   const startDate = etDateString();
   const endDate = etDateString(addETDays(new Date(), safeDays));
@@ -333,7 +336,7 @@ async function runWaveGuardInventoryForecastCheck(options = {}) {
     return await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [ADVISORY_LOCK_KEY]);
       const forecast = await buildWaveGuardInventoryForecast({
-        days: options.days || 14,
+        days: options.days || DEFAULT_FORECAST_DAYS,
         limit: options.limit || 150,
         knex: trx,
       });
@@ -355,6 +358,7 @@ async function runWaveGuardInventoryForecastCheck(options = {}) {
 }
 
 module.exports = {
+  DEFAULT_FORECAST_DAYS,
   buildWaveGuardInventoryForecast,
   runWaveGuardInventoryForecastCheck,
   syncForecastAlert,
