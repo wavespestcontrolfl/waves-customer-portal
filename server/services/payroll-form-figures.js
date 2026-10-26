@@ -332,12 +332,22 @@ function form940(year, yearChecks, depositsCents, rt6Paid = []) {
   } else if (line12 > FORM_940_PART_5_THRESHOLD_CENTS) {
     const byQuarter = [1, 2, 3, 4].map((q) => sum(quarterChecksOf(yearChecks, q), 'futa'));
     // The checks round FUTA per paycheck; line 12 rounds the year's taxable
-    // wages once. The cent difference goes to the LAST quarter that carries
-    // FUTA (never to a quarter with no FUTA wages), so line 17 equals line 12
-    // and no quarter shows a negative liability.
+    // wages once. Line 17 must equal line 12, and no quarter may show a
+    // negative liability or take cents with no FUTA wages. Extra cents go to
+    // the LAST quarter that carries FUTA. Missing cents come off the latest
+    // quarters first, none below zero (pre-push audit P1: a small 4th quarter
+    // could go negative). Line 12 >= 0, so the quarters always cover them.
     const rounding = line12 - byQuarter.reduce((acc, v) => acc + v, 0);
-    const lastWithFuta = Math.max(0, ...[0, 1, 2, 3].filter((i) => byQuarter[i] > 0));
-    byQuarter[lastWithFuta] += rounding;
+    if (rounding > 0) {
+      byQuarter[Math.max(0, ...[0, 1, 2, 3].filter((i) => byQuarter[i] > 0))] += rounding;
+    } else {
+      let missing = -rounding;
+      for (let i = 3; i >= 0 && missing > 0; i -= 1) {
+        const take = Math.min(byQuarter[i], missing);
+        byQuarter[i] -= take;
+        missing -= take;
+      }
+    }
     rows.push(
       cents('16a', 'FUTA liability, 1st quarter (January to March)', byQuarter[0]),
       cents('16b', 'FUTA liability, 2nd quarter (April to June)', byQuarter[1]),
@@ -345,9 +355,10 @@ function form940(year, yearChecks, depositsCents, rt6Paid = []) {
       cents('16d', 'FUTA liability, 4th quarter (October to December)', byQuarter[3]),
       cents('17', 'Total tax liability for the year (must equal line 12)', byQuarter.reduce((acc, v) => acc + v, 0)),
     );
-    notes.push(rounding
-      ? `Part 5 is shown because line 12 is more than $500. The paychecks round FUTA per check, so the ${rounding > 0 ? '' : 'minus '}${Math.abs(rounding)} cent difference is in the last quarter with FUTA, and line 17 equals line 12.`
-      : 'Part 5 is shown because line 12 is more than $500. Line 17 equals line 12.');
+    let roundingText = '';
+    if (rounding > 0) roundingText = ` The paychecks round FUTA per check, so the ${rounding} cent difference is added to the last quarter with FUTA.`;
+    if (rounding < 0) roundingText = ` The paychecks round FUTA per check, so the ${-rounding} cent difference comes off the latest quarters with FUTA, none below zero.`;
+    notes.push(`Part 5 is shown because line 12 is more than $500.${roundingText} Line 17 equals line 12.`);
   } else {
     notes.push('Part 5 is not needed because line 12 is $500 or less.');
   }

@@ -268,11 +268,32 @@ describe('Form 940', () => {
   test('Part 5 appears over $500, by quarter, and line 17 equals line 12', () => {
     const out = build(fourteen(), { rt6Paid: paidOnTime(1, 3) });
     expect(line(out.f940, '12').value).toBe(58800);
-    // The per-check rounding cent (-1) goes to the last quarter WITH FUTA (Q3),
-    // never to a quarter with no FUTA wages: no quarter shows a negative liability.
+    // The per-check rounding cent (-1) comes off the latest quarter WITH FUTA (Q3),
+    // never a quarter with no FUTA wages: no quarter shows a negative liability.
     expect(['16a', '16b', '16c', '16d'].map((id) => line(out.f940, id).value)).toEqual([29401, 0, 29399, 0]);
     expect(line(out.f940, '17').value).toBe(58800);
-    expect(out.f940.notes.join(' ')).toMatch(/minus 1 cent difference is in the last quarter with FUTA/);
+    expect(out.f940.notes.join(' ')).toMatch(/the 1 cent difference comes off the latest quarters with FUTA, none below zero/);
+  });
+
+  test('missing cents larger than the last quarter come off earlier quarters, none below zero (pre-push audit P1)', () => {
+    // 14 employees at $7,000 in Q1 whose checks stored 58,842 cents of FUTA, and
+    // $10.00 in Q4 that stored 6 cents. Line 12 rounds $98,010.00 once: 58,806.
+    const rows = [
+      ...Array.from({ length: 14 }, (_v, i) => check('2026-01-05', '2026-01-16', { tech: i + 1, gross_cents: 700000, futa_cents: 4203 })),
+      check('2026-10-05', '2026-10-16', { tech: 30, gross_cents: 1000, futa_cents: 6 }),
+    ];
+    const out = build(rows, { rt6Paid: paidOnTime(1, 4) });
+    expect(line(out.f940, '12').value).toBe(58806);
+    // 42 missing cents: 6 from Q4 (to zero), the other 36 from Q1.
+    expect(['16a', '16b', '16c', '16d'].map((id) => line(out.f940, id).value)).toEqual([58806, 0, 0, 0]);
+    expect(line(out.f940, '17').value).toBe(58806);
+  });
+
+  test('extra cents go to the last quarter with FUTA', () => {
+    const rows = Array.from({ length: 14 }, (_v, i) => check('2026-01-05', '2026-01-16', { tech: i + 1, gross_cents: 700000, futa_cents: i === 0 ? 4199 : 4200 }));
+    const out = build(rows, { rt6Paid: paidOnTime(1) });
+    expect(['16a', '16b', '16c', '16d'].map((id) => line(out.f940, id).value)).toEqual([58800, 0, 0, 0]);
+    expect(out.f940.notes.join(' ')).toMatch(/the 1 cent difference is added to the last quarter with FUTA/);
   });
 
   test('a line 12 of exactly $500.00 is not over $500', () => {
