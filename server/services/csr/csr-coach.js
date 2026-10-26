@@ -164,6 +164,15 @@ function callbackNamesOwnedNumber(taskType, text) {
   return false;
 }
 
+// Post-insert observability for callbackNamesOwnedNumber: one warn line with the
+// task id and no digits. Never throws and never touches the stored text.
+function warnIfCallbackNamesOwnedNumber(taskId, taskType, text) {
+  if (!callbackNamesOwnedNumber(taskType, text)) return;
+  try {
+    logger.warn(`[csr-coach] call_back task ${taskId} still names a Waves-owned number as written by the model (text left unchanged)`);
+  } catch { /* observability only */ }
+}
+
 // The scoring request's user text. The ANI is presented as caller ID, not as
 // the callback number: the model is told to prefer a different number the
 // caller gave, and when the caller disclaimed the ANI the line is left out.
@@ -646,11 +655,7 @@ Return JSON:
         follow_up_task_created: true,
       });
 
-      if (callbackNamesOwnedNumber(task.task_type || score.follow_up_task.type, score.follow_up_task.recommended_action)) {
-        try {
-          logger.warn(`[csr-coach] call_back task ${task.id} still names a Waves-owned number as written by the model (text left unchanged)`);
-        } catch { /* observability only */ }
-      }
+      warnIfCallbackNamesOwnedNumber(task.id, score.follow_up_task.type, score.follow_up_task.recommended_action);
 
       score._followUpTaskId = task.id;
     }
