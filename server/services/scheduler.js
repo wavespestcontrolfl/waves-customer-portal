@@ -1581,6 +1581,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // MONTHLY, 1st at 9:00AM ET — SiteOne savings-programs check (owner
+  // 2026-10-26). Signs in with the order bot's stored SiteOne login (read-only),
+  // reads the Early Order Programs, promotions and Partners points, compares
+  // them with last month's snapshot and rings ONE admin notification when
+  // something is new or ending. Gate GATE_SITEONE_PROGRAMS_CHECK is checked
+  // INSIDE the check at call time; kill = unset. A failure throws so the
+  // job_health row goes red (and the check rings its own failure bell).
+  // =========================================================================
+  cron.schedule('0 9 1 * *', async () => {
+    try {
+      await runExclusive('siteone-programs-check', async () => {
+        const { runSiteOneProgramsCheck } = require('./procurement/siteone-programs-check');
+        const result = await runSiteOneProgramsCheck();
+        if (result?.skipped) return;
+        logger.info(`Running: SiteOne programs check (${result?.programs ?? 0} programs, ${result?.added ?? 0} new)`);
+      });
+    } catch (err) {
+      logger.error(`SiteOne programs check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Point-in-time MRR snapshot — keeps the MRR Trend honest: past months read
   // their real recorded MRR instead of being recomputed at today's prices.
   //  - DAILY 6:05AM ET: refresh the CURRENT month's row (in-progress month stays
