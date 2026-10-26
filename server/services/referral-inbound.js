@@ -30,7 +30,7 @@ const engine = require('./referral-engine');
 const { isMembershipTier } = require('./billing-lane');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { isPromoterPhoneCollision } = require('./referral-errors');
-const { toE164, isLikelyE164, phoneMatchDigits } = require('../utils/phone');
+const { toE164, isLikelyE164, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
 
 // A completed visit whose closeout performed no service (complete-scheduled-service.js
 // referralVisitPerformed; the same list paf-prepay-release.js reads back).
@@ -321,6 +321,11 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
     // waited decides, never the first pass.
     const locked = await eligibleReferee(trx, customerId, { lock: true });
     await checkedReferrer(trx, referrerCustomerId, locked.referee);
+    // An account's other properties share the phone but lock other rows: the
+    // phone itself serializes the "no referral for this phone" check and the
+    // insert, so two profiles can never both convert (and count toward a
+    // milestone) for one friend.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`referral-inbound-phone:${phoneIdentityKey(locked.phone)}`]);
     if (await trx('referral_inbound_reviews').where({ customer_id: customerId }).first('id')) {
       throw inboundError(409, 'ALREADY_REVIEWED', 'This customer was already confirmed or dismissed');
     }

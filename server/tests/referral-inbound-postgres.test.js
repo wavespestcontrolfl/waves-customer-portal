@@ -388,6 +388,40 @@ jest.mock('../services/customer-credit', () => ({
     expect((await db('referrals').where({ id: result.referralId }).first()).referee_phone).toBe(newPhone);
   });
 
+  test('two profiles that share a phone race to one referral and one conversion', async () => {
+    // Repeated: the race needs both transactions past their own row locks at once.
+    for (let round = 0; round < 3; round += 1) {
+      const referrer = await customer();
+      const accountId = randomUUID();
+      const home = await linkCustomer('WAVES-ANY', { account_id: accountId, phone: '+19415550188' });
+      const rental = await linkCustomer('WAVES-ANY', { account_id: accountId, phone: '(941) 555-0188' });
+      const outcomes = await Promise.allSettled([home, rental].map((friend) => (
+        inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id }))));
+      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+      expect(outcomes.find((o) => o.status === 'rejected').reason).toMatchObject({ statusCode: 409, code: 'ALREADY_REFERRED' });
+      expect(await db('referrals').where({ referrer_customer_id: referrer.id }).count('* as n').first()).toEqual({ n: '1' });
+      expect(await db('referral_promoters').where({ customer_id: referrer.id }).first()).toMatchObject({ total_referrals_converted: 1 });
+      await db('referral_inbound_reviews').del();
+      await db('referrals').del();
+    }
+  });
+
+  test("a confirm that is the referrer's 3rd conversion sends the existing milestone text, and only that", async () => {
+    const referrer = await customer({ referral_code: 'WAVES-JANE' });
+    await db('referral_promoters').insert({
+      customer_phone: referrer.phone, first_name: 'Jane', last_name: 'Smith', customer_id: referrer.id,
+      referral_code: 'WAVES-JANE', status: 'active', total_referrals_converted: 2,
+    });
+    const friend = await linkCustomer('WAVES-JANE');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+    await inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id });
+    expect(await db('referral_promoters').where({ customer_id: referrer.id }).first())
+      .toMatchObject({ total_referrals_converted: 3, milestone_level: 'advocate' });
+    expect(sendCustomerMessage.mock.calls.map(([message]) => message.metadata.original_message_type)).toEqual(['referral_milestone']);
+    // The milestone text is the conversion's own; the no-message guard below covers every other case.
+    sendCustomerMessage.mockClear();
+  });
+
   test('dismiss removes the customer from the list and blocks a later confirm', async () => {
     const referrer = await customer({ referral_code: 'WAVES-JANE' });
     const friend = await linkCustomer('WAVES-JANE');

@@ -447,8 +447,9 @@ function InboundReferralCard({ item, onDone, flash }) {
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
             {item.creditsNow
-              ? "Both accounts get the $25 credit now. No text or email goes out."
-              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer gets the usual reward text then.`}
+              ? "Both accounts get the $25 credit now. No reward text or email goes out."
+              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit, with the usual reward text.`}{" "}
+            A referrer's 3rd, 5th or 10th referral also sends the usual milestone text.
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={confirm} disabled={busy} style={btnPrimary}>

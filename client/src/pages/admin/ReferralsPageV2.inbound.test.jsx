@@ -61,7 +61,7 @@ describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", (
 
     fireEvent.click(screen.getByRole("button", { name: "Choose" }));
     expect(confirms()).toHaveLength(0);
-    expect(screen.getByText(/Confirm Fixture Referrer as the referrer\. Both accounts get the \$25 credit now\. No text or email goes out\./)).toBeInTheDocument();
+    expect(screen.getByText(/Confirm Fixture Referrer as the referrer\. Both accounts get the \$25 credit now\. No reward text or email goes out\. A referrer's 3rd, 5th or 10th referral also sends the usual milestone text\./)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(await screen.findByText("Referral confirmed. $25 credited to both accounts.")).toBeInTheDocument();
@@ -76,7 +76,7 @@ describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", (
     await openQueue(/Queue \(1\)/);
     expect(screen.getByText(/no completed plan visit yet/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Choose" }));
-    expect(screen.getByText(/Both accounts get the \$25 credit at Fixture's next completed plan visit\./)).toBeInTheDocument();
+    expect(screen.getByText(/Both accounts get the \$25 credit at Fixture's next completed plan visit, with the usual reward text\./)).toBeInTheDocument();
   });
 
   it("a referrer found by search is named in the confirm line and posted by id", async () => {
