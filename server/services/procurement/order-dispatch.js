@@ -876,6 +876,11 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) return { skipped: 'not_found' };
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
+  // An order EMAILED to the vendor (vendor_order_emails, GATE_SITEONE_EMAIL_ORDER) for this
+  // request — sent, or sending with the outcome unknown — means the vendor has the order
+  // (or may): never claim it for the bot as well. The email claim takes this same request
+  // row lock, so the two cannot both pass.
+  if (await trx('vendor_order_emails').where({ restock_request_id: requestId }).whereIn('status', ['sending', 'sent']).first('id')) return { skipped: 'email_order' };
   const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, login });
   if (resolved.skipped) return resolved;
   const { vendor, adapterKey, m, credentials = null } = resolved;

@@ -150,6 +150,15 @@ describe('Email order to SiteOne', () => {
     expect(screen.queryByRole('button', { name: 'Email order to SiteOne' })).not.toBeInTheDocument();
   });
 
+  it('Receive defaults to what the emailed packages hold, not the requested amount', async () => {
+    installFetch({
+      requests: [{ ...OPEN_REQUEST, status: 'ordered', requestedQuantity: 301, emailOrder: { status: 'sent', po: 'WAVES-20000000', sentAt: '2026-10-27T15:00:00Z', packages: 7, orderedQuantity: 350 } }],
+    });
+    mount();
+    await screen.findByText(/Emailed to SiteOne/);
+    expect(screen.getByPlaceholderText('Qty')).toHaveValue('350');
+  });
+
   it('an unconfirmed email warns before anyone sends again', async () => {
     installFetch({ requests: [{ ...OPEN_REQUEST, emailOrder: { status: 'sending', po: 'WAVES-20000000', sentAt: null } }] });
     mount();

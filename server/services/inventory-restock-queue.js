@@ -42,7 +42,7 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         'c.last_name',
         'c.address_line1',
         'c.city',
-        ...(hasEmails ? ['voe.status as email_status', 'voe.po as email_po', 'voe.sent_at as email_sent_at', 'voe.packages as email_packages', 'voe.item_number as email_item_number'] : []),
+        ...(hasEmails ? ['voe.status as email_status', 'voe.po as email_po', 'voe.sent_at as email_sent_at', 'voe.packages as email_packages', 'voe.item_number as email_item_number', 'voe.ordered_quantity as email_ordered_quantity'] : []),
         ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
       )
       .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
@@ -92,6 +92,8 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         emailOrder: officeDetail && ['sent', 'sending'].includes(row.email_status) ? {
           status: row.email_status, po: row.email_po, sentAt: row.email_sent_at || null,
           packages: row.email_packages != null ? Number(row.email_packages) : null, itemNumber: row.email_item_number || null,
+          // What those packages hold, in the request's unit: the tab's Receive default (a request for 301 lb emails 7 x 50 lb).
+          orderedQuantity: row.email_status === 'sent' && row.email_ordered_quantity != null ? Number(row.email_ordered_quantity) : null,
         } : null,
         neededBy: row.needed_by,
         reason: row.reason,

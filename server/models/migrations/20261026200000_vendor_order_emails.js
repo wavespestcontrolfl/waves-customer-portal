@@ -47,6 +47,10 @@ exports.up = async function up(knex) {
     t.integer('packages').notNullable();
     t.string('item_number', 50).notNullable();
     t.integer('estimate_cents');
+    // What the packages hold, in the request's own unit (301 lb asked of a 50 lb
+    // pack is 7 packages = 350 lb): the Receive default, as vendor_orders'
+    // request_payload.orderedQuantity is for the bot's orders.
+    t.decimal('ordered_quantity', 14, 4);
     t.timestamps(true, true);
     t.index(['status', 'created_at'], 'idx_vendor_order_emails_status_created');
   });

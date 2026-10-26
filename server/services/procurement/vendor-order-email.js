@@ -140,6 +140,15 @@ async function assertNoEmailOrderOut(conn, requestId) {
   throw refuse('email_order_out', `SiteOne was emailed an order for this request (PO ${out.po})${out.status === 'sending' ? ', and the email may have gone out' : ''}. Receive it when it arrives. To cancel it, tell SiteOne first, then mark the email row dismissed.`);
 }
 
+// What a SENT order email's packages hold, in the request's own unit: the
+// Receive default when the admin types no quantity (301 lb asked of a 50 lb
+// pack is 7 packages, and 350 lb is what arrives). null = no sent email.
+async function emailOrderedQuantityFor(conn, requestId) {
+  const row = await conn(TABLE).where({ restock_request_id: requestId, status: 'sent' }).first('ordered_quantity');
+  const quantity = row && row.ordered_quantity != null ? Number(row.ordered_quantity) : null;
+  return quantity > 0 ? quantity : null;
+}
+
 async function findSiteOneVendor(conn) {
   let vendor = await conn('vendors').where({ code: 1 }).first();
   if (!vendor) vendor = await conn('vendors').whereRaw("LOWER(TRIM(name)) = 'siteone'").first();
@@ -196,7 +205,7 @@ async function loadOrderEmail(conn, requestId, { lock = false, env = process.env
     requestId, accountNumber: vendor.account_number, packages: order.quantity, itemNumber: pricing.vendor_sku,
     productName: product.name, packSize: order.packSize, unitPrice: pricing.price_amount ?? pricing.price,
   }, env);
-  return { ...built, request, vendor, product, pricing, to, cc: ccList.join(', ') || null, packSize: order.packSize };
+  return { ...built, request, vendor, product, pricing, to, cc: ccList.join(', ') || null, packSize: order.packSize, orderedQuantity: order.orderedQuantity };
 }
 
 // A fingerprint of everything the admin approves in the preview. Send must
@@ -204,7 +213,7 @@ async function loadOrderEmail(conn, requestId, { lock = false, env = process.env
 // item or pack, the recipient or the payment setting changed in between, the
 // send is refused and the admin opens a fresh preview.
 const versionOf = (ctx) => createHash('sha256').update(JSON.stringify([
-  ctx.request.id, ctx.to, ctx.cc, ctx.subject, ctx.text, ctx.packages, ctx.itemNumber, ctx.packSize,
+  ctx.request.id, ctx.to, ctx.cc, ctx.subject, ctx.text, ctx.packages, ctx.itemNumber, ctx.packSize, ctx.estimateCents, ctx.orderedQuantity,
 ])).digest('hex').slice(0, 32);
 
 const previewView = (ctx) => ({
@@ -254,7 +263,8 @@ async function claimEmail(conn, requestId, token, { env, now, version }) {
       restock_request_id: requestId, vendor_id: ctx.vendor.id, recipient: ctx.to, cc: ctx.cc,
       subject: ctx.subject, text_body: ctx.text, html: ctx.html, status: 'sending',
       claim_token: token, claimed_at: stamp, send_attempted_at: null, sent_at: null, provider_message_id: null, sent_by: null,
-      po: ctx.po, packages: ctx.packages, item_number: ctx.itemNumber, estimate_cents: ctx.estimateCents, updated_at: stamp,
+      po: ctx.po, packages: ctx.packages, item_number: ctx.itemNumber, estimate_cents: ctx.estimateCents,
+      ordered_quantity: ctx.orderedQuantity, updated_at: stamp,
     };
     const rows = await trx(TABLE).insert(claim)
       .onConflict('restock_request_id').merge(claim)
@@ -378,5 +388,6 @@ module.exports = {
   sendOrderEmail,
   purchaseOrderFor,
   assertNoEmailOrderOut,
+  emailOrderedQuantityFor,
   _internals: { claimable, loadOrderEmail, paymentLine, STALE_UNATTEMPTED_MS },
 };

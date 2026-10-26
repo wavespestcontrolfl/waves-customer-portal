@@ -99,6 +99,16 @@ maybeDescribe('vendor-order-email (live Postgres)', () => {
       expect((await preview(request.id)).packages).toBe(7);
     });
 
+    test('a price-only change after the preview changes the version', async () => {
+      const { request, product } = await fixture();
+      const before = await preview(request.id);
+      await db('vendor_pricing').where({ product_id: product.id }).update({ price: 30, price_amount: 30 });
+      const after = await preview(request.id);
+      expect(after.estimateCents).toBe(18000);
+      expect(after.version).not.toBe(before.version);
+      expect(await reject(svc.sendOrderEmail(request.id, { actor: 'Test Admin', version: before.version }, { sendgrid: mailer(), env: ENV }))).toMatchObject({ code: 'preview_changed' });
+    });
+
     test('gate off refuses 409 gate_off', async () => {
       const { request } = await fixture();
       delete process.env.GATE_SITEONE_EMAIL_ORDER;
@@ -330,6 +340,45 @@ maybeDescribe('vendor-order-email (live Postgres)', () => {
         spy.mockResolvedValue(false);
         expect((await preview(request.id)).packages).toBe(6);
       } finally { spy.mockRestore(); }
+    });
+
+    test.each(['sending', 'sent'])('the order bot cannot claim a request whose order email is %s, even with its gates on', async (status) => {
+      const { request } = await fixture({ request: { source: 'auto_reorder', metadata: JSON.stringify({ vendorId: vendor.id, vendorSku: '098604' }) } });
+      if (status === 'sent') await send(request.id, mailer(), {});
+      else await reject(send(request.id, mailer(async () => { throw new Error('fetch failed'); }), {}));
+      await db('product_restock_requests').where({ id: request.id }).update({ status: 'open' }); // the worst case: the request is still open
+      expect((await emailRow(request.id)).status).toBe(status);
+      const place = jest.fn();
+      const adapter = { key: 'siteone', packagedQuantity: true, loginRequired: false, configured: () => true, place };
+      const dispatch = require('../services/procurement/order-dispatch');
+      const gates = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_SITEONE: 'true' };
+      Object.assign(process.env, gates);
+      try {
+        expect(await dispatch.dispatchRestockOrder(request.id, { adapters: { siteone: adapter, stickermule: adapter }, notify: jest.fn() }))
+          .toMatchObject({ requestId: request.id, skipped: 'email_order' });
+      } finally { for (const k of Object.keys(gates)) delete process.env[k]; }
+      expect(place).not.toHaveBeenCalled();
+      expect(await db('vendor_orders').where({ restock_request_id: request.id }).first()).toBeUndefined();
+    });
+
+    test('Receive defaults to what the emailed packages hold: 301 lb asked, 7 x 50 lb sent, 350 lb received', async () => {
+      const { request, product } = await fixture({ request: { requested_quantity: 301 } });
+      const m = mailer();
+      await send(request.id, m, {});
+      expect(m.sendOne.mock.calls[0][0].text).toContain('7 x 098604');
+      expect(Number((await emailRow(request.id)).ordered_quantity)).toBe(350);
+      const ops = require('../services/inventory-operations');
+      const out = await ops.updateRestockRequest(request.id, { action: 'receive' }, { actorId: null });
+      expect(out.request.status).toBe('received');
+      expect(Number((await db('products_catalog').where({ id: product.id }).first()).inventory_on_hand)).toBe(370); // 20 on hand + 350
+      expect(Number(out.movement.quantity)).toBe(350);
+    });
+
+    test('an unsent email never supplies a receive quantity', async () => {
+      const { request } = await fixture({ request: { requested_quantity: 301 } });
+      const bad = mailer(async () => { throw Object.assign(new Error('SendGrid 503: x'), { status: 503 }); });
+      await reject(send(request.id, bad, {}));
+      expect(await svc.emailOrderedQuantityFor(db, request.id)).toBeNull();
     });
 
     test('a request with an emailed order cannot be cancelled until the email row is dismissed', async () => {
