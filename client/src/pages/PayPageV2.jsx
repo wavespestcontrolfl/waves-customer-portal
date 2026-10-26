@@ -95,6 +95,8 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
+import { FieldDocumentBody, FieldMasthead, FieldTitle, FieldFooter } from '../components/FieldDocument';
+import './pay-invoice-document.css';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
@@ -351,7 +353,7 @@ function CoverageVisitsList({ visits, status }) {
 function DetailBlock({ label, children }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ ...eyebrow, marginBottom: SP.xs }}>{label}</div>
+      <div className="field-section-heading" style={{ ...eyebrow, marginBottom: SP.xs }}>{label}</div>
       <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body }}>
         {children}
       </div>
@@ -2712,25 +2714,10 @@ export default function PayPageV2() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
-      {/* The Print button below calls window.print() — back the
-          waves-no-print marker with an actual print rule (ReceiptPage
-          defines its own local copy) so the newsletter card + identity
-          footer and shell chrome stay out of the invoice printout. */}
-      <style>{`
-        @media print {
-          @page { margin: 0.5in; }
-          body { background: #FFFFFF !important; }
-          header, footer, .waves-no-print { display: none !important; }
-        }
-      `}</style>
-      {/* waves-print-root: glass-theme.css scopes its soft-inner-box rule to
-          `.waves-print-root [data-glass-clear]`; the inactive payment-method
-          icon tile below relies on it (pre-R2a this page carried
-          waves-receipt-page for the same match). The only other rule on the
-          class is ReceiptPage's own print override, which is not mounted here. */}
+      {/* Keep the shared pay/receipt marker for glass payment controls. */}
       <CustomerColumn className="waves-print-root">
         {isOverdue && (
-          <div style={{
+          <div className="waves-no-print" style={{
             marginBottom: SP.md,
             padding: SP.md,
             borderRadius: RADIUS.input,
@@ -2755,15 +2742,15 @@ export default function PayPageV2() {
           pdfFileName="Waves_Invoice.pdf"
           shareTitle={`Waves invoice ${invoice.invoiceNumber || ''}`.trim()}
         />
-        <BrandCard padding={24}>
+        <FieldDocumentBody className="waves-invoice-document" style={{ marginBottom: SP.lg }}>
+          <FieldMasthead />
           {/* No status chip (owner 2026-09-04) — the due panel below carries
               the due / overdue state. */}
-          <div style={{ marginBottom: SP.lg }}>
-            <div style={{ ...eyebrow, marginBottom: SP.xs }}>
-              Invoice · {invoice.invoiceNumber}
-            </div>
-            <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
-            {invoice.dueDate ? (
+          <FieldTitle
+            eyebrow="Invoice"
+            title="Review and pay"
+            reference={`Invoice ${invoice.invoiceNumber}`}
+            subtitle={invoice.dueDate ? (
               <div style={{ fontSize: FS.body, color: isOverdue ? DOC.danger : DOC.muted, fontWeight: isOverdue ? FW.bold : FW.regular }}>
                 {isOverdue ? 'Was due ' : 'Due '}{formatInvoiceDate(invoice.dueDate)}
               </div>
@@ -2771,7 +2758,7 @@ export default function PayPageV2() {
               /* No due date = payable now (the retired chip's fallback). */
               <div style={{ fontSize: FS.body, color: DOC.muted }}>Due now</div>
             )}
-          </div>
+          />
 
           {/* Amount-due hero removed (owner 2026-08-31: the figure already
               shows in the line items and on the Pay button). */}
@@ -2790,7 +2777,7 @@ export default function PayPageV2() {
                 {/* Calendar icon tile removed (owner 2026-07-09 — no decorative icons). */}
                 <div style={{ minWidth: 0 }}>
                   <div style={{ ...eyebrow, color: '#065A8C', marginBottom: SP.xxs }}>Annual prepayment</div>
-                  <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body }}>
+                  <div className="field-document-prose" style={{ fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
                     {prepayCalloutText}
                   </div>
                   <CoverageVisitsList
@@ -2803,7 +2790,7 @@ export default function PayPageV2() {
 
             <AnnualPrepayInvoicePanel term={annualPrepay} />
 
-            <div style={{
+            <div className="field-info-grid" style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
               gap: SP.md,
@@ -2849,8 +2836,8 @@ export default function PayPageV2() {
 
             {visibleLineItems.length > 0 && (
               <div style={{ marginBottom: SP.lg }}>
-                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Invoice items</div>
-                <div style={{ border: `1px solid ${DOC.border}`, borderRadius: RADIUS.input, overflow: 'hidden' }}>
+                <div className="field-section-heading">Invoice items</div>
+                <div className="field-invoice-items" style={{ border: `1px solid ${DOC.border}`, borderRadius: RADIUS.input, overflow: 'hidden' }}>
                   <div data-glass="soft" style={{
                     ...eyebrow,
                     display: 'grid',
@@ -2895,7 +2882,7 @@ export default function PayPageV2() {
 
             {invoiceAttachments.length > 0 && (
               <div style={{ marginBottom: SP.lg }}>
-                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Attachments</div>
+                <div className="field-section-heading">Attachments</div>
                 <div style={{ display: 'grid', gap: SP.xs }}>
                   {invoiceAttachments.map((attachment) => (
                     <a
@@ -2964,7 +2951,7 @@ export default function PayPageV2() {
               const needsTotalFallback = visibleLineItems.length !== 1;
               /* token-sheet preview: totals always render */
               return (
-            <div data-glass="soft" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
+            <div className="field-invoice-totals" data-glass="soft" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
               <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
               {invoice.discountAmount > 0 && (
                 <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -3028,14 +3015,18 @@ export default function PayPageV2() {
             })()}
 
             {invoice.notes && (
-              <div data-glass="soft" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
-                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Notes</div>
+              <div className="field-invoice-notes" data-glass="soft" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
+                <div className="field-section-heading">Notes</div>
                 <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body, whiteSpace: 'pre-wrap' }}>
                   {invoice.notes}
                 </p>
               </div>
             )}
 
+          <FieldFooter label="Invoice" reference={invoice.invoiceNumber} />
+        </FieldDocumentBody>
+
+        <BrandCard padding={24} className="waves-no-print">
             <div className="waves-pay-payment-panel">
             {/* "Pay securely / amount / status" header removed (owner
                 2026-08-31: the Pay button already states the charge); the
