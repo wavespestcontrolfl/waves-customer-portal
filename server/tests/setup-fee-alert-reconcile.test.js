@@ -51,9 +51,10 @@ const EST = 'e1000000-0000-0000-0000-000000000001';
 const FEE_LINE = JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }]);
 const APP_LINE = JSON.stringify([{ client_id: 'scheduled_ss-1_primary', description: 'Quarterly Pest Control', amount: 88 }]);
 
-function alertRow(metaOverrides = {}) {
+function alertRow(metaOverrides = {}, columns = {}) {
   return {
     id: 'alert-1',
+    ...columns,
     metadata: {
       dedupeKey: `unminted_setup_fee_manual_billing:${EST}`,
       customerId: CUST,
@@ -217,4 +218,87 @@ test('a foreign re-linked visit never reconciles another customer\'s alert', asy
   };
   await reconcileSetupFeeAlert({ customerId: 'c2000000-0000-0000-0000-000000000002', sourceEstimateId: EST });
   expect(mockUpdates).toEqual([]);
+});
+
+// ── Idempotent partial branches (daily sweep must not re-open a "Done" alert) ──
+// Each case runs the reconcile once to learn the exact body the branch writes,
+// stores that body + the matching metadata on a done/read alert, and runs again.
+const DONE_COLUMNS = { read_at: 'T0', done_at: 'T1', done_by: 'staff', resolution: 'handled' };
+const stampedNote = `accepted estimate #${EST}`;
+const feePaid = { id: 'inv-fee', status: 'paid', line_items: FEE_LINE, notes: stampedNote };
+const appPaid = { id: 'inv-app', status: 'paid', line_items: APP_LINE, notes: stampedNote };
+
+const PARTIAL_CASES = [
+  {
+    name: 'fee covered, application owed',
+    baseMeta: {},
+    invoices: [feePaid],
+    state: { feeCovered: true, applicationCovered: false, coveredFeeCents: null, uncoveredVisitIds: ['ss-1'] },
+    changed: { uncoveredVisitIds: ['ss-1', 'ss-9'] },
+  },
+  {
+    name: 'application covered, fee owed',
+    baseMeta: { expectedSetupFeeCents: 9900 },
+    invoices: [appPaid],
+    state: { feeCovered: false, applicationCovered: true, coveredFeeCents: 0, uncoveredVisitIds: [] },
+    changed: { coveredFeeCents: 500 },
+  },
+  {
+    name: 'fee owed, one of two applications still owed',
+    baseMeta: { parkedVisitIds: ['ss-1', 'ss-2'] },
+    invoices: [appPaid],
+    state: { feeCovered: false, applicationCovered: false, coveredFeeCents: null, uncoveredVisitIds: ['ss-2'] },
+    changed: { uncoveredVisitIds: ['ss-1', 'ss-2'] },
+  },
+];
+
+function runPartial(c, { meta = {}, columns = {} } = {}) {
+  mockUpdates = [];
+  mockCounters = {};
+  mockTables = {
+    notifications: notificationsInOrder(alertRow({ resolvedCovered: false, ...c.baseMeta, ...meta }, columns)),
+    invoices: (n) => (n === 1 ? c.invoices : []),
+    scheduled_services: [],
+  };
+  return reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
+}
+
+describe.each(PARTIAL_CASES)('partial branch idempotence: $name', (c) => {
+  async function learnBody() {
+    await runPartial(c, { meta: { resolvedCovered: false } });
+    expect(mockUpdates).toHaveLength(1);
+    const { body, detail = null } = mockUpdates[0].payload;
+    return { body, detail };
+  }
+
+  test('a second run with unchanged inputs leaves a done alert done and writes nothing', async () => {
+    const stored = await learnBody();
+    await runPartial(c, { meta: { resolvedCovered: false, ...c.state }, columns: { ...stored, ...DONE_COLUMNS } });
+    expect(mockUpdates).toEqual([]);
+  });
+
+  test('a changed stored state still rewrites and re-opens the alert', async () => {
+    const stored = await learnBody();
+    await runPartial(c, { meta: { resolvedCovered: false, ...c.state, ...c.changed }, columns: { ...stored, ...DONE_COLUMNS } });
+    expect(mockUpdates).toHaveLength(1);
+    expect(mockUpdates[0].payload).toMatchObject({ read_at: null, done_at: null, done_by: null, resolution: null });
+  });
+
+  test('a regression from resolved still rewrites and re-opens the alert', async () => {
+    const stored = await learnBody();
+    await runPartial(c, { meta: { ...c.state, resolvedCovered: true }, columns: { ...stored, ...DONE_COLUMNS } });
+    expect(mockUpdates).toHaveLength(1);
+    expect(mockUpdates[0].payload).toMatchObject({ read_at: null, done_at: null, done_by: null, resolution: null });
+  });
+
+  test('an alert stored with an old body but the same state is rewritten once', async () => {
+    const stored = await learnBody();
+    await runPartial(c, { meta: { resolvedCovered: false, ...c.state }, columns: { body: 'OLD COPY', detail: null, ...DONE_COLUMNS } });
+    expect(mockUpdates).toHaveLength(1);
+    expect(mockUpdates[0].payload.body).toBe(stored.body);
+    expect(mockUpdates[0].payload.read_at).toBe(null);
+    // The rewrite is stable: a run on the rewritten alert writes nothing more.
+    await runPartial(c, { meta: { resolvedCovered: false, ...c.state }, columns: { ...stored, ...DONE_COLUMNS } });
+    expect(mockUpdates).toEqual([]);
+  });
 });
