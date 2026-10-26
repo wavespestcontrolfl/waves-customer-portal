@@ -22,6 +22,14 @@ const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-r
 const { TRANSIENT_FROZEN_REASONS } = require('./outcomes');
 const { techStartPoint, homeFromMap, assertStartPointUnchanged } = require('../scheduling/tech-start-point');
 
+// Whether overlap probes are technician-scoped (occupancy.js techScopedConfirmActive). Looked
+// up at call time and guarded: suites mock the occupancy module down to a few functions, and a
+// missing reader reads as off (tech-blind), today's behavior.
+function techScopedProbes() {
+  const occupancy = require('../scheduling/occupancy');
+  return typeof occupancy.techScopedConfirmActive === 'function' && occupancy.techScopedConfirmActive();
+}
+
 const SCHEDULE_TOOLS = [
   {
     name: 'switch_appointment_property',
@@ -1512,7 +1520,7 @@ async function moveBatchTrx(trx, classified, dateStr, reason) {
   // (techScopedConfirmActive), check that stop on its committed route, with
   // the batch's other stops excluded as in the first probe (they were not on
   // this date then). Tech-blind probes need no second look.
-  if (require('../scheduling/occupancy').techScopedConfirmActive()) {
+  if (techScopedProbes()) {
     const batchIds = classified.map((c) => String(c.s.id));
     for (const c of classified) {
       if (String(c.committedTechId || '') === String(c.s.technician_id || '')) continue;

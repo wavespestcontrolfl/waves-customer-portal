@@ -45,6 +45,15 @@ const PRICE_NOTICE_DISCLOSURE = require('../../config/feature-gates').ibTierUpgr
   ? 'No price-change notice is sent to the customer, with one exception: a card that changes only waveguard_tier and monthly_rate, moves the customer to a higher tier, and leaves a monthly-billed rate above zero emails the customer the tier upgrade notice after Confirm. The preview result and the card say when that email applies; tell the operator.'
   : 'No price-change notice is sent to the customer.';
 const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require('../customer-contact-fanout');
+
+// Whether overlap probes are technician-scoped (occupancy.js techScopedConfirmActive). Looked
+// up at call time and guarded: suites mock the occupancy module down to a few functions, and a
+// missing reader reads as off (tech-blind), today's behavior.
+function techScopedProbes() {
+  const occupancy = require('../scheduling/occupancy');
+  return typeof occupancy.techScopedConfirmActive === 'function' && occupancy.techScopedConfirmActive();
+}
+
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -4467,7 +4476,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // the committed route too. Tech-blind probes need no second look.
       if (updatedRows && probeWindowStart && probeWindowEnd
         && String(committedTechId || '') !== String(appt.technician_id || '')
-        && require('../scheduling/occupancy').techScopedConfirmActive()) {
+        && techScopedProbes()) {
         const again = await probeSlotOverlap({
           trx, date: dateStr, windowStart: probeWindowStart, windowEnd: probeWindowEnd,
           excludeServiceIds: [appointment_id], technicianId: committedTechId,

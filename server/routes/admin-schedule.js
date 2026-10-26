@@ -149,6 +149,15 @@ const {
   activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation, lowercaseGermanRoach,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
+
+// Whether overlap probes are technician-scoped (occupancy.js techScopedConfirmActive). Looked
+// up at call time and guarded: suites mock the occupancy module down to a few functions, and a
+// missing reader reads as off (tech-blind), today's behavior.
+function techScopedProbes() {
+  const occupancy = require('../services/scheduling/occupancy');
+  return typeof occupancy.techScopedConfirmActive === 'function' && occupancy.techScopedConfirmActive();
+}
+
 const {
   stampSeriesPrepaid,
   clearSeriesPrepaid,
@@ -11230,7 +11239,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // scoping is on (techScopedConfirmActive), check the committed
                 // route too. Tech-blind probes need no second look.
                 if (bulkProbedSlot && String(committedTechId || '') !== String(svc.technician_id || '')
-                  && require('../services/scheduling/occupancy').techScopedConfirmActive()) {
+                  && techScopedProbes()) {
                   const again = await probeSlotOverlap({
                     trx, date: bulkTargetDate, windowStart: bulkProbedSlot.effStart, windowEnd: bulkProbedSlot.effEnd,
                     excludeServiceIds: [id], technicianId: committedTechId,
