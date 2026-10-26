@@ -260,15 +260,23 @@ function form940(year, yearChecks, depositsCents) {
   const notes = ['Line 13 counts only deposits you marked paid on the Tax page. The Tax page calendar does not yet write a Form 940 deposit row, so this is 0 unless a row was added.'];
   if (line12 > FORM_940_PART_5_THRESHOLD_CENTS) {
     const byQuarter = [1, 2, 3, 4].map((q) => sum(yearChecks.filter((c) => quarterOfMonth(monthOf(c)) === q), 'futa'));
-    const line16d = line12 - (byQuarter[0] + byQuarter[1] + byQuarter[2]);
+    // The checks round FUTA per paycheck; line 12 rounds the year's taxable
+    // wages once. The cent difference goes to the LAST quarter that carries
+    // FUTA (never to a quarter with no FUTA wages), so line 17 equals line 12
+    // and no quarter shows a negative liability.
+    const rounding = line12 - byQuarter.reduce((acc, v) => acc + v, 0);
+    const lastWithFuta = Math.max(0, ...[0, 1, 2, 3].filter((i) => byQuarter[i] > 0));
+    byQuarter[lastWithFuta] += rounding;
     rows.push(
       cents('16a', 'FUTA liability, 1st quarter (January to March)', byQuarter[0]),
       cents('16b', 'FUTA liability, 2nd quarter (April to June)', byQuarter[1]),
       cents('16c', 'FUTA liability, 3rd quarter (July to September)', byQuarter[2]),
-      cents('16d', 'FUTA liability, 4th quarter (October to December)', line16d),
-      cents('17', 'Total tax liability for the year (must equal line 12)', byQuarter[0] + byQuarter[1] + byQuarter[2] + line16d),
+      cents('16d', 'FUTA liability, 4th quarter (October to December)', byQuarter[3]),
+      cents('17', 'Total tax liability for the year (must equal line 12)', byQuarter.reduce((acc, v) => acc + v, 0)),
     );
-    notes.push('Part 5 is shown because line 12 is more than $500. Line 16d is line 12 less quarters 1 to 3, so line 17 equals line 12.');
+    notes.push(rounding
+      ? `Part 5 is shown because line 12 is more than $500. The paychecks round FUTA per check, so the ${rounding > 0 ? '' : 'minus '}${Math.abs(rounding)} cent difference is in the last quarter with FUTA, and line 17 equals line 12.`
+      : 'Part 5 is shown because line 12 is more than $500. Line 17 equals line 12.');
   } else {
     notes.push('Part 5 is not needed because line 12 is $500 or less.');
   }

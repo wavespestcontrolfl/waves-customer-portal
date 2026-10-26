@@ -239,8 +239,11 @@ describe('Form 940', () => {
   test('Part 5 appears over $500, by quarter, and line 17 equals line 12', () => {
     const out = build(fourteen());
     expect(line(out.f940, '12').value).toBe(58800);
-    expect(['16a', '16b', '16c', '16d'].map((id) => line(out.f940, id).value)).toEqual([29401, 0, 29400, -1]);
+    // The per-check rounding cent (-1) goes to the last quarter WITH FUTA (Q3),
+    // never to a quarter with no FUTA wages: no quarter shows a negative liability.
+    expect(['16a', '16b', '16c', '16d'].map((id) => line(out.f940, id).value)).toEqual([29401, 0, 29399, 0]);
     expect(line(out.f940, '17').value).toBe(58800);
+    expect(out.f940.notes.join(' ')).toMatch(/minus 1 cent difference is in the last quarter with FUTA/);
   });
 
   test('a line 12 of exactly $500.00 is not over $500', () => {
