@@ -272,112 +272,111 @@ jest.setTimeout(30000);
     });
 
     // Amazon's Shipped and Delivered emails for one package can carry
-    // different shipment ids (Gentrol, October 2026): the Delivered email's
-    // lines settle the shipped items by order number and item.
+    // different shipment ids (Gentrol, October 2026). With exactly ONE
+    // authenticated Shipped email for the order, the authenticated Delivered
+    // lines under other ids settle its items; a split order never does.
     describe('a Delivered email under another shipment id', () => {
       const ORDER = '900-1000001-1000001';
-      const delivered = (quantity, overrides = {}) => processReceiptLine(line({
-        orderNumber: ORDER, shipmentKey: 'delivered-key', item: { title: TITLE, quantity }, ...overrides,
-      }));
+      const LINK = 'https://www.amazon.com/x?shipmentId=';
+      // A Delivered email row (authenticated unless overridden) and one line it produced.
+      const delivered = async (quantity, { lineNo = 1, auth = ALIGNED_AMAZON_AUTH, orderNumber = ORDER, title = TITLE, ...rest } = {}) => {
+        const [email] = await mockConn('emails').insert({
+          gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'order-update@amazon.com', subject: 'Delivered: "Control Solutions Taurus..."',
+          authentication_results: auth, body_text: `Order # ${orderNumber}\n${LINK}delivered-key\n\n* ${title}\n  Quantity: ${quantity}\n`, received_at: new Date(NOW - 5 * DAY),
+        }).returning('*');
+        return processReceiptLine(line({ email, orderNumber, shipmentKey: 'delivered-key', item: { title, quantity }, lineNo, ...rest }));
+      };
       const shippedItems = (shipmentId, quantity, overrides = {}) => shipped(shipmentId, {
-        body_text: `Order #\n${ORDER}\nTrack package: https://www.amazon.com/x?shipmentId=${shipmentId}\n\n* ${TITLE}\n  Quantity: ${quantity}\n\n* Lenovo Chromebook\n  Quantity: 1\n`,
+        body_text: `Order #\n${ORDER}\nTrack package: ${LINK}${shipmentId}\n\n* ${TITLE}\n  Quantity: ${quantity}\n\n* Lenovo Chromebook\n  Quantity: 1\n`,
         ...overrides,
       });
+      const bellBody = async (shipmentId) => {
+        const [bell] = await alertBells(shipmentId);
+        return bell.detail || bell.body;
+      };
+      const alerted = async () => (await run()).undelivered.map((row) => row.shipmentId);
 
-      test('the same order and item, delivered and logged: no bell and no held line', async () => {
+      test('the same order and item, delivered and logged under another id: no bell and no held line', async () => {
         await delivered(2);
         await shippedItems('shipped-key', 2);
-        expect((await run()).undelivered).toEqual([]);
+        expect(await alerted()).toEqual([]);
         expect(await alertBells('shipped-key')).toHaveLength(0);
         expect(await mockConn('purchase_receipt_lines').where({ shipment_key: 'shipped-key' })).toEqual([]);
       });
 
-      test('an item the Delivered email ruled equipment or held counts as handled', async () => {
+      test('an item the Delivered email ruled equipment counts as handled', async () => {
         await delivered(2, { forcedStatus: 'agent_equipment' });
         await shippedItems('shipped-key', 2);
-        expect((await run()).undelivered).toEqual([]);
+        expect(await alerted()).toEqual([]);
       });
 
-      test('a genuinely undelivered shipment still rings, even with a Delivered line for another order or item', async () => {
+      test('a genuinely undelivered shipment still rings, even with Delivered lines for another order or item', async () => {
         await delivered(2, { orderNumber: '900-2000002-2000002' });
-        await delivered(1, { lineNo: 2, item: { title: 'Zoecon Gentrol IGR', quantity: 1 } });
+        await delivered(1, { lineNo: 2, title: 'Zoecon Gentrol IGR' });
         await shippedItems('shipped-key', 2);
-        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['shipped-key']);
+        expect(await alerted()).toEqual(['shipped-key']);
         expect(await alertBells('shipped-key')).toHaveLength(1);
       });
 
       test('a partial delivery (2 shipped, 1 delivered) still rings for the rest', async () => {
         await delivered(1);
         await shippedItems('shipped-key', 2);
-        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['shipped-key']);
-        const [bell] = await alertBells('shipped-key');
-        expect(bell.detail || bell.body).toContain('Taurus SC ×1 on');
+        expect(await alerted()).toEqual(['shipped-key']);
+        expect(await bellBody('shipped-key')).toContain('Taurus SC ×1 on');
       });
 
-      test('a split order: the other package\'s Delivered line is not proof for this one', async () => {
-        await delivered(2); // package A, delivered under delivered-key
-        await shippedItems('shipped-a', 2, { received_at: new Date(NOW - 6 * DAY) }); // its own Shipped email, a different id
-        await shippedItems('delivered-key', 2, { received_at: new Date(NOW - 6 * DAY) });
-        // delivered-key IS a sibling's id, so it cannot cover shipped-a.
-        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['shipped-a']);
-      });
-
-      // One order, the same product in two packages (A older, B newer), and a
-      // Delivered email under a third id: its units are allocated once.
-      const twoPackages = async (quantityEach) => {
-        await shippedItems('ship-a', quantityEach, { received_at: new Date(NOW - 5 * DAY) });
-        await shippedItems('ship-b', quantityEach, { received_at: new Date(NOW - 4 * DAY) });
-      };
-      const bellBody = async (shipmentId) => {
-        const [bell] = await alertBells(shipmentId);
-        return bell.detail || bell.body;
-      };
-
-      test('A and B want 1 each, 1 unit delivered under a third id: exactly one package is still missing', async () => {
-        await twoPackages(1);
+      test('a split order (two Shipped emails) rings both as before, even with a third-id delivery', async () => {
+        await shippedItems('ship-a', 1, { received_at: new Date(NOW - 5 * DAY) });
+        await shippedItems('ship-b', 1, { received_at: new Date(NOW - 4 * DAY) });
         await delivered(1);
-        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['ship-b']);
-        expect(await alertBells('ship-a')).toHaveLength(0);
-        expect(await bellBody('ship-b')).toContain('Taurus SC ×1 on');
+        expect(await alerted()).toEqual(['ship-a', 'ship-b']);
       });
 
-      test('a 2 + 2 split with 2 delivered under a third id rings for the 2 still missing', async () => {
-        await twoPackages(2);
+      test('two shipped lines of one product and one delivered unit: the second line still rings for ×1', async () => {
+        await delivered(1);
+        await shipped('shipped-key', {
+          body_text: `Order #\n${ORDER}\nTrack package: ${LINK}shipped-key\n\n* ${TITLE}\n  Quantity: 1\n\n* ${TITLE}\n  Quantity: 1\n`,
+        });
+        expect(await alerted()).toEqual(['shipped-key']);
+        expect(await mockConn('purchase_receipt_lines').where({ shipment_key: 'shipped-key', status: 'no_delivery_email' })).toHaveLength(1);
+        expect(await bellBody('shipped-key')).toContain('Taurus SC ×1 on');
+      });
+
+      test('an unauthenticated Delivered email proves nothing', async () => {
+        await delivered(2, { auth: 'dkim=pass header.i=@evil.example; spf=fail' });
+        await shippedItems('shipped-key', 2);
+        expect(await alerted()).toEqual(['shipped-key']);
+      });
+
+      test('an unauthenticated Shipped email for the order is ignored, not counted as a second shipment', async () => {
         await delivered(2);
-        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['ship-b']);
-        expect(await bellBody('ship-b')).toContain('Taurus SC ×2 on');
+        await shippedItems('shipped-key', 2);
+        await shippedItems('spoofed-key', 2, { authentication_results: 'dkim=pass header.i=@evil.example; spf=fail' });
+        expect(await alerted()).toEqual([]);
       });
 
-      test('the closer uses the same allocation: the one delivered unit closes A\'s bell and leaves B\'s open', async () => {
-        await twoPackages(1);
-        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['ship-a', 'ship-b']);
-        await delivered(1);
-        expect(await closeDeliveredUndeliveredBells()).toBe(1);
-        expect((await alertBells('ship-a'))[0].done_at).not.toBeNull();
-        expect((await alertBells('ship-b'))[0].done_at).toBeNull();
-        expect(await closeDeliveredUndeliveredBells()).toBe(0);
-        await delivered(1, { lineNo: 2 });
-        expect(await closeDeliveredUndeliveredBells()).toBe(1);
-        expect((await alertBells('ship-b'))[0].done_at).not.toBeNull();
-      });
-
-      test('a bell already rung closes once the shipment proves delivered, and one with items still missing stays', async () => {
+      test('the closer uses the same proof: a partial delivery keeps the bell, the full one closes it', async () => {
         await shippedItems('shipped-key', 2);
         await run();
-        const [bell] = await alertBells('shipped-key');
-        expect(bell.done_at).toBeNull();
         await closeDeliveredUndeliveredBells();
         expect((await alertBells('shipped-key'))[0].done_at).toBeNull(); // nothing delivered yet
-
         await delivered(1);
-        await closeDeliveredUndeliveredBells();
-        expect((await alertBells('shipped-key'))[0].done_at).toBeNull(); // 1 of 2
-
-        await delivered(1, { lineNo: 3 });
+        expect(await closeDeliveredUndeliveredBells()).toBe(0); // 1 of 2
+        await delivered(1, { lineNo: 2 });
         expect(await closeDeliveredUndeliveredBells()).toBe(1);
         expect((await alertBells('shipped-key'))[0]).toMatchObject({
           done_by: 'purchase-receipts', resolution: 'The delivery email arrived under another shipment id; the items are accounted for',
         });
+      });
+
+      test('the closer leaves a split order\'s bells open, whatever was delivered', async () => {
+        await shippedItems('ship-a', 1, { received_at: new Date(NOW - 5 * DAY) });
+        await shippedItems('ship-b', 1, { received_at: new Date(NOW - 4 * DAY) });
+        await run();
+        await delivered(2);
+        expect(await closeDeliveredUndeliveredBells()).toBe(0);
+        expect((await alertBells('ship-a'))[0].done_at).toBeNull();
+        expect((await alertBells('ship-b'))[0].done_at).toBeNull();
       });
     });
 

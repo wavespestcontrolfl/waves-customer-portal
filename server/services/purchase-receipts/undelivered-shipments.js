@@ -33,12 +33,15 @@
  * (a Shipped email without one is skipped), but the id is not always the
  * same in the two emails: the 2026-10 Gentrol order's Shipped and Delivered
  * emails carried different ids, and the Delivered one had already stocked
- * the box. So a shipment whose id finds no Delivered line is still settled,
- * item by item, when a Delivered-email line for the SAME order and the SAME
- * item (product, else normalized title) under ANOTHER shipment id covers its
- * quantity (deliveredElsewhere). Only the uncovered items ring; a bell
- * already rung for a shipment that proves delivered this way is closed
- * (closeDeliveredUndeliveredBells). The rows also hand the shipment to a person for good: a late
+ * the box. So, when the order has exactly ONE authenticated Shipped email,
+ * its items are also settled by the order's authenticated Delivered lines
+ * under other shipment ids (deliveredElsewhere): each delivered line's
+ * quantity is spent at most once across the shipment's items, and only the
+ * uncovered quantity rings. An order with two or more authenticated Shipped
+ * emails (a split order) is ambiguous and never suppressed this way. A bell
+ * already rung for a shipment that proves delivered under the same rule is
+ * closed (closeDeliveredUndeliveredBells). The rows also hand the shipment
+ * to a person for good: a late
  * Delivered email for it is never auto-logged (receipt-processor.js), so
  * the box can't be counted twice.
  */
@@ -133,72 +136,62 @@ const DELIVERED_LINE_STATUSES = [
 
 const normalizeTitle = (title) => String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-// The OTHER shipments of the same order, from their Shipped emails, oldest
-// first (ties by shipment id): { shipmentId, receivedAt, items }. A split
-// order's other package is not proof that this one arrived, and it competes
-// for the same Delivered lines.
-async function siblingShipments(conn, orderNumber, shipmentId) {
+// One item identity for both sides: the same product when both name one,
+// else the same normalized title.
+function sameItem(a, b) {
+  if (a.productId && b.productId) return a.productId === b.productId;
+  return normalizeTitle(a.title) === normalizeTitle(b.title);
+}
+
+// True when the order has exactly one authenticated Shipped email and it
+// carries this shipment id. Two or more (a split order) is ambiguous.
+async function soleShippedShipment(conn, orderNumber, shipmentId) {
   const like = `%${likeLiteral(orderNumber)}%`;
   const emails = await conn('emails')
-    .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at')
+    .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'authentication_results')
     .whereRaw('LOWER(from_address) = ?', [AMAZON_SHIPPED_FROM]).whereRaw('subject ILIKE ?', ['Shipped:%'])
     .where((named) => named.whereRaw('body_text LIKE ?', [like]).orWhereRaw('body_html LIKE ?', [like]));
-  const byId = new Map();
-  for (const email of emails) {
-    const parsed = parseAmazonShippedEmail(email);
-    if (parsed?.orderNumber !== orderNumber || !parsed.shipmentId || parsed.shipmentId === shipmentId) continue;
-    const receivedAt = new Date(email.received_at).getTime();
-    const known = byId.get(parsed.shipmentId);
-    if (!known || receivedAt < known.receivedAt) byId.set(parsed.shipmentId, { shipmentId: parsed.shipmentId, receivedAt, items: parsed.items });
-  }
-  return [...byId.values()].sort((x, y) => x.receivedAt - y.receivedAt || (x.shipmentId < y.shipmentId ? -1 : 1));
+  const shipped = emails.filter((email) => authenticated(email)).map((email) => parseAmazonShippedEmail(email))
+    .filter((parsed) => parsed?.orderNumber === orderNumber);
+  return shipped.length === 1 && shipped[0].shipmentId === shipmentId;
 }
 
 /**
- * How much of each shipped item a Delivered email under a DIFFERENT shipment
- * id has not covered. wanted: [{ productId, title, quantity }]; shippedAt:
- * when this shipment's Shipped email came. Returns the missing quantity per
- * index, 0 when covered.
+ * How much of each shipped item the order's Delivered lines under OTHER
+ * shipment ids have not covered. wanted: [{ productId, title, quantity }];
+ * returns the missing quantity per index, 0 when covered.
  *
- * The pool for an item is the Delivered lines (same order, a Delivered-line
- * status, the same product, or for a line with no product the same
- * normalized title) under a shipment id that no Shipped email of the order
- * owns. Sibling shipments of the same order that want the same item draw on
- * that pool first when their Shipped email is older (ties by shipment id),
- * after the Delivered lines under their own id; one delivered unit is never
- * counted for two shipments. A shipped quantity nobody could read is covered
- * by any pool quantity left. With nothing to match on, the whole item is
- * missing.
+ * Evidence is used only for an order with exactly one authenticated Shipped
+ * email (soleShippedShipment); otherwise every item is missing in full, as
+ * if no Delivered line existed. A Delivered line counts when it has a
+ * Delivered-line status and came from an authenticated Delivered email; its
+ * quantity is spent at most once, across all of the wanted items. An item
+ * with no readable quantity needs one unit.
  */
-async function deliveredElsewhere(conn, { orderNumber, shipmentId, shippedAt, wanted }) {
+async function deliveredElsewhere(conn, { orderNumber, shipmentId, wanted }) {
   const missing = wanted.map((item) => item.quantity || 1);
   if (!orderNumber || orderNumber === UNKNOWN_ORDER || !wanted.length) return missing;
   const lines = await conn('purchase_receipt_lines')
     .where({ vendor: VENDOR, order_number: orderNumber }).whereNot('shipment_key', shipmentId)
     .whereIn('status', DELIVERED_LINE_STATUSES)
-    .select('shipment_key', 'product_id', 'raw_title', 'quantity');
+    .select('email_id', 'product_id', 'raw_title', 'quantity');
   if (!lines.length) return missing;
-  const siblings = await siblingShipments(conn, orderNumber, shipmentId);
-  const owned = new Set(siblings.map((sibling) => sibling.shipmentId));
-  const mine = shippedAt ? new Date(shippedAt).getTime() : Infinity;
-  const earlier = siblings.filter((sibling) => sibling.receivedAt < mine || (sibling.receivedAt === mine && sibling.shipmentId < shipmentId));
-  const qty = (rows) => rows.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+  if (!(await soleShippedShipment(conn, orderNumber, shipmentId))) return missing;
+  const emails = await conn('emails')
+    .select('id', 'from_address', 'authentication_results')
+    .whereIn('id', [...new Set(lines.map((line) => line.email_id).filter(Boolean))])
+    .whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM]).whereRaw('subject ILIKE ?', ['Delivered:%']);
+  const proven = new Set(emails.filter((email) => authenticated(email)).map((email) => String(email.id)));
+  const budget = lines.filter((line) => proven.has(String(line.email_id)))
+    .map((line) => ({ productId: line.product_id, title: line.raw_title, left: Number(line.quantity) || 0 }));
   return wanted.map((item, index) => {
-    const title = normalizeTitle(item.title);
-    const sameItem = (line) => (line.product_id ? line.product_id === item.productId : normalizeTitle(line.raw_title) === title);
-    const pool = lines.filter((line) => !owned.has(line.shipment_key) && sameItem(line));
-    if (!pool.length) return missing[index];
-    let left = qty(pool);
-    for (const sibling of earlier) {
-      const wants = sibling.items.filter((other) => normalizeTitle(other.title) === title);
-      if (!wants.length) continue;
-      const own = qty(lines.filter((line) => line.shipment_key === sibling.shipmentId && sameItem(line)));
-      const need = Math.max(0, wants.reduce((sum, other) => sum + (other.quantity || 1), 0) - own);
-      left -= Math.min(need, left);
+    for (const line of budget.filter((entry) => entry.left > 0 && sameItem(entry, item))) {
+      const take = Math.min(line.left, missing[index]);
+      line.left -= take;
+      missing[index] -= take;
+      if (!missing[index]) break;
     }
-    // No readable shipped quantity: any quantity left in the pool covers it.
-    if (!item.quantity) return left > 0 ? 0 : 1;
-    return Math.max(0, item.quantity - left);
+    return missing[index];
   });
 }
 
@@ -247,7 +240,7 @@ async function alertIfUndelivered(email, { notifyAdmin, now, since }, conn) {
     // Its Delivered email may carry another shipment id: items that email
     // already covers are not undelivered.
     const missing = await deliveredElsewhere(trx, {
-      orderNumber: parsed.orderNumber, shipmentId: parsed.shipmentId, shippedAt: email.received_at,
+      orderNumber: parsed.orderNumber, shipmentId: parsed.shipmentId,
       wanted: stocked.map(({ item, product }) => ({ productId: product.id, title: item.title, quantity: item.quantity })),
     });
     const owed = stocked.map((row, index) => ({ ...row, missing: missing[index], remaining: row.item.quantity ? missing[index] : undefined }))
@@ -307,11 +300,10 @@ async function closeDeliveredUndeliveredBells(conn = db) {
     if (!bell.shipment_id) continue;
     const held = await conn('purchase_receipt_lines')
       .where({ vendor: VENDOR, shipment_key: bell.shipment_id, status: 'no_delivery_email' })
-      .select('order_number', 'email_id', 'product_id', 'raw_title', 'quantity');
+      .select('order_number', 'product_id', 'raw_title', 'quantity');
     if (!held.length) continue;
-    const shippedEmail = await conn('emails').where({ id: held[0].email_id }).first('received_at');
     const missing = await deliveredElsewhere(conn, {
-      orderNumber: held[0].order_number, shipmentId: bell.shipment_id, shippedAt: shippedEmail?.received_at,
+      orderNumber: held[0].order_number, shipmentId: bell.shipment_id,
       wanted: held.map((row) => ({ productId: row.product_id, title: row.raw_title, quantity: Number(row.quantity) || null })),
     });
     if (missing.every((left) => left <= 0)) closable.push(bell.id);
