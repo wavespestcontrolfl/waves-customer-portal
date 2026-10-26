@@ -220,3 +220,110 @@ describe('payroll mutation lock', () => {
     expect(trx.lockArgs[1]).toEqual([PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY]);
   });
 });
+
+describe('GATE_PAYROLL_TIME_OFF', () => {
+  const OLD_GATE = process.env.GATE_PAYROLL_TIME_OFF;
+  const run = { week_start: '2026-10-12', pay_date: '2026-10-23' };
+  const build = (patch = {}) => buildCheck({
+    tech: tech(patch), payDate: '2026-10-23', weekStart: '2026-10-12', w4: W4, ytdGrossCents: 0,
+  }).check;
+  afterEach(() => {
+    if (OLD_GATE === undefined) delete process.env.GATE_PAYROLL_TIME_OFF;
+    else process.env.GATE_PAYROLL_TIME_OFF = OLD_GATE;
+  });
+
+  describe('off (unset, or anything but the exact string true)', () => {
+    it.each([undefined, 'false', 'TRUE', '1', ''])('is byte for byte today with the gate %p, even when the row carries time off', (value) => {
+      if (value === undefined) delete process.env.GATE_PAYROLL_TIME_OFF;
+      else process.env.GATE_PAYROLL_TIME_OFF = value;
+      const plain = build();
+      const withMinutes = build({ pto_minutes: '600.00', holiday_minutes: '480.00' });
+      // Same row, same calc_snapshot JSON, no new keys, same token.
+      expect(withMinutes).toEqual(plain);
+      expect(Object.keys(plain)).not.toEqual(expect.arrayContaining(['pto_minutes']));
+      expect(Object.keys(JSON.parse(plain.calc_snapshot))).not.toContain('ptoPayCents');
+      expect(tokenOf(run, [withMinutes])).toBe(tokenOf(run, [plain]));
+      // The token is still the hash of exactly the old parts (no time-off values in it).
+      const oldParts = [[
+        plain.technician_id, '22.00', '2400.00', '0.00', 'check', plain.w4_election_id, 0,
+        ...['gross_cents', 'regular_pay_cents', 'overtime_pay_cents', 'overtime_premium_cents', 'federal_income_tax_cents',
+          'social_security_cents', 'medicare_cents', 'additional_medicare_cents', 'net_cents', 'employer_social_security_cents',
+          'employer_medicare_cents', 'futa_cents', 'fl_reemployment_cents'].map((key) => plain[key]),
+      ]];
+      const expected = require('crypto').createHash('sha256')
+        .update(JSON.stringify([run.week_start, run.pay_date, oldParts])).digest('hex').slice(0, 32);
+      expect(tokenOf(run, [plain])).toBe(expected);
+    });
+
+    it('writes the same CSV header and columns as before', () => {
+      delete process.env.GATE_PAYROLL_TIME_OFF;
+      const lines = checksToCsv([{ ...build(), id: 'c1', check_number: null }]).split('\n');
+      expect(lines[0].endsWith('Pay Method,Check Number')).toBe(true);
+      expect(lines[1].split(',')).toHaveLength(16);
+    });
+  });
+
+  describe('on', () => {
+    beforeEach(() => { process.env.GATE_PAYROLL_TIME_OFF = 'true'; });
+
+    it('adds time off and holiday pay at the straight rate to a worked week', () => {
+      const check = build({ regular_minutes: '1800.00', pto_minutes: '600.00', holiday_minutes: '480.00' });
+      expect(check).toMatchObject({
+        pto_minutes: '600.00', holiday_minutes: '480.00', pto_pay_cents: 22000, holiday_pay_cents: 17600,
+        regular_pay_cents: 66000, gross_cents: 66000 + 22000 + 17600,
+      });
+      expect(JSON.parse(check.calc_snapshot)).toMatchObject({ ptoPayCents: 22000, holidayPayCents: 17600 });
+    });
+
+    it('makes a check for a week of time off alone', () => {
+      const check = build({ regular_minutes: 0, overtime_minutes: 0, pto_minutes: 2400 });
+      expect(check).toMatchObject({ regular_minutes: 0, gross_cents: 88000, pto_pay_cents: 88000, holiday_pay_cents: 0 });
+    });
+
+    it('does not turn 40 hours worked plus a 10 hour holiday into overtime', () => {
+      const check = build({ regular_minutes: '2400.00', overtime_minutes: '0.00', holiday_minutes: '600.00' });
+      expect(check.overtime_pay_cents).toBe(0);
+      expect(check.overtime_premium_cents).toBe(0);
+      expect(check.holiday_pay_cents).toBe(22000);
+      expect(check.gross_cents).toBe(88000 + 22000);
+    });
+
+    it('treats a row with no time-off figures as zero time off', () => {
+      const check = build();
+      expect(check).toMatchObject({ pto_minutes: 0, holiday_minutes: 0, pto_pay_cents: 0, holiday_pay_cents: 0, gross_cents: 88000 });
+    });
+
+    it('changes the review token when time off changes, for stored strings and fresh numbers alike', () => {
+      const base = build({ pto_minutes: '600.00' });
+      expect(tokenOf(run, [build({ pto_minutes: '660.00' })])).not.toBe(tokenOf(run, [base]));
+      expect(tokenOf(run, [build({ holiday_minutes: '60.00' })])).not.toBe(tokenOf(run, [build()]));
+      const stored = { ...base, pto_minutes: '600.00', holiday_minutes: '0.00', pto_pay_cents: String(base.pto_pay_cents), holiday_pay_cents: '0' };
+      expect(tokenOf(run, [stored])).toBe(tokenOf(run, [base]));
+    });
+
+    it('changes the token from the gate-off value', () => {
+      const row = build({ pto_minutes: '600.00' });
+      const on = tokenOf(run, [row]);
+      delete process.env.GATE_PAYROLL_TIME_OFF;
+      expect(tokenOf(run, [row])).not.toBe(on);
+    });
+
+    it('appends the four time-off columns at the end of the CSV', () => {
+      const lines = checksToCsv([{ ...build({ regular_minutes: '1800.00', pto_minutes: '600.00', holiday_minutes: '480.00' }), id: 'c1', check_number: null }]).split('\n');
+      expect(lines[0].endsWith('Pay Method,Check Number,PTO hours,PTO pay,Holiday hours,Holiday pay')).toBe(true);
+      expect(lines[1].endsWith(',Paper check,,10.00,220.00,8.00,176.00')).toBe(true);
+    });
+
+    it('keeps a feature-gates mock without the reader working (off)', () => {
+      jest.isolateModules(() => {
+        jest.doMock('../config/feature-gates', () => ({ shiftCloseReviewLive: () => false }));
+        jest.doMock('../models/db', () => ({}));
+        jest.doMock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
+        const isolated = require('../services/payroll-runs');
+        const check = isolated.buildCheck({ tech: tech({ pto_minutes: '600.00' }), payDate: '2026-10-23', weekStart: '2026-10-12', w4: W4, ytdGrossCents: 0 }).check;
+        expect(check).not.toHaveProperty('pto_minutes');
+        expect(check.gross_cents).toBe(88000);
+      });
+    });
+  });
+});

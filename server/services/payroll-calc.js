@@ -10,7 +10,10 @@
  *
  * For one pay period it returns:
  * - Gross pay: regular minutes at the hourly rate, overtime minutes at 1.5
- *   times it. The overtime premium (the extra half) is also returned on its
+ *   times it. Paid time off and holiday minutes (hours not worked, owner
+ *   2026-10-26) are paid at the straight rate and never count toward
+ *   overtime; the caller passes overtime as the weekly timesheet worked it
+ *   out. The overtime premium (the extra half) is also returned on its
  *   own, because from tax year 2026 the W-2 reports qualified overtime
  *   compensation (IRS Pub. 15-T (2026), What's New).
  * - Federal income tax withholding: Pub. 15-T (2026) Worksheet 1A with the
@@ -193,6 +196,8 @@ function computePaycheck({
   hourlyRate,
   regularMinutes = 0,
   overtimeMinutes = 0,
+  ptoMinutes,
+  holidayMinutes,
   ytdGrossWages = 0,
   w4,
   reemploymentRateBp = FLORIDA_NEW_EMPLOYER_RATE_BP,
@@ -214,7 +219,13 @@ function computePaycheck({
   const regularPay = roundDiv(rateCents * regularHundredths, 6000n);
   const overtimePay = roundDiv(rateCents * overtimeHundredths * 3n, 12000n);
   const overtimePremium = roundDiv(rateCents * overtimeHundredths, 12000n);
-  const gross = regularPay + overtimePay;
+  // Time off is paid at the straight rate. The output carries its two lines only
+  // when the caller passed either figure, so a caller without time off gets the
+  // same output as before.
+  const withTimeOff = ptoMinutes !== undefined || holidayMinutes !== undefined;
+  const ptoPay = roundDiv(rateCents * nonNegativeCents(ptoMinutes, 'Paid time off minutes'), 6000n);
+  const holidayPay = roundDiv(rateCents * nonNegativeCents(holidayMinutes, 'Holiday minutes'), 6000n);
+  const gross = regularPay + overtimePay + ptoPay + holidayPay;
 
   const ytd = nonNegativeCents(ytdGrossWages, 'Year-to-date wages');
   const socialSecurityWages = min(gross, max0(tables.socialSecurityWageBase - ytd));
@@ -244,6 +255,7 @@ function computePaycheck({
       regularPayCents: regularPay,
       overtimePayCents: overtimePay,
       overtimePremiumCents: overtimePremium,
+      ...(withTimeOff ? { ptoPayCents: ptoPay, holidayPayCents: holidayPay } : {}),
       grossPayCents: gross,
       federalIncomeTaxCents: federalIncomeTax,
       federalIncomeTaxShortfallCents: withheld - federalIncomeTax,

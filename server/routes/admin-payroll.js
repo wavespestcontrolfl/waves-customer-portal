@@ -33,6 +33,18 @@
  *                                    W-2/W-3 (the year) from finalized, not-voided checks.
  *                                    400 on a bad year or quarter. Off answers 404.
  *
+ * Paid time off and holidays (GATE_PAYROLL_TIME_OFF, also dark; off answers 404 { enabled: false }).
+ * GET    /time-off?from=&to=         entries in the range (at most 400 days), with technician name.
+ * POST   /time-off                   { technicianId, workDate, kind: 'pto' | 'holiday', hours, note }
+ *                                    201 { entry, warning } (409 on a second entry for the date).
+ * PUT    /time-off/:id               { kind, hours, note } -> { entry, warning }
+ * DELETE /time-off/:id               remove an entry.
+ *                                    Create, change and delete answer 409 once a finalized check
+ *                                    pays that technician's week: void the pay run first.
+ * GET    /time-off/balance?technicianId=&year=   allowance, hours booked, hours paid, holidays.
+ * PUT    /technicians/:id/pto-allowance          { hoursPerYear | null } the yearly allowance.
+ *                                    The allowance only warns; it never blocks an entry.
+ *
  * Admin only. Off answers 404 { enabled: false } on every route but /status,
  * before any query. The portal never stores an SSN or a bank account number:
  * this router returns and logs neither. Responses are no-store.
@@ -40,10 +52,11 @@
 const express = require('express');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { payrollLive, payrollFormFiguresLive } = require('../config/feature-gates');
+const { payrollLive, payrollFormFiguresLive, payrollTimeOffLive } = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
 const payrollRuns = require('../services/payroll-runs');
 const payrollFormFigures = require('../services/payroll-form-figures');
+const payrollTimeOff = require('../services/payroll-time-off');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -75,6 +88,48 @@ router.get('/forms', async (req, res) => {
   try {
     res.json(await payrollFormFigures.readFormFigures(payrollFormFigures.parseFormPeriod(req.query)));
   } catch (err) { fail(res, 'read tax form figures', err); }
+});
+
+// GATE_PAYROLL_TIME_OFF off: the same answer the payroll routes give when their gate is off.
+const timeOffOnly = (req, res, next) => {
+  if (!(typeof payrollTimeOffLive === 'function' && payrollTimeOffLive())) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.get('/time-off/balance', timeOffOnly, async (req, res) => {
+  try {
+    res.json({ balance: await payrollTimeOff.balance(req.query) });
+  } catch (err) { fail(res, 'read time off balance', err); }
+});
+
+router.get('/time-off', timeOffOnly, async (req, res) => {
+  try {
+    res.json({ entries: await payrollTimeOff.listTimeOff(req.query) });
+  } catch (err) { fail(res, 'list time off', err); }
+});
+
+router.post('/time-off', timeOffOnly, async (req, res) => {
+  try {
+    res.status(201).json(await payrollTimeOff.createTimeOff(req.body, req.technicianId));
+  } catch (err) { fail(res, 'record time off', err); }
+});
+
+router.put('/time-off/:id', timeOffOnly, async (req, res) => {
+  try {
+    res.json(await payrollTimeOff.updateTimeOff(req.params.id, req.body, req.technicianId));
+  } catch (err) { fail(res, 'change time off', err); }
+});
+
+router.delete('/time-off/:id', timeOffOnly, async (req, res) => {
+  try {
+    res.json(await payrollTimeOff.deleteTimeOff(req.params.id, req.technicianId));
+  } catch (err) { fail(res, 'remove time off', err); }
+});
+
+router.put('/technicians/:id/pto-allowance', timeOffOnly, async (req, res) => {
+  try {
+    res.json({ technician: await payrollTimeOff.setPtoAllowance(req.params.id, req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set time off allowance', err); }
 });
 
 router.get('/technicians', async (req, res) => {
