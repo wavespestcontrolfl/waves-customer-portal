@@ -9853,23 +9853,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={showAskBar && !isRegulatedCertificateSurface} />
           : null}
         {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
-        {/* Commercial proposal: the what-happens-next card sits directly under
-            the hero identity block (owner 2026-08-08) — at the bottom it
-            repeated the hero's "your formal proposal is ready" and read as a
-            duplicate. Every other terminal state keeps the card in its
-            original slot below the content. */}
-        {isCommercialProposal ? (
-          <TerminalStateCard
-            state={cta.terminalState}
-            customerFirstName={estimate.customerFirstName}
-            address={estimate.address}
-            quoteReason={quoteRequiredReason}
-            isProposal
-            // The browser PDF's own next-step wording (online signing offered
-            // or not), not the legacy "no online checkout" copy.
-            cta={cta}
-          />
-        ) : null}
         {/* Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS
             → /data ships `proposal`): the line items + totals + included-service
             terms the customer used to get only inside the emailed PDF. Rendered
@@ -9883,6 +9866,23 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         {data.proposal?.enabled === true
           ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
           : null}
+        {/* Commercial proposal: the what-happens-next card sits below the
+            proposal (owner 2026-10-26; it replaces the 2026-08-08 slot under the
+            hero) and above the Accept & sign card its wording points to
+            ("below"). Every other terminal state keeps the card in its original
+            slot below the content. */}
+        {isCommercialProposal ? (
+          <TerminalStateCard
+            state={cta.terminalState}
+            customerFirstName={estimate.customerFirstName}
+            address={estimate.address}
+            quoteReason={quoteRequiredReason}
+            isProposal
+            // The browser PDF's own next-step wording (online signing offered
+            // or not), not the legacy "no online checkout" copy.
+            cta={cta}
+          />
+        ) : null}
         {/* "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): only when /data carries
             cta.commercialAgreement — absent with the gate off, so the page is unchanged. */}
         <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} />

@@ -3367,6 +3367,10 @@ Owner, on a commercial proposal page: "the new copy should have only been the at
 
 Owner, after #6837 fixed the estimate page: "so the glass UI, should have stayed as glass UI, like it was before", and, pointing at the Field receipt web page, "this layout, should have been the pdfs". **Decisions.** (1) The web views #6750 and #6803 moved to Field go back to their earlier layout: service report, project report, receipt, statement, invoice pay page, agreement, prep guide, rate notice and service outline. (2) Every generated PDF keeps Field (`EstimateProposalDocument`, `ServiceReportDocument`, the pdfkit builders). (3) Staff printouts (staff documents, pay stubs, tank sheets, staff estimate print) keep Field. (4) The three page style files #6803 added for the web Field layout are removed with it.
 
+## 2026-10-26 — Commercial proposal: What happens next sits below the proposal
+
+Owner: "the what happens next should be below the proposal". **Decision.** On an authored commercial proposal page the order is hero → proposal card → What happens next → Accept & sign → Ask Waves. It replaces the 2026-08-08 slot directly under the hero; the card keeps its "What happens next" title, and its wording ("tap Accept & sign agreement below") still points down to the sign card.
+
 ## 2026-10-26 — Commercial proposals show business-fit reviews
 
 Owner "OK GO" on choice 2A (decision page 8zoPRWmm). **Decision.** An authored commercial proposal shows the Google reviews section again, under "What our customers say". It reads 40 reviews from the shared pool and keeps the first 8 with no home, family, pets or yard words (128 of the 181 reviews qualify; none of the 181 comes from a commercial customer). The reviews stay word for word. The app pitch stays hidden.
