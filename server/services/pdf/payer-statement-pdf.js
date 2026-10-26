@@ -8,28 +8,27 @@
 // always matches what was billed.
 
 const PDFDocument = require('pdfkit');
-const { getLogoBuffer } = require('./brand-logo');
-const {
-  WAVES_WEBSITE_HOST,
-  WAVES_SUPPORT_PHONE_DISPLAY,
-  WAVES_FL_LICENSE_LINE,
-} = require('../../constants/business');
 const { formatDateOnly, formatDisplayDate, dateOnlyString } = require('../../utils/date-only');
 const { etDateString } = require('../../utils/datetime-et');
+const { PDF_COLORS } = require('./pdf-tokens');
+const {
+  FIELD_PDF_LAYOUT,
+  drawFieldContinuationMasthead,
+  drawFieldFooter,
+  drawFieldMasthead,
+} = require('./field-pdf');
 
-// Brand palette — mirrors invoice-pdf.js (single source kept in sync by hand).
-const NAVY = '#1B2C5B';
-const WAVES_BLUE = '#009CDE';
-const RED = '#C8102E';
-const GREEN = '#047857';
+const NAVY = PDF_COLORS.navy;
+const WAVES_BLUE = PDF_COLORS.blue;
+const RED = PDF_COLORS.red;
+const GREEN = PDF_COLORS.green;
 const INK = NAVY;
-const BODY = '#3F4A65';
-const MUTED = '#6B7280';
-const RULE = '#E7E2D7';
-const SOFT = '#FAF8F3';
+const BODY = PDF_COLORS.body;
+const MUTED = PDF_COLORS.muted;
+const RULE = PDF_COLORS.rule;
 
 const PAGE_W = 612;
-const PAGE_BOTTOM = 712; // leave room for the footer bar
+const PAGE_BOTTOM = FIELD_PDF_LAYOUT.contentBottom;
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves';
 
@@ -53,32 +52,12 @@ function isStatementOverdue(statement, now = new Date()) {
 }
 
 function headerBar(doc, statusLabel, statusColor) {
-  doc.save();
-  doc.rect(0, 0, PAGE_W, 92).fill(NAVY);
-  const logoBuf = getLogoBuffer();
-  if (logoBuf) {
-    doc.image(logoBuf, 24, 10, { width: 72, height: 72 });
-  } else {
-    doc.fontSize(26).font('Helvetica-Bold').fillColor('#fff').text('WAVES', 40, 22);
-    doc.fontSize(9).font('Helvetica').fillColor('#B8D4EA').text('PEST CONTROL & LAWN CARE', 40, 52);
-  }
-  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text(WAVES_FL_LICENSE_LINE, 108, 70);
-  doc.fontSize(10).font('Helvetica-Bold').fillColor('#fff').text(WAVES_SUPPORT_PHONE_DISPLAY, 430, 22, { width: 142, align: 'right' });
-  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text(WAVES_WEBSITE_HOST, 430, 38, { width: 142, align: 'right' });
-  doc.text('13649 Luxe Ave #110', 430, 52, { width: 142, align: 'right' });
-  doc.text('Bradenton, FL 34211', 430, 64, { width: 142, align: 'right' });
-  doc.restore();
-
-  doc.save();
-  doc.rect(0, 92, PAGE_W, 44).fill(SOFT);
-  doc.fontSize(20).font('Helvetica').fillColor(NAVY).text('Statement', 40, 104);
-  if (statusLabel) {
-    const badgeW = doc.widthOfString(statusLabel) + 20;
-    doc.roundedRect(PAGE_W - 40 - badgeW, 105, badgeW, 22, 11).fill(statusColor);
-    doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff')
-      .text(statusLabel.toUpperCase(), PAGE_W - 40 - badgeW + 10, 111);
-  }
-  doc.restore();
+  drawFieldMasthead(doc, {
+    title: 'Account Statement',
+    eyebrow: 'Billing document',
+    statusLabel: statusLabel ? statusLabel.toUpperCase() : '',
+    statusColor,
+  });
 }
 
 function sectionLabel(doc, label, x, y) {
@@ -151,7 +130,8 @@ function statementTable(doc, lines, startY) {
     // Page break before a row that would collide with the footer.
     if (y + rowH > PAGE_BOTTOM) {
       doc.addPage();
-      y = tableHeader(doc, 56);
+      drawFieldContinuationMasthead(doc, { title: 'Account Statement · continued' });
+      y = tableHeader(doc, 64);
       doc.fontSize(9).font('Helvetica');
     }
     doc.fillColor(BODY).text(dateOnly(line.service_date), COL.date, y, { width: COL_W.date });
@@ -166,7 +146,11 @@ function statementTable(doc, lines, startY) {
 
 function totalsBlock(doc, statement, startY) {
   let y = startY + 4;
-  if (y + 90 > PAGE_BOTTOM) { doc.addPage(); y = 56; }
+  if (y + 90 > PAGE_BOTTOM) {
+    doc.addPage();
+    drawFieldContinuationMasthead(doc, { title: 'Account Statement · continued' });
+    y = 64;
+  }
   doc.moveTo(360, y).lineTo(PAGE_W - 40, y).lineWidth(0.75).strokeColor(RULE).stroke();
   y += 10;
   const row = (label, value, bold) => {
@@ -185,13 +169,10 @@ function footerBar(doc, tagline) {
   const range = doc.bufferedPageRange();
   for (let i = range.start; i < range.start + range.count; i += 1) {
     doc.switchToPage(i);
-    doc.save();
-    doc.rect(0, 752, PAGE_W, 40).fill(NAVY);
-    doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA')
-      .text(tagline, 40, 766, { width: 360 });
-    doc.fontSize(8).fillColor('#B8D4EA')
-      .text(`Page ${i + 1} of ${range.count}`, PAGE_W - 160, 766, { width: 120, align: 'right' });
-    doc.restore();
+    drawFieldFooter(doc, {
+      tagline,
+      detail: `Statement · Page ${i + 1} of ${range.count}`,
+    });
   }
 }
 

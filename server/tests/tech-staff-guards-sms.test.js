@@ -1,7 +1,7 @@
 // GATE_TECH_STAFF_GUARDS, M12 (census 2026-10-25): an inbound text from an active technician's own cell
 // to an office line is a staff sender. The office still sees it (inbox row, legacy log row, activity row,
 // the owner's unknown-sender text forward, unread); only the customer and lead side is skipped (spam
-// screen, estimator draft and agent, AI auto-reply and drafts, new-prospect bells). Same harness as twilio-webhook-solicitation.test.js (real webhook, mocked
+// screen, estimator draft and agent, new-prospect bells). Same harness as twilio-webhook-solicitation.test.js (real webhook, mocked
 // persistence and providers; nothing is sent). The phone set itself is tested against Postgres in
 // staff-sender-phones-postgres.test.js, so it is stubbed here.
 const mockWrites = [];
@@ -122,7 +122,6 @@ jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEna
 jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: jest.fn(async () => ({})) }));
 jest.mock('../services/tech-line', () => ({ notifyTechLineText: jest.fn(async () => ({})) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({})), __private: { redactSensitiveText: (t) => t } }));
-jest.mock('../services/ai-assistant/assistant', () => ({ processMessage: jest.fn(async () => ({ reply: 'Hi there', escalated: false, conversationId: 'c1' })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/staff-sender-phones', () => ({ isStaffTechSender: jest.fn(async () => false) }));
 
@@ -240,7 +239,6 @@ describe('an inbound text from an active technician\'s phone', () => {
     expect(writesTo('leads')).toEqual([]);
     expect(writesTo('message_drafts')).toEqual([]);
     expect(require('../services/notification-triggers').triggerNotification).not.toHaveBeenCalled();
-    expect(require('../services/ai-assistant/assistant').processMessage).not.toHaveBeenCalled();
     expect(require('../services/messaging/send-customer-message').sendCustomerMessage).not.toHaveBeenCalled();
   });
 
@@ -249,23 +247,6 @@ describe('an inbound text from an active technician\'s phone', () => {
     await receive('We have exclusive pest leads for you.');
     delete process.env.GATE_SMS_SPAM_CLASSIFIER;
     expect(JSON.parse(writesTo('sms_log')[0].row.metadata).spam_verdict).toBeDefined();
-  });
-
-  test('on the AI line it is not auto-replied to (a customer there is)', async () => {
-    const gates = require('../config/feature-gates');
-    gates.isEnabled.mockImplementation((gate) => gate === 'webhooks' || gate === 'aiAssistantAutoReply');
-    const { processMessage } = require('../services/ai-assistant/assistant');
-    try {
-      await receive(TEXT, { to: numbers.tollFree.number });
-      expect(processMessage).toHaveBeenCalledTimes(1);   // control: an ordinary sender is answered
-      processMessage.mockClear();
-      asStaff();
-      await receive(TEXT, { to: numbers.tollFree.number, sid: 'SM-synthetic-staff-guard-2' });
-      expect(processMessage).not.toHaveBeenCalled();
-      expect(require('../services/messaging/send-customer-message').sendCustomerMessage).toHaveBeenCalledTimes(1);
-    } finally {
-      gates.isEnabled.mockImplementation((gate) => gate === 'webhooks');
-    }
   });
 
   test('any other sender (or the gate off) is handled as today: the same inbox row, plus the estimator draft', async () => {

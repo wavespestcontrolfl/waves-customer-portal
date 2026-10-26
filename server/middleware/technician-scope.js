@@ -120,8 +120,8 @@ const TECHNICIAN_ALLOW_LIST = [
   // route (technicianCustomerGuard / technicianCustomerIdsSubquery). This
   // list closes the routes a technician has no business calling at all:
   // stats, the compliance export, outbound calls from the business line,
-  // auto-reply and link library configuration.
-  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|ai-auto-reply-status|customer-link|agent-draft)$/ },
+  // and link library configuration.
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|customer-link|agent-draft)$/ },
   { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|rewrite-sms|ai-draft|customer-link)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
   // The line a text to this number leaves from (the composer's server-chosen

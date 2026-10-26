@@ -228,7 +228,7 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
     expect(replyQuotesUngroundedAmount('You owe $95.', { billing }, { byMeaning: true })).toBe(true);
   });
   // Codex round-46 P1: the payer-LINKAGE scan failing (or hitting its bound) is unknown ownership too - no invoice money leaks into
-  // balance / flags / summary, which legacy readers (response-drafter) use without checking billing.unavailable
+  // balance / flags / summary, which older readers use without checking billing.unavailable
   test('a payer-linkage live scan past its bound exposes no balance, overdue flag or summary amount', async () => {
     db.__rows = { invoices: [inv('i1', 'WPC-2026-0456', 'sent', 95)], payments: [], liveScan: Array.from({ length: 1001 }, (_, n) => ({ id: `x${n}`, scheduled_service_id: `s${n}` })), failedPayments: [{ id: 'f1', amount: 40, status: 'failed', payment_date: '2026-06-01', metadata: null, stripe_payment_intent_id: 'pi_x', retry_count: 1, next_retry_at: null }] };
     hasInFlightMoney.mockResolvedValue(false);

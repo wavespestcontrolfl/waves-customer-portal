@@ -1172,64 +1172,59 @@ export default function TriageInboxTabV2({ isAdmin }) {
     <div className="flex flex-col gap-4 px-3 md:px-0 pb-10">
       {/* Mode switch: needs-review queue vs auto-routed review */}
       <div className="flex gap-2 flex-wrap pt-3">
-        <button
+        <Button
           type="button"
+          density="comfortable"
+          variant={isTriage ? "primary" : "secondary"}
+          aria-pressed={isTriage}
           onClick={() => setMode("triage")}
-          className={cn(
-            "inline-flex items-center gap-1.5 h-8 px-3 rounded-md border-hairline text-13 font-medium transition-colors",
-            isTriage ? "bg-zinc-900 text-white border-zinc-900" : "bg-surface-card text-ink-secondary border-zinc-200 hover:bg-surface-hover"
-          )}
+          className="gap-1.5"
         >
-          <Inbox size={13} strokeWidth={1.75} aria-hidden /> Needs review
-        </button>
-        <button
+          <Inbox size={16} strokeWidth={1.75} aria-hidden /> Needs review
+        </Button>
+        <Button
           type="button"
+          density="comfortable"
+          variant={!isTriage ? "primary" : "secondary"}
+          aria-pressed={!isTriage}
           onClick={() => setMode("auto_routed")}
-          className={cn(
-            "inline-flex items-center gap-1.5 h-8 px-3 rounded-md border-hairline text-13 font-medium transition-colors",
-            !isTriage ? "bg-zinc-900 text-white border-zinc-900" : "bg-surface-card text-ink-secondary border-zinc-200 hover:bg-surface-hover"
-          )}
+          className="gap-1.5"
         >
-          <Zap size={13} strokeWidth={1.75} aria-hidden /> Auto-routed
-        </button>
+          <Zap size={16} strokeWidth={1.75} aria-hidden /> Auto-routed
+        </Button>
       </div>
 
       {/* Status filter chips (triage mode only) */}
       {isTriage && (
         <div className="flex gap-2 flex-wrap">
           {STATUS_TABS.map((t) => (
-            <button
+            <Button
               key={t.key}
               type="button"
+              density="comfortable"
+              variant={status === t.key ? "primary" : "secondary"}
+              aria-pressed={status === t.key}
               onClick={() => setStatus(t.key)}
-              className={cn(
-                "inline-flex items-center gap-1.5 h-8 px-3 rounded-md border-hairline text-13 font-medium transition-colors",
-                status === t.key
-                  ? "bg-zinc-900 text-white border-zinc-900"
-                  : "bg-surface-card text-ink-secondary border-zinc-200 hover:bg-surface-hover"
-              )}
+              className="gap-1.5"
             >
               {t.label}
-              <span className={cn("text-11", status === t.key ? "text-zinc-300" : "text-ink-tertiary")}>
+              <span className={cn("text-ui-caption", status === t.key ? "text-zinc-300" : "text-ink-tertiary")}>
                 {counts[t.key] ?? 0}
               </span>
-            </button>
+            </Button>
           ))}
           <HeldLinesChip held={held} isAdmin={isAdmin} />
           {(status === "resolved" || status === "dismissed") && (
-            <button
+            <Button
               type="button"
+              density="comfortable"
+              variant={autoOnly ? "primary" : "secondary"}
               onClick={() => setAutoOnly((v) => !v)}
               aria-pressed={autoOnly}
-              className={cn(
-                "inline-flex items-center gap-1.5 h-8 px-3 rounded-md border-hairline text-13 font-medium transition-colors",
-                autoOnly
-                  ? "bg-zinc-900 text-white border-zinc-900"
-                  : "bg-surface-card text-ink-secondary border-zinc-200 hover:bg-surface-hover"
-              )}
+              className="gap-1.5"
             >
               Auto-closed only
-            </button>
+            </Button>
           )}
         </div>
       )}

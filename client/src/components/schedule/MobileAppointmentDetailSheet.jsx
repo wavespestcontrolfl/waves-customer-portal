@@ -21,6 +21,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import useModalFocus from '../../hooks/useModalFocus';
+import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { TIMEZONE } from '../../lib/timezone';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
@@ -37,6 +39,7 @@ import { describeCardRequestState, describeCardRequestResult, canSendCardRequest
 import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 import { directionsHref } from '../../lib/directionsHref';
 import { showScheduleSaveNotice } from './ScheduleSaveNotice';
+import { useUiDensity } from '../ui';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -188,10 +191,16 @@ export default function MobileAppointmentDetailSheet({
   // would leave this detail sheet showing the voided invoice snapshot.
   const prepaySwitchDirty = useRef(false);
 
-  // Focus starts in this full-screen sheet, not on whatever opened it behind
-  // it (a schedule row, or a Fast Complete sheet now suspended under it).
-  const closeButtonRef = useRef(null);
-  useEffect(() => { closeButtonRef.current?.focus({ preventScroll: true }); }, []);
+  // Nested overlays own their Escape key. Otherwise the shared modal hook
+  // reaches the same save-aware close path as both visible close controls.
+  const nestedOverlayOpen = [showCustomer, showRainOut, showOutcome, showPrepaySwitch].some(Boolean);
+  const dialogRef = useModalFocus(
+    true,
+    nestedOverlayOpen ? null : () => { void saveAndClose(); },
+    !nestedOverlayOpen,
+  );
+  const density = useUiDensity();
+  useLockBodyScroll(true);
 
   useEffect(() => {
     setCardRequestInfo(null);
@@ -477,6 +486,7 @@ export default function MobileAppointmentDetailSheet({
   // here so a dirty note is saved, never silently discarded. saveNote alerts
   // on failure and returns false — keep the sheet open so the text survives.
   const saveAndClose = async () => {
+    if (savingNote) return;
     if (noteDirty) {
       const saved = await saveNote();
       if (!saved) return;
@@ -538,7 +548,13 @@ export default function MobileAppointmentDetailSheet({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[100] bg-white overflow-y-auto"
+      ref={dialogRef}
+      className="fixed inset-0 z-[100] bg-white overflow-y-auto [&_button]:appearance-none"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Appointment details"
+      data-ui-density={density}
+      onClick={(event) => event.stopPropagation()}
       // Portaled to <body>, so the .admin-shell-v2 forced-Roboto rule can't
       // reach this sheet — restate the family (weight comes from the type
       // system: 400 body / 500 font-medium).
@@ -552,12 +568,11 @@ export default function MobileAppointmentDetailSheet({
         style={{ height: 'calc(64px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
-          ref={closeButtonRef}
           type="button"
           onClick={saveAndClose}
           disabled={savingNote}
           aria-label="Close"
-          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-white border border-hairline border-zinc-200 text-ink-primary font-medium u-focus-ring disabled:opacity-50"
+          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-white border border-hairline border-solid border-zinc-200 text-ink-primary font-medium u-focus-ring disabled:opacity-50"
           style={{ height: 44, padding: '0 18px', fontSize: 15 }}
         >
           <span style={{ fontSize: 18, lineHeight: 1 }}>✕</span>
@@ -568,7 +583,7 @@ export default function MobileAppointmentDetailSheet({
             type="button"
             onClick={() => onEdit?.(service)}
             aria-label="Edit appointment"
-            className="rounded-sm bg-zinc-900 text-white font-medium u-focus-ring"
+            className="rounded-sm border-0 bg-zinc-900 text-white font-medium u-focus-ring"
             style={{ height: 44, padding: '0 26px', fontSize: 15 }}
           >
             Edit
@@ -576,13 +591,16 @@ export default function MobileAppointmentDetailSheet({
         )}
       </div>
 
-      <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 560 }}>
+      <div
+        className="px-4 pt-4 mx-auto"
+        style={{ maxWidth: 560, paddingBottom: 'calc(40px + env(safe-area-inset-bottom, 0px))' }}
+      >
         {canCompleteService && (
           <button
             type="button"
             onClick={completeService}
             disabled={savingNote || projectCompletionClosed}
-            className="w-full rounded-sm bg-zinc-900 text-white font-medium u-focus-ring"
+            className="w-full rounded-sm border-0 bg-zinc-900 text-white font-medium u-focus-ring"
           style={{ padding: '14px 20px', fontSize: 16, opacity: savingNote || projectCompletionClosed ? 0.6 : 1 }}
         >
             {savingNote ? 'Saving note...' : projectBackedCompletion ? projectCompletionLabel : 'Complete service'}
@@ -594,13 +612,13 @@ export default function MobileAppointmentDetailSheet({
           type="button"
           onClick={handleReviewAction}
           disabled={!hasCheckoutAmount && !canCompleteService}
-          className={`w-full rounded-sm font-medium u-focus-ring ${canCompleteService ? 'bg-white text-zinc-900 border border-hairline border-zinc-300 mt-3' : 'bg-zinc-900 text-white'}`}
+          className={`w-full rounded-sm font-medium u-focus-ring ${canCompleteService ? 'bg-white text-zinc-900 border border-hairline border-solid border-zinc-300 mt-3' : 'border-0 bg-zinc-900 text-white'}`}
           style={{ padding: '14px 20px', fontSize: 16, opacity: (!hasCheckoutAmount && !canCompleteService) ? 0.55 : 1 }}
         >
           {hasCheckoutAmount ? 'Review & checkout' : canCompleteService ? (projectBackedCompletion ? (linkedProject?.id ? 'Open project details' : 'Review project details') : 'Review visit details') : 'Visit complete'}
         </button>
         {coveredByMembership && !isPrepaid && (
-          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
+          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 14 }}>
             Covered by WaveGuard {tierLabel(tier)} — no charge needed
           </div>
         )}
@@ -643,12 +661,12 @@ export default function MobileAppointmentDetailSheet({
               </div>
               <span
                 className="inline-flex items-center rounded-full"
-                style={{ height: 22, padding: '0 10px', background: '#DCFCE7', color: '#166534', fontSize: 11, fontWeight: 500, letterSpacing: '0.04em' }}
+                style={{ minHeight: 24, padding: '2px 10px', background: '#DCFCE7', color: '#166534', fontSize: 14, fontWeight: 500 }}
               >
                 PAID
               </span>
             </div>
-            <div className="text-ink-secondary" style={{ fontSize: 12, marginTop: 4 }}>
+            <div className="text-ink-secondary" style={{ fontSize: 14, marginTop: 4 }}>
               {seriesCtx.futureCoveredVisits > 0
                 ? `${seriesCtx.futureCoveredVisits} more visit${seriesCtx.futureCoveredVisits === 1 ? '' : 's'} covered`
                 : 'Final visit on this plan'}
@@ -658,7 +676,7 @@ export default function MobileAppointmentDetailSheet({
           </div>
         )}
         {isPrepaid && (!seriesCtx || seriesCtx.totalCoveredVisits <= 1) && (
-          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
+          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 14 }}>
             Prepaid ${prepaidAmt.toFixed(2)}
             {service.prepaidMethod ? ` via ${service.prepaidMethod.replace(/_/g, ' ')}` : ''} — no charge needed
           </div>
@@ -667,7 +685,7 @@ export default function MobileAppointmentDetailSheet({
           <button
             type="button"
             onClick={() => setShowOutcome(true)}
-            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-zinc-300 font-medium u-focus-ring mt-3"
+            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-solid border-zinc-300 font-medium u-focus-ring mt-3"
             style={{ padding: '13px 20px', fontSize: 15 }}
           >
             Consultation outcome
@@ -677,7 +695,7 @@ export default function MobileAppointmentDetailSheet({
           <button
             type="button"
             onClick={() => onTreatmentPlan?.(service)}
-            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-zinc-300 font-medium u-focus-ring mt-3"
+            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-solid border-zinc-300 font-medium u-focus-ring mt-3"
             style={{ padding: '13px 20px', fontSize: 15 }}
           >
             Treatment plan
@@ -697,13 +715,13 @@ export default function MobileAppointmentDetailSheet({
             <button
               type="button"
               onClick={() => setShowCustomer(true)}
-              className="w-full flex items-start justify-between gap-3 py-3 border-b border-hairline border-zinc-200 text-left bg-transparent hover:bg-zinc-50 -mx-1 px-1 rounded-sm"
+              className="w-full flex items-start justify-between gap-3 py-3 border-b border-hairline border-solid border-zinc-200 text-left bg-transparent hover:bg-zinc-50 -mx-1 px-1 rounded-sm"
             >
               <div className="flex-1 min-w-0">
                 <div className="text-zinc-900 font-medium truncate" style={{ fontSize: 16 }}>
                   {service.customerName || 'Unknown'}
                 </div>
-                <div className="text-ink-secondary truncate" style={{ fontSize: 13, marginTop: 2 }}>
+                <div className="text-ink-secondary truncate" style={{ fontSize: 14, marginTop: 2 }}>
                   {service.customerPhone || ''}
                 </div>
               </div>
@@ -721,7 +739,7 @@ export default function MobileAppointmentDetailSheet({
               return (
                 <div style={{ marginTop: 10 }}>
                   {state && (
-                    <div className={toneClass} style={{ fontSize: 13 }}>
+                    <div className={toneClass} style={{ fontSize: 14 }}>
                       {state.text}
                     </div>
                   )}
@@ -730,7 +748,7 @@ export default function MobileAppointmentDetailSheet({
                       type="button"
                       onClick={sendCardRequestLink}
                       disabled={cardLinkSending}
-                      className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-zinc-300 font-medium u-focus-ring"
+                      className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-solid border-zinc-300 font-medium u-focus-ring"
                       style={{ padding: '13px 20px', fontSize: 15, opacity: cardLinkSending ? 0.6 : 1 }}
                     >
                       {cardLinkSending ? 'Sending...' : 'Text card / Auto Pay link'}
@@ -752,7 +770,7 @@ export default function MobileAppointmentDetailSheet({
               <div className="text-zinc-900" style={{ fontSize: 15 }}>
                 {baseServiceLabel}
               </div>
-              <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
+              <div className="text-ink-secondary" style={{ fontSize: 14, marginTop: 2 }}>
                 {timeWindow}
                 {service.estimatedDuration ? (timeWindow ? ' · ' : '') + `${service.estimatedDuration} mins` : ''}
               </div>
@@ -771,7 +789,7 @@ export default function MobileAppointmentDetailSheet({
                 <div className="text-zinc-900" style={{ fontSize: 15 }}>
                   {addon.serviceName || 'Service add-on'}
                 </div>
-                <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
+                <div className="text-ink-secondary" style={{ fontSize: 14, marginTop: 2 }}>
                   Add-on service
                 </div>
               </div>
@@ -790,7 +808,7 @@ export default function MobileAppointmentDetailSheet({
                 ${displayTotal.toFixed(2)}
               </span>
               {prepaidCovered && (
-                <span className="text-ink-secondary block" style={{ fontSize: 12 }}>
+                <span className="text-ink-secondary block" style={{ fontSize: 14 }}>
                   Covered by prepay
                 </span>
               )}
@@ -813,26 +831,26 @@ export default function MobileAppointmentDetailSheet({
           {visitInvoice && (
             <div className="rounded-xs border border-hairline border-zinc-200 bg-zinc-50" style={{ padding: '10px 12px', marginTop: 2 }}>
               <div className="flex items-baseline justify-between gap-3">
-                <span className="text-zinc-900 font-medium" style={{ fontSize: 13 }}>
+                <span className="text-zinc-900 font-medium" style={{ fontSize: 14 }}>
                   Invoice on file{visitInvoice.number ? ` · ${visitInvoice.number}` : ''}
                 </span>
-                <span className="u-nums text-zinc-900 font-medium" style={{ fontSize: 13 }}>
+                <span className="u-nums text-zinc-900 font-medium" style={{ fontSize: 14 }}>
                   ${visitInvoice.amountDue.toFixed(2)}
                 </span>
               </div>
               {visitInvoice.lines.map((line, i) => (
                 <div key={`${line.description}-${i}`} className="flex items-baseline justify-between gap-3" style={{ marginTop: 4 }}>
-                  <span className="text-ink-secondary" style={{ fontSize: 13 }}>{line.description}</span>
-                  <span className="u-nums text-ink-secondary" style={{ fontSize: 13 }}>${line.amount.toFixed(2)}</span>
+                  <span className="text-ink-secondary" style={{ fontSize: 14 }}>{line.description}</span>
+                  <span className="u-nums text-ink-secondary" style={{ fontSize: 14 }}>${line.amount.toFixed(2)}</span>
                 </div>
               ))}
               {visitInvoice.creditApplied > 0 && (
                 <div className="flex items-baseline justify-between gap-3" style={{ marginTop: 4 }}>
-                  <span className="text-ink-secondary" style={{ fontSize: 13 }}>Account credit applied</span>
-                  <span className="u-nums text-ink-secondary" style={{ fontSize: 13 }}>−${visitInvoice.creditApplied.toFixed(2)}</span>
+                  <span className="text-ink-secondary" style={{ fontSize: 14 }}>Account credit applied</span>
+                  <span className="u-nums text-ink-secondary" style={{ fontSize: 14 }}>−${visitInvoice.creditApplied.toFixed(2)}</span>
                 </div>
               )}
-              <div className="text-ink-secondary" style={{ fontSize: 12, marginTop: 6 }}>
+              <div className="text-ink-secondary" style={{ fontSize: 14, marginTop: 6 }}>
                 {visitInvoiceStatusNote(visitInvoice)}
               </div>
             </div>
@@ -888,7 +906,7 @@ export default function MobileAppointmentDetailSheet({
           <button
             type="button"
             onClick={() => setShowPrepaySwitch(true)}
-            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-zinc-300 font-medium u-focus-ring"
+            className="w-full rounded-sm bg-white text-zinc-900 border border-hairline border-solid border-zinc-300 font-medium u-focus-ring"
             style={{ padding: '13px 20px', fontSize: 15, marginTop: 10 }}
           >
             Switch to annual prepay
@@ -934,7 +952,7 @@ export default function MobileAppointmentDetailSheet({
                 <div className="text-zinc-900" style={{ fontSize: 15, lineHeight: 1.3 }}>
                   {service.address.split(',')[0] || service.address}
                 </div>
-                <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
+                <div className="text-ink-secondary" style={{ fontSize: 14, marginTop: 2 }}>
                   {service.address.split(',').slice(1).join(',').trim()}
                 </div>
               </div>
@@ -958,6 +976,7 @@ export default function MobileAppointmentDetailSheet({
             Appointment note
           </div>
           <textarea
+            aria-label="Appointment note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
             rows={4}
@@ -965,14 +984,14 @@ export default function MobileAppointmentDetailSheet({
             style={{ fontSize: 16, resize: 'vertical', minHeight: 96, fontFamily: 'inherit' }}
           />
           <div className="flex items-center justify-between mt-2">
-            <span className="text-ink-tertiary" style={{ fontSize: 12 }}>
+            <span className="text-ink-tertiary" style={{ fontSize: 14 }}>
               {noteSavedAt ? 'Saved' : noteDirty ? 'Unsaved changes' : ''}
             </span>
             <button
               type="button"
               onClick={saveAndClose}
               disabled={savingNote}
-              className="rounded-sm bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-50"
+              className="rounded-sm border-0 bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-50"
               style={{ padding: '8px 18px', fontSize: 14 }}
             >
               {savingNote ? 'Saving…' : noteDirty ? 'Save note' : 'Done'}
@@ -982,7 +1001,7 @@ export default function MobileAppointmentDetailSheet({
 
         {/* Booked on footer */}
         {service.createdAt && (
-          <div className="text-center text-ink-secondary mt-8" style={{ fontSize: 13 }}>
+          <div className="text-center text-ink-secondary mt-8" style={{ fontSize: 14 }}>
             Booked on {formatBookedOn(service.createdAt)}
           </div>
         )}
@@ -1001,7 +1020,7 @@ export default function MobileAppointmentDetailSheet({
                   type="button"
                   onClick={() => setConfirmingCancel(true)}
                   disabled={!!actionBusy}
-                  className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
+                  className="w-full rounded-full bg-white border border-hairline border-solid border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
                   style={{ padding: '14px 20px', fontSize: 16 }}
                 >
                   Cancel appointment
@@ -1013,7 +1032,7 @@ export default function MobileAppointmentDetailSheet({
                   </div>
                   {canCancelSeries && (
                     <div className="mt-4">
-                      <div className="text-13 font-medium text-zinc-900 mb-2">Apply changes to</div>
+                      <div className="text-14 font-medium text-zinc-900 mb-2">Apply changes to</div>
                       <div className="space-y-2">
                         {[
                           ['this_only', 'This appointment only'],
@@ -1037,7 +1056,7 @@ export default function MobileAppointmentDetailSheet({
                     </div>
                   )}
                   <div className="mt-4">
-                    <div className="text-13 font-medium text-zinc-900 mb-2">Client booking notifications</div>
+                    <div className="text-14 font-medium text-zinc-900 mb-2">Client booking notifications</div>
                     <div className="space-y-2">
                       {[
                         ['text', 'Text message (preferred)'],
@@ -1063,7 +1082,7 @@ export default function MobileAppointmentDetailSheet({
                       type="button"
                       onClick={cancelAppointment}
                       disabled={!!actionBusy}
-                      className="w-full rounded-full bg-alert-fg text-white font-medium u-focus-ring disabled:opacity-50"
+                      className="w-full rounded-full border-0 bg-alert-fg text-white font-medium u-focus-ring disabled:opacity-50"
                       style={{ padding: '14px 20px', fontSize: 16 }}
                     >
                       {actionBusy === 'cancel'
@@ -1074,7 +1093,7 @@ export default function MobileAppointmentDetailSheet({
                       type="button"
                       onClick={() => setConfirmingCancel(false)}
                       disabled={!!actionBusy}
-                      className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
+                      className="w-full rounded-full bg-white border border-hairline border-solid border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
                       style={{ padding: '14px 20px', fontSize: 16 }}
                     >
                       Keep appointment
@@ -1090,7 +1109,7 @@ export default function MobileAppointmentDetailSheet({
               type="button"
               onClick={() => setShowRainOut(true)}
               disabled={!!actionBusy}
-              className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
+              className="w-full rounded-full bg-white border border-hairline border-solid border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
               style={{ padding: '14px 20px', fontSize: 16 }}
             >
               Quick Move Appointment
@@ -1100,7 +1119,7 @@ export default function MobileAppointmentDetailSheet({
             <button
               type="button"
               onClick={() => onBookNext?.(service)}
-              className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring"
+              className="w-full rounded-full bg-white border border-hairline border-solid border-zinc-200 text-zinc-900 font-medium u-focus-ring"
               style={{ padding: '14px 20px', fontSize: 16 }}
             >
               Book next appointment
@@ -1232,7 +1251,7 @@ function NewCallerLinkPanel({ serviceId, onLinked }) {
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="mt-3 w-full border border-hairline border-zinc-300 rounded-sm bg-white text-zinc-900 font-medium hover:bg-zinc-50"
+          className="mt-3 w-full border border-hairline border-solid border-zinc-300 rounded-sm bg-white text-zinc-900 font-medium hover:bg-zinc-50"
           style={{ fontSize: 14, minHeight: 44 }}
         >
           Link customer
@@ -1264,7 +1283,7 @@ function NewCallerLinkPanel({ serviceId, onLinked }) {
                     type="button"
                     aria-pressed={picked?.id === customer.id}
                     onClick={() => setPicked(customer)}
-                    className={`w-full text-left border border-hairline rounded-sm px-3 ${picked?.id === customer.id ? 'border-zinc-900 bg-zinc-50' : 'border-zinc-200 bg-white'}`}
+                    className={`w-full text-left border border-hairline border-solid rounded-sm px-3 ${picked?.id === customer.id ? 'border-zinc-900 bg-zinc-50' : 'border-zinc-200 bg-white'}`}
                     style={{ fontSize: 14, minHeight: 44 }}
                   >
                     {nameOf(customer)}{customer.phone ? ` · ${customer.phone}` : ''}{customer.address ? ` · ${customer.address}` : ''}
@@ -1283,7 +1302,7 @@ function NewCallerLinkPanel({ serviceId, onLinked }) {
                 type="button"
                 disabled={busy}
                 onClick={link}
-                className="w-full rounded-sm bg-zinc-900 text-white font-medium disabled:opacity-50"
+                className="w-full rounded-sm border-0 bg-zinc-900 text-white font-medium disabled:opacity-50"
                 style={{ fontSize: 14, minHeight: 44 }}
               >
                 {busy ? 'Linking…' : `Link to ${nameOf(picked)}`}

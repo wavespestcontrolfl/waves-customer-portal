@@ -1,10 +1,8 @@
 const PDFDocument = require('pdfkit');
-const { getLogoBuffer } = require('./brand-logo');
 const {
   WAVES_ADDRESS_LINE,
   WAVES_WEBSITE_HOST,
   WAVES_SUPPORT_PHONE_DISPLAY,
-  WAVES_FL_LICENSE_LINE,
 } = require('../../constants/business');
 const { formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
 
@@ -12,6 +10,11 @@ const { formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
 // pdf-tokens.js for provenance). Navy is the canonical customer ink
 // #04395E (owner ruling); print documents carry the same ink as the pages.
 const { PDF_COLORS, PDF_TYPE } = require('./pdf-tokens');
+const {
+  drawFieldContinuationMasthead,
+  drawFieldFooter,
+  drawFieldMasthead,
+} = require('./field-pdf');
 const { groupInvoiceLinesByProperty, propertyStreetLine } = require('@waves/invoice-property-groups');
 const {
   navy: NAVY, // headings, header bar
@@ -23,8 +26,6 @@ const {
   green: GREEN, // paid badge
   rule: RULE,
   soft: SOFT,
-  headerSub: HEADER_SUB, // reversed-out subtitle text on the navy bar
-  white: WHITE,
 } = PDF_COLORS;
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves';
@@ -43,39 +44,12 @@ function currency(n) {
 }
 
 function headerBar(doc, title, statusLabel, statusColor) {
-  doc.save();
-  doc.rect(0, 0, 612, 92).fill(NAVY);
-
-  // Logo block (left). PDF header bar is 92px tall; render the square
-  // logo at 72px so it fits with 10px padding top/bottom. If the asset
-  // is missing we silently fall back to the wordmark so the PDF never
-  // breaks in production.
-  const logoBuf = getLogoBuffer();
-  if (logoBuf) {
-    doc.image(logoBuf, 24, 10, { width: 72, height: 72 });
-  } else {
-    doc.fontSize(PDF_TYPE.display).font('Helvetica-Bold').fillColor(WHITE).text('WAVES', 40, 22);
-    doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(HEADER_SUB).text('PEST CONTROL & LAWN CARE', 40, 52);
-  }
-  doc.fontSize(PDF_TYPE.micro).font('Helvetica').fillColor(HEADER_SUB).text(WAVES_FL_LICENSE_LINE, 108, 70);
-
-  doc.fontSize(PDF_TYPE.body).font('Helvetica-Bold').fillColor(WHITE).text(WAVES_SUPPORT_PHONE_DISPLAY, 430, 22, { width: 142, align: 'right' });
-  doc.fontSize(PDF_TYPE.micro).font('Helvetica').fillColor(HEADER_SUB).text(WAVES_WEBSITE_HOST, 430, 38, { width: 142, align: 'right' });
-  doc.text('13649 Luxe Ave #110', 430, 52, { width: 142, align: 'right' });
-  doc.text('Bradenton, FL 34211', 430, 64, { width: 142, align: 'right' });
-  doc.restore();
-
-  doc.save();
-  doc.rect(0, 92, 612, 44).fill(SOFT);
-  doc.fontSize(PDF_TYPE.h1).font('Helvetica').fillColor(NAVY).text(title, 40, 104);
-
-  if (statusLabel) {
-    const badgeW = doc.widthOfString(statusLabel) + 20;
-    doc.roundedRect(612 - 40 - badgeW, 105, badgeW, 22, 11).fill(statusColor);
-    doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(WHITE)
-      .text(statusLabel.toUpperCase(), 612 - 40 - badgeW + 10, 111);
-  }
-  doc.restore();
+  drawFieldMasthead(doc, {
+    title,
+    eyebrow: title === 'Receipt' ? 'Payment confirmation' : 'Billing document',
+    statusLabel: statusLabel ? statusLabel.toUpperCase() : '',
+    statusColor,
+  });
 }
 
 function sectionLabel(doc, label, x, y) {
@@ -261,12 +235,12 @@ function invoiceLineParts(item) {
 // LETTER page with a 40pt margin: the last printable y. The table advances an
 // absolute y, so a row that would cross this line starts a new page instead
 // (PDFKit's own text pagination would not reset that y).
-const PAGE_TOP = 40;
-const PAGE_BOTTOM = 792 - 40;
+const PAGE_BOTTOM = 730;
 function ensureRoom(doc, y, needed) {
   if (y + needed <= PAGE_BOTTOM) return y;
+  drawFieldFooter(doc, { tagline: 'Continued on the next page' });
   doc.addPage();
-  return PAGE_TOP;
+  return drawFieldContinuationMasthead(doc, { title: 'Billing document · continued' });
 }
 
 // One service row, exactly as the flat table has always printed it. Returns the next y.
@@ -468,23 +442,10 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
 }
 
 function footerBar(doc, tagline) {
-  const previousBottomMargin = doc.page.margins.bottom;
-  doc.save();
-  doc.page.margins.bottom = 0;
-  doc.rect(0, 742, 612, 50).fill(NAVY);
-  doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(WHITE).text(
-    tagline || 'Thank you for choosing Waves',
-    0, 752, { width: 612, align: 'center' },
-  );
-  // 7pt kept as a literal: the footer fine-print line lives in a fixed
-  // 50px bottom bar (text at y=768, page bottom 792) and must stay one
-  // line — snapping up to micro (8) risks wrapping the long address line.
-  doc.fontSize(7).font('Helvetica').fillColor(HEADER_SUB).text(
-    `Waves Pest Control, LLC · ${WAVES_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY} · ${WAVES_WEBSITE_HOST}`,
-    0, 768, { width: 612, align: 'center' },
-  );
-  doc.page.margins.bottom = previousBottomMargin;
-  doc.restore();
+  drawFieldFooter(doc, {
+    tagline: tagline || 'Thank you for choosing Waves',
+    detail: `${WAVES_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY} · ${WAVES_WEBSITE_HOST}`,
+  });
 }
 
 function generateInvoicePDF(invoice, res) {

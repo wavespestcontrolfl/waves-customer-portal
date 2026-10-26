@@ -12,8 +12,6 @@
  *   - appointment-reminders.js — pre-send guard so a blocked reminder
  *     defers/skips deliberately instead of falling through to the email
  *     fallback + no-reachable-channel alert.
- *   - dropped-call-sms.js — its pre-existing 8/20 fence (live regardless of
- *     GATE_SMS_SEND_WINDOW) delegates here so the hours have one owner.
  *   - invoice.js processScheduledSends — pre-claim guard that moves a due
  *     scheduled send to the window open instead of burning retry attempts.
  *

@@ -69,7 +69,6 @@ async function main() {
       else if (api === '/admin/email/thread/thread-b') body = { thread: [refreshedEmail ? { ...b, body_text: 'Synthetic updated Email body' } : b] };
       else if (api === '/admin/communications/log') body = { messages: smsMessages, page: 1, hasMore: false };
       else if (api === '/admin/communications/stats') body = {};
-      else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
       else if (api === '/admin/communications/agent-draft') body = { draft: null };
       else if (api === '/admin/communications/link-library') body = { receiptLinksEnabled, links: [
         { key: 'fixture-quote', name: 'Request a quote', category: 'booking', url: 'https://www.wavespestcontrol.com/quote/' },

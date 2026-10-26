@@ -9,7 +9,7 @@
  *   5. Either auto-send (low-risk) or queue for Adam's review (high-value/complex)
  *   6. Set up follow-up sequence if not converted immediately
  *
- * Tools wrap existing services: lead-triage, lead-scorer, response-drafter,
+ * Tools wrap existing services: lead-triage, lead-scorer,
  * estimate-follow-up, pipeline-manager, context-aggregator, availability
  */
 

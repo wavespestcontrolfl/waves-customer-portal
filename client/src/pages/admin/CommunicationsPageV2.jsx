@@ -6,8 +6,6 @@
 //   GET  /admin/communications/log[?search=...]
 //   GET  /admin/communications/stats
 //   POST /admin/communications/sms
-//   GET  /admin/communications/ai-auto-reply-status
-//   POST /admin/communications/ai-auto-reply
 //   POST /admin/communications/ai-draft
 //   POST /admin/communications/rewrite-sms
 //   GET  /admin/customers?search=...
@@ -549,16 +547,16 @@ function SmsLogItemV2({ msg: m, onReply }) {
           {" "}
           <div className="flex items-center gap-2 flex-wrap mb-0.5">
             {" "}
-            <span className="font-mono text-12 text-ink-secondary u-nums">
+            <span className="font-mono text-ui-body text-ink-secondary u-nums">
               {m.from} → {m.to}
             </span>
             {m.customerName && (
-              <span className="text-11 text-zinc-900">({m.customerName})</span>
+              <span className="text-ui-body text-zinc-900">({m.customerName})</span>
             )}
           </div>{" "}
           <div
             className={cn(
-              "text-13 leading-normal break-words",
+              "text-ui-body leading-normal break-words",
               expanded
                 ? "whitespace-pre-wrap text-zinc-900"
                 : "text-ink-secondary",
@@ -583,7 +581,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
             <StatusBadgeV2 status={m.status} />{" "}
             <TypeBadgeV2 type={m.messageType} />{" "}
           </div>{" "}
-          <span className="font-mono text-11 text-ink-tertiary">
+          <span className="font-mono text-ui-body text-ink-tertiary">
             {timeAgo(m.createdAt)}
           </span>{" "}
         </div>{" "}
@@ -677,7 +675,7 @@ function ConversationViewV2({
                 {contactName}
               </div>
             )}
-            <div className="font-mono text-12 text-ink-secondary truncate">
+            <div className="font-mono text-ui-body text-ink-secondary truncate">
               {contactPhone}
             </div>{" "}
           </div>{" "}
@@ -742,7 +740,7 @@ function ConversationViewV2({
                 )}
               >
                 {" "}
-                <div className="text-13 leading-normal whitespace-pre-wrap break-words">
+                <div className="text-ui-body leading-normal whitespace-pre-wrap break-words">
                   {/* a whitespace-only body (stray newlines) rendered as a
                       giant empty bubble under whitespace-pre-wrap — blank it;
                       bodies with content render verbatim */}
@@ -761,7 +759,7 @@ function ConversationViewV2({
                   {" "}
                   <span
                     className={cn(
-                      "text-11",
+                      "text-ui-body",
                       isOut ? "text-white/70" : "text-ink-tertiary",
                     )}
                   >
@@ -770,7 +768,7 @@ function ConversationViewV2({
                   {m.messageType && (
                     <span
                       className={cn(
-                        "text-11 uppercase tracking-label",
+                        "text-ui-body uppercase tracking-label",
                         isOut ? "text-white/70" : "text-ink-tertiary",
                       )}
                     >
@@ -780,7 +778,7 @@ function ConversationViewV2({
                   {receipt && (
                     <span
                       className={cn(
-                        "text-11",
+                        "text-ui-body",
                         isOut
                           ? m.status === "failed" || m.status === "undelivered"
                             ? "text-red-200"
@@ -1161,9 +1159,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [smsStatsError, setSmsStatsError] = useState(false);
   const [smsRefreshing, setSmsRefreshing] = useState(false);
   const [smsFilter, setSmsFilter] = useState("all");
-
-  const [aiAutoReply, setAiAutoReply] = useState(false);
-  const [togglingAi, setTogglingAi] = useState(false);
 
   // Compose
   const [toNumber, setToNumber] = useState(() => customer ? customer.phone || "" : new URLSearchParams(window.location.search).get("phone") || "");
@@ -1642,16 +1637,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   }, [active, customer?.id, customerMessages, customerReadScope, markMessagesRead]);
 
   useEffect(() => {
-    // Server-enforced too (ADMIN-BUG-R38): the route is requireAdmin, so a
-    // technician's fetch would just 403 — skip it so the tab doesn't render
-    // a control it can never use.
-    if (customer || !smsIsAdminRole) return;
-    adminFetch("/admin/communications/ai-auto-reply-status")
-      .then((d) => setAiAutoReply(d.enabled))
-      .catch(() => {});
-  }, [smsIsAdminRole]);
-
-  useEffect(() => {
     if (!active) return undefined;
     const phone = toNumber.trim();
     if (!phone && !selectedCustomerId) {
@@ -1820,31 +1805,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setReplyContext(null);
     }
   }, [toNumber, selectedCustomerId]);
-
-  const toggleAiAutoReply = async () => {
-    setTogglingAi(true);
-    try {
-      const r = await adminFetch("/admin/communications/ai-auto-reply", {
-        method: "POST",
-        body: JSON.stringify({ enabled: !aiAutoReply }),
-      });
-      // A body carrying `error` (the server's own failure shape, kept here
-      // defensively even though the route now answers non-2xx on failure)
-      // never gets adopted as the confirmed state — the switch must not
-      // silently flip to a value that was never written.
-      if (r?.error) {
-        setSendResult({ ok: false, text: r.error || "AI Auto-Reply could not be changed. It is still set the way it was." });
-      } else {
-        setAiAutoReply(r.enabled);
-      }
-    } catch (err) {
-      // The failed toggle must be visible: the switch stays at its last
-      // confirmed position, and the operator is told the change did not
-      // take, instead of the empty catch that used to leave both silent.
-      setSendResult({ ok: false, text: err?.message || "AI Auto-Reply could not be changed. It is still set the way it was." });
-    }
-    setTogglingAi(false);
-  };
 
   // Compute the scheduled-for value as an ET-naive wall-clock string
   // (YYYY-MM-DDTHH:MM) or null if "now". The server parses ET-naive strings
@@ -3269,37 +3229,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         {recoveryWarning && <ActionFeedback error>{recoveryWarning}</ActionFeedback>}
         <fieldset disabled={sending} className="m-0 min-w-0 border-0 p-0">
         {" "}
-        {/* Owner-only (ADMIN-BUG-R38): company-wide AI auto-reply switch. */}
-        {!customer && smsIsAdminRole && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={toggleAiAutoReply}
-            disabled={togglingAi}
-            aria-pressed={aiAutoReply}
-            className="flex items-center gap-2 min-h-[44px] md:min-h-0 px-1 md:px-0 u-focus-ring"
-          >
-            {" "}
-            <span className="text-ui-body md:text-ui-caption text-ink-secondary">
-              AI Auto-Reply
-            </span>{" "}
-            <span
-              className={cn(
-                "h-6 w-10 rounded-full border-hairline transition-colors relative",
-                aiAutoReply
-                  ? "bg-zinc-900 border-zinc-900"
-                  : "bg-white border-zinc-300",
-              )}
-            >
-              {" "}
-              <span
-                className={cn(
-                  "absolute top-0.5 h-4 w-4 rounded-full transition-all",
-                  aiAutoReply ? "left-5 bg-white" : "left-0.5 bg-zinc-400",
-                )}
-              />{" "}
-            </span>{" "}
-          </button>{" "}
-        </div>}
         {customer && <h3 className="mb-4 text-18 font-medium">Text message</h3>}
         {/* PR 4 — thread-reply lock banner */}
         {threadLock && (

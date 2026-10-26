@@ -1311,8 +1311,7 @@ class ContextAggregator {
   // `includeLiveEta` (Codex round-2 P2, PR #5334 — inverted from the
   // earlier opt-OUT `skipLiveEta`): LIVE ETA resolution is an external GPS +
   // Distance Matrix call, so it defaults OFF and every caller that discards
-  // the fact — sms-amount-recheck's send-time revalidation, the legacy
-  // response-drafter path, previsit-brief, lead-response-tools,
+  // the fact — sms-amount-recheck's send-time revalidation, previsit-brief, lead-response-tools,
   // sms-shadow-backfill, the managed-assistant snapshot, email-reply-context
   // — pays nothing for it. Only the SMS drafting paths that actually render
   // context.upcomingServices[].liveEta / liveEtaGroups into a prompt

@@ -1561,7 +1561,7 @@ function outboundImpliedConsentEligible(call, outboundEligible) {
 // long (owner ruling 2026-09-26: "never on calls that dropped before a real
 // conversation"; codex pre-push r1 P2 on PR #5012). Deliberately NOT the
 // negation of the dropped-mid-intake detector: that detector requires
-// durationSeconds >= dropped-call-sms's MIN_CALL_SECONDS BEFORE it can even
+// durationSeconds >= dropped-call-detect's MIN_CALL_SECONDS BEFORE it can even
 // fire, so a call that connected and hung up in the first few seconds is
 // "too short to judge" for it (never flagged dropped) — exactly the early
 // drop this predicate must exclude, not admit. Reuses speakerTurns (already
@@ -17027,7 +17027,7 @@ const CallRecordingProcessor = {
         if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
           && (!isOutboundCall(call) || outboundReturnMessagesEligible) && transcription) {
           try {
-            const DroppedCallSmsDetect = require('./dropped-call-sms');
+            const DroppedCallDetect = require('./dropped-call-detect');
             // recordingDurationSeconds: fresh recording jobs can have
             // duration_seconds unset while recording_duration_seconds is
             // populated (the race this file already handles elsewhere).
@@ -17037,7 +17037,7 @@ const CallRecordingProcessor = {
             // missing-address drop; don't card it or text for information
             // already on file (codex P1).
             const leadAddressOnFile = !!String(existingLead?.address || '').trim();
-            droppedDetectorFired = DroppedCallSmsDetect.detectDroppedMidIntake({
+            droppedDetectorFired = DroppedCallDetect.detectDroppedMidIntake({
               durationSeconds: droppedCallSeconds,
               transcription,
               extracted,
@@ -18399,153 +18399,38 @@ const CallRecordingProcessor = {
           }
         }
 
-        // Dropped-call detector, phase 2 of 2: the gated one-shot text (all
-        // send-side gates — feature gate, quiet hours, one-per-phone claim,
-        // landline, STOP suppression, template kill switch — live in the
-        // service) and the always-on review card. Runs after the enrichment
-        // write so the module's extracted_data claim stamp survives.
+        // Dropped-call detector, phase 2 of 2: the always-on call-back review
+        // card. No text goes out; the office calls the caller back. Runs
+        // after the enrichment write so the card sees the settled lead.
         if (droppedMidIntake && leadId) {
           try {
-            const DroppedCallSms = require('./dropped-call-sms');
-            // Card evidence must say WHY there is no text: a caller who asked
-            // on the call not to be contacted renders as do-not-contact, not
-            // "call them back" (codex P1).
-            let smsOutcome = v2Result?.extraction?.consent?.do_not_contact_request === true
-              ? { sent: false, skipped: 'policy_block', code: 'DNC_REQUESTED_ON_CALL' }
-              : { sent: false, skipped: 'not_eligible' };
-            // A customer record created FROM THIS CALL is still a new
-            // prospect (Step 3 mints one for any named live caller);
-            // classification fails CLOSED to card-only.
-            const genuineNewProspect = DroppedCallSms.eligibleNewProspect({
-              customerId,
-              createdCustomerFromCall,
-              isOutbound: isOutboundCall(call),
-              outboundEligible: outboundReturnMessagesEligible,
-              v2Status: v2Result?.status,
-              callNature: v2Result?.extraction?.call_nature,
-              doNotContactRequested: v2Result?.extraction?.consent?.do_not_contact_request === true,
-            });
-            // TCPA: implied consent is PERSONAL to the inbound ANI on
-            // inbound. On an eligible OUTBOUND return call, the ANI-
-            // equivalent is the number WE dialed (never a dictated
-            // callback number either) — resolveCallContactPhone(call) with
-            // no extracted-phone override resolves exactly that (to_phone,
-            // or the bridge's leadPhone), the same contract item 1's
-            // implied-consent comment relies on. No usable external ANI →
-            // card-only.
-            const smsAni = isOutboundCall(call)
+            // A caller who asked on the call not to be contacted renders as
+            // do-not-contact on the card, not "call them back" (codex P1).
+            const dncRequestedOnCall = v2Result?.extraction?.consent?.do_not_contact_request === true;
+            // The caller's own number (never a dictated callback number): on
+            // an eligible OUTBOUND return call it is the number WE dialed
+            // (resolveCallContactPhone with no extracted-phone override).
+            const cardAni = isOutboundCall(call)
               ? resolveCallContactPhone(call)
               : firstExternalPhone(call.from_phone);
-            // callback_number_needed (codex pre-push r6 P1 — a pre-existing
-            // gap on BOTH directions, not outbound-specific): the caller
-            // told us the ANI/dialed number isn't theirs and gave no
-            // callback of their own, so smsAni above is exactly the
-            // disclaimed number — the SAME hold the booking-confirmation
-            // leg already honors (callbackNumberNeededBlocksSms, set onto
-            // callbackNumberNeededHoldActive at the decision point above)
-            // must also cover this independent send path. The review card
-            // still opens either way; only the text is held.
-            if (genuineNewProspect && !smsAni) {
-              smsOutcome = { sent: false, skipped: 'no_usable_ani' };
-            } else if (genuineNewProspect && callbackNumberNeededHoldActive) {
-              smsOutcome = { sent: false, skipped: 'callback_number_needed' };
-            } else if (genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true) {
-              // The caller said no to texts on THIS call (owner 2026-09-30).
-              // Read from the live extraction: the row may not carry it yet.
-              // genuineNewProspect already requires a valid V2 result; the
-              // sender checks every earlier call with this number itself.
-              smsOutcome = { sent: false, skipped: 'said_no_texts' };
-            } else if (genuineNewProspect) {
-              // Inner catch: the review card below MUST still open when the
-              // send path throws — a failed text plus no card is exactly the
-              // silent-cold-lead outcome this lane prevents.
-              if (!(await stillOwnsClaim())) return abandonToPeer('the dropped-call address text');
-              try {
-                smsOutcome = await DroppedCallSms.sendDroppedCallAddressRequest({
-                  leadId, extracted, call, phone: smsAni, expectedCustomerId: customerId || null,
-                });
-              } catch (sendErr) {
-                logger.warn(`[call-proc] dropped-call text failed (card still opens): ${sendErr.message}`);
-                smsOutcome = { sent: false, skipped: 'send_error' };
-              }
-            }
             await db('triage_items')
               .insert(buildTriageItem({
                 callLogId: call.id,
                 flag: 'call_dropped_mid_intake',
                 extraction: v2Result?.status === 'valid' ? v2Result.extraction : null,
                 extraPayload: {
-                  // The ANI the text went to (never a dictated callback
-                  // number) — the bounce handler's legacy fallback and the
-                  // office both need the number that was actually texted.
-                  caller_phone: smsAni || phone || null,
+                  caller_phone: cardAni || phone || null,
                   dropped_after_seconds: droppedCallSeconds || null,
-                  address_request_sms: smsOutcome.sent ? 'sent' : (smsOutcome.skipped || 'not_sent'),
-                  ...(smsOutcome.code ? { address_request_sms_code: smsOutcome.code } : {}),
+                  ...(dncRequestedOnCall
+                    ? { address_request_sms: 'policy_block', address_request_sms_code: 'DNC_REQUESTED_ON_CALL' }
+                    : {}),
                 },
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
-            // Reprocess refresh: the insert above no-ops when an open card
-            // already exists (first run: gate off / quiet hours / transient
-            // block with released claims). A successful send on THIS run
-            // must update that stale card or it keeps saying "not sent —
-            // call them back" after the text went out (codex P2).
-            if (smsOutcome.sent) {
-              await db('triage_items')
-                .where({ call_log_id: call.id, reason_code: 'call_dropped_mid_intake' })
-                .whereIn('status', ['open', 'in_progress'])
-                .update({
-                  payload: db.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'sent') - 'address_request_sms_code'"),
-                  updated_at: new Date(),
-                })
-                .catch((e) => logger.warn(`[call-proc] dropped-call card sent-refresh failed: ${e.code || e.name || 'db_error'}`));
-            }
-            // A delivery bounce can race this insert (callback lands between
-            // the awaited send and here — its card flip found no row). The
-            // claim outcome is the bounce handler's authority: reconcile the
-            // fresh card so it never permanently says 'sent' for a text that
-            // already bounced.
-            // Reconcile terminal bounce outcomes for a FRESH send AND for a
-            // rebuilt card whose original text already went out (reprocess
-            // path returns already_sent_to_phone) — a 21610 that landed
-            // while the first card insert was lost must reach the rebuilt
-            // card too (codex P1).
-            const bounceVerdict = (smsOutcome.sent || smsOutcome.skipped === 'already_sent_to_phone')
-              ? await DroppedCallSms.terminalBounceOutcome(smsAni || phone) : null;
-            // An opt-out is PHONE-level truth and applies to any card for
-            // this number; 'undelivered' is call-specific — an old call's
-            // bounce must not stamp a NEW call's card (codex P2).
-            // A START reply clears the canonical suppression and re-enables
-            // SMS — an opted_out claim is then STALE and must not stamp DNC
-            // onto new cards (codex P2). Verify against the live store.
-            let optOutStillActive = false;
-            if (bounceVerdict?.outcome === 'opted_out') {
-              optOutStillActive = !!(await db('messaging_suppression')
-                .where({ phone: smsAni || phone, active: true })
-                .first('phone')
-                .catch(() => null));
-            }
-            const bounceOutcome = bounceVerdict
-              && ((bounceVerdict.outcome === 'opted_out' && optOutStillActive)
-                || (bounceVerdict.outcome === 'undelivered'
-                  && (!bounceVerdict.callLogId || String(bounceVerdict.callLogId) === String(call.id))))
-              ? bounceVerdict.outcome : null;
-            if (bounceOutcome) {
-              await db('triage_items')
-                .where({ call_log_id: call.id, reason_code: 'call_dropped_mid_intake' })
-                .whereIn('status', ['open', 'in_progress'])
-                .update({
-                  payload: bounceOutcome === 'opted_out'
-                    ? db.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered', 'address_request_sms_code', 'SUPPRESSED_PROVIDER_OPT_OUT_21610')")
-                    : db.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered')"),
-                  updated_at: new Date(),
-                })
-                .catch((e) => logger.warn(`[call-proc] dropped-call card bounce reconcile failed: ${e.code || e.name || 'db_error'}`));
-            }
-            logger.info(`[call-proc] Dropped call mid-intake for ${maskSid(callSid)} — review card opened (sms: ${smsOutcome.sent ? 'sent' : smsOutcome.skipped || 'skipped'})`);
+            logger.info(`[call-proc] Dropped call mid-intake for ${maskSid(callSid)} — review card opened`);
           } catch (dropErr) {
-            logger.warn(`[call-proc] dropped-call card/text failed (non-blocking): ${dropErr.message}`);
+            logger.warn(`[call-proc] dropped-call card failed (non-blocking): ${dropErr.message}`);
           }
         }
 

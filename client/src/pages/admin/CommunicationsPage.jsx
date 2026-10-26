@@ -13,7 +13,6 @@
 //   GET   /admin/communications/log
 //   GET   /admin/communications/stats
 //   POST  /admin/communications/sms
-//   GET/POST /admin/communications/ai-auto-reply{,-status}
 //   POST  /admin/communications/ai-draft
 //   GET   /admin/communications/blocked-numbers, POST/DELETE
 //   POST  /admin/communications/schedule-sms, GET, DELETE

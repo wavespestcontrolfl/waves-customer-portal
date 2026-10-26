@@ -71,7 +71,7 @@
  *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
  *   GATE_PAYROLL_TAX_CALENDAR=true (basic payroll layer 2, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Needs GATE_PAYROLL for the finalized pay runs it reads. Puts the amount and due date of each payroll tax deposit and filing on the existing Tax page filing calendar: the monthly federal deposit, Form 941, Florida RT-6, a FUTA over $500 alert (FUTA deposits are out of scope), Form 940, W-2 and W-3, and the Florida new hire report. Due dates move past weekends and legal holidays by the IRS and Florida rules. The 14-day reminder text to the owner is the existing tax deadline alert. A row the owner marks filed or paid is never changed; if a pay run later raises an amount above what the marked rows cover, a new balance row holds the difference, and if the pay checks behind a marked return change, a review row asks the owner to check the figures. Read at call time via payrollTaxCalendarLive(), strict 'true', dark by default; off = the sync returns before any query. The owner makes every deposit and filing himself; sends nothing to a customer or staff member. Rollback = unset.)
  *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
- *   GATE_TECH_STAFF_GUARDS=true (census M12 + M6, owner 2026-10-25: (M12) an inbound text or call FROM the phone of an ACTIVE technician (technicians.employment_status 'active') is staff, like the env staff phones: a text to an office line stays in the office inbox (unread, with the owner's usual unknown-sender text forward) but gets no spam screen, estimator draft, AI auto-reply or new-prospect bell; a call keys no customer or lead and gets no missed-call text-back; a number that is also on a customer record stays a customer. Outbound sends and the owner phone set are unchanged. (M6) a technician's En Route or On Site tap on a booking the office has not reviewed no longer approves it: the tap answers 409 and ONE office notification per visit rings (Schedule, needs-you); an admin login still auto-confirms. Read at call time via techStaffGuardsLive(), strict 'true', dark by default; off = today's behavior byte for byte; rollback = unset. Sends nothing to a customer.)
+ *   GATE_TECH_STAFF_GUARDS=true (census M12 + M6, owner 2026-10-25: (M12) an inbound text or call FROM the phone of an ACTIVE technician (technicians.employment_status 'active') is staff, like the env staff phones: a text to an office line stays in the office inbox (unread, with the owner's usual unknown-sender text forward) but gets no spam screen, estimator draft or new-prospect bell; a call keys no customer or lead and gets no missed-call text-back; a number that is also on a customer record stays a customer. Outbound sends and the owner phone set are unchanged. (M6) a technician's En Route or On Site tap on a booking the office has not reviewed no longer approves it: the tap answers 409 and ONE office notification per visit rings (Schedule, needs-you); an admin login still auto-confirms. Read at call time via techStaffGuardsLive(), strict 'true', dark by default; off = today's behavior byte for byte; rollback = unset. Sends nothing to a customer.)
  *   GATE_CONTACT_LOGIN=true (an on-location contact signs into the customer app with their OWN phone number through the same SMS code login, landing on the account they are a contact for as a CONTACT session: view-only schedule, visit history, technician tracking, service-report documents (never for a contact the report rule withholds from) and their own notification choices (GET/PUT /api/notifications/contact-preferences); every other portal route answers 403 ACCOUNT_HOLDER_ONLY — billing, payments, cards, referrals, credits, requests, chat, property, account deletion, the holder's preferences, push subscriptions. The account holder's own number always wins; a contact number is tried only when no holder row matches, and the contact's session dies at its next refresh once the holder removes them. Per-contact notification choices (service_contact_notification_prefs) only NARROW what the account sends: a purpose the holder turned off stays off. Owner rulings 2026-10-20: view only, no confirm or reschedule; the contact's in-app text-consent checkbox counts as the YES for a pending opt-in ask only, never over a STOP. Read at call time via contactLoginLive(), strict 'true', dark by default; off = a contact number never logs in, an existing contact token is refused (401) and the senders ignore the per-contact table, byte-identical to before. Sends nothing to a customer.)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
@@ -109,8 +109,6 @@
  *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 15s+, no answer, no voicemail — texts them back from the line they called)
  *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 15s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
  *   GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN=true (text-back lane only: no text to a caller who failed the press-1 pre-connect screen, call_log.metadata.preconnect_screen 'failed'; settles skipped:screen_failed; the missed-call bell is unchanged; dark by default)
- *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
- *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
  *   GATE_SMS_UNANSWERED_REPLY=true (a suggested house-voice reply nobody acted on goes out on its own after 2 open hours, ordinary questions only; strict opt-in, read at call time via smsUnansweredReplyLive(), dark by default; customer-facing)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
@@ -146,7 +144,6 @@
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
  *   GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE=true (portal GET /api/billing/cards stamps holdsAppointment on a card holding a future secured visit, so Remove opens the call-us disclaimer; removal itself is never blocked — off = field absent, payload unchanged)
  *   GATE_PAYMENT_METHOD_CHANGE_EMAILS=true (customer lifecycle emails for Auto Pay turned OFF and saved method REMOVED — portal, and Stripe-dashboard detaches via webhook)
- *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
@@ -1258,15 +1255,6 @@ const gates = {
   // no old flow to roll back to).
   reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
 
-  // Day-0 review-ask contextual topic (recurring customers only): stores a
-  // grounded service topic (review-ask-topic.js) on review_sequences.ask_context
-  // for a later PR's wording to read. This PR only WRITES the
-  // topic — nothing customer-facing reads it yet. Customer-facing generated
-  // text still needs its own opt-in when that lane ships; this gate exists
-  // so the storage half ships dark first. Off = enrollPostService makes no
-  // extra DB read and no model call.
-  reviewDay0Context: process.env.GATE_REVIEW_DAY0_CONTEXT === 'true',
-
   // Digital business card — the card.issued email a customer gets after their
   // FIRST completed visit (services/customer-card.js). The card row and the
   // /card/:token page are NOT behind this gate (tokenized, unlisted,
@@ -1339,14 +1327,11 @@ const gates = {
   // this entry is the status/log listing. Kill switch: unset.
   relayUnbookedHandoff: process.env.GATE_RELAY_UNBOOKED_HANDOFF === 'true',
 
-  // AI Assistant — auto-sends AI replies to customers via SMS
-  aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
-
   // Ask Waves — public conversational intake on the marketing site (hub). The
   // brain answers pest questions and steers visitors to the instant quote; it
   // can NEVER state a price (pricing only comes from the existing contact-gated
   // /api/public/quote/calculate path). Replies only when a visitor asks — not
-  // an auto-send — so dev is open like aiAssistantAutoReply; prod ships dark
+  // an auto-send — so dev is open; prod ships dark
   // until Adam sets GATE_ASK_WAVES=true.
   askWaves: isProd ? process.env.GATE_ASK_WAVES === 'true' : true,
   // Ask Waves topic routing — a safety, re-entry or medical-emergency question
@@ -1359,11 +1344,6 @@ const gates = {
   // a non-emergency answer into the emergency script. Dark everywhere; read at
   // call time through askWavesEmergencyCheckLive() (logGateStatus only here).
   askWavesEmergencyCheck: process.env.GATE_ASK_WAVES_EMERGENCY_CHECK === 'true',
-
-  // Legacy SMS AI Drafts — creates message_drafts rows and owner "Approve"
-  // alerts from inbound customer SMS. Off by default in prod until the
-  // approval workflow is ready.
-  legacyAiDrafts: isProd ? process.env.GATE_LEGACY_AI_DRAFTS === 'true' : true,
 
   // SMS Shadow Drafter (brand-voice loop, Phase B) — silently records what
   // the house-voice AI would have replied to inbound customer SMS as
@@ -1879,11 +1859,6 @@ const gates = {
   // regardless. Complements the reactive competitor harvest (backlink-deep-harvest.js).
   localOpportunityProspector: isProd ? process.env.GATE_LOCAL_OPPORTUNITY_PROSPECTOR === 'true' : true,
 
-  // Marchex Auto-Block — reject inbound calls the Marchex Clean Call
-  // Marketplace add-on flags as spam. Explicit opt-in everywhere: until the
-  // gate is on, verdicts are only logged (shadow) and never block a caller.
-  marchexAutoBlock: process.env.GATE_MARCHEX_AUTO_BLOCK === 'true',
-
   // Lead Alert Call — the business-hours phone call to Adam's cell when a
   // website quote form lands (announce, or Press-1 bridge under
   // leadAutoBridge). Owner 2026-10-14: off for now. Off unless exactly
@@ -2009,14 +1984,6 @@ const gates = {
   // GATE_MOVE_NOTICE_EMAIL (the email version of a reschedule or cancellation text that reached nobody, dark). Boot-log entry only; the call-time reader is moveNoticeEmailLive().
   moveNoticeEmail: process.env.GATE_MOVE_NOTICE_EMAIL === 'true',
 
-  // Estimate Deposit-Abandonment SMS — texts customers who started the
-  // deposit payment step on a public estimate (a pending Stripe
-  // PaymentIntent in estimate_deposits) but never completed it. Customer-
-  // facing auto-send: explicit opt-in in EVERY environment. Until the gate
-  // is on, the follow-up cron only logs candidate counts (shadow) and never
-  // claims or sends.
-  estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
-
   // Pre-connect caller screen — inbound callers with NO customer match AND
   // STIR/SHAKEN attestation B (spoofed-number robocall profile; 67% dead-air
   // in 60d of prod signal, ~2% of lead calls) must press a key before staff
@@ -2062,16 +2029,6 @@ const gates = {
   // GATE_BOOKING_ABANDON_RECOVERY=true on prod at merge to go live (effectively
   // "live on merge", one env flip). Off → the cron only shadow-logs candidates.
   bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY === 'true',
-
-  // Click-followup action queue — turns human short-link clicks on estimate /
-  // booking links that DIDN'T convert into PENDING message_drafts (intent
-  // 'click_followup') for owner review in /admin/drafts. This lane NEVER
-  // sends anything itself — the draft is the terminal artifact and only the
-  // owner's approval in /admin/drafts puts a message on the wire. The gate
-  // covers the queue writes (action rows + drafts): off → the cron only
-  // shadow-logs candidate counts so volume can be judged first. Flip
-  // GATE_CLICK_FOLLOWUP=true to start queueing drafts.
-  clickFollowup: process.env.GATE_CLICK_FOLLOWUP === 'true',
 
   // Estimate Clarify Asks — when automated quote drafting dead-ends on a
   // machine-readable missing item (no address / no concrete service), park
@@ -2342,7 +2299,7 @@ const gates = {
   callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
   // Owner ruling 2026-09-26: the four customer-facing call-processor features
   // #4912 deliberately kept inbound-only (booking-confirmation implied
-  // consent, the dropped-mid-intake address text, customer-less lead
+  // consent, the dropped-mid-intake call-back card, customer-less lead
   // creation, the approval-gated unit/address clarify draft) may run the
   // same on an OUTBOUND call ONLY when the person contacted Waves FIRST —
   // a prior inbound call/text, a lead record, or an existing customer
@@ -2603,15 +2560,6 @@ const gates = {
   // GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the voicemail
   // still becomes a Needs-Review lead; only the SMS is skipped.
   voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
-
-  // Dropped-call address-request text (services/dropped-call-sms.js): a NEW
-  // prospect whose intake call died mid-conversation before the service
-  // address was captured gets ONE text asking for it. Same fail-CLOSED rule
-  // as voicemailLeadSms — customer-facing auto-send, explicit opt-in in
-  // every environment. Owner sets GATE_DROPPED_CALL_SMS=true to go live.
-  // Off → the dropped call still opens its call-back triage card; only the
-  // SMS is skipped.
-  droppedCallSms: process.env.GATE_DROPPED_CALL_SMS === 'true',
 
   // Outbound voicemail text-back (services/outbound-voicemail-sms.js): an
   // admin click-to-call that reaches the CUSTOMER'S voicemail hangs up the

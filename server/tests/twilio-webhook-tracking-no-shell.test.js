@@ -1,5 +1,5 @@
 // Real webhook control flow; synthetic persistence and inert delivery seams.
-const mockState = { sms: [], sequence: 0, ai: true, read: false, pending: 0 };
+const mockState = { sms: [], sequence: 0, read: false, pending: 0 };
 function mockDb(table) {
   const filters = [];
   const q = { rows: [] };
@@ -34,7 +34,7 @@ function mockDb(table) {
 }
 mockDb.raw = (sql) => ({ sql });
 jest.mock('../models/db', () => mockDb);
-jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'webhooks' || (key === 'aiAssistantAutoReply' && mockState.ai), gateEnvValue: () => false, smsCourtesyAfterTemplateLive: () => false }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'webhooks', gateEnvValue: () => false, smsCourtesyAfterTemplateLive: () => false }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/messaging/validators/suppression', () => ({ recordSuppression: jest.fn(), clearSuppression: jest.fn() }));
@@ -50,12 +50,10 @@ jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: asyn
 jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEnabled: () => false }));
 jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: async () => ({}) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true, push: { sent: 1 } })) }));
-jest.mock('../services/ai-assistant/assistant', () => ({ processMessage: jest.fn(async () => ({ reply: 'Synthetic answer', escalated: false })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 
 const { EventEmitter } = require('node:events');
 const { triggerNotification } = require('../services/notification-triggers');
-const { processMessage } = require('../services/ai-assistant/assistant');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const numbers = require('../config/twilio-numbers');
@@ -79,14 +77,13 @@ async function receive(body = 'What services do you offer?', to = aiLine) {
   }
   expect(mockState.pending).toBe(0);
   expect(res.body).toBe('<Response></Response>');
-  const errors = require('../services/logger').error.mock.calls.filter(([message]) => !String(message).startsWith('AI '));
+  const errors = require('../services/logger').error.mock.calls;
   expect(errors).toEqual([]);
   return sid;
 }
 beforeEach(async () => {
   jest.clearAllMocks();
-  mockState.sms = []; mockState.sequence = 0; mockState.ai = false; mockState.read = false;
-  processMessage.mockResolvedValue({ reply: 'Synthetic answer', escalated: false });
+  mockState.sms = []; mockState.sequence = 0; mockState.read = false;
   sendCustomerMessage.mockResolvedValue({ sent: true });
   triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
   uploadTwilioMedia.mockResolvedValue([]);
