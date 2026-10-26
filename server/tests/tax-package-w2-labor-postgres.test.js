@@ -141,6 +141,34 @@ postgres('tax package W-2 labor', () => {
     expect(files['README.txt']).toMatch(/8\. pnl\.csv/);
   });
 
+  it('GATE_PAYROLL_TIME_OFF on: w2-payroll.csv adds the time off and holiday hours, and the totals row foots them', async () => {
+    process.env[GATE] = 'true';
+    process.env.GATE_PAYROLL_TIME_OFF = 'true';
+    try {
+      const hire = (await trx('technicians').where({ name: 'Sample Hire' }).first('id')).id;
+      const offRun = await run('2026-10-05', '2026-10-16', 'finalized');
+      await check(offRun, hire, 'Sample Hire', '2026-10-05', '2026-10-16', 'finalized', { pto_minutes: '600.00', holiday_minutes: '480.00', pto_pay_cents: 25000, holiday_pay_cents: 20000 });
+      const lines = (await pack())['w2-payroll.csv'].split('\n');
+      expect(lines[0]).toContain('Regular Hours,Overtime Hours,Paid Time Off Hours,Holiday Hours,Gross Wages');
+      expect(lines).toHaveLength(4);
+      expect(lines[1]).toBe('Sample Hire,2026-09-14,2026-09-20,2026-09-25,40.00,1.50,0.00,0.00,1000.00,90.00,62.00,15.00,62.00,14.50,6.00,2.70,833.00');
+      expect(lines[2]).toBe('Sample Hire,2026-10-05,2026-10-11,2026-10-16,40.00,1.50,10.00,8.00,1000.00,90.00,62.00,15.00,62.00,14.50,6.00,2.70,833.00');
+      expect(lines[3]).toBe('TOTAL,,,,80.00,3.00,10.00,8.00,2000.00,180.00,124.00,30.00,124.00,29.00,12.00,5.40,1666.00');
+    } finally {
+      delete process.env.GATE_PAYROLL_TIME_OFF;
+    }
+  });
+
+  it('GATE_PAYROLL_TIME_OFF off: the same package is byte for byte today\'s even with time off on a check', async () => {
+    process.env[GATE] = 'true';
+    const hire = (await trx('technicians').where({ name: 'Sample Hire' }).first('id')).id;
+    const offRun = await run('2026-10-05', '2026-10-16', 'finalized');
+    await check(offRun, hire, 'Sample Hire', '2026-10-05', '2026-10-16', 'finalized', { pto_minutes: '600.00', holiday_minutes: '480.00' });
+    const lines = (await pack())['w2-payroll.csv'].split('\n');
+    expect(lines[0]).not.toMatch(/Paid Time Off|Holiday/);
+    expect(lines[2]).toBe('Sample Hire,2026-10-05,2026-10-11,2026-10-16,40.00,1.50,1000.00,90.00,62.00,15.00,62.00,14.50,6.00,2.70,833.00');
+  });
+
   // The standalone export (Taxes → Exports → Labor) once filtered a column the table does not
   // have, and swallowed the error into a header-only CSV.
   it('the standalone labor export lists every technician\'s days in the picked range, gate on too', async () => {

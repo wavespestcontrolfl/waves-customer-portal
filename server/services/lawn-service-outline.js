@@ -8,11 +8,15 @@ const {
 const { PROGRAM_DETAIL_V13 } = require('./service-report/lawn-program-line');
 const { estimateHasBahiaLawn, estimateLawnGrassValues } = require('./estimate-bahia-review');
 const featureGates = require('../config/feature-gates');
+const { etDateString } = require('../utils/datetime-et');
+const WATERING_COPY = require('../../shared/watering-copy.json');
+const RAIN_COPY = require('../../shared/lawn-water-rain-copy.json');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
 const V13_CONTENT_LIBRARY_VERSION = 'lawn-v13-copy-1';
+const V13_DETAIL_CONTENT_LIBRARY_VERSION = 'lawn-v13-detail-1';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
 const V13_PROTOCOL_VERSION = 'lawn-v13';
@@ -288,6 +292,12 @@ function outlineV13Live() {
   return featureGates.lawnOutlineV13Live?.() === true;
 }
 
+// GATE_LAWN_OUTLINE_DETAIL (live only with GATE_LAWN_OUTLINE_V13): the v13 outline with the detail sections.
+// Off = the v13 outline exactly.
+function outlineDetailLive() {
+  return featureGates.lawnOutlineDetailLive?.() === true;
+}
+
 // The same categories, for every line of the month's step: the 12x step and each plan-size
 // variant (the 9x April bag), so a category one plan size uses is never missing. A fertilizer
 // analysis may have one-digit parts (44-0-0); Headway, Advion and the Topchoice add-on are v13 lines too.
@@ -359,11 +369,13 @@ function protocolVersion() {
   return featureGates.lawnV13Live?.() === true ? V13_PROTOCOL_VERSION : PROTOCOL_VERSION;
 }
 
-// The same for the outline's own words: the v13 outline (GATE_LAWN_OUTLINE_V13) stamps
-// its own content version, so a flip shows outlines built before it as updated. The
-// Estimates list's stale check reads it, so it reads the gate and the two constants only.
+// The same for the outline's own words: the v13 outline (GATE_LAWN_OUTLINE_V13) and its detailed
+// version (GATE_LAWN_OUTLINE_DETAIL) each stamp their own content version, so a flip shows outlines
+// built before it as updated. The Estimates list's stale check reads it, so it reads the gates and
+// the constants only.
 function contentLibraryVersion() {
-  return outlineV13Live() ? V13_CONTENT_LIBRARY_VERSION : CONTENT_LIBRARY_VERSION;
+  if (!outlineV13Live()) return CONTENT_LIBRARY_VERSION;
+  return outlineDetailLive() ? V13_DETAIL_CONTENT_LIBRARY_VERSION : V13_CONTENT_LIBRARY_VERSION;
 }
 
 function protocolVisitForMonth(turfType, month) {
@@ -895,37 +907,251 @@ function legacySections({ modules, snapshot, tier, turf, turfText, month, season
 
 const tilesSection = (key, title, body, tiles) => makeSection(key, title, body, titledLines(tiles), { type: 'tiles', items: tiles });
 
+// GATE_LAWN_OUTLINE_DETAIL words (owner 2026-10-26: "this needs to be more detailed, and we should be using the
+// protocols, and youtube transcripts to further develop it"; the decision page's choices, "do whatever you
+// recommend"). Each fact is a v13 rule (server/config/lawn-protocol-v13.json notes and safety_rules), an approved
+// report sentence (shared/watering-copy.json, shared/lawn-water-rain-copy.json) or a UF/IFAS fact; the month text
+// stays the report's own (PROGRAM_DETAIL_V13). Still no rate, tier, visit count or visit date; product names come
+// only from the product list below (decision D1-B).
+const V13_DETAIL_COPY = Object.freeze({
+  // v13 confirms chinch bugs at the edge of the damage (the float test only if unsure). "Spot", not "any": May's one
+  // whole-lawn insect pass goes on sunny turf with no count first.
+  confirmedTile: Object.freeze({ icon: 'count', title: 'Confirmed before treating', text: 'Chinch bugs and other insects are confirmed where the damage starts before any spot treatment' }),
+  // A 9-visit plan skips some months, so the list says each visit follows its month (the v13 outline's own sentence).
+  yearBody: 'Each visit follows the step for the month it falls in. This month and the next two are open. Tap any month to see what a visit then does and one thing to do at home.',
+  // One thing to do at home each month, from the v13 visit rules (barrier water-in, holds, storm holds).
+  atHome: Object.freeze({
+    1: 'Run your normal watering day: that waters in the weed barrier.',
+    2: 'Keep your normal mowing height; a low mow now sets back grass that is waking up.',
+    3: 'Leave sprayed weeds alone while they brown out.',
+    4: 'On your watering day, check that the sprinklers reach the strips by the driveway and sidewalk.',
+    5: 'Text us a photo the day a dry-looking patch shows on a watered lawn.',
+    6: 'When the daily rains start, turn the sprinklers off or down; the rain also waters in the weed barrier.',
+    7: 'Moths flying up at dusk or chewed blades are worth a text.',
+    8: 'Bag the clippings while caterpillars or leaf spot are active.',
+    9: 'After a storm or flooding, text us a photo before the next visit.',
+    10: 'When the rains stop, set the sprinklers back to your dry-season run and check every head.',
+    11: 'Water in your early-morning window only; this is large patch season.',
+    12: 'After a frost, stay off the white grass. A purple-red tint in the cold is a color change, not a disease.',
+  }),
+  problemsTitle: 'Problems We Watch For',
+  problemsBody: 'How to spot the common Southwest Florida lawn problems, and what we do.',
+  problemTiles: Object.freeze([
+    { icon: 'insects', title: 'Chinch bugs', text: 'Yellow, then dry brown patches in hot, sunny spots, often beside pavement, spring through fall. A patch that stays dry on a watered lawn is a common sign: text us a photo. We confirm live bugs at the edge of the damage before treating, and rotate products because Florida chinch bugs resist some.' },
+    { icon: 'insects', title: 'Caterpillars (sod webworm, armyworm)', text: 'Chewed, ragged blades, green droppings, or small moths flying up at dusk, June through fall; new sod is a magnet. We spot treat and recheck on the next visit, or sooner if you text us. Established St. Augustine usually grows back from the roots.' },
+    { icon: 'insects', title: 'Mole crickets and grubs', text: 'Raised tunnels, turf that lifts like a loose carpet, or birds and armadillos digging in one area. In early summer we bait mole cricket tunnels: keep the sprinklers off that area for three days. Grubs and larger mole crickets get a granule on a spreader visit, watered in the same day.' },
+    { icon: 'disease', title: 'Large patch', text: 'Tan or orange rings, October through May as the soil cools; extra water and scalping make it worse. It returns to the same damp spots, so we map them and treat them each fall. Do not put weed killer on a patch.' },
+    { icon: 'disease', title: 'Take-all root rot', text: 'Thin, yellow patches with short, black roots. Overwatering and stress feed it, and it works on the roots for weeks before you see it. Once the roots are black, no spray brings that spot back, so mapped areas get a treatment in spring and fall.' },
+    { icon: 'disease', title: 'Gray leaf spot', text: 'Tan-gray spots with dark edges on the blades in hot, humid weather. Some leaf spot is normal in a wet summer, even on treated lawns; it thins the grass but rarely kills it. We spot treat it.' },
+    { icon: 'disease', title: 'Yellow streaks on Floratam or ProVista', text: 'Yellow streaks between the leaf veins, mostly September to January, with healthy roots and no chinch bugs, can be lethal viral necrosis. No spray fixes it. Call us before you re-sod: we send a sample to the UF plant lab at our cost, and new sod should be Palmetto or CitraBlue.' },
+    { icon: 'area', title: 'A spot by a shrub, downspout, or low area', text: 'Often water, not a pest: a blocked sprinkler head, a downspout, a low spot that stays wet, or soil that sheds water. On your watering day, run each zone and look before adding minutes for one spot. Straight brown lines point to the mower or a sprinkler, not insects or disease.' },
+    { icon: 'weeds', title: 'Weeds are clues', text: 'Dollarweed, doveweed and sedge mean soil that stays too wet; goosegrass means packed soil; annual bluegrass often follows a low mow. We spot treat them; fixing the cause helps keep them from coming back.' },
+  ].map((tile) => Object.freeze(tile))),
+  productsTitle: 'Products We May Use',
+  productsBody: 'Each visit uses only what the lawn needs. Your service report names every product applied, with its EPA number.',
+  afterTreatmentTitle: 'After A Treatment',
+  afterTreatmentBody: 'Your service report lists any instructions for that visit. These are the common ones.',
+  afterTreatmentTiles: Object.freeze([
+    { icon: 'barrier', title: 'Water in the weed barrier', text: 'A weed barrier needs about 1/2 inch of rain or irrigation within 14 days to activate. Your regular watering day counts.' },
+    { icon: 'reentry', title: 'Hold, or water in: your report says which', text: 'Weed sprays and some insect sprays need 24 hours with no sprinklers, and the mole cricket bait needs three days: turn the timer off for that long. If a hold falls on your watering day, skip that run. Some granular fertilizers and insect granules need the opposite: one sprinkler cycle within the time on your report.' },
+    { icon: 'calendar', title: 'Mowing around a treatment', text: 'No mowing two days before or after a weed spray, or for 24 hours after a caterpillar spray.' },
+    { icon: 'weeds', title: 'Leave sprayed weeds in place', text: 'They yellow and curl over one to three weeks; sedge is the slowest. Pulling them early interrupts the treatment.' },
+  ].map((tile) => Object.freeze(tile))),
+  wateringTitle: 'Your Part: Watering',
+  wateringBody: 'Watering is the biggest part of lawn care you control.',
+  wateringTiles: Object.freeze([
+    { icon: 'dry_spots', title: 'When to water', text: `${WATERING_COPY.deficitAdvice} A full cycle puts down about 1/2 to 3/4 inch.` },
+    { icon: 'rotate', title: 'Reset the timer by season', text: 'Down when the summer rains start, up when they stop, lower in winter. After a soaking rain, skip a run rather than shortening your runs: longer runs reach the roots better than short ones.' },
+    { icon: 'inspection', title: 'Check your coverage', text: 'On your watering day, set a few straight-sided cans in a line, run the zone 15 minutes and measure. Uneven cans mean uneven coverage.' },
+    { icon: 'label', title: 'Rain shutoff device', text: `${RAIN_COPY.sensorLine.split('. ')[0]}. They wear out in about two years: if the sprinklers run in the rain, replace it.` },
+  ].map((tile) => Object.freeze(tile))),
+  // Decision D2-A: only where the District's one-day order applies, and never after it ends. Source: the portal fact
+  // register's SWFWMD Modified Phase III entry (fact sheet revised Oct. 12, 2026, verified 2026-10-24).
+  wateringOrderTile: Object.freeze({ icon: 'calendar', title: 'Your watering day', text: 'Manatee and Sarasota are under a one-day-a-week order through March 31, 2027. Your city or county sets your day by address; check its schedule. Use the 12:01 to 4 a.m. window, not the evening one: blades that stay wet all night help large patch and leaf spot spread. Lots under an acre may use one window only. Reclaimed (purple-pipe) water follows your utility’s rules.' }),
+  mowingTitle: 'Your Part: Mowing',
+  mowingBody: 'We do not mow. If a crew mows for you, pass these along.',
+  mowingTiles: Object.freeze([
+    { icon: 'count', title: 'Mow high', text: 'St. Augustine: 3.5 to 4 inches. Other grasses and dwarf St. Augustine are cut lower: ask us for your lawn’s height.' },
+    { icon: 'rotate', title: 'A third at a time, sharp blade', text: 'Never cut more than a third of the blade at once; if it got tall, step it down over a few mows. Keep the blade sharp: ragged brown tips mean it is dull.' },
+    { icon: 'micros', title: 'Leave the clippings', text: 'They feed the lawn and do not add much thatch. Bag them only while caterpillars or leaf spot are active.' },
+    { icon: 'disease', title: 'Dry grass, sick spot last', text: 'Mow when the grass is dry; mow a sick spot last and rinse the mower.' },
+  ].map((tile) => Object.freeze(tile))),
+  expectTitle: 'What To Expect',
+  expectBody: 'A lawn changes over seasons, not days.',
+  expectTiles: Object.freeze([
+    { icon: 'barrier', title: 'A barrier stops seeds, not weeds already up', text: 'It does not stop sedge or dollarweed either; those get spot treatments. Weeds break through first along drives and walks, and heavy rain can wear a barrier down sooner; we spot treat the breakthrough.' },
+    { icon: 'weeds', title: 'Some weeds wait for cooler months', text: 'Weed sprays have yearly label limits. If your lawn reaches them, weed sprays pause from April through October. Sedge and kyllinga are managed, not cured; thick grass is the long-term fix.' },
+    { icon: 'calendar', title: 'Quiet visits are normal', text: 'A winter weed barrier visit can look like nothing happened; that is the point. While the lawn greens up we spot treat lightly, because heavy spraying delays green-up.' },
+    { icon: 'feeding', title: 'Brown grass takes weeks to regrow', text: 'Once insects or disease are controlled, St. Augustine fills in by runners: a basketball-size patch can take about six weeks in the rainy season. Large thin spots usually do not fill in from November to February.' },
+    { icon: 'barrier', title: 'New sod is handled differently', text: 'No weed barrier goes on sod in its first season, and new sod is where caterpillars show first. Planning sod or plugs? Tell us first.' },
+    { icon: 'area', title: 'Some spots need a different fix', text: 'Deep shade, packed new-build soil, buried debris or a blocked sprinkler head limit any lawn program. Grass that never grew under a tree will not start now; trimming limbs or a planting bed works better.' },
+  ].map((tile) => Object.freeze(tile))),
+  questionsTitle: 'Common Questions',
+  questionsBody: 'The questions we hear most, answered straight.',
+  questionTiles: Object.freeze([
+    { icon: 'micros', title: 'My lawn is yellow. Does it need more fertilizer?', text: 'Often not. On our alkaline soil, yellow St. Augustine is often short on iron, not nitrogen, and extra quick-release nitrogen can feed insects and disease.' },
+    { icon: 'insects', title: 'Why not spray the whole lawn for bugs every visit?', text: 'Blanket sprays breed resistant chinch bugs and kill helpful insects, so we treat where we find them. The one exception is May, peak chinch bug season: one pass on hot, sunny turf, where they start.' },
+    { icon: 'weeds', title: 'Should I put down weed-and-feed between visits?', text: 'Please skip it. The weed killer in it can reach shrub and tree roots, and extra products make it hard to tell what is working.' },
+    { icon: 'area', title: 'Can you get rid of torpedograss?', text: 'Not without killing the St. Augustine around it. The fix is removing the patch and re-sodding, which is not part of the lawn program.' },
+  ].map((tile) => Object.freeze(tile))),
+});
+
+// Decision D2-A: the order tile shows only for these rule areas, and only while the order runs. A stored outline keeps
+// the tile, so the tile carries `until` and the page hides it after that day.
+const WATERING_ORDER = Object.freeze({ jurisdictions: Object.freeze(['manatee_county_fl', 'sarasota_county_fl']), until: '2027-03-31' });
+
+function v13WateringTiles(jurisdictionId, now) {
+  const [whenToWater, ...rest] = V13_DETAIL_COPY.wateringTiles;
+  const orderLive = WATERING_ORDER.jurisdictions.includes(jurisdictionId) && etDateString(now) <= WATERING_ORDER.until;
+  return [whenToWater, ...(orderLive ? [{ ...V13_DETAIL_COPY.wateringOrderTile, until: WATERING_ORDER.until }] : []), ...rest];
+}
+
+// The month list: the year chart's steps per month, plus the report's "why now" line and the month's thing to do at
+// home. The build month and the next two open; the rest open on a tap.
+function v13MonthsVisual(trackKey, jurisdictionRule, month) {
+  const year = v13YearVisual(trackKey, jurisdictionRule);
+  const open = new Set([0, 1, 2].map((ahead) => ((Number(month) - 1 + ahead) % 12) + 1));
+  return {
+    ...year,
+    type: 'months',
+    months: year.months.map((m) => ({
+      ...m,
+      name: FULL_MONTHS[m.month - 1],
+      visit: PROGRAM_DETAIL_V13[m.month]?.whyNow || '',
+      atHome: V13_DETAIL_COPY.atHome[m.month],
+      open: open.has(m.month),
+    })),
+  };
+}
+
+function v13MonthLines(visual) {
+  return v13YearLines(visual).map((line, index) => `${line}. ${visual.months[index].visit} At home: ${visual.months[index].atHome}`);
+}
+
+// Decision D1-B: the products the outline's v13 track names (each recipe line names its catalog product before " — ";
+// every month and plan size), under the step each serves, with the catalog's active ingredient, never a rate. A
+// product that is also a fertilizer sits under its weed-barrier step. The optional add-on (its line says so) and the
+// weed-mix surfactant are not program products.
+const NOT_PROGRAM_LINE_RE = /optional add-on/i;
+const NOT_PROGRAM_NAME_RE = /nonionic surfactant/i;
+
+function v13TrackProducts(trackKey) {
+  const byName = new Map();
+  for (const visit of lawnProtocols()?.[trackKey]?.visits || []) {
+    for (const line of v13StepLines(visit)) {
+      const cut = line.indexOf(' — ');
+      const steps = v13OutlineCategory(line)?.[2] || [];
+      if (cut <= 0 || !steps.length || NOT_PROGRAM_LINE_RE.test(line)) continue;
+      const name = line.slice(0, cut).trim();
+      if (!NOT_PROGRAM_NAME_RE.test(name) && !byName.has(name)) byName.set(name, steps.includes('barrier') ? 'barrier' : steps[0]);
+    }
+  }
+  return [...byName].map(([name, step]) => ({ name, step }));
+}
+
+// The catalog's active ingredient without strengths or an N-P-K analysis ("Clothianidin 50%" -> "clothianidin"). A
+// fertilizer has none to show: its name carries its analysis.
+function activeIngredientText(row) {
+  if (!row || /fertilizer/i.test(`${row.product_type || ''} ${row.category || ''}`)) return null;
+  const text = String(row.active_ingredient || '')
+    .replace(/\d+(?:\.\d+)?\s*%/g, '')
+    .replace(/\b\d{1,2}-\d{1,2}-\d{1,2}\b/g, '')
+    .replace(/\(\s*\)/g, '')
+    .split('+')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(' + ');
+  return text ? text.toLowerCase() : null;
+}
+
+// The catalog read is one query by exact name (the v13 recipe uses catalog names). A failed read leaves the section
+// out rather than showing names without their ingredients.
+async function loadV13ProductList(db, trackKey) {
+  const products = v13TrackProducts(trackKey);
+  if (!products.length) return [];
+  let rows;
+  try {
+    rows = await db('products_catalog')
+      .whereIn('name', products.map((product) => product.name))
+      .select('name', 'display_name', 'active_ingredient', 'category', 'product_type');
+  } catch {
+    return [];
+  }
+  const byName = new Map((rows || []).map((row) => [row.name, row]));
+  return products
+    .filter((product) => byName.get(product.name)?.category !== 'adjuvant')
+    .map((product) => {
+      const row = byName.get(product.name);
+      const ingredient = activeIngredientText(row);
+      // A name's own trailing bracket ("Artavia 2 SC (Azoxy)") gives way to the ingredient's.
+      const name = row?.display_name || product.name;
+      const label = ingredient ? name.replace(/\s*\([^)]*\)$/, '') : name;
+      return { step: product.step, text: ingredient ? `${label} (${ingredient})` : label };
+    });
+}
+
+function v13ProductsSection(productList) {
+  const items = V13_TREATMENT_CATEGORIES
+    .map((category) => ({ key: category.key, label: category.label, text: productList.filter((product) => product.step === category.key).map((product) => product.text).join('; ') }))
+    .filter((item) => item.text);
+  if (!items.length) return null;
+  return makeSection('products', V13_DETAIL_COPY.productsTitle, V13_DETAIL_COPY.productsBody, items.map((item) => `${item.label}: ${item.text}`), { type: 'categories', items });
+}
+
 // GATE_LAWN_OUTLINE_V13: the one v13 program for every lawn, every section boxed (owner 2026-10-24):
 // program tiles, month chips, a year chart, treatment cards that key its icons, the visit as four
 // steps, rule, safety and after-visit tiles, and the exclusions as tags. Nothing in it depends on the
 // grass: the grass only blocks a bahia lawn, which has no v13 program. Each drawn section keeps text
 // bullets for readers that draw none (the composer preview, the stored HTML).
-function v13Sections({ month, visit, trackKey, jurisdictionRule }) {
-  const year = v13YearVisual(trackKey, jurisdictionRule);
-  return [
-    tilesSection('lawn_program', V13_COPY.programTitle, V13_COPY.programBody, V13_COPY.programTiles),
-    makeSection('season_focus', `${MONTHS[month - 1]} Service Focus`, PROGRAM_DETAIL_V13[month]?.whyNow || '', visit ? v13FullOutlineBullets(visit) : [], v13FocusVisual(visit)),
-    makeSection('program_year', V13_COPY.yearTitle, V13_COPY.yearBody, v13YearLines(year), year),
-    makeSection(
-      'treatment_categories',
-      V13_COPY.treatmentsTitle,
-      V13_COPY.treatmentsBody,
-      V13_TREATMENT_CATEGORIES.map((item) => `${item.label}: ${item.reason}`),
-      { type: 'categories', items: V13_TREATMENT_CATEGORIES.map((item) => ({ key: item.key, label: item.label, text: item.reason })) },
-    ),
-    makeSection('typical_visit', 'What A Typical Visit Includes', '', titledLines(V13_COPY.visitSteps), { type: 'steps', items: V13_COPY.visitSteps }),
+function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [], now = new Date() }) {
+  const treatments = makeSection(
+    'treatment_categories',
+    V13_COPY.treatmentsTitle,
+    V13_COPY.treatmentsBody,
+    V13_TREATMENT_CATEGORIES.map((item) => `${item.label}: ${item.reason}`),
+    { type: 'categories', items: V13_TREATMENT_CATEGORIES.map((item) => ({ key: item.key, label: item.label, text: item.reason })) },
+  );
+  const typicalVisit = makeSection('typical_visit', 'What A Typical Visit Includes', '', titledLines(V13_COPY.visitSteps), { type: 'steps', items: V13_COPY.visitSteps });
+  const closing = [
     tilesSection('local_rules', V13_COPY.rulesTitle, '', v13RuleTiles(jurisdictionRule)),
     tilesSection('safety', V13_COPY.safetyTitle, '', V13_COPY.safetyTiles),
     tilesSection('after_visit', V13_COPY.afterVisitTitle, '', V13_COPY.afterVisitTiles),
     makeSection('not_included', V13_COPY.notIncludedTitle, '', V13_COPY.notIncludedTags, { type: 'tags', items: V13_COPY.notIncludedTags, note: V13_COPY.notIncludedNote }),
   ];
+  if (!outlineDetailLive()) {
+    const year = v13YearVisual(trackKey, jurisdictionRule);
+    return [
+      tilesSection('lawn_program', V13_COPY.programTitle, V13_COPY.programBody, V13_COPY.programTiles),
+      makeSection('season_focus', `${MONTHS[month - 1]} Service Focus`, PROGRAM_DETAIL_V13[month]?.whyNow || '', visit ? v13FullOutlineBullets(visit) : [], v13FocusVisual(visit)),
+      makeSection('program_year', V13_COPY.yearTitle, V13_COPY.yearBody, v13YearLines(year), year),
+      treatments,
+      typicalVisit,
+      ...closing,
+    ];
+  }
+  // GATE_LAWN_OUTLINE_DETAIL: the open month in the month list replaces the Service Focus box.
+  const months = v13MonthsVisual(trackKey, jurisdictionRule, month);
+  const programTiles = V13_COPY.programTiles.map((tile) => (tile.icon === 'count' ? V13_DETAIL_COPY.confirmedTile : tile));
+  return [
+    tilesSection('lawn_program', V13_COPY.programTitle, V13_COPY.programBody, programTiles),
+    makeSection('program_year', V13_COPY.yearTitle, V13_DETAIL_COPY.yearBody, v13MonthLines(months), months),
+    tilesSection('problems', V13_DETAIL_COPY.problemsTitle, V13_DETAIL_COPY.problemsBody, V13_DETAIL_COPY.problemTiles),
+    treatments,
+    v13ProductsSection(productList),
+    typicalVisit,
+    tilesSection('after_treatment', V13_DETAIL_COPY.afterTreatmentTitle, V13_DETAIL_COPY.afterTreatmentBody, V13_DETAIL_COPY.afterTreatmentTiles),
+    tilesSection('your_watering', V13_DETAIL_COPY.wateringTitle, V13_DETAIL_COPY.wateringBody, v13WateringTiles(jurisdictionRule?.jurisdiction_id, now)),
+    tilesSection('your_mowing', V13_DETAIL_COPY.mowingTitle, V13_DETAIL_COPY.mowingBody, V13_DETAIL_COPY.mowingTiles),
+    tilesSection('what_to_expect', V13_DETAIL_COPY.expectTitle, V13_DETAIL_COPY.expectBody, V13_DETAIL_COPY.expectTiles),
+    tilesSection('common_questions', V13_DETAIL_COPY.questionsTitle, V13_DETAIL_COPY.questionsBody, V13_DETAIL_COPY.questionTiles),
+    ...closing,
+  ].filter(Boolean);
 }
 
 // The two outlines, chosen once per build: the gate-off outline exactly as before, and the v13
 // one (GATE_LAWN_OUTLINE_V13).
 const OUTLINES = Object.freeze({
   legacy: Object.freeze({
-    contentLibraryVersion: CONTENT_LIBRARY_VERSION,
     resolveTurf,
     trackKey: (turfType) => turfType,
     sections: legacySections,
@@ -938,7 +1164,6 @@ const OUTLINES = Object.freeze({
     regenerationTurfType: (packet, snapshot) => packet?.turf_type || snapshot.turfType || null,
   }),
   v13: Object.freeze({
-    contentLibraryVersion: V13_CONTENT_LIBRARY_VERSION,
     resolveTurf: resolveTurfV13,
     trackKey: v13TrackKey,
     sections: v13Sections,
@@ -981,6 +1206,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
   const visit = protocolVisitForMonth(trackKey, month);
   const includeProductCards = input.includeProductCards === true;
   const productCards = await loadEligibleProductCards(db, { turfType: turf.turfType, visit, includeProductCards, productCardReason: variant.productCardReason });
+  const productList = outlineDetailLive() ? await loadV13ProductList(db, trackKey) : [];
   const seasonText = approvedModuleText(modules, SEASON_MODULE_KEYS[seasonBand]);
   const turfText = approvedModuleText(modules, TURF_MODULE_KEYS[turf.turfType], approvedModuleText(modules, 'unknown_turf_summary'));
   const snapshot = estimateSnapshot(estimate, estimateData);
@@ -1001,6 +1227,8 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
     restrictedSeasonActive,
     trackKey,
     jurisdictionRule,
+    productList,
+    now,
   });
 
   const content = {
@@ -1077,7 +1305,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
       visit,
       jurisdictionRule,
       templateVersion: TEMPLATE_VERSION,
-      contentLibraryVersion: variant.contentLibraryVersion,
+      contentLibraryVersion: contentLibraryVersion(),
       productRegistryVersion: PRODUCT_REGISTRY_VERSION,
       protocolVersion: protocolVersion(),
     },
@@ -1104,4 +1332,15 @@ module.exports = {
   resolveJurisdictionId,
   resolveSeasonBand,
   validateContent,
+  // Shared with the Tree & Shrub outline (tree-shrub-service-outline.js, GATE_TS_OUTLINE).
+  V13_COPY,
+  WATERING_ORDER,
+  addressSummary,
+  estimateSnapshot,
+  estimateViewPath,
+  firstNonEmpty,
+  isRestrictedSeason,
+  loadFertilizerRule,
+  makeSection,
+  parseJsonMaybe,
 };

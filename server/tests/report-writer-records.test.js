@@ -50,7 +50,7 @@ describe('writer expectations', () => {
 describe('how-it-works lines', () => {
   test('come from the approved wording, labeled with the recorded work', () => {
     expect(howItWorksLines([TAURUS])).toEqual([
-      expect.stringMatching(/^- insect-control application, perimeter spray, Exterior perimeter: Pests can.t detect it/),
+      expect.stringMatching(/^- insect-control application, perimeter spray, Exterior perimeter: Ants can.t detect it/),
     ]);
   });
 

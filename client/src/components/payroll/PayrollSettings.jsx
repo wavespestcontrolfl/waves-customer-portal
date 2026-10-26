@@ -219,6 +219,37 @@ export function W4HistoryDialog({ technician, onClose }) {
   </Dialog>;
 }
 
+// GATE_PAYROLL_TIME_OFF: the yearly paid time off allowance. It only warns when a
+// day is booked past it. Empty = no allowance set.
+function AllowanceCell({ technician, onSaved }) {
+  const current = technician.ptoHoursPerYear == null ? '' : String(technician.ptoHoursPerYear);
+  const [value, setValue] = useState(current);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function save(event) {
+    event.preventDefault();
+    setBusy(true); setError('');
+    try {
+      await call(`/technicians/${technician.id}/pto-allowance`, {
+        method: 'PUT',
+        body: { hoursPerYear: value.trim() === '' ? null : value.trim() },
+      });
+      onSaved(`Paid time off allowance saved for ${technician.name}.`);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <form onSubmit={save} className="flex flex-wrap items-center gap-2">
+    <Input
+      aria-label={`Paid time off hours per year for ${technician.name}`} className="w-24" inputMode="decimal"
+      autoComplete="off" placeholder="None" value={value} onChange={event => setValue(event.target.value)}
+    />
+    <Button type="submit" variant="secondary" disabled={busy || value.trim() === current}>Save</Button>
+    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+  </form>;
+}
+
 function payMethodLabel(technician) {
   if (technician.payMethod === 'bank_transfer') {
     return <span>Bank transfer<span className="block text-ui-caption text-ink-secondary">Written OK {dayLabel(technician.payMethodConsentOn)}</span></span>;
@@ -244,6 +275,8 @@ export default function PayrollSettings() {
 
   const close = () => setDialog(null);
   const saved = text => { setDialog(null); setMessage(text); load(); };
+  // Present only when the server has GATE_PAYROLL_TIME_OFF on.
+  const showAllowance = Boolean(technicians) && technicians.some(tech => 'ptoHoursPerYear' in tech);
 
   return <UiSurface density="touch" className="grid gap-4">
     <header>
@@ -257,7 +290,9 @@ export default function PayrollSettings() {
     {technicians && technicians.length > 0 && <Card>
       <Table aria-label="W-2 employees">
         <THead><TR>
-          <TH>Employee</TH><TH>Pay rate</TH><TH>Pay method</TH><TH>Current W-4</TH><TH><span className="sr-only">Actions</span></TH>
+          <TH>Employee</TH><TH>Pay rate</TH><TH>Pay method</TH><TH>Current W-4</TH>
+          {showAllowance && <TH>Paid time off hours per year</TH>}
+          <TH><span className="sr-only">Actions</span></TH>
         </TR></THead>
         <TBody>
           {technicians.map(tech => <TR key={tech.id}>
@@ -265,6 +300,7 @@ export default function PayrollSettings() {
             <TD nums>{tech.payRate != null ? `${dollars(tech.payRate)}/hr` : 'Not set'}</TD>
             <TD>{payMethodLabel(tech)}</TD>
             <TD><W4Summary w4={tech.currentW4} /></TD>
+            {showAllowance && <TD><AllowanceCell key={`${tech.id}:${tech.ptoHoursPerYear}`} technician={tech} onSaved={saved} /></TD>}
             <TD>
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setDialog({ kind: 'w4', tech })}>Enter W-4</Button>

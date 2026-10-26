@@ -439,7 +439,7 @@ const SERVICE_DETAILS_COPY = {
       rows: [
         ['Visits', 'The count on your estimate, timed to turf growth, pest season, weather, and local fertilizer rules — not a fixed monthly date'],
         ['Built for your grass', 'St. Augustine, Bermuda, Zoysia, and Bahia each run their own product track. We confirm the grass before anything goes down, because a product that helps one grass can injure another', { lawnTracks: true }],
-        ['Every visit', 'Inspect first. Then turf-specific fertilization, weed and sedge control, and insect or disease treatment when the evidence supports it'],
+        ['Every visit', 'Inspect first. Then the month’s step for your turf (a feeding, a weed barrier, micronutrients or an insect pass), plus weed, insect or disease treatment when the evidence supports it'],
         ['Covered insects', 'Chinch bugs, sod webworms, armyworms, white grubs, mole crickets — checked every visit, treated on evidence. Fire ants only when your proposal includes them'],
         ['Disease', 'Scouted every visit. Fungicide is applied when disease is present or the risk is documented, on comprehensive plans; fertilization-only and weed-only plans quote it separately'],
         ['Re-service', 'Covered issues are re-serviced at no charge while your plan is active. Report a concern any time. Grass lost to a plant virus (sugarcane mosaic virus) is not covered, because no treatment cures it'],
@@ -467,7 +467,7 @@ const SERVICE_DETAILS_COPY = {
         oneTimeHeading: 'Before your service',
         treatmentOnly: true,
         bullets: [
-          'Mow at least 24 hours before if mowing is due. Don’t mow the day of. Why: we need leaf surface to treat, and fresh cuts bleed product.',
+          'Mow at least 2 days before if mowing is due, and wait 2 days after. Why: weed sprays need leaf surface to soak in, and their labels ask for two uncut days on each side.',
           'Sprinklers off the night before a treatment visit. Why: we treat a dry lawn; wet grass dilutes liquids and granules stick to the blade instead of reaching the soil. Plugging and top dressing are the exceptions: follow their own watering steps below.',
           'Clear the lawn: toys, hoses, furniture, pet bowls, pet waste. Unlock gates. Pets and kids inside during the application.',
           'Tell us what changed: new sod, a new dog, a sprinkler repair, a brown patch that showed up this week. Text a photo. Why: the visit starts from your lawn’s history, and a change we don’t know about is a diagnosis we get wrong.',
@@ -485,8 +485,8 @@ const SERVICE_DETAILS_COPY = {
           { scope: 'one_time', text: 'Your service report tells you which of these applies. They change with the product, so we will not print one rule for every job.' },
         ],
         bullets: [
-          'Watering. The report says one of: water in today (granular fertilizer, most insect granules), keep dry for the stated hours (liquid weed control, fungicide), or resume your normal schedule. Don’t run the sprinklers after a visit unless the report says to.',
-          'Mowing. Wait 1–2 days after liquid applications, longer if the report says so. Never mow a wet application.',
+          'Watering. The report says one of: water in today (granular fertilizer, most insect granules), keep dry for the stated hours (liquid weed control, fungicide), or resume your normal schedule. A weed barrier needs about ½ inch of rain or irrigation within 14 days to activate; your regular watering counts.',
+          'Mowing. Wait 2 days after a weed spray and 1 day after other liquid applications, longer if the report says so. Never mow a wet application.',
           'Kids and pets. Off the lawn until the treated area is dry for liquids; until watered in for granules. Dogs that graze grass or lick paws are the main exposure route. If you have a grazer, tell us.',
           'What “working” looks like. Weeds yellow and wilt over 1–2 weeks; stubborn perennials may need a second pass. Insect damage stops spreading, but dead turf does not regrow. It fills in by runners, plugs, or sod.',
           { scope: 'recurring', text: 'Call us right away if the lawn yellows in streaks or stripes within days of a visit, or damage is spreading. That’s an immediate look, not wait-and-see. No waiting period for a re-service.' },
@@ -502,7 +502,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         heading: 'Mowing heights (UF/IFAS starting points)',
-        paragraphs: ['Standard St. Augustine (Floratam, Palmetto, Raleigh) 3.5–4"; dwarf St. Augustine (Seville, Captiva) 2–2.5"; Bermuda 1–2"; Zoysia 1.75–2.5"; Bahia 3–4". Never remove more than a third of the blade in one mowing. Keep blades sharp. Scalping looks like pest damage and invites Bermuda and weeds.'],
+        paragraphs: ['Standard St. Augustine (Floratam, Palmetto, Raleigh) 3.5–4"; dwarf St. Augustine (Seville, Captiva) 2–2.5"; Bermuda 1–2"; Zoysia 1.5–2"; Bahia 3–4". Never remove more than a third of the blade in one mowing. Keep blades sharp. Scalping looks like pest damage and invites Bermuda and weeds.'],
       },
       {
         heading: 'Bermuda removal from St. Augustine (Recognition + Fusilade II)',
@@ -596,7 +596,7 @@ const SERVICE_DETAILS_COPY = {
       {
         heading: 'Summer fertilizer rules (June 1 – September 30; North Port from April 1)',
         scope: 'recurring',
-        paragraphs: ['Manatee, Sarasota, and Charlotte counties and the City of Bradenton restrict nitrogen and phosphorus lawn fertilizer from June 1 through September 30. The City of North Port starts earlier: April 1 through September 30. Your address decides which ordinance applies. Summer visits still run the full inspection, insect and disease work, weed control, and iron and micronutrients to hold color. Your lawn is not skipped, and we won’t break the ordinance for you.'],
+        paragraphs: ['Manatee, Sarasota, and Charlotte counties and the City of Bradenton restrict nitrogen and phosphorus lawn fertilizer from June 1 through September 30. The City of North Port starts earlier: April 1 through September 30. Your address decides which ordinance applies. Summer visits still run the full inspection, insect and disease work, and weed control where label limits allow, with micronutrients for color where your ordinance allows them. Your lawn is not skipped, and we won’t break the ordinance for you.'],
       },
     ],
     included: [
@@ -685,7 +685,7 @@ const SERVICE_DETAILS_COPY = {
       {
         scope: 'recurring',
         q: 'Do you spray insecticide every visit?',
-        a: 'No. Treatments follow evidence, and when insecticide is applied the report names the pest or the evidence.',
+        a: 'No. Treatments follow evidence, and when insecticide is applied the report names the pest or the evidence. The one planned exception is May, peak chinch bug season: one insect pass on hot, sunny turf where it fits the property.',
       },
       {
         scope: 'recurring',
@@ -721,7 +721,7 @@ const SERVICE_DETAILS_COPY = {
     // program's flagship products, generated 2026-07-11 (gemini-3-pro-image;
     // no manufacturer photography, no copied trade dress). Products chosen
     // from the lawn protocols: Arena 50 WDG (insecticide rotation), LESCO
-    // granular fert + Chelated AM+Micros (summer iron/micros), Celsius WG
+    // granular fert, Celsius WG
     // (primary post-emergent, unified St. Augustine protocol).
     productImages: {
       heading: 'A few of the products doing the work',
@@ -729,7 +729,6 @@ const SERVICE_DETAILS_COPY = {
         { file: 'product-lesco-fertilizer-bag.png', caption: 'LESCO® professional turf fertilizer' },
         { file: 'product-celsius-wg.png', product: 'Celsius', caption: 'Celsius® WG — post-emergent herbicide' },
         { file: 'product-arena-50-wdg.png', product: 'Arena', caption: 'Arena® 50 WDG — turf insecticide' },
-        { file: 'product-lesco-am-micros.png', caption: 'LESCO® Chelated AM + Micros — summer iron & micronutrients' },
       ],
       note: 'Stylized product illustrations — product selection follows your turf, the season, and the label, and your service report names the exact products applied at your home.',
     },
@@ -755,18 +754,10 @@ const SERVICE_DETAILS_COPY = {
   // fertilization"/"season-long protection" claims.
   tree_shrub: {
     title: 'Tree & Shrub Care — Service Details',
-    // Products from the T&S protocols: Dominion 2L is the primary systemic
-    // (is_primary in the protocol usage seed). TriTek replaced SuffOil-X as
-    // the horticultural spray oil (SiteOne repricing, owner-approved
-    // 2026-07-16) — no TriTek artwork yet, so the packet shows Dominion only
-    // rather than advertising a product the protocol no longer uses.
-    productImages: {
-      heading: 'A few of the products doing the work',
-      images: [
-        { file: 'product-dominion-2l.png', product: 'Dominion', caption: 'Dominion® 2L — systemic insecticide (imidacloprid)' },
-      ],
-      note: 'Stylized product illustrations — product selection follows the plant, the diagnosis, and the label, and your service report names the exact products applied at your home.',
-    },
+    // No productImages block: the T&S protocol never names Dominion and keeps
+    // neonicotinoids "Selective use only", and TriTek (which replaced
+    // SuffOil-X as the horticultural spray oil, owner-approved 2026-07-16)
+    // has no artwork yet. Aligned to the protocol 2026-10-26.
     tagline: 'Your ornamentals are not lawn grass — plant-specific inspection, treatment, and honest diagnosis, documented every visit.',
     systemBox: {
       heading: 'Your program at a glance',
@@ -775,7 +766,7 @@ const SERVICE_DETAILS_COPY = {
         ['Watch list', 'Scale, whiteflies, aphids, mealybugs, mites, lace bugs, caterpillars, thrips & other covered ornamental pests'],
         ['Every visit', 'Plant-by-plant inspection first — treatment only where the evidence and the label support it'],
         ['Disease', 'Symptoms evaluated before fungicide — some problems need a sample or lab work, and some are cultural, not chemical'],
-        ['Plant nutrition', 'A combination of foliar feeding and root-zone feeding (soil drenches / deep-root applications), selected per plant species, soil, and diagnosis — palms get palm-specific care, never lawn fertilizer pointed at a palm'],
+        ['Plant nutrition', 'Slow-release granular feedings: palm fertilizer spread under the canopy, and a bed and shrub feeding in spring and late fall, outside the summer limits. Iron or manganese only where new growth shows a shortage — palms get palm-specific care, never lawn fertilizer pointed at a palm'],
         ['Pollinators & edibles', 'Blooms, foraging bees, and food plants are checked before treatment — tell us about hives, butterfly gardens, and edibles'],
         ['Documentation', 'Digital report every visit: plants inspected, findings, exact products, photos, watering & re-entry instructions'],
         ['Separate services', 'Pruning, hedge shaping, tree removal, structural tree-risk assessment, irrigation repair, bed weed control, palm trunk injections (own program), plant replacement'],
@@ -816,11 +807,11 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'Which plants are included?',
-        a: 'The plants and areas covered by your written estimate — that is the honest boundary. Ask us specifically about palms, mature canopy trees, newly installed plants, container plants, and anything edible: each has its own coverage answer. On tree size: there is no fixed height limit for root-zone and systemic treatment — a mature oak can be treated through its root system — but foliar and contact applications are limited to canopy we can reach safely and effectively from the ground. We do not climb, spray from bucket trucks, prune, or remove trees; large trees are inspected before treatment is accepted, and anything beyond the program gets documented and referred rather than half-treated.',
+        a: 'The plants and areas covered by your written estimate — that is the honest boundary. Ask us specifically about palms, mature canopy trees, newly installed plants, container plants, and anything edible: each has its own coverage answer. On tree size: root-zone insect treatments reach large trees, and we use them only where a pest history calls for it, within each product\'s yearly label limit; foliar and contact applications are limited to canopy we can reach safely and effectively from the ground. We do not climb, spray from bucket trucks, prune, or remove trees; large trees are inspected before treatment is accepted, and anything beyond the program gets documented and referred rather than half-treated.',
       },
       {
         q: 'How do you feed plants — through the leaves or the roots?',
-        a: 'Both, chosen per plant. Foliar feeding delivers targeted nutrients directly through the leaves; soil drenches and deep-root applications deliver nutrients and systemic protection through the root system. The method follows the plant species, soil conditions, pest pressure, and the diagnosed deficiency — not a one-method routine. And feeding follows diagnosis: we do not fertilize a yellow plant until we know why it is yellow.',
+        a: 'Mostly through the soil: slow-release palm fertilizer under the canopy, a bed and shrub feeding in spring and late fall, and iron or manganese only where new growth shows a shortage. A yellow plant gets a look before any extra nutrient, because yellow has a dozen causes and most are not hunger.',
       },
       {
         q: 'Do you spray every plant at every visit?',
@@ -836,7 +827,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What about my palms specifically?',
-        a: 'Palms get palm care, not shrub care. Their most common problems in our area are nutritional — potassium, magnesium, manganese, boron — and those deficiencies can mimic disease, which is why palm discoloration should never automatically trigger fungicide. When supplemental nutrition is warranted, we use palm-specific controlled-release analyses in line with UF/IFAS guidance, not lawn fertilizer. Palms are inspected and coordinated with this program, but trunk injections are their own program: diagnosed first, then quoted by palm species, condition, the treatment needed, and the number of palms — never automatically included. And we are straight about the hard cases: some palm diseases, like Ganoderma butt rot, have no effective treatment — a suspected lethal disease or trunk decay gets documented and referred promptly instead of being dressed up as a treatable condition.',
+        a: 'Palms get palm care, not shrub care. Their most common problems in our area are nutritional — potassium, magnesium, manganese, boron — and those deficiencies can mimic disease, which is why palm discoloration should never automatically trigger fungicide. Palms get controlled-release palm fertilizer on the program, at least three months apart, using analyses in line with UF/IFAS guidance, not lawn fertilizer. Palms are inspected and coordinated with this program, but trunk injections are their own program: diagnosed first, then quoted by the treatment needed, palm size, and the number of palms — never automatically included. And we are straight about the hard cases: some palm diseases, like Ganoderma butt rot, have no effective treatment — a suspected lethal disease or trunk decay gets documented and referred promptly instead of being dressed up as a treatable condition.',
       },
       {
         q: 'Can you save a dying plant?',

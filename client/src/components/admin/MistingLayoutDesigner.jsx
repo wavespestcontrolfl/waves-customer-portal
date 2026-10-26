@@ -11,6 +11,10 @@
 // risers. Step 3: "Save layout" composes the branded sketch PNG and saves it with the geometry on the
 // estimate (needs a saved estimate); reopening the designer on that estimate restores the saved layout.
 //
+// Every nozzle carries a spray direction (lib/mistingLayoutAim): an arrow on the map and, with Spray on, animated
+// mist along it (misting-designer/MistingSprayLayer). In Edit nozzles, dragging an arrow tip aims that nozzle by hand
+// and Reset aim puts it back. The photo stays clean: the tools, counts and legend are the admin's normal UI around it.
+//
 // The pieces live in ./misting-designer: useMistingMapImage (photo), useMistingLayoutState (lines,
 // edits, notice), useMistingLayoutExtras (risers, pump, zones, flags), useMistingLayoutPointer (taps
 // and drags per tool), useSavedMistingLayout / useMistingLayoutSave (step 3) and MistingLayoutParts /
@@ -24,12 +28,14 @@ import useMistingLayoutSave from './misting-designer/useMistingLayoutSave';
 import MistingLayoutSaveBar from './misting-designer/MistingLayoutSaveBar';
 import useMistingLayoutState, { editCount } from './misting-designer/useMistingLayoutState';
 import useMistingLayoutPointer from './misting-designer/useMistingLayoutPointer';
+import useMistingZoom from './misting-designer/useMistingZoom';
 import {
   CONCEPT_LABEL,
   CountsPanel,
   EditsClearedNotice,
   ExtrasClearedNotice,
   MapCanvas,
+  MistingLegend,
   Toolbar,
   limitNote,
   riserLimitNote,
@@ -62,6 +68,8 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
   const { ready, mode, totals, notice } = layout;
   const save = useMistingLayoutSave({ estimateId, mapState, address: address || (saved && saved.address) || null, layout, saved });
 
+  const zoom = useMistingZoom(mapState, layout);
+
   const useCounts = () => {
     if (totals.count <= 0) return;
     // Second argument: the riser count, which the estimator writes only when it is above zero.
@@ -80,12 +88,24 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
                 A layout saved for a different address is not shown. Saving this one replaces it.
               </p>
             )}
-            <Toolbar layout={layout} editsPresent={editCount(layout.edits) > 0} />
+            <Toolbar
+              layout={layout}
+              editsPresent={editCount(layout.edits) > 0}
+              zoom={zoom}
+            />
             <p className="text-14 text-zinc-600 mb-3">{toolHint(mode)}</p>
             {mode === 'add' && layout.addMiss && (
               <p role="status" className="text-14 text-amber-800 mb-3">Tap on a drawn line to add a nozzle</p>
             )}
-            <MapCanvas frameRef={frameRef} handlers={handlers} layout={layout} mapUrl={mapState.url} address={address} />
+            <MapCanvas
+              frameRef={frameRef}
+              handlers={handlers}
+              layout={layout}
+              mapUrl={mapState.url}
+              address={address}
+              map={{ lat: mapState.center.lat, zoom: mapState.zoom }}
+            />
+            <p className="mt-2 text-14 text-zinc-600">{CONCEPT_LABEL}</p>
             {notice && <EditsClearedNotice notice={notice} onRestore={layout.restoreSnapshot} onDismiss={layout.dismissNotice} />}
             {layout.clearedExtras && (
               <ExtrasClearedNotice
@@ -94,7 +114,10 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
                 onDismiss={layout.dismissClearedExtras}
               />
             )}
-            <CountsPanel layout={layout} note={limitNote(totals.count, limits)} riserNote={riserLimitNote(layout.risers.length, limits)} />
+            <div className="mt-3 grid gap-4 sm:grid-cols-2">
+              <CountsPanel layout={layout} note={limitNote(totals.count, limits)} riserNote={riserLimitNote(layout.risers.length, limits)} />
+              <MistingLegend />
+            </div>
           </>
         )}
       </DialogBody>

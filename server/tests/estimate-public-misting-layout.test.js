@@ -1,10 +1,10 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 process.env.ESTIMATE_DOC_PIN_SECRET = 'test-doc-pin-secret';
 
-// GATE_MISTING_LAYOUT_DESIGNER (step 3): GET /:token/data carries `mistingLayout` (the saved sketch
-// and counts for the estimate document's "Proposed misting layout" section) on the document render
-// pass only, with both gates on, a saved layout and a misting system in the estimate. Everywhere
-// else the key is absent and the response is as before.
+// GATE_MISTING_LAYOUT_DESIGNER: GET /:token/data carries `mistingLayout` (the saved sketch, the counts and the
+// geometry the customer page animates the spray from) on a normal page load and on the document render pass,
+// with both gates on, a saved layout, a misting system in the estimate and a layout drawn for the estimate's
+// address. Everywhere else the key is absent and the response is as before.
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
@@ -113,7 +113,26 @@ const getData = (baseUrl, query = '') => fetch(`${baseUrl}/estimates/mistinglayo
 const LAYOUT_ROW = {
   estimate_id: 'est-misting-layout', snapshot_s3_key: 'service-photos/misting-layouts/est-misting-layout/1-aa-layout.png',
   address: '123 Trust Ln, Bradenton, FL 34203', nozzle_count: 14, eave_count: 10, fence_count: 4, riser_count: 2, linear_ft: 131.5,
-  zones: [{ kind: 'pool' }], pump: { x: 1, y: 2 },
+  zones: [{ kind: 'pool', x: 600, y: 480, radiusFt: 6.5, label: 'staff note' }], pump: { x: 1, y: 2 },
+  center_lat: 27.4989, center_lng: -82.5748, zoom: 20, map_width: 1280, map_height: 960,
+  lines: [
+    { id: 'staff-line-7', kind: 'eave', points: [{ x: 100, y: 100 }, { x: 300, y: 100 }, { x: 300, y: 250 }] },
+    { id: 'staff-line-8', kind: 'bed', points: [{ x: 10, y: 10 }, { x: 'bad', y: 20 }] },
+  ],
+  nozzles: [{ x: 120, y: 100, kind: 'eave', lineIndex: 0, aim: 45 }, { x: 200, y: 100, kind: 'eave', lineIndex: 0, aim: null, createdBy: 'staff-9' }],
+  risers: [{ x: 50, y: 60, source: 'bed', lineIndex: 1 }, { x: 70, y: 80 }],
+  created_by: 'staff-9', updated_by: 'staff-9',
+};
+const GEOMETRY = {
+  center: { lat: 27.4989, lng: -82.5748 },
+  zoom: 20,
+  mapWidth: 1280,
+  mapHeight: 960,
+  lines: [{ kind: 'eave', points: [{ x: 100, y: 100 }, { x: 300, y: 100 }, { x: 300, y: 250 }] }],
+  nozzles: [{ x: 120, y: 100, kind: 'eave', lineIndex: 0, aim: 45 }, { x: 200, y: 100, kind: 'eave', lineIndex: 0 }],
+  risers: [{ x: 50, y: 60, source: 'bed', lineIndex: 1 }, { x: 70, y: 80 }],
+  pump: { x: 1, y: 2 },
+  zones: [{ kind: 'pool', x: 600, y: 480, radiusFt: 6.5 }],
 };
 const PROPERTIES = [{ id: 'prop-a', customer_id: 'cust-synthetic-1', active: true, is_primary: true }];
 const GATES = ['GATE_MOSQUITO_MISTING', 'GATE_MISTING_LAYOUT_DESIGNER'];
@@ -134,7 +153,7 @@ describe('GET /:token/data — misting layout section (GATE_MISTING_LAYOUT_DESIG
     customers: { lawn_type: null },
   });
 
-  test('the document render pass carries the signed sketch link and the counts', async () => {
+  test('the document render pass carries the signed sketch link, the counts and the geometry', async () => {
     gatesOn();
     dbRows = rows();
     await withServer(async (baseUrl) => {
@@ -145,28 +164,47 @@ describe('GET /:token/data — misting layout section (GATE_MISTING_LAYOUT_DESIG
         revision: expect.stringMatching(/^[0-9a-f]{16}$/),
         address: '123 Trust Ln, Bradenton, FL 34203',
         counts: { nozzles: 14, eave: 10, fence: 4, risers: 2, linearFt: 131.5, zones: 1, pump: true },
+        geometry: GEOMETRY,
       });
     });
   });
 
-  test('a normal page load never carries it, even with a saved layout and both gates on', async () => {
+  test('a normal page load carries the same block', async () => {
     gatesOn();
     dbRows = rows();
     await withServer(async (baseUrl) => {
-      const body = await getData(baseUrl);
-      expect(body.estimate).toBeDefined();
-      expect(body).not.toHaveProperty('mistingLayout');
+      const page = await getData(baseUrl);
+      const pdf = await getData(baseUrl, '?mode=pdf');
+      expect(page.estimate).toBeDefined();
+      expect(page.mistingLayout).toEqual(pdf.mistingLayout);
+      expect(page.mistingLayout.imageUrl).toBe('https://signed.example/layout.png');
+      expect(page.mistingLayout.geometry).toEqual(GEOMETRY);
     });
   });
 
-  test.each(GATES)('%s off: the render pass has no key', async (gate) => {
+  test('the public block holds no S3 key, staff id, line id, label or price', async () => {
+    gatesOn();
+    dbRows = rows();
+    await withServer(async (baseUrl) => {
+      const text = JSON.stringify((await getData(baseUrl)).mistingLayout);
+      expect(text).not.toContain('service-photos');
+      expect(text).not.toContain('1-aa-layout');
+      expect(text).not.toContain('staff-');
+      expect(text).not.toContain('staff note');
+      expect(text).not.toMatch(/price|amount|snapshot_s3_key|createdBy|created_by/i);
+    });
+  });
+
+  test.each(GATES)('%s off: neither the page load nor the render pass has the key', async (gate) => {
     gatesOn();
     delete process.env[gate];
     dbRows = rows();
     await withServer(async (baseUrl) => {
-      const body = await getData(baseUrl, '?mode=pdf');
-      expect(body.estimate).toBeDefined();
-      expect(body).not.toHaveProperty('mistingLayout');
+      for (const query of ['', '?mode=pdf']) {
+        const body = await getData(baseUrl, query);
+        expect(body.estimate).toBeDefined();
+        expect(body).not.toHaveProperty('mistingLayout');
+      }
     });
   });
 
@@ -174,10 +212,21 @@ describe('GET /:token/data — misting layout section (GATE_MISTING_LAYOUT_DESIG
     gatesOn();
     dbRows = { ...rows(), misting_layouts: undefined };
     await withServer(async (baseUrl) => {
+      expect(await getData(baseUrl)).not.toHaveProperty('mistingLayout');
       expect(await getData(baseUrl, '?mode=pdf')).not.toHaveProperty('mistingLayout');
     });
     dbRows = rows(['lawn_care'], { services: { lawn: true } });
     await withServer(async (baseUrl) => {
+      expect(await getData(baseUrl)).not.toHaveProperty('mistingLayout');
+      expect(await getData(baseUrl, '?mode=pdf')).not.toHaveProperty('mistingLayout');
+    });
+  });
+
+  test('a layout drawn for another address is not carried on either path', async () => {
+    gatesOn();
+    dbRows = { ...rows(), misting_layouts: { ...LAYOUT_ROW, address: '999 Other Rd, Bradenton, FL 34203' } };
+    await withServer(async (baseUrl) => {
+      expect(await getData(baseUrl)).not.toHaveProperty('mistingLayout');
       expect(await getData(baseUrl, '?mode=pdf')).not.toHaveProperty('mistingLayout');
     });
   });

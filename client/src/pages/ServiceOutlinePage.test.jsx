@@ -175,6 +175,63 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(screen.queryByText('Turf type')).not.toBeInTheDocument();
   });
 
+  // GATE_LAWN_OUTLINE_DETAIL: the month list replaces the year chart; a tile may carry the ET day it stops showing.
+  it('draws the detailed month list: open months show the visit text and the at-home line, the rest open on a tap', async () => {
+    const content = v13Content();
+    const year = content.sections.find((s) => s.key === 'program_year');
+    year.body = 'Each visit follows the step for the month it falls in. This month and the next two are open. Tap any month to see what a visit then does and one thing to do at home.';
+    year.visual = {
+      ...year.visual,
+      type: 'months',
+      months: year.visual.months.map((m) => ({
+        ...m,
+        name: m.label,
+        visit: `Visit text for ${m.label}.`,
+        atHome: `Home step for ${m.label}.`,
+        open: [10, 11, 12].includes(m.month),
+      })),
+    };
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
+    const list = sectionOf('Your Year At A Glance');
+    const rows = [...list.querySelectorAll('details')];
+    expect(rows).toHaveLength(12);
+    expect(rows.filter((row) => row.open).map((row) => row.querySelector('summary span').textContent)).toEqual(['Oct', 'Nov', 'Dec']);
+    expect(rows.filter((row) => row.dataset.limited === 'true').map((row) => row.querySelector('summary span').textContent)).toEqual(['Jun', 'Jul', 'Aug', 'Sep']);
+    expect(within(rows[9]).getByText('Visit text for Oct.')).toBeInTheDocument();
+    expect(within(rows[9]).getByText('At home:')).toBeInTheDocument();
+    expect(within(rows[9]).getByText('Home step for Oct.')).toBeInTheDocument();
+    // A closed row keeps its text in the page for the tap that opens it.
+    expect(rows[0].open).toBe(false);
+    expect(within(rows[0]).getByText('Home step for Jan.')).toBeInTheDocument();
+    expect(within(rows[6]).getByText('Insect control')).toHaveClass('sr-only');
+    expect(within(list).getByText('Local summer limits on nitrogen and phosphorus')).toBeInTheDocument();
+  });
+
+  it('hides a tile whose until day has passed and keeps one whose day has not', async () => {
+    const content = v13Content();
+    content.sections.push({
+      key: 'your_watering',
+      title: 'Your Part: Watering',
+      body: 'Watering is the biggest part of lawn care you control.',
+      bullets: ['When to water: Run one full cycle.', 'Old order: Ended.', 'Current order: Still running.'],
+      visual: {
+        type: 'tiles',
+        items: [
+          { icon: 'dry_spots', title: 'When to water', text: 'Run one full cycle.' },
+          { icon: 'calendar', title: 'Old order', text: 'Ended.', until: '2000-01-01' },
+          { icon: 'calendar', title: 'Current order', text: 'Still running.', until: '2999-12-31' },
+        ],
+      },
+    });
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'Your Part: Watering' });
+    const watering = sectionOf('Your Part: Watering');
+    expect(within(watering).getByText('When to water')).toBeInTheDocument();
+    expect(within(watering).queryByText('Old order')).not.toBeInTheDocument();
+    expect(within(watering).getByText('Current order')).toBeInTheDocument();
+  });
+
   it('a section with no drawing keeps its body and bullet cards, and the side panel keeps the grass (the gate-off outline)', async () => {
     renderWith(legacyContent());
     await screen.findByRole('heading', { level: 2, name: 'Local Fertilizer-Rule Note' });
@@ -184,5 +241,41 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(screen.getByText('Turf type')).toBeInTheDocument();
     expect(screen.getByText('St. Augustine')).toBeInTheDocument();
     expect(screen.queryByText('Program')).not.toBeInTheDocument();
+  });
+
+  // GATE_TS_OUTLINE: a Tree & Shrub packet names its program; two treatment cards share the fertilizer icon.
+  it('names the Tree & Shrub program in the badge and the tab title, and draws cards that share an icon', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const content = {
+      ...v13Content(),
+      serviceLine: 'tree_shrub',
+      title: 'Your Waves Tree & Shrub Program Overview',
+      property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One program for every landscape' },
+      sections: [{
+        key: 'treatment_categories',
+        title: 'Treatments That May Be Used',
+        body: 'Which ones a visit uses depends on what the plants show.',
+        bullets: ['Palm fertilizer: Slow-release.', 'Shrub fertilizer: Slow-release, twice a year.'],
+        visual: { type: 'categories', items: [
+          { key: 'feeding', label: 'Palm fertilizer', text: 'Slow-release.' },
+          { key: 'feeding', label: 'Shrub fertilizer', text: 'Slow-release, twice a year.' },
+        ] },
+      }],
+    };
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'Treatments That May Be Used' });
+    expect(screen.getByText('Tree & Shrub Program')).toBeInTheDocument();
+    expect(screen.queryByText('Lawn Care Program')).not.toBeInTheDocument();
+    expect(document.title).toBe('Your Tree & Shrub Program Overview | Waves');
+    const cards = within(sectionOf('Treatments That May Be Used')).getAllByRole('listitem');
+    expect(cards.map((card) => card.querySelector('span span').textContent)).toEqual(['Palm fertilizer', 'Shrub fertilizer']);
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/);
+  });
+
+  it('a packet with no service line stays the lawn program', async () => {
+    renderWith(v13Content());
+    await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
+    expect(screen.getByText('Lawn Care Program')).toBeInTheDocument();
+    expect(document.title).toBe('Your Lawn Care Program Overview | Waves');
   });
 });

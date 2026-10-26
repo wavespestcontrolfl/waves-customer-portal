@@ -3370,3 +3370,7 @@ Owner, after #6837 fixed the estimate page: "so the glass UI, should have stayed
 ## 2026-10-26 — Commercial proposal: What happens next sits below the proposal
 
 Owner: "the what happens next should be below the proposal". **Decision.** On an authored commercial proposal page the order is hero → proposal card → What happens next → Accept & sign → Ask Waves. It replaces the 2026-08-08 slot directly under the hero; the card keeps its "What happens next" title, and its wording ("tap Accept & sign agreement below") still points down to the sign card.
+
+## 2026-10-26 — Commercial proposals show business-fit reviews
+
+Owner "OK GO" on choice 2A (decision page 8zoPRWmm). **Decision.** An authored commercial proposal shows the Google reviews section again, under "What our customers say". It reads 40 reviews from the shared pool and keeps the first 8 with no home, family, pets or yard words (128 of the 181 reviews qualify; none of the 181 comes from a commercial customer). The reviews stay word for word. The app pitch stays hidden.

@@ -6,6 +6,8 @@
 // designer's usual edit overlay (removed, moved, added). The shown nozzles are then exactly the saved
 // ones, and the overlay follows the step 1 rule: changing the lines re-places the nozzles and clears it.
 import { adminFetch } from '../utils/admin-fetch';
+import { normalizeAim } from './mistingLayoutAim';
+import { nozzleLines, placeBedRisers } from './mistingLayoutBeds';
 import { nearestPointOnLines, placeNozzles } from './mistingLayoutGeometry';
 import { numberNozzles } from './mistingLayoutSketch';
 
@@ -15,9 +17,10 @@ const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 /**
  * The lines and nozzles as they are stored and drawn: lines with fewer than two points are dropped
  * (a lone draft vertex is not a line), and the nozzles are numbered in walking order with their
- * `lineIndex` pointing into the kept lines (null when their line was dropped).
+ * `lineIndex` pointing into the kept lines (null when their line was dropped). A nozzle keeps its
+ * `key`, and its `aim` only when staff aimed it by hand.
  */
-export function layoutForExport(allLines, nozzles) {
+export function layoutForExport(allLines, nozzles, risers = []) {
   const remap = new Map();
   const lines = [];
   (allLines || []).forEach((line, i) => {
@@ -25,18 +28,31 @@ export function layoutForExport(allLines, nozzles) {
     remap.set(i, lines.length);
     lines.push({ id: line.id, kind: line.kind, points: line.points.map((p) => ({ x: p.x, y: p.y })) });
   });
-  const prepared = (nozzles || []).map((n) => ({
-    x: n.x,
-    y: n.y,
-    kind: n.kind === 'fence' ? 'fence' : 'eave',
-    lineIndex: remap.has(n.lineIndex) ? remap.get(n.lineIndex) : null,
+  const prepared = (nozzles || []).map((n) => {
+    const aim = normalizeAim(n.aim);
+    return {
+      key: n.key,
+      x: n.x,
+      y: n.y,
+      kind: n.kind === 'fence' ? 'fence' : 'eave',
+      lineIndex: remap.has(n.lineIndex) ? remap.get(n.lineIndex) : null,
+      ...(aim === null ? {} : { aim }),
+    };
+  });
+  // A bed riser keeps the bed line it was placed on (its aim follows that line); a manual one names no line.
+  const exportedRisers = (risers || []).map((r) => ({
+    key: r.key,
+    x: r.x,
+    y: r.y,
+    source: r.source === 'bed' ? 'bed' : 'manual',
+    lineIndex: remap.has(r.lineIndex) ? remap.get(r.lineIndex) : null,
   }));
-  return { lines, nozzles: numberNozzles(prepared, lines) };
+  return { lines, nozzles: numberNozzles(prepared, lines), risers: exportedRisers };
 }
 
-/** The JSON part of the save request. Nozzles are in walking order. */
+/** The JSON part of the save request. Nozzles are in walking order; risers carry where they came from (bed or manual). */
 export function buildLayoutPayload({ address, center, zoom, lines, nozzles, risers, pump, zones, mapWidth, mapHeight }) {
-  const exported = layoutForExport(lines, nozzles);
+  const exported = layoutForExport(lines, nozzles, risers);
   return {
     address: address || null,
     center: { lat: center.lat, lng: center.lng },
@@ -44,44 +60,57 @@ export function buildLayoutPayload({ address, center, zoom, lines, nozzles, rise
     mapWidth,
     mapHeight,
     lines: exported.lines,
-    nozzles: exported.nozzles.map(({ x, y, kind, lineIndex }) => ({ x, y, kind, lineIndex })),
-    risers: (risers || []).map(({ x, y }) => ({ x, y })),
+    nozzles: exported.nozzles.map(({ x, y, kind, lineIndex, aim }) => ({ x, y, kind, lineIndex, ...(aim === undefined ? {} : { aim }) })),
+    // A bed riser also names its bed line, so reopening gives it back to that line (it decides which way the riser aims).
+    risers: exported.risers.map(({ x, y, source, lineIndex }) => ({ x, y, source, ...(source === 'bed' && lineIndex !== null ? { lineIndex } : {}) })),
     pump: pump ? { x: pump.x, y: pump.y } : null,
     zones: (zones || []).map(({ kind, x, y, radiusFt }) => ({ kind, x, y, radiusFt })),
   };
 }
 
+// A moved nozzle keeps the line it was placed on, and the line decides which way it aims, so a saved nozzle that
+// names a different line than an automatic one is not that nozzle moved: it is another one (removed + added).
+const sameLine = (auto, saved) => !Number.isInteger(saved.lineIndex) || saved.lineIndex === auto.lineIndex;
+
 /**
  * Express `saved` nozzles as an edit overlay on the automatic placement `auto`.
- * Pass 1 keeps every saved nozzle that sits on an automatic one (same kind, same spot). Pass 2 pairs
+ * Pass 1 keeps every saved nozzle that sits on an automatic one (same kind, same spot, same line when the saved nozzle names one). Pass 2 pairs
  * what is left, nearest first, as MOVED nozzles. Whatever is still unpaired is removed (automatic) or
  * added (saved). Whatever the pairing, applyNozzleEdits(auto, overlay) has exactly the saved positions.
+ * A saved manual `aim` goes with its nozzle: into `aimed` for a kept or moved automatic one, onto the
+ * nozzle itself for an added one.
  */
 export function diffNozzleEdits(auto, saved, lines, nextKey) {
   const freeAuto = new Set(auto.map((_, i) => i));
   const freeSaved = new Set(saved.map((_, i) => i));
-  const take = (a, s) => { freeAuto.delete(a); freeSaved.delete(s); };
+  const aimed = {};
+  const take = (a, s) => {
+    freeAuto.delete(a);
+    freeSaved.delete(s);
+    const aim = normalizeAim(saved[s].aim);
+    if (aim !== null) aimed[auto[a].key] = aim;
+  };
 
   saved.forEach((s, si) => {
     let best = -1;
     let bestD = Infinity;
     freeAuto.forEach((ai) => {
       const d = distance(auto[ai], s);
-      if (auto[ai].kind === s.kind && d <= MATCH_TOLERANCE_PX && d < bestD) { best = ai; bestD = d; }
+      if (auto[ai].kind === s.kind && sameLine(auto[ai], s) && d <= MATCH_TOLERANCE_PX && d < bestD) { best = ai; bestD = d; }
     });
     if (best >= 0) take(best, si);
   });
 
   const pairs = [];
   freeAuto.forEach((ai) => freeSaved.forEach((si) => {
-    if (auto[ai].kind === saved[si].kind) pairs.push({ ai, si, d: distance(auto[ai], saved[si]) });
+    if (auto[ai].kind === saved[si].kind && sameLine(auto[ai], saved[si])) pairs.push({ ai, si, d: distance(auto[ai], saved[si]) });
   }));
   pairs.sort((a, b) => a.d - b.d || a.ai - b.ai || a.si - b.si);
   const moved = {};
   pairs.forEach(({ ai, si }) => {
     if (!freeAuto.has(ai) || !freeSaved.has(si)) return;
-    moved[auto[ai].key] = { x: saved[si].x, y: saved[si].y };
     take(ai, si);
+    moved[auto[ai].key] = { x: saved[si].x, y: saved[si].y };
   });
 
   const removed = [...freeAuto].map((ai) => auto[ai].key);
@@ -90,8 +119,10 @@ export function diffNozzleEdits(auto, saved, lines, nextKey) {
     const byIndex = Number.isInteger(s.lineIndex) && lines[s.lineIndex] ? lines[s.lineIndex] : null;
     const near = byIndex ? null : nearestPointOnLines(lines, s, Infinity);
     const line = byIndex || (near ? lines[near.lineIndex] : null);
+    const aim = normalizeAim(s.aim);
     return {
       key: nextKey(),
+      ...(aim === null ? {} : { aim }),
       manual: true,
       x: s.x,
       y: s.y,
@@ -103,7 +134,18 @@ export function diffNozzleEdits(auto, saved, lines, nextKey) {
       corner: false,
     };
   });
-  return { removed, moved, added };
+  return { removed, moved, added, aimed };
+}
+
+/**
+ * Express the saved bed-sourced risers as an edit overlay on the automatic ones (the same pairing as the nozzles: those in
+ * place, then the nearest as moved). A saved bed riser with no automatic one to pair with is a riser staff added by hand, so
+ * it comes back as a manual riser. Returns { riserRemoved, riserMoved, manual: [{x, y}] }.
+ */
+export function diffRiserEdits(autoRisers, savedBed) {
+  const tag = (list) => list.map((r) => ({ ...r, kind: 'riser' }));
+  const { removed, moved, added } = diffNozzleEdits(tag(autoRisers), tag(savedBed), [], () => 'unused');
+  return { riserRemoved: removed, riserMoved: moved, manual: added.map(({ x, y }) => ({ x, y })) };
 }
 
 /**
@@ -115,11 +157,19 @@ export function restoreLayout(saved) {
   const nextNumber = () => { counter += 1; return counter; };
   const lines = (saved.lines || []).map((line) => ({
     id: `L${nextNumber()}`,
-    kind: line.kind === 'fence' ? 'fence' : 'eave',
+    kind: line.kind === 'fence' || line.kind === 'bed' ? line.kind : 'eave',
     points: (line.points || []).map((p) => ({ x: p.x, y: p.y })),
   }));
-  const placed = placeNozzles(lines, { lat: saved.center.lat, zoom: saved.zoom });
-  const edits = diffNozzleEdits(placed.nozzles, saved.nozzles || [], lines, () => `m${nextNumber()}`);
+  const map = { lat: saved.center.lat, zoom: saved.zoom };
+  const forNozzles = nozzleLines(lines);
+  const placed = placeNozzles(forNozzles, map);
+  const nozzleEdits = diffNozzleEdits(placed.nozzles, saved.nozzles || [], forNozzles, () => `m${nextNumber()}`);
+  // Bed risers come back from the bed lines, with staff's moves and deletions as an overlay on them; every other saved
+  // riser (manual, or saved before risers had a source) is a riser staff dropped.
+  const savedRisers = saved.risers || [];
+  const bedEdits = diffRiserEdits(placeBedRisers(lines, map), savedRisers.filter((r) => r.source === 'bed'));
+  const edits = { ...nozzleEdits, riserRemoved: bedEdits.riserRemoved, riserMoved: bedEdits.riserMoved };
+  const manualRisers = [...savedRisers.filter((r) => r.source !== 'bed'), ...bedEdits.manual];
 
   let extras = 0;
   const key = (prefix) => { extras += 1; return `${prefix}${extras}`; };
@@ -128,7 +178,7 @@ export function restoreLayout(saved) {
     edits,
     idCounter: counter,
     extras: {
-      risers: (saved.risers || []).map((r) => ({ key: key('R'), x: r.x, y: r.y })),
+      risers: manualRisers.map((r) => ({ key: key('R'), x: r.x, y: r.y })),
       pump: saved.pump ? { x: saved.pump.x, y: saved.pump.y } : null,
       zones: (saved.zones || []).map((z) => ({ key: key('Z'), kind: z.kind, x: z.x, y: z.y, radiusFt: z.radiusFt })),
       idCounter: extras,

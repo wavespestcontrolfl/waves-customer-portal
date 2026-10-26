@@ -318,21 +318,26 @@ export function computeTotals(lineStats, nozzles) {
 }
 
 /**
- * Staff edits on top of the automatic placement: delete, move, add.
- * `edits` = { removed: string[] of nozzle keys, moved: { [key]: {x, y} }, added: nozzle objects }.
+ * Staff edits on top of the automatic placement: delete, move, add, aim.
+ * `edits` = { removed: string[] of nozzle keys, moved: { [key]: {x, y} }, added: nozzle objects,
+ *             aimed: { [key]: heading in degrees } }.
+ * `aimed` is the manual spray direction of an automatic nozzle (an added nozzle carries its own `aim`).
+ * A nozzle with a manual aim comes back with `aim` set; without one it has no `aim` at all.
  * Keys are unique within one placement only. Edits are valid for the lines they were made on;
  * when the lines change, placement is redone and the caller discards the edits.
  */
 export function applyNozzleEdits(nozzles, edits = {}) {
   const removed = new Set(edits.removed || []);
   const moved = edits.moved || {};
+  const aimed = edits.aimed || {};
+  const withAim = (n) => (Number.isFinite(aimed[n.key]) ? { ...n, aim: aimed[n.key] } : n);
   const untouched = [];
   const byKey = new Map();
   (nozzles || []).forEach((n) => {
     if (removed.has(n.key)) return;
     const m = moved[n.key];
-    if (m && validPoint(m)) byKey.set(n.key, { ...n, x: m.x, y: m.y, edited: true });
-    else untouched.push(n);
+    if (m && validPoint(m)) byKey.set(n.key, withAim({ ...n, x: m.x, y: m.y, edited: true }));
+    else untouched.push(withAim(n));
   });
   // Most recently edited last, so a tap on overlapping nozzles takes the newest first.
   const movedOut = Object.keys(moved).filter((k) => byKey.has(k)).map((k) => byKey.get(k));
