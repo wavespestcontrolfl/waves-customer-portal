@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import React from "react";
+import { IDBFactory } from "fake-indexeddb";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
@@ -47,9 +48,7 @@ const renderPage = (url = "/") => render(
 beforeEach(() => {
   adminFetch.mockReset();
   localStorage.clear();
-  vi.stubGlobal("navigator", Object.assign(Object.create(navigator), {
-    locks: { request: (_key, _options, callback) => Promise.resolve().then(callback) },
-  }));
+  vi.stubGlobal("indexedDB", new IDBFactory());
 });
 afterEach(() => {
   cleanup();
@@ -342,6 +341,7 @@ it("saves and applies a named Bid Desk view through the shared control", async (
   fireEvent.click(screen.getByRole("button", { name: "Done" }));
 
   fireEvent.click(screen.getByRole("button", { name: "Bid Desk saved views" }));
+  await waitFor(() => expect(screen.getByLabelText("View name")).toBeEnabled());
   fireEvent.change(screen.getByLabelText("View name"), { target: { value: "Due without buyer" } });
   fireEvent.click(screen.getByRole("button", { name: "Save current view" }));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "Bid Desk saved views" })).toBeNull());
@@ -354,11 +354,11 @@ it("saves and applies a named Bid Desk view through the shared control", async (
   fireEvent.click(screen.getByRole("button", { name: "Done" }));
 
   fireEvent.click(screen.getByRole("button", { name: "Bid Desk saved views" }));
-  const savedView = screen.getByRole("option", { name: "Due without buyer" });
+  const savedView = await screen.findByRole("option", { name: "Due without buyer" });
   fireEvent.change(screen.getByLabelText("Bid Desk saved view"), { target: { value: savedView.value } });
   fireEvent.click(screen.getByRole("button", { name: "Use view" }));
 
-  expect(screen.getByLabelText("Status")).toHaveValue("all");
+  await waitFor(() => expect(screen.getByLabelText("Status")).toHaveValue("all"));
   expect(screen.getByLabelText("Earlier mail")).toHaveValue("hide");
   expect(screen.getByLabelText("Sort")).toHaveValue("due");
   expect(screen.getByRole("columnheader", { name: "Project" })).toBeInTheDocument();

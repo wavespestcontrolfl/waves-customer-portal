@@ -1,5 +1,5 @@
 "use strict";
-/* global document, localStorage, navigator, getComputedStyle */
+/* global document, localStorage, navigator, indexedDB, getComputedStyle */
 // Synthetic frontend-only proof. All API requests are intercepted; unknown
 // routes, external requests, sockets, and provider actions cannot reach a server.
 const assert = require("node:assert/strict");
@@ -385,33 +385,92 @@ async function exerciseSavedViews(page, context, server, report, kind) {
   await otherSearch.fill("Example");
   const otherDialog = await openViews(other, spec.label);
   await otherDialog.getByText("No saved views yet.", { exact: true }).waitFor();
-
-  // Hold the real origin-wide lock, queue both tabs, then release it. Both
-  // durable snapshots must survive and the UI must stay pending until release.
-  const lockName = `waves-admin-table-views:${storageKey}`;
-  await other.evaluate((name) => new Promise((ready) => {
-    navigator.locks.request(name, { mode: "exclusive" }, () => {
-      ready();
-      return new Promise((release) => { globalThis.releaseCatalogLock = release; });
-    });
-  }), lockName);
   await openViews(page, spec.label);
   await dialog.getByRole("textbox", { name: "View name", exact: true }).fill("Concurrent first");
   await otherDialog.getByRole("textbox", { name: "View name", exact: true }).fill("Concurrent second");
+  const firstSave = dialog.getByRole("button", { name: "Save current view", exact: true });
+  const secondSave = otherDialog.getByRole("button", { name: "Save current view", exact: true });
+  await Promise.all([firstSave.click({ trial: true }), secondSave.click({ trial: true })]);
+
+  // Keep a real catalog readwrite transaction active. The chained reads hold
+  // the object store's transaction queue until the harness explicitly stops
+  // adding requests, so both tabs contend on the same primitive as production.
+  await other.evaluate(({ databaseName, storeName, key }) => new Promise((ready, reject) => {
+    const open = indexedDB.open(databaseName);
+    open.onerror = () => reject(open.error || new Error("Catalog database did not open"));
+    open.onsuccess = () => {
+      const database = open.result;
+      let released = false;
+      let transaction;
+      try {
+        transaction = database.transaction(storeName, "readwrite");
+      } catch (error) {
+        database.close();
+        reject(error);
+        return;
+      }
+      const store = transaction.objectStore(storeName);
+      const completed = new Promise((resolveComplete, rejectComplete) => {
+        transaction.oncomplete = () => { database.close(); resolveComplete(); };
+        transaction.onabort = () => {
+          database.close();
+          rejectComplete(transaction.error || new Error("Held catalog transaction aborted"));
+        };
+      });
+      globalThis.releaseCatalogTransaction = () => { released = true; return completed; };
+      const keepAlive = () => {
+        const read = store.get(key);
+        read.onsuccess = () => { if (!released) keepAlive(); };
+      };
+      keepAlive();
+      ready();
+    };
+  }), { databaseName: "waves-admin-table-views", storeName: "catalogs", key: storageKey });
   await Promise.all([
-    dialog.getByRole("button", { name: "Save current view", exact: true }).click(),
-    otherDialog.getByRole("button", { name: "Save current view", exact: true }).click(),
+    firstSave.click(),
+    secondSave.click(),
   ]);
-  await page.waitForFunction(async (name) => {
-    const locks = await navigator.locks.query();
-    return locks.pending.filter((lock) => lock.name === name).length === 2;
-  }, lockName);
-  assert.equal(await dialog.getByRole("button", { name: "Save current view" }).isDisabled(), true);
-  assert.equal(await otherDialog.getByRole("button", { name: "Save current view" }).isDisabled(), true);
-  await other.evaluate(() => globalThis.releaseCatalogLock());
+  await Promise.all([
+    page.waitForFunction(() => [...document.querySelectorAll("button")]
+      .some((button) => button.textContent.trim() === "Save current view" && button.disabled)),
+    other.waitForFunction(() => [...document.querySelectorAll("button")]
+      .some((button) => button.textContent.trim() === "Save current view" && button.disabled)),
+  ]);
+  assert.equal(await dialog.isVisible(), true, "First save stays pending behind the catalog transaction");
+  assert.equal(await otherDialog.isVisible(), true, "Second save stays pending behind the catalog transaction");
+  assert.equal(await firstSave.isDisabled(), true);
+  assert.equal(await secondSave.isDisabled(), true);
+  await other.evaluate(() => globalThis.releaseCatalogTransaction());
   await Promise.all([dialog.waitFor({ state: "hidden" }), otherDialog.waitFor({ state: "hidden" })]);
-  assert.deepEqual(await page.evaluate((key) => JSON.parse(localStorage.getItem(`${key}:views`)).views.map((view) => view.name).sort(), storageKey),
-    ["Concurrent first", "Concurrent second"]);
+  const verifier = await context.newPage();
+  verifier.on("pageerror", (error) => report.errors.push(error.message));
+  await verifier.goto(url);
+  await verifier.getByRole("searchbox", { name: `${spec.label} search`, exact: true }).waitFor();
+  const durableNames = await verifier.evaluate(({ databaseName, storeName, key }) => new Promise((resolve, reject) => {
+    const open = indexedDB.open(databaseName);
+    open.onupgradeneeded = () => open.transaction.abort();
+    open.onerror = () => reject(open.error || new Error("Catalog database did not reopen"));
+    open.onsuccess = () => {
+      const database = open.result;
+      try {
+        const transaction = database.transaction(storeName, "readonly");
+        const read = transaction.objectStore(storeName).get(key);
+        let names = [];
+        read.onsuccess = () => {
+          names = Array.isArray(read.result?.views)
+            ? read.result.views.map((view) => view.name).sort()
+            : [];
+        };
+        transaction.oncomplete = () => { database.close(); resolve(names); };
+        transaction.onabort = () => { database.close(); reject(transaction.error || read.error); };
+      } catch (error) {
+        database.close();
+        reject(error);
+      }
+    };
+  }), { databaseName: "waves-admin-table-views", storeName: "catalogs", key: storageKey });
+  assert.deepEqual(durableNames, ["Concurrent first", "Concurrent second"]);
+  await verifier.close();
   await other.close();
 
   report.userId = "fixture-other-admin";
