@@ -696,6 +696,49 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
     }
   } catch (err) { failures.push({ id: 'estimates_expiring' }); logger.error(`[dashboard-alerts] estimates_expiring: ${err.message}`); }
 
+  // 9b. Estimator drafts waiting to be sent (owner 2026-10-26, "B"). The
+  //     estimator engine drafts quotes from calls and texts, but its admin
+  //     alerts (category 'lead') are silenced by GATE_ADMIN_BELL_POLICY, so
+  //     since August nothing but the Estimates page showed them. Owner ruling
+  //     2026-09-30: unsent drafts are an Action Inbox count, not a bell.
+  //     Only drafts that can still be sent count: not archived, not past
+  //     expires_at (the engine stamps 7 days). Other sources stay out: their
+  //     open drafts are mostly months-old intake shells (lead_webhook,
+  //     quote_wizard) that would bury the count.
+  try {
+    const draftQuery = db('estimates as d')
+      .leftJoin('customers as c', 'd.customer_id', 'c.id')
+      .whereNull('d.archived_at')
+      .where('d.status', 'draft')
+      .where('d.source', 'estimator_engine')
+      .whereRaw('(d.expires_at IS NULL OR d.expires_at > NOW())');
+    if (INTERNAL_TEST_CUSTOMERS.length) {
+      draftQuery
+        .whereNotIn(db.raw("LOWER(COALESCE(d.customer_name, ''))"), INTERNAL_TEST_CUSTOMERS)
+        .whereNotIn(
+          db.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
+          INTERNAL_TEST_CUSTOMERS,
+        );
+    }
+    // Soonest deadline first (NULLs sort last in ASC): the link opens the
+    // draft that expires next, which the Estimates page scrolls to.
+    const draftRows = (await draftQuery
+      .orderBy('d.expires_at', 'asc')
+      .select('d.id')) || [];
+    const count = draftRows.length;
+    if (count > 0) {
+      alerts.push({
+        id: 'estimate_drafts_unsent',
+        kind: 'action',
+        severity: 'warn',
+        count,
+        members: queueMembers(draftRows.map((r) => r.id)),
+        label: `${count} estimate draft${count === 1 ? '' : 's'} waiting to be sent`,
+        href: `/admin/estimates?estimateId=${encodeURIComponent(draftRows[0].id)}`,
+      });
+    }
+  } catch (err) { failures.push({ id: 'estimate_drafts_unsent' }); logger.error(`[dashboard-alerts] estimate_drafts_unsent: ${err.message}`); }
+
   // 10. MRR the next billing run can't count on (service-paused, autopay-paused,
   //     overdue, or prepay payment-pending). Reuses the SAME shared breakdown
   //     the MRR hero tile splits on (services/mrr-breakdown.js), so this item
