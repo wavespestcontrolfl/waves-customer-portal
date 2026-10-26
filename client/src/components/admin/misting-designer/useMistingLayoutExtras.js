@@ -25,11 +25,12 @@ import {
 const NO_FLAGS = Object.freeze({ nozzleKeys: new Set(), riserKeys: new Set() });
 const point = (p) => ({ x: p.x, y: p.y });
 
-export default function useMistingLayoutExtras(mapState, nozzles) {
-  const [extras, setExtras] = useState(NO_EXTRAS);
+// `initial` is the risers, pump and zones of a reopened saved layout, with the key counter to continue from.
+export default function useMistingLayoutExtras(mapState, nozzles, initial = null) {
+  const [extras, setExtras] = useState(initial ? { risers: initial.risers, pump: initial.pump, zones: initial.zones } : NO_EXTRAS);
   const [zoneKind, setZoneKind] = useState(DEFAULT_ZONE_KIND);
   const [clearedExtras, setClearedExtras] = useState(null); // { count, snapshot }
-  const idRef = useRef(0);
+  const idRef = useRef(initial ? initial.idCounter : 0);
   const nextKey = (prefix) => {
     idRef.current += 1;
     return `${prefix}${idRef.current}`;

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest';
-import { render } from '@testing-library/react';
+import { fireEvent, render } from '@testing-library/react';
 import EstimateProposalDocument from './EstimateProposalDocument';
 import { GLASS_COPY } from '../lib/estimate-glass-copy';
 import { RATE_REVIEW_TERMS_LINE } from '@estimate-copy-claims';
@@ -1120,6 +1120,43 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
       const data = docData({ ...pestMosquito, monthlyAverage: { planMonthly: 108.1, credit: { label: 'Referral Credit', monthly: 5 }, bundleDiscountPct: 0.1, oneTime: null } });
       const { container } = render(<EstimateProposalDocument data={data} token="tok-123" />);
       expect(container.querySelector('[data-application-months]')).toBeNull();
+    });
+  });
+
+  describe('Proposed misting layout (GATE_MISTING_LAYOUT_DESIGNER)', () => {
+    const layout = {
+      imageUrl: 'https://files.example/layout.png?sig=abc',
+      address: '600 Sample Plaza Dr',
+      counts: { nozzles: 12, eave: 8, fence: 4, risers: 3, linearFt: 118.6, zones: 2, pump: true },
+    };
+
+    it('prints the sketch, the counts and the concept note when the server sends a saved layout', () => {
+      const { container } = render(<EstimateProposalDocument data={{ ...BASE_DATA, mistingLayout: layout }} token="tok-123" />);
+      const section = container.querySelector('[data-testid="doc-misting-layout"]');
+      expect(section).toBeTruthy();
+      expect(section.textContent).toContain('Proposed misting layout');
+      expect(section.textContent).toContain('Nozzles: 12 (eave 8, fence 4)');
+      expect(section.textContent).toContain('Risers: 3');
+      expect(section.textContent).toContain('Pump: placed');
+      expect(section.textContent).toContain('Concept layout — final placement at the design visit and install.');
+      expect(section.querySelector('img').getAttribute('src')).toBe(layout.imageUrl);
+      expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(0);
+    });
+
+    it('adds no section and no text when the key is absent, so the document is unchanged', () => {
+      const without = render(<EstimateProposalDocument data={BASE_DATA} token="tok-123" />).container.innerHTML;
+      expect(without).not.toContain('doc-misting-layout');
+      expect(without).not.toContain('Proposed misting layout');
+      // An empty block (no image) is the same as absent.
+      const emptyBlock = render(<EstimateProposalDocument data={{ ...BASE_DATA, mistingLayout: { counts: {} } }} token="tok-123" />).container.innerHTML;
+      expect(emptyBlock).toBe(without);
+    });
+
+    it('drops the section and counts one failed image when the sketch cannot load', () => {
+      const { container } = render(<EstimateProposalDocument data={{ ...BASE_DATA, mistingLayout: layout }} token="tok-123" />);
+      fireEvent.error(container.querySelector('[data-testid="doc-misting-layout"] img'));
+      expect(container.querySelector('[data-testid="doc-misting-layout"]')).toBeNull();
+      expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(1);
     });
   });
 });
