@@ -251,3 +251,48 @@ describe('ContractSignPage Auto Pay next step (commercial agreement, GATE_COMMER
     expect(queryByTestId('autopay-next-step')).toBeNull();
   });
 });
+
+describe('ContractSignPage drawn signature', () => {
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+  const ctx = { clearRect: vi.fn(), beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), stroke: vi.fn(), drawImage: vi.fn() };
+
+  async function signWith({ draw }) {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ctx);
+    vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockImplementation(() => PNG);
+    const fetchMock = vi.fn(async (url, init) => {
+      if (init?.method === 'POST') return jsonResponse({ contract: { ...CONTRACT_A, status: 'signed', signedName: 'Alice Anderson', signedAt: '2026-10-26T12:00:00Z' }, signed: true });
+      return jsonResponse({ contract: CONTRACT_A });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container, getByTestId, getByRole } = render(
+      <MemoryRouter initialEntries={[`/contract/${CONTRACT_A.token}`]}>
+        <Routes><Route path="/contract/:token" element={<ContractSignPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(input(container, 'signedName')).toBeInTheDocument());
+    if (draw) {
+      const canvas = getByTestId('drawn-signature-canvas');
+      fireEvent.mouseDown(canvas, { clientX: 10, clientY: 10 });
+      fireEvent.mouseMove(canvas, { clientX: 60, clientY: 40 });
+      fireEvent.mouseUp(canvas);
+    }
+    fireEvent.change(input(container, 'initials'), { target: { value: 'AA' } });
+    const boxes = container.querySelectorAll('input[type="checkbox"]');
+    boxes.forEach((box) => fireEvent.click(box));
+    fireEvent.click(getByRole('button', { name: /Sign Document/ }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(true));
+    const [, init] = fetchMock.mock.calls.find(([, i]) => i?.method === 'POST');
+    return JSON.parse(init.body);
+  }
+
+  it('sends the drawn PNG with the sign POST when something was drawn', async () => {
+    const body = await signWith({ draw: true });
+    expect(body).toMatchObject({ initials: 'AA', signedName: 'Alice Anderson', signatureImage: PNG, agreeElectronic: true, agreeDocumentTerms: true });
+  });
+
+  it('omits signatureImage when the pad was left blank (typed signature only, as before)', async () => {
+    const body = await signWith({ draw: false });
+    expect(body).toMatchObject({ initials: 'AA', signedName: 'Alice Anderson' });
+    expect(body).not.toHaveProperty('signatureImage');
+  });
+});

@@ -16,7 +16,7 @@ const { randomUUID } = require('node:crypto');
 const NotificationService = require('../services/notification-service');
 const { closeAdminAlertKeys } = require('../services/admin-alert-episodes');
 const { NEW_CONSTRUCTION_WARRANTY_KEY } = require('../services/new-construction-warranty');
-const { runWarrantyRenewalReminder, _private: { alertKey, alertSpec, isoFromUs } } = require('../services/warranty-renewal-reminder');
+const { runWarrantyRenewalReminder, COMMERCIAL_AGREEMENT_KEY, _private: { alertKey, alertSpec, isoFromUs, liveKeys } } = require('../services/warranty-renewal-reminder');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 
 describe('warranty renewal reminder (pure)', () => {
@@ -31,6 +31,23 @@ describe('warranty renewal reminder (pure)', () => {
     expect(composed.why).toMatch(/renews Oct 1.*notice about 30 days before\.$/);
     expect(composed.metadata).toMatchObject({ severity: 'needs-you', doneWhen: 'renewal_notice_sent', subject: { type: 'customer', id: 'cust-1' } });
     expect(alertKey('c1', '2027-10-01')).toBe('warranty-renewal:c1:2027-10-01');
+  });
+
+  test('the commercial agreement composes its own rule-clean notification under its own key', () => {
+    const spec = alertSpec({ id: 'c2', customer_id: 'cust-2', document_template_key: COMMERCIAL_AGREEMENT_KEY, day: '2027-11-15', first_name: null, last_name: null, company_name: 'Harbor Dental' });
+    const composed = composeAdminAlert(spec);
+    expect(composed.headline).toBe('Customers — send Harbor Dental the agreement renewal notice');
+    expect(composed.why).toMatch(/^Commercial agreement renews Nov 15.*30 days before\.$/);
+    expect(composed.metadata).toMatchObject({ severity: 'needs-you', doneWhen: 'renewal_notice_sent', subject: { type: 'customer', id: 'cust-2' } });
+    expect(alertKey('c2', '2027-11-15', COMMERCIAL_AGREEMENT_KEY)).toBe('agreement-renewal:c2:2027-11-15');
+  });
+
+  test('the commercial lane is dark by default and joins the warranty lane only with the gate on', () => {
+    delete process.env.GATE_AGREEMENT_RENEWAL_REMINDER;
+    expect(liveKeys()).toEqual([NEW_CONSTRUCTION_WARRANTY_KEY]);
+    process.env.GATE_AGREEMENT_RENEWAL_REMINDER = 'true';
+    expect(liveKeys()).toEqual([NEW_CONSTRUCTION_WARRANTY_KEY, COMMERCIAL_AGREEMENT_KEY]);
+    delete process.env.GATE_AGREEMENT_RENEWAL_REMINDER;
   });
 });
 
@@ -60,6 +77,24 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
   };
   const read = (id) => trx('customer_contracts').where({ id })
     .first(trx.raw("to_char(renewal_date, 'YYYY-MM-DD') as day"), 'auto_renewal_notice_required', 'auto_renewal_notice_sent_at');
+  const commercial = async (customerId, { status = 'signed', signedAt = '2027-01-15T15:00:00Z', renewalDate = null, sentAt = null } = {}) => {
+    const [row] = await trx('customer_contracts').insert({
+      customer_id: customerId,
+      contract_type: 'document_template',
+      title: 'Commercial Pest Service Agreement',
+      status,
+      signed_at: status === 'signed' ? signedAt : null,
+      document_template_key: COMMERCIAL_AGREEMENT_KEY,
+      document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-1', source: 'commercial_proposal_sign' } }),
+      renewal_date: renewalDate,
+      auto_renewal_notice_required: Boolean(renewalDate),
+      auto_renewal_notice_sent_at: sentAt,
+    }).returning(['id']);
+    return row.id;
+  };
+  const visit = (customerId, scheduledDate, status = 'confirmed') => trx('scheduled_services').insert({
+    customer_id: customerId, scheduled_date: scheduledDate, status, service_type: 'Commercial Pest Control',
+  });
 
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
@@ -71,10 +106,12 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
+    delete process.env.GATE_AGREEMENT_RENEWAL_REMINDER;
     trx = await database.transaction();
     mockConnection = trx;
   });
   afterEach(async () => {
+    delete process.env.GATE_AGREEMENT_RENEWAL_REMINDER;
     await trx.rollback();
   });
   afterAll(async () => { await database?.destroy(); });
@@ -130,5 +167,58 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
     expect(result.raised).toBe(1);
     const closedKeys = closeAdminAlertKeys.mock.calls.flatMap(([, keys]) => keys);
     expect(closedKeys).toEqual(expect.arrayContaining([alertKey(today, '2027-10-01'), alertKey(ended, '2027-10-01')]));
+  });
+
+  test('gate off: a signed commercial agreement is left alone (no date filled, no bell)', async () => {
+    const id = await commercial(await customer());
+    const result = await runWarrantyRenewalReminder({ conn: trx, today: '2027-12-20' });
+    expect(result).toMatchObject({ filled: 0, raised: 0 });
+    expect((await read(id)).day).toBeNull();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the term anchors on the first visit on or after signing (else the signing day) + 12 months, and reminds 45 days out', async () => {
+    process.env.GATE_AGREEMENT_RENEWAL_REMINDER = 'true';
+    const withVisit = await customer();
+    await visit(withVisit, '2027-01-10', 'completed'); // before signing: not the anchor
+    await visit(withVisit, '2027-02-03', 'cancelled'); // cancelled: not the anchor
+    await visit(withVisit, '2027-02-20'); // the first real visit after signing
+    await visit(withVisit, '2027-03-20');
+    const anchored = await commercial(withVisit);
+    const noVisit = await customer();
+    const bySigning = await commercial(noVisit, { signedAt: '2027-01-31T20:00:00Z' });
+    const open = await commercial(await customer(), { status: 'viewed' });
+
+    const early = await runWarrantyRenewalReminder({ conn: trx, today: '2027-06-01' });
+    expect(early).toMatchObject({ filled: 2, raised: 0 });
+    expect(await read(anchored)).toMatchObject({ day: '2028-02-20', auto_renewal_notice_required: true });
+    expect(await read(bySigning)).toMatchObject({ day: '2028-01-31', auto_renewal_notice_required: true });
+    expect((await read(open)).day).toBeNull();
+
+    const due = await runWarrantyRenewalReminder({ conn: trx, today: '2028-01-08' });
+    expect(due).toMatchObject({ filled: 0, raised: 2 });
+    const calls = NotificationService.notifyAdmin.mock.calls;
+    expect(calls.map(([, headline]) => headline)).toEqual(expect.arrayContaining([
+      'Customers — send Sample Owner the agreement renewal notice',
+    ]));
+    expect(calls.map(([, , , opts]) => opts.dedupeKey)).toEqual(expect.arrayContaining([
+      alertKey(anchored, '2028-02-20', COMMERCIAL_AGREEMENT_KEY), alertKey(bySigning, '2028-01-31', COMMERCIAL_AGREEMENT_KEY),
+    ]));
+    expect(calls.every(([, , why]) => /Commercial agreement renews .*30 days before\.$/.test(why))).toBe(true);
+  });
+
+  test('gate on: a notice marked sent or a cancelled agreement closes its reminder, and a passed term rolls a year', async () => {
+    process.env.GATE_AGREEMENT_RENEWAL_REMINDER = 'true';
+    const sent = await commercial(await customer(), { renewalDate: '2028-02-20', sentAt: new Date('2028-01-10T15:00:00Z') });
+    const cancelled = await commercial(await customer(), { status: 'cancelled', renewalDate: '2028-02-20' });
+    const passed = await commercial(await customer(), { renewalDate: '2027-11-01', sentAt: new Date('2027-09-20T15:00:00Z') });
+    const result = await runWarrantyRenewalReminder({ conn: trx, today: '2028-01-12' });
+    expect(result).toMatchObject({ rolled: 1, raised: 0 });
+    expect(await read(passed)).toMatchObject({ day: '2028-11-01', auto_renewal_notice_sent_at: null });
+    const closedKeys = closeAdminAlertKeys.mock.calls.flatMap(([, keys]) => keys);
+    expect(closedKeys).toEqual(expect.arrayContaining([
+      alertKey(sent, '2028-02-20', COMMERCIAL_AGREEMENT_KEY), alertKey(cancelled, '2028-02-20', COMMERCIAL_AGREEMENT_KEY), alertKey(passed, '2027-11-01', COMMERCIAL_AGREEMENT_KEY),
+    ]));
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 });

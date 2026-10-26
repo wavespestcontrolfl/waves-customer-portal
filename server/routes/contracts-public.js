@@ -19,11 +19,16 @@ const { ANNUAL_TEMPLATE_KEY: ANNUAL_TERMITE_TEMPLATE_KEY } = require('../service
 // does not load the service for every other contract).
 const COMMERCIAL_AGREEMENT_TEMPLATE_KEY = 'service_agreement.commercial_pest';
 
-// The public payload of a contract. A consumer notice issued from the estimate page
-// (services/estimate-consumer-notice.js marks its snapshot) also carries fromEstimate: true, so the
-// signing page can offer "Back to your estimate". The estimate id and token never leave the server.
+// A signature pad's PNG is tens of KB; this cap keeps a hostile body from parking megabytes on the row.
+const MAX_DRAWN_SIGNATURE_BYTES = 512 * 1024;
+
+// The public payload of a contract. A consumer notice or a residential service agreement issued from
+// the estimate page (services/estimate-consumer-notice.js and services/estimate-service-agreement.js
+// mark their snapshots) also carries fromEstimate: true, so the signing page can offer "Back to your
+// estimate". The estimate id and token never leave the server.
+const FROM_ESTIMATE_SOURCES = new Set(['estimate_consumer_notice', 'estimate_service_agreement']);
 function publicContract(row) {
-  const fromEstimate = row.document_variables_snapshot?.estimate?.source === 'estimate_consumer_notice';
+  const fromEstimate = FROM_ESTIMATE_SOURCES.has(row.document_variables_snapshot?.estimate?.source);
   return { ...serializeContract(row, { includeAudit: false }), ...(fromEstimate ? { fromEstimate: true } : {}) };
 }
 
@@ -149,6 +154,17 @@ router.post('/:token/sign', async (req, res, next) => {
     const tokenHash = publicTokenHash(req.params.token);
     if (!tokenHash) return res.status(404).json({ error: 'Contract not found' });
 
+    // Optional drawn signature from the page's signature pad. The typed name above stays the signature of
+    // record; the image is additional evidence stamped into the executed PDF. Validated after the cheap
+    // token-shape check and before any lock (type, size, magic bytes, visible ink) so a blank or malformed
+    // pad never reaches the row.
+    let signatureImage = null;
+    if (req.body?.signatureImage != null && String(req.body.signatureImage).trim() !== '') {
+      const parsed = await require('../services/signature-image').parseSignatureImage(req.body.signatureImage, { maxBytes: MAX_DRAWN_SIGNATURE_BYTES, maxLabel: '512KB' });
+      if (!parsed.ok) return res.status(parsed.status).json({ error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) });
+      signatureImage = parsed.image;
+    }
+
     let response;
     await db.transaction(async (trx) => {
       // Lock-order alignment with the merge-undo (Codex #3109 r29): the
@@ -256,6 +272,7 @@ router.post('/:token/sign', async (req, res, next) => {
           signed_at: now,
           signed_name: signedName,
           recipient_initials: initials,
+          ...(signatureImage ? { signature_image: signatureImage } : {}),
           signer_ip: req.ip || null,
           signer_user_agent: req.get('user-agent') || null,
           share_token_hash: null,
@@ -270,6 +287,7 @@ router.post('/:token/sign', async (req, res, next) => {
       await insertEvent(trx, contract, 'signed', req, {
         signedName,
         initials,
+        drawnSignature: Boolean(signatureImage),
         agreeElectronic,
         agreementType: isAutopayAuthorization ? 'autopay_authorization' : 'document_terms',
         ...(isAutopayAuthorization ? { agreeAuthorization } : { agreeDocumentTerms }),

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import DocumentActionBar from '../components/DocumentActionBar';
+import DrawnSignaturePad from '../components/DrawnSignaturePad';
 import {
   WavesShell,
   CustomerColumn,
@@ -82,10 +83,15 @@ function ContractBodyText({ text }) {
   ));
 }
 
-// A Florida consumer notice opened from the estimate page (the server marks it fromEstimate) offers the way back,
-// when this tab has a page to go back to.
+// A Florida consumer notice or a residential service agreement opened from the estimate page (the server marks it
+// fromEstimate) offers the way back, when this tab has a page to go back to.
+const FROM_ESTIMATE_TEMPLATE_KEYS = new Set([
+  'consumer_notice.fdacs_13692',
+  'service_agreement.residential_pest',
+  'service_agreement.lawn_ornamental',
+]);
 function BackToEstimateButton({ contract }) {
-  if (contract.fromEstimate !== true || contract.documentTemplateKey !== 'consumer_notice.fdacs_13692') return null;
+  if (contract.fromEstimate !== true || !FROM_ESTIMATE_TEMPLATE_KEYS.has(contract.documentTemplateKey)) return null;
   if (window.history.length <= 1) return null;
   return (
     <BrandButton type="button" fullWidth style={{ marginTop: SP.md }} onClick={() => window.history.back()}>
@@ -134,6 +140,8 @@ export default function ContractSignPage() {
   const [submitting, setSubmitting] = useState(false);
   const [signed, setSigned] = useState(false);
   const [autopaySetup, setAutopaySetup] = useState(null);
+  // The optional drawn signature (PNG data URL from the pad), null until something is drawn.
+  const [signatureImage, setSignatureImage] = useState(null);
   const [form, setForm] = useState({
     initials: '',
     signedName: '',
@@ -176,6 +184,7 @@ export default function ContractSignPage() {
     setSubmitting(false);
     setSigned(false);
     setAutopaySetup(null);
+    setSignatureImage(null);
     setForm({
       initials: '',
       signedName: '',
@@ -241,6 +250,8 @@ export default function ContractSignPage() {
         body: JSON.stringify({
           initials: form.initials.trim(),
           signedName: form.signedName.trim(),
+          // Only when something was drawn: the typed signature is the signature of record either way.
+          ...(signatureImage ? { signatureImage } : {}),
           agreeElectronic: form.agreeElectronic,
           agreeAuthorization: contract?.contractType === 'autopay_authorization' ? form.agreeAuthorization : false,
           agreeDocumentTerms: contract?.contractType === 'autopay_authorization' ? false : form.agreeDocumentTerms,
@@ -382,9 +393,11 @@ export default function ContractSignPage() {
                 <div style={{ marginBottom: SP.md }}>
                   <div>
                     <div style={{ fontSize: FS.h4, fontWeight: FW.bold, color: DOC.ink }}>Sign {documentKind}</div>
-                    <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2 }}>Both fields and agreements are required.</div>
+                    <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2 }}>Initials, your typed signature and both agreements are required.</div>
                   </div>
                 </div>
+
+                <DrawnSignaturePad onChange={setSignatureImage} disabled={submitting} resetKey={token} />
 
                 <label style={{ display: 'block', marginBottom: SP.sm }}>
                   <div style={DOC_EYEBROW}>Initials</div>

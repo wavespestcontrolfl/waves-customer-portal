@@ -20,6 +20,7 @@ const {
   WAVES_FL_LICENSE_LINE,
 } = require('../../constants/business');
 const { formatDisplayDate } = require('../../utils/date-only');
+const { signatureImageBuffer } = require('../signature-image');
 
 // Brand palette — mirrors invoice-pdf.js / brand-tokens.css.
 const NAVY = '#1B2C5B';
@@ -34,6 +35,8 @@ const MARGIN_X = 48;
 const CONTENT_W = PAGE_W - MARGIN_X * 2;
 const FOOTER_TOP = 742;
 const BODY_TOP = 150; // below the header + title bar on page 1
+const DRAWN_SIGNATURE_W = 240; // the drawn signature's box in the signature block
+const DRAWN_SIGNATURE_H = 64;
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60) || 'waves-agreement';
 
@@ -141,9 +144,12 @@ function recipientBlock(doc, { recipient, requestedDate }) {
 // Signature block: stamped execution details when signed, or a blank
 // signature line on the review copy.
 function signatureBlock(doc, contract, { signed }) {
+  // The drawn signature (customer_contracts.signature_image, a validated PNG/JPEG data URL) prints
+  // above the typed name on the executed copy. An image that fails to decode is skipped, never fatal.
+  const drawn = signed ? signatureImageBuffer(contract.signature_image) : null;
   // Keep the block together — push to a new page if it won't fit. A
   // countersigned agreement adds one more stamped line below.
-  const needed = contract.countersigned_at ? 130 : 96;
+  const needed = (contract.countersigned_at ? 130 : 96) + (drawn ? DRAWN_SIGNATURE_H + 8 : 0);
   if (doc.y + needed > FOOTER_TOP - 16) doc.addPage();
 
   let y = doc.y + 10;
@@ -156,6 +162,14 @@ function signatureBlock(doc, contract, { signed }) {
   y += 14;
 
   if (signed) {
+    if (drawn) {
+      try {
+        doc.image(drawn, MARGIN_X, y, { fit: [DRAWN_SIGNATURE_W, DRAWN_SIGNATURE_H] });
+        y += DRAWN_SIGNATURE_H + 8;
+      } catch {
+        // Not a decodable image after all: the typed signature below still stands.
+      }
+    }
     doc.fontSize(13).font('Helvetica-Bold').fillColor(NAVY).text(contract.signed_name || '—', MARGIN_X, y);
     y += 18;
     doc.fontSize(9).font('Helvetica').fillColor(BODY)

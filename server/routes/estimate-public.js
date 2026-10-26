@@ -19296,6 +19296,65 @@ router.post('/:token/consumer-notice', consumerNoticeLimiter, async (req, res, n
   }
 });
 
+// Residential service agreement (GATE_ESTIMATE_SERVICE_AGREEMENT): the same contract as commercial-agreement above, so
+// its privacy-header stamp is reused. Gate-aware limiter: a dark gate answers the generic 404 on every probe, never a 429.
+const serviceAgreementLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.estimateServiceAgreementLive(),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like commercialAgreementPreGuard: the
+// privacy headers and the dark gate's generic 404 land ahead of any limiter. POST only.
+const SERVICE_AGREEMENT_PATH_RE = /^\/[^/]+\/service-agreement\/?$/i;
+function serviceAgreementPreGuard(req, res, next) {
+  if (req.method !== 'POST' || !SERVICE_AGREEMENT_PATH_RE.test(req.path || '')) return next();
+  stampCommercialAgreementHeaders(res);
+  if (!featureGates.estimateServiceAgreementLive()) return res.status(404).json({ error: 'Estimate not found' });
+  return next();
+}
+
+// The accepted estimate is still the customer's to read: viewable (not archived, not off the customer surface) and
+// accepted. Re-run on the locked row by the issuer; true = no longer open for online signing.
+async function serviceAgreementBlockedFor(_trx, locked) {
+  return !isEstimateCustomerViewable(locked) || locked.status !== 'accepted';
+}
+
+// POST /api/estimates/:token/service-agreement — the accepted page's "Review and sign your service agreement" tap.
+// Body { lane: 'pest' | 'lawn' }. Issues, or re-opens, the lane's service agreement (Residential Pest, or Lawn &
+// Ornamental) for the estimate's customer and returns its public signing URL. The estimate, its visit, invoice and
+// charge are never changed. The generic 404 covers a dark gate, an unknown token, an estimate that is not accepted or
+// not viewable, a staff preview, a commercial estimate and a lane the plan does not carry; the distinct 409s (no
+// account, already signed, agreement unavailable) come only after the token has cleared every check.
+router.post('/:token/service-agreement', serviceAgreementLimiter, async (req, res, next) => {
+  stampCommercialAgreementHeaders(res);
+  const notFound = () => res.status(404).json({ error: 'Estimate not found' });
+  try {
+    if (!featureGates.estimateServiceAgreementLive() || req.query.adminPreview === '1') return notFound();
+    const lane = String(req.body?.lane || '').trim();
+    const serviceAgreement = require('../services/estimate-service-agreement');
+    if (!serviceAgreement.LANES[lane]) return notFound();
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return notFound();
+    if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) return notFound();
+    if (await serviceAgreementBlockedFor(db, estimate)) return notFound();
+    if (!serviceAgreement.estimateServiceAgreementLanes(estimate).includes(lane)) return notFound();
+    const result = await serviceAgreement.ensureEstimateServiceAgreement({ estimate, lane, req, blockedFor: serviceAgreementBlockedFor });
+    if (!result.ok) {
+      return res.status(result.status).json(result.status === 404 ? { error: 'Estimate not found' } : { error: result.error, code: result.code });
+    }
+    return res.status(result.status).json({ signingUrl: result.signingUrl });
+  } catch (err) {
+    // err.code only, never err.message (PG constraint errors can quote customer data).
+    logger.warn(`[estimate-public] service-agreement failed (code=${err?.code || 'none'})`);
+    next(err);
+  }
+});
+
 // Mirrors extensionRequestLimiter exactly (codex #3376 r2): the shared
 // add-service limiter runs BEFORE the handler's gate check, so a dark gate
 // would leak a distinctive 429 on the ninth probe instead of the promised
@@ -30808,6 +30867,13 @@ async function composeEstimateDataPayload(estimate, {
       && isEstimateAcceptActive(estimate)
       ? await require('../services/estimate-consumer-notice').consumerNoticeCtaFor(estimate)
       : null;
+    // Residential service agreement (GATE_ESTIMATE_SERVICE_AGREEMENT): the ACCEPTED page offers the plan's service
+    // agreement(s) for signing. Nothing is read or added with the gate off; never a staff preview, a draft preview or
+    // the headless document render.
+    const serviceAgreementsCta = featureGates.estimateServiceAgreementLive()
+      && terminalState === 'accepted' && !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass
+      ? await require('../services/estimate-service-agreement').serviceAgreementCtaFor(estimate)
+      : null;
     // Public proposal view — the authored buildings/line items the customer's
     // emailed PDF already contains, projected for the on-page glass render.
     // Resolved with the SAME live billing lane as the PDF generator so the
@@ -31517,6 +31583,7 @@ async function composeEstimateDataPayload(estimate, {
         commercialProposal: quoteRequirement.reason === 'commercial_proposal',
         ...(commercialAgreementCta ? { commercialAgreement: commercialAgreementCta } : {}),
         ...(consumerNoticeCta ? { consumerNotice: consumerNoticeCta } : {}),
+        ...(serviceAgreementsCta ? { serviceAgreements: serviceAgreementsCta } : {}),
         // Auto-priced commercial (no quote-required proposal): React needs the
         // commercial identity too — its bundle card keeps the monthly contract
         // price, mirroring the SSR fork (codex #3128 r5).
@@ -31990,6 +32057,7 @@ module.exports.mapImagePreGuard = mapImagePreGuard;
 module.exports.contactPhonePreGuard = contactPhonePreGuard;
 module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
 module.exports.consumerNoticePreGuard = consumerNoticePreGuard;
+module.exports.serviceAgreementPreGuard = serviceAgreementPreGuard;
 module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
