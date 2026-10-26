@@ -272,12 +272,272 @@ const REFERRALS_LEAF_BY_KEY = Object.fromEntries(
   REFERRALS_TAB_LEAVES.map((l) => [l.key, l]),
 );
 
+// Inbound referral actions answer with the server's own reason (a 409 says
+// which guard refused), so the card can show it instead of "HTTP 409".
+function adminPost(path, body) {
+  return fetch(`${API}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body || {}),
+  }).then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
+  });
+}
+
+function inboundEvidenceLine(evidence) {
+  if (evidence.source === "link")
+    return `Came in through referral link ${evidence.code}`;
+  if (evidence.spokenName)
+    return `Said on the first call: "Referred by ${evidence.spokenName}"`;
+  return "Said on the first call that a customer referred them, with no name";
+}
+
+function inboundConfirmedMessage(result) {
+  if (result.error === "convert_failed")
+    return "Error: referral saved, but the conversion failed. Use Convert on it in the queue below.";
+  if (result.error === "credit_failed")
+    return "Referral confirmed, but the $25 credits did not post. They post at the next plan visit.";
+  if (result.credited) return "Referral confirmed. $25 credited to both accounts.";
+  if (!result.creditsNow)
+    return "Referral confirmed. The $25 credits post at the next completed plan visit.";
+  return "Referral confirmed. The credit step posted nothing; check the referral in the queue below.";
+}
+
+// GATE_REFERRAL_INBOUND_CONFIRM: one plan customer who came in through a
+// referral link or named a referrer. The office picks the referrer (a
+// suggestion or a search result), then confirms; or marks "not a referral".
+function InboundReferralCard({ item, onDone, flash }) {
+  const [chosen, setChosen] = useState(null);
+  const [search, setSearch] = useState(item.evidence.spokenName || "");
+  const [results, setResults] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [dismissing, setDismissing] = useState(false);
+
+  const runSearch = async (q) => {
+    setSearch(q);
+    if (q.trim().length < 2) {
+      setResults([]);
+      return;
+    }
+    try {
+      const r = await af(
+        `/admin/customers?search=${encodeURIComponent(q.trim())}&limit=8`,
+      );
+      setResults(
+        (r.customers || []).filter((c) => c.id !== item.customerId),
+      );
+    } catch {
+      setResults([]);
+    }
+  };
+
+  const confirm = async () => {
+    if (!chosen || busy) return;
+    setBusy(true);
+    try {
+      const result = await adminPost(
+        `/admin/referrals/inbound/${item.customerId}/confirm`,
+        { referrerCustomerId: chosen.customerId },
+      );
+      flash(inboundConfirmedMessage(result));
+      onDone();
+    } catch (e) {
+      flash("Error: " + e.message);
+      setBusy(false);
+    }
+  };
+
+  const dismiss = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await adminPost(`/admin/referrals/inbound/${item.customerId}/dismiss`);
+      flash("Removed from the list");
+      onDone();
+    } catch (e) {
+      flash("Error: " + e.message);
+      setBusy(false);
+    }
+  };
+
+  const firstName = item.name.split(" ")[0] || "the customer";
+  const pickRow = (c, note) => (
+    <div
+      key={c.customerId}
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 8,
+        padding: "6px 0",
+        borderBottom: `1px solid ${D.border}`,
+        fontSize: 14,
+        color: D.text,
+      }}
+    >
+      <span>
+        {c.name || "(no name)"}
+        <span style={{ color: D.muted }}>
+          {c.city ? ` · ${c.city}` : ""}
+          {c.phone ? ` · ${c.phone}` : ""}
+          {note ? ` · ${note}` : ""}
+        </span>
+      </span>
+      <button
+        onClick={() => setChosen(c)}
+        disabled={busy}
+        style={btnSmall(D.card, D.heading)}
+      >
+        Choose
+      </button>
+    </div>
+  );
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${D.border}`,
+        borderRadius: 10,
+        padding: 14,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      <div style={{ fontSize: 14, color: D.heading, fontWeight: 500 }}>
+        <a
+          href={`/admin/customers?customerId=${item.customerId}`}
+          style={{ color: D.heading }}
+        >
+          {item.name || "(no name)"}
+        </a>
+        <span style={{ color: D.muted, fontWeight: 400 }}>
+          {item.city ? ` · ${item.city}` : ""}
+          {` · ${item.plan.tier} ${fd(item.plan.monthlyRate)}/mo · `}
+          {item.creditsNow
+            ? "plan visit done"
+            : "no completed plan visit yet"}
+        </span>
+      </div>
+      <div style={{ fontSize: 14, color: D.text }}>
+        {inboundEvidenceLine(item.evidence)}
+      </div>
+      {item.selfReferral && (
+        <div style={{ fontSize: 14, color: D.muted }}>
+          The link code belongs to this customer's own household.
+        </div>
+      )}
+      {chosen ? (
+        <div
+          style={{
+            background: D.bg,
+            borderRadius: 8,
+            padding: 10,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <div style={{ fontSize: 14, color: D.heading }}>
+            Confirm {chosen.name || "this customer"} as the referrer.{" "}
+            {item.creditsNow
+              ? "Both accounts get the $25 credit now. No reward text or email goes out."
+              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit, with the usual reward text.`}{" "}
+            A referrer's 3rd, 5th or 10th referral also sends the usual milestone text.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={confirm} disabled={busy} style={btnPrimary}>
+              {busy ? "..." : "Confirm"}
+            </button>
+            <button
+              onClick={() => setChosen(null)}
+              disabled={busy}
+              style={{ ...btnPrimary, background: D.card, color: D.heading, border: `1px solid ${D.border}` }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          {item.suggestions.length > 0 && (
+            <div>
+              <div style={{ fontSize: 14, color: D.muted }}>
+                {item.evidence.source === "link"
+                  ? "Owner of the link code"
+                  : "Likely referrers"}
+              </div>
+              {item.suggestions.map((c) =>
+                pickRow(
+                  c,
+                  [
+                    c.viaCode ? null : c.exact ? "full name match" : null,
+                    c.onPlan ? "on a plan" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · "),
+                ),
+              )}
+            </div>
+          )}
+          <input
+            placeholder="Find the referrer by name or phone"
+            value={search}
+            onChange={(e) => runSearch(e.target.value)}
+            style={inputSt}
+          />
+          {results.map((c) =>
+            pickRow({
+              customerId: c.id,
+              name: `${c.firstName || ""} ${c.lastName || ""}`.trim(),
+              city: c.city,
+              phone: c.phone,
+            }),
+          )}
+          {dismissing ? (
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, fontSize: 14, color: D.text }}>
+              Remove {firstName} from this list for good?
+              <button onClick={dismiss} disabled={busy} style={btnSmall(D.teal)}>
+                Yes, not a referral
+              </button>
+              <button
+                onClick={() => setDismissing(false)}
+                disabled={busy}
+                style={btnSmall(D.card, D.heading)}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div>
+              <button
+                onClick={() => setDismissing(true)}
+                disabled={busy}
+                style={btnSmall(D.card, D.muted)}
+              >
+                Not a referral
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function ReferralsPageV2() {
   const isMobile = useIsMobile();
   const [tab, setTab] = useState("dashboard");
   const [stats, setStats] = useState(null);
   const [promoters, setPromoters] = useState([]);
   const [queue, setQueue] = useState([]);
+  const [inbound, setInbound] = useState({ enabled: false, items: [] });
   const [payouts, setPayouts] = useState([]);
   const [settings, setSettings] = useState(null);
   const [analytics, setAnalytics] = useState(null);
@@ -303,11 +563,13 @@ export default function ReferralsPageV2() {
       })),
       af("/admin/referrals/queue").catch(() => ({ referrals: [] })),
       af("/admin/referrals/payouts").catch(() => ({ payouts: [] })),
-    ]).then(([s, p, q, pay]) => {
+      af("/admin/referrals/inbound").catch(() => ({ enabled: false, items: [] })),
+    ]).then(([s, p, q, pay, inb]) => {
       setStats(s);
       setPromoters(p.promoters || []);
       setQueue(q.referrals || []);
       setPayouts(pay.payouts || []);
+      setInbound({ enabled: Boolean(inb.enabled), items: inb.items || [] });
       setLoading(false);
     });
   }, []);
@@ -495,7 +757,7 @@ export default function ReferralsPageV2() {
         icon={Gift}
         sections={REFERRALS_TAB_GROUPS.map((g) =>
           g.key === "queue"
-            ? { key: g.key, label: `${g.label} (${queue.length})`, Icon: g.Icon }
+            ? { key: g.key, label: `${g.label} (${queue.length + inbound.items.length})`, Icon: g.Icon }
             : { key: g.key, label: g.label, Icon: g.Icon },
         )}
         activeKey={activeGroup.key}
@@ -718,6 +980,37 @@ export default function ReferralsPageV2() {
       {/* QUEUE */}
       {tab === "queue" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {inbound.enabled && inbound.items.length > 0 && (
+            <div
+              style={{
+                background: D.card,
+                borderRadius: 12,
+                padding: 20,
+                border: `1px solid ${D.border}`,
+                display: "flex",
+                flexDirection: "column",
+                gap: 12,
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+                  Needs confirmation ({inbound.items.length})
+                </div>
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                  Plan customers who came in through a referral link or named
+                  a referrer. Confirm the referrer to pay the $25 rewards.
+                </div>
+              </div>
+              {inbound.items.map((item) => (
+                <InboundReferralCard
+                  key={item.customerId}
+                  item={item}
+                  onDone={load}
+                  flash={flash}
+                />
+              ))}
+            </div>
+          )}
           {/* Submit form */}
           <div
             style={{
