@@ -1424,6 +1424,53 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  // GATE_SPRAY_RAIN_RULES (owner 2026-10-26, plan page "Visit-Day Rain Rule"): off is today's strip,
+  // shadow records the rain-rule verdict without changing the strip, true shows it.
+  describe('rain rules on the readiness poll', () => {
+    const talstar = { id: 't', name: 'Talstar P', category: 'insecticide', epa_reg_number: '91234-145', label_verified_at: '2026-07-12', active: true };
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal' }] } };
+    // A 10:00 ET start (14:00Z) read at 8:00 ET.
+    const hourly = (pop) => [14, 15, 16, 17, 18].map((h) => ({ startTime: `2026-09-04T${h}:00:00Z`, temperatureF: 85, windMph: 5, rainChance: pop }));
+    const poll = (pop, extra = {}) => jobCard.buildJobCard('svc1', {
+      dbh: factsDb({ 'scheduled_services as ss': { ...visit(false), window_start: '10:00', latitude: 27.4, longitude: -82.5 }, property_preferences: prefs, products_catalog: [talstar], product_aliases: [] }),
+      readinessOnly: true,
+      deps: { getRecentCalls: async () => [], getHourly: async () => hourly(pop), protocols, ...extra },
+      now: new Date('2026-09-04T12:00:00Z'),
+    });
+    const weather = (result) => result.issues.find((issue) => issue.kind === 'weather') || null;
+    afterEach(() => { delete process.env.GATE_SPRAY_RAIN_RULES; });
+
+    test('off: today\'s chip, nothing recorded', async () => {
+      const recordSprayRainShadow = jest.fn();
+      expect(weather(await poll(85, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(recordSprayRainShadow).not.toHaveBeenCalled();
+    });
+
+    test('shadow: the chip is unchanged and the rain-rule verdict is recorded once', async () => {
+      process.env.GATE_SPRAY_RAIN_RULES = 'shadow';
+      const recordSprayRainShadow = jest.fn(async () => null);
+      expect(weather(await poll(85, { recordSprayRainShadow }))).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(recordSprayRainShadow).toHaveBeenCalledTimes(1);
+      const [arg] = recordSprayRainShadow.mock.calls[0];
+      expect(arg.live).toEqual({ hold: false, issue: { kind: 'weather', status: 'unknown', label: 'Weather unknown' } });
+      expect(arg.shadow.issue).toEqual({ kind: 'weather', status: 'hold', label: 'Rain hold · label' });
+      expect(arg.shadow.verdicts).toEqual([expect.objectContaining({ productId: 't', verdict: 'hold', source: 'label', at: '10 am' })]);
+      expect(arg.serviceInstant.toISOString()).toBe('2026-09-04T14:00:00.000Z');
+      // A failed record never takes the poll down.
+      const failing = jest.fn(async () => { throw new Error('relation does not exist'); });
+      expect(weather(await poll(85, { recordSprayRainShadow: failing }))).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
+    });
+
+    test('true: above 60% at the start is a caution, above 80% a hold, 60% or less no chip', async () => {
+      process.env.GATE_SPRAY_RAIN_RULES = 'true';
+      expect(weather(await poll(65))).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 10 am · label: no spraying in rain' });
+      expect(weather(await poll(85))).toEqual({ kind: 'weather', status: 'hold', label: 'Rain hold · label' });
+      expect(weather(await poll(60))).toBeNull();
+    });
+  });
+
   test('the rain window ends on the viewed visit date, today at the latest (Codex r14 P2)', async () => {
     const getAreaRainfall = jest.fn(async () => 0.4);
     const today = new Date();
