@@ -5,7 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
-  buildFormFigures, parseFormPeriod, monthlyLiabilityLines, FROM_RECORDS,
+  buildFormFigures, parseFormPeriod, monthlyLiabilityLines, depositSchedule, FROM_RECORDS,
 } = require('../services/payroll-form-figures');
 const { RATES, TAX_YEARS } = require('../services/payroll-calc');
 
@@ -36,6 +36,9 @@ const paidOnTime = (...quarters) => quarters.map((q) => ({ source_key: `payroll:
 const line = (form, id) => form.rows.find((r) => r.line === id);
 // Social Security and Medicare as a $1,000.00 paycheck withholds and owes them, both halves.
 const taxed = (patch = {}) => ({ social_security_cents: 6200, employer_social_security_cents: 6200, medicare_cents: 1450, employer_medicare_cents: 1450, ...patch });
+// A 3rd-quarter check whose line 12 ($3,153.00) is over $2,500, so the 4th
+// quarter cannot use the prior-quarter $2,500 rule.
+const q3Over2500 = () => check('2026-07-06', '2026-07-17', taxed({ tech: 99, federal_income_tax_cents: 300000 }));
 
 describe('constants come from the calculator', () => {
   test('the 2026 wage base and the rates are the calculator’s', () => {
@@ -150,10 +153,13 @@ describe('Form 941', () => {
 
   test('line 16 at $2,500 or more lists the three months, and they total line 12', () => {
     const out = build([
+      q3Over2500(),
       check('2026-09-28', '2026-10-09', taxed({ tech: 1, federal_income_tax_cents: 100000 })),
       check('2026-10-26', '2026-11-06', taxed({ tech: 1, federal_income_tax_cents: 90000 })),
       check('2026-11-23', '2026-12-04', taxed({ tech: 1, federal_income_tax_cents: 70000 })),
     ]);
+    expect(line(out.f941, '16')).toMatchObject({ kind: 'text', value: 'Monthly schedule depositor' });
+    expect(line(out.f941, '16').note).toMatch(/lookback period holds \$0\.00 of tax, \$50,000 or less, and no month reached \$100,000/);
     const [m1, m2, m3] = ['16 month 1', '16 month 2', '16 month 3'].map((id) => line(out.f941, id).value);
     expect([m1, m2, m3]).toEqual([115300, 105300, 85300]);
     expect(m1 + m2 + m3).toBe(line(out.f941, '12').value);
@@ -165,6 +171,7 @@ describe('Form 941', () => {
     // The employer half of check 3 was rounded 2 cents high; line 12 takes the
     // employer share from line 5e, so 2 cents come off month 3.
     const out = build([
+      q3Over2500(),
       check('2026-09-28', '2026-10-09', taxed({ tech: 1, federal_income_tax_cents: 100000 })),
       check('2026-10-26', '2026-11-06', taxed({ tech: 1, federal_income_tax_cents: 90000 })),
       check('2026-11-23', '2026-12-04', taxed({ tech: 1, federal_income_tax_cents: 70000, employer_medicare_cents: 1452 })),
@@ -181,6 +188,81 @@ describe('Form 941', () => {
     expect(monthlyLiabilityLines(100, [60, 45, 0])).toEqual({ months: [60, 40, 0], rounding: -5 });
     // More missing than month 3 holds: month 3 goes to zero, the rest comes off month 2.
     expect(monthlyLiabilityLines(100, [60, 45, 3])).toEqual({ months: [60, 40, 0], rounding: -8 });
+  });
+
+  // Pre-push audit P1: line 16 was "monthly" for every quarter of $2,500 or more.
+  test('the prior quarter under $2,500: no schedule is needed, unless this quarter is $100,000 or more', () => {
+    const q4 = [
+      check('2026-10-05', '2026-10-16', taxed({ tech: 1, federal_income_tax_cents: 300000 })),
+    ];
+    expect(line(build(q4).f941, '16').value).toBe('Line 12 of the prior quarter was less than $2,500: no schedule is needed');
+    // $3.2M of wages over three months: line 12 is over $100,000, no month reaches it.
+    const big = [10, 11, 12].map((m) => check(`2026-${m}-05`, `2026-${m}-09`, { tech: 1, gross_cents: 20000000, federal_income_tax_cents: 2000000 }));
+    const out = build(big);
+    expect(line(out.f941, '12').value).toBeGreaterThanOrEqual(10000000);
+    expect(line(out.f941, '16').value).toBe('Monthly schedule depositor');
+    expect(line(out.f941, '16 month 1')).toBeDefined();
+  });
+
+  test('a month whose tax reaches $100,000 in the quarter: semiweekly, "Needs your check", no monthly lines', () => {
+    const rows = [q3Over2500(), check('2026-11-02', '2026-11-13', { tech: 1, gross_cents: 30000000, federal_income_tax_cents: 9000000, employer_social_security_cents: 1000000 })];
+    const out = build(rows);
+    expect(line(out.f941, '16')).toMatchObject({ kind: 'text', value: 'Needs your check' });
+    expect(line(out.f941, '16').note).toMatch(/The tax for 2026-11 reached \$100,000, so a next-day deposit was due\. A semiweekly schedule depositor files Schedule B/);
+    expect(line(out.f941, '16 month 1')).toBeUndefined();
+    expect(line(out.f941, '16 total')).toBeUndefined();
+  });
+
+  test('a $100,000 month earlier in the year keeps later quarters semiweekly', () => {
+    const rows = [
+      check('2026-05-04', '2026-05-15', { tech: 1, gross_cents: 30000000, federal_income_tax_cents: 9000000, employer_social_security_cents: 1000000 }),
+      q3Over2500(),
+      check('2026-10-05', '2026-10-16', taxed({ tech: 2, federal_income_tax_cents: 300000 })),
+    ];
+    const out = build(rows);
+    expect(line(out.f941, '16')).toMatchObject({ kind: 'text', value: 'Needs your check' });
+    expect(line(out.f941, '16').note).toMatch(/The tax for 2026-05 reached \$100,000, so you have been a semiweekly depositor since then/);
+  });
+
+  test('the depositor rules, figure by figure', () => {
+    const base = { year: 2027, quarter: 2, line12: 400000, priorQuarterLine12: 400000, lookbackCents: 0, monthCents: new Map() };
+    expect(depositSchedule(base).kind).toBe('monthly');
+    expect(depositSchedule({ ...base, lookbackCents: 5000000 }).kind).toBe('monthly'); // $50,000 is not more than $50,000
+    expect(depositSchedule({ ...base, lookbackCents: 5000001 })).toMatchObject({ kind: 'semiweekly', reason: expect.stringMatching(/\$50,000\.01 of tax, more than \$50,000/) });
+    // Last year's next-day month still counts this year; one after this quarter does not yet.
+    expect(depositSchedule({ ...base, monthCents: new Map([['2026-12', 10000000]]) }).kind).toBe('semiweekly');
+    expect(depositSchedule({ ...base, monthCents: new Map([['2027-07', 10000000]]) }).kind).toBe('monthly');
+    expect(depositSchedule({ ...base, monthCents: new Map([['2026-12', 9999999]]) }).kind).toBe('monthly');
+    // The $2,500 rules come before the lookback.
+    expect(depositSchedule({ ...base, line12: 249999, lookbackCents: 9000000 }).kind).toBe('none');
+    expect(depositSchedule({ ...base, priorQuarterLine12: 249999, lookbackCents: 9000000 }).kind).toBe('none');
+    // A next-day month in this quarter wins over both $2,500 rules.
+    expect(depositSchedule({ ...base, line12: 100, monthCents: new Map([['2027-05', 10000000]]) }).kind).toBe('semiweekly');
+  });
+
+  test('the lookback and last year come from the earlier checks (priorRows), each year with its own wage base', () => {
+    // Only 2026 has tax tables here; borrow them for 2027 for this test.
+    TAX_YEARS[2027] = TAX_YEARS[2026];
+    try {
+      const prior = [
+        // Lookback for 2027 is July 1, 2025 to June 30, 2026: $60,000 of tax in Q2 2026.
+        check('2026-04-06', '2026-04-17', { tech: 1, gross_cents: 20000000, federal_income_tax_cents: 6000000 }),
+        // Q4 2026, the prior quarter of Q1 2027: over $2,500.
+        check('2026-10-05', '2026-10-16', taxed({ tech: 2, federal_income_tax_cents: 300000 })),
+      ];
+      const rows = [check('2027-01-04', '2027-01-15', taxed({ tech: 2, federal_income_tax_cents: 300000 }))];
+      const out = buildFormFigures({ year: 2027, quarter: 1, rows, priorRows: prior });
+      expect(line(out.f941, '16')).toMatchObject({ kind: 'text', value: 'Needs your check' });
+      expect(line(out.f941, '16').note).toMatch(/The lookback period holds \$[0-9,]+\.\d\d of tax, more than \$50,000/);
+      expect(out.f941.notes.join(' ')).toMatch(/The lookback period is July 1, 2025 to June 30, 2026/);
+      // Prior rows never count as this year's wages.
+      expect(line(out.f941, '2').value).toBe(100000);
+      expect(line(out.f940, '3').value).toBe(100000);
+      // Without the lookback tax: monthly.
+      expect(line(buildFormFigures({ year: 2027, quarter: 1, rows, priorRows: prior.slice(1) }).f941, '16').value).toBe('Monthly schedule depositor');
+    } finally {
+      delete TAX_YEARS[2027];
+    }
   });
 
   test('deposits recorded as paid reduce the balance; a surplus is an overpayment', () => {

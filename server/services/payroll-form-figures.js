@@ -41,6 +41,9 @@ const FROM_RECORDS = 'Enter from your records';
 const DEPOSIT_LABEL = 'deposits recorded as paid on the Tax page';
 const NEEDS_CHECK = 'Needs your check';
 const FORM_941_SCHEDULE_THRESHOLD_CENTS = 250000;
+// Pub 15 section 11: the $100,000 next-day deposit rule and the $50,000 lookback limit.
+const NEXT_DAY_DEPOSIT_CENTS = 10000000;
+const LOOKBACK_LIMIT_CENTS = 5000000;
 const FORM_940_PART_5_THRESHOLD_CENTS = 50000;
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -50,7 +53,7 @@ const pad = (n) => String(n).padStart(2, '0');
 // Half-up rounding of cents x basis points / 10,000 (cents are non-negative integers).
 const pct = (cents, bp) => Math.floor((cents * bp + 5000) / 10000);
 const pctText = (bp) => `${(bp / 100).toFixed(bp % 10 === 0 ? 1 : 2)}%`;
-const centsText = (cents) => `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`;
+const centsText = (cents) => `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const monthOf = (check) => Number(check.payDate.slice(5, 7));
 const quarterOfMonth = (month) => Math.ceil(month / 3);
@@ -147,8 +150,8 @@ function monthlyLiabilityLines(line12Cents, monthCents) {
   return { months: values, rounding };
 }
 
-function form941(year, quarter, quarterChecks, depositsCents) {
-  const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
+// Lines 2 to 12 of Form 941 for one quarter's checks.
+function quarterTaxes(quarterChecks) {
   const wages = sum(quarterChecks, 'gross');
   const fit = sum(quarterChecks, 'fit');
   const ssWages = sum(quarterChecks, 'ssWages');
@@ -167,7 +170,46 @@ function form941(year, quarter, quarterChecks, depositsCents) {
   const employeeShare = pct(ssWages, RATES.socialSecurityBp) + pct(wages, RATES.medicareBp) + addlTax;
   const line7 = withheld - employeeShare;
   const line10 = line6 + line7;
-  const line12 = line10;
+  return { wages, fit, ssWages, addlWages, ssTax, medicareTax, addlTax, line5e, line6, line7, line10, line12: line10 };
+}
+
+/**
+ * Form 941 line 16 (Form 941 instructions; Pub 15 section 11). Inputs come
+ * from the stored checks: this quarter's line 12, the prior quarter's line 12,
+ * the lookback period's tax (July 1 two years back to June 30 last year: the
+ * four quarters' line 12) and each month's tax ('YYYY-MM' => cents) last year
+ * and this year through the quarter's end. A month is a monthly depositor's
+ * deposit period, so a month reaching $100,000 is a next-day deposit
+ * obligation, and the employer is a semiweekly depositor from then on through
+ * the next year.
+ *   - A next-day obligation in this quarter: semiweekly (Schedule B).
+ *   - Else line 12 under $2,500, or the prior quarter's under $2,500 while this
+ *     one is under $100,000: no schedule (box 1).
+ *   - Else a lookback over $50,000, or an earlier next-day obligation:
+ *     semiweekly (Schedule B). The portal does not fill Schedule B.
+ *   - Else monthly (box 2). A new employer's lookback is $0.
+ */
+function depositSchedule({ year, quarter, line12, priorQuarterLine12, lookbackCents, monthCents }) {
+  const firstMonth = `${year}-${pad((quarter - 1) * 3 + 1)}`;
+  const lastMonth = `${year}-${pad(quarter * 3)}`;
+  const nextDay = [...monthCents.entries()]
+    .filter(([month, value]) => value >= NEXT_DAY_DEPOSIT_CENTS && month <= lastMonth)
+    .map(([month]) => month)
+    .sort();
+  const inQuarter = nextDay.find((month) => month >= firstMonth);
+  if (inQuarter) return { kind: 'semiweekly', reason: `The tax for ${inQuarter} reached $100,000, so a next-day deposit was due.` };
+  if (line12 < FORM_941_SCHEDULE_THRESHOLD_CENTS) return { kind: 'none', reason: 'Line 12 is less than $2,500: no schedule is needed' };
+  if (priorQuarterLine12 < FORM_941_SCHEDULE_THRESHOLD_CENTS && line12 < NEXT_DAY_DEPOSIT_CENTS) {
+    return { kind: 'none', reason: 'Line 12 of the prior quarter was less than $2,500: no schedule is needed' };
+  }
+  if (nextDay.length) return { kind: 'semiweekly', reason: `The tax for ${nextDay[0]} reached $100,000, so you have been a semiweekly depositor since then.` };
+  if (lookbackCents > LOOKBACK_LIMIT_CENTS) return { kind: 'semiweekly', reason: `The lookback period holds ${centsText(lookbackCents)} of tax, more than $50,000.` };
+  return { kind: 'monthly', reason: `The lookback period holds ${centsText(lookbackCents)} of tax, $50,000 or less, and no month reached $100,000.` };
+}
+
+function form941(year, quarter, quarterChecks, depositsCents, history) {
+  const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
+  const { wages, fit, ssWages, addlWages, ssTax, medicareTax, addlTax, line5e, line6, line7, line10, line12 } = quarterTaxes(quarterChecks);
   const line14 = max0(line12 - depositsCents);
   const line15 = max0(depositsCents - line12);
 
@@ -194,14 +236,23 @@ function form941(year, quarter, quarterChecks, depositsCents) {
   ];
   const notes = [];
 
-  if (line12 < FORM_941_SCHEDULE_THRESHOLD_CENTS) {
-    rows.push(text('16', 'Deposit schedule', 'Line 12 is less than $2,500: no schedule is needed'));
+  const schedule = depositSchedule({ year, quarter, line12, ...history });
+  const lookbackText = `The lookback period is July 1, ${year - 2} to June 30, ${year - 1}. These figures come from the portal's pay checks; tax reported outside the portal counts too.`;
+  if (schedule.kind === 'none') {
+    rows.push(text('16', 'Deposit schedule', schedule.reason));
+  } else if (schedule.kind === 'semiweekly') {
+    // Pre-push audit P1: never label a semiweekly depositor monthly.
+    rows.push(text('16', 'Deposit schedule', NEEDS_CHECK, {
+      note: `${schedule.reason} A semiweekly schedule depositor files Schedule B (Form 941) instead of the monthly lines. The portal does not fill it in.`,
+    }));
+    notes.push(lookbackText);
   } else {
     const monthCents = months.map((month) => quarterChecks
       .filter((c) => monthOf(c) === month)
       .reduce((total, c) => total + liabilityOf(c), 0));
     const split = monthlyLiabilityLines(line12, monthCents);
-    rows.push(text('16', 'Deposit schedule', 'Monthly schedule depositor (a new employer is monthly in its first year)'));
+    rows.push(text('16', 'Deposit schedule', 'Monthly schedule depositor', { note: schedule.reason }));
+    notes.push(lookbackText);
     split.months.forEach((value, index) => {
       rows.push(cents(`16 month ${index + 1}`, `Tax liability for month ${index + 1} (${MONTH_NAMES[months[index] - 1]})`, value));
     });
@@ -422,17 +473,36 @@ function w3Totals(forms) {
  * `year`, dates as YYYY-MM-DD text); deposits are paid calendar rows as
  * { source_key, amount_paid, amount_due }.
  */
-function buildFormFigures({ year, quarter, rows = [], deposits941 = [], deposits940 = [], rt6Paid = [], addresses = new Map() }) {
-  const wageBase = rows.length ? socialSecurityWageBaseCents(year) : 0;
-  const yearChecks = rows.map((r) => normalize(r, wageBase));
+function buildFormFigures({ year, quarter, rows = [], priorRows = [], deposits941 = [], deposits940 = [], rt6Paid = [], addresses = new Map() }) {
+  // Each check takes its own pay year's Social Security wage base.
+  const normalizeYear = (list, y) => {
+    const wageBase = list.length ? socialSecurityWageBaseCents(y) : 0;
+    return list.map((r) => normalize(r, wageBase));
+  };
+  const yearChecks = normalizeYear(rows, year);
+  const priorChecks = [year - 2, year - 1].flatMap((y) => normalizeYear(priorRows.filter((r) => String(r.pay_date).startsWith(`${y}-`)), y));
   const quarterChecks = yearChecks.filter((c) => quarterOfMonth(monthOf(c)) === quarter);
+  const allChecks = [...priorChecks, ...yearChecks];
+  const line12Of = (y, q) => quarterTaxes(allChecks.filter((c) => c.payDate.startsWith(`${y}-`) && quarterOfMonth(monthOf(c)) === q)).line12;
+  const quarterEnd = `${year}-${pad(quarter * 3)}`;
+  const monthCents = new Map();
+  for (const c of allChecks) {
+    const month = c.payDate.slice(0, 7);
+    if (month < `${year - 1}-01` || month > quarterEnd) continue;
+    monthCents.set(month, (monthCents.get(month) || 0) + liabilityOf(c));
+  }
+  const history = {
+    priorQuarterLine12: quarter === 1 ? line12Of(year - 1, 4) : line12Of(year, quarter - 1),
+    lookbackCents: line12Of(year - 2, 3) + line12Of(year - 2, 4) + line12Of(year - 1, 1) + line12Of(year - 1, 2),
+    monthCents,
+  };
   const depositTotal = (list) => list.reduce((acc, d) => acc + Math.round(num(d.amount_paid ?? d.amount_due) * 100), 0);
   const w2 = w2Figures(yearChecks, addresses);
   return {
     year,
     quarter,
     employer: { name: WAVES_BUSINESS_NAME, address: WAVES_ADDRESS_LINE, ein: FROM_RECORDS },
-    f941: form941(year, quarter, quarterChecks, depositTotal(deposits941)),
+    f941: form941(year, quarter, quarterChecks, depositTotal(deposits941), history),
     rt6: formRt6(year, quarter, quarterChecks),
     f940: form940(year, yearChecks, depositTotal(deposits940), rt6Paid),
     w2,
@@ -476,6 +546,17 @@ async function readFormFigures({ year, quarter, conn = db }) {
       conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"),
     );
+  // Form 941 line 16 also reads the lookback period and last year (July 1 two
+  // years back through December 31 last year).
+  const priorRows = await conn('payroll_checks')
+    .where({ status: 'finalized' })
+    .where('pay_date', '>=', `${year - 2}-07-01`)
+    .where('pay_date', '<=', `${year - 1}-12-31`)
+    .select(
+      ...CHECK_COLUMNS,
+      conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
+      conn.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"),
+    );
   const quarterMonths = [1, 2, 3].map((n) => `${year}-${pad((quarter - 1) * 3 + n)}`);
   const deposits941 = await paidDeposits(conn, '941_deposit', quarterMonths);
   const deposits940 = await paidDeposits(conn, '940_deposit', [String(year)]);
@@ -489,7 +570,7 @@ async function readFormFigures({ year, quarter, conn = db }) {
       if (address) addresses.set(t.id, address);
     }
   }
-  return buildFormFigures({ year, quarter, rows, deposits941, deposits940, rt6Paid, addresses });
+  return buildFormFigures({ year, quarter, rows, priorRows, deposits941, deposits940, rt6Paid, addresses });
 }
 
 /** Query-string check: a 4-digit year from 2020 on and a quarter 1 to 4. */
@@ -503,4 +584,4 @@ function parseFormPeriod(query = {}) {
   return { year: Number(yearText), quarter: Number(quarterText) };
 }
 
-module.exports = { buildFormFigures, readFormFigures, parseFormPeriod, monthlyLiabilityLines, FROM_RECORDS };
+module.exports = { buildFormFigures, readFormFigures, parseFormPeriod, monthlyLiabilityLines, depositSchedule, FROM_RECORDS };
