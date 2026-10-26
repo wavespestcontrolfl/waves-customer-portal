@@ -188,9 +188,7 @@ describe('a known customer\'s text to an office line (GATE_CUSTOMER_TEXT_TO_VISI
 
     expect(res.statusCode).toBe(200);
     expect(relayCustomerTextToVisitTech).toHaveBeenCalledTimes(1);
-    expect(relayCustomerTextToVisitTech).toHaveBeenCalledWith(expect.objectContaining({
-      customer: expect.objectContaining({ id: 'customer-1' }), from: CUSTOMER_CELL, body: 'The gate is open', mediaCount: 0,
-    }));
+    expect(relayCustomerTextToVisitTech).toHaveBeenCalledWith({ from: CUSTOMER_CELL, body: 'The gate is open', mediaCount: 0 });
     // The office path is unchanged: the inbox row is still written.
     expect(recordTouchpoint).toHaveBeenCalledTimes(1);
   });
@@ -216,7 +214,7 @@ describe('a known customer\'s text to an office line (GATE_CUSTOMER_TEXT_TO_VISI
     await receive('The gate is open', { from: '+12025550133' });
 
     expect(relayCustomerTextToVisitTech).toHaveBeenCalledTimes(1);
-    expect(relayCustomerTextToVisitTech).toHaveBeenCalledWith(expect.objectContaining({ customer: null, from: '+12025550133' }));
+    expect(relayCustomerTextToVisitTech).toHaveBeenCalledWith(expect.objectContaining({ from: '+12025550133' }));
   });
 
   test('gate off: no relay', async () => {

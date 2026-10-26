@@ -1105,12 +1105,13 @@ router.post('/sms', async (req, res) => {
     // the dog is out" reaches the technician even when a reschedule offer
     // consumes it (Codex #6760 r1); started on response finish. A known caller
     // record covers the service-contact and second phones too; the relay
-    // resolves that number to its ONE customer. The office path is unchanged;
-    // nothing is sent to the customer.
+    // itself resolves the number to its ONE customer across every phone slot
+    // (a shared number relays nothing). The office path is unchanged; nothing
+    // is sent to the customer.
     if (numberConfig.type !== 'tech_line' && (customer || knownCallerRecord) && (Body || inboundMedia.length)
       && !smsReaction && !courtesyOnly && !staffSender && !detectSmsOptCommand(Body || '').action
       && require('../config/feature-gates').customerTextToVisitTechLive?.()) {
-      const relayInput = { customer, from: From, body: Body, mediaCount: inboundMedia.length };
+      const relayInput = { from: From, body: Body, mediaCount: inboundMedia.length };
       res.once('finish', () => {
         const relay = require('../services/visit-tech-relay');
         void relay.relayCustomerTextToVisitTech(relayInput)

@@ -169,24 +169,39 @@ postgres('visit tech relay (real Postgres)', () => {
     await visit(customer, hire, 'en_route', '09:00');
 
     expect((await relay.customerForPhone(db, contactPhone))?.id).toBe(customer.id);
-    const sent = await relay.relayCustomerTextToVisitTech({ customer: null, from: contactPhone, body: 'The gate is open' });
+    const sent = await relay.relayCustomerTextToVisitTech({ from: contactPhone, body: 'The gate is open' });
     expect(sent).toBe(1);
     expect(await db('tech_notifications').where({ technician_id: hire.id })).toHaveLength(1);
 
     const neighbor = await makeCustomer('Neighbor');
     await db('customers').where({ id: neighbor.id }).update({ secondary_phone: contactPhone });
     expect(await relay.customerForPhone(db, contactPhone)).toBeNull();
-    expect(await relay.relayCustomerTextToVisitTech({ customer: null, from: contactPhone, body: 'Hello' })).toBe(0);
+    expect(await relay.relayCustomerTextToVisitTech({ from: contactPhone, body: 'Hello' })).toBe(0);
+  });
+
+  test('a number that is one customer\'s primary and another\'s service contact relays nothing (pre-push audit P1)', async () => {
+    const hire = await makeTech('Synthetic Hire');
+    const owner = await makeCustomer('Primaryholder');
+    const other = await makeCustomer('Contactholder');
+    const phone = `+1202555${String(Math.floor(1000 + Math.random() * 8999))}`;
+    await db('customers').where({ id: owner.id }).update({ phone });
+    await db('customers').where({ id: other.id }).update({ service_contact2_phone: phone });
+    await visit(owner, hire, 'en_route', '09:00');
+
+    expect(await relay.relayCustomerTextToVisitTech({ from: phone, body: 'The gate is open' })).toBe(0);
+    expect(await db('tech_notifications').where({ technician_id: hire.id })).toHaveLength(0);
   });
 
   test('the relay writes one tech-home text card and one push for the visit\'s technician', async () => {
     const hire = await makeTech('Synthetic Hire');
     const customer = await makeCustomer('Gate');
+    const phone = `+1202555${String(Math.floor(1000 + Math.random() * 8999))}`;
+    await db('customers').where({ id: customer.id }).update({ phone });
     await visit(customer, hire, 'en_route', '09:00');
     const { sendToAdminUser } = require('../services/push-notifications');
     sendToAdminUser.mockClear();
 
-    const sent = await relay.relayCustomerTextToVisitTech({ customer, from: '+12025550101', body: 'The gate is open', mediaCount: 0 });
+    const sent = await relay.relayCustomerTextToVisitTech({ from: phone, body: 'The gate is open', mediaCount: 0 });
 
     expect(sent).toBe(1);
     const cards = await db('tech_notifications').where({ technician_id: hire.id });

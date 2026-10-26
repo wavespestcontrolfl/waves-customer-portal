@@ -111,11 +111,12 @@ async function visitTechniciansFor(customerId, { conn = db, today = etDateString
   return out;
 }
 
-// A text from a saved service contact (spouse, tenant) or a second phone: the
-// webhook's customer lookup matches the primary phone only. The ONE live
-// customer holding this number in any identity slot (known-caller-phone.js
-// column set) is the sender's customer; none, or more than one, = no relay,
-// so a shared number is never guessed.
+// The sender's customer: the ONE live customer holding this number in any
+// identity slot (primary, service contacts, second phone: the known-caller-phone.js
+// column set), so a spouse or tenant texting from a saved service-contact
+// number reaches the visit too. None, or more than one, = no relay: a shared
+// number is never guessed, even when the webhook matched one customer by the
+// primary phone alone (or picked one under GATE_SMS_SHARED_PHONE_LINK).
 async function customerForPhone(conn, phone) {
   const key = customerPhoneLookupKey(phone);
   if (!key) return null;
@@ -132,8 +133,8 @@ async function customerForPhone(conn, phone) {
   return rows.length === 1 ? rows[0] : null;
 }
 
-async function relayCustomerTextToVisitTech({ customer: knownCustomer = null, from, body, mediaCount = 0, conn = db } = {}) {
-  const customer = knownCustomer?.id ? knownCustomer : await customerForPhone(conn, from);
+async function relayCustomerTextToVisitTech({ from, body, mediaCount = 0, conn = db } = {}) {
+  const customer = await customerForPhone(conn, from);
   if (!customer?.id) return 0;
   const techs = await visitTechniciansFor(customer.id, { conn });
   if (!techs.length) return 0;
