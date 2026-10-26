@@ -65,6 +65,10 @@ jest.mock('../services/procurement/order-dispatch', () => ({
   settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
 }));
 
+jest.mock('../services/procurement/vendor-order-email', () => ({
+  findEmailOrderOut: jest.fn(async () => mockState.emailOut || null), // a SiteOne order email sent, or sending
+}));
+
 const { runSuppliesAutoReorderSweep, sweepFailureError } = require('../services/procurement/auto-reorder');
 
 const lowSign = {
@@ -477,4 +481,18 @@ test('re-bell on an open auto request says what the REQUEST says, not the produc
   expect(body).toContain('gemplers.com/x');
   expect(body).not.toContain('amazon');
   expect(opts.metadata).toMatchObject({ vendorId: 'vend-gemplers', vendorSku: '127544' });
+});
+
+test('an open auto request whose SiteOne order email is SENDING (outcome unknown) is NOT re-belled "order manually" — the vendor may already have it', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'SiteOne', metadata: { vendorId: 'vend-siteone' } };
+  mockState.autoOrder = false; // the bot is off; the email is how this request was ordered
+  mockState.emailOut = { po: 'WAVES-REQAUTO1', status: 'sending' };
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(r.renotified).toEqual([]);
+    expect(r.deduped).toEqual([expect.objectContaining({ requestId: 'req-auto' }), expect.objectContaining({ requestId: 'req-auto', reason: 'email_order_out' })]);
+    expect(notify).not.toHaveBeenCalled();
+  } finally { mockState.emailOut = null; }
 });

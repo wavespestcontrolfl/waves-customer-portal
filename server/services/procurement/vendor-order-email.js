@@ -134,8 +134,14 @@ async function assertBotCannotOrder(conn, request, vendor, env) {
 // from the Restock tab: a cancelled request drops out of the reorder sweep's
 // dedupe, and the next tick would raise a new request and buy the product
 // again on top of the emailed order. Called by the Restock cancel path.
+// The order email for a request that SiteOne has, or may have: sent, or sending with the outcome
+// unknown. null = no email out. The cancel guard and the reorder sweep's stand-down both read it.
+function findEmailOrderOut(conn, requestId) {
+  return conn(TABLE).where({ restock_request_id: requestId }).whereIn('status', ['sent', 'sending']).first('po', 'status');
+}
+
 async function assertNoEmailOrderOut(conn, requestId) {
-  const out = await conn(TABLE).where({ restock_request_id: requestId }).whereIn('status', ['sent', 'sending']).first('po', 'status');
+  const out = await findEmailOrderOut(conn, requestId);
   if (!out) return;
   throw refuse('email_order_out', `SiteOne was emailed an order for this request (PO ${out.po})${out.status === 'sending' ? ', and the email may have gone out' : ''}. Receive it when it arrives. To cancel it, tell SiteOne first, then mark the email row dismissed.`);
 }
@@ -383,6 +389,7 @@ async function sendOrderEmail(requestId, { actor, actorId, version } = {}, deps 
 }
 
 module.exports = {
+  findEmailOrderOut,
   buildSiteOneOrderEmail,
   previewOrderEmail,
   sendOrderEmail,

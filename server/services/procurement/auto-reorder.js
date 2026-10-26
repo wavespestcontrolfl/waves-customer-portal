@@ -226,6 +226,10 @@ async function handleLiveRequest(ctx, p, existing) {
   // retired since must not ring "order manually" on top of it (hook r27
   // P0). Reconciliation — receive or revoke — is what reopens the lane.
   if (await require('./order-dispatch').findLiveAutoOrder(ctx.conn, p.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'auto_order_live' }); return; }
+  // An order EMAILED to SiteOne for this request (vendor_order_emails: sent, or sending with the
+  // outcome unknown) may already be with the vendor: the same stand-down, never "order manually"
+  // on top of it. The Restock tab shows the emailed order; receiving it closes the request.
+  if (await require('./vendor-order-email').findEmailOrderOut(ctx.conn, request.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'email_order_out' }); return; }
   // A pre-submit park (no_price, dry_run, …) left this request a versioned
   // ledger bell that already says "order manually": the generic hand-off
   // must not ring beside it. Settle the ledger's bell first; when that
