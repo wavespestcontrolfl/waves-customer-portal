@@ -34,6 +34,8 @@ const build = (rows, extra = {}) => buildFormFigures({ year: 2026, quarter: 4, r
 // RT-6 rows marked paid on the Tax page well before the Form 940 due date, in full.
 const paidOnTime = (...quarters) => quarters.map((q) => ({ source_key: `payroll:rt6:2026-Q${q}`, amount_paid: '100000.00', paid_date: '2026-12-31' }));
 const line = (form, id) => form.rows.find((r) => r.line === id);
+// Social Security and Medicare as a $1,000.00 paycheck withholds and owes them, both halves.
+const taxed = (patch = {}) => ({ social_security_cents: 6200, employer_social_security_cents: 6200, medicare_cents: 1450, employer_medicare_cents: 1450, ...patch });
 
 describe('constants come from the calculator', () => {
   test('the 2026 wage base and the rates are the calculator’s', () => {
@@ -88,7 +90,10 @@ describe('Form 941', () => {
     expect(line(out.f941, '5e').value).toBe(line(out.f941, '5c').value2 + 4500);
   });
 
-  test('line 7 is positive when the checks collected more cents than the form rounds', () => {
+  // Line 7 is the EMPLOYEE share only (Form 941 instructions; pre-push audit P0):
+  // what the paychecks withheld less the employee share of line 5e. The
+  // employer's per-check rounding is no adjustment.
+  test('line 7 is positive when the paychecks withheld more cents than the employee share of 5e', () => {
     const rows = [1, 2, 3].map((n) => check('2026-10-05', `2026-10-1${n}`, {
       tech: n, gross_cents: 1001, social_security_cents: 62, employer_social_security_cents: 62, medicare_cents: 15, employer_medicare_cents: 15,
     }));
@@ -96,19 +101,27 @@ describe('Form 941', () => {
     expect(line(out.f941, '5a').value2).toBe(372);
     expect(line(out.f941, '5c').value2).toBe(87);
     expect(line(out.f941, '5e').value).toBe(459);
-    expect(line(out.f941, '7').value).toBe(3); // 462 stored less 459
-    expect(line(out.f941, '10').value).toBe(462);
-    expect(line(out.f941, '12').value).toBe(462);
+    // Withheld 3 x (62 + 15) = 231; employee share of $30.03: 186 + 44 = 230.
+    expect(line(out.f941, '7').value).toBe(1);
+    expect(line(out.f941, '10').value).toBe(460);
+    expect(line(out.f941, '12').value).toBe(460);
   });
 
-  test('line 7 is negative when the form rounds up more than the checks collected', () => {
+  test('line 7 is negative when the employee share of 5e is more than the paychecks withheld', () => {
     const rows = [1, 2, 3].map((n) => check('2026-10-05', `2026-10-1${n}`, {
-      tech: n, gross_cents: 1008, social_security_cents: 62, employer_social_security_cents: 62, medicare_cents: 15, employer_medicare_cents: 15,
+      tech: n, gross_cents: 1023, social_security_cents: 63, employer_social_security_cents: 63, medicare_cents: 15, employer_medicare_cents: 15,
     }));
     const out = build(rows);
-    expect(line(out.f941, '5e').value).toBe(463);
+    expect(line(out.f941, '5e').value).toBe(470);
+    // Withheld 3 x (63 + 15) = 234; employee share of $30.69: 190 + 45 = 235.
     expect(line(out.f941, '7').value).toBe(-1);
-    expect(line(out.f941, '12').value).toBe(462);
+    expect(line(out.f941, '12').value).toBe(469);
+  });
+
+  test('line 7 is 0 when the withholding matches the employee share, whatever the employer half rounded to', () => {
+    const rows = [check('2026-10-05', '2026-10-16', taxed({ tech: 1, employer_social_security_cents: 6203 }))];
+    expect(line(build(rows).f941, '7').value).toBe(0);
+    expect(line(build(rows).f941, '12').value).toBe(15300);
   });
 
   test('the 12th rule: a week that holds the 12th counts, a week that does not is left out', () => {
@@ -129,40 +142,58 @@ describe('Form 941', () => {
   });
 
   test('line 16 under $2,500 needs no schedule', () => {
-    const out = build([check('2026-10-05', '2026-10-16', { tech: 1, federal_income_tax_cents: 10000 })]);
-    expect(line(out.f941, '12').value).toBe(10000);
+    const out = build([check('2026-10-05', '2026-10-16', taxed({ tech: 1, federal_income_tax_cents: 10000 }))]);
+    expect(line(out.f941, '12').value).toBe(25300);
     expect(line(out.f941, '16').value).toMatch(/no schedule is needed/i);
     expect(line(out.f941, '16 month 1')).toBeUndefined();
   });
 
   test('line 16 at $2,500 or more lists the three months, and they total line 12', () => {
     const out = build([
-      check('2026-09-28', '2026-10-09', { tech: 1, federal_income_tax_cents: 100000, social_security_cents: 6200, employer_social_security_cents: 6200 }),
-      check('2026-10-26', '2026-11-06', { tech: 1, federal_income_tax_cents: 90000, medicare_cents: 1450, employer_medicare_cents: 1450 }),
-      check('2026-11-23', '2026-12-04', { tech: 1, federal_income_tax_cents: 70000, additional_medicare_cents: 900 }),
+      check('2026-09-28', '2026-10-09', taxed({ tech: 1, federal_income_tax_cents: 100000 })),
+      check('2026-10-26', '2026-11-06', taxed({ tech: 1, federal_income_tax_cents: 90000 })),
+      check('2026-11-23', '2026-12-04', taxed({ tech: 1, federal_income_tax_cents: 70000 })),
     ]);
     const [m1, m2, m3] = ['16 month 1', '16 month 2', '16 month 3'].map((id) => line(out.f941, id).value);
-    expect([m1, m2, m3]).toEqual([112400, 92900, 70900]);
+    expect([m1, m2, m3]).toEqual([115300, 105300, 85300]);
     expect(m1 + m2 + m3).toBe(line(out.f941, '12').value);
-    expect(line(out.f941, '16 total').value).toBe(276200);
+    expect(line(out.f941, '16 total').value).toBe(305900);
     expect(out.f941.notes.join(' ')).not.toMatch(/rounding difference/);
   });
 
-  test('any rounding difference goes into month 3', () => {
-    expect(monthlyLiabilityLines(100000, [30000, 30000, 39999])).toEqual({ months: [30000, 30000, 40000], monthThreeAdjustment: 1 });
-    expect(monthlyLiabilityLines(100000, [30000, 30000, 40000])).toEqual({ months: [30000, 30000, 40000], monthThreeAdjustment: 0 });
+  test('the employer half rounded per check: the months still total line 12, with a note', () => {
+    // The employer half of check 3 was rounded 2 cents high; line 12 takes the
+    // employer share from line 5e, so 2 cents come off month 3.
+    const out = build([
+      check('2026-09-28', '2026-10-09', taxed({ tech: 1, federal_income_tax_cents: 100000 })),
+      check('2026-10-26', '2026-11-06', taxed({ tech: 1, federal_income_tax_cents: 90000 })),
+      check('2026-11-23', '2026-12-04', taxed({ tech: 1, federal_income_tax_cents: 70000, employer_medicare_cents: 1452 })),
+    ]);
+    expect(['16 month 1', '16 month 2', '16 month 3'].map((id) => line(out.f941, id).value)).toEqual([115300, 105300, 85300]);
+    expect(out.f941.notes.join(' ')).toMatch(/rounding difference of 2 cents, taken off the latest months with tax, none below zero/);
+  });
+
+  test('the month split: extra cents go to the last month with tax; missing cents come off the latest months, none below zero (pre-push audit P1)', () => {
+    expect(monthlyLiabilityLines(100000, [30000, 30000, 39999])).toEqual({ months: [30000, 30000, 40000], rounding: 1 });
+    expect(monthlyLiabilityLines(100000, [30000, 30000, 40000])).toEqual({ months: [30000, 30000, 40000], rounding: 0 });
+    // No tax in month 3: the cents stay off it.
+    expect(monthlyLiabilityLines(110, [60, 45, 0])).toEqual({ months: [60, 50, 0], rounding: 5 });
+    expect(monthlyLiabilityLines(100, [60, 45, 0])).toEqual({ months: [60, 40, 0], rounding: -5 });
+    // More missing than month 3 holds: month 3 goes to zero, the rest comes off month 2.
+    expect(monthlyLiabilityLines(100, [60, 45, 3])).toEqual({ months: [60, 40, 0], rounding: -8 });
   });
 
   test('deposits recorded as paid reduce the balance; a surplus is an overpayment', () => {
-    const rows = [check('2026-10-05', '2026-10-16', { tech: 1, federal_income_tax_cents: 30000 })];
-    const owing = build(rows, { deposits941: [{ amount_paid: '100.00', amount_due: '300.00' }] });
+    // Line 12: $300.00 withheld income tax plus $153.00 Social Security and Medicare.
+    const rows = [check('2026-10-05', '2026-10-16', taxed({ tech: 1, federal_income_tax_cents: 30000 }))];
+    const owing = build(rows, { deposits941: [{ amount_paid: '100.00', amount_due: '453.00' }] });
     expect(line(owing.f941, '13').value).toBe(10000);
-    expect(line(owing.f941, '14').value).toBe(20000);
+    expect(line(owing.f941, '14').value).toBe(35300);
     expect(line(owing.f941, '15').value).toBe(0);
     expect(line(owing.f941, '13').label).toMatch(/deposits recorded as paid on the Tax page/);
-    const over = build(rows, { deposits941: [{ amount_paid: null, amount_due: '350.00' }] });
+    const over = build(rows, { deposits941: [{ amount_paid: null, amount_due: '500.00' }] });
     expect(line(over.f941, '14').value).toBe(0);
-    expect(line(over.f941, '15').value).toBe(5000);
+    expect(line(over.f941, '15').value).toBe(4700);
   });
 });
 

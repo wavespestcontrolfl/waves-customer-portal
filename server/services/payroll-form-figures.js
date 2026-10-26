@@ -118,15 +118,37 @@ const count = (line, label, value, extra) => row(line, label, 'count', value, ex
 const text = (line, label, value, extra) => row(line, label, 'text', value, extra);
 
 /**
- * Splits line 12 over the quarter's three months. The months already add up to
- * line 12 (both come from the stored tax columns); any difference still goes
- * into month 3.
+ * Makes `values` (per month or per quarter) total `target` with no negative
+ * entry and no cents on an entry that has none: extra cents go to the last
+ * entry above zero, and missing cents come off the latest entries first, none
+ * below zero (pre-push audit P1). Returns the new values and the difference.
+ */
+function spreadRounding(values, target) {
+  const out = [...values];
+  const rounding = target - out.reduce((acc, v) => acc + v, 0);
+  if (rounding > 0) {
+    let last = out.length - 1;
+    while (last > 0 && out[last] <= 0) last -= 1;
+    out[last] += rounding;
+  } else {
+    let missing = -rounding;
+    for (let i = out.length - 1; i >= 0 && missing > 0; i -= 1) {
+      const take = Math.min(Math.max(out[i], 0), missing);
+      out[i] -= take;
+      missing -= take;
+    }
+  }
+  return { values: out, rounding };
+}
+
+/**
+ * Splits line 12 over the quarter's three months. The months come from the
+ * paychecks (the employer half rounded per check); line 12 takes the employer
+ * share from line 5e. Any difference is spread by spreadRounding.
  */
 function monthlyLiabilityLines(line12Cents, monthCents) {
-  const first = monthCents[0];
-  const second = monthCents[1];
-  const third = line12Cents - first - second;
-  return { months: [first, second, third], monthThreeAdjustment: third - monthCents[2] };
+  const { values, rounding } = spreadRounding(monthCents, line12Cents);
+  return { months: values, rounding };
 }
 
 function form941(year, quarter, quarterChecks, depositsCents) {
@@ -140,8 +162,14 @@ function form941(year, quarter, quarterChecks, depositsCents) {
   const addlTax = pct(addlWages, RATES.additionalMedicareBp);
   const line5e = ssTax + medicareTax + addlTax;
   const line6 = fit + line5e;
-  const stored = quarterChecks.reduce((total, c) => total + c.ssEmployee + c.medicareEmployee + c.addlMedicare + c.ssEmployer + c.medicareEmployer, 0);
-  const line7 = stored - line5e;
+  // Line 7 (Form 941 instructions) is the fractions of cents in the EMPLOYEE
+  // share only: the Social Security, Medicare and Additional Medicare the
+  // paychecks withheld, less the employee share of line 5e figured on the
+  // quarter's wages. The employer share is what line 5e leaves; its per-check
+  // rounding is no adjustment (pre-push audit P0).
+  const withheld = sum(quarterChecks, 'ssEmployee') + sum(quarterChecks, 'medicareEmployee') + sum(quarterChecks, 'addlMedicare');
+  const employeeShare = pct(ssWages, RATES.socialSecurityBp) + pct(wages, RATES.medicareBp) + addlTax;
+  const line7 = withheld - employeeShare;
   const line10 = line6 + line7;
   const line12 = line10;
   const line14 = max0(line12 - depositsCents);
@@ -158,7 +186,7 @@ function form941(year, quarter, quarterChecks, depositsCents) {
     cents('5e', 'Total social security and Medicare taxes (5a + 5b + 5c + 5d, column 2)', line5e),
     cents('5f', 'Section 3121(q) Notice and Demand: tax due on unreported tips', 0),
     cents('6', 'Total taxes before adjustments (lines 3 + 5e + 5f)', line6),
-    cents('7', 'Current quarter’s adjustment for fractions of cents', line7, { note: 'The cents the paychecks collected, less the form’s own rounding of line 5e. It can be negative.' }),
+    cents('7', 'Current quarter’s adjustment for fractions of cents', line7, { note: 'The employee Social Security and Medicare the paychecks withheld, less the employee share of line 5e. It can be negative.' }),
     cents('8', 'Current quarter’s adjustment for sick pay', 0),
     cents('9', 'Current quarter’s adjustments for tips and group-term life insurance', 0),
     cents('10', 'Total taxes after adjustments (lines 6 + 7 + 8 + 9)', line10),
@@ -182,9 +210,8 @@ function form941(year, quarter, quarterChecks, depositsCents) {
       rows.push(cents(`16 month ${index + 1}`, `Tax liability for month ${index + 1} (${MONTH_NAMES[months[index] - 1]})`, value));
     });
     rows.push(cents('16 total', 'Total liability for the quarter (must equal line 12)', line12));
-    if (split.monthThreeAdjustment !== 0) {
-      notes.push(`Month 3 includes a rounding difference of ${split.monthThreeAdjustment} cents so the three months total line 12.`);
-    }
+    if (split.rounding > 0) notes.push(`The months include a rounding difference of ${split.rounding} cents, added to the last month with tax, so they total line 12.`);
+    if (split.rounding < 0) notes.push(`The months include a rounding difference of ${-split.rounding} cents, taken off the latest months with tax, none below zero, so they total line 12.`);
   }
   notes.push('Line 13 counts only deposits you marked paid on the Tax page. A deposit you made but did not mark there is missing.');
   return { form: '941', year, quarter, rows, notes };
@@ -330,24 +357,10 @@ function form940(year, yearChecks, depositsCents, rt6Paid = []) {
       ? 'Part 5 (lines 16 and 17) is needed because line 8 is more than $500. Fill it in after line 10 is checked: line 17 must equal line 12.'
       : 'Part 5 is needed only if line 12 is more than $500. Decide after line 10 is checked.');
   } else if (line12 > FORM_940_PART_5_THRESHOLD_CENTS) {
-    const byQuarter = [1, 2, 3, 4].map((q) => sum(quarterChecksOf(yearChecks, q), 'futa'));
     // The checks round FUTA per paycheck; line 12 rounds the year's taxable
-    // wages once. Line 17 must equal line 12, and no quarter may show a
-    // negative liability or take cents with no FUTA wages. Extra cents go to
-    // the LAST quarter that carries FUTA. Missing cents come off the latest
-    // quarters first, none below zero (pre-push audit P1: a small 4th quarter
-    // could go negative). Line 12 >= 0, so the quarters always cover them.
-    const rounding = line12 - byQuarter.reduce((acc, v) => acc + v, 0);
-    if (rounding > 0) {
-      byQuarter[Math.max(0, ...[0, 1, 2, 3].filter((i) => byQuarter[i] > 0))] += rounding;
-    } else {
-      let missing = -rounding;
-      for (let i = 3; i >= 0 && missing > 0; i -= 1) {
-        const take = Math.min(byQuarter[i], missing);
-        byQuarter[i] -= take;
-        missing -= take;
-      }
-    }
+    // wages once. Line 17 must equal line 12, so spreadRounding moves the cent
+    // difference without a negative quarter or cents on a quarter with no FUTA.
+    const { values: byQuarter, rounding } = spreadRounding([1, 2, 3, 4].map((q) => sum(quarterChecksOf(yearChecks, q), 'futa')), line12);
     rows.push(
       cents('16a', 'FUTA liability, 1st quarter (January to March)', byQuarter[0]),
       cents('16b', 'FUTA liability, 2nd quarter (April to June)', byQuarter[1]),
