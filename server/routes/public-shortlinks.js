@@ -20,7 +20,6 @@ const { shortlinkLegacyExpireLive } = require('../config/feature-gates');
 const { isBotUserAgent } = require('../utils/bot-ua');
 const { shouldRecord } = require('../services/customer-page-views');
 const {
-  WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
 } = require('../constants/business');
 
@@ -113,8 +112,8 @@ function genericErrorPage() {
 }
 
 const SUPPORT_CTAS = [
-  { href: WAVES_SUPPORT_PHONE_TEL, label: `Call ${WAVES_SUPPORT_PHONE_DISPLAY}` },
-  { href: 'mailto:contact@wavespestcontrol.com', label: 'Email contact@wavespestcontrol.com' },
+  { href: WAVES_SUPPORT_PHONE_TEL, label: 'Call Waves' },
+  { href: 'mailto:contact@wavespestcontrol.com', label: 'Email Waves' },
 ];
 
 // Glass UI (owner 2026-10-24): same frosted-card-over-scene treatment the

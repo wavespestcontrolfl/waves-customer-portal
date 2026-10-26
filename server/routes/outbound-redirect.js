@@ -96,7 +96,7 @@ function genericErrorPage() {
 }
 
 const SUPPORT_CTAS = [
-  { href: 'mailto:contact@wavespestcontrol.com', label: 'Email contact@wavespestcontrol.com' },
+  { href: 'mailto:contact@wavespestcontrol.com', label: 'Email Waves' },
 ];
 
 // Glass UI (owner 2026-10-24): same frosted-card-over-scene treatment the
