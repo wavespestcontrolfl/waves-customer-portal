@@ -54,25 +54,23 @@ describe('bookingSlotWindow — one config derivation for builder + commit', () 
       dayEndMin: 1080,
       lunchStartMin: 720,
       lunchEndMin: 780,
-      maxPerDay: 3,
     });
   });
 
-  test('honors configured hours, lunch, and cap', () => {
+  test('honors configured hours and lunch', () => {
     const w = bookingSlotWindow({
       day_start: '09:00', day_end: '18:00',
       lunch_start: '11:30', lunch_end: '12:30',
-      max_self_books_per_day: 5,
     });
     expect(w).toMatchObject({
       dayStartMin: 540, dayEndMin: 1080,
-      lunchStartMin: 690, lunchEndMin: 750, maxPerDay: 5,
+      lunchStartMin: 690, lunchEndMin: 750,
     });
   });
 
   test('the availability builder consumes the SAME derivation (no duplicated constants)', () => {
-    // builder destructures it + createSelfBooking geometry/day-cap use it
-    expect((src.match(/bookingSlotWindow\(config\)/g) || []).length).toBeGreaterThanOrEqual(3);
+    // builder destructures it + createSelfBooking geometry use it
+    expect((src.match(/bookingSlotWindow\(config\)/g) || []).length).toBeGreaterThanOrEqual(2);
     // the old inline constants are gone from the builder
     expect(src).not.toMatch(/const slotGridMinutes = 60;/);
   });
@@ -402,7 +400,7 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
       expect(idx).toBeLessThan(insertIdx);
     }
     // Failures only detectable under the advisory locks still roll the
-    // just-created profile back (the DAY_FULL / SLOT_TAKEN catch).
+    // just-created profile back (the SLOT_TAKEN catch).
     expect(src).toMatch(/if \(createdCustomerId\) \{\s*\n\s*await db\('notification_prefs'\)\.where\(\{ customer_id: createdCustomerId \}\)\.del\(\)/);
   });
 
@@ -412,37 +410,24 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(identityIdx).toBeLessThan(src.indexOf('const slotDateError = validateBookingSlotDate(slotDateStr, config);'));
   });
 
-  test('day-cap count is serialized under the SHARED date-scoped advisory lock (cross-zone, cross-writer)', () => {
-    // The customer/tech/zone locks don't cover two confirms in DIFFERENT
-    // zones — both could observe a cap-1 count. The cap is global by date, so
-    // both self_booked_appointments writers take the SAME shared lock+count
-    // primitives (services/availability.js) — a private copy in either file
-    // would let the other bypass it.
-    expect(src).toMatch(/const \{ acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay \} = require\('\.\.\/services\/availability'\);/);
-    const lockIdx = src.indexOf('await acquireSelfBookingDayCapLock(trx, slotDateStr);');
-    const txIdx = src.indexOf('txResult = await db.transaction');
-    const capCountIdx = src.indexOf('const dayCount = await countActiveSelfBookingsForDay(trx, slotDateStr);');
-    expect(txIdx).toBeGreaterThan(-1);
-    expect(lockIdx).toBeGreaterThan(txIdx); // inside the transaction (xact-scoped)
-    expect(lockIdx).toBeLessThan(capCountIdx); // taken before the count it serializes
+  test('no per-day count cap or day lock in createSelfBooking (retired 2026-09-23 for the self-serve notice window)', () => {
+    expect(src).not.toMatch(/acquireSelfBookingDayCapLock|countActiveSelfBookingsForDay|selfBookDayCapEnabled/);
   });
 
   // ORDERING CONTRACT (services/scheduling/occupancy.js): the ONE global
-  // order is date-occupancy → self-booking-confirm → tech → zone → day-cap.
-  // createSelfBooking uses every rung, so it is the writer that pins the
-  // whole order down.
-  test('lock acquisition order stays fixed — date → customer → tech → zone → day-cap — so writers can never deadlock', () => {
+  // order is date-occupancy → self-booking-confirm → tech → zone → day lock.
+  // createSelfBooking uses rungs 1-4 (the day lock is the phone-booking
+  // ladder's rung 5 only), so it pins the order down for those.
+  test('lock acquisition order stays fixed — date → customer → tech → zone — so writers can never deadlock', () => {
     const txIdx = src.indexOf('txResult = await db.transaction');
     const dateLockIdx = src.indexOf('await acquireOccupancyLock(trx, slotDateStr);', txIdx);
     const customerLockIdx = src.indexOf("['self-booking-confirm', `${custId}:${slotDateStr}`],", txIdx);
     const techLockIdx = src.indexOf("['slot-reserve', `${technician_id}:${slotDateStr}`],", txIdx);
     const zoneLockIdx = src.indexOf("['slot-reserve', `zone:${zone?.id || 'unknown'}:${slotDateStr}`],", txIdx);
-    const dayLockIdx = src.indexOf('await acquireSelfBookingDayCapLock(trx, slotDateStr);', txIdx);
     expect(dateLockIdx).toBeGreaterThan(txIdx);
     expect(customerLockIdx).toBeGreaterThan(dateLockIdx);
     expect(techLockIdx).toBeGreaterThan(customerLockIdx);
     expect(zoneLockIdx).toBeGreaterThan(techLockIdx);
-    expect(dayLockIdx).toBeGreaterThan(zoneLockIdx);
   });
 
   test('the date-occupancy lock comes from the SHARED module (a private copy would key a different lock)', () => {
@@ -497,20 +482,8 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(src.slice(txIdx, dateLockIdx)).toContain('findConflictingVisits');
   });
 
-  test('day cap re-checked INSIDE the transaction, after the idempotent-replay lookup', () => {
-    // Round-10 P2 :1593 replaced the unconditional replay return with a
-    // linked-visit liveness gate — `if (replayIsLive) return { existing };`
-    // is the new terminal marker for "the replay decision is settled".
-    const replayIdx = src.indexOf("if (replayIsLive) return { existing };");
-    const capIdx = src.indexOf("code: 'DAY_FULL',");
-    const conflictIdx = src.indexOf("code: 'SLOT_TAKEN',");
-    expect(replayIdx).toBeGreaterThan(-1);
-    expect(capIdx).toBeGreaterThan(replayIdx);
-    expect(conflictIdx).toBeGreaterThan(capIdx);
-  });
-
-  test('DAY_FULL rides the SLOT_TAKEN catch (409 + created-profile rollback)', () => {
-    expect(src).toMatch(/txErr\.code === 'SLOT_TAKEN' \|\| txErr\.code === 'DAY_FULL'/);
+  test('SLOT_TAKEN rides the 409 catch with created-profile rollback', () => {
+    expect(src).toMatch(/txErr\.code === 'SLOT_TAKEN' \|\| txErr\.code === 'ALREADY_BOOKED'/);
   });
 
   test('source_estimate_id: uuid-shape 400, existence-checked (FK), stamped on the scheduled_services insert', () => {
@@ -645,46 +618,31 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Global day cap — availability.js's confirmBooking is the OTHER writer
+// Day lock — availability.js's confirmBooking is the OTHER writer
 // ---------------------------------------------------------------------------
 
-describe('AvailabilityEngine.confirmBooking — shared global day cap (source guards)', () => {
+describe('AvailabilityEngine.confirmBooking — no per-day count cap (source guards)', () => {
   const availSrc = fs.readFileSync(path.join(__dirname, '../services/availability.js'), 'utf8');
 
-  test('the shared helpers own the lock namespace + the global non-cancelled count', () => {
+  test('the shared helper keeps only the day lock namespace, for the phone-booking ladder', () => {
     expect(availSrc).toMatch(/const SELF_BOOKING_DAY_CAP_LOCK_NS = 'self-booking-day-cap';/);
     expect(availSrc).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)/);
-    const countIdx = availSrc.indexOf('async function countActiveSelfBookingsForDay');
-    expect(countIdx).toBeGreaterThan(-1);
-    const countFn = availSrc.slice(countIdx, countIdx + 600);
-    expect(countFn).toMatch(/\.whereNot\('status', 'cancelled'\)/);
-    // GLOBAL by date — no zone scoping inside the shared count
-    expect(countFn).not.toMatch(/service_zone_id/);
-    // …and both primitives are exported for the route writer
     expect(availSrc).toMatch(/module\.exports\.acquireSelfBookingDayCapLock = acquireSelfBookingDayCapLock;/);
-    expect(availSrc).toMatch(/module\.exports\.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;/);
+    // The count helper and its gate were retired with the per-day cap.
+    expect(availSrc).not.toMatch(/countActiveSelfBookingsForDay|selfBookDayCapEnabled|SELF_BOOKING_EFFECTIVE_DATE_SQL/);
   });
 
-  test('confirmBooking takes date → zone → day-cap (the global order) and counts globally before inserting', () => {
+  test('confirmBooking takes date → zone and takes no day lock or day count', () => {
     const dateLockIdx = availSrc.indexOf('await acquireOccupancyLock(trx, dateStr);');
     const zoneLockIdx = availSrc.indexOf("['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],");
-    const dayLockIdx = availSrc.indexOf('await acquireSelfBookingDayCapLock(trx, dateStr);');
-    const dayCountIdx = availSrc.indexOf('const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {');
-    const insertIdx = availSrc.indexOf("await trx('self_booked_appointments').insert({");
     expect(dateLockIdx).toBeGreaterThan(-1);
     expect(zoneLockIdx).toBeGreaterThan(dateLockIdx); // rung 1 before rung 4
     // Exactly ONE acquisition — hoisted out of the zone-null branch, so the
     // zone-resolved branch can't skip it.
     expect(availSrc.split('await acquireOccupancyLock(trx, dateStr);')).toHaveLength(2);
-    expect(dayLockIdx).toBeGreaterThan(zoneLockIdx); // zone → day, same relative order as createSelfBooking
-    expect(dayCountIdx).toBeGreaterThan(dayLockIdx); // count under the lock
-    expect(insertIdx).toBeGreaterThan(dayCountIdx); // checked before the write
+    expect(availSrc).not.toMatch(/await acquireSelfBookingDayCapLock\(trx, dateStr\)/);
     // reschedules still exclude the row being moved
-    expect(availSrc).toMatch(/excludeSelfBookingId: options\.excludeSelfBookingId \|\| null,/);
-  });
-
-  test('the old PER-ZONE cap count is gone (it let cross-zone writers exceed the global cap)', () => {
-    expect(availSrc).not.toMatch(/const existingBookings = await trx\('self_booked_appointments'\)/);
+    expect(availSrc).toMatch(/if \(options\.excludeSelfBookingId\) q\.whereNot\('id', options\.excludeSelfBookingId\);/);
   });
 
   test('confirmBooking replaces the old same-day-only "already passed" floor with the shared notice-window helper', () => {
@@ -693,16 +651,6 @@ describe('AvailabilityEngine.confirmBooking — shared global day cap (source gu
     expect(idx).toBeGreaterThan(-1);
     expect(availSrc.slice(idx, idx + 200)).toMatch(/'SLOT_TAKEN'/);
     expect(availSrc).not.toMatch(/already passed today/);
-  });
-
-  test('getAvailableSlots filters full days by the GLOBAL count (shared helper), matching what confirm enforces', () => {
-    // The zone-engine BUILDER used to count per zone: when another zone had
-    // consumed the global cap, it still offered this zone's slots and every
-    // confirm then 409'd SLOT_TAKEN. Both builders (this one and booking.js's
-    // buildBookingAvailability, which already counts with no zone filter)
-    // must use the same global-by-date count the confirms enforce.
-    expect(availSrc).toMatch(/const existingBookingsCount = await countActiveSelfBookingsForDay\(db, dateStr\);/);
-    expect(availSrc).not.toMatch(/const existingBookings = await db\('self_booked_appointments'\)\s*\n\s*\.where\('service_zone_id', zone\.id\)[\s\S]{0,200}\.count\(/);
   });
 });
 
@@ -925,17 +873,17 @@ describe('self-serve notice window — offer/commit parity (source guards)', () 
     expect(idx).toBeGreaterThan(-1);
     // After the replay lookup (a booking that landed just outside the boundary
     // whose response was lost must still replay as success when the retry
-    // crosses it), before the day-cap / slot-conflict re-checks. Round-10 P2
+    // crosses it), before the slot-conflict re-check. Round-10 P2
     // :1593 replaced the unconditional replay return with a linked-visit
     // liveness gate — `if (replayIsLive) return { existing };` is the new
     // terminal marker for "the replay decision is settled".
     const replayIdx = src.indexOf('if (replayIsLive) return { existing };');
-    const dayCapIdx = src.indexOf('if (selfBookDayCapEnabled()) {', replayIdx);
+    const dayCapIdx = src.indexOf('// Re-verify the slot is still available (race condition guard).', replayIdx);
     expect(replayIdx).toBeGreaterThan(-1);
     expect(idx).toBeGreaterThan(replayIdx);
     expect(idx).toBeLessThan(dayCapIdx);
     // Customer-facing call-us copy, thrown as an operational 409 the route's
-    // error mapping already renders (same shape as DAY_FULL / ALREADY_BOOKED).
+    // error mapping already renders (same shape as ALREADY_BOOKED).
     const block = src.slice(idx, idx + 400);
     expect(block).toMatch(/941\)\s*297-5749/);
     expect(block).toMatch(/statusCode: 409/);

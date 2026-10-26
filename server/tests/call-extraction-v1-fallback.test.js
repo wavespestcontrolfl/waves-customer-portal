@@ -10,7 +10,6 @@ const mockAnthropicCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockAnthropicCreate } })));
 jest.mock('../services/llm-dispatch-metrics', () => ({
   recordCall: jest.fn(() => null),
-  recordTrace: jest.fn(),
   failCall: jest.fn(),
   recordDispatch: jest.fn(),
   recordedPolicyLabel: jest.fn((policy) => policy?.name || null),

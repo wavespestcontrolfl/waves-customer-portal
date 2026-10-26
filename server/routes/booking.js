@@ -167,7 +167,7 @@ const {
   CUSTOMER_HOUR_GRID, lunchBlockEnabled, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
-const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive, bookArrivalGraceLive } = require('../config/feature-gates');
+const { reserviceRankAfterNewLive, bookCapacityCommitLive, bookArrivalGraceLive } = require('../config/feature-gates');
 const { multiTechConfirmLive } = require('../config/feature-gates');
 const {
   bookArrivalGraceMinutes, delayWithinGrace, bookGapAdmits, bookClashesWaivable,
@@ -1212,7 +1212,6 @@ function bookingSlotWindow(config = {}) {
     // GATE_BOOKING_LUNCH_BLOCK is the single point of control.
     lunchStartMin: timeToMin(config.lunch_start || '12:00'),
     lunchEndMin: timeToMin(config.lunch_end || '13:00'),
-    maxPerDay: config.max_self_books_per_day ?? 3,
   };
 }
 
@@ -1585,7 +1584,7 @@ function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, 
 }
 
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
-// rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
+// rangeTo], applies the lunch / whole-hour rules, then returns the
 // curated best-4 (best-3 under the re-service profile — see rankProfile
 // below) plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
@@ -1604,7 +1603,7 @@ function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, 
 // lookup), so this function itself carries none of that branching. It only
 // ever reorders `slots`/`days`' is_best_fit; the offered slot SET
 // (days[].slots) is never filtered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace }) {
   config = applySchedulingPolicy(config);
   // The signed-offer policy tag for this build (minted inside addCandidate
   // below; createSelfBooking verifies with the same mapping). An offer built
@@ -1735,9 +1734,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // Slide shadow (GATE_SLOT_SLIDE_OFFER): the same daypart + self-serve
     // notice filters this function applies to find-time's results below,
     // so a logged slide is one this request could actually show. The
-    // retired per-day cap (GATE_SELF_BOOK_DAY_CAP, owner ruling 2026-09-23)
-    // is resolved only after this call, so with it on /book doesn't opt in.
-    slideNewStartAllowed: selfBookDayCapEnabled() ? undefined : (date, startMin) => {
+    slideNewStartAllowed: (date, startMin) => {
       const startTime = `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`;
       return inTimeOfDay(startTime, timeOfDay)
         && !(selfServeNotice && violatesSelfServeNotice({ date, startTime }, today));
@@ -1760,82 +1757,6 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     slotGridMinutes, dayStartMin, dayEndMin,
     lunchStartMin: lunchStart, lunchEndMin: lunchEnd,
   } = bookingSlotWindow(config);
-  // Enforce max_self_books_per_day — filter out dates already at cap.
-  // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): retired in favor of
-  // the self-serve notice window below. Unset (default) = no per-day cap
-  // (fullDays stays empty, no day-cap queries run at all).
-  let fullDays = new Set();
-  if (selfBookDayCapEnabled()) {
-    const { maxPerDay } = bookingSlotWindow(config);
-    // Count each booking on its EFFECTIVE date (the linked live visit's date;
-    // the copy's own date only when unlinked) — the same expression the
-    // commit-time gate keys on. A booking whose live visit was moved off its
-    // original day must release that day's cap here AND consume the new
-    // day's, or the offer keeps a phantom slot the commit would refuse (or
-    // offers one the commit would grant).
-    const {
-      SELF_BOOKING_EFFECTIVE_DATE_SQL: effectiveDateSql,
-      SELF_BOOKING_INACTIVE_STATUSES: inactiveStatuses,
-    } = require('../services/availability');
-    // The expression is bound ONCE, in a subquery, and the outer query
-    // filters/groups its plain column — PostgreSQL matches GROUP BY to SELECT
-    // by expression identity, and two separately-bound copies of the CASE
-    // ($1..$3 vs $4..$6) are not the same expression to it.
-    const bookingCounts = await db(function effectiveDates() {
-      this.select('id', db.raw(`${effectiveDateSql} AS effective_date`, inactiveStatuses))
-        .from('self_booked_appointments')
-        .whereNot('status', 'cancelled');
-      if (excludeSelfBookingId) this.whereNot('id', excludeSelfBookingId);
-      this.as('sb');
-    })
-      .whereBetween('effective_date', [rangeFrom, rangeTo])
-      .select('effective_date as date')
-      .count('* as count')
-      .groupBy('effective_date');
-    // ⭐ THE OFFER MUST COUNT WHAT THE COMMIT COUNTS. Voice-agent bookings write
-    // only `scheduled_services` (the office-review pending lifecycle), and
-    // countActiveSelfBookingsForDay — the commit-time gate — now includes them.
-    // Counting only self_booked_appointments HERE would keep offering a day the
-    // commit refuses, so every pick on a voice-filled day would come back
-    // day_full: the offer surface promising what the gate declines, which is the
-    // exact divergence this filter exists to prevent.
-    const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-    const voiceCountQuery = db('scheduled_services')
-      .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
-      // Same inactive set the commit-time counter uses — a skipped (office-
-      // rejected) AI request releases its slot instead of holding the day full.
-      .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
-      .whereBetween('scheduled_date', [rangeFrom, rangeTo])
-      // Owner ruling 2026-09-30: an unconfirmed street-level address hold takes no
-      // daily-cap capacity (same exclusion the commit-time counter uses).
-      .whereNotExists(function () { require('../services/street-level-hold').heldVisitSubquery(this, 'scheduled_services'); })
-      .select('scheduled_date')
-      .count('* as count')
-      .groupBy('scheduled_date');
-    if (excludeServiceIds.length) voiceCountQuery.whereNotIn('id', excludeServiceIds);
-    const voiceCounts = await voiceCountQuery;
-    // Never throws on a missing/unparseable date: an availability BUILDER that
-    // dies mid-count would take the whole offer surface down with it.
-    const dayKey = (d) => {
-      if (!d) return null;
-      if (typeof d === 'string') return d.split('T')[0] || null;
-      const t = new Date(d);
-      return Number.isNaN(t.getTime()) ? null : t.toISOString().split('T')[0];
-    };
-    const perDay = new Map();
-    for (const r of bookingCounts) {
-      const k = dayKey(r.date);
-      if (k) perDay.set(k, parseInt(r.count, 10) || 0);
-    }
-    for (const r of voiceCounts) {
-      const k = dayKey(r.scheduled_date);
-      if (k) perDay.set(k, (perDay.get(k) || 0) + (parseInt(r.count, 10) || 0));
-    }
-    fullDays = new Set(
-      [...perDay.entries()].filter(([, count]) => count >= maxPerDay).map(([date]) => date)
-    );
-  }
-
   // Offer must mirror the /confirm commit gate (the #2704 estimate-surface
   // rule, filterCollidingSlots' dead-end-loop incident): createSelfBooking
   // blocks on unassigned zone rows and live customer-NULL estimate holds,
@@ -2024,7 +1945,6 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // confirm. Ungraced builds pass every slot through untouched.
   const offerSlots = graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []);
   for (const slot of offerSlots) {
-    if (fullDays.has(slot.date)) continue;
     if (capacityEnabled()) {
       // Capacity evaluates each start against the whole route and live blocks.
       // Never synthesize additional hours from an otherwise empty route.
@@ -3123,7 +3043,7 @@ async function createSelfBooking(payload = {}) {
     // call (the same anti-forgery model reschedule-public.js uses for its
     // commits), and callbackVisit is unreachable from public POST bodies
     // (/confirm pins it null after the spread). Every transactional re-check
-    // below — blackout, date bounds, geometry, day cap, conflict + global
+    // below — blackout, date bounds, geometry, conflict + global
     // occupancy — still runs for them. No separate policy tag is needed for
     // them either: reservice-public.js's buildAvailabilityForCustomer and
     // inspection-public.js's buildAvailabilityForLead both call
@@ -3223,7 +3143,7 @@ async function createSelfBooking(payload = {}) {
     // Create customer from new_customer payload if none resolved. Runs AFTER
     // every no-customer-needed validation above: a rejection past this point
     // would strand the just-created profile, and the retry would then hit the
-    // phone-already-on-file 409. (The transaction's DAY_FULL / SLOT_TAKEN
+    // phone-already-on-file 409. (The transaction's SLOT_TAKEN
     // catch below rolls the profile back for the failures that can only be
     // detected under the advisory locks.)
     let createdCustomerId = null;
@@ -3570,11 +3490,6 @@ async function createSelfBooking(payload = {}) {
     // customer+day: a double-submit (button double-tap, client retry)
     // otherwise mints two parents — and two seeded quarterly series — and a
     // partial failure could leave a booking without its dispatch row.
-    // Shared global day-cap primitives (services/availability.js) — the SAME
-    // lock namespace + count EVERY self_booked_appointments writer takes, so
-    // the zone-engine confirmBooking and this path serialize against each
-    // other. Lazy require: the route ↔ service load order must not cycle.
-    const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../services/availability');
     // Pest-series seeding condition — computed BEFORE the booking
     // transaction (owner ruling 2026-08-27) so the duplicate-kept
     // disposition can be decided atomically with the visit's creation.
@@ -3725,19 +3640,6 @@ async function createSelfBooking(payload = {}) {
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['slot-reserve', `zone:${zone?.id || 'unknown'}:${slotDateStr}`],
       );
-      // The locks above are customer-, tech-, and zone-scoped, but the
-      // max_self_books_per_day cap below is GLOBAL by date — two confirms in
-      // different zones share none of those locks, so both could observe a
-      // cap-1 count and insert, exceeding the cap. One date-scoped lock
-      // (the SHARED helper — availability.js's confirmBooking takes the same
-      // one) serializes the count+insert across zones AND across writers.
-      // Taken last, keeping the acquisition order fixed
-      // (date → customer → tech → zone → day-cap — the global order in
-      // scheduling/occupancy.js) so concurrent confirms can't deadlock.
-      // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): retired in favor
-      // of the self-serve notice window — unset (default) skips the lock
-      // AND the re-check below; the primitives themselves are unchanged.
-      if (selfBookDayCapEnabled()) await acquireSelfBookingDayCapLock(trx, slotDateStr);
       // The county-roll ADDRESS-VERDICT contact-pair locks, BEFORE the
       // customer-comms fence (pre-push audit P1 after r41): the staff
       // revision of a flagged draft and the website publication both take
@@ -4213,25 +4115,6 @@ async function createSelfBooking(payload = {}) {
         }
       }
 
-      // Commit-time max_self_books_per_day re-check (same predicate the
-      // availability builder uses to drop full days, via the shared helper) —
-      // the builder's cap is advisory-only without this, since a direct POST
-      // never saw it. Runs AFTER the replay lookup so a double-submit on a
-      // now-full day still returns its original booking. Gated off by
-      // default (GATE_SELF_BOOK_DAY_CAP, owner ruling 2026-09-23) — see the
-      // lock acquisition above.
-      if (selfBookDayCapEnabled()) {
-        const { maxPerDay } = bookingSlotWindow(config);
-        const dayCount = await countActiveSelfBookingsForDay(trx, slotDateStr);
-        if (dayCount >= maxPerDay) {
-          throw Object.assign(new Error('That day is fully booked — please pick another day.'), {
-            statusCode: 409,
-            isOperational: true,
-            code: 'DAY_FULL',
-          });
-        }
-      }
-
       // Re-verify the slot is still available (race condition guard).
       // Tech bookings conflict against the tech's route; no-tech bookings
       // conflict against other unassigned jobs in the same zone (the
@@ -4606,10 +4489,9 @@ async function createSelfBooking(payload = {}) {
     } catch (txErr) {
       // Expected race outcome — answer directly rather than throwing into
       // the global error middleware, which logs req.body (new_customer
-      // phone/email/address would land in the logs). DAY_FULL rides the same
-      // path: both are "pick another slot" outcomes, and both must roll back
-      // a just-created profile so the retry doesn't strand on the
-      // phone-already-on-file 409.
+      // phone/email/address would land in the logs). A SLOT_TAKEN outcome is a
+      // "pick another slot" answer and must roll back a just-created profile
+      // so the retry doesn't strand on the phone-already-on-file 409.
       // SELF_SERVE_NOTICE rides it too (Codex r1 P1): the offered slot
       // crossed the notice boundary while this request waited — another
       // "pick another slot" outcome that must not strand a just-created
@@ -4622,7 +4504,7 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
         if (txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
           // No message may follow this refusal: retire the recovery intent the
           // wizard's capture-intent staged for this contact.

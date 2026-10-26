@@ -5,10 +5,9 @@
 // is the provider's, not a guess.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockRecordCall = jest.fn(() => 77);
-const mockRecordTrace = jest.fn();
 jest.mock('../services/llm-dispatch-metrics', () => {
   const actual = jest.requireActual('../services/llm-dispatch-metrics');
-  return { ...actual, recordCall: (...a) => mockRecordCall(...a), recordTrace: (...a) => mockRecordTrace(...a), recordDispatch: jest.fn() };
+  return { ...actual, recordCall: (...a) => mockRecordCall(...a), recordDispatch: jest.fn() };
 });
 
 const { callWorkersAIDecision, dispatch, WORKERS_AI_ACCOUNTS_API, workersAiDecisionModel } = require('../services/llm/call');
@@ -49,7 +48,6 @@ describe('callWorkersAIDecision', () => {
     process.env.CF_ACCOUNT_ID = 'acct123';
     global.fetch = jest.fn().mockResolvedValue(okResponse());
     mockRecordCall.mockClear();
-    mockRecordTrace.mockClear();
   });
   afterAll(() => {
     global.fetch = originalFetch;
@@ -80,7 +78,6 @@ describe('callWorkersAIDecision', () => {
       provider: 'cloudflare', requestedModel: 'clef-flash', servedModel: 'clef-flash', laneId: 'typed_decisions_clef', promptVersion: 'call_judge.v2', ok: true,
       usage: { input_tokens: 346, output_tokens: 0 },
     });
-    expect(mockRecordTrace).toHaveBeenCalledWith(77, expect.objectContaining({ prompt: STATE, laneId: 'typed_decisions_clef' }));
   });
 
   test("the live answers are Jev's shape: typed-decisions normalises all three types unchanged", () => {

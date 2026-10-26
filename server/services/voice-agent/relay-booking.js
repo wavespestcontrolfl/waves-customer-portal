@@ -263,7 +263,7 @@ const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../call-booking-source-ac
  *   2. self-booking     'self-booking-confirm' / `<customerId>:<date>`
  *   3. technician       'slot-reserve' / `<techId>:<date>`  (when assigned)
  *   4. zone             SKIPPED — this writer resolves no zone
- *   5. global day cap   acquireSelfBookingDayCapLock(trx, date)
+ *   5. global day lock  acquireSelfBookingDayCapLock(trx, date)
  *   6. customer-comms   lockCustomerComms(trx, customerId)           [required
  *      of EVERY writer that COMMITS a scheduled_services INSERT, and taken
  *      before any row lock]
@@ -283,11 +283,8 @@ async function commitVoiceBooking({
   coords = null,
 }) {
   const { acquireOccupancyLock, findConflictingVisits } = require('../scheduling/occupancy');
-  const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../availability');
+  const { acquireSelfBookingDayCapLock } = require('../availability');
   const { lockCustomerComms } = require('../../utils/customer-comms-lock');
-  const booking = require('../../routes/booking')._internals;
-  const config = await booking.loadBookingConfig();
-  const { maxPerDay } = booking.bookingSlotWindow(config);
   // window_end may be NULL on a slot with no explicit end; the conflict
   // predicate needs a real end, so fall back to the row's own duration. When
   // BOTH exist they agree by construction (the engine was re-run with the
@@ -319,7 +316,7 @@ async function commitVoiceBooking({
           ['slot-reserve', `${insertData.technician_id}:${dateStr}`],
         );
       }
-      // Rung 5 — the global self-booking day cap.
+      // Rung 5 — the global self-booking day lock.
       await acquireSelfBookingDayCapLock(trx, dateStr);
       // Rung 6 — every scheduled_services INSERT owes this one.
       await lockCustomerComms(trx, customerId);
@@ -341,8 +338,8 @@ async function commitVoiceBooking({
       const existing = await trx('scheduled_services')
         .where({ customer_id: customerId, scheduled_date: dateStr })
         // A REJECTED request (office 'skipped') is not a live booking and
-        // must not block a replacement — the same inactive set the day cap and
-        // the activation helper honour.
+        // must not block a replacement — the same inactive set the
+        // activation helper honours.
         .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
         .where((q) => q
           .where('window_start', windowStart)
@@ -379,20 +376,6 @@ async function commitVoiceBooking({
           .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
           .first('id');
         if (priorForCall) return { status: 'duplicate' };
-      }
-
-      // Commit-time max_self_books_per_day re-check, the same predicate the
-      // availability builder drops full days with (shared helper). The builder's
-      // cap is advisory-only without this. GATE_SELF_BOOK_DAY_CAP (owner
-      // ruling 2026-09-23): the cap is retired — the shared builder no longer
-      // drops full days for anyone while the gate is unset, so this commit
-      // check must skip too or every voice pick on a 3-booking day comes back
-      // day_full for a time the builder just offered (offer/commit parity).
-      // The self-serve NOTICE rule is separate and still never reaches the
-      // voice agent.
-      if (require('../../config/feature-gates').selfBookDayCapEnabled()) {
-        const dayCount = await countActiveSelfBookingsForDay(trx, dateStr);
-        if (dayCount >= maxPerDay) return { status: 'day_full' };
       }
 
       // The GLOBAL occupancy probe the contract requires of every rung-1
@@ -934,10 +917,6 @@ async function requestBookingText(input = {}, ctx = {}) {
   if (commit.status === 'slot_taken') {
     return 'That time was just taken by someone else — NOTHING was booked. Call find_slots again for '
       + 'fresh times and offer the caller a new option.';
-  }
-  if (commit.status === 'day_full') {
-    return 'That day just filled up — NOTHING was booked. Call find_slots again and offer the caller a '
-      + 'different day.';
   }
   if (commit.status !== 'ok') {
     return 'The booking request could not be placed — NOTHING was booked. Tell the caller a Waves team '

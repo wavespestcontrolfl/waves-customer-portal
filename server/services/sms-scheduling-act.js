@@ -175,8 +175,8 @@ async function syncReminders({ dbh, decisionId, visitId, date, start, notify, de
 }
 
 /**
- * A self-booked visit's /book snapshot (the day-cap count and the customer's
- * confirmation-code page read it) follows the move. Written from the visit's
+ * A self-booked visit's /book snapshot (the customer's
+ * confirmation-code page reads it) follows the move. Written from the visit's
  * own row and only while it still holds this move's time, so it can run again
  * safely and never writes a slot a newer move replaced. Stamped on the
  * decision when it ran; finishMoveEffects retries one that did not.

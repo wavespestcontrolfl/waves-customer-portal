@@ -572,7 +572,7 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     const header = read('services/scheduling/occupancy.js').split('const OCCUPANCY_LOCK_NS')[0];
     expect(header).toContain('ORDERING CONTRACT');
     // The five rungs, in order.
-    const rungs = ['date-occupancy', 'self-booking', 'technician', 'zone', 'global day cap'];
+    const rungs = ['date-occupancy', 'self-booking', 'technician', 'zone', 'global day lock'];
     let cursor = -1;
     for (const rung of rungs) {
       const idx = header.indexOf(rung, cursor + 1);

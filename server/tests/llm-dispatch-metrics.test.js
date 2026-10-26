@@ -498,8 +498,7 @@ describe('llm-dispatch-metrics', () => {
 
   describe('runLlmDispatchDigest', () => {
     // db() call order in runLlmDispatchDigest: retention prune FIRST (it runs
-    // even when the gate is off), then the llm_call_traces prune (same
-    // gate-independence), then yesterday stats, prior-week stats, and the
+    // even when the gate is off), then yesterday stats, prior-week stats, and the
     // heartbeat count for the day being summarized. `heartbeats` defaults
     // to a healthy day; 0 means the recorder was dead during that day.
     function armDb({
@@ -508,10 +507,8 @@ describe('llm-dispatch-metrics', () => {
     }) {
       const prune = makeChain([], delCount);
       if (pruneError) prune.del = jest.fn(() => Promise.reject(new Error(pruneError)));
-      const tracesPrune = makeChain([], 0);
       mockDb
         .mockReturnValueOnce(prune)
-        .mockReturnValueOnce(tracesPrune)
         .mockReturnValueOnce(makeChain(yesterdayRows, 0, { selectError: statsError }))
         .mockReturnValueOnce(makeChain(priorRows))
         // Recent-window stats for the bursty gone-silent check; defaults to
@@ -519,21 +516,17 @@ describe('llm-dispatch-metrics', () => {
         .mockReturnValueOnce(makeChain(recentRows || yesterdayRows))
         .mockReturnValueOnce(makeChain([], 0, { first: { n: String(heartbeats) } }))
         .mockReturnValueOnce(makeChain([], 0, { first: { n: String(priorHeartbeats) } }));
-      return { prune, tracesPrune };
+      return { prune };
     }
 
     it('skips stats and email while the gate is off, but STILL prunes retention', async () => {
       const prune = makeChain([], 7);
-      const tracesPrune = makeChain([], 2);
-      mockDb.mockReturnValueOnce(prune).mockReturnValueOnce(tracesPrune);
+      mockDb.mockReturnValueOnce(prune);
       const { runLlmDispatchDigest } = load();
       await expect(runLlmDispatchDigest()).resolves.toEqual({ skipped: 'gate_off', pruned: 7 });
-      // Exactly two db calls (the ledger prune + the traces prune) — no stats
-      // queries, no email.
-      expect(mockDb).toHaveBeenCalledTimes(2);
-      expect(mockDb).toHaveBeenNthCalledWith(2, 'llm_call_traces');
+      // Exactly one db call (the ledger prune) — no stats queries, no email.
+      expect(mockDb).toHaveBeenCalledTimes(1);
       expect(prune.del).toHaveBeenCalled();
-      expect(tracesPrune.del).toHaveBeenCalled();
       expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
@@ -599,7 +592,6 @@ describe('llm-dispatch-metrics', () => {
       const hb = makeChain([], 0, { first: { n: '10' } });
       mockDb
         .mockReturnValueOnce(makeChain([], 1))
-        .mockReturnValueOnce(makeChain([], 0)) // traces prune
         .mockReturnValueOnce(makeChain([]))
         .mockReturnValueOnce(makeChain([{ policy: 'report', total: '300', fallbacks: '0', failed: '0' }]))
         .mockReturnValueOnce(makeChain([])) // recent-window stats
@@ -725,7 +717,7 @@ describe('llm-dispatch-metrics', () => {
         expect(mockEmailSend).toHaveBeenCalledTimes(1);
         expect(mockEmailSend.mock.calls[0][0].body).toMatch(/could not read llm_dispatch_log/);
         expect(deliver).not.toHaveBeenCalled();
-        expect(mockDb).toHaveBeenCalledTimes(7);
+        expect(mockDb).toHaveBeenCalledTimes(6);
       } finally { jest.dontMock('../services/ops-digest'); }
     });
 
@@ -797,7 +789,6 @@ describe('llm-dispatch-metrics', () => {
       const prior = makeChain([]);
       const hb = makeChain([], 0, { first: { n: '24' } });
       mockDb
-        .mockReturnValueOnce(makeChain([], 0))
         .mockReturnValueOnce(makeChain([], 0))
         .mockReturnValueOnce(yesterday)
         .mockReturnValueOnce(prior)
