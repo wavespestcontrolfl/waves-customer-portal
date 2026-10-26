@@ -41,17 +41,18 @@ describe('mosquito +5% reprice (owner 2026-08-08) — exact tables', () => {
     });
   });
 
-  it('one-time buckets and the over-acre increment carry the raised values; add-ons unchanged', () => {
+  it('one-time buckets and the over-acre increment carry the 2026-10-25 ladder; add-ons unchanged', () => {
     expect(ONE_TIME.mosquito).toMatchObject({
-      SMALL: 156,
-      STANDARD: 177,
-      LARGE: 198,
-      XL: 219,
-      ESTATE: 251,
-      ACRE_CLASS: 282,
-      OVER_ACRE: 282,
+      SMALL: 199,
+      STANDARD: 212,
+      LARGE: 230,
+      XL: 255,
+      ESTATE: 278,
+      ACRE_CLASS: 309,
+      OVER_ACRE: 309,
       overAcreIncrementSqFt: 10000,
-      overAcreIncrementPrice: 42,
+      overAcreIncrementPrice: 26,
+      floor: 199,
       // Product-cost-linked add-ons deliberately excluded from the raise.
       stationAddOn: 75,
       dunkAddOn: 15,

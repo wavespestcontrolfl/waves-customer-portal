@@ -482,10 +482,11 @@ describe('deprecated client estimator pricing drift guards', () => {
 
   test('one-time mosquito mirrors the server pest-aligned band, not a retired band', () => {
     // Server-authoritative band: server/services/pricing-engine/constants.js
-    // ONE_TIME.mosquito (repriced 2026-07 to ~25% under the one-time pest
-    // band). The deprecated client fallback must quote the same anchors +
-    // over-acre increment so the previewed price matches what the server will
-    // actually charge.
+    // ONE_TIME.mosquito (repriced 2026-10-25: $199 start, steps that shrink as
+    // yards grow, $199 minimum after the recurring perk). The deprecated
+    // client fallback must quote the same anchors, over-acre increment and
+    // minimum so the previewed price matches what the server will actually
+    // charge.
     expect([
       ONE_TIME.mosquito.SMALL,
       ONE_TIME.mosquito.STANDARD,
@@ -493,13 +494,17 @@ describe('deprecated client estimator pricing drift guards', () => {
       ONE_TIME.mosquito.XL,
       ONE_TIME.mosquito.ESTATE,
       ONE_TIME.mosquito.ACRE_CLASS,
-    ]).toEqual([156, 177, 198, 219, 251, 282]);
-    expect(ONE_TIME.mosquito.overAcreIncrementPrice).toBe(42);
+    ]).toEqual([199, 212, 230, 255, 278, 309]);
+    expect(ONE_TIME.mosquito.overAcreIncrementPrice).toBe(26);
+    expect(ONE_TIME.mosquito.floor).toBe(199);
+    expect(source).toContain(`export const ONE_TIME_MOSQUITO_FLOOR = ${ONE_TIME.mosquito.floor};`);
 
     // Anchors + 500-sf interpolation must mirror the server curve
     // (service-pricing.js ONE_TIME_MOSQUITO_ANCHOR_SQFT + interpolateMosquitoPrice).
-    expect(source).toContain('const otAnchors = [[7500, 156], [11000, 177], [16000, 198], [24000, 219], [32000, 251], [43560, 282]];');
-    expect(source).toContain('p = 282 + Math.ceil((treatableSqFt - 43560) / 10000) * 42;');
+    expect(source).toContain('const otAnchors = [[7500, 199], [11000, 212], [16000, 230], [24000, 255], [32000, 278], [43560, 309]];');
+    expect(source).toContain('p = 309 + Math.ceil((treatableSqFt - 43560) / 10000) * 26;');
+    // The 2026-08-08 ladder is gone.
+    expect(source).not.toContain('[[7500, 156], [11000, 177]');
     // Retired bands must be gone (2026-06 flat ladder and the 2x-market band).
     expect(source).not.toContain('let p = 99;');
     expect(source).not.toContain('let p = 149;');

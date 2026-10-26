@@ -1562,15 +1562,32 @@ const ONE_TIME = {
     // increment move; the station/dunk ADD-ONS are product-cost-linked and
     // deliberately excluded from the percentage raise. DB-authoritative:
     // migration 20260808010000 raises the live onetime_mosquito row.
-    SMALL:   r(156),
-    STANDARD: r(177),
-    LARGE:   r(198),
-    XL:      r(219),
-    ESTATE:  r(251),
-    ACRE_CLASS: r(282),
-    OVER_ACRE: r(282),
+    //
+    // Repriced 2026-10-25 (owner): a $199 minimum, and each step up in yard
+    // size adds a little less than the one before (+$18 per extra 5,000 sf
+    // tapering to +$13 near an acre; the old ladder went +27/+19/+13/+18/+19).
+    // Sized on spray volume: the Bifen I/T label sprays 1 gal per 1,000 sf, so
+    // one 4-gal backpack tank covers ~4,000 sf of sprayed foliage ≈ a
+    // 7,500 sf yard (plants and edges, not open lawn). Bigger yards need more
+    // tanks but not in proportion — tanks ≈ (yard / 7,500)^0.75, fit to the
+    // 5–52 L per property measured by Trout et al. 2007 (J Med Entomol
+    // 44:470) — at ~$40 per extra tank. The over-acre step follows the same
+    // curve. DB-authoritative: migration 20261025235000 moves the live row.
+    SMALL:   r(199),
+    STANDARD: r(212),
+    LARGE:   r(230),
+    XL:      r(255),
+    ESTATE:  r(278),
+    ACRE_CLASS: r(309),
+    OVER_ACRE: r(309),
     overAcreIncrementSqFt: 10000,
-    overAcreIncrementPrice: r(42),
+    overAcreIncrementPrice: r(26),
+    // List minimum applied AFTER the recurring-customer perk (owner
+    // 2026-10-25: "one time minimum for mosquito has to be 199"), the same
+    // shape as ONE_TIME.pest.floor. It is an owner-set one-time minimum, not
+    // one of the post-discount margin floors disarmed 2026-07-17. 0 turns it
+    // off (admin-editable as onetime_mosquito.floor).
+    floor: r(199),
     stationAddOn: r(75),
     dunkAddOn: r(15),
   },

@@ -2886,9 +2886,14 @@ function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null, { recurr
   const base = Number(catalogBasePrice);
   if (!Number.isFinite(base) || base <= 0) return null;
   if (!isRecurringCustomer) return null;
-  const { WAVEGUARD } = require('../services/pricing-engine/constants');
+  const { WAVEGUARD, ONE_TIME } = require('../services/pricing-engine/constants');
   const rate = Number(WAVEGUARD?.recurringCustomerOneTimePerk) || 0;
-  return rate > 0 ? Math.round(base * (1 - rate)) : null;
+  if (!(rate > 0)) return null;
+  // The one-time minimum binds after the perk here too, as in the engine
+  // (owner 2026-10-25: a member's visit is $199, not $169), but never lifts a
+  // member above the catalog price a non-member pays.
+  const floor = Math.max(0, Number(ONE_TIME?.mosquito?.floor) || 0);
+  return Math.min(base, Math.max(floor, Math.round(base * (1 - rate))));
 }
 
 // GET /mosquito-onetime-quote?customerId= — live default for the

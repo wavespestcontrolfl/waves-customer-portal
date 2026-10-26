@@ -132,16 +132,22 @@ describe('hand-scheduled one-time mosquito lot-ladder default', () => {
     expect(pricing.finalPrice).toBe(priceOneTimeMosquito({ lotSqFt }).price);
   });
 
-  test('recurring-plan member with no lot data gets the perk applied to the catalog base', async () => {
-    const pricing = await buildAppointmentPricing({
-      serviceRecord: mosquitoService,
+  test('recurring-plan member with no lot data gets the perk applied to the catalog base, never under the $199 minimum', async () => {
+    const memberNoLot = (basePrice) => buildAppointmentPricing({
+      serviceRecord: { ...mosquitoService, base_price: basePrice },
       estimatedPrice: null,
       primaryLinePrice: null,
       serviceAddons: [],
       customer: { id: 'customer-1', lot_sqft: null, waveguard_tier: 'Gold' },
     });
 
-    expect(pricing.finalPrice).toBe(Math.round(149 * 0.85));
+    // The live catalog base (199): 199 x 0.85 = 169 lifts back to the minimum.
+    expect((await memberNoLot(199)).finalPrice).toBe(199);
+    // A higher catalog base clears the minimum and keeps the full 15%.
+    expect((await memberNoLot(280)).finalPrice).toBe(Math.round(280 * 0.85));
+    // A catalog base an admin set under the minimum: the member never pays
+    // more than the catalog price a non-member pays.
+    expect((await memberNoLot(149)).finalPrice).toBe(149);
   });
 
   test('recurring-plan customers get the canonical 15% one-time perk on the ladder default', async () => {

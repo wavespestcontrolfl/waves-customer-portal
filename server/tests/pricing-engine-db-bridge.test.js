@@ -392,18 +392,50 @@ describe('pricing engine DB bridge', () => {
     }));
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
     expect(constants.ONE_TIME.mosquito).toEqual(expect.objectContaining({
-      SMALL: 156,
-      STANDARD: 177,
-      LARGE: 198,
-      XL: 219,
-      ESTATE: 251,
-      ACRE_CLASS: 282,
-      OVER_ACRE: 282,
+      SMALL: 199,
+      STANDARD: 212,
+      LARGE: 230,
+      XL: 255,
+      ESTATE: 278,
+      ACRE_CLASS: 309,
+      OVER_ACRE: 309,
       overAcreIncrementSqFt: 10000,
-      overAcreIncrementPrice: 42,
+      overAcreIncrementPrice: 26,
+      floor: 199,
       stationAddOn: 75,
       dunkAddOn: 15,
     }));
+  });
+
+  test('syncs the one-time mosquito minimum from pricing_config; 0 turns it off', async () => {
+    const { priceOneTimeMosquito } = require('../services/pricing-engine');
+    const member = (sqft) => priceOneTimeMosquito({ mosquitoTreatableSqFt: sqft }, { isRecurringCustomer: true });
+    // Default: a member's small-yard visit is the $199 minimum, not 199 x 0.85.
+    expect(member(6000).price).toBe(199);
+
+    await expect(syncConstantsFromDB(pricingConfigDb([
+      { config_key: 'onetime_mosquito', data: { floor: 0 } },
+    ]))).resolves.toBe(true);
+    expect(constants.ONE_TIME.mosquito.floor).toBe(0);
+    expect(constants.ONE_TIME.mosquito.SMALL).toBe(199); // a row without ladder keys keeps the defaults
+    expect(member(6000).price).toBe(169);
+
+    await expect(syncConstantsFromDB(pricingConfigDb([
+      { config_key: 'onetime_mosquito', data: { floor: 209 } },
+    ]))).resolves.toBe(true);
+    expect(member(6000).price).toBe(209);
+  });
+
+  test('rejects a one-time mosquito minimum that is not a number and keeps the last good value', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(syncConstantsFromDB(pricingConfigDb([
+        { config_key: 'onetime_mosquito', data: { floor: 'abc' } },
+      ]))).resolves.toBe(false);
+      expect(constants.ONE_TIME.mosquito.floor).toBe(199);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   test('rejects drifted mosquito config values during validation', () => {
@@ -415,6 +447,7 @@ describe('pricing engine DB bridge', () => {
     snapshot.ONE_TIME.mosquito.OVER_ACRE = 0;
     snapshot.ONE_TIME.mosquito.overAcreIncrementSqFt = 0;
     snapshot.ONE_TIME.mosquito.overAcreIncrementPrice = 0;
+    snapshot.ONE_TIME.mosquito.floor = -1;
 
     const result = validatePestPricingConfig(snapshot);
 
@@ -427,6 +460,7 @@ describe('pricing engine DB bridge', () => {
       'ONE_TIME.mosquito.OVER_ACRE must be positive',
       'ONE_TIME.mosquito.overAcreIncrementSqFt must be positive',
       'ONE_TIME.mosquito.overAcreIncrementPrice must be positive',
+      'ONE_TIME.mosquito.floor must be non-negative',
     ]));
   });
 
