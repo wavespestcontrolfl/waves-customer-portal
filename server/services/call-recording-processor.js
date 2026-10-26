@@ -6524,6 +6524,21 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
   }
 }
 
+// Phone agent stop order (GATE_CALL_BOOKING_STOP_ORDER, owner 2026-10-26
+// "go d"): a fresh call booking numbers its technician's day in the order the
+// staff route check certifies (placeMovedVisit, the writer New Appointment and
+// staff moves use), so the tech app and the board list it in its place, not
+// last. A street-level pending row (its address waits on the office) stays as
+// it was. The writer is a no-op unless GATE_STAFF_ROUTE_INSERTION is on, runs
+// under a savepoint and never fails the booking. Read at call time; a partial
+// test mock of the gates module reads as off.
+async function placeCallBookingInRoute(trx, created, { streetLevelPending = false } = {}) {
+  if (streetLevelPending || !created?.id) return null;
+  const gates = require('../config/feature-gates');
+  if (typeof gates.gateEnvValue !== 'function' || !gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) return null;
+  return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
+}
+
 // Convert the call's lead to won when the pipeline books an appointment,
 // on the SAME transaction as the scheduled_services insert (mirrors the
 // admin-leads schedule-appointment route: conversion cannot commit without
@@ -21400,6 +21415,7 @@ const CallRecordingProcessor = {
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created, { fresh: true });
                   await stampCallbackNumberHoldForCall();
+                  await placeCallBookingInRoute(trx, created, { streetLevelPending });
                   return created;
                 }
                 // Idempotency conflict: another writer already created a row with this key.
@@ -25722,6 +25738,7 @@ CallRecordingProcessor._test = {
   v1BackupTimingsJson,
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
+  placeCallBookingInRoute,
   findReusableCallLead,
   applySameCallLeadEligibility,
   clearStampAndRestoreLead,
