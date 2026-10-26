@@ -10862,6 +10862,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
         // inside the trx would survive the rollback and report an unmoved
         // row as stacked (Codex #3486 r3 P2).
         let pendingOverlapWarning = null;
+        // The bulk overlap probe's window, kept for the committed-route recheck.
+        let bulkProbedSlot = null;
         switch (action) {
           case 'reassign': {
             await db.transaction(async (trx) => {
@@ -11109,6 +11111,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 if (!slotUnchanged && effStart && effEnd) {
                   // A bulk edit never reassigns: the row is saved with the
                   // technician it already carries (null = tech-blind).
+                  bulkProbedSlot = { effStart, effEnd };
                   const bulkOverlap = await probeSlotOverlap({
                     trx, date: bulkTargetDate, windowStart: effStart, windowEnd: effEnd, excludeServiceIds: [id],
                     technicianId: svc.technician_id || null,
@@ -11221,6 +11224,19 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               await require('../services/area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: id, visit: svc, scheduledDate: bulkTargetDate, staff: true });
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;
+                // The probe above was scoped to the technician read before the
+                // CAS, which does not pin technician_id: a concurrent
+                // reassignment can commit this row onto another route. When
+                // scoping is on (techScopedConfirmActive), check the committed
+                // route too. Tech-blind probes need no second look.
+                if (bulkProbedSlot && String(committedTechId || '') !== String(svc.technician_id || '')
+                  && require('../services/scheduling/occupancy').techScopedConfirmActive()) {
+                  const again = await probeSlotOverlap({
+                    trx, date: bulkTargetDate, windowStart: bulkProbedSlot.effStart, windowEnd: bulkProbedSlot.effEnd,
+                    excludeServiceIds: [id], technicianId: committedTechId,
+                  });
+                  pendingOverlapWarning = again.length ? { id, warning: slotOverlapWarning(bulkTargetDate) } : null;
+                }
                 const nextStartRaw = updates.window_start !== undefined ? updates.window_start : svc.window_start;
                 const nextEndRaw = updates.window_end !== undefined ? updates.window_end : svc.window_end;
                 const slotMoved = prevDate !== bulkTargetDate
