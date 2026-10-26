@@ -42,10 +42,15 @@ postgres('callback credit (real Postgres)', () => {
     return id;
   }
 
+  // created_at defaults to the order of the calls, one minute apart, so a test
+  // reads as the day happened.
+  let clock = Date.parse('2030-01-01T12:00:00Z');
   async function record(customerId, technicianId, serviceDate, serviceType, isCallback = false) {
     const id = randomUUID();
+    clock += 60 * 1000;
     await db('service_records').insert({
       id, customer_id: customerId, technician_id: technicianId, service_date: serviceDate, service_type: serviceType, is_callback: isCallback,
+      created_at: new Date(clock),
     });
     made.recordIds.push(id);
     return id;
@@ -90,6 +95,18 @@ postgres('callback credit (real Postgres)', () => {
     expect(counts.get(hire)).toBe(2);   // the corrected pest visit, and the same-day one
     expect(counts.get(owner)).toBe(1);  // no source within 60 days: its own technician
     expect([...counts.values()].reduce((a, b) => a + b, 0)).toBe(3);
+  });
+
+  test('a regular visit recorded AFTER the callback on the same day is not its source (pre-push audit P1)', async () => {
+    const customer = await makeCustomer();
+    await record(customer, owner, '2042-06-01', 'Quarterly Pest Control');            // the visit it corrects
+    await record(customer, owner, '2042-06-20', 'Pest Control Re-Service', true);     // the callback
+    await record(customer, hire, '2042-06-20', 'Quarterly Pest Control');            // later that day
+
+    const counts = await credit.callbackCreditByTechnician(db, { start: '2042-06-01', endDate: '2042-06-30' });
+
+    expect(counts.get(owner)).toBe(1);
+    expect(counts.get(hire)).toBeUndefined();
   });
 
   test('a callback never sources from another callback', async () => {

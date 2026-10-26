@@ -8,10 +8,13 @@
  * re-service row stores no link to the visit it corrects, so the source is
  * read: the latest earlier regular record (not itself a callback) for the
  * same customer, in the same service category, with a technician, within
- * LOOKBACK_DAYS before the callback. The category is the name classifier the
- * night run uses (auto-dispatch/service-category.js classifyServiceCategory),
- * so a lawn re-service never lands on the last pest visit. No source found:
- * the callback stays with its own technician, as today.
+ * LOOKBACK_DAYS before the callback. On the callback's own date only a record
+ * created before the callback's record counts: a regular visit recorded later
+ * that day cannot be the visit the callback corrects. The category is the
+ * name classifier the night run uses (auto-dispatch/service-category.js
+ * classifyServiceCategory), so a lawn re-service never lands on the last pest
+ * visit. No source found: the callback stays with its own technician, as
+ * today.
  *
  * Reads only. Jobs, revenue and margins stay with the technician who did the
  * work; only the callback count moves.
@@ -38,7 +41,8 @@ async function callbackCreditByTechnician(conn, { start, endDate }) {
        AND sr.id <> cb.id
        AND sr.is_callback IS NOT TRUE
        AND sr.technician_id IS NOT NULL
-       AND sr.service_date <= cb.service_date
+       AND (sr.service_date < cb.service_date
+            OR (sr.service_date = cb.service_date AND sr.created_at < cb.created_at))
        AND sr.service_date >= cb.service_date - CAST(? AS integer)
      WHERE cb.is_callback = true
        AND cb.service_date >= ?
