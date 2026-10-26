@@ -6519,7 +6519,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2">$1.26</span>/day for pest control.');
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4">$2.57</span>/day for lawn care.');
     expect(html).not.toContain('Exterior perimeter protection around entry-prone areas');
-    expect(html).not.toContain('Interior service support when activity is reported');
+    expect(html).not.toContain('Interior treatment on the first visit, then whenever you ask');
     expect(html).not.toContain('Free re-service between recurring visits');
     expect(html).not.toContain('90-day WaveGuard money-back guarantee');
     expect(html).not.toContain('<ul class="service-inclusions">');
