@@ -121,7 +121,6 @@ const w3Rows = totals => [
   { line: 'Box 4', label: 'Social security tax withheld', kind: 'cents', value: totals.box4 },
   { line: 'Box 5', label: 'Medicare wages and tips', kind: 'cents', value: totals.box5 },
   { line: 'Box 6', label: 'Medicare tax withheld (with Additional Medicare Tax)', kind: 'cents', value: totals.box6 },
-  ...(totals.box12TT ? [{ line: 'Box 12 TT', label: 'Qualified overtime compensation', kind: 'cents', value: totals.box12TT }] : []),
 ];
 
 function Rt6Employees({ employees }) {

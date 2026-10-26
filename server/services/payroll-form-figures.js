@@ -41,6 +41,7 @@ const pad = (n) => String(n).padStart(2, '0');
 // Half-up rounding of cents x basis points / 10,000 (cents are non-negative integers).
 const pct = (cents, bp) => Math.floor((cents * bp + 5000) / 10000);
 const pctText = (bp) => `${(bp / 100).toFixed(bp % 10 === 0 ? 1 : 2)}%`;
+const centsText = (cents) => `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`;
 
 function addDays(date, days) {
   const d = new Date(`${date}T00:00:00Z`);
@@ -202,16 +203,28 @@ function formRt6(year, quarter, quarterChecks) {
   const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
   const gross = sum(quarterChecks, 'gross');
   const excess = sum(quarterChecks, 'excessWages');
-  const tax = sum(quarterChecks, 'flReemployment');
+  const checkTax = sum(quarterChecks, 'flReemployment');
   const { bp, distinct } = rt6Rate(quarterChecks);
+  // RT-6 line 5 is line 4 times the rate, rounded once on the quarter's taxable
+  // wages (Florida RT-6 instructions), not the sum of per-paycheck rounding.
+  // Pay runs pass no rate, so every check uses the calculator's new-employer
+  // rate; if the stored figures do not show it, that rate is used and said so.
+  const taxable = gross - excess;
+  const rateBp = bp != null ? bp : (taxable > 0 ? RATES.floridaNewEmployerBp : null);
+  const tax = rateBp == null ? 0 : pct(taxable, rateBp);
   const rows = months.map((month, index) => count(`1 month ${index + 1}`, `Covered employees, ${MONTH_NAMES[month - 1]}`, employeesOnTwelfth(quarterChecks, year, month)));
   rows.push(
     cents('2', 'Gross wages', gross),
     cents('3', 'Excess wages over the $7,000 wage base', excess),
     cents('4', 'Taxable wages (line 2 minus line 3)', gross - excess),
-    cents('5', 'Tax due (what the paychecks charged)', tax, {
-      rate: bp == null ? null : pctText(bp),
-      note: bp == null ? `No taxable wages this quarter. New employers start at ${pctText(RATES.floridaNewEmployerBp)}.` : 'The rate the paychecks used, read back from the stored pay figures.',
+    cents('5', 'Tax due (line 4 times the rate)', tax, {
+      rate: rateBp == null ? null : pctText(rateBp),
+      note: [
+        rateBp == null ? `No taxable wages this quarter. New employers start at ${pctText(RATES.floridaNewEmployerBp)}.`
+          : bp != null ? 'The rate the paychecks used, read back from the stored pay figures.'
+            : `The stored pay figures do not show the rate; this uses the new-employer rate, ${pctText(RATES.floridaNewEmployerBp)}.`,
+        checkTax !== tax ? `The paychecks charged ${centsText(checkTax)}; the difference is per-paycheck rounding.` : null,
+      ].filter(Boolean).join(' '),
     }),
   );
   const byEmployee = new Map();
@@ -311,9 +324,10 @@ function w2Figures(yearChecks, addresses) {
   return forms.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// The W-3 carries no box 12 code TT total: the IRS W-2/W-3 instructions keep
+// qualified overtime on each employee's W-2 only.
 function w3Totals(forms) {
   const total = (key) => forms.reduce((acc, f) => acc + f[key], 0);
-  const tt = forms.reduce((acc, f) => acc + (f.box12TT || 0), 0);
   return {
     boxC: forms.length,
     box1: total('box1'),
@@ -322,7 +336,6 @@ function w3Totals(forms) {
     box4: total('box4'),
     box5: total('box5'),
     box6: total('box6'),
-    box12TT: tt > 0 ? tt : null,
   };
 }
 

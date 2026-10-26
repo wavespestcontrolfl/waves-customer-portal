@@ -50,7 +50,7 @@ describe('a quarter or year with no checks', () => {
     expect(line(out.f940, '12').value).toBe(0);
     expect(out.f940.rows.find((r) => r.line === '16a')).toBeUndefined();
     expect(out.w2).toEqual([]);
-    expect(out.w3).toMatchObject({ boxC: 0, box1: 0, box12TT: null });
+    expect(out.w3).toMatchObject({ boxC: 0, box1: 0 });
   });
 
   test('checks in another quarter leave this quarter at zero but still count for the year', () => {
@@ -177,6 +177,16 @@ describe('Florida RT-6', () => {
     expect(out.rt6.employees).toEqual([{ name: 'Sample Employee', grossCents: 200000, taxableCents: 50000, ssn: FROM_RECORDS }]);
   });
 
+  test('line 5 is line 4 times the rate, rounded once (pre-push audit P1): three $100.10 checks owe $8.11, not $8.10', () => {
+    const snapshot = { floridaReemploymentCents: 270, taxableWages: { floridaReemploymentCents: 10010 } };
+    const out = build(['2026-10-05', '2026-10-12', '2026-10-19'].map((week, i) => check(week, `2026-10-${16 + 7 * i}`, {
+      tech: 1, gross_cents: 10010, ytd_gross_before_cents: 10010 * i, fl_reemployment_cents: 270, calc_snapshot: JSON.stringify(snapshot),
+    })));
+    expect(line(out.rt6, '4').value).toBe(30030);
+    expect(line(out.rt6, '5').value).toBe(811);
+    expect(line(out.rt6, '5').note).toMatch(/The paychecks charged \$8\.10; the difference is per-paycheck rounding\./);
+  });
+
   test('the rate is read back from the stored pay figures', () => {
     const snapshot = { floridaReemploymentCents: 270, taxableWages: { floridaReemploymentCents: 10000 } };
     const out = build([check('2026-10-05', '2026-10-16', { tech: 1, calc_snapshot: JSON.stringify(snapshot), fl_reemployment_cents: 270 })]);
@@ -273,8 +283,9 @@ describe('W-2 and W-3', () => {
     expect(alpha.state).toMatch(/no state income tax/);
     const beta = out.w2[1];
     expect(beta).toMatchObject({ box6: 4440, box12TT: null, address: '1 Example Way, Testville, FL 00000' });
+    // No box 12 TT total on the W-3 (IRS W-2/W-3 instructions): TT stays on each W-2.
     expect(out.w3).toEqual({
-      boxC: 2, box1: 19200000, box2: 2070000, box3: 18750000, box4: 1164670, box5: 19200000, box6: 278490, box12TT: 5000,
+      boxC: 2, box1: 19200000, box2: 2070000, box3: 18750000, box4: 1164670, box5: 19200000, box6: 278490,
     });
     expect(out.employer.ein).toBe(FROM_RECORDS);
   });

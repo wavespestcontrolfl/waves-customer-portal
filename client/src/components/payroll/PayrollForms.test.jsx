@@ -42,7 +42,7 @@ const FIGURES = {
       box5: 1000, box6: 15, box12TT: null, state: 'Florida has no state income tax: boxes 15 to 17 stay empty.',
     },
   ],
-  w3: { boxC: 2, box1: 124456, box2: 10000, box3: 124456, box4: 7716, box5: 124456, box6: 1805, box12TT: 2500 },
+  w3: { boxC: 2, box1: 124456, box2: 10000, box3: 124456, box4: 7716, box5: 124456, box6: 1805 },
 };
 
 let writeText;
@@ -103,6 +103,8 @@ describe('Tax forms section', () => {
     const w3 = within(screen.getByRole('table', { name: 'W-3 totals' }));
     expect(w3.getByText('Total number of Forms W-2')).toBeInTheDocument();
     expect(w3.getAllByText('$1,244.56')).toHaveLength(3);
+    // No box 12 TT total on the W-3: TT stays on each W-2 (IRS W-2/W-3 instructions).
+    expect(w3.queryByText('Qualified overtime compensation')).toBeNull();
     expect(screen.getByText(/EIN: Enter from your records/)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/\b\d{3}-\d{2}-\d{4}\b/);
   });
@@ -154,7 +156,7 @@ describe('Tax forms section', () => {
   });
 
   it('says so when a year has no final pay checks', async () => {
-    const empty = { ...FIGURES, w2: [], w3: { boxC: 0, box1: 0, box2: 0, box3: 0, box4: 0, box5: 0, box6: 0, box12TT: null } };
+    const empty = { ...FIGURES, w2: [], w3: { boxC: 0, box1: 0, box2: 0, box3: 0, box4: 0, box5: 0, box6: 0 } };
     render(<PayrollForms call={callWith(() => empty)} />);
     expect(await screen.findByText('No final pay checks in 2026.')).toBeInTheDocument();
     expect(screen.queryByRole('table', { name: 'W-3 totals' })).toBeNull();
