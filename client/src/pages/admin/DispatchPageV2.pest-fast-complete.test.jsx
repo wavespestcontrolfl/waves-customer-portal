@@ -25,7 +25,7 @@ vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({ default: ({ serv
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({
   default: ({ service, onFullForm }) => (
     <div>
-      Lawn re-service sheet for {service.id}
+      Lawn re-service sheet for {service.id} <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
       <button type="button" onClick={onFullForm}>Full form</button>
     </div>
   ),
@@ -33,7 +33,7 @@ vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
   default: ({ service, voiceFillEnabled, onClose, onCompleted, onFullForm }) => (
     <div>
-      Pest sheet for {service.id} (flow {String(service.reportFlow)}, trace {String(service.traceEligible)}, key {String(service.routedServiceKey)}, voice {String(voiceFillEnabled)})
+      Pest sheet for {service.id} (flow {String(service.reportFlow)}, trace {String(service.traceEligible)}, key {String(service.routedServiceKey)}, voice {String(voiceFillEnabled)}) <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onClose({ refresh: true })}>Sheet close refresh</button>
       <button type="button" onClick={() => onCompleted()}>Sheet completed</button>
@@ -212,5 +212,34 @@ describe('Dispatch completion routing for regular pest visits', () => {
     const before = loads();
     fireEvent.click(await screen.findByRole('button', { name: 'Sheet close refresh' }));
     await waitFor(() => expect(loads()).toBe(before + 1));
+  });
+});
+
+// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): the sheet's copy of the row
+// keeps the codes, so the Complete service header can show them (Codex P2 on #6784).
+const ACCESS = { scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
+
+describe('Dispatch Fast Complete sheets get the row\'s gate codes', () => {
+  it('pest sheet', async () => {
+    mount([visit('svc-pest-codes', ACCESS)]);
+    await open('svc-pest-codes');
+    expect(await screen.findByTestId('sheet-access')).toHaveTextContent('Gate: #4821 (neighborhood)|1 dog');
+  });
+
+  it('lawn re-service sheet', async () => {
+    mount([visit('svc-lawn-re-codes', {
+      ...ACCESS,
+      lawnReserviceFastCompleteEnabled: true,
+      completionProfile: { category: 'lawn_care', serviceKey: 'lawn_re_service', findingsType: 'one_time_lawn_treatment' },
+      findingsSchema: { type: 'one_time_lawn_treatment' },
+    })]);
+    await open('svc-lawn-re-codes');
+    expect(await screen.findByTestId('sheet-access')).toHaveTextContent('Gate: #4821 (neighborhood)|1 dog');
+  });
+
+  it('a row without the gate gives the sheet none', async () => {
+    mount([visit('svc-pest-nocodes', { propertyAlerts: ACCESS.propertyAlerts })]);
+    await open('svc-pest-nocodes');
+    expect(await screen.findByTestId('sheet-access')).toHaveTextContent('off');
   });
 });

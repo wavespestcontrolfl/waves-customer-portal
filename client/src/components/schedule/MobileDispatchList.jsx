@@ -19,6 +19,7 @@ import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib
 import InlineTechPicker from './InlineTechPicker';
 import QuickActionMenu from './QuickActionMenu';
 import DispatchReadinessStrip from './DispatchReadinessStrip';
+import { ScheduleAccessLine } from './ScheduleAccess';
 import { openHoursForDay, hourToHHMM, formatOpenHour, useHourClock, NOT_OCCUPYING } from './openHours';
 import { directionsHref } from '../../lib/directionsHref';
 
@@ -368,6 +369,9 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
               </span>
             )}
           </span>
+          {/* The stop's gate and access codes (GATE_SCHEDULE_ACCESS_CODES,
+              owner ruling 2026-10-26), inside the button so a tap opens the stop. */}
+          <ScheduleAccessLine service={service} />
         </button>
         <DispatchReadinessStrip readiness={service.readiness} onOpen={onProtocol ? () => onProtocol(service) : null} className="mt-2" />
         {hasActions && (

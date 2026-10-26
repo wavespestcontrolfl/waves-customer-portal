@@ -8,6 +8,7 @@ import { TIMEZONE } from '../../lib/timezone';
 import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
 import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
+import { ScheduleAccessSection } from './ScheduleAccess';
 
 function money(value) {
   const n = Number(value || 0);
@@ -416,6 +417,8 @@ export default function ScheduleCustomerSidebar({
                 </a>
               </div>
             )}
+            {/* The stop's gate and access codes, read only (GATE_SCHEDULE_ACCESS_CODES). */}
+            <ScheduleAccessSection service={service} variant="panel" />
             {service.technicianName && (
               <div className="mt-4">
                 <div className="u-label text-ink-tertiary mb-1">Staff</div>

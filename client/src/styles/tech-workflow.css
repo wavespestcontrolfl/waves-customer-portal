@@ -497,3 +497,13 @@
    a long email breaks rather than widen the header. */
 .tech-visit-contact { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .tech-visit-contact a { color: inherit; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; min-height: 24px; }
+/* The stop's gate and access codes under the contact lines (SheetAccessCodes,
+   GATE_SCHEDULE_ACCESS_CODES): large digits read at arm's length at the gate. */
+.tech-visit-access { display: grid; gap: 4px; margin-top: 10px; padding: 8px 12px; border: 0.5px solid var(--tech-border-strong); border-radius: 6px; background: var(--tech-subtle); }
+.tech-visit-access.is-unconfirmed { border-color: var(--tech-warn-line); background: var(--tech-warn-bg); }
+.tech-visit-access-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; margin: 0; color: var(--tech-text); }
+.tech-visit-access-label { min-width: 72px; color: var(--tech-muted); font-size: 14px; font-weight: 500; }
+.tech-visit-access-code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 21px; font-weight: 600; letter-spacing: 0.03em; overflow-wrap: anywhere; }
+.tech-visit-access-text { font-size: 15px; overflow-wrap: anywhere; }
+.tech-visit-access-tag { color: var(--tech-muted); font-size: 14px; }
+.tech-visit-access-tag.is-warn { color: var(--tech-warn-text); font-weight: 500; }

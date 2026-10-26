@@ -173,3 +173,24 @@ describe('ScheduleCustomerSidebar sibling-covered visit', () => {
     expect(link.getAttribute('href')).toBe('/admin/invoices/inv-1');
   });
 });
+
+// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): read-only Access block.
+describe('ScheduleCustomerSidebar Access block', () => {
+  it("shows the stop's codes with no buttons", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}), clone() { return this; }, text: async () => '', headers: { get: () => null } })));
+    try {
+      render(
+        <ScheduleCustomerSidebar
+          service={{ id: 'v0', customerId: 'c1', customerName: 'Test Customer', status: 'pending', address: '1 Test Lane', scheduleAccessEnabled: true, neighborhoodGateActions: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)', neighborhoodEntryId: 'e1', neighborhoodEntryCode: '#4821' }] }}
+          onClose={() => {}}
+        />,
+      );
+      const panel = screen.getByTestId('schedule-access-panel');
+      expect(panel.textContent).toContain('#4821');
+      expect(panel.querySelector('button')).toBeNull();
+      await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/access-codes/visits/v0', expect.anything()));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
