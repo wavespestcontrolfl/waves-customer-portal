@@ -4102,7 +4102,7 @@ router.get('/', async (req, res, next) => {
     }
 
     // The newest outline per estimate and program: each program's packets (service-outline-programs.js: Tree & Shrub,
-    // Pest Control) apart; every other packet is lawn.
+    // Pest Control, Mosquito) apart; every other packet is lawn.
     let outlineByEstimateId = new Map();
     const programOutlines = new Map(Object.keys(OUTLINE_PROGRAMS).map((line) => [line, new Map()]));
     const livePrograms = Object.entries(OUTLINE_PROGRAMS).filter(([, program]) => program.live());
@@ -4405,7 +4405,7 @@ router.get('/', async (req, res, next) => {
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
           // Each program whose gate is on: whether the estimate offers its outline, and its newest outline; off = neither key.
           ...Object.fromEntries(livePrograms.flatMap(([line, program]) => [
-            [program.listKeys.available, serviceLines.some((line) => program.offeredOn(line, { monthlyTotal }))],
+            [program.listKeys.available, serviceLines.some((line) => program.offeredOn(line, { monthlyTotal, estimateData: estData, pricingAuthority: e.pricing_authority || null }))],
             [program.listKeys.outline, programOutlines.get(line).get(e.id) || null],
           ])),
         };

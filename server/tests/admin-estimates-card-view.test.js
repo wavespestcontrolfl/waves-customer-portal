@@ -6,8 +6,9 @@
  *    `staffPreviewable` (whether the staff preview renders the row).
  *  - GET /admin/estimates/:id/acceptance serves the recorded acceptance to the
  *    owner only, 404 when there is none, 500 when the read fails.
- *  - The rows' outline summaries keep lawn, Tree & Shrub and Pest Control
- *    packets apart (GATE_TS_OUTLINE, GATE_PEST_OUTLINE, owner 2026-10-26).
+ *  - The rows' outline summaries keep lawn, Tree & Shrub, Pest Control and
+ *    Mosquito packets apart (GATE_TS_OUTLINE, GATE_PEST_OUTLINE,
+ *    GATE_MOSQUITO_OUTLINE, owner 2026-10-26).
  * Synthetic data only.
  */
 jest.mock('../models/db', () => {
@@ -475,6 +476,51 @@ describe('GET /admin/estimates Pest Control outline (GATE_PEST_OUTLINE)', () => 
       const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
       expect(estimates[0]).not.toHaveProperty('pestOutlineAvailable');
       expect(estimates[0]).not.toHaveProperty('pestServiceOutline');
+    });
+  });
+});
+
+describe('GET /admin/estimates Mosquito outline (GATE_MOSQUITO_OUTLINE)', () => {
+  const saved = process.env.GATE_MOSQUITO_OUTLINE;
+  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_MOSQUITO_OUTLINE; else process.env.GATE_MOSQUITO_OUTLINE = saved;
+  });
+  const withRows = (services, oneTimeItems = []) => ({ result: { recurring: { services }, oneTime: { items: oneTimeItems } } });
+
+  test('on: only an exact recurring mosquito row offers the outline, and its packet stays apart', async () => {
+    process.env.GATE_MOSQUITO_OUTLINE = 'true';
+    tableDb({
+      estimates: [
+        base('e-program', { service_interest: 'Mosquito', monthly_total: '55.00', estimate_data: withRows([{ service: 'mosquito', addOns: { dunkCount: 1, stationCount: 0 } }]) }),
+        base('e-one-time', { service_interest: 'One-Time Mosquito', monthly_total: '0', onetime_total: '149.00', estimate_data: withRows([], [{ service: 'one_time_mosquito', price: 149 }]) }),
+        base('e-misting', { service_interest: 'Mosquito misting', monthly_total: '90.00', estimate_data: withRows([{ service: 'mosquito_misting' }]) }),
+        base('e-commercial', { service_interest: 'Commercial Mosquito', monthly_total: '300.00', estimate_data: withRows([{ service: 'commercial_mosquito' }]) }),
+        base('e-pest-beside-one-time', { service_interest: 'Pest Control, Mosquito', monthly_total: '45.00', estimate_data: withRows([{ service: 'pest_control' }], [{ service: 'one_time_mosquito', price: 149 }]) }),
+        // A server reprice removed every service: the empty result wins over the older priced engine result.
+        base('e-server-repriced', { service_interest: 'Mosquito', monthly_total: '55.00', pricing_authority: 'SERVER', estimate_data: { result: { recurring: { services: [] } }, engineResult: { recurring: { services: [{ service: 'mosquito' }] } } } }),
+      ],
+      outlines: [
+        { id: 'mosquito-packet', estimate_id: 'e-program', service_line: 'mosquito', status: 'sent', validation_status: 'passed', created_at: '2026-10-26T12:00:00Z', summary_json: {}, content_json: {}, content_library_version: 'mosquito-v1-copy-1', template_version: 'mvp-1', product_registry_version: 'public-facts-v1', protocol_version: null },
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-program'].mosquitoOutlineAvailable).toBe(true);
+      expect(byId['e-program'].mosquitoServiceOutline).toEqual(expect.objectContaining({ id: 'mosquito-packet', stale: false, staleReasons: [] }));
+      expect(byId['e-program'].lawnServiceOutline).toBeNull();
+      for (const id of ['e-one-time', 'e-misting', 'e-commercial', 'e-pest-beside-one-time', 'e-server-repriced']) expect({ id, offered: byId[id].mosquitoOutlineAvailable }).toEqual({ id, offered: false });
+    });
+  });
+
+  test('off: no Mosquito key is sent', async () => {
+    delete process.env.GATE_MOSQUITO_OUTLINE;
+    tableDb({ estimates: [base('e-program', { service_interest: 'Mosquito', monthly_total: '55.00', estimate_data: withRows([{ service: 'mosquito' }]) })] });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      expect(estimates[0]).not.toHaveProperty('mosquitoOutlineAvailable');
+      expect(estimates[0]).not.toHaveProperty('mosquitoServiceOutline');
     });
   });
 });

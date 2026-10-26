@@ -20,6 +20,7 @@ const {
   estimateSnapshot,
   estimateViewPath,
   firstNonEmpty,
+  loadActiveCatalogRows,
   loadFertilizerRule,
   makeSection,
   parseJsonMaybe,
@@ -153,18 +154,12 @@ const PEST_PRODUCTS = Object.freeze([
 ].map((product) => Object.freeze(product)));
 const PRODUCT_STEP_LABELS = Object.freeze({ barrier: 'Outside band', treat: 'Inside', insects: 'Bait' });
 
-// One query by exact name. A failed read leaves the section out rather than showing names without their ingredients.
+// One query by exact name, active rows only (the shared read in lawn-service-outline.js). A failed read leaves the
+// section out rather than showing names without their ingredients.
 async function loadPestProductList(db, scope) {
   const wanted = PEST_PRODUCTS.filter((product) => scope.interior || !product.inside);
-  let rows;
-  try {
-    rows = await db('products_catalog')
-      .whereIn('name', wanted.flatMap((product) => product.names))
-      .select('name', 'display_name', 'active_ingredient', 'category', 'product_type');
-  } catch {
-    return [];
-  }
-  const byName = new Map((rows || []).map((row) => [row.name, row]));
+  const rows = await loadActiveCatalogRows(db, wanted.flatMap((product) => product.names));
+  const byName = new Map(rows.map((row) => [row.name, row]));
   return wanted.map((product) => {
     const row = product.names.map((name) => byName.get(name)).find(Boolean);
     if (!row) return null;

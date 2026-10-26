@@ -25,23 +25,28 @@ const RULE = {
 };
 // Catalog rows as production stores them (product facts only).
 const CATALOG = [
-  { name: 'Taurus SC', display_name: null, active_ingredient: 'Fipronil', category: 'termiticide / insecticide', product_type: null },
-  { name: 'Atticus Talak 7.9 F', display_name: null, active_ingredient: 'Bifenthrin 7.9%', category: 'insecticide', product_type: 'pesticide' },
-  { name: 'Alpine WSG', display_name: null, active_ingredient: 'Dinotefuran 40.0%', category: 'insecticide', product_type: 'pesticide' },
-  { name: 'Advion Ant Bait Gel', display_name: null, active_ingredient: 'Indoxacarb', category: 'insecticide', product_type: null },
+  { name: 'Taurus SC', display_name: null, active_ingredient: 'Fipronil', category: 'termiticide / insecticide', product_type: null, active: true },
+  { name: 'Atticus Talak 7.9 F', display_name: null, active_ingredient: 'Bifenthrin 7.9%', category: 'insecticide', product_type: 'pesticide', active: true },
+  { name: 'Alpine WSG', display_name: null, active_ingredient: 'Dinotefuran 40.0%', category: 'insecticide', product_type: 'pesticide', active: true },
+  { name: 'Advion Ant Bait Gel', display_name: null, active_ingredient: 'Indoxacarb', category: 'insecticide', product_type: null, active: true },
 ];
 
+// A catalog read as SQL answers it: the names asked for, and only active rows when the read asks for them.
 function makeDb({ catalog = CATALOG, catalogFails = false } = {}) {
   return jest.fn((table) => {
+    const filters = { names: null, activeOnly: false };
     const chain = {
-      where: jest.fn(() => chain),
-      whereIn: jest.fn(() => chain),
+      where: jest.fn((column, value) => { if (column === 'active' && value === true) filters.activeOnly = true; return chain; }),
+      whereIn: jest.fn((column, names) => { if (column === 'name') filters.names = names; return chain; }),
       orderBy: jest.fn(() => chain),
       select: jest.fn(() => chain),
       first: jest.fn(() => Promise.resolve(table === 'jurisdiction_fertilizer_rules' ? RULE : null)),
-      then: (resolve, reject) => (table === 'products_catalog' && catalogFails
-        ? Promise.reject(new Error('catalog read failed'))
-        : Promise.resolve(table === 'products_catalog' ? catalog : [])).then(resolve, reject),
+      then: (resolve, reject) => {
+        if (table !== 'products_catalog') return Promise.resolve([]).then(resolve, reject);
+        if (catalogFails) return Promise.reject(new Error('catalog read failed')).then(resolve, reject);
+        const rows = catalog.filter((row) => (!filters.names || filters.names.includes(row.name)) && (!filters.activeOnly || row.active === true));
+        return Promise.resolve(rows).then(resolve, reject);
+      },
     };
     return chain;
   });
@@ -179,10 +184,31 @@ describe('the product list', () => {
   });
 
   test('the renamed dinotefuran row (#6863) prints its new name; the granular bait never shows', async () => {
-    const catalog = [...CATALOG, { name: 'Atticus Antapex WSG', display_name: null, active_ingredient: 'Dinotefuran 40%', category: 'insecticide', product_type: 'pesticide' }, { name: 'Advion WDG Granular', active_ingredient: 'Indoxacarb', category: 'insecticide' }];
+    const catalog = [...CATALOG, { name: 'Atticus Antapex WSG', display_name: null, active_ingredient: 'Dinotefuran 40%', category: 'insecticide', product_type: 'pesticide', active: true }, { name: 'Advion WDG Granular', active_ingredient: 'Indoxacarb', category: 'insecticide', active: true }];
     const products = section(await build({ catalog }), 'products');
     expect(products.bullets).toContain('Inside: Atticus Antapex WSG (dinotefuran)');
     expect(products.bullets.join(' ')).not.toMatch(/Alpine|Granular/);
+  });
+
+  test('an inactive duplicate never prints, and the first active row per name wins', async () => {
+    // Production holds an inactive duplicate row with another product's ingredients (the shared read in lawn-service-outline.js).
+    const catalog = [
+      { name: 'Atticus Talak 7.9 F', display_name: null, active_ingredient: 'Fipronil 0.5%', category: 'insecticide', product_type: 'pesticide', active: false },
+      ...CATALOG,
+      { name: 'Atticus Talak 7.9 F', display_name: null, active_ingredient: 'Imidacloprid 21.4%', category: 'insecticide', product_type: 'pesticide', active: true },
+    ];
+    const products = section(await build({ catalog }), 'products');
+    expect(products.bullets[0]).toBe('Outside band: Taurus SC (fipronil); Atticus Talak 7.9 F (bifenthrin)');
+    expect(products.bullets.join(' ')).not.toMatch(/imidacloprid/);
+  });
+
+  test('a retired (inactive) product drops from the list', async () => {
+    const catalog = CATALOG.map((row) => (row.name === 'Advion Ant Bait Gel' ? { ...row, active: false } : row));
+    const products = section(await build({ catalog }), 'products');
+    expect(products.bullets).toEqual([
+      'Outside band: Taurus SC (fipronil); Atticus Talak 7.9 F (bifenthrin)',
+      'Inside: Alpine WSG (dinotefuran)',
+    ]);
   });
 
   test('a failed catalog read leaves the section out; the page still validates', async () => {
