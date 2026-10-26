@@ -150,16 +150,39 @@ describe("Cost cards section", () => {
       const heading = await screen.findByText("Add card for Second Sample");
       const form = heading.parentElement;
       expect(within(form).getAllByDisplayValue(TODAY)).toHaveLength(1);
+      // No pay rate on file: the wage starts blank and is typed on the card.
+      expect(within(form).getByLabelText("Hourly wage")).toHaveValue(null);
+      fireEvent.change(within(form).getByLabelText("Hourly wage"), { target: { value: "21" } });
       fireEvent.change(within(form).getByLabelText("Health money per month"), { target: { value: "200" } });
       fireEvent.change(within(form).getByLabelText("Workers' comp %"), { target: { value: "4" } });
       fireEvent.change(within(form).getByLabelText("Vehicle driven"), { target: { value: "veh-1" } });
       fireEvent.click(within(form).getByRole("button", { name: "Add card" }));
       expect(await within(form).findByText("Card added.")).toBeInTheDocument();
       expect(posted).toEqual({
-        effectiveDate: TODAY, kind: "w2", healthMoneyMonthly: 200, workersCompPct: 4, vehicleEquipmentId: "veh-1",
+        effectiveDate: TODAY, kind: "w2", hourlyWage: 21, healthMoneyMonthly: 200, workersCompPct: 4, vehicleEquipmentId: "veh-1",
       });
       // The section reloads so the new card shows.
       expect(calls.filter((c) => c.method === "GET" && c.path === "/admin/cost-cards").length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("a W-2 card starts from the technician's pay rate, keeps the wage on the card, and needs one", async () => {
+      let posted = null;
+      handlers["POST /admin/cost-cards/technicians/tech-1"] = (_p, options) => {
+        posted = JSON.parse(options.body);
+        return response({ card: { ...techCard, id: "card-3", hourlyWage: 21 } }, 201);
+      };
+      render(<CostCardsSection />);
+      const heading = await screen.findByText("Add card for Sample Tech");
+      const form = heading.parentElement;
+      expect(within(form).getByLabelText("Hourly wage")).toHaveValue(21);
+      fireEvent.change(within(form).getByLabelText("Hourly wage"), { target: { value: "" } });
+      fireEvent.click(within(form).getByRole("button", { name: "Add card" }));
+      expect(await within(form).findByText("Enter the hourly wage.")).toBeInTheDocument();
+      expect(calls.some((c) => c.method === "POST")).toBe(false);
+      fireEvent.change(within(form).getByLabelText("Hourly wage"), { target: { value: "22.50" } });
+      fireEvent.click(within(form).getByRole("button", { name: "Add card" }));
+      expect(await within(form).findByText("Card added.")).toBeInTheDocument();
+      expect(posted).toMatchObject({ kind: "w2", hourlyWage: 22.5 });
     });
 
     it("an imputed card asks for an hourly rate and refuses a missing one without posting", async () => {
@@ -173,17 +196,18 @@ describe("Cost cards section", () => {
     });
 
     it("a negative number is refused on the form, and a server refusal is shown", async () => {
-      handlers["POST /admin/cost-cards/technicians/tech-2"] = () => response({ error: "Set the technician's pay rate before adding a W-2 card." }, 400);
+      handlers["POST /admin/cost-cards/technicians/tech-2"] = () => response({ error: "Enter the hourly wage, or set the technician's pay rate first." }, 400);
       render(<CostCardsSection />);
       const heading = await screen.findByText("Add card for Second Sample");
       const form = heading.parentElement;
+      fireEvent.change(within(form).getByLabelText("Hourly wage"), { target: { value: "21" } });
       fireEvent.change(within(form).getByLabelText("Retirement %"), { target: { value: "-1" } });
       fireEvent.click(within(form).getByRole("button", { name: "Add card" }));
       expect(await within(form).findByText('"Retirement %" must be a number of 0 or more.')).toBeInTheDocument();
       expect(calls.some((c) => c.method === "POST")).toBe(false);
       fireEvent.change(within(form).getByLabelText("Retirement %"), { target: { value: "2" } });
       fireEvent.click(within(form).getByRole("button", { name: "Add card" }));
-      expect(await within(form).findByText("Set the technician's pay rate before adding a W-2 card.")).toBeInTheDocument();
+      expect(await within(form).findByText("Enter the hourly wage, or set the technician's pay rate first.")).toBeInTheDocument();
     });
 
     it("adds a vehicle card", async () => {

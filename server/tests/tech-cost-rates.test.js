@@ -96,6 +96,22 @@ describe('computeTechnicianRate: a W-2 card needs a pay rate', () => {
   });
 });
 
+describe('computeTechnicianRate: the card keeps its own wage', () => {
+  test('a card wage wins over the technician pay rate (a raise does not re-cost an old card)', () => {
+    const atCardWage = computeTechnicianRate({ ...PINNED, hourly_wage: '21.00' }, '25.00');
+    expect(atCardWage).toMatchObject({ ok: true, laborPerWorkedHourCents: 2725, hourlyWageCents: 2100, wageSource: 'card' });
+  });
+
+  test('a card with no wage reads the technician pay rate', () => {
+    expect(computeTechnicianRate({ ...PINNED, hourly_wage: null }, '21.00'))
+      .toMatchObject({ ok: true, laborPerWorkedHourCents: 2725, hourlyWageCents: 2100, wageSource: 'technician' });
+  });
+
+  test('a card wage gives a rate when the technician has no pay rate', () => {
+    expect(computeTechnicianRate({ ...PINNED, hourly_wage: '21.00' }, null)).toMatchObject({ ok: true, laborPerWorkedHourCents: 2725 });
+  });
+});
+
 describe('computeTechnicianRate: an imputed card', () => {
   const imputed = {
     kind: 'imputed',
@@ -194,6 +210,10 @@ function fakeCardDb(tables) {
         return chain;
       },
       orderBy: (spec) => { orderSpec = spec; return chain; },
+      distinct: (col) => {
+        const values = [...new Set((tables[table] || []).filter((r) => wheres.every((w) => w(r))).map((r) => r[col]))];
+        return Promise.resolve(values.map((value) => ({ [col]: value })));
+      },
       first: (...cols) => {
         const rows = (tables[table] || []).filter((r) => wheres.every((w) => w(r)));
         rows.sort((a, b) => {

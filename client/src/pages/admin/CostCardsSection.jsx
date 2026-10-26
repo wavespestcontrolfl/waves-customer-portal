@@ -118,7 +118,7 @@ function VehicleRateLines({ rate }) {
   return (
     <p className="text-ui-caption text-ink-secondary">
       {rate.spreadOverHoursPerYear
-        ? `Fixed costs ${money(rate.fixedPerYearCents)} a year = ${money(rate.fixedPerWorkedHourCents)} per worked hour (spread over ${plain(rate.spreadOverHoursPerYear)} worked hours of the technician who drives it). `
+        ? `Fixed costs ${money(rate.fixedPerYearCents)} a year = ${money(rate.fixedPerWorkedHourCents)} per worked hour (spread over ${plain(rate.spreadOverHoursPerYear)} worked hours a year of the technicians whose cards name it). `
         : `Fixed costs ${money(rate.fixedPerYearCents)} a year. No technician card names this vehicle, so no fixed cost is charged per hour yet. `}
       Per mile: ${rate.perMile.toFixed(4)}.
     </p>
@@ -126,7 +126,14 @@ function VehicleRateLines({ rate }) {
 }
 
 function TechnicianCardForm({ tech, vehicles, today, onSaved }) {
-  const [form, setForm] = useState({ effectiveDate: today, kind: "w2", imputedHourlyRate: "", vehicleEquipmentId: "", note: "" });
+  const [form, setForm] = useState({
+    effectiveDate: today,
+    kind: "w2",
+    hourlyWage: tech.payRate != null ? plain(tech.payRate) : "",
+    imputedHourlyRate: "",
+    vehicleEquipmentId: "",
+    note: "",
+  });
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const set = (key) => (ev) => setForm((f) => ({ ...f, [key]: ev.target.value }));
@@ -140,6 +147,10 @@ function TechnicianCardForm({ tech, vehicles, today, onSaved }) {
         const rate = Number(form.imputedHourlyRate);
         if (!(rate > 0)) throw new Error("Enter an hourly rate above zero.");
         body.imputedHourlyRate = rate;
+      } else {
+        const wage = Number(form.hourlyWage);
+        if (!(wage > 0)) throw new Error("Enter the hourly wage.");
+        body.hourlyWage = wage;
       }
       if (form.vehicleEquipmentId) body.vehicleEquipmentId = form.vehicleEquipmentId;
       if (form.note.trim()) body.note = form.note.trim();
@@ -169,13 +180,17 @@ function TechnicianCardForm({ tech, vehicles, today, onSaved }) {
         </Field>
         <Field label="Kind of card" id={`${id}-kind`}>
           <Select value={form.kind} onChange={set("kind")}>
-            <option value="w2">W-2 employee (worked out from pay rate)</option>
+            <option value="w2">W-2 employee (worked out from the hourly wage)</option>
             <option value="imputed">Stated hourly rate (owner or other)</option>
           </Select>
         </Field>
-        {form.kind === "imputed" && (
+        {form.kind === "imputed" ? (
           <Field label="Hourly rate" id={`${id}-imputed`}>
             <Input type="number" min="0" step="any" value={form.imputedHourlyRate} onChange={set("imputedHourlyRate")} className="u-nums" />
+          </Field>
+        ) : (
+          <Field label="Hourly wage" id={`${id}-wage`}>
+            <Input type="number" min="0" step="any" value={form.hourlyWage} onChange={set("hourlyWage")} className="u-nums" />
           </Field>
         )}
         {TECH_FIELDS.map((f) => (
@@ -256,7 +271,9 @@ function VehicleCardForm({ vehicle, today, onSaved }) {
 
 function cardSummary(card) {
   if (!card) return "No card yet. Costing uses the company labor rate and drive cost per stop.";
-  const kind = card.kind === "imputed" ? `stated rate $${plain(card.imputedHourlyRate)} an hour` : "W-2";
+  const kind = card.kind === "imputed"
+    ? `stated rate $${plain(card.imputedHourlyRate)} an hour`
+    : card.hourlyWage != null ? `W-2 at $${plain(card.hourlyWage)} an hour` : "W-2";
   return `In effect since ${card.effectiveDate}: ${kind}, ${plain(card.paidHoursPerWeek)} paid hours a week, ${plain(card.paidDaysOffPerYear, 1)} paid days off a year.`;
 }
 

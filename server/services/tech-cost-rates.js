@@ -9,7 +9,8 @@
  *
  * W-2 card, per year:
  *   paid hours   = paid_hours_per_week x 52
- *   wages        = technicians.pay_rate x paid hours
+ *   wages        = the card's hourly_wage x paid hours (a card made before cards kept a
+ *                  wage reads technicians.pay_rate, which is not dated)
  *   health money = health_money_monthly x 12
  *   employer Social Security + Medicare = 7.65% of (wages + health money)
  *   FUTA and Florida reemployment tax = their rates on the first $7,000 of wages
@@ -20,9 +21,10 @@
  * Imputed card: labor per worked hour = imputed_hourly_rate.
  *
  * Vehicle card: fixed per year = loss of value + insurance + loan interest +
- * other fixed. Fixed per worked hour = fixed per year / the worked hours of the
- * technician whose card names that vehicle (a technician's worked hours use the
- * same formula for both kinds of card). Per mile = fuel + upkeep.
+ * other fixed. Fixed per worked hour = fixed per year / the worked hours of ALL
+ * the technicians whose cards in effect name that vehicle (two drivers share one
+ * year of fixed cost; a technician's worked hours use the same formula for both
+ * kinds of card). Per mile = fuel + upkeep.
  *
  * Rounding, stated once: every dollar line is rounded half up to the cent per
  * year; every per-hour figure is rounded half up to the cent from the yearly
@@ -81,7 +83,8 @@ function line(key, label, perYearCents, paidH, workedH) {
 
 /**
  * Labor rate for one technician card. Returns { ok: true, ... } or
- * { ok: false, reason }. `payRate` is technicians.pay_rate (W-2 cards only).
+ * { ok: false, reason }. A W-2 card uses its own hourly_wage; `payRate`
+ * (technicians.pay_rate) is read only for a card that has none.
  */
 function computeTechnicianRate(card, payRate) {
   if (!card) return { ok: false, reason: 'no_card' };
@@ -108,8 +111,11 @@ function computeTechnicianRate(card, payRate) {
     };
   }
 
-  const payRateCents = cents(payRate);
+  const cardWage = Number(card.hourly_wage) > 0 ? card.hourly_wage : null;
+  const payRateCents = cents(cardWage != null ? cardWage : payRate);
   if (!(payRateCents > 0)) return { ok: false, reason: 'no_pay_rate' };
+  base.hourlyWageCents = payRateCents;
+  base.wageSource = cardWage != null ? 'card' : 'technician';
   const wages = divRound(payRateCents * paidH, 100);
   const health = cents(card.health_money_monthly) * MONTHS_PER_YEAR;
   const taxableBase = wages + health;
@@ -185,6 +191,24 @@ async function cardInEffect(conn, table, keyColumn, keyId, onDate) {
 }
 
 /**
+ * The worked hours a year (hundredths) a vehicle's fixed cost is spread over on a date: the sum over
+ * every technician whose card in effect on that date names the vehicle. One driver = that driver's
+ * hours; two drivers share one year of fixed cost. Job costing and the rates screen both use this.
+ */
+async function vehicleWorkedHundredths(conn, equipmentId, onDate) {
+  if (!equipmentId) return 0;
+  const named = await conn('technician_cost_cards').where({ vehicle_equipment_id: equipmentId }).distinct('technician_id');
+  let total = 0;
+  for (const { technician_id: technicianId } of named) {
+    const card = await cardInEffect(conn, 'technician_cost_cards', 'technician_id', technicianId, onDate);
+    if (!card || String(card.vehicle_equipment_id) !== String(equipmentId)) continue;
+    const { workedH } = yearHours(card);
+    if (workedH > 0) total += workedH;
+  }
+  return total;
+}
+
+/**
  * The rates job costing needs for one visit: null when the technician has no
  * card in effect on the visit date, or the card cannot give a rate (W-2 card
  * with no pay rate). Never throws; a read failure is "no rate" so costing falls
@@ -195,7 +219,7 @@ async function loadVisitRates(conn, technicianId, onDate) {
     const card = await cardInEffect(conn, 'technician_cost_cards', 'technician_id', technicianId, onDate);
     if (!card) return null;
     let payRate = null;
-    if (card.kind === 'w2') {
+    if (card.kind === 'w2' && !(Number(card.hourly_wage) > 0)) {
       const tech = await conn('technicians').where({ id: technicianId }).first('pay_rate');
       payRate = tech ? tech.pay_rate : null;
     }
@@ -204,7 +228,9 @@ async function loadVisitRates(conn, technicianId, onDate) {
     let vehicle = null;
     if (card.vehicle_equipment_id) {
       const vehicleCard = await cardInEffect(conn, 'vehicle_cost_cards', 'equipment_id', card.vehicle_equipment_id, onDate);
-      const rate = vehicleCard ? computeVehicleRate(vehicleCard, labor.workedHoursPerYearHundredths) : null;
+      const rate = vehicleCard
+        ? computeVehicleRate(vehicleCard, await vehicleWorkedHundredths(conn, card.vehicle_equipment_id, onDate))
+        : null;
       if (rate && rate.ok) {
         vehicle = {
           cardId: vehicleCard.id,
@@ -230,7 +256,6 @@ async function loadRatesForDate(conn, onDate) {
   const dateStr = dateString(onDate);
   const technicians = await conn('technicians').orderBy('name').select('id', 'name', 'pay_rate', 'employment_type', 'employment_status');
   const out = { date: dateStr, technicians: [], vehicles: [] };
-  const vehicleHours = new Map();
   for (const tech of technicians) {
     const card = await cardInEffect(conn, 'technician_cost_cards', 'technician_id', tech.id, dateStr);
     if (!card) continue;
@@ -243,15 +268,12 @@ async function loadRatesForDate(conn, onDate) {
       vehicleEquipmentId: card.vehicle_equipment_id || null,
       ...(labor.ok ? labor : { ok: false, reason: labor.reason }),
     });
-    if (labor.ok && card.vehicle_equipment_id) {
-      vehicleHours.set(card.vehicle_equipment_id, labor.workedHoursPerYearHundredths);
-    }
   }
   const equipment = await conn('equipment').where({ category: 'vehicle' }).orderBy('name').select('id', 'name');
   for (const item of equipment) {
     const card = await cardInEffect(conn, 'vehicle_cost_cards', 'equipment_id', item.id, dateStr);
     if (!card) continue;
-    const rate = computeVehicleRate(card, vehicleHours.get(item.id) || 0);
+    const rate = computeVehicleRate(card, await vehicleWorkedHundredths(conn, item.id, dateStr));
     out.vehicles.push({
       equipmentId: item.id,
       name: item.name,
@@ -267,6 +289,7 @@ module.exports = {
   computeTechnicianRate,
   computeVehicleRate,
   cardInEffect,
+  vehicleWorkedHundredths,
   loadVisitRates,
   loadRatesForDate,
   dateString,

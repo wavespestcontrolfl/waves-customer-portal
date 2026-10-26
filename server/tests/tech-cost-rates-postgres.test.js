@@ -324,6 +324,33 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       expect((await jobCosting.calculateJobCost(later, trx)).labor_cost).toBe(56);
     });
 
+    it('a raise after the card does not re-cost a visit the card covers (the card keeps its wage)', async () => {
+      await addTechCard({ hourly_wage: 21 });
+      await addVehicleCard();
+      process.env[GATE] = 'true';
+      const before = await jobCosting.calculateJobCost(visitId, trx);
+      await trx('technicians').where({ id: techId }).update({ pay_rate: '25.00' });
+      const after = await jobCosting.calculateJobCost(visitId, trx);
+      expect(after.labor_cost).toBe(before.labor_cost);
+      expect(after.labor_cost).toBe(38.15); // $27.25 x 84 minutes
+    });
+
+    it('two technicians who drive one vehicle share its yearly fixed cost', async () => {
+      await addTechCard();
+      await addVehicleCard();
+      const second = randomUUID();
+      await trx('technicians').insert({ id: second, name: 'Second Sample', employment_type: 'w2', employment_status: 'active', pay_rate: '21.00' });
+      await addTechCard({ technician_id: second });
+      process.env[GATE] = 'true';
+      // $10,200 a year over 1,930 + 1,930 worked hours = $2.64 an hour (alone it is $5.28).
+      const res = await jobCosting.calculateJobCost(visitId, trx);
+      expect(res.drive_cost).toBe(6.23); // 0.23 x 11 = 2.53, plus 2.64 x 1.4 h = 3.696
+      // The rates screen spreads it the same way.
+      const rates = await require('../services/tech-cost-rates').loadRatesForDate(trx, '2026-10-26');
+      expect(rates.vehicles.find((v) => v.equipmentId === vehicleId))
+        .toMatchObject({ fixedPerWorkedHourCents: 264, spreadOverHoursPerYear: 3860 });
+    });
+
     it('a combined closeout charges the drive once per stop, to the marked owner', async () => {
       const other = await addVisit();
       const mark = (allocatedMinutes) => JSON.stringify({
@@ -440,7 +467,8 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       ['retirement over 100', { kind: 'w2', retirementPct: 101 }],
       ['a negative health amount', { kind: 'w2', healthMoneyMonthly: -5 }],
       ['too many decimals', { kind: 'w2', workersCompPct: 4.123 }],
-      ['an unknown field', { kind: 'w2', hourlyWage: 21 }],
+      ['an unknown field', { kind: 'w2', payRate: 21 }],
+      ['a wage of zero', { kind: 'w2', hourlyWage: 0 }],
       ['a note over 500 characters', { kind: 'w2', note: 'x'.repeat(501) }],
       ['a date that is not a date', { kind: 'w2', effectiveDate: '2026-02-30' }],
       ['a vehicle that is not a vehicle', { kind: 'w2', vehicleEquipmentId: randomUUID() }],
@@ -462,6 +490,20 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       // A technician (not a vehicle) id is not a vehicle.
       expect((await call('POST', `/vehicles/${techId}`, {})).status).toBe(404);
       expect((await call('POST', `/vehicles/${vehicleId}`, { fuelPerMile: -1 })).status).toBe(400);
+    });
+
+    it('a W-2 card keeps the wage it was made with: the pay rate by default, a typed wage when given', async () => {
+      process.env[GATE] = 'true';
+      const byDefault = await call('POST', `/technicians/${techId}`, { effectiveDate: '2026-01-01', kind: 'w2' });
+      expect(byDefault.status).toBe(201);
+      expect(byDefault.body.card.hourlyWage).toBe(21);
+      const typed = await call('POST', `/technicians/${techId}`, { effectiveDate: '2026-06-01', kind: 'w2', hourlyWage: 23.5 });
+      expect(typed.body.card.hourlyWage).toBe(23.5);
+      await trx('technicians').where({ id: techId }).update({ pay_rate: null });
+      const noPayRate = await call('POST', `/technicians/${techId}`, { effectiveDate: '2026-07-01', kind: 'w2', hourlyWage: 24 });
+      expect(noPayRate.status).toBe(201);
+      const imputed = await call('POST', `/technicians/${techId}`, { kind: 'imputed', imputedHourlyRate: 30 });
+      expect(imputed.body.card.hourlyWage).toBeNull();
     });
 
     it('a bad date on /rates is a 400', async () => {

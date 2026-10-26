@@ -57,6 +57,7 @@ const technicianCardSchema = Joi.object({
   effectiveDate: dateField,
   kind: Joi.string().valid('w2', 'imputed').required(),
   imputedHourlyRate: num(0, 1000, 2).allow(null),
+  hourlyWage: num(0.01, 1000, 2).allow(null),
   paidHoursPerWeek: num(0.01, 168, 2).default(40),
   paidHoursPerDay: num(0.01, 24, 2).default(10),
   healthMoneyMonthly: num(0, 100000, 2).default(0),
@@ -99,6 +100,7 @@ function technicianCardOut(row) {
     effectiveDate: dateString(row.effective_date),
     kind: row.kind,
     imputedHourlyRate: n(row.imputed_hourly_rate),
+    hourlyWage: n(row.hourly_wage),
     paidHoursPerWeek: n(row.paid_hours_per_week),
     paidHoursPerDay: n(row.paid_hours_per_day),
     healthMoneyMonthly: n(row.health_money_monthly),
@@ -184,8 +186,11 @@ router.post('/technicians/:id', async (req, res) => {
     }
     const tech = await db('technicians').where({ id: req.params.id }).first('id', 'pay_rate');
     if (!tech) throw new CardError(404, 'Technician not found.');
-    if (v.kind === 'w2' && !(Number(tech.pay_rate) > 0)) {
-      throw new CardError(400, 'Set the technician\'s pay rate before adding a W-2 card.');
+    // A W-2 card keeps the wage it is made with (technicians.pay_rate is not dated): the wage typed
+    // on the card, else the technician's pay rate today.
+    const wage = v.kind === 'w2' ? (v.hourlyWage != null ? v.hourlyWage : Number(tech.pay_rate)) : null;
+    if (v.kind === 'w2' && !(wage > 0)) {
+      throw new CardError(400, 'Enter the hourly wage, or set the technician\'s pay rate first.');
     }
     const vehicleId = v.vehicleEquipmentId || null;
     if (vehicleId) {
@@ -199,6 +204,7 @@ router.post('/technicians/:id', async (req, res) => {
         effective_date: v.effectiveDate || etDateString(),
         kind: v.kind,
         imputed_hourly_rate: v.kind === 'imputed' ? v.imputedHourlyRate : null,
+        hourly_wage: wage,
         paid_hours_per_week: v.paidHoursPerWeek,
         paid_hours_per_day: v.paidHoursPerDay,
         health_money_monthly: v.healthMoneyMonthly,

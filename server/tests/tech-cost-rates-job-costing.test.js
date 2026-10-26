@@ -98,7 +98,13 @@ function fakeDb({
       whereNotNull: () => chain,
       whereBetween: () => chain,
       leftJoin: () => chain,
-      distinct: () => chain,
+      // A store table answers distinct(col) with its matching rows' distinct values (the shared
+      // vehicle read); any other table keeps chaining.
+      distinct: (col) => {
+        if (!stores[table]) return chain;
+        const values = [...new Set(stores[table].filter((r) => predicates.every((p) => p(r))).map((r) => r[col]))];
+        return Promise.resolve(values.map((value) => ({ [col]: value })));
+      },
       orderBy: (spec, dir) => {
         orderSpec = Array.isArray(spec) ? spec : [{ column: spec, order: dir || 'asc' }];
         return chain;
