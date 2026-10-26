@@ -8286,16 +8286,21 @@ const ReviewService = {
 // "First review ask" flag and the completion's saved review choice both call it.
 // A missing customer, a marked-reviewed customer or a read failure is NOT never-asked
 // (false): the lock only ever adds an ask for a customer we can prove was never asked.
+// `database`: a caller inside a transaction (the visit-closeout packet's records phase) passes its
+// trx, so the read never takes a second pool connection; savepointRead keeps a failed read from
+// aborting that transaction.
 async function customerNeverAskedForReview(customerId, database = db) {
   if (!customerId) return false;
   try {
-    const customer = await database("customers").where({ id: customerId }).first("id", "has_left_google_review");
-    if (!customer || customer.has_left_google_review) return false;
-    const asked = await database("review_requests")
-      .where({ customer_id: customerId })
-      .where((q) => q.whereNotNull("sms_sent_at").orWhereNotNull("sent_at"))
-      .first("id");
-    return !asked;
+    return await require("../utils/savepoint-read").savepointRead(database, async (conn) => {
+      const customer = await conn("customers").where({ id: customerId }).first("id", "has_left_google_review");
+      if (!customer || customer.has_left_google_review) return false;
+      const asked = await conn("review_requests")
+        .where({ customer_id: customerId })
+        .where((q) => q.whereNotNull("sms_sent_at").orWhereNotNull("sent_at"))
+        .first("id");
+      return !asked;
+    });
   } catch (err) {
     logger.warn(`[review-request] never-asked read failed for ${customerId}: ${err.message}`);
     return false;
@@ -8309,10 +8314,10 @@ async function customerNeverAskedForReview(customerId, database = db) {
 async function firstAskLockVisit(serviceId, database = db) {
   if (!serviceId) return null;
   try {
-    const visit = await database("scheduled_services as s")
+    const visit = await require("../utils/savepoint-read").savepointRead(database, (conn) => conn("scheduled_services as s")
       .leftJoin("services as sv", "s.service_id", "sv.id")
       .where("s.id", serviceId)
-      .first("s.customer_id", "s.is_callback", "s.service_type", "sv.service_key");
+      .first("s.customer_id", "s.is_callback", "s.service_type", "sv.service_key"));
     if (!visit || visit.is_callback === true) return null;
     if (require("./re-service").isReService({ serviceKey: visit.service_key, serviceType: visit.service_type })) return null;
     return visit;

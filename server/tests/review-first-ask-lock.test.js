@@ -120,3 +120,43 @@ describe('firstAskLockVisit', () => {
     expect(await visit({ customer_id: 'cust-1' }, { fail: true })).toBeNull();
   });
 });
+
+describe('inside a transaction (the visit-closeout packet records phase)', () => {
+  // A transaction stand-in: table reads answer from `rows`, raw() records the savepoint statements.
+  function fakeTrx({ rows = {}, fail = false } = {}) {
+    const statements = [];
+    const trx = (table) => {
+      const q = {};
+      q.leftJoin = () => q;
+      q.where = () => q;
+      q.first = async () => { if (fail) throw new Error('read failed'); return rows[table]; };
+      return q;
+    };
+    trx.isTransaction = true;
+    trx.raw = async (sql) => { statements.push(sql.split(' ').slice(0, 2).join(' ')); };
+    return { trx, statements };
+  }
+  const globalDb = require('../models/db');
+  beforeEach(() => globalDb.mockClear());
+
+  test('the reads ride the caller\'s transaction inside a savepoint, never a pool connection', async () => {
+    const { trx, statements } = fakeTrx({ rows: { customers: { id: 'cust-1' }, review_requests: undefined } });
+    expect(await ReviewService.customerNeverAskedForReview('cust-1', trx)).toBe(true);
+    const visit = fakeTrx({ rows: { 'scheduled_services as s': { customer_id: 'cust-1', is_callback: false, service_type: 'Pest Control', service_key: 'pest_quarterly' } } });
+    expect(await ReviewService.firstAskLockVisit('svc-1', visit.trx)).toMatchObject({ customer_id: 'cust-1' });
+    expect(globalDb).not.toHaveBeenCalled();
+    expect(statements[0]).toMatch(/^SAVEPOINT fail_soft_/);
+    expect(statements.slice(1)).toEqual(['RELEASE SAVEPOINT']);
+    expect(visit.statements.slice(1)).toEqual(['RELEASE SAVEPOINT']);
+  });
+
+  test('a failed read rolls back only its savepoint and answers "no lock"', async () => {
+    const never = fakeTrx({ fail: true });
+    expect(await ReviewService.customerNeverAskedForReview('cust-1', never.trx)).toBe(false);
+    expect(never.statements.slice(1)).toEqual(['ROLLBACK TO', 'RELEASE SAVEPOINT']);
+    const visit = fakeTrx({ fail: true });
+    expect(await ReviewService.firstAskLockVisit('svc-1', visit.trx)).toBeNull();
+    expect(visit.statements.slice(1)).toEqual(['ROLLBACK TO', 'RELEASE SAVEPOINT']);
+    expect(globalDb).not.toHaveBeenCalled();
+  });
+});

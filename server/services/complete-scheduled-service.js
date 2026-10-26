@@ -3122,11 +3122,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && !(sendCompletionSmsRequested === false && includePayLink === false)
       && require('../config/feature-gates').reviewFirstAskLockLive()) {
       const reviewRequest = require('./review-request');
-      const lockVisit = await reviewRequest.firstAskLockVisit(completionInput.serviceId);
+      // `db` is the packet transaction in a visit-closeout records phase: the reads ride it.
+      const lockVisit = await reviewRequest.firstAskLockVisit(completionInput.serviceId, db);
       if (lockVisit) {
         reviewFirstAskLock = await reviewRequest.firstAskLockChoice({
           customerId: lockVisit.customer_id, requestReview: requestReviewPosted, optOutReason: reviewOptOutReason,
-        });
+        }, db);
       }
       if (reviewFirstAskLock?.forcedOn) {
         requestReview = true;
