@@ -15,7 +15,9 @@ const {
   validateReading, containerAgreement, classifyDecision, extractEpaRegNumber,
   canonicalSizeText, inventoryUnitForNewProduct, recordAttemptFailure,
   DECISION_SYSTEM_PROMPT, buildUserMessage, categoriesStatedBy, closestGuessText,
+  attachEpaLookup, resolveNewProduct, decisionRecord, intakeChangeNote,
 } = require('../services/purchase-receipts/inventory-agent');
+const inventoryOperations = require('../services/inventory-operations');
 
 const ctx = (overrides = {}) => ({
   rawTitle: '', lineQuantity: 1, candidates: [], allActiveProducts: [], matchedProductId: null, ...overrides,
@@ -1321,4 +1323,263 @@ describe('ops/agents/inventory-agent-undo.js CLI — DATABASE_PUBLIC_URL enables
     const chunk = await firstBytesSent({}, '?sslmode=disable');
     expect(chunk.length).not.toBe(8);
   }, 30000);
+});
+
+describe('GATE_PRODUCT_INTAKE_GUARD — an "existing" answer for a near-name product', () => {
+  const originalGate = process.env.GATE_PRODUCT_INTAKE_GUARD;
+  afterEach(() => {
+    if (originalGate === undefined) delete process.env.GATE_PRODUCT_INTAKE_GUARD;
+    else process.env.GATE_PRODUCT_INTAKE_GUARD = originalGate;
+  });
+  const gateOn = () => { process.env.GATE_PRODUCT_INTAKE_GUARD = 'true'; };
+  const dismiss = { id: 'p-dismiss', name: 'Dismiss', container_size: '1 gal', inventory_unit: 'gal' };
+  const reading = { size_text: '1 gal', size_number: 1, size_unit: 'gal', pack_count: 1 };
+  const existing = { kind: 'existing', product_id: 'p-dismiss', reading };
+
+  test('gate on: "Dismiss NXT" against catalog "Dismiss" is held, naming the word, with no closest guess', () => {
+    gateOn();
+    const decision = classifyDecision(existing, ctx({ rawTitle: 'Dismiss NXT Turf Herbicide 1 gal', candidates: [dismiss], allActiveProducts: [dismiss] }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    expect(decision.reason).toBe('the title has a product-line word ("nxt") that "Dismiss" does not');
+    expect(decision).not.toHaveProperty('suggestion');
+  });
+
+  test('gate off: the same answer validates exactly as before', () => {
+    delete process.env.GATE_PRODUCT_INTAKE_GUARD;
+    expect(classifyDecision(existing, ctx({ rawTitle: 'Dismiss NXT Turf Herbicide 1 gal', candidates: [dismiss], allActiveProducts: [dismiss] })))
+      .toMatchObject({ kind: 'existing', status: 'logged' });
+  });
+
+  test('gate on: a refused candidate is not shown as "Closest guess" when the model only answered unsure with its id', () => {
+    gateOn();
+    const decision = classifyDecision({ kind: 'unsure', product_id: 'p-dismiss', reason: 'not sure' }, ctx({
+      rawTitle: 'Dismiss NXT Turf Herbicide 1 gal', candidates: [dismiss], allActiveProducts: [dismiss] }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    expect(decision).not.toHaveProperty('suggestion');
+  });
+
+  test('gate on: a title with the same words as the product (a size such as "4 x 30 g" included) still validates', () => {
+    gateOn();
+    const advion = { id: 'p-adv', name: 'Advion Cockroach Gel Bait', container_size: '30 g', inventory_unit: 'g' };
+    const decision = classifyDecision({ kind: 'existing', product_id: 'p-adv', reading: { size_text: '30 g', size_number: 30, size_unit: 'g', pack_count: 4 } },
+      ctx({ rawTitle: 'Advion Cockroach Gel Bait 4 x 30 g', lineQuantity: 1, candidates: [advion], allActiveProducts: [advion] }));
+    expect(decision).toMatchObject({ kind: 'existing', status: 'logged' });
+  });
+
+  test('gate on: a pre-existing alias that names the product supplies its product-line words (a person confirmed that alias)', () => {
+    gateOn();
+    const gentrol = { id: 'p-gentrol', name: 'Gentrol', container_size: '16 fl oz', inventory_unit: 'fl_oz' };
+    const raw = { kind: 'existing', product_id: 'p-gentrol', reading: { size_text: '16 fl oz', size_number: 16, size_unit: 'fl_oz', pack_count: 1 } };
+    const title = 'Zoecon Gentrol Complete EC3 Insecticide 16 fl oz';
+    const withAlias = classifyDecision(raw, ctx({ rawTitle: title, candidates: [gentrol], allActiveProducts: [gentrol], aliasesByProduct: { 'p-gentrol': ['Gentrol Complete EC3'] } }));
+    expect(withAlias).toMatchObject({ kind: 'existing', status: 'logged' });
+    const withoutAlias = classifyDecision(raw, ctx({ rawTitle: title, candidates: [gentrol], allActiveProducts: [gentrol] }));
+    expect(withoutAlias.reason).toBe('the title has a product-line word ("complete") that "Gentrol" does not');
+  });
+
+  test('gate on: when the catalog matcher already named the product the answer is not guarded', () => {
+    gateOn();
+    const decision = classifyDecision(existing, ctx({
+      rawTitle: 'Dismiss NXT Turf Herbicide 1 gal', candidates: [dismiss], allActiveProducts: [dismiss], matchedProductId: 'p-dismiss' }));
+    expect(decision).toMatchObject({ kind: 'existing', status: 'logged' });
+  });
+});
+
+describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number and label', () => {
+  const originalGate = process.env.GATE_PRODUCT_INTAKE_GUARD;
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (originalGate === undefined) delete process.env.GATE_PRODUCT_INTAKE_GUARD;
+    else process.env.GATE_PRODUCT_INTAKE_GUARD = originalGate;
+  });
+  const gateOn = () => { process.env.GATE_PRODUCT_INTAKE_GUARD = 'true'; };
+  const GENTROL_RECORD = {
+    eparegno: '89459-119', productname: 'RF2296 LH EC', product_status: 'Active', cancel_flag: 'No',
+    altbrandnames: [{ altbrandname: 'GENTROL\u00ae COMPLETE EC3' }], active_ingredients: [{ active_ing: '(S)-Hydroprene' }],
+    pdffiles: [{ epa_reg_num: '89459-119', pdffile: '089459-00119-20260204.pdf' }],
+  };
+  const FOUND = {
+    status: 'found', registration: '89459-119', matchedName: 'GENTROL\u00ae COMPLETE EC3', via: 'name_search',
+    labelUrl: 'https://www3.epa.gov/pesticides/chem_search/ppls/089459-00119-20260204.pdf',
+  };
+  const newProductDecision = (overrides = {}) => ({
+    kind: 'new_product', status: 'logged', amount: 16, unit: 'fl_oz',
+    newProduct: { name: 'Gentrol Complete EC3', category: 'igr', containerSize: '16 fl oz', inventoryUnit: 'fl_oz', activeIngredient: undefined, listingEpaRegNumber: null, ...overrides },
+  });
+  const createSpy = () => jest.spyOn(inventoryOperations, 'createCatalogProduct').mockImplementation(async (fields) => ({ id: 'p-new', name: fields.name }));
+  const run = (decision) => resolveNewProduct({}, { line: { raw_title: 'Zoecon Gentrol Complete EC3 16 fl oz' }, vendor: 'siteone', decision });
+
+  test('attachEpaLookup: gate off makes no EPA request', async () => {
+    delete process.env.GATE_PRODUCT_INTAKE_GUARD;
+    const fetched = jest.spyOn(global, 'fetch');
+    const decision = newProductDecision();
+    await attachEpaLookup(decision);
+    expect(fetched).not.toHaveBeenCalled();
+    expect(decision.newProduct).not.toHaveProperty('epaLookup');
+  });
+
+  test('attachEpaLookup: gate on looks up a pesticide, passing the listing number, and skips every other kind of decision', async () => {
+    gateOn();
+    const fetched = jest.spyOn(global, 'fetch').mockImplementation(async (url) => (String(url).includes('/riname/')
+      ? new Response(JSON.stringify({ items: [{ eparegno: '89459-119', productname: 'GENTROL\u00ae COMPLETE EC3', product_status: 'Active', product_name_status: 'Active' }] }))
+      : new Response(JSON.stringify({ items: [GENTROL_RECORD] }))));
+    const decision = newProductDecision({ listingEpaRegNumber: '89459-119' });
+    await attachEpaLookup(decision);
+    expect(decision.newProduct.epaLookup).toMatchObject({ status: 'found', registration: '89459-119', via: 'listing' });
+    expect(String(fetched.mock.calls[0][0])).toMatch(/\/ppls\/89459-119$/);
+
+    fetched.mockClear();
+    await attachEpaLookup(newProductDecision({ name: 'Nutri Plus', category: 'fertilizer' }));
+    await attachEpaLookup({ kind: 'existing' });
+    await attachEpaLookup({ kind: 'unsure' });
+    expect(fetched).not.toHaveBeenCalled();
+  });
+
+  test('attachEpaLookup never throws when EPA does not answer', async () => {
+    gateOn();
+    jest.spyOn(global, 'fetch').mockRejectedValue(new TypeError('network down'));
+    const decision = newProductDecision();
+    await expect(attachEpaLookup(decision)).resolves.toBeUndefined();
+    expect(decision.newProduct.epaLookup).toEqual({ status: 'unavailable' });
+  });
+
+  test('the lookup is outside the transaction: processOneLine runs it before applyDecision, and the apply step never calls EPA', async () => {
+    const source = require('fs').readFileSync(require.resolve('../services/purchase-receipts/inventory-agent'), 'utf8');
+    const body = source.slice(source.indexOf('async function processOneLine('), source.indexOf('async function runInventoryAgent('));
+    expect(body.indexOf('attachEpaLookup(outcome.decision)')).toBeGreaterThan(body.indexOf('decideForTitle('));
+    expect(body.indexOf('attachEpaLookup(outcome.decision)')).toBeLessThan(body.indexOf('applyDecision('));
+    const apply = source.slice(source.indexOf('async function resolveNewProduct('), source.indexOf('async function attachEpaLookup('));
+    expect(apply).not.toMatch(/findEpaRegistrationByName\(/);
+    // And at run time: creating the product (inside applyDecision's transaction) makes no EPA request.
+    gateOn();
+    createSpy();
+    const fetched = jest.spyOn(global, 'fetch');
+    await run(newProductDecision({ epaLookup: FOUND }));
+    expect(fetched).not.toHaveBeenCalled();
+  });
+
+  test('gate off: the product is created exactly as today (no EPA fields) and the bell text is today\'s', async () => {
+    delete process.env.GATE_PRODUCT_INTAKE_GUARD;
+    const spy = createSpy();
+    const result = await run(newProductDecision({ listingEpaRegNumber: '279-3206' }));
+    const fields = spy.mock.calls[0][0];
+    expect(fields).not.toHaveProperty('epaRegNumber');
+    expect(fields).not.toHaveProperty('labelUrl');
+    expect(fields).not.toHaveProperty('leaveEpaBlank');
+    expect(result.catalogChangeNote).toBe('added "Gentrol Complete EC3" to the catalog; the listing gives EPA Reg. No. 279-3206, so confirm it from the label and enter it on the product');
+    expect(result.bellLink).toBeNull();
+    expect((await run(newProductDecision())).catalogChangeNote).toBe('added "Gentrol Complete EC3" to the catalog');
+  });
+
+  test('gate on, found: EPA number and label are saved; label_verified_by / label_verified_at are never set; the bell links to the product', async () => {
+    gateOn();
+    const spy = createSpy();
+    const result = await run(newProductDecision({ epaLookup: FOUND }));
+    const fields = spy.mock.calls[0][0];
+    expect(fields).toMatchObject({ epaRegNumber: '89459-119', labelUrl: FOUND.labelUrl });
+    expect(fields).not.toHaveProperty('leaveEpaBlank');
+    expect(fields.activeIngredient).toBeUndefined();
+    expect(JSON.stringify(fields)).not.toMatch(/label_verified/i);
+    expect(result.catalogChangeNote).toBe(
+      'added "Gentrol Complete EC3" to the catalog. EPA Reg. No. 89459-119 and its EPA label came from EPA\'s label system. Still missing: SDS and active ingredient; add them on the product');
+    expect(result.bellLink).toBe('/admin/inventory?tab=products&productId=p-new');
+  });
+
+  test.each([
+    ['not_found', { status: 'not_found', reason: 'no_exact_name' }, "EPA's label system could not prove one EPA number for this name"],
+    ['ambiguous', { status: 'ambiguous', registrations: ['1-2', '3-4'] }, "EPA's label system could not prove one EPA number for this name"],
+    ['unavailable', { status: 'unavailable' }, "EPA's label system did not answer"],
+  ])('gate on, %s: the pesticide is still created with the EPA number left blank, never "N/A", and the bell says what is missing', async (_label, lookup, sentence) => {
+    gateOn();
+    const spy = createSpy();
+    const result = await run(newProductDecision({ epaLookup: lookup }));
+    const fields = spy.mock.calls[0][0];
+    expect(fields).toMatchObject({ leaveEpaBlank: true });
+    expect(fields).not.toHaveProperty('epaRegNumber');
+    expect(fields).not.toHaveProperty('labelUrl');
+    expect(result.catalogChangeNote).toBe(`added "Gentrol Complete EC3" to the catalog. ${sentence}. Still missing: EPA number, label, SDS and active ingredient; add them on the product`);
+  });
+
+  test('gate on: a listing number is named in the bell, as a mismatch or as something to confirm', () => {
+    gateOn();
+    const created = { name: 'Taurus SC' };
+    const base = { listingEpaRegNumber: '53883-279', category: 'termiticide' };
+    expect(intakeChangeNote(created, base, { status: 'not_found', listingMismatch: true })).toMatch(/\. The listing gives EPA Reg\. No\. 53883-279; it does not match this name in EPA's records$/);
+    expect(intakeChangeNote(created, base, { status: 'unavailable' })).toMatch(/\. The listing gives EPA Reg\. No\. 53883-279; confirm it from the label$/);
+    expect(intakeChangeNote(created, base, { ...FOUND, listingMismatch: true })).toMatch(/Still missing: SDS and active ingredient; add them on the product\. The listing gives EPA Reg\. No\. 53883-279; it does not match/);
+    expect(intakeChangeNote(created, base, FOUND)).not.toMatch(/The listing gives/);
+  });
+
+  test('gate on, a pesticide with no lookup recorded keeps the number blank (never "N/A") and says EPA did not answer', async () => {
+    gateOn();
+    const spy = createSpy();
+    const result = await run(newProductDecision());
+    expect(spy.mock.calls[0][0]).toMatchObject({ leaveEpaBlank: true });
+    expect(result.catalogChangeNote).toMatch(/EPA's label system did not answer/);
+  });
+
+  test.each([
+    ['fertilizer'], ['micronutrient fertilizer'], ['adjuvant'], ['soil_amendment'],
+  ])('gate on, %s: no EPA fields (the default "N/A" stays) and the bell says only the SDS is missing', async (category) => {
+    gateOn();
+    const spy = createSpy();
+    const result = await run(newProductDecision({ name: 'Nutri Mix', category }));
+    const fields = spy.mock.calls[0][0];
+    for (const key of ['epaRegNumber', 'labelUrl', 'leaveEpaBlank']) expect(fields).not.toHaveProperty(key);
+    expect(result.catalogChangeNote).toBe('added "Nutri Mix" to the catalog. Still missing: SDS; add it on the product');
+  });
+
+  test('gate on, rodent_trap: no missing sentence at all', async () => {
+    gateOn();
+    createSpy();
+    expect((await run(newProductDecision({ name: 'Victor Snap Trap', category: 'rodent_trap' }))).catalogChangeNote).toBe('added "Victor Snap Trap" to the catalog');
+  });
+
+  test('decisionRecord keeps the lookup evidence on the line (gate on) and adds nothing with the gate off', () => {
+    const withLookup = decisionRecord(newProductDecision({ epaLookup: { ...FOUND, listingMismatch: true } }));
+    expect(withLookup.epaLookup).toEqual({
+      status: 'found', registration: '89459-119', matchedName: 'GENTROL\u00ae COMPLETE EC3', labelFile: '089459-00119-20260204.pdf',
+      via: 'name_search', listingMismatch: true, reason: null, registrations: null,
+    });
+    expect(withLookup.newProduct).not.toHaveProperty('epaLookup');
+    expect(withLookup.newProduct.name).toBe('Gentrol Complete EC3');
+    const plain = decisionRecord(newProductDecision());
+    expect(plain).not.toHaveProperty('epaLookup');
+    expect(plain.newProduct).toEqual(newProductDecision().newProduct);
+  });
+});
+
+describe('createCatalogProduct — the EPA number default and the optional label link', () => {
+  function makeTrx() {
+    const inserted = [];
+    const trx = (table) => {
+      expect(table).toBe('products_catalog');
+      const q = {};
+      q.where = () => q; q.whereRaw = () => q; q.first = async () => undefined;
+      q.insert = (row) => { inserted.push(row); return { returning: async () => [{ id: 'p-1', ...row }] }; };
+      return q;
+    };
+    trx.raw = async () => ({ rows: [] });
+    return { trx, inserted };
+  }
+  const create = async (fields) => {
+    const { trx, inserted } = makeTrx();
+    await inventoryOperations.createCatalogProduct({ name: 'X Product', category: 'insecticide', ...fields }, { trx });
+    return inserted[0];
+  };
+
+  test('the admin create (epaRegNumber missing, null or empty) still stores "N/A"', async () => {
+    expect((await create({})).epa_reg_number).toBe('N/A');
+    expect((await create({ epaRegNumber: null })).epa_reg_number).toBe('N/A');
+    expect((await create({ epaRegNumber: '' })).epa_reg_number).toBe('N/A');
+    expect(await create({})).not.toHaveProperty('label_url');
+  });
+
+  test('leaveEpaBlank stores NULL; a given number always wins; labelUrl is written only when given', async () => {
+    expect((await create({ leaveEpaBlank: true })).epa_reg_number).toBeNull();
+    const filled = await create({ epaRegNumber: '89459-119', labelUrl: 'https://www3.epa.gov/pesticides/chem_search/ppls/089459-00119-20260204.pdf', leaveEpaBlank: true });
+    expect(filled).toMatchObject({ epa_reg_number: '89459-119', label_url: 'https://www3.epa.gov/pesticides/chem_search/ppls/089459-00119-20260204.pdf' });
+    expect(filled).not.toHaveProperty('label_verified_by');
+    expect(filled).not.toHaveProperty('label_verified_at');
+  });
 });
