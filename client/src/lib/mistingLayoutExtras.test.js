@@ -16,7 +16,10 @@ import {
   hitZoneIndex,
   insideAnyZone,
   moveRiser,
+  pumpChecklistDone,
+  pumpChecksOf,
   setPump,
+  setPumpCheck,
   zoneKindDef,
 } from './mistingLayoutExtras';
 
@@ -75,6 +78,22 @@ describe('riser, pump and zone reducers', () => {
     const second = setPump(first, { x: 400, y: 250 });
     expect(second.pump).toEqual({ x: 400, y: 250 });
     expect(Array.isArray(second.pump)).toBe(false);
+  });
+
+  it('ticks the pump spot checklist one known key at a time; a new spot clears it', () => {
+    const none = { outlet: false, level: false, dry: false, stucco: false };
+    expect(pumpChecksOf({ x: 1, y: 1 })).toEqual(none); // an older saved pump has no checks
+    expect(pumpChecksOf({ x: 1, y: 1, checks: { outlet: 'true', level: 1 } })).toEqual(none); // only exactly true counts
+    expect(setPumpCheck(NO_EXTRAS, 'outlet', true)).toBe(NO_EXTRAS); // no pump, no change
+    let e = setPump(NO_EXTRAS, { x: 100, y: 100 });
+    expect(setPumpCheck(e, 'shade', true)).toBe(e);
+    e = ['outlet', 'level', 'dry'].reduce((acc, key) => setPumpCheck(acc, key, true), e);
+    expect(pumpChecklistDone(e.pump)).toBe(false);
+    e = setPumpCheck(e, 'stucco', true);
+    expect(e.pump).toEqual({ x: 100, y: 100, checks: { outlet: true, level: true, dry: true, stucco: true } });
+    expect(pumpChecklistDone(e.pump)).toBe(true);
+    expect(pumpChecklistDone(null)).toBe(false);
+    expect(setPump(e, { x: 400, y: 250 }).pump).toEqual({ x: 400, y: 250 });
   });
 
   it('does not mutate its input', () => {

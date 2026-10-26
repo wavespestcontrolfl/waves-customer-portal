@@ -3,7 +3,7 @@
 // and the pump being required before a layout can be saved (GATE_MISTING_LAYOUT_DESIGNER).
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { placeBedRisers } from '../../lib/mistingLayoutBeds';
 import { pxToFeet } from '../tech/treatmentZoneSpray';
@@ -279,13 +279,16 @@ describe('the pump', () => {
     expect(screen.getByTestId('layout-save-status')).toHaveTextContent('Place the pump first');
     tool('Pump');
     tap(frame, 200, 160);
+    expect(screen.getByTestId('layout-save-status')).toHaveTextContent('Confirm the pump checklist');
+    expect(screen.getByRole('button', { name: 'Save layout' })).toBeDisabled();
+    within(screen.getByTestId('layout-pump-checklist')).getAllByRole('checkbox').forEach((box) => fireEvent.click(box));
     expect(screen.getByRole('button', { name: 'Save layout' })).toBeEnabled();
     adminFetch.mockResolvedValueOnce({ layout: { savedAt: '2026-10-26T15:30:00Z' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
     await waitFor(() => expect(screen.getByTestId('layout-save-status').textContent).toMatch(/^Saved /));
     const put = adminFetch.mock.calls.find(([, o]) => o && o.method === 'PUT');
     const sent = JSON.parse(put[1].body.get('payload'));
-    expect(sent.pump).toEqual({ x: 400, y: 320 });
+    expect(sent.pump).toEqual({ x: 400, y: 320, checks: { outlet: true, level: true, dry: true, stucco: true } });
     expect(sent.lines.map((l) => l.kind)).toEqual(['bed', 'eave']);
     expect(sent.nozzles.every((n) => n.lineIndex === 1)).toBe(true); // the bed line carries none
     expect(sent.risers.length).toBeGreaterThan(3);
@@ -305,6 +308,7 @@ describe('a saved bed reopens', () => {
     tap(frame, 400, 400); // and add a manual one
     tool('Pump');
     tap(frame, 200, 160);
+    within(screen.getByTestId('layout-pump-checklist')).getAllByRole('checkbox').forEach((box) => fireEvent.click(box));
     const finals = risers().map(riserXY).map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).sort();
     adminFetch.mockResolvedValueOnce({ layout: { savedAt: '2026-10-26T15:30:00Z' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));

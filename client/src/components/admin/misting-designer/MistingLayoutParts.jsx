@@ -1,10 +1,10 @@
 // Presentational parts of the misting layout designer: tool bar, map canvas, notices, counts, legend.
 // Everything but the map is the admin's normal UI, outside the photo; the drawing itself is plain.
-import { Button } from '../../ui';
+import { Button, Checkbox } from '../../ui';
 import { MAP_HEIGHT, MAP_WIDTH } from '../../tech/treatmentZoneSpray';
 import { MISTING_LEGEND_KEYS } from '../../../lib/mistingLayoutCounts';
 import { pumpLoad, pumpLoadLine, pumpNotice } from '../../../lib/mistingLayoutLimits';
-import { ZONE_KINDS, zoneKindDef } from '../../../lib/mistingLayoutExtras';
+import { PUMP_CHECKS, ZONE_KINDS, pumpChecksOf, zoneKindDef } from '../../../lib/mistingLayoutExtras';
 import {
   AimArrow,
   LineGraphic,
@@ -259,6 +259,30 @@ export function zoneWarnings(flags) {
   if (nozzles > 0) out.push(`${plural(nozzles, 'nozzle', 'nozzles')} inside a no-mist zone: aim away or remove`);
   if (risers > 0) out.push(`${plural(risers, 'riser', 'risers')} inside a no-mist zone: move or remove`);
   return out;
+}
+
+// Pynamite's manual lists these for the pump spot. Staff confirm all four before a layout can be saved; moving the pump
+// clears them. Shown only once the pump is placed, outside the photo.
+export function PumpChecklist({ layout }) {
+  const { pump, checkPump } = layout;
+  if (!pump) return null;
+  const checks = pumpChecksOf(pump);
+  return (
+    <fieldset data-testid="layout-pump-checklist" className="mt-3 border-0 p-0 m-0 min-w-0">
+      <legend className="text-14 font-medium text-zinc-900 mb-1 p-0">Pump spot (Pynamite manual)</legend>
+      <div className="flex flex-col gap-1.5">
+        {PUMP_CHECKS.map(({ key, label }) => (
+          <Checkbox
+            key={key}
+            id={`misting-pump-check-${key}`}
+            label={label}
+            checked={checks[key]}
+            onChange={(e) => checkPump(key, e.target.checked)}
+          />
+        ))}
+      </div>
+    </fieldset>
+  );
 }
 
 export function CountsPanel({ layout, note, riserNote }) {
