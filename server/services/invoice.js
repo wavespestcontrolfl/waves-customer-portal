@@ -4835,6 +4835,9 @@ async function raiseHoldClaimStrandedAlert(invoiceId, customerId, claimToken, { 
       ? `Invoice ${invoiceId}: the send was stopped because the hold check failed, and its in-progress send claim could not be released. We could not confirm whether a hold applies, so do not assume one is pending: check the customer's hold status and whether the pay link was delivered, then re-queue or resend it if it was not.`
       : `Invoice ${invoiceId}: the customer has an active collections hold, so its send was stopped, but its in-progress send claim could not be released. It will not send on its own after the hold ends. Open the invoice and re-queue or resend it once the hold is released.`,
     dedupeKey: holdClaimStrandedAlertKey(invoiceId, claimToken),
+    // The admin bell policy (on in production) writes no row for an 'alert' that does not ask to ring. This one
+    // rings unless the owner silences the category.
+    bellDefault: true,
     metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
   });
   if (!raised) throw new Error("the stranded-claim alert was not recorded");
@@ -4859,6 +4862,8 @@ async function raiseHoldClaimMaybeStuckAlert(invoiceId, customerId, claimToken, 
       ? `Invoice ${invoiceId}: its send claim was left in progress after a failed hold check. We could not confirm whether a hold applies; check the hold and whether the customer actually received the pay link before resending, so it is not sent twice.`
       : `Invoice ${invoiceId}: its send claim was left in progress and the customer has a collections hold. Check whether the customer actually received the pay link before resending, so it is not sent twice.`,
     dedupeKey: holdClaimMaybeStuckAlertKey(invoiceId, claimToken),
+    // Rings unless the owner silences the category, as the stranded alert does.
+    bellDefault: true,
     metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
   });
   if (!raised) throw new Error("the maybe-stuck alert was not recorded");
@@ -5807,6 +5812,9 @@ async function alertSummaryCarriedEmailFailed(invoiceId, invoiceNumber, reason) 
     }, {
       detail: `Invoice ${invoiceNumber || invoiceId}: its pay link was sent only in the visit summary text, and the invoice email did not go (${reason}). Check that the customer has the link, or resend the invoice.`,
       dedupeKey: `summary-carried-email:${invoiceId}`,
+      // The admin bell policy (on in production) writes no row for an 'alert' that does not ask to
+      // ring. This one rings unless the owner silences the category.
+      bellDefault: true,
       metadata: { invoice_id: invoiceId },
     });
   } catch (err) {
@@ -5833,6 +5841,8 @@ async function alertSummaryLinkUndelivered(invoiceId, invoiceNumber, reason) {
     }, {
       detail: `Invoice ${invoiceNumber || invoiceId}: the visit summary text did not carry its pay link and the invoice email did not go (${reason}). It is parked for review: send the link to the customer.`,
       dedupeKey: `summary-link-undelivered:${invoiceId}`,
+      // Rings unless the owner silences the category, as the carried-email alert does.
+      bellDefault: true,
       metadata: { invoice_id: invoiceId },
     });
     // The summary text may have been accepted between the park and this insert: its acceptance

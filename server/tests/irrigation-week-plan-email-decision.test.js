@@ -109,6 +109,16 @@ describe('weekly email decision — plan mode', () => {
     expect(d.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
   });
 
+  test('mixed spray + rotor with typed weekly inches → the plan note explains the per-type times from the frozen head types (owner 2026-10-26)', () => {
+    const d = buildWeeklyEmailDecision({ ...BASE, irrigationRunMinutes: null, wateringDays: ['Tue', 'Thu', 'Sun'], irrigationSystemType: ['rotor', 'spray'], irrigationInchesPerWeek: 0.6, rainfallInches7d: 0 });
+    expect(d.templateKey).toBe(TEMPLATE_WEEK_PLAN);
+    expect(d.weekPlan.action).not.toBe('hold');
+    expect(d.weekPlan.minutesPerEvent).toBe(null);
+    expect(d.decisionInputs.headTypes).toEqual(['rotor', 'spray']);
+    expect(d.payload.plan_note).toContain('Your system is on file with rotor heads and spray heads');
+    expect(d.payload.plan_note).not.toContain('Add your sprinkler head type');
+  });
+
   test('balanced week, dry forecast → still a plan (never the on-track template) in plan mode', () => {
     const d = buildWeeklyEmailDecision({ ...BASE, irrigationInchesPerWeek: 0.75, irrigationRunMinutes: null, rainfallInches7d: 0.5, forecastRainInches: 0 });
     expect(d.templateKey).toBe(TEMPLATE_WEEK_PLAN);
@@ -168,7 +178,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     }
     expect(sweep).toMatch(/const lastWeekLine = scheduleUnconfirmed\s*\? `Rain near your home last week came to/);
     expect(sweep).toMatch(/'pp\.irrigation_confirmed_fields',\s*'pp\.irrigation_home_changed_at',/);
-    expect(sweep).toMatch(/scheduleUnconfirmed,\s*rateTable: table,\s*(\/\/[^\n]*\n\s*)*waterSaved: decisionInputs\.waterSaved \|\| null,\s*\}\);/); // renderWeekPlanEmail ctx
+    expect(sweep).toMatch(/scheduleUnconfirmed,\s*rateTable: table,\s*(\/\/[^\n]*\n\s*)*waterSaved: decisionInputs\.waterSaved \|\| null,\s*(\/\/[^\n]*\n\s*)*headTypes: decisionInputs\.headTypes \|\| null,\s*\}\);/); // renderWeekPlanEmail ctx: frozen inputs only
   });
   test('the prior week\'s sent plan feeds the cool-season cadence', () => {
     expect(sweep).toMatch(/weekPlanEnabled \? await loadPriorWeekPlan\(\{ customerId: customer\.id, weekEnding, home: \{ addressLine1: customer\.address_line1, addressLine2: customer\.address_line2, city: customer\.city, zip: customer\.zip \} \}\) : null;/);
@@ -342,7 +352,7 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     expect(moved.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
     expect(moved.payload.schedule_ask).toMatch(/^Your address changed after your sprinkler settings were saved/);
     expect(moved.payload.schedule_ask).not.toMatch(/2 watering days|20 minutes|Mon|Thu/);
-    expect(moved.payload.schedule_ask).toMatch(/Add your watering days, minutes per zone and head type/);
+    expect(moved.payload.schedule_ask).toMatch(/[Aa]dd your watering days, minutes per zone and head type/);
     // Gate off: the wrapper withholds the same inputs before the decision.
     const legacy = buildWeeklyEmailDecision({ ...partial, scheduleUnconfirmed: true, weekPlanEnabled: false });
     expect(legacy.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
