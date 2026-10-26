@@ -33,6 +33,7 @@ const { validEpaRegNumber, PESTICIDE_CATEGORIES, isPesticideCategory } = require
 const { normalizeForMatch } = require('./purchase-receipts/product-matcher');
 const { buildProductListPdf, fileNameFor } = require('./pdf/product-list-pdf');
 const { WAVES_BUSINESS_NAME, WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
+const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 
 const ITEM_KEY = 'product_list';
 const AREA = 'Estimates';
@@ -44,6 +45,18 @@ const AUTO_SIGN_OFF = 'siteone_purchases';
 // service_products row was written: editing an old recap deletes and reinserts its lines with a fresh created_at. applied_at is no
 // better (it defaults to the insert time), so the visit date is the one date that is reliably the visit's.
 const WINDOW_SQL = "sr.service_date > ((now() AT TIME ZONE 'America/New_York')::date - 365)";
+// Visits on the owner's internal test accounts (internal-test-customers.js, the same list business metrics exclude) never count:
+// a dummy account's seeded and test visits list products no customer was treated with (owner 2026-10-26: "adam m is a dummy
+// account"). Matched by "first last" name, lowercased, exactly as that list is kept. A left join: a visit whose customer row is
+// gone still counts, as before.
+const INTERNAL_NAME_SQL = "LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))";
+function customerVisitsOnly(query) {
+  query.leftJoin('customers as c', 'c.id', 'sr.customer_id');
+  if (INTERNAL_TEST_CUSTOMERS.length) {
+    query.whereRaw(`${INTERNAL_NAME_SQL} NOT IN (${INTERNAL_TEST_CUSTOMERS.map(() => '?').join(', ')})`, INTERNAL_TEST_CUSTOMERS);
+  }
+  return query;
+}
 const MAX_NAMED = 2; // names in the bell's one sentence; the rest go to its full text
 
 // ---- the list ----
@@ -86,17 +99,17 @@ function foldUnlinked(linked, unlinked, catalog) {
 
 // Every product applied in the last 12 months, once each, plus the free-text lines that match no catalog product. Read only.
 async function readProductList(conn = db) {
-  const linked = await conn('service_products as sp')
+  const linked = await customerVisitsOnly(conn('service_products as sp')
     .join('products_catalog as p', 'p.id', 'sp.product_id')
     .join('service_records as sr', 'sr.id', 'sp.service_record_id')
-    .whereRaw(WINDOW_SQL)
+    .whereRaw(WINDOW_SQL))
     .groupBy('p.id', 'p.name', 'p.category', 'p.active_ingredient', 'p.epa_reg_number', 'p.label_url', 'p.sds_url')
     .select('p.id as product_id', 'p.name', 'p.category', 'p.active_ingredient', 'p.epa_reg_number', 'p.label_url', 'p.sds_url')
     .count('sp.id as uses');
-  const unlinked = await conn('service_products as sp')
+  const unlinked = await customerVisitsOnly(conn('service_products as sp')
     .join('service_records as sr', 'sr.id', 'sp.service_record_id')
     .whereNull('sp.product_id')
-    .whereRaw(WINDOW_SQL)
+    .whereRaw(WINDOW_SQL))
     .groupBy('sp.product_name')
     .select('sp.product_name')
     .count('sp.id as uses');

@@ -671,6 +671,22 @@ describe('runBidKitProductListSync', () => {
       expect(filter).not.toMatch(/created_at|applied_at/);
     }
   });
+  test('both product queries leave out the internal test accounts (owner 2026-10-26: "adam m is a dummy account")', async () => {
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    expect(INTERNAL_TEST_CUSTOMERS.length).toBeGreaterThan(0);
+    mockQueries.length = 0;
+    mockTables.service_products = [{ product_name: 'Taurus SC', uses: 1 }];
+    await run();
+    const lines = mockQueries.filter((q) => q.table === 'service_products as sp');
+    expect(lines).toHaveLength(2);
+    for (const query of lines) {
+      // A left join: a visit whose customer row is gone still counts.
+      expect(query.calls.some((c) => c.method === 'leftJoin' && c.args[0] === 'customers as c' && c.args[1] === 'c.id' && c.args[2] === 'sr.customer_id')).toBe(true);
+      const exclusion = query.calls.find((c) => c.method === 'whereRaw' && /NOT IN/.test(c.args[0]));
+      expect(exclusion.args[0]).toMatch(/LOWER\(COALESCE\(c\.first_name, ''\) \|\| ' ' \|\| COALESCE\(c\.last_name, ''\)\) NOT IN \(\?(, \?)*\)/);
+      expect(exclusion.args[1]).toEqual(INTERNAL_TEST_CUSTOMERS);
+    }
+  });
   test('a sign-off by the owner closes the open bell on the next run', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue([`bid-kit:product-list:${ITEM}`]);
     expect(await run()).toEqual({ changed: false });
