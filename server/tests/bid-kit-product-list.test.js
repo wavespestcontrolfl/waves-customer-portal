@@ -129,6 +129,12 @@ describe('diffSnapshots', () => {
 });
 
 describe('listIsComplete', () => {
+  test('a registered row counts only with an EPA number in EPA format (a note like TBD is never complete)', () => {
+    expect(lib.listIsComplete([product(1, { epa_reg_number: 'TBD' })])).toBe(false);
+    expect(lib.listIsComplete([product(1, { epa_reg_number: 'See label' })])).toBe(false);
+    expect(lib.listIsComplete([product(1, { epa_reg_number: '228-631-10404' })])).toBe(true);
+    expect(lib.listIsComplete([product(1, { epa_reg_number: '5481-641-101563' })])).toBe(true);
+  });
   test('a registered pesticide needs both links', () => {
     expect(lib.listIsComplete([product(1)])).toBe(true);
     expect(lib.listIsComplete([product(1, { label_url: '' })])).toBe(false);

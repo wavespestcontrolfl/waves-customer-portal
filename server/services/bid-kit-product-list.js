@@ -169,9 +169,16 @@ function diffSnapshots(previous, next) {
 }
 
 // Complete = every registered pesticide has both links, and no pesticide-category product lacks its EPA number.
+// An EPA registration number as EPA prints it: company-product, with an optional distributor suffix (100-1484, 228-631-10404).
+// validEpaRegNumber only tells a number from the "N/A" placeholders; a registered row whose field is any other text (TBD, a
+// note) is not complete, so it can never be signed off automatically.
+const EPA_REG_FORMAT = /^\d{1,6}-\d{1,6}(-\d{1,6})?$/;
+
 function listIsComplete(rows) {
   return rows.every((row) => {
-    if (validEpaRegNumber(row.epa_reg_number)) return Boolean(text(row.label_url) && text(row.sds_url));
+    if (validEpaRegNumber(row.epa_reg_number)) {
+      return EPA_REG_FORMAT.test(text(row.epa_reg_number)) && Boolean(text(row.label_url) && text(row.sds_url));
+    }
     return !isPesticideCategory(row.category);
   });
 }
