@@ -247,3 +247,37 @@ export function nearestNozzleIndex(nozzles, p, thresholdPx) {
   });
   return bestIndex;
 }
+
+const HIT_MAX_CSS_PX = 10;
+const HIT_MIN_CSS_PX = 4;
+const HIT_GAP_SHARE = 0.35;
+
+/**
+ * Tap radius for a nozzle, in map pixels. `cssScale` is map pixels per CSS pixel (the map's
+ * logical width over its rendered width). The radius is 35% of the on-screen nominal nozzle
+ * gap, clamped to 4..10 CSS px, so a small rendered map (phone) or a wider zoom keeps room
+ * between two nozzles for a tap that adds one.
+ */
+export function nozzleHitRadiusPx(lat, zoom, cssScale, spacingFt = NOMINAL_SPACING_FT) {
+  const scale = cssScale > 0 ? cssScale : 1;
+  const gapCss = spacingFt / feetPerPixel(lat, zoom) / scale;
+  const radiusCss = Math.max(HIT_MIN_CSS_PX, Math.min(HIT_MAX_CSS_PX, HIT_GAP_SHARE * gapCss));
+  return radiusCss * scale;
+}
+
+/**
+ * Index of the nozzle a tap at `p` hits, or -1. A hit needs the nearest nozzle within
+ * `radiusPx` AND within 45% of the distance to that nozzle's own nearest neighbour, so the
+ * tap midway between two nozzles never counts as a hit (it adds instead), float noise included.
+ */
+export function hitNozzleIndex(nozzles, p, radiusPx) {
+  const list = nozzles || [];
+  const idx = nearestNozzleIndex(list, p, radiusPx);
+  if (idx < 0) return -1;
+  const d = distance(list[idx], p);
+  let nearestNeighbour = Infinity;
+  list.forEach((n, i) => {
+    if (i !== idx) nearestNeighbour = Math.min(nearestNeighbour, distance(n, list[idx]));
+  });
+  return d < nearestNeighbour * 0.45 ? idx : -1;
+}

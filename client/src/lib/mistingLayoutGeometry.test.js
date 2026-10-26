@@ -4,7 +4,9 @@ import {
   MIN_SPACING_FT,
   NOMINAL_SPACING_FT,
   applyNozzleEdits,
+  hitNozzleIndex,
   nearestNozzleIndex,
+  nozzleHitRadiusPx,
   nearestPointOnLines,
   placeNozzles,
   polylineFeet,
@@ -222,5 +224,25 @@ describe('hit testing', () => {
     const pts = [{ x: 0, y: 0 }, { x: 50, y: 0 }];
     expect(nearestNozzleIndex(pts, { x: 48, y: 1 }, 10)).toBe(1);
     expect(nearestNozzleIndex(pts, { x: 200, y: 0 }, 10)).toBe(-1);
+  });
+});
+
+describe('nozzle hit radius', () => {
+  it('shrinks with the on-screen nozzle gap and stays within 4..10 CSS px', () => {
+    const cssPx = (zoom, cssScale) => nozzleHitRadiusPx(LAT, zoom, cssScale) / cssScale;
+    expect(cssPx(20, 1)).toBe(10); // roomy: capped
+    expect(cssPx(19, 2)).toBeLessThan(10);
+    expect(cssPx(19, 4)).toBe(4); // tiny map: floor
+    expect(cssPx(19, 2)).toBeGreaterThanOrEqual(4);
+  });
+
+  it('never treats the midpoint between two nozzles as a hit, but does hit a nozzle', () => {
+    const pts = [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 80, y: 0 }];
+    expect(hitNozzleIndex(pts, { x: 0, y: 0 }, 30)).toBe(0);
+    expect(hitNozzleIndex(pts, { x: 17, y: 0 }, 30)).toBe(0);
+    expect(hitNozzleIndex(pts, { x: 20, y: 0 }, 30)).toBe(-1); // exactly midway
+    expect(hitNozzleIndex(pts, { x: 22, y: 5 }, 30)).toBe(-1);
+    expect(hitNozzleIndex(pts, { x: 200, y: 0 }, 30)).toBe(-1);
+    expect(hitNozzleIndex([{ x: 5, y: 5 }], { x: 6, y: 5 }, 10)).toBe(0); // a lone nozzle
   });
 });

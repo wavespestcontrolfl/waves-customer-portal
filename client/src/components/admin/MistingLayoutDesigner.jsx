@@ -22,8 +22,9 @@ import {
 import {
   applyNozzleEdits,
   computeTotals,
-  nearestNozzleIndex,
+  hitNozzleIndex,
   nearestPointOnLines,
+  nozzleHitRadiusPx,
   placeNozzles,
 } from '../../lib/mistingLayoutGeometry';
 
@@ -33,8 +34,7 @@ const DESIGNER_ZOOMS = [20, 19];
 export const CONCEPT_LABEL = 'Concept layout — final placement at the design visit and install.';
 
 // Touch targets in CSS pixels, converted to map pixels from the frame width.
-// Under half the usual 10 ft nozzle gap, so a tap midway between two nozzles still adds one.
-const NOZZLE_HIT_CSS_PX = 10;
+// The nozzle tap radius is computed per tap from the on-screen nozzle gap (nozzleHitRadiusPx).
 const LINE_HIT_CSS_PX = 12;
 const VERTEX_HIT_CSS_PX = 14;
 const DRAG_START_CSS_PX = 5;
@@ -191,7 +191,7 @@ export default function MistingLayoutDesigner({ address, lat, lng, limits, onUse
     if (p.x < 0 || p.y < 0 || p.x > MAP_WIDTH || p.y > MAP_HEIGHT) return;
     gestureRef.current = { start: p, moved: false, nozzle: null, pointerId: e.pointerId };
     if (mode === 'edit') {
-      const idx = nearestNozzleIndex(nozzles, p, NOZZLE_HIT_CSS_PX * p.scale);
+      const idx = hitNozzleIndex(nozzles, p, nozzleHitRadiusPx(mapState.center.lat, mapState.zoom, p.scale));
       if (idx >= 0) {
         gestureRef.current.nozzle = nozzles[idx];
         try { frameRef.current.setPointerCapture(e.pointerId); } catch { /* older WebKit */ }

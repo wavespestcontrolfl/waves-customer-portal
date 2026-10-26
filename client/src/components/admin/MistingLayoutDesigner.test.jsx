@@ -19,7 +19,8 @@ const LNG = -82.4;
 const ZOOM = 20;
 
 // The frame is 640 css px wide for a 1280 px map, so one css px is two map px.
-const RECT = { left: 0, top: 0, width: 640, height: 480, right: 640, bottom: 480, x: 0, y: 0 };
+const FULL_RECT = { left: 0, top: 0, width: 640, height: 480, right: 640, bottom: 480, x: 0, y: 0 };
+let RECT = FULL_RECT;
 
 // jsdom has no PointerEvent; the designer reads clientX, clientY and pointerId off it.
 if (!window.PointerEvent) {
@@ -32,6 +33,7 @@ if (!window.PointerEvent) {
 }
 
 beforeEach(() => {
+  RECT = { ...FULL_RECT };
   loadBestMapImage.mockReset();
   loadBestMapImage.mockResolvedValue({ image: {}, url: 'https://maps.example/test.png', zoom: ZOOM });
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(() => RECT);
@@ -197,6 +199,29 @@ describe('MistingLayoutDesigner', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Use counts' }));
     expect(onUseCounts).toHaveBeenCalledWith(total);
+  });
+
+  it('still adds between nozzles and deletes on a nozzle on a small phone-width map at the zoom-19 fallback', async () => {
+    // 320 css px for 1280 map px: one css px is four map px. At zoom 19 a 10 ft gap is ~6 css px.
+    RECT = { left: 0, top: 0, width: 320, height: 240, right: 320, bottom: 240, x: 0, y: 0 };
+    loadBestMapImage.mockResolvedValue({ image: {}, url: 'https://maps.example/test.png', zoom: 19 });
+    const { frame } = await open();
+    tap(frame, 20, 100);
+    tap(frame, 300, 100);
+    fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
+    const total = nozzleCount();
+    const xs = () => screen.getAllByTestId('layout-nozzle').map((n) => Number(n.getAttribute('cx'))).sort((a, b) => a - b);
+    const gap = xs()[3] - xs()[2];
+    expect(gap / 4).toBeLessThan(8); // the nozzles really are crowded on screen
+
+    // midway between two nozzles: adds, never deletes
+    tap(frame, (xs()[2] + xs()[3]) / 2 / 4, 100);
+    expect(nozzleCount()).toBe(total + 1);
+
+    // exactly on a nozzle: deletes it
+    tap(frame, xs()[5] / 4, 100);
+    expect(nozzleCount()).toBe(total);
   });
 
   it('warns when the count is above the estimator limit', async () => {
