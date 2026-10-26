@@ -437,6 +437,51 @@ maybeDescribe('vendor-order-email (live Postgres)', () => {
       expect(again.sendOne).toHaveBeenCalledTimes(1);
     });
 
+    test('an ambiguous send after a parked bot order retires its "order manually" bells, and neither the re-ring nor the hand-off rings again', async () => {
+      const dispatch = require('../services/procurement/order-dispatch');
+      const savedGate = process.env.GATE_AUTO_ORDER;
+      delete process.env.GATE_AUTO_ORDER; // the bot lane closed: dispatch hands the request off
+      const { request } = await fixture({ request: { source: 'auto_reorder' } });
+      // A pre-submit park (dry run) left its versioned "order manually" bell on the ledger row, plus
+      // the ledger notification and the reorder sweep's request notification, both still open.
+      const bell = { title: 'Auto-order dry run: Fixture Fertilizer', body: 'Order it manually.', v: 'fixture-v1' };
+      const [claim] = await db('vendor_orders').insert({
+        restock_request_id: request.id, vendor_id: vendor.id, adapter: 'siteone', status: 'needs_review',
+        error: 'dry_run: fixture', evidence: JSON.stringify({ bell }),
+      }).returning('id');
+      made.vendor_orders.push(claim.id);
+      const notes = await db('notifications').insert([
+        { recipient_type: 'admin', category: 'system', title: bell.title, body: bell.body, metadata: JSON.stringify({ dedupeKey: `auto-order:${claim.id}` }) },
+        { recipient_type: 'admin', category: 'system', title: 'Low stock: Fixture Fertilizer', body: 'Order it manually.', metadata: JSON.stringify({ dedupeKey: `auto-reorder:${request.id}` }) },
+      ]).returning('id');
+      const noteIds = notes.map((n) => n.id);
+      try {
+        const m = mailer(async () => { throw new Error('fetch failed'); });
+        expect(await reject(send(request.id, m, {}))).toMatchObject({ statusCode: 502, code: 'send_unconfirmed' });
+        expect((await requestRow(request.id)).status).toBe('open');
+        expect((await emailRow(request.id)).status).toBe('sending');
+
+        // the claim retired both instructions and stripped the park's stored bell
+        const after = await db('notifications').whereIn('id', noteIds).select('done_at');
+        expect(after).toHaveLength(2);
+        expect(after.every((n) => n.done_at)).toBe(true);
+        expect((await db('vendor_orders').where({ id: claim.id }).first('evidence')).evidence.bell).toBeUndefined();
+
+        // a bell written back onto the park later is still never re-rung while the email may be out
+        await db('vendor_orders').where({ id: claim.id }).update({ evidence: JSON.stringify({ bell }) });
+        const notify = jest.fn(async () => ({ id: 'fixture-note' }));
+        const rerung = await dispatch.reringPendingBells({ conn: db, notify });
+        expect([...rerung.rung, ...rerung.pending]).not.toContain(claim.id);
+
+        // and the gated hand-off stands down instead of ringing "order manually"
+        expect(await dispatch.dispatchRestockOrder(request.id, { conn: db, notify })).toMatchObject({ skipped: 'gated', emailOrderOut: true });
+        expect(notify).not.toHaveBeenCalled();
+      } finally {
+        await db('notifications').whereIn('id', noteIds).del();
+        if (savedGate === undefined) delete process.env.GATE_AUTO_ORDER; else process.env.GATE_AUTO_ORDER = savedGate;
+      }
+    });
+
     test('a definite rejection (HTTP 4xx) reopens the row for a retry', async () => {
       const { request } = await fixture();
       const bad = mailer(async () => { throw Object.assign(new Error('SendGrid 400: bad sender'), { status: 400 }); });

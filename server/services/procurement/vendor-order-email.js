@@ -277,6 +277,13 @@ async function claimEmail(conn, requestId, token, { env, now, version }) {
       .whereRaw(CLAIMABLE_SQL, [new Date(now - STALE_UNATTEMPTED_MS)])
       .returning('*');
     if (!rows.length) throw refuse('email_sending', 'An email to SiteOne for this request is already in progress or sent.');
+    // From this claim on, the email may go out: retire every "order manually" instruction the
+    // bot's parks and the reorder hand-off left for this request, in the claim's own transaction
+    // (the order a manual restock action uses: ledger row, then its notifications). An ambiguous
+    // send keeps the request open, and a stale bell would tell staff to buy it again (pre-push
+    // audit P1 on a76c029245). The re-ring and hand-off paths stand down on the claim row too.
+    await dispatch.settleRequestLedgerBells(trx, requestId);
+    await dispatch.retireRequestBell(trx, requestId);
     return { ctx, row: rows[0] };
   });
 }
