@@ -26,7 +26,7 @@ const GOOD_RULE = 'When the facts do not list an arrival window, say you will co
 const SECOND_RULE = 'When the facts do not name a technician, do not say who is coming to the visit.';
 const DAY = 24 * 3600 * 1000;
 const NOW = new Date('2026-10-26T15:00:00Z');
-const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_OFFERS_SCHEDULER'];
+const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE_SMS_EDIT_LEARNING', 'GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_OFFERS_SCHEDULER'];
 
 (SKIP ? describe.skip : describe)('SMS prompt auto-promote, record-only', () => {
   let database;
@@ -250,10 +250,26 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(distill).not.toHaveBeenCalled();
     });
 
-    test('with real answers off there is nothing to patch', async () => {
+    test('with real answers off there is nothing to patch, even when a voice-input tag rides on the v11 identity', async () => {
       delete process.env.GATE_SMS_REAL_ANSWERS;
       await insertProposal({ prompt_version: drafter.PROMPT_VERSION });
       expect(await auto.createCandidate({ dbi: trx, now: NOW, distill: distillWith(GOOD_RULE) })).toEqual({ skipped: 'real_answers_off' });
+      process.env.GATE_SMS_EDIT_LEARNING = 'true';
+      expect(baseVersion()).toBe(`${drafter.PROMPT_VERSION}+e`);
+      await insertProposal({ prompt_version: drafter.currentPromptVersion(), failure_mode: 'invented_service_details' });
+      const distill = distillWith(GOOD_RULE);
+      expect(await auto.createCandidate({ dbi: trx, now: NOW, distill })).toEqual({ skipped: 'real_answers_off' });
+      expect(distill).not.toHaveBeenCalled();
+      expect(await trx('sms_prompt_patches').first()).toBeUndefined();
+    });
+
+    test('a candidate made with real answers on is rejected unpaid once real answers is turned off', async () => {
+      const items = await seedItems();
+      const patch = await insertPatch();
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      const { runner } = stubRunner({ items });
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ rejected: patch.id, reason: 'base_changed' });
+      expect(runner).not.toHaveBeenCalled();
     });
 
     test.each([

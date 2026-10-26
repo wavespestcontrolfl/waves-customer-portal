@@ -1727,6 +1727,7 @@ module.exports = {
   runSealedExam,
   finalizeRun,
   computeSignificance,
+  judgeRulerOf,
   parseScores,
   getSealedExamSummary,
   evaluateExamGate,

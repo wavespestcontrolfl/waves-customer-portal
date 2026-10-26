@@ -30,6 +30,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { gateEnvValue } = require('../config/feature-gates');
 const patchLib = require('./sms-prompt-patch');
 
 const envNum = (name, def) => {
@@ -134,9 +135,12 @@ async function candidateGate({ dbi, now }) {
 async function createCandidate({ dbi = db, now = new Date(), distill = distillRule } = {}) {
   const mode = patchLib.promptAutopromoteMode();
   if (mode === 'off') return { skipped: 'gate_off' };
+  // The drafter only applies a patch to the real-answers prompt. Read the same gate it reads: with real
+  // answers off the base identity can still carry voice-input tags ('house_voice_v11+e'), so comparing
+  // it with PROMPT_VERSION would let a candidate through whose exam can never match.
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { skipped: 'real_answers_off' };
   const drafter = require('./sms-shadow-drafter');
   const baseVersion = drafter.currentPromptVersionBase();
-  if (baseVersion === drafter.PROMPT_VERSION) return { skipped: 'real_answers_off' };
   const blocked = await candidateGate({ dbi, now });
   if (blocked) return { skipped: blocked };
   // One version letter per patch on this base identity, never reused (no shared cohorts).
@@ -210,12 +214,17 @@ function pairedMeanDeltas(candidateResults, baselineResults, keys) {
  * McNemar regression), and the overall and actions score means each improve by their margin.
  */
 function decidePromotion({ candidateRun, baselineRun, candidateResults, baselineResults }) {
-  const { computeSignificance } = require('./sms-sealed-eval');
+  const { computeSignificance, judgeRulerOf } = require('./sms-sealed-eval');
   const reject = (reason, detail) => ({ promote: false, reason, detail: detail || {} });
   if (!candidateRun || candidateRun.status !== 'complete') return reject('exam_incomplete');
   if (!baselineRun || baselineRun.status !== 'complete') return reject('baseline_incomplete');
   // One model and one voice profile on both sides: a resumed run can keep an older profile.
   if (candidateRun.model !== baselineRun.model || (candidateRun.voice_profile_version ?? null) !== (baselineRun.voice_profile_version ?? null)) return reject('run_mismatch');
+  // One judge ruler on both runs, the same rule finalizeRun applies before it computes significance: a
+  // stricter judge on one side (or a run that mixes rulers after a resume) reads as a change in the drafter.
+  const candidateRuler = judgeRulerOf(candidateResults);
+  const baselineRuler = judgeRulerOf(baselineResults);
+  if (candidateRuler.includes('+') || candidateRuler !== baselineRuler) return reject('judge_mismatch', { candidateRuler, baselineRuler });
   const sig = computeSignificance({ candidateResults, baselineResults });
   const deltas = pairedMeanDeltas(candidateResults, baselineResults, ['overall', 'actions']);
   const detail = {

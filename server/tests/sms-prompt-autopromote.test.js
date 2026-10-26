@@ -42,6 +42,15 @@ describe('promotion bar (pure)', () => {
     expect(decide(opts, runs)).toMatchObject({ promote: false, reason });
   });
 
+  test('runs graded by different judge rulers, or a run that mixes them, are never compared', () => {
+    const judged = (rows, version, from = 0) => rows.map((r, i) => (i >= from ? { ...r, scores: JSON.stringify({ ...JSON.parse(r.scores), judge_version: version }) } : r));
+    const { candidateResults, baselineResults } = results();
+    const ruleOut = (cand, base) => decidePromotion({ candidateRun: run(), baselineRun: run(), candidateResults: cand, baselineResults: base });
+    expect(ruleOut(judged(candidateResults, 'j2'), baselineResults)).toMatchObject({ promote: false, reason: 'judge_mismatch', detail: { candidateRuler: 'j2', baselineRuler: 'j1' } });
+    expect(ruleOut(judged(candidateResults, 'j2', 12), judged(baselineResults, 'j2', 12))).toMatchObject({ promote: false, reason: 'judge_mismatch', detail: { candidateRuler: 'j1+j2' } });
+    expect(ruleOut(judged(candidateResults, 'j2'), judged(baselineResults, 'j2'))).toMatchObject({ promote: true, reason: 'bar_met' });
+  });
+
   test('exactly the minimum item count is enough; an equal trade of unsafe flips is not a rise', () => {
     expect(decide({ n: 20 }).promote).toBe(true);
     expect(decide({ n: 30, newlyUnsafe: 1, newlySafe: 1 }).promote).toBe(true);
