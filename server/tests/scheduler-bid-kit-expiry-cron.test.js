@@ -33,12 +33,14 @@ jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUp
 
 jest.mock('../services/credential-expiry-checker', () => ({ runCredentialExpiryCheck: jest.fn() }));
 jest.mock('../services/bid-kit-expiry', () => ({ runBidKitExpiryCheck: jest.fn() }));
+jest.mock('../services/bid-kit-product-list', () => ({ runBidKitProductListSync: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
 const { isEnabled } = require('../config/feature-gates');
 const { runCredentialExpiryCheck } = require('../services/credential-expiry-checker');
 const { runBidKitExpiryCheck } = require('../services/bid-kit-expiry');
+const { runBidKitProductListSync } = require('../services/bid-kit-product-list');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -74,4 +76,21 @@ test('a failed sweep is logged, never thrown out of the tick', async () => {
   runBidKitExpiryCheck.mockRejectedValueOnce(new Error('sweep failed'));
   await expect(complianceTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Bid kit expiry check failed: sweep failed');
+});
+
+test('the product list rebuild runs in its own runExclusive right after the expiry sweep', async () => {
+  const order = [];
+  runBidKitExpiryCheck.mockImplementationOnce(async () => { order.push('expiry'); });
+  runBidKitProductListSync.mockImplementationOnce(async () => { order.push('product-list'); });
+  await complianceTick();
+  expect(runExclusive).toHaveBeenCalledWith('bid-kit-product-list', expect.any(Function));
+  expect(order).toEqual(['expiry', 'product-list']);
+});
+
+test('a failed expiry sweep does not stop the product list rebuild, and a failed rebuild is logged, never thrown', async () => {
+  runBidKitExpiryCheck.mockRejectedValueOnce(new Error('sweep failed'));
+  runBidKitProductListSync.mockRejectedValueOnce(new Error('rebuild failed'));
+  await expect(complianceTick()).resolves.toBeUndefined();
+  expect(runBidKitProductListSync).toHaveBeenCalledTimes(1);
+  expect(logger.error).toHaveBeenCalledWith('Bid kit product list sync failed: rebuild failed');
 });
