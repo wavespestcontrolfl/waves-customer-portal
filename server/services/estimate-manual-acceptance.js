@@ -1216,6 +1216,7 @@ async function planPostCommitSteps(trx, ctx, outcome) {
   }
   const consumerNoticeLive = require('../config/feature-gates').manualAcceptConsumerNoticeSendLive();
   let consumerNoticeSends = null;
+  let consumerNoticeRecipients = null;
   const noticeCustomerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
   if (collecting && consumerNoticeLive && noticeCustomerId) {
     // The card says whether the Florida consumer notice goes out: gate on, a termite line, no signed notice on file.
@@ -1227,10 +1228,15 @@ async function planPostCommitSteps(trx, ctx, outcome) {
         && (trx.isTransaction
           ? await trx.transaction((sp) => notice.consumerNoticeState(noticeCustomerId, sp))
           : await notice.consumerNoticeState(noticeCustomerId, trx)) !== 'signed';
-    } catch { consumerNoticeSends = true; }
+      if (consumerNoticeSends) {
+        consumerNoticeRecipients = trx.isTransaction
+          ? await trx.transaction((sp) => notice.consumerNoticeRecipients(sp, noticeCustomerId))
+          : await notice.consumerNoticeRecipients(trx, noticeCustomerId);
+      }
+    } catch { consumerNoticeSends = true; consumerNoticeRecipients = null; }
   }
   const plan = AcceptEffects.planPostCommit({
-    billingTerm: ctx.billingTerm, acceptedEstimate, conversion, proposalCustomer, emailInputs, termiteProgram, consumerNoticeLive, consumerNoticeSends,
+    billingTerm: ctx.billingTerm, acceptedEstimate, conversion, proposalCustomer, emailInputs, termiteProgram, consumerNoticeLive, consumerNoticeSends, consumerNoticeRecipients,
   });
   // A carded accept pins each step's concrete target (resolved here, under the
   // locks); the page's own accept has no card and keeps the unpinned plan.

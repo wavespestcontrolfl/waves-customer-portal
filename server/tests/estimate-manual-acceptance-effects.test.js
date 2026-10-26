@@ -1565,6 +1565,12 @@ describe('the post-commit plan (pure)', () => {
     const plan = Effects.planPostCommit({ billingTerm: 'standard', acceptedEstimate: accepted, conversion, consumerNoticeLive: true, consumerNoticeSends: true });
     expect(plan.map((s) => s.step).slice(-2)).toEqual(['termite_agreement', 'consumer_notice']);
     expect(plan.find((s) => s.step === 'consumer_notice')).toEqual({ step: 'consumer_notice', sends: true });
+    // A carded accept carries the masked recipients the card shows.
+    const carded = Effects.planPostCommit({
+      billingTerm: 'standard', acceptedEstimate: accepted, conversion, consumerNoticeLive: true, consumerNoticeSends: true,
+      consumerNoticeRecipients: { email: 'pat@example.com', phone: '+19415550100' },
+    });
+    expect(carded.find((s) => s.step === 'consumer_notice')).toEqual({ step: 'consumer_notice', sends: true, to_email: 'p***@example.com', to_phone: '***00' });
     const noCustomer = Effects.planPostCommit({ billingTerm: 'standard', acceptedEstimate: { id: 'est-1', customer_id: null }, conversion: null, consumerNoticeLive: true });
     expect(noCustomer.some((s) => s.step === 'consumer_notice')).toBe(false);
   });
@@ -1575,7 +1581,11 @@ describe('the post-commit plan (pure)', () => {
     const send = jest.spyOn(notice, 'sendManualAcceptConsumerNotice').mockImplementation(() => new Promise((r) => { release = r; }));
     try {
       await Effects.POST_COMMIT_STEPS.consumer_notice.run({ step: 'consumer_notice' }, { acceptedEstimate: { id: 'est-9', customer_id: 'cust-1' } });
-      expect(send).toHaveBeenCalledWith({ estimateId: 'est-9', customerId: 'cust-1' });
+      expect(send).toHaveBeenCalledWith({ estimateId: 'est-9', customerId: 'cust-1', expected: null });
+      // A carded accept hands over the pinned target, which the sender checks again before delivery.
+      const target = { estimate_id: 'est-9', customer_id: 'cust-1', contract_id: null, email_key: 'k', phone_key: null };
+      await Effects.POST_COMMIT_STEPS.consumer_notice.run({ step: 'consumer_notice', target }, { acceptedEstimate: { id: 'est-9', customer_id: 'cust-1' } });
+      expect(send).toHaveBeenLastCalledWith({ estimateId: 'est-9', customerId: 'cust-1', expected: target });
       release({ sent: true });
     } finally {
       send.mockRestore();

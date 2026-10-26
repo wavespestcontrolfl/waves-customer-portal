@@ -28,7 +28,7 @@ const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { TEMPLATE: SEED } = require('../models/migrations/20261024140000_seed_fdacs_13692_consumer_notice');
 const {
   SNAPSHOT_SOURCE, MANUAL_ACCEPT_SOURCE, estimateNeedsConsumerNotice, consumerNoticeState, consumerNoticeCtaFor, consumerNoticeBlocksAccept,
-  ensureEstimateConsumerNotice, sendManualAcceptConsumerNotice,
+  ensureEstimateConsumerNotice, sendManualAcceptConsumerNotice, consumerNoticeRecipients, consumerNoticeTarget,
 } = require('../services/estimate-consumer-notice');
 
 const req = { ip: '203.0.113.9', get: () => 'jest-agent' };
@@ -479,6 +479,34 @@ describe('sendManualAcceptConsumerNotice', () => {
     expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(raiseAdminAlert.mock.calls[0][1])).not.toThrow();
   });
 
+  test('the card\'s pinned recipients unchanged: it sends', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = await consumerNoticeTarget(database, 'est-1', 'cust-1');
+    expect(expected).toMatchObject({ estimate_id: 'est-1', customer_id: 'cust-1', contract_id: 'contract-open' });
+    expect(expected.email_key).toMatch(/^[a-f0-9]{24}$/);
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: true });
+  });
+
+  test('a new notice issued after the card compares only its recipients', async () => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH] });
+    const expected = await consumerNoticeTarget(database, 'est-1', 'cust-1');
+    expect(expected.contract_id).toBeNull();
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: true });
+  });
+
+  test.each([
+    ['the email changed', (t) => ({ ...t, email_key: 'something-else' })],
+    ['the phone changed', (t) => ({ ...t, phone_key: null })],
+    ['a different open notice', (t) => ({ ...t, contract_id: 'contract-other' })],
+  ])('%s after the card: nothing is sent and the bell rings', async (_label, change) => {
+    const { database } = makeDb({ estimateRow: accepted, technicians: [TECH], contracts: [openNotice()] });
+    const expected = change(await consumerNoticeTarget(database, 'est-1', 'cust-1'));
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: false, reason: 'recipient_changed' });
+    expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(raiseAdminAlert.mock.calls[0][1])).not.toThrow();
+  });
+
   test('the first read failing still rings the bell for the accepted estimate', async () => {
     const database = jest.fn((table) => {
       if (table === 'estimates') return { where: () => ({ first: async () => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); } }) };
@@ -495,5 +523,27 @@ describe('sendManualAcceptConsumerNotice', () => {
     findConsumerNotice.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', conn: database })).toEqual({ sent: false, reason: 'error' });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Where a send would go: the Document Requests delivery's own rules (open notice's recipient, else the customer's).
+describe('consumerNoticeRecipients', () => {
+  const withPrefs = (prefs, opts) => {
+    const { database } = makeDb(opts);
+    return (table) => (table === 'notification_prefs' ? { where: () => ({ first: async () => prefs }) } : database(table));
+  };
+
+  test('the customer\'s email and phone when no notice is open', async () => {
+    expect(await consumerNoticeRecipients(withPrefs(null, {}), 'cust-1')).toEqual({ contractId: null, email: 'pat@example.com', phone: '+19415550100' });
+  });
+
+  test('the open notice\'s own recipient email wins, as delivery reads it', async () => {
+    const conn = withPrefs(null, { contracts: [openNotice({ recipient_email: 'Other@Example.com' })] });
+    expect(await consumerNoticeRecipients(conn, 'cust-1')).toEqual({ contractId: 'contract-open', email: 'other@example.com', phone: '+19415550100' });
+  });
+
+  test('email turned off: no email; a phone that is not the one on file: no text', async () => {
+    const conn = withPrefs({ email_enabled: false }, { contracts: [openNotice({ recipient_phone: '+19415550199' })] });
+    expect(await consumerNoticeRecipients(conn, 'cust-1')).toEqual({ contractId: 'contract-open', email: '', phone: '' });
   });
 });

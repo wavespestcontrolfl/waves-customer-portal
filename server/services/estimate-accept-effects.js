@@ -647,7 +647,7 @@ function membershipEmailStep({ conversion, billingTerm, emailInputs }) {
 // recipient facts. A step is listed whenever the page attempts it.
 function planPostCommit({
   billingTerm, acceptedEstimate, conversion, proposalCustomer = null, emailInputs = null, termiteProgram = null,
-  consumerNoticeLive = false, consumerNoticeSends = null,
+  consumerNoticeLive = false, consumerNoticeSends = null, consumerNoticeRecipients = null,
 }) {
   const customerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
   const steps = [
@@ -658,9 +658,15 @@ function planPostCommit({
   if (billingTerm !== 'prepay_annual' && conversion?.membershipEmail) steps.push(membershipEmailStep({ conversion, billingTerm, emailInputs }));
   if (conversion?.welcomeSms) steps.push({ step: 'welcome_sms' });
   if (customerId) steps.push({ step: 'termite_agreement', applies: termiteProgram });
-  // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND (off = no step, the plan unchanged): `sends` is read on a carded
-  // accept (null on the page's own accept, where the step decides when it runs).
-  if (customerId && consumerNoticeLive) steps.push({ step: 'consumer_notice', sends: consumerNoticeSends });
+  // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND (off = no step, the plan unchanged): `sends` and the masked
+  // recipients are read on a carded accept (null on the page's own accept, where the step decides when it runs).
+  if (customerId && consumerNoticeLive) {
+    steps.push({
+      step: 'consumer_notice',
+      sends: consumerNoticeSends,
+      ...(consumerNoticeRecipients ? { to_email: maskEmail(consumerNoticeRecipients.email), to_phone: maskPhone(consumerNoticeRecipients.phone) } : {}),
+    });
+  }
   for (const [bell, field] of BELLS) {
     if (conversion?.[field]) steps.push({ step: 'admin_bell', bell, title: String(conversion[field].title || '') });
   }
@@ -926,14 +932,16 @@ const POST_COMMIT_STEPS = {
     },
   },
   consumer_notice: {
-    // The estimate and customer the FDACS-13692 is sent for.
-    async resolveTarget(_database, facts) {
-      return { estimate_id: idText(facts.acceptedEstimate.id), customer_id: idText(customerIdOf(facts)) };
+    // The estimate and customer the FDACS-13692 is sent for, the open notice it would resend and the hashed email
+    // and phone it would go to (the card shows them masked).
+    async resolveTarget(database, facts) {
+      return require('./estimate-consumer-notice').consumerNoticeTarget(database, facts.acceptedEstimate.id, customerIdOf(facts));
     },
-    async run(_step, ctx) {
+    async run(step, ctx) {
       // Detached like the termite agreement: the send (and its bell on failure) never holds the accept's response.
+      // A carded accept hands over its pinned target; the sender checks it again right before delivery.
       const { sendManualAcceptConsumerNotice } = require('./estimate-consumer-notice');
-      void sendManualAcceptConsumerNotice({ estimateId: ctx.acceptedEstimate.id, customerId: customerIdOf(ctx) })
+      void sendManualAcceptConsumerNotice({ estimateId: ctx.acceptedEstimate.id, customerId: customerIdOf(ctx), expected: step.target || null, ...(ctx.database ? { conn: ctx.database } : {}) })
         .catch((err) => logger.warn(`[estimate-manual-acceptance] consumer notice send failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
     },
   },

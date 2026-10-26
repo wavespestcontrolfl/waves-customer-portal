@@ -321,17 +321,28 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
       { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
       { kind: 'customer', before: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }), after: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }) },
       { kind: 'one_time_line', name: 'Termite Trenching', amount: 1500, consequence: 'schedule_and_invoice_by_hand' },
-      postCommit([{ step: 'consumer_notice', sends: true }]),
+      postCommit([{ step: 'consumer_notice', sends: true, to_email: 'l***@example.com', to_phone: '***00' }]),
     ];
     const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
     const lines = labels(card(preview));
     expect(lines).toEqual(expect.arrayContaining([
       'Message: No membership email: a one-time estimate only changes status here',
-      'Message: Email and text the Florida consumer notice (FDACS-13692) to sign, right after Confirm. Not sent if it is signed first; a text after 8 PM waits until 8 AM',
+      'Message: Email l***@example.com and text ***00: the Florida consumer notice (FDACS-13692) to sign, right after Confirm. Not sent if it is signed first or the address changes; a text after 8 PM waits until 8 AM',
     ]));
     expect(card(preview).notifies_customer).toBe(true);
     // The membership email decision stays its own: the notice never turns it on.
     expect(preview.membership_email).toBe('skip');
+  });
+
+  test('a notice with no email or phone it can go to is not promised, and the card says the office finishes it', async () => {
+    dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep(), { step: 'consumer_notice', sends: true, to_email: null, to_phone: null }]) });
+    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    expect(lines).toContain('Message: No Florida consumer notice: no email or phone it can go to. The office is notified to send it by hand');
+  });
+
+  test('a notice whose recipients could not be read refuses the card', async () => {
+    dryEffects = () => addOnEffects({ postCommit: postCommit([emailStep(), { step: 'consumer_notice', sends: true }]) });
+    expect(await executeEstimateAcceptTool('accept_estimate', INPUT)).toMatchObject({ code: 'consumer_notice_recipients_unread' });
   });
 
   test('a notice already on file (sends: false) puts nothing about it on the card', async () => {

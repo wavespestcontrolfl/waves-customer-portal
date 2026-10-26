@@ -216,12 +216,41 @@ async function ensureEstimateConsumerNotice({
   return outcome.ok ? { ...outcome, signingUrl: publicContractUrl(token) } : outcome;
 }
 
+// Where a send would go, read the way Document Requests delivery reads it (document-contract-delivery.js
+// recipientFor/validatePreparedChannel): the newest open notice's recipient, else the customer's; no email when the
+// customer turned email off; a text only to the phone on file. '' = that channel does not go out.
+async function consumerNoticeRecipients(conn, customerId) {
+  const customer = await conn('customers').where({ id: customerId }).first('email', 'phone');
+  const open = await conn('customer_contracts')
+    .where({ customer_id: customerId, contract_type: 'document_template', document_template_key: CONSUMER_NOTICE_TEMPLATE_KEY })
+    .whereIn('status', OPEN_STATUSES)
+    .orderBy('created_at', 'desc')
+    .first('id', 'recipient_email', 'recipient_phone');
+  const prefs = await conn('notification_prefs').where({ customer_id: customerId }).first('email_enabled');
+  const email = String(open?.recipient_email || customer?.email || '').trim().toLowerCase();
+  const phone = String(open?.recipient_phone || customer?.phone || '').trim();
+  const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+  const phoneOnFile = lastTen(phone).length === 10 && lastTen(phone) === lastTen(customer?.phone);
+  return { contractId: open?.id || null, email: prefs?.email_enabled === false ? '' : email, phone: phoneOnFile ? phone : '' };
+}
+
+// The pinned form of those recipients (the Intelligence Bar card binds them): ids and hashed addresses only.
+async function consumerNoticeTarget(conn, estimateId, customerId) {
+  const { recipientKey } = require('./estimate-accept-effects');
+  const r = await consumerNoticeRecipients(conn, customerId);
+  return {
+    estimate_id: String(estimateId), customer_id: String(customerId), contract_id: r.contractId ? String(r.contractId) : null,
+    email_key: r.email ? recipientKey(r.email) : null, phone_key: r.phone ? recipientKey(r.phone) : null,
+  };
+}
+
 // What the office reads on the bell when the notice did not go out, by refusal or delivery code.
 const SEND_FAILURE_WHY = {
   no_representative: 'No active office name to print on the form, so it was not sent.',
   template_unavailable: 'The notice form is not available, so it was not sent.',
   customer_unavailable: 'The customer record could not be used, so the notice was not sent.',
   not_delivered: 'Neither the email nor the text went out.',
+  recipient_changed: 'The email or phone changed after the accept card was confirmed, so nothing was sent.',
 };
 
 async function alertNoticeNotSent(estimate, reason, conn = db) {
@@ -254,8 +283,9 @@ async function alertNoticeNotSent(estimate, reason, conn = db) {
 // resent with a fresh link; otherwise one is issued. Nothing is sent when the gate is off, the estimate is not an
 // accepted termite estimate or a notice is already signed. A refusal or a delivery that reached no channel rings
 // the office bell. Never throws. `customerId` is the accept's committed customer: a failed first read can still
-// name them on the bell.
-async function sendManualAcceptConsumerNotice({ estimateId, customerId = null, conn = db }) {
+// name them on the bell. `expected` is the Intelligence Bar card's pinned target (consumerNoticeTarget): the notice
+// and the recipients it was approved for, checked again right before delivery.
+async function sendManualAcceptConsumerNotice({ estimateId, customerId = null, expected = null, conn = db }) {
   const { manualAcceptConsumerNoticeSendLive } = require('../config/feature-gates');
   if (!manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off' };
   let estimate = null;
@@ -291,6 +321,15 @@ async function sendManualAcceptConsumerNotice({ estimateId, customerId = null, c
     // The kill switch is read once more right before anything goes out: a send that waited on reads while the gate
     // was turned off sends nothing (a notice issued in between stays open, unsent, as one issued from the page).
     if (!manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off', contractId };
+    if (expected) {
+      const now = await consumerNoticeTarget(conn, estimate.id, estimate.customer_id);
+      // A notice found open must be the one the card saw; a notice issued here is new, so only its recipients compare.
+      const sameNotice = now.contract_id === String(contractId) && (expected.contract_id === null || expected.contract_id === now.contract_id);
+      if (!sameNotice || now.email_key !== expected.email_key || now.phone_key !== expected.phone_key) {
+        await alertNoticeNotSent(estimate, 'recipient_changed', conn);
+        return { sent: false, reason: 'recipient_changed', contractId };
+      }
+    }
     const { deliverDocumentRequestChannels } = require('./document-contract-delivery');
     // 'system': the send window holds a late text until 8 AM instead of sending it at night.
     const delivery = await deliverDocumentRequestChannels(contractId, { actorType: 'system' }, {
@@ -319,5 +358,7 @@ module.exports = {
   consumerNoticeCtaFor,
   consumerNoticeBlocksAccept,
   ensureEstimateConsumerNotice,
+  consumerNoticeRecipients,
+  consumerNoticeTarget,
   sendManualAcceptConsumerNotice,
 };
