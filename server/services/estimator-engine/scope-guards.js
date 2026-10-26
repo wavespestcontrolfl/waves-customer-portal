@@ -48,7 +48,8 @@ function scopeGuardsEnabled() {
 }
 
 // The Twilio webhook awaits triage before its TwiML response, alongside the
-// classifier's own 3.5s cap — the whole grounding phase gets a hard budget
+// classifier's own cap (5 s primary, 3.5 s resume scope check; sms-thread.js)
+// — the whole grounding phase gets a hard budget
 // so a saturated pool degrades to the ungrounded prompt, not a webhook
 // timeout.
 const TRIAGE_TIMEOUT_MS = 1200;
