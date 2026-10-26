@@ -140,4 +140,17 @@ postgres('tax package W-2 labor', () => {
     expect(files['README.txt']).toMatch(/7\. w2-payroll\.csv/);
     expect(files['README.txt']).toMatch(/8\. pnl\.csv/);
   });
+
+  // The standalone export (Taxes → Exports → Labor) once filtered a column the table does not
+  // have, and swallowed the error into a header-only CSV.
+  it('the standalone labor export lists every technician\'s days in the picked range, gate on too', async () => {
+    process.env[GATE] = 'true';
+    await trx('company_financials').insert({ effective_date: '2026-03-01', loaded_labor_rate: '40.00' });
+    const res = await fetch(`${baseUrl}/admin/tax/export/labor?start_date=2026-03-03&end_date=2026-03-31`);
+    expect(res.status).toBe(200);
+    expect((await res.text()).split('\n').slice(1)).toEqual([
+      '2026-03-04,Sample Hire,4.0,0.0,4.0,2,40.00,160.00,0.00,160.00',
+      '2026-03-03,Sample Contractor,3.0,0.0,3.0,2,40.00,120.00,0.00,120.00',
+    ]);
+  });
 });

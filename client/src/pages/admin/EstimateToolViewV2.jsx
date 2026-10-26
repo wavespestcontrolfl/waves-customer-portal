@@ -7010,6 +7010,7 @@ export default function EstimateToolViewV2({
                       lat={(pickedPlaceRef.current?.address === form.address ? pickedPlaceRef.current : satelliteData)?.lat}
                       lng={(pickedPlaceRef.current?.address === form.address ? pickedPlaceRef.current : satelliteData)?.lng}
                       limits={mistingAvailability.limits}
+                      estimateId={savedId || editMode?.id || null}
                       onUseCounts={(count, extra) => {
                         set("mistingNozzles", String(count));
                         // Risers only when the designer placed some, so a typed count is not wiped by a layout with none.

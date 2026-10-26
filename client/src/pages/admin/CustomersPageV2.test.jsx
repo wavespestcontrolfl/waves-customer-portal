@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
 
 vi.mock('../../components/admin/Customer360ProfileV2', () => ({
-  default: function Profile({ customerId, initialTab, onCustomerMutation, onDraftActiveChange }) {
+  default: function Profile({ customerId, initialTab, onCustomerMutation, onDraftActiveChange, feedbackEnabled }) {
     const [tab, setTab] = React.useState(initialTab);
     // Stands in for the embedded address-review panel's own draft-active
     // signal (CustomerGeocodeReviewPanel -> useCustomerProfileNavigation),
@@ -16,6 +16,7 @@ vi.mock('../../components/admin/Customer360ProfileV2', () => ({
     const [draftOpen, setDraftOpen] = React.useState(false);
     return <div data-testid="customer-profile">Profile {customerId}
       <span data-testid="profile-active-tab">{tab}</span>
+      <span data-testid="profile-feedback-enabled">{String(feedbackEnabled)}</span>
       <span data-testid="draft-open">{String(draftOpen)}</span>
       <button onClick={() => setTab('overview')}>Profile overview</button>
       <button onClick={() => onCustomerMutation?.({ customerId, action: 'update' })}>Save profile address</button>
@@ -230,7 +231,10 @@ describe('CustomersPageV2 workflow state', () => {
     await waitFor(() => expect(requests.at(-1).has('healthRisk')).toBe(false));
   });
 
-  it('retains an edit through workspace navigation and a failed save without creating a membership', async () => {
+  it.each([
+    ['absent', '/admin/customers?customer360=workspace'],
+    ['zero', '/admin/customers?customer360=workspace&feedback=0'],
+  ])('retains an edit and the existing alert path when feedback is %s', async (_gate, route) => {
     const writes = [];
     const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
@@ -241,7 +245,7 @@ describe('CustomersPageV2 workflow state', () => {
       }
       return response(parsed.pathname === '/api/admin/customers' ? list : {});
     }));
-    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={[route]}><CustomersPageV2 /></MemoryRouter>);
     await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
     fireEvent.click(screen.getByLabelText('Actions for Avery Customer'));
     fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
@@ -261,6 +265,48 @@ describe('CustomersPageV2 workflow state', () => {
       body: { firstName: 'Edited name', tier: null, serviceContactEmail: '' },
     });
     alert.mockRestore();
+  });
+
+  it('shows gated inline save feedback, retries the same draft, and keeps the write payload unchanged', async () => {
+    const writes = [];
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (options.method === 'PUT') {
+        writes.push({ path: parsed.pathname, body: JSON.parse(options.body) });
+        return writes.length === 1 ? response({ error: 'Try again' }, 500) : response({ success: true });
+      }
+      return response(parsed.pathname === '/api/admin/customers' ? list : {});
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&feedback=1']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    fireEvent.click(screen.getByLabelText('Actions for Avery Customer'));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
+    fireEvent.change(screen.getByDisplayValue('Avery'), { target: { value: 'Edited inline' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Save failed: Try again');
+    expect(alert).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue('Edited inline')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByDisplayValue('Edited inline')).not.toBeInTheDocument());
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).toEqual(writes[0]);
+    expect(writes[0]).toMatchObject({
+      path: '/api/admin/customers/customer-a',
+      body: { firstName: 'Edited inline', tier: null, serviceContactEmail: '' },
+    });
+    alert.mockRestore();
+  });
+
+  it.each([
+    ['/admin/customers?customerId=customer-a', 'false'],
+    ['/admin/customers?customerId=customer-a&feedback=0', 'false'],
+    ['/admin/customers?customerId=customer-a&feedback=1', 'true'],
+  ])('enables profile feedback only for the exact feedback=1 query (%s)', async (route, expected) => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={[route]}><CustomersPageV2 /></MemoryRouter>);
+    expect(await screen.findByTestId('profile-feedback-enabled')).toHaveTextContent(expected);
   });
 
   it('refreshes the address review queue after a successful city save and customer deletion', async () => {

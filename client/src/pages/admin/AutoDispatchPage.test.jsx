@@ -41,6 +41,22 @@ it("opens a requested run and links the named appointment to its CURRENT date", 
   expect(screen.getAllByText(/evaluates visits from 7 days out/)[0]).toBeVisible();
 });
 
+it("words the policy by the guard mode in force", async () => {
+  automation = { scheduledEnabled: true, config: { ...config, routeTiersEnabled: false, flexTierEnabled: true, guardMode: "flex" } };
+  mount();
+  await screen.findByText("Original decision");
+  const flex = screen.getAllByText(/^Flexible rule: checks plan visits from tomorrow\. A visit is frozen 73 hours before it, or once its 72-hour reminder is sent\. A move to another day lands at least 5 days out, within 5 days of the visit's date\.$/);
+  expect(flex.length).toBeGreaterThan(0);
+  expect(screen.queryByText(/more than 14 days out/)).not.toBeInTheDocument();
+  cleanup();
+  automation = { scheduledEnabled: true, config: { ...config, routeTiersEnabled: false, guardMode: "legacy" } };
+  detail = { run: { ...run, config_snapshot: automation.config }, logs: [{ ...decision }] };
+  mount();
+  await screen.findByText("Original decision");
+  expect(screen.getAllByText("Evaluates visits more than 14 days out.").length).toBeGreaterThan(0);
+  expect(screen.queryByText(/Flexible rule/)).not.toBeInTheDocument();
+});
+
 it("refreshes selected decisions as well as the list when the page regains focus", async () => {
   mount();
   await screen.findByText("Original decision");

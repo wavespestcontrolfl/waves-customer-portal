@@ -1581,6 +1581,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // MONTHLY, 1st at 9:00AM ET — SiteOne savings-programs check (owner
+  // 2026-10-26). Signs in with the order bot's stored SiteOne login (read-only),
+  // reads the Early Order Programs, promotions and Partners points, compares
+  // them with last month's snapshot and rings ONE admin notification when
+  // something is new or ending. Gate GATE_SITEONE_PROGRAMS_CHECK is checked
+  // INSIDE the check at call time; kill = unset. A failure throws so the
+  // job_health row goes red (and the check rings its own failure bell).
+  // =========================================================================
+  cron.schedule('0 9 1 * *', async () => {
+    try {
+      await runExclusive('siteone-programs-check', async () => {
+        const { runSiteOneProgramsCheck } = require('./procurement/siteone-programs-check');
+        const result = await runSiteOneProgramsCheck();
+        if (result?.skipped) return;
+        logger.info(`Running: SiteOne programs check (${result?.programs ?? 0} programs, ${result?.added ?? 0} new)`);
+      });
+    } catch (err) {
+      logger.error(`SiteOne programs check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Point-in-time MRR snapshot — keeps the MRR Trend honest: past months read
   // their real recorded MRR instead of being recomputed at today's prices.
   //  - DAILY 6:05AM ET: refresh the CURRENT month's row (in-progress month stays
@@ -1784,6 +1806,46 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Route-Tiers reorder run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 5:00AM — Auto-Dispatch CATCH-UP (GATE_AUTO_DISPATCH_CATCH_UP, dark;
+  // owner 2026-10-26). A deploy that restarts the server during the 4:10 run
+  // cuts it off: it moves nothing and nothing re-runs it (2026-09-03,
+  // 2026-10-26). If today has no finished night run, this job settles the
+  // dead cron run row and runs the night tool once more (triggered_by
+  // 'catch_up', at most one a day). It holds the same writer lock as 4:10.
+  // Gate off: returns before any database read.
+  // =========================================================================
+  cron.schedule('0 5 * * *', async () => {
+    // Call-time read so a Railway var flip takes effect on the next tick.
+    if (!require('../config/feature-gates').autoDispatchCatchUpLive()) return;
+    if (!isEnabled('cronJobs') || !isEnabled('autoDispatch')) return;
+    try {
+      await runExclusive('auto-dispatch-catch-up', async () => {
+        const { runCatchUp } = require('./auto-dispatch/catch-up');
+        // recordHealth:false — this only BORROWS the 4:10 writer lock; the
+        // outer 'auto-dispatch-catch-up' job records the health.
+        const inner = await runExclusive('auto-dispatch-recurring', () => runCatchUp({ nowDate: new Date() }), { recordHealth: false });
+        if (inner && inner.skipped === true) {
+          logger.warn(`[auto-dispatch] catch-up skipped (${inner.reason}) - another auto-dispatch run holds the writer lock`);
+          throw new Error(`auto-dispatch catch-up skipped (${inner.reason}) - the run lock was held`);
+        }
+        if (!inner.ran) {
+          logger.info(`[auto-dispatch] catch-up not needed: ${inner.reason}`);
+          return;
+        }
+        const result = inner.result;
+        logger.info(`[auto-dispatch] catch-up running now (${inner.reason}); settled=${inner.settled}`);
+        logger.info(`[auto-dispatch] catch-up run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
+        // Same health rule as the 4:10 run: anything but 'completed' fails job health.
+        if (result.status !== 'completed') {
+          throw new Error(`auto-dispatch catch-up run ${result.runId} unhealthy: status=${result.status} failed=${result.failed}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Auto-Dispatch catch-up failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

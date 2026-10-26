@@ -17,8 +17,8 @@ vi.setConfig({ testTimeout: 30000 });
 vi.mock("../../components/admin/EstimateSendDialog", () => ({ useEstimateSend: () => vi.fn() }));
 // The layout designer has its own tests; here it is a stub that reports its props and hands back a count.
 vi.mock("../../components/admin/MistingLayoutDesigner", () => ({
-  default: ({ address, lat, lng, limits, onUseCounts, onClose }) => (
-    <div role="dialog" aria-label="Layout designer stub" data-address={address} data-lat={String(lat)} data-lng={String(lng)} data-max={String(limits?.maxNozzles)}>
+  default: ({ address, lat, lng, limits, estimateId, onUseCounts, onClose }) => (
+    <div role="dialog" aria-label="Layout designer stub" data-estimate-id={String(estimateId)} data-address={address} data-lat={String(lat)} data-lng={String(lng)} data-max={String(limits?.maxNozzles)}>
       <button type="button" onClick={() => { onUseCounts(17, { risers: 0 }); onClose(); }}>Stub use 17</button>
       <button type="button" onClick={() => { onUseCounts(17, { risers: 5 }); onClose(); }}>Stub use 17 and 5 risers</button>
       <button type="button" onClick={onClose}>Stub close</button>
@@ -474,6 +474,14 @@ describe("layout designer button (GATE_MISTING_LAYOUT_DESIGNER)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Design on map" }));
     fireEvent.click(screen.getByRole("button", { name: "Stub close" }));
     expect(screen.getByLabelText("Nozzles")).toHaveValue(22);
+  });
+
+  it("tells the designer there is no saved estimate yet, so it can ask for the estimate to be saved first (step 3)", async () => {
+    mistingRead = withDesigner();
+    renderNew();
+    fireEvent.click(await toggle());
+    fireEvent.click(screen.getByRole("button", { name: "Design on map" }));
+    expect(screen.getByRole("dialog", { name: "Layout designer stub" })).toHaveAttribute("data-estimate-id", "null");
   });
 
   it("passes the property lookup's coordinates to the designer", async () => {
