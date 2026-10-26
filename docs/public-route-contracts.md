@@ -1331,8 +1331,8 @@ reserve/commit/extend gates, `/api/booking/availability`, `/find-slots`,
 re-service, and the assistant's availability engine — neither offers nor
 accepts a start within that window of now (the estimate picker's minimum lead
 IS this window, replacing the flat 120-minute same-day lead). The old
-`max_self_books_per_day` cap is retired: its offer-time day filtering and
-commit-time re-checks run only while `GATE_SELF_BOOK_DAY_CAP` is set. Staff,
+`max_self_books_per_day` cap is retired and removed: there is no offer-time day
+filtering or commit-time day re-check. Staff,
 admin and the voice agent's booking tools are unaffected.
 Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
 lenient than strict" — the Parrish live miss: a Tuesday 11:00 candidate hid
@@ -6050,9 +6050,7 @@ route-fit, not the day's). Day lists contain the packed feasible starts (owner r
 on a day with a committed stop, each route gap offers only the hour packed
 against its neighbouring stop(s) — the latest start before the next stop and/or
 the earliest after the previous one — never a mid-gap hour; an empty day still
-lists every grid hour); only the separate recommendations are curated. Moving an existing self-booked visit
-excludes that booking from its own day-cap count (the per-day cap runs only
-while `GATE_SELF_BOOK_DAY_CAP` is set — retired 2026-09-23). Self-serve notice
+lists every grid hour); only the separate recommendations are curated. Self-serve notice
 windows (owner ruling 2026-09-23, `scheduling/self-serve-notice.js`; split
 into a book window and a move window 2026-09-28, `SELF_SERVE_MOVE_NOTICE_HOURS`,
 default 24, independent of `SELF_SERVE_NOTICE_HOURS` — no fallback to it):
@@ -6069,8 +6067,7 @@ scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
 (route feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK`
-is set, the self-serve notice window, and — only while `GATE_SELF_BOOK_DAY_CAP`
-is set — self-book day caps re-checked server-side):
+is set, and the self-serve notice window):
   - default: moves the single visit via `SmartRebooker.reschedule`
     (advisory lock + tech-route overlap conflict check + `reschedule_log`
     audit as `customer_self_serve` + escalation flagging);
@@ -6162,8 +6159,7 @@ allowing the page to select the remaining lane; malformed lanes still return 400
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
 feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK` is set,
-the self-serve notice window, day caps only while `GATE_SELF_BOOK_DAY_CAP`
-is set — the anti-forgery model
+and the self-serve notice window — the anti-forgery model
 reschedule-public uses in place of the funnel's signed-offer HMAC), then
 committed through `createSelfBooking`'s transaction with the
 internal-only `callbackVisit` option (is_callback=true — completion

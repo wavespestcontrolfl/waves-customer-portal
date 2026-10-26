@@ -6,7 +6,6 @@ if (process.env.DATABASE_URL) {
 }
 process.env.GATE_LLM_CALL_LEDGER = 'false';
 process.env.GATE_LLM_DISPATCH_METRICS = 'false';
-process.env.GATE_LLM_CALL_TRACES = 'false';
 const { review } = require('../services/content/editorial-review');
 const cases = require('../tests/fixtures/editorial-calibration.json');
 async function evaluateCases() {

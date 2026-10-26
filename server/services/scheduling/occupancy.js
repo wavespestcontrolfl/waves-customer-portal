@@ -128,7 +128,7 @@ function applyTechScope(query, column, technicianId) {
 //   2. self-booking     'self-booking-confirm' / `<customerId>:<date>`
 //   3. technician       'slot-reserve' / `<techId|'unassigned'>:<date>`
 //   4. zone             'slot-reserve' / `zone:<zoneId|'unknown'>:<date>`
-//   5. global day cap   'self-booking-day-cap' / `<date>`
+//   5. global day lock  'self-booking-day-cap' / `<date>`
 //                       (availability.acquireSelfBookingDayCapLock)
 //   6. customer-comms   `customer-comms:<customerId>`
 //                       (utils/customer-comms-lock.js — every writer that

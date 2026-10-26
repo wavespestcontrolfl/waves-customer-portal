@@ -40,9 +40,7 @@
  * turns along. Each is stamped with the ambient agent-control lane / chain
  * / run / step ids. Chain
  * rows and heartbeats keep their row_kind so the digest above reads exactly
- * what it always did. Redacted bodies (GATE_LLM_CALL_TRACES + a lane policy
- * that opts in) live in llm_call_traces, keyed to the call row and pruned
- * after TRACE_RETENTION_DAYS. Every recorder here has the same contract as
+ * what it always did. Every recorder here has the same contract as
  * recordDispatch: never throws, never blocks the call it observes.
  */
 
@@ -50,14 +48,9 @@ const logger = require('./logger');
 const { v5: uuidv5 } = require('uuid');
 
 const { classifyFailure } = require('./agent-control/taxonomy');
-const { policyFor } = require('./agent-control/lane-policies');
 
 const DIGEST_TO = 'contact@wavespestcontrol.com';
 const RETENTION_DAYS = 30;
-// Traces are debugging material, not history: pruned independently of the
-// ledger rows they hang off, gate or no gate.
-const TRACE_RETENTION_DAYS = 7;
-const TRACE_BODY_CAP = 8 * 1024;
 
 // Exception thresholds. Volumes are per ET day per policy.
 const FALLBACK_RATE_THRESHOLD = 0.2; // fallback on >=20% of a policy's calls
@@ -161,13 +154,10 @@ function policyLabel(policy) {
 function isEnabled() {
   return require('../config/feature-gates').isEnabled('llmDispatchMetrics');
 }
-// Both ledger gates are read at CALL time (gateEnvValue) so a flip needs no
+// The ledger gates are read at CALL time (gateEnvValue) so a flip needs no
 // redeploy and unset = off = kill.
 function ledgerEnabled() {
   return require('../config/feature-gates').gateEnvValue('GATE_LLM_CALL_LEDGER');
-}
-function tracesEnabled() {
-  return require('../config/feature-gates').gateEnvValue('GATE_LLM_CALL_TRACES');
 }
 
 // The correlation columns every ledger row carries, straight from the
@@ -326,8 +316,8 @@ function extractUsage(provider, data) {
 }
 
 // Run a ledger write and resolve the row id it produced (null when the DB
-// says no). Separate from insertRow because the trace writer needs the id
-// back and the heartbeat/chain path must keep its exact mocked shape.
+// says no). Separate from insertRow because callers need the id back and
+// the heartbeat/chain path must keep its exact mocked shape.
 async function writtenId(query) {
   const rows = typeof query.returning === 'function' ? await query.returning('id') : await query;
   const first = Array.isArray(rows) ? rows[0] : rows;
@@ -523,11 +513,8 @@ function ledgerCallRejected(value, errorCode) {
  * own value — an SDK Message or a parsed JSON body — which is returned
  * UNCHANGED; a throw is recorded as a failed call and rethrown unchanged, so
  * every caller's catch / fallback path sees exactly what it saw before.
- * `trace: { system, prompt }` hands the request bodies to recordTrace (the
- * response is read from the resolved Message's text blocks), so a direct-SDK
- * lane traces exactly like an adapter lane once its policy opts in.
  */
-async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, laneId = null, policyLabel: label = null, trace = null } = {}) {
+async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, laneId = null, policyLabel: label = null } = {}) {
   // Monotonic clock: callers' own budget math uses Date.now (and tests pin it).
   const t0 = performance.now();
   // Inside runAsReplay a direct call is filed under `<policy>:replay`, the
@@ -544,10 +531,7 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     // llm/call.js requires this module, so its require is lazy.
     let errorCode = 'error';
     try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
-    const failedId = recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: policy });
-    // The calls most worth debugging are the ones that failed: an opted-in
-    // lane keeps the request bodies of a rejected call too (no response).
-    if (trace) recordTrace(failedId, { system: trace.system, prompt: trace.prompt, laneId });
+    recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: policy });
     throw err;
   }
   // An Anthropic Message that resolved with stop_reason 'refusal' is a
@@ -575,17 +559,8 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     laneId,
     policyLabel: policy,
   });
-  if (trace) recordTrace(callId, { system: trace.system, prompt: trace.prompt, response: messageText(value), laneId });
   if (value && typeof value === 'object' && !errorCode) ledgerCallIdOf.set(value, callId);
   return value;
-}
-
-// The text an SDK Message answered with (thinking blocks skipped) — the
-// response body a trace keeps. Null when the value carries no text blocks.
-function messageText(value) {
-  const blocks = Array.isArray(value?.content) ? value.content : [];
-  const text = blocks.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('');
-  return text || null;
 }
 
 // One row per session, keyed by the session id in provider_ref (unique
@@ -779,59 +754,6 @@ function failureCode(failure) {
   if (!failure) return null;
   if (failure instanceof Error) return String(failure.code || 'runner_error').slice(0, 80);
   return String(failure).slice(0, 80);
-}
-
-/**
- * Keep the redacted bodies of one call, fire-and-forget. Only when
- * GATE_LLM_CALL_TRACES is on AND the lane's runtime policy opts in
- * (`trace: true`). A LOW-confidence redaction is never persisted, on any
- * lane: the redactor reports low exactly when its name / address heuristics
- * may be blind, and a report or draft lane carries customer names as
- * readily as an inbound one — "redacted" has to mean it. Bodies are
- * redacted in full and THEN capped, so a cap can never split a phone number
- * into an unredacted half. Nothing is written when the call row itself was
- * not (null id).
- */
-function recordTrace(callIdPromise, { system = null, prompt = null, response = null, laneId = null } = {}) {
-  try {
-    if (!tracesEnabled()) return;
-    const ctx = agentContext.current();
-    const lane = laneId || ctx.laneId || null;
-    if (!lane || policyFor(lane).trace !== true) return;
-    const runId = ctx.runId || null;
-    void Promise.resolve(callIdPromise).then((callId) => {
-      if (callId === null || callId === undefined) return null;
-      const { redact } = require('./content/pii-redactor');
-      const RANK = { high: 0, medium: 1, low: 2 };
-      let worst = 'high';
-      const clean = (body) => {
-        if (body === null || body === undefined) return null;
-        const r = redact(String(body));
-        if (RANK[r.confidence] > RANK[worst]) worst = r.confidence;
-        return r.text.slice(0, TRACE_BODY_CAP);
-      };
-      const row = {
-        system_redacted: clean(system),
-        prompt_redacted: clean(prompt),
-        response_redacted: clean(response),
-      };
-      if (worst === 'low') {
-        logger.debug(`[llm-dispatch-metrics] trace for call ${callId} (${lane}) skipped: low redaction confidence`);
-        return null;
-      }
-      return require('../models/db')('llm_call_traces').insert({
-        call_id: callId,
-        lane_id: lane,
-        run_id: runId,
-        ...row,
-        redaction_confidence: worst,
-      });
-    }).catch((err) => {
-      logger.debug(`[llm-dispatch-metrics] trace insert failed: ${err.message}`);
-    });
-  } catch (err) {
-    logger.debug(`[llm-dispatch-metrics] trace skipped: ${err.message}`);
-  }
 }
 
 /**
@@ -1130,14 +1052,12 @@ async function runLlmDispatchDigest() {
   let priorHeartbeats = 0;
 
   // Retention pruning runs regardless of the gate (codex r2 P2: a kill-switch
-  // flip must not park rows forever); traces age out on their own shorter
-  // window for the same reason. Each prune FAILS INDEPENDENTLY (codex r7): a
+  // flip must not park rows forever). The prune FAILS INDEPENDENTLY (codex r7): a
   // DELETE deadlock or lost DELETE grant says nothing about recorder health,
   // and must not abort the digest or masquerade as an outage while INSERT and
   // SELECT still work. Maintenance failure = log and carry on; a genuinely
   // dead table fails the stats reads below, which DO alert.
   const { pruned, error: pruneError } = await pruneOlderThan(db, 'llm_dispatch_log', RETENTION_DAYS);
-  await pruneOlderThan(db, 'llm_call_traces', TRACE_RETENTION_DAYS);
 
   if (!isEnabled()) return { skipped: 'gate_off', pruned, ...(pruneError ? { pruneError } : {}) };
 
@@ -1245,10 +1165,7 @@ module.exports = {
   recordStreamedMessage,
   ledgerCallRejected,
   recordSessionUsage,
-  recordTrace,
   extractUsage,
-  TRACE_RETENTION_DAYS,
-  TRACE_BODY_CAP,
   runLlmDispatchDigest,
   alertRecorderUnreachable,
   detectExceptions,
