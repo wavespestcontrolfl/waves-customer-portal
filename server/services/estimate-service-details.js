@@ -175,7 +175,6 @@ const SERVICE_DETAILS_COPY = {
       heading: 'A few of the products doing the work',
       images: [
         { file: 'product-scion.png', product: 'Scion', caption: 'Scion® — residual insecticide' },
-        { file: 'product-bifen-it.png', product: 'Bifen', caption: 'Bifen® I/T — bifenthrin insecticide' },
         { file: 'product-tekko-pro.png', product: 'Tekko', caption: 'Tekko® Pro — insect growth regulator' },
       ],
       note: 'Stylized product illustrations — product selection follows the inspection, the season, and the label, and your service report names the exact products applied at your home.',
@@ -188,7 +187,7 @@ const SERVICE_DETAILS_COPY = {
         ['Covered pest', 'Mosquitoes'],
         ['Other biting insects', 'No-see-ums, biting midges, gnats, fleas & ticks only when named in your estimate'],
         ['Every visit', 'Adult-mosquito treatment in resting zones + inspection of accessible on-property water sources'],
-        ['Larval control', 'EPA-registered larvicide or growth regulator applied only to eligible, label-approved sites within your covered area'],
+        ['Larval control', 'EPA-registered larvicide or growth regulator applied only to eligible, label-approved sites within your covered area; Bti dunks and mosquito stations when your estimate includes them'],
         ['Re-service', 'No-charge re-service for qualifying mosquito activity between visits'],
         ['Guarantee', 'Money-back guarantee on recurring plans'],
       ],
@@ -197,11 +196,11 @@ const SERVICE_DETAILS_COPY = {
     included: [
       'Targeted adult-mosquito treatment in identified resting zones',
       'Inspection of accessible on-property water-holding sources, documented each visit',
-      'Label-directed larval treatment of eligible water sources within the covered area',
+      'Label-directed larval treatment of eligible water sources within the covered area; Bti dunks and mosquito stations when your estimate includes them',
       'Weather-aware treatment timing',
     ],
     process: [
-      'Many adult mosquitoes rest through the heat of the day in shaded, humid, protected places — dense vegetation, fence lines, lanai framing, under decks and outdoor structures. We direct treatment there with gas-powered backpack misting equipment that places fine, labeled spray droplets into and beneath the foliage — controlled placement where mosquitoes actually rest, not a blanket pass over the lawn.',
+      'Many adult mosquitoes rest through the heat of the day in shaded, humid, protected places — dense vegetation, fence lines, lanai framing, under decks and outdoor structures. We direct treatment there with a gas-powered backpack sprayer that places fine, labeled spray droplets into and beneath the foliage — controlled placement where mosquitoes actually rest, not a blanket pass over the lawn.',
       'The treatment reduces adult mosquitoes that contact treated surfaces and pressure from mosquitoes entering the yard. It is not a physical barrier — no honest company will tell you nothing can fly in from next door.',
       'Every visit includes a visual inspection of accessible, on-property water-holding sources — planters, toys, tarps, birdbaths, bromeliads, visible drainage, accessible gutters — with each finding documented: emptied, treated, inaccessible, off-property, or flagged for you to correct.',
       'Where the label, site, and your plan allow, standing water that cannot be emptied is treated with an EPA-registered larvicide or insect growth regulator — applied only through label-approved methods to eligible locations. Adult sprays, by contrast, are kept out of water and away from drift into aquatic areas per label; the two applications are separate tools with separate rules.',
@@ -234,17 +233,39 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'How do you handle kids, pets, gardens, pollinators, and water?',
-        a: 'Before treating, the technician accounts for play areas, pets, open blooms and active pollinators, edible plants, ponds, pools, aquarium airways, wind, and neighboring property — placement and product selection follow the complete label. Adult sprays are kept off edible plants unless the specific label permits it, and away from blooms and aquatic features where the label requires. Larvicides are the one deliberate water application, used only on eligible sites. Tell us about hives, butterfly gardens, or koi ponds before service, and keep people and pets clear until the report\u2019s re-entry condition is met.',
+        a: 'Before treating, the technician accounts for play areas, pets, open blooms and active pollinators, edible plants, ponds, pools, aquarium airways, wind, and neighboring property — placement and product selection follow the complete label. Adult sprays are kept off edible plants and open water, and off blooming plants where pollinators are active. Larvicides are the one deliberate water application, used only on eligible sites. Tell us about hives, butterfly gardens, or koi ponds before service, and keep people and pets clear until the report\u2019s re-entry condition is met.',
       },
       {
         q: 'What if it rains right after treatment?',
-        a: 'We evaluate current and forecast weather, wind, and wet foliage against the product label before treating — and we do not apply when the label says no. No exterior treatment is weatherproof: if heavy rain hits before an application dries or you believe a visit was compromised, contact us and we will re-service at no charge when your plan warrants it.',
+        a: 'We evaluate current and forecast weather, wind, and wet foliage against the product label before treating — and we do not apply when the label says no. No exterior treatment is weatherproof: a spray needs to dry and bond to the foliage, and after that it holds up to weather.',
       },
       {
         q: 'Why is there a sign in my yard after service?',
         a: 'Florida law requires a conspicuous treatment notice whenever pesticide is applied to lawn or exterior foliage. We post it at every qualifying visit — and pair it with something better than a sign: a digital report naming the exact products, treatment areas, and precautions for your property.',
       },
     ],
+    // Mosquito-specific safety copy replaces the shared structural-pest
+    // section: a yard spray has no crack-and-crevice, wall-void or bait
+    // placement, and its precautions are blooms, edibles and water.
+    safetyOverride: {
+      heading: 'Pets, kids, pollinators & your yard — mosquito-treatment safety, straight',
+      paragraphs: [
+        'A mosquito treatment goes into the shrubs and shade around the places your family and pets spend time outside — so here is the full answer, not a slogan.',
+        'Every pesticide product Waves applies is EPA-registered and used in accordance with its product label. Registration means the EPA evaluated the required scientific data and the proposed label and determined the product can be used without unreasonable adverse effects when the label is followed — and that label is legally binding: it dictates where the product may go, at what rate, with what precautions, and when people and pets may re-enter. EPA registration does not mean exposure is risk-free; in this industry the label is the law, and our technicians treat it that way.',
+      ],
+      bullets: [
+        'The adult spray goes into the shaded leaves where mosquitoes rest — hedges, fence lines, under decks, the lanai and pool-cage edges — not across the open lawn or onto play equipment.',
+        'Blooming plants with active pollinators, edible plants, and open water are not sprayed. Larvicides are the one deliberate water application, used only on eligible sites. Tell us about beehives, butterfly gardens, edible plants, and fish ponds before service.',
+        'Wind and rain must allow the application. When they do not, the technician holds or limits the treatment and notes why in your service report.',
+        'Read the signal word on every product card in this guide. It is the EPA’s at-a-glance acute-hazard communication: DANGER is the most severe category, WARNING is next, and CAUTION is the lowest signal-word category. It reflects the product’s acute hazard labeling — a useful indicator, though not a complete measure of every risk, which is why the full label governs every application.',
+        'The adult mosquito sprays are mixed at label-mandated rates of about an ounce or less per gallon and go down at finished concentrations well under one-tenth of one percent active ingredient. Concentration alone does not set the precautions, though: the label does, and we follow it in full.',
+        'Where a program uses insect-specific chemistry, we say so — insect growth regulators (mosquito and flea programs) disrupt molting and reproduction hormone systems that mammals simply do not have.',
+        'The "keep off until dry" rule has a mechanism behind it: while a liquid application is wet, it can transfer to skin, paws, and mouths; once dry, the residue stays on the treated surface where insects contact it. For labels that require it, complete drying — not a generic clock time — is the controlling condition, and your service report carries the precautions for the products actually used at your visit.',
+        'More product is never the answer. Rates come from the label, not from pest pressure or an upsell — correct identification, accurate placement, and label-compliant application are what produce results.',
+        'Waves Pest Control, LLC operates under Florida pest-control business license JB351547 and is insured, and every applied product is documented in your service report with its own re-entry guidance — so you never have to wonder what was used at your home or when the yard is yours again.',
+      ],
+      closing: 'We will never tell you a pesticide is “100% safe” — no honest company can, and the EPA does not permit that claim for any product. What we can show you is every choice made to minimize exposure, and the paper trail to verify it — our technicians treat their own homes with the same products and the same rules.',
+    },
     ctaMicro: 'Month-to-month plan \u00b7 No-charge re-service for qualifying mosquito activity \u00b7 Money-back guarantee',
     illustrations: ['treatment_notice'],
   },
