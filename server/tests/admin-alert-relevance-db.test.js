@@ -314,19 +314,21 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       for (const open of [d, e, f]) expect((await get(open.row.id)).done_at).toBeNull();
     });
 
-    test('a text from an unknown sender is judged by its phone: a person\'s text to that number closes it', async () => {
-      gate('true');
+    test('a text from an unknown sender is never judged: whatever is sent to that number, its bell stays open and nothing is recorded in shadow', async () => {
       const t0 = mins(new Date(), -240);
       const phone = '+15555558009';
-      const answered = await text({ phone, at: t0, known: false });
-      const other = await text({ phone: '+15555558010', at: t0, known: false });
+      const unknown = await text({ phone, at: t0, known: false });
       await staffText(null, phone, mins(t0, 10));
+      await staffCall(null, phone, mins(t0, 12));
+      gate('shadow');
       await sweep();
-      expect(await get(answered.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
-      expect((await get(other.row.id)).done_at).toBeNull();
+      expect(await wouldClose(unknown.row.id)).toHaveLength(0);
+      gate('true');
+      await sweep();
+      expect((await get(unknown.row.id)).done_at).toBeNull();
     });
 
-    test('a new text after a close rings the sender\'s thread bell again, and a new unanswered text puts an unknown sender\'s bell back', async () => {
+    test('a new text after a close rings the sender\'s thread bell again', async () => {
       gate('true');
       const NotificationService = require('../services/notification-service');
       const t0 = mins(new Date(), -240);
@@ -353,18 +355,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       await staffText(customer, customer.phone, mins(t0, 70));
       await sweep();
       expect((await get(first.row.id)).done_by).toBe('relevance');
-
-      // An unknown sender answered, then texting again unanswered: the re-arm pass puts the bell back.
-      const phone = '+15555558012';
-      const unknown = await text({ phone, at: t0, known: false });
-      await staffText(null, phone, mins(t0, 10));
-      await sweep();
-      expect((await get(unknown.row.id)).done_by).toBe('relevance');
-      await insert('sms_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, message_body: 'Hello? Anyone there?', message_type: 'customer_reply',
-        status: 'received', twilio_sid: sid('SMI'), created_at: mins(t0, 120) });
-      const result = await sweep();
-      expect(result.rearmed).toBeGreaterThanOrEqual(1);
-      expect((await get(unknown.row.id)).done_at).toBeNull();
     });
 
     test('a voicemail callback request (a missed call is missed-call-bell.js\'s, not the sweep\'s): a person\'s call back, a person-answered call in, a person\'s text, a booked visit or a handed-off quote after the call closes it; earlier contact, an unanswered callback and an automated bell do not', async () => {
@@ -605,21 +595,17 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect(await get(courtesy.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered, or no reply needed' });
     });
 
-    test('an unknown sender on a shared phone stays open unless a witness with no customer id answers it', async () => {
+    test('an unknown sender on a shared phone is never judged either: no reply, with or without a customer id, closes it', async () => {
       gate('true');
       const t0 = mins(new Date(), -240);
       const phone = '+15555558089';
       const c1 = await customerWith(phone);
       await customerWith(phone);
       const unknown = await text({ phone, at: t0, known: false });
-      // A reply filed under one of the customers is not an answer for an unidentified sender.
       await staffText(c1, phone, mins(t0, 10));
-      await sweep();
-      expect((await get(unknown.row.id)).done_at).toBeNull();
-      // A reply that carries no customer id names the number: it answers.
       await staffText(null, phone, mins(t0, 20), { status: 'sent' });
       await sweep();
-      expect(await get(unknown.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+      expect((await get(unknown.row.id)).done_at).toBeNull();
     });
 
     test('an email from a customer: a person\'s reply in its thread closes it; a forward to someone else, a reply on another thread and an earlier reply do not', async () => {

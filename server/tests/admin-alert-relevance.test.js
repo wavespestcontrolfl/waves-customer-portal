@@ -1144,7 +1144,7 @@ describe('customer-contact classes', () => {
     expect(classify(smsThread(), { anyMode: true }).key).toBe('inbound_sms');
   });
 
-  test('the loader gets each row\'s own references (a text\'s sid and customer, a call, an email, a lead\'s phone) and is not called with the gate off', async () => {
+  test('the loader gets each row\'s own references (a known sender\'s text sid and customer, a call, an email, a lead\'s phone), never an unknown sender\'s text, and is not called with the gate off', async () => {
     const rows = [smsThread(), smsUnknown(), voicemail(), email(), { ...leadNote(), id: uid(77) }];
     mockTables.leads = [lead({ phone: '+15555550102' })];
     await loadSubjects(rows);
@@ -1154,7 +1154,6 @@ describe('customer-contact classes', () => {
     const items = mockLoadContactBundles.mock.calls[0][0];
     expect(items.map((i) => [i.kind, i.refs])).toEqual([
       ['sms', { sid: SID, customerId: CUST }],
-      ['sms', { sid: SID, customerId: null }],
       ['voice', { callLogId: CALL, customerId: CUST, phone: '+15555550101' }],
       ['email', { emailId: EMAIL, customerId: CUST }],
       ['lead', { customerId: CUST, phone: '+15555550102' }],
@@ -1184,9 +1183,8 @@ describe('customer-contact classes', () => {
       expect((await verdictFor(smsThread(), { shared: true, pending: false, textAt: at(-10), backAt: at(-10) })).reason).toBeNull();
       // A person's text or call from BEFORE the text never names the answer.
       expect((await verdictFor(smsThread(), { pending: false, textAt: at(-30), backAt: at(-30) })).reason).toBe('Answered, or no reply needed');
-      // An unknown sender is judged the same way, by the number its sid names.
-      expect((await verdictFor(smsUnknown(), { pending: false, textAt: at(5) })).reason).toBe('Answered by text');
-      expect((await verdictFor(smsUnknown(), { pending: true })).reason).toBeNull();
+      // An unknown sender's text bell is never judged (no references, so no bundle), whatever was sent to the number.
+      expect((await verdictFor(smsUnknown(), { pending: false, textAt: at(5) })).reason).toBeNull();
     });
 
     test.each([['voicemail', voicemail]])('a %s: a person\'s call back, a call in a person answered, a person\'s text, a booked visit or a quote after the call closes it; nothing, or only earlier contact, keeps it', async (_name, make) => {
@@ -1369,17 +1367,18 @@ describe('customer-contact classes', () => {
     };
     const NOW_AFTER = new Date('2026-09-28T16:00:00Z');
 
-    test('an unknown sender\'s bell is put back, unread, when the number has an unanswered text again; one still answered stays closed', async () => {
+    test('an unknown sender\'s text bell is never judged: never closed whatever the witnesses say, and a close this class once wrote on one is put back (nothing holds it)', async () => {
       gate('true');
-      const back = closed(smsUnknown(), 'Answered by text');
-      const stays = closed({ ...smsUnknown(), id: uid(900) }, 'Answered by text');
-      mockTables.notifications = [back, stays];
-      mockBundles = new Map([[String(back.id), bundle({ pending: true })], [String(stays.id), bundle({ pending: false, textAt: at(10) })]]);
+      const unknown = closed(smsUnknown(), 'Answered by text');
+      const open = smsUnknown();
+      open.id = uid(900);
+      mockTables.notifications = [unknown, open];
+      mockBundles = new Map([[String(unknown.id), bundle({ pending: true })], [String(open.id), bundle({ pending: false, textAt: at(10) })]]);
       const result = await runAdminAlertRelevanceSweep({ now: NOW_AFTER });
-      expect(result.rearmed).toBe(1);
-      expect([back.read_at, back.done_at, back.done_by]).toEqual([null, null, null]);
-      expect(JSON.parse(back.metadata).retired).toBeUndefined();
-      expect(stays.done_by).toBe('relevance');
+      expect(result).toMatchObject({ rearmed: 1, retired: 0 });
+      expect(unknown.done_at ?? null).toBeNull();
+      expect(open.done_at ?? null).toBeNull();
+      expect(mockAuditWouldClose).not.toHaveBeenCalled();
     });
 
     test('a call bell whose visit was cancelled again is put back; a failed witness load leaves every closed row as it is', async () => {

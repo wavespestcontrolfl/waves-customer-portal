@@ -59,11 +59,10 @@ function namesItem(row, item) {
 }
 
 // On a SHARED phone (see sharedPhoneItems) the phone says nothing about WHO was
-// reached, so a witness names the item only by customer id: the same id, or, for
-// a subject that has none (an unknown sender), a witness that has none either.
+// reached, so a witness names the item only by customer id. (Only a known
+// sender's text bell is judged on this path, so the subject always has an id.)
 function ownMatch(row, item) {
-  if (item.customerId) return !!row.customer_id && String(row.customer_id) === item.customerId;
-  return !row.customer_id && !!row.peer && item.peers.has(row.peer);
+  return !!item.customerId && !!row.customer_id && String(row.customer_id) === item.customerId;
 }
 
 // The newest time among the witness rows that name this item.
@@ -152,8 +151,7 @@ const SHARED_PHONE_LOOKBACK_DAYS = 365;
 // The sms items whose phone is SHARED: some other customer (a different non-null
 // customer id) is tied to one of the item's phone identities, by a live customers
 // row with that phone, or by a text or call row on it carrying a customer id (or a
-// thread of that customer). A subject with no customer id (an unknown sender) is
-// shared when two different customers are tied to it. The schema lets different
+// thread of that customer). The schema lets different
 // people share a phone, and the Messages reader judges a conversation by phone
 // alone, so for a shared phone its verdict is not used (textAnswered).
 async function sharedPhoneItems(conn, smsIdents, since) {
@@ -182,7 +180,7 @@ async function sharedPhoneItems(conn, smsIdents, since) {
   const shared = new Set();
   for (const ident of smsIdents) {
     const ids = new Set([...ident.peers].flatMap((peer) => [...(tied.get(peer) || [])]));
-    if (ident.customerId ? [...ids].some((id) => id !== ident.customerId) : ids.size >= 2) shared.add(ident);
+    if ([...ids].some((id) => id !== ident.customerId)) shared.add(ident);
   }
   return shared;
 }

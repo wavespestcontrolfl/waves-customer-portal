@@ -74,9 +74,9 @@
  * below. A missed call (customer_missed_call) is NOT in the table: its one owner
  * is missed-call-bell.js (retireCalledBackMissedCalls, every 2 minutes), which
  * judges the same contact facts behind the same gate. A new text from a known
- * sender rewrites the sender's one thread bell and rings it again (the refresh clears done and the retired stamp); an
- * unknown sender's bell is put back by the re-arm pass when the number has an
- * unanswered text again. Two other customer-contact bells are in it by owner
+ * sender rewrites the sender's one thread bell and rings it again (the refresh clears done and the retired stamp). An
+ * unknown sender's text bell (no customer on file) is not judged at all: it
+ * stays a person's to close. Two other customer-contact bells are in it by owner
  * ruling (2026-10-03), each closed only by the record that answers it: the
  * promise-chaser bell once the promise it chases is closed, and a portal chat
  * hand-off about adding a service once an estimate is handed off to that
@@ -239,10 +239,12 @@ function contactRefs(kind, row, data) {
   const params = linkParams(row.link);
   if (kind === 'sms') {
     const key = String(refs.meta.dedupeKey || '');
-    return {
-      sid: first(params.get('message'), payload.twilioSid),
-      customerId: key.startsWith(SMS_THREAD_PREFIX) ? uuidOrNull(key.slice(SMS_THREAD_PREFIX.length)) : uuidOrNull(first(payload.threadId, params.get('thread'))),
-    };
+    const customerId = key.startsWith(SMS_THREAD_PREFIX) ? uuidOrNull(key.slice(SMS_THREAD_PREFIX.length)) : uuidOrNull(first(payload.threadId, params.get('thread')));
+    // An unknown sender's bell (no customer on file) is not judged: its emitter keeps a row per 4-hour window
+    // and suppresses a second text inside it, so no anchor here can stand for its latest text. It stays a
+    // person's to close; the 30-day retention sweep closes it if nobody does.
+    if (!customerId) return null;
+    return { sid: first(params.get('message'), payload.twilioSid), customerId };
   }
   if (kind === 'voice') return { callLogId: uuidOrNull(payload.callLogId), customerId: uuidOrNull(payload.customerId), phone: payload.phone };
   if (kind === 'email') return { emailId: uuidOrNull(payload.emailId), customerId: uuidOrNull(payload.customerId) };
@@ -709,8 +711,9 @@ const CLASSES = [
     // (sms-thread:<customer>) that a new text rewrites, bumps and rings again,
     // which also clears the done fields and the retired stamp (notification-
     // service mergeRefreshMetadata), so a text after a close always rings. An
-    // unknown sender gets a row per 4-hour window (sms-reply:<sid>); the re-arm
-    // pass puts it back if the number has an unanswered text again.
+    // unknown sender's bell (a row per 4-hour window, sms-reply:<sid>) is NOT
+    // judged (contactRefs returns null): a second text inside the window raises
+    // no new row, so no anchor can stand for its latest text.
     key: 'inbound_sms', categories: ['inbound_sms'], triggerKey: 'sms_reply', contactOnly: true, contact: 'sms', contactRule: textAnswered,
   },
   { // call-recording-processor.js — one bell per voicemail, no dedupe key
