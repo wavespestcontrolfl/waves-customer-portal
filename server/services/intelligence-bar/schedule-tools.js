@@ -9,7 +9,7 @@ const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-
  */
 
 const db = require('../../models/db');
-const { ibTargetRulesV2Live } = require('../../config/feature-gates');
+const { ibTargetRulesV2Live, secondTechLowsLive } = require('../../config/feature-gates');
 const logger = require('../logger');
 const { assertAssignableTechnician, applyAssignable } = require('../technician-eligibility');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
@@ -639,10 +639,28 @@ async function optimizeAllRoutes(input) {
 }
 
 
+// Technician picked by name text. GATE_SECOND_TECH_LOWS (census L3) off: the
+// old unordered first() substring match. On: resolveTechnicianByName
+// (tools.js) - assignable technicians only, and a name that fits two of them
+// comes back as { error, ambiguous, candidates } so the caller refuses
+// instead of guessing. Returns a row, null (no match) or that ambiguity object.
+// These tools take a name, not technician_id, so the retry asks for the full name.
+async function technicianByName(name) {
+  if (!(typeof secondTechLowsLive === 'function' && secondTechLowsLive())) {
+    return db('technicians').whereILike('name', `%${name}%`).first();
+  }
+  const found = await require('./tools').resolveTechnicianByName(name);
+  if (found && found.ambiguous) {
+    return { ...found, error: 'Multiple technicians match that name. Ask the operator which one, then retry with their full name.' };
+  }
+  return found;
+}
+
 async function optimizeTechRoute(input) {
   const { date, technician_name: techName, confirmed } = input;
-  const tech = await db('technicians').whereILike('name', `%${techName}%`).first();
+  const tech = await technicianByName(techName);
   if (!tech) return { error: `Technician "${techName}" not found` };
+  if (tech.ambiguous) return tech;
 
   let RouteOptimizer;
   try { RouteOptimizer = require('../route-optimizer'); } catch {
@@ -842,8 +860,9 @@ function assignLockedRowDrifted(approved, locked, stop) {
 async function assignTechnician(input, actionContext = {}) {
   const { service_ids: rawServiceIds, technician_name: techName, confirmed } = input;
   let serviceIds = rawServiceIds;
-  let tech = await db('technicians').whereILike('name', `%${techName}%`).first();
+  let tech = await technicianByName(techName);
   if (!tech) return { error: `Technician "${techName}" not found` };
+  if (tech.ambiguous) return tech;
 
   const allServices = await db('scheduled_services')
     .whereIn('scheduled_services.id', serviceIds)
@@ -1801,8 +1820,10 @@ async function moveStopsToDay(input, actionContext = {}) {
 
 async function swapTechAssignments(input, actionContext = {}) {
   const { date, tech_a_name: techAName, tech_b_name: techBName, confirmed } = input;
-  const techA = await db('technicians').whereILike('name', `%${techAName}%`).first();
-  const techB = await db('technicians').whereILike('name', `%${techBName}%`).first();
+  const techA = await technicianByName(techAName);
+  const techB = await technicianByName(techBName);
+  if (techA && techA.ambiguous) return techA;
+  if (techB && techB.ambiguous) return techB;
   if (!techA) return { error: `Tech "${techAName}" not found` };
   if (!techB) return { error: `Tech "${techBName}" not found` };
 
@@ -2230,8 +2251,9 @@ async function findAvailableSlotsTool(input) {
 
   let technician_id;
   if (technician_name) {
-    const tech = await db('technicians').whereILike('name', `%${technician_name}%`).first();
+    const tech = await technicianByName(technician_name);
     if (!tech) return { error: `Technician "${technician_name}" not found` };
+    if (tech.ambiguous) return tech;
     technician_id = tech.id;
   }
 

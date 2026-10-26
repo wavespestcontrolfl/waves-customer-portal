@@ -149,6 +149,7 @@
  *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_ADS_CAPACITY_WORK_DAYS=true (ads capacity counts a technician only on dates they work: absences and, with GATE_TECH_WORK_DAYS, off weekdays; strict 'true', read at call time via adsCapacityWorkDaysLive(); off = every assignable technician every day; changes ad budgets only, sends nothing to a customer)
+ *   GATE_SECOND_TECH_LOWS=true (owner 2026-10-25, second technician census lows L1 + L3: (L1) the admin dashboard tech utilization counts only assignable field staff (active and field-dispatchable) and, for each, only the days in the window they work (technicians.work_days; no list = every day), 8 hours a work day, instead of every active row on every calendar day; (L3) the four Intelligence Bar schedule-tool sites that pick a technician by name text with an unordered first() match use resolveTechnicianByName instead: assignable technicians only, and a name that fits two technicians is an error that lists them, never a guess. Strict opt-in: exactly 'true', read at call time via secondTechLowsLive(). Ships DARK; off = both paths byte-identical to before. Admin-only, sends nothing to a customer.)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
@@ -4660,6 +4661,11 @@ const gates = {
   // CALL time. Kill switch: unset - capability checks classify by visit name only.
   techJobTypeChecks: process.env.GATE_TECH_JOB_TYPE_CHECKS === 'true',
 
+  // Second technician census lows L1 + L3 (owner 2026-10-25). Ships DARK: exactly 'true'.
+  // Registered for logGateStatus only; consumers read secondTechLowsLive() at
+  // CALL time. Kill switch: unset - dashboard utilization and the IB name picks stay as before.
+  secondTechLows: process.env.GATE_SECOND_TECH_LOWS === 'true',
+
   // Service-line map (owner 2026-10-25), SHADOW ONLY. Registered for logGateStatus only;
   // consumers read serviceLineMapMode() at CALL time. Kill switch: unset.
   serviceLineMapShadow: String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow',
@@ -6400,6 +6406,15 @@ function techJobTypeChecksLive() {
   return process.env.GATE_TECH_JOB_TYPE_CHECKS === 'true';
 }
 
+// GATE_SECOND_TECH_LOWS read at CALL time - strict `=== 'true'`. The one reader for census
+// lows L1 (admin dashboard tech utilization counts assignable staff on their work days,
+// routes/admin-dashboard.js) and L3 (Intelligence Bar schedule tools resolve a technician
+// by name through resolveTechnicianByName, services/intelligence-bar/schedule-tools.js):
+// off, both are byte-identical to before.
+function secondTechLowsLive() {
+  return process.env.GATE_SECOND_TECH_LOWS === 'true';
+}
+
 // GATE_SERVICE_LINE_MAP read at CALL time: 'shadow' or 'off'. 'shadow' (exactly, trimmed, any
 // case) lets the six booking choice points record what the service-line map
 // (services/scheduling/line-technician.js) would pick next to what was actually chosen, in
@@ -7755,6 +7770,8 @@ module.exports.adsCapacityWorkDaysLive = adsCapacityWorkDaysLive;
 module.exports.techWorkDaysLive = techWorkDaysLive;
 // GATE_TECH_JOB_TYPE_CHECKS reader, on its own line so gate PRs never conflict.
 module.exports.techJobTypeChecksLive = techJobTypeChecksLive;
+// GATE_SECOND_TECH_LOWS reader, on its own line so gate PRs never conflict.
+module.exports.secondTechLowsLive = secondTechLowsLive;
 // GATE_SERVICE_LINE_MAP reader, on its own line so gate PRs never conflict.
 module.exports.serviceLineMapMode = serviceLineMapMode;
 // GATE_UNASSIGNED_VISIT_GUARD reader, on its own line so gate PRs never conflict.
