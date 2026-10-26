@@ -268,6 +268,14 @@ describe('POST /:token (book)', () => {
     expect(await book()).toMatchObject({ status: 404, body: { error: 'not_found' } });
   });
 
+  test('a 409 at commit after which the property reads out of the area: gone, not a retry loop', async () => {
+    mockInspection.bookAssessmentVisit.mockImplementation(async () => {
+      mockInspection.serviceAreaFailure.mockResolvedValue({ failure: 'out_of_area' });
+      return { ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY', error: 'Your address just changed — please pick a time again.' };
+    });
+    expect(await book()).toMatchObject({ status: 200, body: { state: 'gone' } });
+  });
+
   test('a slot race at commit: 409 SLOT_TAKEN with fresh times', async () => {
     mockInspection.bookAssessmentVisit.mockResolvedValue({ ok: false, status: 409, code: 'SLOT_TAKEN', error: 'That time was just taken.' });
     expect(await book()).toMatchObject({ status: 409, body: { code: 'SLOT_TAKEN', error: 'That time was just taken.' } });

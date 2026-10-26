@@ -242,15 +242,20 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   }
 });
 
+// 409 SLOT_TAKEN with fresh times from `setup` (a bookingSetup answer). A setup that can no longer reach times
+// answers the page's state for it (gone) or the 409 with no times.
 async function sendSlotTaken(res, setup, error) {
+  if (setup.blocked?.state === 'gone') return res.json(setup.blocked);
   let refreshed = null;
-  try {
-    refreshed = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes });
-  } catch (err) {
-    logger.warn(`[estimate-assessment] refresh availability failed: ${err.code || err.name || 'error'}`);
+  if (!setup.blocked) {
+    try {
+      refreshed = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes });
+    } catch (err) {
+      logger.warn(`[estimate-assessment] refresh availability failed: ${err.code || err.name || 'error'}`);
+    }
   }
   return res.status(409).json({
-    error: error || 'That time is no longer open. Here are the latest available times.',
+    error: error || (refreshed ? 'That time is no longer open. Here are the latest available times.' : 'That time is no longer open.'),
     code: 'SLOT_TAKEN',
     availability: refreshed ? inspection().shapeAvailability(refreshed, setup.range) : null,
   });
@@ -328,13 +333,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         const visit = await inspection().findOpenVisit(db, resolved.customer.id, { assessmentOnly: true });
         if (visit) return res.json(await alreadyBookedBody(visit, resolved.lead));
       }
-      if (result.status === 409) {
-        // A slot race, or the customer's pin moved under the booking fence: fresh times at the current pin.
-        const fresh = await bookingSetup(resolved.customer, resolved.lead);
-        if (fresh.blocked?.state === 'gone') return res.json(fresh.blocked);
-        if (fresh.blocked) return res.status(409).json({ error: result.error || 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null });
-        return sendSlotTaken(res, fresh, result.error);
-      }
+      // A slot race, or the customer's pin moved under the booking fence: fresh times at the current pin.
+      if (result.status === 409) return sendSlotTaken(res, await bookingSetup(resolved.customer, resolved.lead), result.error);
       return res.status(result.status || 500).json({ error: result.error || 'Booking is temporarily unavailable — please text or call us.' });
     }
     return res.json(await inspection().finishCommittedBooking({
