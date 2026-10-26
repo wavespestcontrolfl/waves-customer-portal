@@ -72,7 +72,7 @@ function fakeDb({
 } = {}) {
   const SR_COLS = {
     scheduled_service_id: {}, status: {}, revenue: {}, material_cost: {}, labor_hours: {}, labor_cost: {}, drive_cost: {},
-    total_job_cost: {}, gross_profit: {}, gross_margin_pct: {}, revenue_per_man_hour: {},
+    total_job_cost: {}, gross_profit: {}, gross_margin_pct: {}, revenue_per_man_hour: {}, vehicle_fixed_cost: {},
   };
   const stores = {
     technician_cost_cards: technicianCards,
@@ -180,7 +180,8 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
       expect(res.drive_cost).toBe(6);
       expect(res.total_cost).toBe(41);
       expect(res.costRates).toBeNull();
-      expect(db.writes.jobCosts[0].vehicle_fixed_cost).toBeNull();
+      expect(db.writes.serviceRecordUpdates[0].vehicle_fixed_cost).toBeNull();
+      expect(db.writes.jobCosts[0]).not.toHaveProperty('vehicle_fixed_cost');
       // Nothing about cost cards is read at all.
       expect(db.writes.hasTableCalls).toBe(0);
       expect(db.writes.legQueries).toBe(0);
@@ -250,8 +251,8 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
       expect(res.costRates).toMatchObject({ onJobMinutes: 60, driveMinutes: 20, driveMiles: 8, driveSource: 'gps_leg' });
       expect(db.writes.serviceRecordUpdates[0]).toMatchObject({ labor_cost: 36.33, drive_cost: 8.88, labor_hours: 1 });
       expect(db.writes.jobCosts[0]).toMatchObject({ labor_cost: 36.33, drive_cost: 8.88 });
-      // The vehicle fixed part of drive_cost, kept for the EBITDA bridge: 5.28 x 1.3333 h.
-      expect(db.writes.jobCosts[0].vehicle_fixed_cost).toBe(7.04);
+      // The vehicle fixed part of drive_cost, kept beside it for the EBITDA bridge: 5.28 x 1.3333 h.
+      expect(db.writes.serviceRecordUpdates[0].vehicle_fixed_cost).toBe(7.04);
       expect(res.costRates.vehicleFixedCost).toBe(7.04);
     });
 

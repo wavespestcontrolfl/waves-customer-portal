@@ -214,6 +214,14 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
 
   describe('calculateJobCost on a completed visit', () => {
     const costRow = async (id = visitId) => trx('job_costs').where({ scheduled_service_id: id }).first();
+    const addRecord = async () => {
+      const recordId = randomUUID();
+      await trx('service_records').insert({
+        id: recordId, customer_id: customerId, scheduled_service_id: visitId, technician_id: techId,
+        service_date: '2026-10-26', service_type: 'Quarterly Pest Control Service', status: 'completed',
+      });
+      return recordId;
+    };
     const num = (v) => Number(v);
 
     it('gate off: $35 x 1 h labor and the $6 stop cost, even with cards on file', async () => {
@@ -223,7 +231,6 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       expect(res.labor_cost).toBe(35);
       expect(res.drive_cost).toBe(6);
       expect(res.costRates).toBeNull();
-      expect((await costRow()).vehicle_fixed_cost).toBeNull();
       expect(num((await costRow()).labor_cost)).toBe(35);
       expect(num((await costRow()).drive_cost)).toBe(6);
     });
@@ -290,11 +297,7 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
     });
 
     it('the service record carries the new costs and labor_hours stays the on-job hours', async () => {
-      const recordId = randomUUID();
-      await trx('service_records').insert({
-        id: recordId, customer_id: customerId, scheduled_service_id: visitId, technician_id: techId,
-        service_date: '2026-10-26', service_type: 'Quarterly Pest Control Service', status: 'completed',
-      });
+      const recordId = await addRecord();
       await addTechCard();
       await addVehicleCard();
       await addLeg();
@@ -325,16 +328,19 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       expect((await jobCosting.calculateJobCost(later, trx)).labor_cost).toBe(56);
     });
 
-    it('job_costs keeps the vehicle fixed share of drive_cost; a recalculation without the card clears it', async () => {
+    it('the service record keeps the vehicle fixed share of drive_cost; a recalculation without the card clears it', async () => {
       await addTechCard();
       await addVehicleCard();
+      const recordId = await addRecord();
       process.env[GATE] = 'true';
       await jobCosting.calculateJobCost(visitId, trx);
-      const withCard = await trx('job_costs').where({ scheduled_service_id: visitId }).first();
+      const withCard = await trx('service_records').where({ id: recordId }).first();
       expect(Number(withCard.vehicle_fixed_cost)).toBe(7.39); // 5.28 x 1.4 h (60 on site + 24 drive)
+      expect(Number(withCard.drive_cost)).toBe(9.92); // it is part of drive_cost
+      expect(await trx('job_costs').columnInfo()).not.toHaveProperty('vehicle_fixed_cost');
       delete process.env[GATE];
       await jobCosting.calculateJobCost(visitId, trx);
-      const without = await trx('job_costs').where({ scheduled_service_id: visitId }).first();
+      const without = await trx('service_records').where({ id: recordId }).first();
       expect(without.vehicle_fixed_cost).toBeNull();
       expect(Number(without.drive_cost)).toBe(6);
     });

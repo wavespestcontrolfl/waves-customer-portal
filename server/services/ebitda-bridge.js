@@ -84,7 +84,7 @@ function buildEbitdaBridge({
   const sumOf = (parts) => money(Object.values(parts).reduce((t, v) => t + v, 0));
   const overheadEntered = overheadBasis === 'entered' ? true : sumOf(components) > 0;
   // Vehicle fixed cost the window's visits already carry in COGS (vehicle cost cards,
-  // GATE_TECH_COST_RATES; job_costs.vehicle_fixed_cost): the vehicle overhead keeps only the
+  // GATE_TECH_COST_RATES; service_records.vehicle_fixed_cost): the vehicle overhead keeps only the
   // rest, so it is counted once. It nets at most the vehicle overhead itself; none allocated
   // (or no vehicle line) leaves the overhead as it was.
   // (money() reads anything that is not a number, such as a missing amount or line, as 0.)

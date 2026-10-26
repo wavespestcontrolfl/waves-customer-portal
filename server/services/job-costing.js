@@ -733,9 +733,9 @@ async function calculateJobCost(scheduledServiceId, db, {
   let driveCost = ownsDriveCost ? driveCostPerStop : 0;
   let costRatesApplied = null;
   // The vehicle fixed cost inside drive_cost (NULL = no cost card applied).
-  // job_costs keeps it so the adjusted-EBITDA bridge takes it out of the
-  // vehicle overhead (counted once); written every time, so a recalculation
-  // without a card clears an earlier share.
+  // service_records keeps it beside drive_cost so the adjusted-EBITDA bridge
+  // takes it out of the vehicle overhead (counted once); written with the other
+  // financials, so a recalculation without a card clears an earlier share.
   let vehicleFixedCost = null;
   if (costRates) {
     // Each visit's own on-site minutes (its allocated share in a combined
@@ -786,7 +786,6 @@ async function calculateJobCost(scheduledServiceId, db, {
     gross_profit: fin.gross_profit,
     margin_pct: fin.gross_margin_pct,
     products_used: JSON.stringify(breakdown),
-    vehicle_fixed_cost: vehicleFixedCost,
   };
 
   // Correction-stamp fence, ATOMIC with the financial writes (codex P2
@@ -868,6 +867,7 @@ async function calculateJobCost(scheduledServiceId, db, {
       set('gross_profit', fin.gross_profit);
       set('gross_margin_pct', fin.gross_margin_pct);
       set('revenue_per_man_hour', fin.revenue_per_man_hour);
+      set('vehicle_fixed_cost', vehicleFixedCost);
       if (Object.keys(upd).length) {
         await trx('service_records').where({ id: record.id }).update(upd);
         wroteThrough = true;
