@@ -48,6 +48,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { payrollTaxCalendarLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
+const { rt6CheckInputs, rt6Tax } = require('./payroll-rt6');
 
 // The day layer 2 was built. Earlier staff are not new hires.
 const NEW_HIRE_FLOOR = '2026-10-25';
@@ -186,7 +187,7 @@ function digestOf(checks) {
 }
 const taxCents = (check) => TAX_COLUMNS.reduce((sum, col) => sum + num(check[col]), 0);
 
-const zeroTotals = (extra) => ({ tax: 0, futa: 0, reemployment: 0, checks: [], ...extra });
+const zeroTotals = (extra) => ({ tax: 0, futa: 0, checks: [], ...extra });
 
 // The periods (month 'YYYY-MM', quarter 'YYYY-Qn', year 'YYYY') of payroll rows
 // the owner already marked done, read from their source keys. New hire and FUTA
@@ -215,7 +216,6 @@ function totalsOf(checks, remembered) {
     t.checks.push(check);
     t.tax += taxCents(check);
     t.futa += num(check.futa_cents);
-    t.reemployment += num(check.fl_reemployment_cents);
     Object.assign(t, extra);
     map.set(key, t);
   };
@@ -272,7 +272,9 @@ function quarterRows(year, q, t) {
     title: `Florida RT-6 — ${label}`,
     period_label: label,
     due_date: rollFlorida(afterQuarterDue(year, q)),
-    amount_due: dollars(t.reemployment),
+    // RT-6 line 5, rounded once on the quarter as the return does (payroll-rt6.js),
+    // so the amount to pay matches the return and Form 940 line 10's check.
+    amount_due: dollars(rt6Tax(t.checks.map(rt6CheckInputs)).tax),
     source_digest,
     notes: 'File and pay on the Florida Department of Revenue site. E-pay by 5 PM ET on the business day before the due date. File even with no wages.',
   }];
@@ -354,7 +356,8 @@ function hireRow(hire) {
 }
 
 /**
- * checks: finalized payroll_checks rows (pay_date 'YYYY-MM-DD' + cents columns).
+ * checks: finalized payroll_checks rows (pay_date 'YYYY-MM-DD' + cents columns,
+ * and calc_snapshot for the RT-6 rate).
  * hires: W-2 technicians ({ id, name, hire_date, employment_type, employment_status }).
  * today: 'YYYY-MM-DD' in ET. remembered: source keys of rows already marked
  * done; their periods are covered even when no finalized check is left in them.
@@ -365,7 +368,7 @@ function payrollObligations({ checks = [], hires = [], today, remembered = [] })
   const rows = [...months.values()].map(depositRow);
   if (quarters.size) {
     for (const [year, q] of quarterSpan(quarters, today)) {
-      rows.push(...quarterRows(year, q, quarters.get(quarterKey(year, q)) || { tax: 0, reemployment: 0, checks: [] }));
+      rows.push(...quarterRows(year, q, quarters.get(quarterKey(year, q)) || { tax: 0, checks: [] }));
     }
   }
   for (const [year, t] of years) rows.push(...yearRows(Number(year), t, quarters));
@@ -461,7 +464,7 @@ async function syncPayrollFilings({ conn = db, today = etDateString() } = {}) {
   return conn.transaction(async (trx) => {
     await trx.raw("SELECT pg_advisory_xact_lock(hashtext('payroll-tax-calendar'))");
     const checks = await trx('payroll_checks').where({ status: 'finalized' }).select(
-      'id', trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"), ...DIGEST_COLUMNS,
+      'id', trx.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"), ...DIGEST_COLUMNS, 'calc_snapshot',
     );
     const hires = await trx('technicians')
       .where({ employment_type: 'w2' })
