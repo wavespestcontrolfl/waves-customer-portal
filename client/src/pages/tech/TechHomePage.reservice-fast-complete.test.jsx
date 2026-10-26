@@ -31,9 +31,10 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
   ),
 }));
 vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({
-  default: ({ service, onEdit, onRescheduled, onClose, adminActions }) => (
+  default: ({ service, onEdit, onRescheduled, onClose, onAccessChanged, adminActions }) => (
     <div data-admin-actions={String(adminActions)}>
       Appointment details for {service.id}
+      <button type="button" onClick={async () => { globalThis.__accessFreshRow = await onAccessChanged(); }}>Access changed</button>
       <button type="button" onClick={() => onClose()}>Close details</button>
       <button type="button" onClick={() => onEdit(service)}>Edit appointment</button>
       <button type="button" onClick={() => onRescheduled(service)}>Moved with a warning</button>
@@ -216,4 +217,22 @@ it('hands the sheet the row\'s gate codes for its header', async () => {
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(await screen.findByTestId('sheet-access')).toHaveTextContent('Gate: #4821 (neighborhood)|1 dog');
+});
+
+it('Details → Access gets the visit\'s fresh row from a route reload after a gate code change', async () => {
+  rows = [row('svc-access', { reserviceFastCompleteEnabled: true, ...ACCESS })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  await screen.findByText('Fast Complete sheet for svc-access');
+  fireEvent.click(screen.getByRole('button', { name: 'Sheet details' }));
+  await screen.findByText('Appointment details for svc-access');
+  globalThis.__accessFreshRow = undefined;
+  const reportedWrong = [{ type: 'gate', text: 'Gate: #4821 (neighborhood)', neighborhoodEntryId: 'e1', neighborhoodEntryCode: '#4821', reportedWrong: true }];
+  rows = [row('svc-access', { reserviceFastCompleteEnabled: true, scheduleAccessEnabled: true, propertyAlerts: reportedWrong })];
+  const loadsBefore = fetchMock.mock.calls.filter(([path]) => path.includes('/admin/schedule?')).length;
+  fireEvent.click(screen.getByRole('button', { name: 'Access changed' }));
+  await waitFor(() => expect(globalThis.__accessFreshRow).toBeDefined());
+  expect(fetchMock.mock.calls.filter(([path]) => path.includes('/admin/schedule?')).length).toBe(loadsBefore + 1);
+  expect(globalThis.__accessFreshRow).toMatchObject({ id: 'svc-access', propertyAlerts: reportedWrong });
+  delete globalThis.__accessFreshRow;
 });

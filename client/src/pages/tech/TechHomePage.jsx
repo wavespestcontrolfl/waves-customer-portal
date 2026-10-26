@@ -442,7 +442,10 @@ export default function TechHomePage({ section = 'today' }) {
           rainChance: next.rainChance,
           services: scheduleRowsFromResponse(result.data).filter((s) => String(serviceTechnicianId(s)) === String(techId)),
         } });
-        return;
+        // The fresh rows, for a caller that needs one visit's current row
+        // (Details → Access after a gate code change). Every other path
+        // answers nothing.
+        return next.rows;
       }
       console.error('Failed to fetch schedule:', result.kind, result.message || '');
       // Offline fallback: the last good route this tech loaded today, read
@@ -1172,6 +1175,14 @@ export default function TechHomePage({ section = 'today' }) {
           onCancelled={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
           onRescheduled={() => { closeFastSheetsBehindDetails(); fetchSchedule(); }}
           onBillingChanged={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
+          // GATE_SCHEDULE_ACCESS_CODES: after Wrong code or Add gate code in
+          // Details → Access, reload the route and hand the section this
+          // visit's fresh row (null when the reload did not bring it back).
+          onAccessChanged={async () => {
+            const visitId = detailService?.id;
+            const rows = await fetchSchedule();
+            return (rows || []).find((r) => String(r.id) === String(visitId)) || null;
+          }}
           // Complete from the details sheet: back to the fast sheet behind it,
           // entries intact, or into this visit's own sheet when none is open.
           onCompleteService={(svc) => {
