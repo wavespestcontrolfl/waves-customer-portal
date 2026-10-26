@@ -13,6 +13,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/customer-dunning/wiring', () => ({ liveForCustomer: jest.fn(() => false) }));
 
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
@@ -52,6 +53,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, status text, next_retry_at timestamptz,
       created_at timestamptz DEFAULT now())`);
     await mockPg.raw('CREATE TABLE scheduled_services (id uuid PRIMARY KEY, status text)');
+    await mockPg.raw('CREATE TABLE customer_dunning_schedules (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, status text)');
     await mockPg.raw('CREATE TABLE payment_plans (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, status text)');
     await mockPg.raw(`CREATE TABLE audit_log (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), actor_type text NOT NULL, actor_id uuid, action text NOT NULL,
@@ -69,7 +71,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
   });
 
   beforeEach(async () => {
-    await mockPg.raw('TRUNCATE invoices, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, scheduled_services, audit_log');
+    await mockPg.raw('TRUNCATE invoices, invoice_followup_sequences, stripe_invoice_charge_attempts, payments, payment_plans, scheduled_services, customer_dunning_schedules, audit_log');
     delete process.env.GATE_AUTOPAY_HOLD_TIMEOUT;
   });
 
@@ -136,10 +138,50 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       await untouched(h);
     });
 
-    test('a charge attempt from before the hold began does not keep it', async () => {
+    test('a charge attempt from before the hold began keeps it too: Auto Pay acted on this invoice', async () => {
       const h = await held();
-      await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, created_at: new Date(Date.now() - 9 * DAY) });
+      await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: h.invoiceId, created_at: new Date(Date.now() - 90 * DAY) });
+      expect(await sweep()).toMatchObject({ candidates: 0, released: 0 });
+      await untouched(h);
+    });
+
+    test.each(['active', 'held', 'paused', 'autopay_hold'])('a customer on an open (%s) customer-level schedule is left to that engine', async (scheduleStatus) => {
+      const h = await held();
+      await mockPg('customer_dunning_schedules').insert({ customer_id: h.customerId, status: scheduleStatus });
+      expect(await sweep()).toMatchObject({ candidates: 0, released: 0 });
+      await untouched(h);
+    });
+
+    test.each(['completed', 'released'])('a customer whose customer-level schedule is %s is released', async (scheduleStatus) => {
+      const h = await held();
+      await mockPg('customer_dunning_schedules').insert({ customer_id: h.customerId, status: scheduleStatus });
       expect(await sweep()).toMatchObject({ candidates: 1, released: 1 });
+      expect((await seqOf(h.invoiceId)).status).toBe('active');
+    });
+
+    test('a customer the live customer-level engine covers is left to it; one it does not cover is released', async () => {
+      const FeatureGates = require('../config/feature-gates');
+      const { liveForCustomer } = require('../services/customer-dunning/wiring');
+      const covered = await held();
+      const other = await held();
+      const live = jest.spyOn(FeatureGates, 'dunningCustomerScheduleLive').mockReturnValue(true);
+      liveForCustomer.mockImplementation((customerId) => customerId === covered.customerId);
+      try {
+        expect(await sweep()).toMatchObject({ candidates: 1, released: 1 });
+      } finally {
+        live.mockRestore();
+        liveForCustomer.mockImplementation(() => false);
+      }
+      await untouched(covered);
+      expect((await seqOf(other.invoiceId)).status).toBe('active');
+    });
+
+    test('with the customer-level engine off, its coverage check is never asked', async () => {
+      const { liveForCustomer } = require('../services/customer-dunning/wiring');
+      liveForCustomer.mockClear();
+      await held();
+      expect(await sweep()).toMatchObject({ candidates: 1, released: 1 });
+      expect(liveForCustomer).not.toHaveBeenCalled();
     });
 
     test.each(['paid', 'failed', 'processing', 'upcoming'])('a %s payment for the customer since the hold began keeps the hold', async (status) => {

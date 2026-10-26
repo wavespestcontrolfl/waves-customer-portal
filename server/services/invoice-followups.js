@@ -2859,20 +2859,28 @@ const AUTOPAY_HOLD_SHADOW_ACTION = 'invoice_followup.autopay_hold_timeout_shadow
 /**
  * Release Auto Pay holds that Auto Pay never acted on. Selects `autopay_hold` sequences whose hold
  * began (updated_at: every hold writer, and handleAutopayFailure's counter bump, stamps it) more
- * than AUTOPAY_HOLD_TIMEOUT_DAYS ago with no stripe_invoice_charge_attempts row for the invoice,
- * no payments row (any status) for the customer created since, and no failed payments row for the
- * customer still on the Auto Pay retry ladder (next_retry_at set). Terminal, non-schedulable,
- * payer-billed and payment-plan invoices are skipped, and so is an invoice whose linked visit is still
- * open (Auto Pay charges when the visit closes). Every held row is read, in id-keyset pages, so rows
- * the skips pass over never hide the rows behind them. 'true' releases through the existing
- * releaseFromAutopayHold; 'shadow' writes at most one audit_log row per invoice per ET day and
- * changes nothing; off returns before any query.
+ * than AUTOPAY_HOLD_TIMEOUT_DAYS ago with no stripe_invoice_charge_attempts row for the invoice at
+ * all (any age, any state: an attempt means Auto Pay acted, and an unresolved one still needs its
+ * reconciliation), no payments row (any status) for the customer created since the hold began, and
+ * no failed payments row for the customer still on the Auto Pay retry ladder (next_retry_at set).
+ * A customer the customer-level reminder engine owns (an open customer_dunning_schedules row) or
+ * covers (GATE_DUNNING_CUSTOMER_SCHEDULE live for them) is skipped: that engine holds the whole set
+ * while the customer is on Auto Pay and can promote a released row back into its hold. Terminal,
+ * non-schedulable, payer-billed and payment-plan invoices are skipped, and so is an invoice whose
+ * linked visit is still open (Auto Pay charges when the visit closes). Every held row is read, in
+ * id-keyset pages, so rows the skips pass over never hide the rows behind them. 'true' releases
+ * through the existing releaseFromAutopayHold; 'shadow' writes at most one audit_log row per
+ * invoice per ET day and changes nothing; off returns before any query.
  */
 async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_HOLD_SWEEP_PAGE } = {}) {
   const mode = require('../config/feature-gates').autopayHoldTimeoutMode();
   if (mode !== 'shadow' && mode !== 'true') return { mode: 'off', candidates: 0, released: 0, recorded: 0 };
 
   const cutoff = new Date(now.getTime() - AUTOPAY_HOLD_TIMEOUT_DAYS * 86400000);
+  const engineGates = customerDunningGates();
+  const coveredByCustomerEngine = engineGates && engineGates.dunningCustomerScheduleLive()
+    ? require('./customer-dunning/wiring').liveForCustomer
+    : () => false;
   const due = [];
   let afterId = null;
   for (;;) {
@@ -2881,8 +2889,7 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
       .where('s.updated_at', '<', cutoff)
       .whereNotExists(function noChargeAttempt() {
         this.select(db.raw('1')).from('stripe_invoice_charge_attempts as a')
-          .whereRaw('a.invoice_id = s.invoice_id')
-          .whereRaw('a.created_at >= s.updated_at');
+          .whereRaw('a.invoice_id = s.invoice_id');
       })
       .whereNotExists(function noPayment() {
         this.select(db.raw('1')).from('payments as p')
@@ -2896,13 +2903,15 @@ async function releaseStaleAutopayHolds({ now = new Date(), pageSize = AUTOPAY_H
           .where('r.status', 'failed')
           .whereNotNull('r.next_retry_at');
       })
+      .where(notOwnedByCustomerSchedule)
       .orderBy('s.id', 'asc')
       .limit(pageSize)
-      .select('s.id', 's.invoice_id', 's.updated_at');
+      .select('s.id', 's.invoice_id', 's.customer_id', 's.updated_at');
     if (afterId) page.where('s.id', '>', afterId);
     const rows = await page;
 
     for (const row of rows) {
+      if (coveredByCustomerEngine(row.customer_id)) continue;
       const invoice = await db('invoices').where({ id: row.invoice_id }).first();
       if (!invoice || isTerminalInvoice(invoice) || followupArmBlock(invoice)) continue;
       if (await activePaymentPlan(db, row.invoice_id)) continue;
