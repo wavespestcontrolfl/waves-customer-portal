@@ -22,6 +22,11 @@ const tomorrow = () => {
   const { addStaffWorkDays } = require('../utils/staff-time-work-date');
   return addStaffWorkDays(etDateString(), 1);
 };
+const daysFromToday = (days) => {
+  const { etDateString } = require('../utils/datetime-et');
+  const { addStaffWorkDays } = require('../utils/staff-time-work-date');
+  return addStaffWorkDays(etDateString(), days);
+};
 const good = (patch = {}) => ({ technicianId: TECH_ID, workDate: tomorrow(), kind: 'pto', hours: 8, note: 'Vacation', ...patch });
 
 describe('hours', () => {
@@ -76,7 +81,7 @@ describe('input checks stop before the connection is used', () => {
     ['three decimals', { hours: '1.005' }, /2 decimal/],
     ['a long note', { note: 'x'.repeat(501) }, /at most 500/],
     ['an impossible date', { workDate: '2026-02-30' }, /real date/],
-    ['a date 2 years out', { workDate: '2028-10-26' }, /within 400 days/],
+    ['a date 401 days out', { workDate: daysFromToday(401) }, /within 400 days/],
   ])('create refuses %s', async (_name, patch, message) => {
     await expect(createTimeOff(good(patch), TECH_ID, untouched)).rejects.toMatchObject({ message: expect.stringMatching(message) });
   });

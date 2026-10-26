@@ -92,7 +92,8 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
       setBalances(found);
     } catch (failure) {
       if (failure.status === 404) { setEnabled(false); return; }
-      setEnabled(prev => (prev === null ? true : prev));
+      // Fail closed: only a successful gated answer opens the panel. Any other
+      // failure keeps it as it was (hidden until the first good load).
       setError(failure.message);
     }
   }, [call, weekStart, weekEnd, year]);

@@ -235,6 +235,20 @@ describe('Paid time off hours per year (settings)', () => {
   });
 });
 
+describe('load failures', () => {
+  it('keeps the panel hidden when the first time off request fails with a server error', async () => {
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => (path.startsWith('/admin/payroll/time-off?')
+      ? (calls.push({ path, method: 'GET' }), reply({ error: 'Server error' }, false, 500))
+      : original(path, options)));
+    render(<PayrollSettings />);
+    await screen.findByText('Sample Alpha');
+    await waitFor(() => expect(calls.some(c => c.path.startsWith('/admin/payroll/time-off?'))).toBe(true));
+    expect(screen.queryByRole('region', { name: 'Time off' })).toBeNull();
+    expect(writes()).toHaveLength(0);
+  });
+});
+
 describe('gate off', () => {
   beforeEach(() => { gateOn = false; });
 
