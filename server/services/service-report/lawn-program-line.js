@@ -245,7 +245,7 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     whyNow: 'The rainy season starts in June, and local summer fertilizer rules limit nitrogen through September. The lawn gets iron and micronutrients for color instead, plus a weed barrier for summer weeds where it fits the property. Heat and rain bring gray leaf spot and chinch bugs, which we spot treat.',
   }),
   7: Object.freeze({
-    whyNow: 'July is a scouting visit. Summer fertilizer limits mean no whole-lawn feeding, so we inspect the whole lawn and treat problem spots only, such as caterpillars, leaf spot or chinch bugs.',
+    whyNow: 'July is a scouting visit with no whole-lawn pass. We inspect the whole lawn and treat problem spots only, such as caterpillars, leaf spot, mole cricket tunnels or chinch bugs.',
   }),
   8: Object.freeze({
     whyNow: 'Late summer heat and rain continue. A micronutrient feeding keeps the color up, and we treat leaf spot or caterpillar spots where we find them.',
@@ -254,13 +254,13 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     whyNow: 'September is the end of the rainy season. A micronutrient feeding keeps the color up, mapped take-all areas get a fall treatment, and we watch for caterpillars.',
   }),
   10: Object.freeze({
-    whyNow: 'As the soil cools in October, winter weeds like annual bluegrass and chickweed start to sprout. The fall feeding goes down now, with a weed barrier where it fits the property, so the barrier is in place before they come up. Cooler, damp nights also bring large patch, a fungus that shows as tan or orange rings, so we check for it and treat any spots.',
+    whyNow: 'As the soil cools in October, winter weeds like annual bluegrass and chickweed start to sprout. The fall feeding goes down now, with a weed barrier where it fits the property, so the barrier is in place before they come up. Cooler, damp nights also bring large patch, a fungus that shows as tan or orange rings, so mapped areas get a preventive treatment and we treat any active spots.',
   }),
   11: Object.freeze({
     whyNow: 'November is cool and dry. The lawn gets a feeding to carry it into winter, and mapped large patch areas are treated.',
   }),
   12: Object.freeze({
-    whyNow: 'December brings cooler spells. A feeding with extra potassium helps the lawn handle cold and dry weather, and we treat any large patch and weed spots.',
+    whyNow: 'December brings cooler spells. The December feeding carries extra potassium for the cool, dry season, and we treat any large patch and weed spots.',
   }),
 });
 
