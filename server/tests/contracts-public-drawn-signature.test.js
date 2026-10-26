@@ -17,7 +17,11 @@ jest.mock('../models/db', () => {
       forUpdate: () => { state.locks += 1; return chain; },
       async first() {
         if (table === 'customers') return { id: 'cust-1', active: true, deleted_at: null };
-        if (String(table).startsWith('customer_contracts')) return state.row;
+        if (String(table).startsWith('customer_contracts')) {
+          // A lookup by link hash finds the row only for its own link (an unknown token finds nothing).
+          if (q.share_token_hash !== undefined && q.share_token_hash !== state.row?.share_token_hash) return null;
+          return state.row;
+        }
         return null;
       },
       async update(payload) { state.updates.push({ table, payload }); Object.assign(state.row, payload); return 1; },
@@ -63,7 +67,7 @@ const noisePng = async () => {
   return `data:image/png;base64,${buf.toString('base64')}`;
 };
 
-async function sign(body) {
+async function sign(body, token = TOKEN) {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
   app.use('/api/contracts', contractsPublic);
@@ -71,7 +75,7 @@ async function sign(body) {
   app.use((err, _req, res, _next) => { res.status(err.status || err.statusCode || 500).json({ error: err.message, where: String(err.stack || '').split('\n').slice(1, 3).join(' ') }); });
   const server = app.listen(0);
   try {
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/contracts/${TOKEN}/sign`, {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/contracts/${token}/sign`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     });
     const text = await res.text();
@@ -114,6 +118,23 @@ describe('parseSignatureImage (shared with the WDO licensee pad)', () => {
   test('the size cap is the caller\'s', async () => {
     const dataUrl = await png();
     expect(await parseSignatureImage(dataUrl, { maxBytes: 16, maxLabel: '16 bytes' })).toMatchObject({ ok: false, status: 413, error: 'Signature image too large (max 16 bytes)' });
+  });
+
+  test.each([
+    ['wider than 8192px', { width: 9000, height: 40 }],
+    ['taller than 8192px', { width: 40, height: 9000 }],
+    ['over 8 megapixels', { width: 2900, height: 2900 }],
+  ])('a pad image %s is refused from its header, under the byte cap (a small PNG can declare a huge bitmap)', async (_label, dims) => {
+    const dataUrl = await png(dims);
+    expect(Math.floor((dataUrl.length * 3) / 4)).toBeLessThan(512 * 1024);
+    expect(await parseSignatureImage(dataUrl, { maxBytes: 512 * 1024, maxLabel: '512KB' })).toMatchObject({
+      ok: false, status: 413, error: 'Signature image is too large. Please clear the pad and sign again.',
+    });
+  });
+
+  test('a real pad export (the customer pad\'s 1200px cap, the WDO pad on a wide screen) is inside the bounds', async () => {
+    expect(await parseSignatureImage(await png({ width: 1200, height: 450 }))).toMatchObject({ ok: true });
+    expect(await parseSignatureImage(await png({ width: 7680, height: 320 }))).toMatchObject({ ok: true });
   });
 
   test('signatureImageBuffer reads only a data URL', () => {
@@ -165,6 +186,15 @@ describe('POST /api/contracts/:token/sign with a drawn signature', () => {
     expect(state.updates).toEqual([]);
     expect(state.events).toEqual([]);
     expect(state.row.status).toBe('viewed');
+  });
+
+  test('an unknown link with a drawn signature is the plain 404, before any image work, lock or write', async () => {
+    const res = await sign({ ...typed, signatureImage: await png({ ink: false }) }, 'c'.repeat(48));
+    // A blank pad would be a 400 if it were decoded: the 404 shows the image was never looked at.
+    expect(res).toMatchObject({ status: 404, body: { error: 'Contract not found' } });
+    expect(state.locks).toBe(0);
+    expect(state.updates).toEqual([]);
+    expect(state.events).toEqual([]);
   });
 
   test('the typed signature stays required even with a drawn one', async () => {

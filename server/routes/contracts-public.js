@@ -155,11 +155,13 @@ router.post('/:token/sign', async (req, res, next) => {
     if (!tokenHash) return res.status(404).json({ error: 'Contract not found' });
 
     // Optional drawn signature from the page's signature pad. The typed name above stays the signature of
-    // record; the image is additional evidence stamped into the executed PDF. Validated after the cheap
-    // token-shape check and before any lock (type, size, magic bytes, visible ink) so a blank or malformed
-    // pad never reaches the row.
+    // record; the image is additional evidence stamped into the executed PDF. Validated before any lock (type,
+    // size, dimensions, magic bytes, visible ink) so a blank or malformed pad never reaches the row, and only
+    // for a link that exists: an unknown token answers the same 404 before any image is decoded.
     let signatureImage = null;
     if (req.body?.signatureImage != null && String(req.body.signatureImage).trim() !== '') {
+      const linkExists = await db('customer_contracts').where({ share_token_hash: tokenHash }).first('id');
+      if (!linkExists) return res.status(404).json({ error: 'Contract not found' });
       const parsed = await require('../services/signature-image').parseSignatureImage(req.body.signatureImage, { maxBytes: MAX_DRAWN_SIGNATURE_BYTES, maxLabel: '512KB' });
       if (!parsed.ok) return res.status(parsed.status).json({ error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) });
       signatureImage = parsed.image;

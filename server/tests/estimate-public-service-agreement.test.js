@@ -215,6 +215,26 @@ describe('POST /:token/service-agreement', () => {
     expect(await blockedFor(db, makeEstimate({ archived_at: '2026-10-01T00:00:00.000Z' }))).toBe(true);
   });
 
+  test('the issuer\'s re-check also re-runs the call-side verdict and live linkage on the locked row', async () => {
+    gateOn();
+    await post(makeEstimate());
+    const { blockedFor } = mockEnsure.mock.calls[0][0];
+    const withEngine = (estimatorEngine) => makeEstimate({ estimate_data: { ...PEST_DATA, estimatorEngine } });
+    // A linkage correction that landed (or is queued) while the tap waited on the locks.
+    expect(await blockedFor(db, withEngine({ linkage_invalidated_at: '2026-10-25T12:00:00.000Z' }))).toBe(true);
+    expect(await blockedFor(db, withEngine({ invalidation_pending_at: '2026-10-25T12:00:00.000Z' }))).toBe(true);
+    // The durable call verdict is read through the issuing transaction, and an unreadable verdict fails closed.
+    const trxTables = [];
+    const trx = jest.fn((table) => {
+      trxTables.push(table);
+      const chain = chainFor(undefined);
+      if (table === 'call_log') chain.first = jest.fn().mockRejectedValue(Object.assign(new Error('read failed'), { code: 'ECONNRESET' }));
+      return chain;
+    });
+    expect(await blockedFor(trx, withEngine({ callLogId: 'call-1' }))).toBe(true);
+    expect(trxTables).toContain('call_log');
+  });
+
   test('a staff preview tap is the generic 404', async () => {
     gateOn();
     const res = await post(makeEstimate(), { lane: 'pest' }, '?adminPreview=1');

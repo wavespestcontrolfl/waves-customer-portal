@@ -19201,6 +19201,13 @@ function commercialAgreementPreGuard(req, res, next) {
 // true = the estimate is no longer open for online signing.
 async function commercialAgreementBlockedFor(trx, locked) {
   if (!isEstimateCustomerViewable(locked) || !isEstimateAcceptActive(locked)) return true;
+  return estimateCallLinkageBlockedFor(trx, locked);
+}
+
+// The call-side half of the locked re-check, shared by every route that issues a contract from the estimate page: the
+// durable call verdict and the live linkage, on the row locked in the issuing transaction (the lead row is locked
+// before the call row, the issuers' order). True = an identity rejection or a linkage correction landed in between.
+async function estimateCallLinkageBlockedFor(trx, locked) {
   const linkData = parseEstimateDataSafe(locked);
   const eng = linkData?.estimatorEngine;
   if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
@@ -19319,9 +19326,17 @@ function serviceAgreementPreGuard(req, res, next) {
 }
 
 // The accepted estimate is still the customer's to read: viewable (not archived, not off the customer surface) and
-// accepted. Re-run on the locked row by the issuer; true = no longer open for online signing.
-async function serviceAgreementBlockedFor(_trx, locked) {
-  return !isEstimateCustomerViewable(locked) || locked.status !== 'accepted';
+// accepted. The route's unlocked preflight.
+function serviceAgreementEstimateOpen(estimate) {
+  return isEstimateCustomerViewable(estimate) && estimate.status === 'accepted';
+}
+
+// Re-run by the issuer on the estimate row locked in its transaction: the preflight above plus the call-side verdict
+// and live linkage (estimateCallLinkageBlockedFor), so an identity rejection or a linkage correction landing while the
+// tap waited on the locks issues nothing. True = no longer open for online signing.
+async function serviceAgreementBlockedFor(trx, locked) {
+  if (!serviceAgreementEstimateOpen(locked)) return true;
+  return estimateCallLinkageBlockedFor(trx, locked);
 }
 
 // POST /api/estimates/:token/service-agreement — the accepted page's "Review and sign your service agreement" tap.
@@ -19341,7 +19356,7 @@ router.post('/:token/service-agreement', serviceAgreementLimiter, async (req, re
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return notFound();
     if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) return notFound();
-    if (await serviceAgreementBlockedFor(db, estimate)) return notFound();
+    if (!serviceAgreementEstimateOpen(estimate)) return notFound();
     if (!serviceAgreement.estimateServiceAgreementLanes(estimate).includes(lane)) return notFound();
     const result = await serviceAgreement.ensureEstimateServiceAgreement({ estimate, lane, req, blockedFor: serviceAgreementBlockedFor });
     if (!result.ok) {
