@@ -265,7 +265,7 @@ async function alertNoticeNotSent(estimate, reason, conn = db) {
     ]),
     why: SEND_FAILURE_WHY[reason] || 'The notice could not be sent after the accept.',
     severity: 'needs-you',
-    link: `/admin/estimates/${estimate.id}`,
+    link: `/admin/estimates?estimateId=${encodeURIComponent(estimate.id)}`,
     subject: { type: 'estimate', id: String(estimate.id) },
     doneWhen: 'consumer_notice_signed',
     who: 'person',
@@ -291,69 +291,76 @@ async function sendManualAcceptConsumerNotice({ estimateId, customerId = null, e
   let estimate = null;
   try {
     estimate = await conn('estimates').where({ id: estimateId }).first();
-    if (!estimate || estimate.status !== 'accepted' || !estimate.customer_id) return { skipped: 'not_applicable' };
-    if (!estimateNeedsConsumerNotice(estimate)) return { skipped: 'no_termite_line' };
-    if (await findConsumerNotice(conn, estimate.customer_id, { onOrBefore: etDateString() })) return { skipped: 'already_signed' };
-
-    let contractId = (await conn('customer_contracts')
-      .where({ customer_id: estimate.customer_id, contract_type: 'document_template', document_template_key: CONSUMER_NOTICE_TEMPLATE_KEY })
-      .whereIn('status', OPEN_STATUSES)
-      .orderBy('created_at', 'desc')
-      .first('id'))?.id || null;
-    if (!contractId) {
-      const issued = await ensureEstimateConsumerNotice({
-        estimate,
-        conn,
-        source: MANUAL_ACCEPT_SOURCE,
-        actorType: 'system',
-        gateLive: manualAcceptConsumerNoticeSendLive,
-        // The locked row must still be the accepted estimate.
-        blockedFor: async (_trx, locked) => locked.status !== 'accepted',
-      });
-      if (!issued.ok) {
-        if (issued.code === 'already_signed' || issued.code === 'not_available') return { skipped: issued.code };
-        await alertNoticeNotSent(estimate, issued.code, conn);
-        return { sent: false, reason: issued.code };
-      }
-      contractId = issued.contractId;
-    }
-
+    const skipped = await manualAcceptSkip(estimate, conn);
+    if (skipped) return { skipped };
+    const notice = await manualAcceptNoticeContract(estimate, conn, manualAcceptConsumerNoticeSendLive);
+    if (!notice.contractId) return notice;
     // The kill switch is read once more right before anything goes out: a send that waited on reads while the gate
     // was turned off sends nothing (a notice issued in between stays open, unsent, as one issued from the page).
-    if (!manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off', contractId };
-    // A notice found open must be the one the card saw (a notice issued here is new). The recipients themselves are
-    // compared inside delivery, against the very addresses it is about to use.
-    if (expected && expected.contract_id !== null && expected.contract_id !== String(contractId)) {
-      await alertNoticeNotSent(estimate, 'recipient_changed', conn);
-      return { sent: false, reason: 'recipient_changed', contractId };
-    }
-    const { deliverDocumentRequestChannels } = require('./document-contract-delivery');
-    // 'system': the send window holds a late text until 8 AM instead of sending it at night.
-    // A carded accept sends only the channels the card named (a channel it showed as not going out stays off).
-    const channels = expected ? ['email', 'sms'].filter((c) => (c === 'email' ? expected.email_key : expected.phone_key)) : ['email', 'sms'];
-    if (!channels.length) {
-      await alertNoticeNotSent(estimate, 'not_delivered', conn);
-      return { sent: false, reason: 'not_delivered', contractId };
-    }
-    const delivery = await deliverDocumentRequestChannels(contractId, { actorType: 'system' }, {
-      channels,
-      smsEntryPoint: 'manual_accept_consumer_notice',
-      ...(expected ? { expectedRecipientKeys: { email: expected.email_key, sms: expected.phone_key } } : {}),
-    });
-    const changed = (delivery.deliveries || []).some((d) => d.code === 'RECIPIENT_CHANGED');
-    if (!delivery.ok || changed) {
-      // A changed recipient is said even when the other channel went out: the office confirms who has the link.
-      const reason = changed ? 'recipient_changed' : 'not_delivered';
-      await alertNoticeNotSent(estimate, reason, conn);
-      return { sent: delivery.ok, reason, contractId };
-    }
-    return { sent: true, contractId, channels: delivery.deliveries.filter((d) => d.ok).map((d) => d.channel) };
+    if (!manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off', contractId: notice.contractId };
+    const result = await deliverManualAcceptNotice(notice.contractId, expected);
+    if (result.reason) await alertNoticeNotSent(estimate, result.reason, conn);
+    return result;
   } catch (err) {
     logger.warn(`[estimate-consumer-notice] manual-accept send failed for estimate ${estimateId}: ${err.code || err.message}`);
     const subject = estimate || { id: estimateId, customer_id: customerId };
     await alertNoticeNotSent(subject, 'error', conn).catch(() => {});
     return { sent: false, reason: 'error' };
   }
+}
+
+// Why the send does not apply, or null: not an accepted estimate with a customer, no termite line, or signed already.
+async function manualAcceptSkip(estimate, conn) {
+  if (!estimate || estimate.status !== 'accepted' || !estimate.customer_id) return 'not_applicable';
+  if (!estimateNeedsConsumerNotice(estimate)) return 'no_termite_line';
+  if (await findConsumerNotice(conn, estimate.customer_id, { onOrBefore: etDateString() })) return 'already_signed';
+  return null;
+}
+
+// The notice to send: the customer's newest open one (any source), else one issued now. { contractId } or the
+// issuer's answer: a refusal the office must finish rings the bell here; signed or gone in between is a quiet skip.
+async function manualAcceptNoticeContract(estimate, conn, gateLive) {
+  const open = await conn('customer_contracts')
+    .where({ customer_id: estimate.customer_id, contract_type: 'document_template', document_template_key: CONSUMER_NOTICE_TEMPLATE_KEY })
+    .whereIn('status', OPEN_STATUSES)
+    .orderBy('created_at', 'desc')
+    .first('id');
+  if (open?.id) return { contractId: open.id, reused: true };
+  const issued = await ensureEstimateConsumerNotice({
+    estimate,
+    conn,
+    source: MANUAL_ACCEPT_SOURCE,
+    actorType: 'system',
+    gateLive,
+    // The locked row must still be the accepted estimate.
+    blockedFor: async (_trx, locked) => locked.status !== 'accepted',
+  });
+  if (issued.ok) return { contractId: issued.contractId, reused: false };
+  if (issued.code === 'already_signed' || issued.code === 'not_available') return { skipped: issued.code };
+  await alertNoticeNotSent(estimate, issued.code, conn);
+  return { sent: false, reason: issued.code };
+}
+
+// Email and text the notice. `expected` (a carded accept) binds the notice it saw and the recipients it showed: a
+// different open notice sends nothing, only the channels it named go out, and delivery itself refuses a recipient
+// that changed. `reason` is set whenever the office must finish it.
+async function deliverManualAcceptNotice(contractId, expected) {
+  if (expected && expected.contract_id !== null && expected.contract_id !== String(contractId)) {
+    return { sent: false, reason: 'recipient_changed', contractId };
+  }
+  const channels = expected ? ['email', 'sms'].filter((c) => (c === 'email' ? expected.email_key : expected.phone_key)) : ['email', 'sms'];
+  if (!channels.length) return { sent: false, reason: 'not_delivered', contractId };
+  const { deliverDocumentRequestChannels } = require('./document-contract-delivery');
+  // 'system': the send window holds a late text until 8 AM instead of sending it at night.
+  const delivery = await deliverDocumentRequestChannels(contractId, { actorType: 'system' }, {
+    channels,
+    smsEntryPoint: 'manual_accept_consumer_notice',
+    ...(expected ? { expectedRecipientKeys: { email: expected.email_key, sms: expected.phone_key } } : {}),
+  });
+  // A changed recipient is said even when the other channel went out: the office confirms who has the link.
+  if ((delivery.deliveries || []).some((d) => d.code === 'RECIPIENT_CHANGED')) return { sent: delivery.ok, reason: 'recipient_changed', contractId };
+  if (!delivery.ok) return { sent: false, reason: 'not_delivered', contractId };
+  return { sent: true, contractId, channels: delivery.deliveries.filter((d) => d.ok).map((d) => d.channel) };
 }
 
 // The Intelligence Bar accept skipped the send because its pinned target changed after the commit (runPostCommit):
