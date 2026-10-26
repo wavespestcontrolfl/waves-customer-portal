@@ -27,7 +27,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const engine = require('./referral-engine');
-const { isMembershipTier } = require('./billing-lane');
+const { MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { isPromoterPhoneCollision } = require('./referral-errors');
 const { toE164, isLikelyE164, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
@@ -58,9 +58,10 @@ function fullName(c) {
   return [c.first_name, c.last_name].map((s) => String(s || '').trim()).filter(Boolean).join(' ');
 }
 
-function onPlan(c) {
-  return c.active !== false && isMembershipTier(c.waveguard_tier) && Number(c.monthly_rate) > 0;
-}
+// On a WaveGuard plan in any billing lane: the recurring-plans audience
+// (mrr-breakdown computeRecurringPlans), active, with the rate narrowing the
+// membership audience. Unqualified columns: every query here reads customers alone.
+const ON_PLAN_SQL = `(active IS TRUE AND monthly_rate > 0 AND ${MEMBERSHIP_TIER_SQL})`;
 
 // The ref code on the landing page URL the website forwarded at intake.
 function codeFromLanding(url) {
@@ -106,6 +107,7 @@ const CUSTOMER_COLUMNS = [
   'id', 'first_name', 'last_name', 'phone', 'email', 'account_id', 'city', 'active',
   'monthly_rate', 'waveguard_tier', 'landing_page_url', 'lead_source_detail', 'created_at',
 ];
+const customerSelect = (conn) => [...CUSTOMER_COLUMNS, conn.raw(`${ON_PLAN_SQL} AS on_plan`)];
 
 // The customer a referral code belongs to: the active promoter that owns it
 // (a merged-away promoter's code follows merged_into_promoter_id, as the /r/
@@ -125,9 +127,9 @@ async function customerForCode(code, conn = db) {
     }
   }
   const query = conn('customers').whereNull('deleted_at');
-  if (promoter?.customer_id) return query.where({ id: promoter.customer_id }).first(CUSTOMER_COLUMNS);
+  if (promoter?.customer_id) return query.where({ id: promoter.customer_id }).first(customerSelect(conn));
   if (promoter) return null;
-  return query.where({ referral_code: code }).first(CUSTOMER_COLUMNS);
+  return query.where({ referral_code: code }).first(customerSelect(conn));
 }
 
 // Likely referrers for a spoken name. Two or more words: the same last name,
@@ -150,10 +152,10 @@ async function customersForSpokenName(spokenName, referee, conn = db) {
       else this.whereRaw('LOWER(first_name) = ?', [first]).orWhereRaw('LOWER(last_name) = ?', [first]);
     })
     .orderByRaw('(LOWER(first_name) = ?) DESC', [first])
-    .orderByRaw('(active AND monthly_rate > 0) DESC NULLS LAST')
+    .orderByRaw(`${ON_PLAN_SQL} DESC NULLS LAST`)
     .orderBy('created_at', 'asc')
     .limit(SUGGESTION_LIMIT * 2)
-    .select(CUSTOMER_COLUMNS);
+    .select(customerSelect(conn));
   return rows
     .filter((m) => !sameHousehold(m, referee))
     .slice(0, SUGGESTION_LIMIT)
@@ -188,7 +190,7 @@ function suggestionView(c, extra = {}) {
     name: fullName(c),
     city: c.city || null,
     phone: c.phone || null,
-    onPlan: onPlan(c),
+    onPlan: c.on_plan === true,
     ...extra,
   };
 }
@@ -200,8 +202,7 @@ function suggestionView(c, extra = {}) {
 async function listInboundReferrals(conn = db) {
   const rows = await conn('customers as c')
     .whereNull('c.deleted_at')
-    .where('c.active', true)
-    .where('c.monthly_rate', '>', 0)
+    .whereRaw(ON_PLAN_SQL)
     .where(function evidence() {
       this.whereILike('c.landing_page_url', '%ref=%')
         .orWhereILike('c.lead_source_detail', 'Referred by %')
@@ -219,7 +220,7 @@ async function listInboundReferrals(conn = db) {
   const candidates = rows
     .map((c) => ({ customer: c, evidence: evidenceFor(c), digits: phoneMatchDigits(normalizePhone(c.phone) || '') }))
     // A referral pays by the referee's phone (creditReferralOnFirstService).
-    .filter((x) => x.evidence && x.digits.length && onPlan(x.customer));
+    .filter((x) => x.evidence && x.digits.length);
   if (!candidates.length) return [];
 
   // Drop anyone a referral row already names, by phone digits (the engine's
@@ -271,11 +272,11 @@ async function listInboundReferrals(conn = db) {
 async function eligibleReferee(conn, customerId, { lock = false } = {}) {
   let query = conn('customers').where({ id: customerId }).whereNull('deleted_at');
   if (lock) query = query.forUpdate();
-  const referee = await query.first(CUSTOMER_COLUMNS);
+  const referee = await query.first(customerSelect(conn));
   if (!referee) throw inboundError(404, 'NOT_FOUND', 'Customer not found');
   const evidence = evidenceFor(referee);
   if (!evidence) throw inboundError(409, 'NO_REFERRAL_EVIDENCE', 'This customer did not come in through a referral link or name a referrer');
-  if (!onPlan(referee)) throw inboundError(409, 'NOT_ON_PLAN', 'This customer is not on a WaveGuard plan');
+  if (referee.on_plan !== true) throw inboundError(409, 'NOT_ON_PLAN', 'This customer is not on a WaveGuard plan');
   const phone = normalizePhone(referee.phone);
   const variants = phoneMatchDigits(phone || '');
   if (!variants.length) throw inboundError(409, 'NO_PHONE', 'This customer has no valid phone number, so the referral cannot pay');
