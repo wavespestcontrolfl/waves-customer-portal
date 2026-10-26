@@ -12,6 +12,7 @@ function safeErrorSummary(err) {
 }
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const { stampClaudeQueue } = require('./admin-alert-routing');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
   'appointment_confirmation',
@@ -393,6 +394,29 @@ async function resolveRingOnRefresh(ringOnRefresh, existing, existingMeta) {
 //     is left exactly as this emission composed it ('activity', its own
 //     value) — never forced.
 function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
+  const merged = mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing);
+  if (!metadata.claudeQueue) {
+    if (!existingMeta.claudeQueue) return merged;
+    // The standing row was routed to Claude's queue, and this emission is not (a reminder that became an owner
+    // ask, or GATE_ALERT_CLAUDE_QUEUE turned off): drop the fields routing set, so the row returns to the bell.
+    // Whatever this emission itself carries stands (its own feed / who / severity); a feed the emitter wrote
+    // itself on a row that was never routed is not touched, because this branch needs claudeQueue.
+    const { claudeQueue: _gone, who, severity, feed: _routedFeed, ...rest } = merged;
+    return {
+      ...rest,
+      ...('who' in metadata ? { who } : {}),
+      ...('severity' in metadata ? { severity } : {}),
+      ...('feed' in metadata && metadata.feed != null ? { feed: metadata.feed } : {}),
+    };
+  }
+  // A row routed to Claude's queue (admin-alert-routing.js) is Activity-only whether or not this refresh
+  // rings: never let a stale quiet flag or the owner-bell correction above put it back in the bell, and
+  // move a row first written into the bell off it. Moving off the bell is not a ring.
+  const { quiet: _routedQuiet, ...rest } = merged;
+  return { ...rest, feed: 'activity' };
+}
+
+function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
   if (shouldRing) {
     // A ringing refresh clears the done fields (below), so a relevance
     // retirement stamp on the row is stale: dropped, or the sweep would never
@@ -488,7 +512,12 @@ const NotificationService = {
       // converted ex-raw-insert sites. Same truthy sentinel as the internal
       // test-customer gate above: intentional suppression must read as
       // success-without-a-row, never as an insert failure.
-      if (recipientType === 'admin') {
+      // Claude's queue (GATE_ALERT_CLAUDE_QUEUE, services/admin-alert-routing.js): a Mac reminder job's row or one of
+      // our own engineering faults is written Activity-only and stamped who 'claude'. It is no longer a ring, so the
+      // bell policy below (which decides whether to ring) must not silence it: the row still has to be written.
+      const rowMetadata = recipientType === 'admin' ? stampClaudeQueue({ category, metadata }) : metadata;
+      const routedToClaude = rowMetadata !== metadata || Boolean(rowMetadata?.claudeQueue);
+      if (recipientType === 'admin' && !routedToClaude) {
         try {
           const bellPolicy = require('./notification-bell-policy');
           if (bellPolicy.isBellPolicyEnabled()) {
@@ -545,7 +574,7 @@ const NotificationService = {
         ...(normalized.detail ? { detail: normalized.detail } : {}),
         icon: icon || getCategoryIcon(category),
         link: link || null,
-        metadata: metadata ? JSON.stringify(metadata) : null,
+        metadata: rowMetadata ? JSON.stringify(rowMetadata) : null,
       }).returning('*');
       return notif;
     } catch (err) {
@@ -611,7 +640,9 @@ const NotificationService = {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
     const windowMs = Number(dedupeWindowMs);
-    const metadata = { ...createOpts.metadata, dedupeKey, ...(dedupeVersion === undefined ? {} : { dedupeVersion }) };
+    // Stamped here too (create() would stamp a fresh insert anyway): a refresh of a standing row never reaches
+    // create(), and it must carry the Claude-queue fields (see mergeRefreshMetadata).
+    const metadata = stampClaudeQueue({ category, metadata: { ...createOpts.metadata, dedupeKey, ...(dedupeVersion === undefined ? {} : { dedupeVersion }) } });
     const dedupeAndInsert = async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
         let existingQuery = trx('notifications')
@@ -670,8 +701,14 @@ const NotificationService = {
           // text must still merge the new feed/kind/audience, or the owner's
           // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
           // #5236). Only keys this emission actually carries are compared.
+          // The Claude-queue class is routing too, whether or not this emission carries it: a routed row refreshed
+          // by an emission that no longer routes (a Claude-to-person transition) is a change, never an identical repeat.
           const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
-            && (existingMeta[k] ?? null) !== (useMeta[k] ?? null));
+            && (existingMeta[k] ?? null) !== (useMeta[k] ?? null))
+            // A routed emission also changes the row when the assignment or its severity moves under the same class
+            // (an opsKind fyi -> ask reminder with identical text): who and severity are compared, only when routed.
+            || (Boolean(useMeta.claudeQueue) && ['claudeQueue', 'who', 'severity'].some((k) => (existingMeta[k] ?? null) !== (useMeta[k] ?? null)))
+            || (existingMeta.claudeQueue ?? null) !== (useMeta.claudeQueue ?? null);
           // Ring-only-on-change stamps are content too (admin-alerts-ring-v2
           // follow-up): count/newCount growing, or itemKeys naming a
           // different item, must trigger the refresh (and ringOnRefresh's
@@ -684,7 +721,10 @@ const NotificationService = {
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
             const enteredOwner = useMeta.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
-            const shouldRing = adjusted?.quiet ? false : (enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
+            // Likewise a row that leaves Claude's queue for the bell is news to the owner: it rings back in,
+            // unless the emission itself asked for a quiet refresh.
+            const leftClaudeQueue = Boolean(existingMeta.claudeQueue) && !useMeta.claudeQueue;
+            const shouldRing = adjusted?.quiet ? false : (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
             const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
             const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
@@ -1178,6 +1218,7 @@ module.exports = NotificationService;
 module.exports.safeErrorSummary = safeErrorSummary;
 module.exports._private = {
   resolveRingOnRefresh,
+  mergeRefreshMetadata,
   safeErrorSummary,
   CUSTOMER_PREFERENCE_KEYS,
   customerPreferenceEnabled,

@@ -115,6 +115,21 @@ test('an engineering digest that is Activity-only appears under who=claude, flag
   expect(all.items.map((i) => [i.id, i.activityOnly])).toEqual([['eng', true], ['person-new', false]]);
 });
 
+test('a row routed to Claude\'s queue (GATE_ALERT_CLAUDE_QUEUE stamps) lists under who=claude, off the bell', async () => {
+  mockRows = [
+    row({ id: 'person-new', created_at: '2026-09-30T20:00:00Z' }),
+    row({ id: 'canary', title: 'SMS draft route FAILING', created_at: '2026-09-30T10:00:00Z',
+      metadata: { dedupeKey: 'sms-draft-canary:smsDraftDefault', feed: 'activity', who: 'claude', severity: 'broken', claudeQueue: 'sms-draft-canary' } }),
+    row({ id: 'mac-ask', title: 'PR 6407 is live: check it', created_at: '2026-09-30T09:00:00Z',
+      metadata: { opsJob: 'pr-6407', opsKind: 'ask', feed: 'activity', who: 'claude', severity: 'needs-you', claudeQueue: 'ops-job' } }),
+  ];
+  const claude = await listNeedsMe({ who: 'claude' });
+  expect(claude.items.map((i) => [i.id, i.severity, i.who, i.activityOnly])).toEqual([
+    ['canary', 'broken', 'claude', true], ['mac-ask', 'needs-you', 'claude', true],
+  ]);
+  expect((await listNeedsMe({ who: 'person' })).items.map((i) => i.id)).toEqual(['person-new']);
+});
+
 test('an fyi digest is severity fyi and absent under every who', async () => {
   mockRows = [row({ id: 'fyi-digest', category: 'ops_digest', metadata: { kind: 'FYI', audience: 'fyi', feed: 'activity' } }), row({ id: 'real', metadata: { triggerKey: 'sms_reply' } })];
   expect(mapAlertRow(mockRows[0]).severity).toBe('fyi');

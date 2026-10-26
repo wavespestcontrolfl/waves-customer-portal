@@ -28,7 +28,7 @@ vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
   default: ({ service, operatorId, catalog, onClose, onCompleted, onFullForm, onViewDetails, suspended }) => (
     <div data-suspended={String(!!suspended)}>
-      Lawn sheet for {service.id} (catalog {catalog.length}, type {String(service.routedServiceType)})
+      Lawn sheet for {service.id} (catalog {catalog.length}, type {String(service.routedServiceType)}) <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
       <span data-testid="lawn-operator">{operatorId}</span>
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onClose({ refresh: true })}>Sheet close refresh</button>
@@ -278,5 +278,17 @@ describe('Dispatch saved-completion scope (GitHub Codex P2 on #6001)', () => {
     );
     fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-scope' }));
     expect(await screen.findByTestId('lawn-operator')).toHaveTextContent('staff-verified');
+  });
+});
+
+// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): the sheet's copy of the row
+// keeps the codes, so the Complete service header can show them (Codex P2 on #6784).
+const ACCESS = { scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
+
+describe('the Fast Complete sheet gets the row\'s gate codes', () => {
+  it('passes them through', async () => {
+    mount([visit('svc-lawn-codes', ACCESS)]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-codes' }));
+    expect(await screen.findByTestId('sheet-access')).toHaveTextContent('Gate: #4821 (neighborhood)|1 dog');
   });
 });

@@ -8,7 +8,9 @@
 //   job_health               → crons that are failing or mid-run (healthy ones
 //                              are only counted — exception-based feed)
 //   notifications            → ops_digest rows (services/ops-digest.js, the
-//                              in-app form of the owner FIX:/ACT: emails)
+//                              in-app form of the owner FIX:/ACT: emails),
+//                              and the rows routed to Claude's queue
+//                              (metadata.claudeQueue, GATE_ALERT_CLAUDE_QUEUE)
 //
 // Read-only. Behind GATE_AGENT_ACTIVITY (feature-gates.js `agentActivity`):
 // the route answers { available: false } while the gate is off.
@@ -41,6 +43,7 @@ const SMS_AGENT = 'Customer Assistant';
 const SYSTEM_AGENT = 'System';
 const OPS_AGENT = 'Waves Ops';
 const DIGEST_CATEGORY = 'ops_digest'; // written by services/ops-digest.js
+const CLAUDE_QUEUE_AGENT = "Claude's queue"; // rows services/admin-alert-routing.js sends off the bell
 
 // Stage order of the autonomous content runner; the *_ms columns are null
 // for stages a run never reached.
@@ -364,6 +367,29 @@ function digestItem(row) {
   };
 }
 
+// A row routed to Claude's queue (services/admin-alert-routing.js, GATE_ALERT_CLAUDE_QUEUE): written
+// Activity-only, so this feed is where it shows. It renders as a digest item (the client's Review / Done /
+// focus handling is keyed on kind 'digest' and a notification id; Done is the same fenced PUT), labelled
+// "Claude's queue". Its stamped severity sets the status: broken reads failed, needs-you awaiting review,
+// fyi completed. An fyi row is never work (needs-me leaves it out) but stays visible here until it ages out.
+function claudeQueueItem(row) {
+  const meta = parseJson(row.metadata, {}) || {};
+  const item = digestItem(row);
+  const done = Boolean(row.done_at);
+  const closed = done || meta.resolved === true;
+  const status = closed ? 'completed' : meta.severity === 'broken' ? 'failed' : meta.severity === 'needs-you' ? 'awaiting_review' : 'completed';
+  const state = done ? 'done' : closed ? 'cleared' : meta.severity === 'broken' ? 'needs a fix' : meta.severity === 'needs-you' ? 'needs Claude' : 'FYI';
+  return {
+    ...item,
+    title: String(row.title || ''),
+    agent: CLAUDE_QUEUE_AGENT,
+    subtitle: [meta.claudeQueue ? humanize(meta.claudeQueue) : 'routed', state].join(' \u00b7 '),
+    status,
+    finishedAt: closed ? item.finishedAt : status === 'completed' && row.read_at ? iso(row.read_at) : null,
+    stepsDone: status === 'completed' ? 1 : 0,
+  };
+}
+
 function summarize(items, healthyJobs = 0) {
   const summary = { total: items.length, healthyJobs };
   for (const s of STATUSES) summary[s] = 0;
@@ -379,7 +405,7 @@ function jobIsException(job) {
 }
 
 // Pure: rows in → feed out. The route loads the rows; tests feed fixtures.
-function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [], digests = [] }) {
+function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [], digests = [], claudeQueue = [] }) {
   // ONE newest approval per run (by created_at, never input order), then
   // classify that row: a run can be re-requested, and only its latest
   // request says whether the owner still owes a reply or already decided.
@@ -407,6 +433,7 @@ function buildActivity({ runs = [], approvals = [], drafts = [], jobs = [], dige
     .concat(runs.map((run) => contentRunItem(run, awaitingReplyByRun, decidedByRun)))
     .concat(drafts.map(smsDraftItem))
     .concat(digests.map(digestItem))
+    .concat(claudeQueue.map(claudeQueueItem))
     .concat(exceptionJobs.map(jobItem))
     .sort((a, b) => String(b.eventAt || b.startedAt || '').localeCompare(String(a.eventAt || a.startedAt || '')));
   const agents = Array.from(new Set(items.map((i) => i.agent))).sort();
@@ -497,6 +524,37 @@ async function loadDigestRows(db, since, focusId) {
   return rows;
 }
 
+// Rows routed to Claude's queue (metadata.claudeQueue). Same two windows as the digest rows: every open one
+// (not done, not resolved) however old, so a standing fault stays visible, plus the ones created, closed or
+// resolved inside the window. The focus id also loads one routed row whatever its age.
+async function loadClaudeQueueRows(db, since, focusId) {
+  const base = () => db('notifications')
+    .select(...DIGEST_COLUMNS, db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))
+    .where({ recipient_type: 'admin' })
+    .whereRaw("COALESCE(metadata->>'claudeQueue', '') <> ''");
+  const open = await base()
+    .whereNull('done_at')
+    .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+    .orderBy('created_at', 'desc')
+    .limit(PINNED_CAP);
+  const windowed = await base()
+    .where((w) => w.where('created_at', '>=', since)
+      .orWhereRaw("NULLIF(metadata->>'resolvedAt', '')::timestamptz >= ?", [since])
+      .orWhere('done_at', '>=', since))
+    .orderByRaw("GREATEST(created_at, NULLIF(metadata->>'resolvedAt', '')::timestamptz, done_at) DESC")
+    .limit(MAX_ITEMS);
+  const focused = focusId ? await base().where('id', focusId).limit(1) : [];
+  const seen = new Set();
+  const rows = [];
+  for (const row of [].concat(open || [], windowed || [], focused || [])) {
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    rows.push(row);
+  }
+  return rows;
+}
+
 async function loadRows(windowHours, focusId) {
   const since = new Date(Date.now() - windowHours * 3600 * 1000);
   // Only a MISSING table (Postgres 42P01 — a ledger not yet migrated on
@@ -510,7 +568,7 @@ async function loadRows(windowHours, focusId) {
       return await query();
     } catch (err) {
       if (err && err.code === MISSING_TABLE_SQLSTATE) {
-        unavailable.push(label);
+        if (!unavailable.includes(label)) unavailable.push(label);
         return [];
       }
       throw err;
@@ -528,7 +586,7 @@ async function loadRows(windowHours, focusId) {
           'publish_ms', 'index_submit_ms', 'link_plan_ms',
           'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result',
         );
-  const [runs, drafts, jobs, digests] = await Promise.all([
+  const [runs, drafts, jobs, digests, claudeQueue] = await Promise.all([
     safe('autonomous_runs', () =>
       runQuery()
         .where('created_at', '>=', since)
@@ -560,6 +618,7 @@ async function loadRows(windowHours, focusId) {
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
     safe('notifications', () => loadDigestRows(db, since, focusId)),
+    safe('notifications', () => loadClaudeQueueRows(db, since, focusId)),
   ]);
   // Approvals (any status — a terminal one tells us a pending-review run
   // was decided): every row on a loaded run, PLUS any still awaiting that
@@ -586,7 +645,7 @@ async function loadRows(windowHours, focusId) {
   const stragglers = missingRunIds.length
     ? await safe('autonomous_runs', () => runQuery().whereIn('id', missingRunIds))
     : [];
-  return { runs: runs.concat(stragglers), approvals, drafts, jobs, digests, unavailable };
+  return { runs: runs.concat(stragglers), approvals, drafts, jobs, digests, claudeQueue, unavailable };
 }
 
 async function getActivity({ windowHours, focus } = {}) {
@@ -604,5 +663,5 @@ async function getActivity({ windowHours, focus } = {}) {
 }
 
 module.exports = { getActivity, buildActivity, legacyKindFromTitle, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE,
-  _private: { loadDigestRows },
+  _private: { loadDigestRows, loadClaudeQueueRows },
 };

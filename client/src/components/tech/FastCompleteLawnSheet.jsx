@@ -123,7 +123,7 @@ import {
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
-  RecoveredCompletion, SavedView, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
+  RecoveredCompletion, SavedView, SheetAccessCodes, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
@@ -1787,6 +1787,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <CustomerContact service={service} visit={ctx.visit} request={request} />
+        <SheetAccessCodes service={service} />
         <TimeOnSite since={service?.onSiteAt} />
         <SodBanner newSod={newSod} onRooted={confirmSodRooted} locked={locked} dictationPending={dictationPending} />
         <fieldset className="tech-visit-form" disabled={locked}>
