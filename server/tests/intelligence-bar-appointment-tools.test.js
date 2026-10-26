@@ -1443,7 +1443,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
   test('a tierless customer with live recurring coverage books the one-time mosquito line at the member ladder rate, not the flat nonmember rate', async () => {
     const MOSQUITO = {
       id: 'svc-mq', name: 'One-Time Mosquito Control Service', short_name: null,
-      service_key: 'mosquito_one_time', base_price: '156.00', category: 'mosquito',
+      service_key: 'mosquito_one_time', base_price: '199.00', category: 'mosquito',
     };
     const recurringOnly = {
       id: 'cust-1', first_name: 'Ada', last_name: 'L', billing_mode: 'per_application', per_application_fee: 95,
@@ -1466,14 +1466,14 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
   test('the one-time mosquito default comes from the Schedule screen\'s lot ladder, not the flat catalog price', async () => {
     const mosquito = {
       id: 'svc-mq', name: 'One-Time Mosquito Control Service', short_name: null,
-      service_key: 'mosquito_one_time', base_price: '156.00', category: 'mosquito',
+      service_key: 'mosquito_one_time', base_price: '199.00', category: 'mosquito',
     };
     const customer = { ...PER_VISIT, lot_sqft: 43560 };
     const expected = (await require('../routes/admin-schedule').buildAppointmentPricing({
       serviceRecord: mosquito, serviceType: mosquito.name, serviceId: mosquito.id, customer,
     })).finalPrice;
     expect(expected).toBeGreaterThan(0);
-    expect(expected).not.toBe(156);
+    expect(expected).not.toBe(199);
     // A non-member mosquito booking now ALSO checks live recurring coverage
     // (Codex r2 on #5093, P1 — the ladder's own "or recurring customers"
     // floor), on both the preflight and the locked pass; wired with no live
