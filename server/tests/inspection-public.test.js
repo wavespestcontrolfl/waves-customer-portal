@@ -474,6 +474,21 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
     });
     await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
     expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.expectedLocation).toEqual({ lat: 27.4, lng: -82.5 });
+    // The lead link carries no estimate re-check (only the estimate-token page passes one).
+    expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit).not.toHaveProperty('estimateGuard');
+  });
+
+  test('bookAssessmentVisit hands an estimate page\'s guard to the booking transaction unchanged', async () => {
+    const { bookAssessmentVisit } = require('../routes/inspection-public')._internals;
+    const createSelfBooking = jest.fn(async () => ({ ok: true }));
+    const estimateGuard = { estimateId: 'est-1', revalidate: jest.fn() };
+    await bookAssessmentVisit({
+      booking: { _internals: { createSelfBooking } }, date: FUTURE_DATE,
+      bookingSlot: { start_time: '09:00', end_time: '09:30', technician_id: 'tech-1' }, custRow: { id: 'cust-1' },
+      catalog: { serviceId: 'svc-catalog-1', serviceType: 'Waves Assessment', durationMinutes: 30 },
+      bookingLocation: { lat: 27.4, lng: -82.5 }, source: 'estimate_assessment_link', alertLabel: 'x', estimateGuard,
+    });
+    expect(createSelfBooking.mock.calls[0][0].callbackVisit.estimateGuard).toBe(estimateGuard);
   });
 
   test('booking.js checks expectedLocation under the customer-comms fence, before any insert', () => {

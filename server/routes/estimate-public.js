@@ -31217,7 +31217,17 @@ async function composeEstimateDataPayload(estimate, {
     // on this page (returnVisit, softExit below) — never a staff draft/
     // preview or the headless document pass. Include-when-present; the
     // builder itself fails soft (never throws) on any ineligibility or error.
-    const consultationOffer = includeConsultationOffer && !isInternalRefresh
+    // "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST, owner 2026-10-26 decision page choice 3A):
+    // every eligible open estimate, booked from the estimate itself (routes/estimate-assessment-public.js). Nothing is
+    // read with the gate off. When it is offered it replaces the lead-only consultation offer below, which links to the
+    // same Waves Assessment through the lead.
+    const assessmentFirst = includeConsultationOffer && require('../config/feature-gates').estimateAssessmentFirstLive()
+      ? await require('./estimate-assessment-public')._internals.assessmentFirstFor(estimate, {
+        open: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && isEstimateAcceptActive(estimate),
+        estimateData: estimateDataForIntelligence,
+      })
+      : null;
+    const consultationOffer = !assessmentFirst && includeConsultationOffer && !isInternalRefresh
       ? await buildEstimateConsultationOffer({
         estimate,
         estimateData: estimateDataForIntelligence,
@@ -31268,6 +31278,7 @@ async function composeEstimateDataPayload(estimate, {
       ...(successReferral ? { referral: successReferral } : {}),
       ...(contactGaps ? { contactGaps } : {}),
       ...(consultationOffer ? { consultationOffer } : {}),
+      ...(assessmentFirst ? { assessmentFirst } : {}),
       // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): per lawn
       // frequency key, the program's annual application count when that
       // count is a catalog lawn plan (resolveLawnCareRecurringPlanByCount);

@@ -2510,8 +2510,8 @@ async function createSelfBooking(payload = {}) {
     // callback — the visit carries the server-resolved per-visit price and
     // invoices on completion. callbackVisit.estimateGuard ({ estimateId,
     // revalidate(trx) }): a booking made from an estimate's page
-    // (commercial-first-visit.js) re-checks that estimate inside the booking
-    // transaction (see the lock below).
+    // (commercial-first-visit.js, estimate-assessment-public.js) re-checks
+    // that estimate inside the booking transaction (see the lock below).
     const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
       && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
       ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
@@ -3575,12 +3575,13 @@ async function createSelfBooking(payload = {}) {
       // that same fallback when the legacy profile has no saved pin. The
       // assessment caller already supplies expectedLocation from its own
       // resolved/fenced property flow, so it must not trigger a second,
-      // potentially divergent geocode here. A paid internal visit
-      // (commercial-first-visit.js) offers its times at
+      // potentially divergent geocode here. A booking from an estimate's page
+      // (callbackVisit.estimateGuard: commercial-first-visit.js,
+      // estimate-assessment-public.js) offers its times at
       // customerBookingLocation, which is this same fallback, so it resolves
       // here too and its expectedLocation fence checks the re-derived pin
       // (Codex #6869 P1).
-      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false || !!paidInternalVisit;
+      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false || !!callbackVisit.estimateGuard;
       const preloadedBookingLocation = shouldResolveMissingBookingLocation
         ? await preloadBookingLocation(preFenceCustomer)
         : null;
@@ -4036,8 +4037,8 @@ async function createSelfBooking(payload = {}) {
           });
         }
       }
-      // callbackVisit.estimateGuard (a booking from an estimate's page,
-      // commercial-first-visit.js): a per-estimate
+      // callbackVisit.estimateGuard (a booking from an estimate's page:
+      // commercial-first-visit.js, estimate-assessment-public.js): a per-estimate
       // lock taken after every shared rung and the lane/lead locks (only these
       // callers take the namespace, and it is the terminal lock, so no cycle),
       // then the caller's re-check on THIS transaction: 'booked' when the one
@@ -4079,6 +4080,20 @@ async function createSelfBooking(payload = {}) {
         .where({ customer_id: custId, date: slotDateStr, start_time: slot_start })
         .whereNot('status', 'cancelled');
       if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);
+      // A paid estimate-page booking replays only its OWN estimate's booking:
+      // another signed proposal's booking for this customer at the same start
+      // is not this one, and replaying it would mark this proposal won against
+      // that visit and price (pre-push audit P0). Its estimate guard already
+      // answers a visit linked to its own estimate as ALREADY_BOOKED, above.
+      if (paidInternalVisit) {
+        const ownEstimateId = callbackVisit.estimateGuard?.estimateId;
+        if (!ownEstimateId) replayQuery.whereRaw('false');
+        else {
+          replayQuery.whereExists((visit) => visit.select(trx.raw('1')).from('scheduled_services')
+            .whereRaw('scheduled_services.self_booking_id = self_booked_appointments.id')
+            .where('scheduled_services.source_estimate_id', String(ownEstimateId)));
+        }
+      }
       const existing = await replayQuery.first();
       if (existing) {
         // A callback/consultation replay (round-10 P2) must also confirm the

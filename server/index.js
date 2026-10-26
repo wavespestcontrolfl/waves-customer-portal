@@ -469,6 +469,18 @@ app.use('/api/public/inspection', (req, res, next) => {
   }
   next();
 });
+// "Book a free Waves Assessment first" from an estimate (routes/estimate-assessment-public.js,
+// GATE_ESTIMATE_ASSESSMENT_FIRST): the inspection guard's contract above. Privacy headers first, then while the gate
+// is off, or the path's token is not an estimate token, every request is a uniform 404 before the global limiter and
+// the body parsers. Call-time gate read.
+app.use('/api/public/estimate-assessment', require('./middleware/no-store').noStore);
+app.use('/api/public/estimate-assessment', (req, res, next) => {
+  if (!require('./config/feature-gates').estimateAssessmentFirstLive()) return res.status(404).json({ error: 'not_found' });
+  let token = String(req.path || '').split('/').filter(Boolean)[0] || '';
+  try { token = decodeURIComponent(token); } catch { token = ''; }
+  if (!require('./routes/estimate-public').ESTIMATE_TOKEN_RE.test(token)) return res.status(404).json({ error: 'not_found' });
+  next();
+});
 // Appointment and re-service links: dark application requests must reach
 // their 404 before the shared API limiter or body parsers can answer. Keep
 // CORS and the Staff maintenance interlock above these guards; the routers
@@ -844,6 +856,9 @@ app.use('/api/public/reservice', require('./routes/reservice-public'));
 // Assessment). Token-gated on the signed lead-consultation token; every
 // route 404s until GATE_LEAD_INSPECTION_LINK is on.
 app.use('/api/public/inspection', require('./routes/inspection-public'));
+// "Book a free Waves Assessment first" from an estimate: the estimate's own token, the same page contract as
+// /inspection. Every route 404s until GATE_ESTIMATE_ASSESSMENT_FIRST is on.
+app.use('/api/public/estimate-assessment', require('./routes/estimate-assessment-public'));
 // Customer appointment page (24h reminder + booking confirmation link
 // target). Token-gated on the same reschedule_token; every route 404s
 // until GATE_APPOINTMENT_PAGE is on.
