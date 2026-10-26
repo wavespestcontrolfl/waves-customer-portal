@@ -2210,6 +2210,31 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 01:40 — trip link (GATE_TRIP_LINK, dark): links yesterday's Bouncie trips and truck stops, and the day
+  // before's again (trip events can arrive late), to the completed visits they served and stores the GPS minutes on
+  // site, drive minutes and drive miles per visit (visit_gps_legs) and a business / personal suggestion per trip
+  // (trip_links). Shadow data: it writes only those two tables, never mileage_log, scheduled_services, job_costs,
+  // pins or alerts, and sends nothing. Gate read per run; off = the run returns before any query. runExclusive records
+  // the job health.
+  cron.schedule('40 1 * * *', async () => {
+    try {
+      const lockRes = await runExclusive('trip-link', async () => {
+        const result = await require('./trip-link').runTripLinkNightly();
+        if (result.legs) logger.info(`[trip-link] ${result.day}: ${result.legs.matched}/${result.legs.total} visit(s) matched`);
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`trip-link tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('trip-link').catch(() => {});
+        await recordJobEnd('trip-link', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[trip-link] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 07:20 — agreement renewal reminder: one admin notification 45 days before each signed new
   // construction warranty renews (and, with GATE_AGREEMENT_RENEWAL_REMINDER on, each signed Commercial Pest
   // Service Agreement's 12-month term ends), closed when staff mark the notice sent. It sends nothing to a
