@@ -296,3 +296,21 @@ describe('ContractSignPage drawn signature', () => {
     expect(body).not.toHaveProperty('signatureImage');
   });
 });
+
+describe('ContractSignPage layout and printing', () => {
+  it('keeps the earlier web layout (no Field paper body) and prints the whole terms box', async () => {
+    const contract = { ...CONTRACT_A, contractTextSnapshot: 'First clause.\nSecond clause.' };
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ contract })));
+    const { findByText, container } = render(
+      <MemoryRouter initialEntries={[`/contract/${CONTRACT_A.token}`]}>
+        <Routes><Route path="/contract/:token" element={<ContractSignPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await findByText(/First clause\./);
+    expect(container.querySelector('.waves-field-document-body, .field-document-masthead')).toBeNull();
+    expect(container.querySelector('.waves-contract-terms')).not.toBeNull();
+    const printRules = Array.from(container.querySelectorAll('style')).map((el) => el.textContent).join(' ');
+    expect(printRules).toContain('@media print');
+    expect(printRules).toContain('.waves-contract-terms { max-height: none !important; overflow: visible !important; }');
+  });
+});

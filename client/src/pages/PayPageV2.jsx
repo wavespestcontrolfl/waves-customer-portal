@@ -3036,7 +3036,8 @@ export default function PayPageV2() {
               </div>
             )}
 
-            <div className="waves-pay-payment-panel">
+            {/* waves-no-print: the payment inputs, consent and Pay button stay off the invoice printout. */}
+            <div className="waves-pay-payment-panel waves-no-print">
             {/* "Pay securely / amount / status" header removed (owner
                 2026-08-31: the Pay button already states the charge); the
                 Secure badge went with every other status chip (owner

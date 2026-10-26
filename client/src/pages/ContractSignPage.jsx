@@ -330,6 +330,8 @@ export default function ContractSignPage() {
           />
         )}
 
+        {/* Print shows the whole terms box, not only its 420px scroll window. */}
+        <style>{'@media print { .waves-contract-terms { max-height: none !important; overflow: visible !important; } }'}</style>
         <div className="waves-contract-grid">
           <BrandCard padding={28}>
             {/* Stacked contact block, same as the estimate / report header
@@ -349,7 +351,7 @@ export default function ContractSignPage() {
 
             <div style={{ marginTop: SP.xl }}>
               <div style={DOC_EYEBROW}>{termsLabel}</div>
-              <div style={{
+              <div className="waves-contract-terms" style={{
                 border: `1px solid ${DOC.border}`,
                 borderRadius: RADIUS.input,
                 background: DOC.surface,

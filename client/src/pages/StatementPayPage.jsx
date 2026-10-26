@@ -589,6 +589,8 @@ export default function StatementPayPage() {
     <>
       {/* No server-side statement PDF render — Share + Print only. */}
       <DocumentActionBar shareTitle={`Waves statement ${statement.number || ''}`.trim()} />
+      {/* Print keeps the statement and drops the payment controls (the Print button prints this page). */}
+      <style>{'@media print { .waves-no-print { display: none !important; } }'}</style>
       <BrandCard padding={24}>
       <SerifHeading style={{ marginBottom: 6 }}>Pay statement {statement.number}</SerifHeading>
       <p style={{ margin: "0 0 20px", fontSize: FS.body, color: DOC.muted }}>
@@ -617,6 +619,7 @@ export default function StatementPayPage() {
         </div>
       </div>
 
+      <div className="waves-no-print">
       {payNotice && (
         <p style={{ fontSize: FS.body, color: DOC.danger, marginBottom: SP.sm, lineHeight: LH.body }}>{payNotice}</p>
       )}
@@ -673,6 +676,8 @@ export default function StatementPayPage() {
           onFinalizeFailed={resetPaymentIntent}
         />
       )}
+
+      </div>
 
       <p style={{ marginTop: SP.lg, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
         Questions about this statement? <HelpPhoneLink tone="dark" inline /> or reply to the email it came from.
