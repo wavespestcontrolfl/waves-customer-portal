@@ -12,14 +12,16 @@
 // ============================================================
 
 const PDFDocument = require('pdfkit');
-const { getLogoBuffer } = require('./brand-logo');
 const {
-  WAVES_ADDRESS_LINE,
-  WAVES_WEBSITE_HOST,
-  WAVES_SUPPORT_PHONE_DISPLAY,
-  WAVES_FL_LICENSE_LINE,
   WAVES_FDACS_LICENSE_NUMBER,
 } = require('../../constants/business');
+const { PDF_COLORS } = require('./pdf-tokens');
+const {
+  FIELD_PDF_LAYOUT,
+  drawFieldContinuationMasthead,
+  drawFieldFooter,
+  drawFieldMasthead,
+} = require('./field-pdf');
 const { formatDisplayDate } = require('../../utils/date-only');
 const { normalizeProposal, computeProposalTotals, annualizedAmount } = require('../estimate-proposal');
 const { formatUnitPrice, formatQuantity } = require('../../../shared/proposal-bid.cjs');
@@ -30,21 +32,19 @@ const { RATE_REVIEW_TERMS_LINE } = require('../../../shared/estimate-copy-claims
 const { lawnLimitsForEstimate } = require('../estimate-lawn-limits');
 const { beforeYouBookForEstimate, estimateIsOpen, trimByRank } = require('../estimate-before-you-book');
 
-// Brand palette — identical to invoice-pdf.js.
-const NAVY = '#1B2C5B';
-const WAVES_BLUE = '#009CDE';
-const GREEN = '#047857';
+// Approved Field document palette — shared with the active browser document.
+const NAVY = PDF_COLORS.navy;
+const WAVES_BLUE = PDF_COLORS.blue;
 const INK = NAVY;
-const BODY = '#3F4A65';
-const MUTED = '#6B7280';
-const RULE = '#E7E2D7';
-const SOFT = '#FAF8F3';
+const BODY = PDF_COLORS.body;
+const MUTED = PDF_COLORS.muted;
+const RULE = PDF_COLORS.rule;
+const SOFT = PDF_COLORS.soft;
 
 const PAGE_W = 612;
 const L = 40;            // left margin
 const W = PAGE_W - 80;   // content width
-const FOOTER_TOP = 742;
-const CONTENT_BOTTOM = FOOTER_TOP - 18;  // last y a row may occupy
+const CONTENT_BOTTOM = FIELD_PDF_LAYOUT.contentBottom;
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves';
 
@@ -54,62 +54,25 @@ function currency(n) {
 }
 
 function headerBar(doc, title, statusLabel, statusColor) {
-  doc.save();
-  doc.rect(0, 0, PAGE_W, 92).fill(NAVY);
-
-  const logoBuf = getLogoBuffer();
-  if (logoBuf) {
-    doc.image(logoBuf, 24, 10, { width: 72, height: 72 });
-  } else {
-    doc.fontSize(26).font('Helvetica-Bold').fillColor('#fff').text('WAVES', 40, 22);
-    doc.fontSize(9).font('Helvetica').fillColor('#B8D4EA').text('PEST CONTROL & LAWN CARE', 40, 52);
-  }
-  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text(WAVES_FL_LICENSE_LINE, 108, 70);
-
-  doc.fontSize(10).font('Helvetica-Bold').fillColor('#fff').text(WAVES_SUPPORT_PHONE_DISPLAY, 430, 22, { width: 142, align: 'right' });
-  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text(WAVES_WEBSITE_HOST, 430, 38, { width: 142, align: 'right' });
-  doc.text('13649 Luxe Ave #110', 430, 52, { width: 142, align: 'right' });
-  doc.text('Bradenton, FL 34211', 430, 64, { width: 142, align: 'right' });
-  doc.restore();
-
-  doc.save();
-  doc.rect(0, 92, PAGE_W, 44).fill(SOFT);
-  doc.fontSize(20).font('Helvetica').fillColor(NAVY).text(title, 40, 104, { width: 420 });
-
-  if (statusLabel) {
-    const badgeW = doc.widthOfString(statusLabel) + 20;
-    doc.roundedRect(PAGE_W - 40 - badgeW, 105, badgeW, 22, 11).fill(statusColor);
-    doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff')
-      .text(statusLabel.toUpperCase(), PAGE_W - 40 - badgeW + 10, 111);
-  }
-  doc.restore();
+  drawFieldMasthead(doc, {
+    title,
+    eyebrow: 'Service proposal',
+    statusLabel: statusLabel ? statusLabel.toUpperCase() : '',
+    statusColor,
+  });
 }
 
 // Slim continuation header for pages 2+ so a long multi-building proposal
 // stays branded without re-printing the full masthead.
 function continuationHeader(doc, title) {
-  doc.save();
-  doc.rect(0, 0, PAGE_W, 40).fill(NAVY);
-  doc.fontSize(11).font('Helvetica-Bold').fillColor('#fff').text('WAVES', 40, 13);
-  doc.fontSize(9).font('Helvetica').fillColor('#B8D4EA').text(title, 120, 15, { width: 452, align: 'right' });
-  doc.restore();
+  return drawFieldContinuationMasthead(doc, { title: `${title} · continued` });
 }
 
 function footerBar(doc, tagline) {
-  const previousBottomMargin = doc.page.margins.bottom;
-  doc.save();
-  doc.page.margins.bottom = 0;
-  doc.rect(0, FOOTER_TOP, PAGE_W, 50).fill(NAVY);
-  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(
-    tagline || 'Thank you for considering Waves',
-    0, FOOTER_TOP + 10, { width: PAGE_W, align: 'center' },
-  );
-  doc.fontSize(7).font('Helvetica').fillColor('#B8D4EA').text(
-    `Waves Pest Control, LLC · FDACS #${WAVES_FDACS_LICENSE_NUMBER} · ${WAVES_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY} · ${WAVES_WEBSITE_HOST}`,
-    0, FOOTER_TOP + 26, { width: PAGE_W, align: 'center' },
-  );
-  doc.page.margins.bottom = previousBottomMargin;
-  doc.restore();
+  drawFieldFooter(doc, {
+    tagline: tagline || 'Thank you for considering Waves',
+    detail: `Florida FDACS #${WAVES_FDACS_LICENSE_NUMBER}`,
+  });
 }
 
 function sectionLabel(doc, label, x, y) {
@@ -125,8 +88,7 @@ function ensureSpace(ctx, y, needed) {
   if (y + needed <= CONTENT_BOTTOM) return y;
   footerBar(ctx.doc, ctx.tagline);
   ctx.doc.addPage();
-  continuationHeader(ctx.doc, ctx.title);
-  return 56;
+  return continuationHeader(ctx.doc, ctx.title);
 }
 
 function metaBlock(doc, estimate, proposal, x, y) {
@@ -512,10 +474,11 @@ function beforeYouBookPage(ctx, estimate, proposal) {
   const { doc } = ctx;
   footerBar(doc, ctx.tagline);
   doc.addPage();
-  continuationHeader(doc, ctx.title);
-  doc.fontSize(20).font('Helvetica').fillColor(NAVY).text(page.title, L, 58, { width: W });
-  const fitted = trimBeforeYouBook(doc, page, CONTENT_BOTTOM - BYB_TOP);
-  let y = BYB_TOP;
+  const bodyTop = continuationHeader(doc, ctx.title);
+  doc.fontSize(20).font('Helvetica').fillColor(NAVY).text(page.title, L, bodyTop + 2, { width: W });
+  const contentTop = Math.max(BYB_TOP, doc.y + 20);
+  const fitted = trimBeforeYouBook(doc, page, CONTENT_BOTTOM - contentTop);
+  let y = contentTop;
   const drawLine = (text) => {
     doc.fontSize(BYB_BODY_SIZE).font('Helvetica').fillColor(BODY);
     const h = doc.heightOfString(`• ${text}`, { width: W - 12, lineGap: BYB_LINE_GAP });
@@ -677,8 +640,8 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
 
   headerBar(doc, proposal.title, totals.isMultiBuilding ? 'Commercial' : 'Proposal', WAVES_BLUE);
 
-  let yLeft = 160;
-  let yRight = 160;
+  let yLeft = Math.max(160, doc.y);
+  let yRight = yLeft;
   yLeft = metaBlock(doc, estimate, proposal, L, yLeft);
   yRight = detailsBlock(doc, estimate, L + W / 2 + 20, yRight);
   let y = Math.max(yLeft, yRight) + 18;

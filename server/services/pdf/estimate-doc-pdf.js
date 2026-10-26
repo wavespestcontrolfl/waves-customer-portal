@@ -25,6 +25,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const logger = require('../logger');
 const { launchBrowser, serviceReportPublicBase } = require('../service-report/pdf-puppeteer');
+const { fieldBrowserFooterTemplate } = require('./pdf-tokens');
 
 const DOC_PIN_TTL_SECONDS = 15 * 60;
 
@@ -179,7 +180,7 @@ async function renderEstimateDocumentPdfInner(estimate, { validThrough = null, f
       margin: { top: '0.5in', right: '0.5in', bottom: '0.5in', left: '0.5in' },
       displayHeaderFooter: true,
       headerTemplate: '<div></div>',
-      footerTemplate: '<div style="font-size:8px; width:100%; text-align:center; color:#999;">Waves Pest Control &middot; Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
+      footerTemplate: fieldBrowserFooterTemplate('Waves Pest Control · Proposal'),
     });
     if (failOnImageErrors) {
       const failures = await pageImageFailures(page);
