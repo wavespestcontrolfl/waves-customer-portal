@@ -450,11 +450,13 @@ describe('the in-transaction estimate guard', () => {
     expect(mockBlockedUnderLock).toHaveBeenCalledWith(trx, expect.objectContaining({ id: ESTIMATE_ID }));
   });
 
-  test('the gate turned off while the booking waited: ineligible, before any read', async () => {
-    delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
-    const trx = trxWith({ estimates: proposalEstimate() });
-    expect(await guard().revalidate(trx)).toBe('ineligible');
-    expect(trx).not.toHaveBeenCalled();
+  // Pre-push audit P0: the gate is read after the guard's last lock wait (the call-side locks, the customer row), so a
+  // flip during any of them books nothing.
+  test('the gate turned off during the guard\'s own lock waits: ineligible, and no accept pin', async () => {
+    const g = guard();
+    mockBlockedUnderLock.mockImplementationOnce(async () => { delete process.env.GATE_COMMERCIAL_FIRST_VISIT; return false; });
+    expect(await g.revalidate(trxWith({ scheduled_services: undefined, estimates: proposalEstimate() }))).toBe('ineligible');
+    expect(g.acceptPin).toBeNull();
   });
 });
 

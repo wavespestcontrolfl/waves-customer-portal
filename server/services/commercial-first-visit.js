@@ -335,9 +335,6 @@ function estimateGuardFor(estimate, { openFor }) {
     // refuses the accept instead of marking unchecked terms won (pre-push audit P0).
     acceptPin: null,
     revalidate: async (trx) => {
-      // The kill switch, read again at the commit boundary: a flip during the availability build or a lock wait books
-      // nothing.
-      if (!live()) return 'ineligible';
       if (await linkedFirstVisit(estimate.id, trx)) return 'booked';
       const fresh = await trx('estimates').where({ id: estimate.id }).forShare().first();
       if (!fresh || String(fresh.customer_id || '') !== String(estimate.customer_id) || !openFor(fresh)) return 'ineligible';
@@ -354,6 +351,9 @@ function estimateGuardFor(estimate, { openFor }) {
       if (!atSignedPremises(plan, customer)) return 'ineligible';
       // The quote on this read is still the one the customer signed (no edit landed since the caller's check).
       if (!(await require('./commercial-proposal-agreement').signedQuoteMatches(fresh, trx))) return 'ineligible';
+      // The kill switch, read last, after every lock wait above: a flip during the availability build or any of those
+      // waits books nothing (no row lock holds an environment flip).
+      if (!live()) return 'ineligible';
       guard.acceptPin = require('./estimate-manual-acceptance').estimateRowPin(fresh);
       return 'ok';
     },
