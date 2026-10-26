@@ -27,6 +27,8 @@ jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
   redactEmailAddresses: (s) => s,
 }));
+// A synthetic internal account stands in for the real list (no real names in tests).
+jest.mock('../services/internal-test-customers', () => ({ INTERNAL_TEST_CUSTOMERS: ['fixture internal'] }));
 // The credit ledger has its own suites; here only the postings are counted.
 jest.mock('../services/customer-credit', () => ({
   postCreditMovement: jest.fn(async () => ({ id: 'movement' })),
@@ -209,12 +211,12 @@ jest.mock('../services/customer-credit', () => ({
     await recurringVisit(linked.id);
     const named = await customer({ waveguard_tier: 'Bronze', monthly_rate: 47, lead_source_detail: 'Referred by Jane Smith' });
     const unnamed = await customer({ waveguard_tier: 'Bronze', monthly_rate: 39.33, lead_source_detail: 'Referral (unnamed)' });
-    // Not asked about: no plan, a sentinel tier, no phone, archived, the owner's test account.
+    // Not asked about: no plan, a sentinel tier, no phone, archived, an internal test account.
     await customer({ lead_source_detail: 'Referred by Jane Smith' });
     await customer({ waveguard_tier: 'One-Time', monthly_rate: 99, lead_source_detail: 'Referred by Jane Smith' });
     await linkCustomer('WAVES-JANE', { phone: null });
     await linkCustomer('WAVES-JANE', { deleted_at: new Date() });
-    await linkCustomer('WAVES-JANE', { first_name: 'Adam', last_name: 'Martinez' });
+    await linkCustomer('WAVES-JANE', { first_name: 'Fixture', last_name: 'Internal' });
     // A referral row already names this one, under another phone format.
     const typedIn = await linkCustomer('WAVES-JANE', { phone: '+19415550199' });
     await db('referrals').insert({
