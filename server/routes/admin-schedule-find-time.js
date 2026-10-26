@@ -25,6 +25,8 @@
  *                             // (same order, '' when none), for the rain ranking
  *     serviceTypes?,          // compareTechs: every service in the booking; a tech that
  *                             // cannot perform one is left out of `pickedByTech`
+ *     quickMove?,             // Quick Move's picker: with GATE_PICKER_ROAD_CHECK on, the
+ *                             // route check Edit appointment uses (arrivalWindows)
  *     openTimes?,             // summary mode, GATE_OPEN_TIMES_BOX or GATE_BOARD_OPEN_TIMES on: the open-times
  *                             // list (the box; the Dispatch grid's lit hours) instead (up to 28 days,
  *                             // every technician's hours, no picked verdict, no best-times rows);
@@ -343,7 +345,14 @@ router.post('/', async (req, res) => {
       from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes,
     });
 
-    const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();
+    // Google inside the staff pickers' route check (GATE_PICKER_ROAD_CHECK,
+    // owner 2026-10-26): Quick Move joins Edit appointment's route check (it
+    // used the gap check, which offers no start after 4 PM), and the check
+    // drives this week on Google road times (find-time.js
+    // findArrivalWindowSlots). Off = byte-identical.
+    const pickerRoadCheck = hint && gateEnvValue('GATE_PICKER_ROAD_CHECK');
+    const routeCheck = arrivalWindows === true || (pickerRoadCheck && req.body?.quickMove === true);
+    const useArrivalWindows = hint && serviceId && routeCheck && arrivalWindowRoutingEnabled();
     // New Appointment has no visit yet (GATE_NEW_APPT_ROUTE_TIMES, owner
     // 2026-10-26): its open-times box runs the same route check on a new stop
     // at the searched address, as customer booking does (find-time.js
@@ -405,8 +414,9 @@ router.post('/', async (req, res) => {
       // unit: the staff screens this hint feeds move a shared stop as a
       // whole, unless the operator chose to separate this service (alone).
       // GATE_COMBO_ROUTE_CHECK decides; for a visit alone, neither matters.
-      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges, unit: !moveAlone, alone: moveAlone } } : {}),
+      ...(hint && serviceId && routeCheck ? { arrivalWindow: { serviceId, changes: hintChanges, unit: !moveAlone, alone: moveAlone } } : {}),
       ...(newVisitRoute ? { arrivalWindow: { prospective: { lat: target.lat, lng: target.lng, estimated_duration_minutes: spanMin } } } : {}),
+      ...(pickerRoadCheck && (useArrivalWindows || newVisitRoute) ? { pickerRoadCheck: true } : {}),
       slotStepMinutes: plan.step,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).

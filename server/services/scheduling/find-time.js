@@ -106,6 +106,44 @@ function enumerateDates(from, to, { includeWeekends = false } = {}) {
 // under GATE_NEW_APPT_ROUTE_TIMES) can use the slack in each promised
 // arrival window. Evaluate every on-the-hour promise against the COMPLETE
 // resulting route, not just the gap between two stored service-end blocks.
+// Staff pickers under GATE_PICKER_ROAD_CHECK (owner 2026-10-26: Google
+// inside the check, "Next 7 days"): today and the six days after it are
+// checked on Google road times; a later day is checked on the model and its
+// best hour re-checked on Google, so the times shown carry road numbers.
+const ROAD_CHECK_DAYS = 7;
+
+function plusDays(ymd, days) {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// Three passes, as findCapacitySlots does: a leg Google re-timed moves the
+// departures after it, which are then asked at their new hour.
+async function preloadRouteLegs(travel, items, collect) {
+  if (!travel || !items.length) return;
+  for (let pass = 0; pass < 3; pass++) {
+    const legs = [];
+    for (const item of items) collect(item, legs);
+    await travel.preload(legs);
+  }
+}
+
+function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
+  const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
+  return {
+    date, technician: { id: tech.id, name: tech.name },
+    start_time: windowStart, end_time: windowEnd,
+    detour_minutes: fit.detourMinutes, total_drive_minutes: fit.driveMinutes,
+    score: fit.detourMinutes + daysOut * 0.5,
+    waiting_minutes: fit.waitingMinutes, arrival_delay_minutes: fit.arrivalDelayMinutes,
+    estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+    route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
+    latest_start_min: timeToMinutes(windowStart),
+    ...(fit.travelSource ? { drive_source: fit.travelSource === 'google_traffic' ? 'google' : 'estimate' } : {}),
+  };
+}
+
 async function findArrivalWindowSlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 60, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
@@ -119,12 +157,15 @@ async function findArrivalWindowSlots(opts) {
   const now = new Date();
   const today = etDateString(now);
   const parts = etParts(now);
+  const roadTravel = opts.pickerRoadCheck === true ? require('./hint-road-times').createPickerTravel() : null;
+  const roadUntil = plusDays(today, ROAD_CHECK_DAYS - 1);
   const slots = [];
   // Refusal counts per date (same shape as findCapacitySlots'), so the
   // availability strip can tell a day whose route could not be verified
   // from a day that is full.
   const rejectionsByDate = {};
   let evaluated = 0;
+  const routes = [];
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today) continue;
     for (const tech of techs) {
@@ -146,6 +187,10 @@ async function findArrivalWindowSlots(opts) {
         date, technicianId: tech.id, excludeServiceIds: opts.excludeServiceIds, now,
         // Staff callers only (GATE_TECH_START_POINTS; tech-start-point.js).
         startPoints: opts.techStartPoints === true,
+        // GATE_PICKER_ROAD_CHECK: Google legs this week, and today's route
+        // under way continues from the tech's current stop.
+        travel: roadTravel && date <= roadUntil ? roadTravel : undefined,
+        fromActiveStop: !!roadTravel,
       });
       if (!context) continue;
       // A whole visit: the technician must be able to do every service on it
@@ -153,25 +198,42 @@ async function findArrivalWindowSlots(opts) {
       if (context.target.memberServices && (await require('../technician-capabilities')
         .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      const candidates = enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES });
-      evaluated += candidates.evaluated;
-      for (const [reason, count] of Object.entries(candidates.rejections || {})) {
-        if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
-        rejectionsByDate[date][reason] = (rejectionsByDate[date][reason] || 0) + count;
-      }
-      for (const { windowStart, windowEnd, fit } of candidates.placements) {
-        const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
-        slots.push({
-          date, technician: { id: tech.id, name: tech.name },
-          start_time: windowStart, end_time: windowEnd,
-          detour_minutes: fit.detourMinutes, total_drive_minutes: fit.driveMinutes,
-          score: fit.detourMinutes + daysOut * 0.5,
-          waiting_minutes: fit.waitingMinutes, arrival_delay_minutes: fit.arrivalDelayMinutes,
-          estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
-          route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
-          latest_start_min: timeToMinutes(windowStart),
-        });
-      }
+      routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES } });
+    }
+  }
+  await preloadRouteLegs(roadTravel, routes.filter((route) => route.context.travel),
+    (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs }));
+  // A later day's best hour, re-checked on Google below.
+  const recheck = [];
+  for (const route of routes) {
+    const { date, tech, context, limits } = route;
+    const candidates = enumerateArrivalPlacements(context, limits);
+    evaluated += candidates.evaluated;
+    for (const [reason, count] of Object.entries(candidates.rejections || {})) {
+      if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
+      rejectionsByDate[date][reason] = (rejectionsByDate[date][reason] || 0) + count;
+    }
+    let best = null;
+    for (const { windowStart, windowEnd, fit } of candidates.placements) {
+      const slot = arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit });
+      slots.push(slot);
+      if (!best || slot.detour_minutes < best.detour_minutes) best = slot;
+    }
+    if (roadTravel && !context.travel && best) recheck.push({ context, slot: best });
+  }
+  // The model decided which hours fit on a later day; Google gives its best
+  // hour road numbers. An hour Google cannot certify keeps the model's, marked.
+  for (const item of recheck) item.context.travel = roadTravel;
+  const recheckOptions = ({ slot }) => ({ windowStart: slot.start_time, windowEnd: slot.end_time, durationMinutes });
+  await preloadRouteLegs(roadTravel, recheck,
+    (item, legs) => evaluateArrivalPlacement(item.context, { ...recheckOptions(item), collectLegs: legs }));
+  for (const item of recheck) {
+    const fit = evaluateArrivalPlacement(item.context, recheckOptions(item));
+    if (fit.feasible && fit.travelSource === 'google_traffic') {
+      Object.assign(item.slot, arrivalSlot({ date: item.slot.date, tech: item.slot.technician, dateFrom,
+        windowStart: item.slot.start_time, windowEnd: item.slot.end_time, fit }));
+    } else {
+      item.slot.drive_source = 'estimate';
     }
   }
   slots.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes

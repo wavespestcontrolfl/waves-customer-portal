@@ -327,6 +327,45 @@ test.each([undefined, false, true])('existing-visit arrival routing requires exp
   else expect(opts).not.toHaveProperty('arrivalWindow');
 });
 
+// Owner 2026-10-26: Quick Move used the gap check (no start after 4 PM, and
+// straight-line drive only). With GATE_PICKER_ROAD_CHECK it asks for the
+// route check Edit appointment uses, driven on Google this week.
+test.each([false, true])('Quick Move gets the route check on Google only with GATE_PICKER_ROAD_CHECK: %s', async (gateOn) => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  if (gateOn) process.env.GATE_PICKER_ROAD_CHECK = 'true';
+  const db = require('../models/db');
+  db.raw = jest.fn(sql => sql);
+  db.mockReturnValue({
+    where: () => ({
+      leftJoin: () => ({
+        first: async () => ({
+          lat: 27.55, lng: -82.4,
+          address_line1: '100 Fixture Street', city: 'Parrish', state: 'FL', zip: '34219',
+          visit_customer_id: 'fixture-customer', visit_profile_label: null,
+        }),
+      }),
+    }),
+  });
+  try {
+    const res = await post({ ...BASE, serviceId: 'svc-1', hint: true, quickMove: true });
+    expect(res.status).toBe(200);
+    const opts = findAvailableSlots.mock.calls[0][0];
+    if (gateOn) {
+      expect(opts.arrivalWindow).toEqual(expect.objectContaining({ serviceId: 'svc-1', unit: true, alone: false }));
+      expect(opts.pickerRoadCheck).toBe(true);
+    } else {
+      expect(opts).not.toHaveProperty('arrivalWindow');
+      expect(opts).not.toHaveProperty('pickerRoadCheck');
+    }
+  } finally {
+    delete process.env.GATE_PICKER_ROAD_CHECK;
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
+});
+
 // ── Picked-hour scoring ──────────────────────────────────────────────
 // A hint request may carry the hour already in the picker; the answer says
 // what THAT hour costs (drive into the stop + what the insertion adds) by

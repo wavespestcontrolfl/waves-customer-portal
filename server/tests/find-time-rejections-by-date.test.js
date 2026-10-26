@@ -117,3 +117,43 @@ test('an advisory caller spends none of the shared Google drive-time allowance',
   await findAvailableSlots(BASE);
   expect(createSchedulingTravel).toHaveBeenCalledWith(undefined);
 });
+
+// GATE_PICKER_ROAD_CHECK (owner 2026-10-26, "Next 7 days"): the staff
+// picker's route check drives today and the next six days on Google; a later
+// day is checked on the model and only its best hour re-checked on Google.
+test('the picker road check: Google this week, a later day re-checks its best hour', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date, travel }) => ({
+    date, travel, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
+  }));
+  const source = (context) => (context.travel ? 'google_traffic' : undefined);
+  enumerateArrivalPlacements.mockImplementation((context, opts) => {
+    if (opts.collectLegs) { opts.collectLegs.push({ date: context.date }); return { placements: [], evaluated: 0, rejections: {} }; }
+    return { placements: [
+      { windowStart: '09:00', windowEnd: '10:00', fit: { ...fit, detourMinutes: 9, travelSource: source(context) } },
+      { windowStart: '14:00', windowEnd: '15:00', fit: { ...fit, detourMinutes: 4, travelSource: source(context) } },
+    ], evaluated: 2, rejections: {} };
+  });
+  evaluateArrivalPlacement.mockImplementation((context, opts) => {
+    if (opts.collectLegs) opts.collectLegs.push({ date: context.date });
+    return { ...fit, detourMinutes: 6, travelSource: 'google_traffic' };
+  });
+  const [near, far] = [ymd(1), ymd(10)];
+  try {
+    const result = await findAvailableSlots({ ...BASE, dateFrom: near, dateTo: far, pickerRoadCheck: true });
+    const calls = loadArrivalRouteContext.mock.calls.map(([opts]) => opts);
+    expect(calls.find((opts) => opts.date === near)).toMatchObject({ travel: roadTravel, fromActiveStop: true });
+    expect(calls.find((opts) => opts.date === far)).toMatchObject({ travel: undefined, fromActiveStop: true });
+    const at = (date) => result.slots.filter((slot) => slot.date === date)
+      .map((slot) => [slot.start_time, slot.detour_minutes, slot.drive_source]).sort();
+    expect(at(near)).toEqual([['09:00', 9, 'google'], ['14:00', 4, 'google']]);
+    expect(at(far)).toEqual([['09:00', 9, undefined], ['14:00', 6, 'google']]);
+    // Three passes over this week's routes, three over the later days' best hours.
+    expect(roadTravel.preload).toHaveBeenCalledTimes(6);
+  } finally {
+    spy.mockRestore();
+  }
+});

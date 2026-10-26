@@ -33,7 +33,8 @@ function toMin(hhmm) {
   return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
 }
 
-const pinKey = (p) => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
+// Route rows carry their pins as numeric strings (PostgreSQL numeric).
+const pinKey = (p) => `${Number(p.lat).toFixed(5)},${Number(p.lng).toFixed(5)}`;
 const legKey = (leg) => `${leg.date}|${Math.ceil(leg.departureMin)}|${pinKey(leg.from)}>${pinKey(leg.to)}`;
 
 function cachedMinutes(leg, now) {
@@ -96,7 +97,9 @@ function etNow(ms) {
 async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now() } = {}) {
   // Only gap chips (GAP_LEGS) are re-priced; a capacity chip stays an
   // estimate (Codex #6045 r9: its admission and numbers stay on the model).
-  const estimate = (c) => ({ ...c, drive_source: 'estimate' });
+  // An hour the route check already drove on Google (GATE_PICKER_ROAD_CHECK)
+  // keeps that label.
+  const estimate = (c) => ({ ...c, drive_source: c.drive_source === 'google' ? 'google' : 'estimate' });
   if (!Array.isArray(chips) || !chips.length) return [];
   if (!gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES')) return chips.map(estimate);
   try {
@@ -189,10 +192,51 @@ async function priceOpenTimesOnRoads(days, { travelFactory = openTimesTravel, no
     ...day,
     hours: (day.hours || []).map((hour) => {
       const p = byGap.get(gapKey(day.date, hour));
-      if (p?.drive_source !== 'google') return { ...hour, drive_source: 'estimate' };
+      if (p?.drive_source !== 'google') return { ...hour, drive_source: hour.drive_source === 'google' ? 'google' : 'estimate' };
       return { ...hour, drive_in_minutes: p.drive_in_minutes, detour_minutes: p.detour_minutes, drive_source: 'google' };
     }),
   }));
 }
 
-module.exports = { priceChipsOnRoads, priceOpenTimesOnRoads, _test: { roadCache, chipLegs } };
+// Google inside the staff pickers' route check (GATE_PICKER_ROAD_CHECK, owner
+// 2026-10-26: "we need to run Google inside the scheduling check itself").
+// The check simulates every hour at every place on the route, so each leg
+// leaves at many slightly different minutes. Departures are rounded up to
+// the hour (never earlier, so a leg never asks for the past): one Google
+// answer serves every simulation leaving in that hour. Answers live in the
+// same 6-hour process cache as the chips, so a second look costs nothing.
+// Per search: up to 1,200 legs (Google bills per leg; ~$12 at the traffic
+// rate), so one search never spends more than that.
+const PICKER_CHECK_TRAVEL = { maxRequests: 400, maxElements: 1200, budgetMs: 8000, workers: 16 };
+const DEPARTURE_STEP_MIN = 60;
+
+/**
+ * A travel source for loadArrivalRouteContext ({ preload, lookup }, the
+ * createSchedulingTravel shape) on the picker's allowance. A leg Google did
+ * not answer gets the inner source's conservative model, labelled as such.
+ */
+function createPickerTravel({ factory, now = () => Date.now() } = {}) {
+  const inner = (factory || (() => {
+    const RouteOptimizer = require('../route-optimizer');
+    return RouteOptimizer.createSchedulingTravel({ ...PICKER_CHECK_TRAVEL, sharedBudget: RouteOptimizer.hintTravelBudget });
+  }))();
+  const bucket = (leg) => ({ ...leg, departureMin: Math.ceil(leg.departureMin / DEPARTURE_STEP_MIN) * DEPARTURE_STEP_MIN });
+  return {
+    async preload(legs) {
+      const t = now();
+      const missing = legs.map(bucket).filter((leg) => cachedMinutes(leg, t) == null);
+      if (missing.length) await inner.preload(missing);
+    },
+    lookup(leg) {
+      const b = bucket(leg);
+      const t = now();
+      const hit = cachedMinutes(b, t);
+      if (hit != null) return { minutes: hit, source: 'google_traffic', reason: null };
+      const answer = inner.lookup(b);
+      if (answer?.source === 'google_traffic' && Number.isFinite(answer.minutes)) remember(b, answer.minutes, t);
+      return answer;
+    },
+  };
+}
+
+module.exports = { priceChipsOnRoads, priceOpenTimesOnRoads, createPickerTravel, _test: { roadCache, chipLegs } };

@@ -38,10 +38,11 @@ const SCHEDULING_TRAVEL_BUDGET_MS = 15 * 60 * 1000;
  * The caller preloads before taking any scheduling lock. */
 // The admin picker's own allowance (best-times chips and the open-times list,
 // GATE_BEST_TIMES_ROAD_TIMES): separate from the one above, so staff picks
-// never spend customer booking's. Sized for the four-week list (owner
-// 2026-10-26: "raise the limits if you have to"): one cold list is up to
-// ~240 requests, and repeat looks are served from hint-road-times' cache.
-const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 1200, maxElements: 3000 };
+// never spend customer booking's. Sized for the four-week list and the
+// pickers' Google route check (owner 2026-10-26: "raise the limits if you
+// have to"): a cold search is up to ~1,200 legs, and repeat looks are served
+// from hint-road-times' cache. Past it, searches fall back to the model ("~").
+const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 2400, maxElements: 6000 };
 
 function createSchedulingTravel({
   maxRequests = 40, maxElements = 800, budgetMs = 6000, fetchImpl = fetch, now = () => Date.now(),
