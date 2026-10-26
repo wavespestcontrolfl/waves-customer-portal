@@ -1,4 +1,4 @@
-// Save layout for the misting layout designer (step 3): compose the branded sketch, send it with the
+// Save layout for the misting layout designer (step 3): compose the plain sketch, send it with the
 // geometry, and track whether what is on screen is what is saved.
 //
 // "Saved" shows only while the current layout still matches the last saved one (compared as the exact JSON
@@ -12,7 +12,7 @@ import { composeSketchPng } from '../../../lib/mistingLayoutSketchCanvas';
 
 export default function useMistingLayoutSave({ estimateId, mapState, address, layout, saved }) {
   const ready = mapState.status === 'ready';
-  const { allLines, nozzles, risers, pump, zones, totals } = layout;
+  const { allLines, nozzles, risers, pump, zones } = layout;
 
   const payload = useMemo(() => (ready && nozzles.length > 0
     ? buildLayoutPayload({
@@ -44,13 +44,11 @@ export default function useMistingLayoutSave({ estimateId, mapState, address, la
       const model = buildSketchModel({
         lat: mapState.center.lat,
         zoom: mapState.zoom,
-        address,
         lines: exported.lines,
         nozzles: exported.nozzles,
         risers,
         pump,
         zones,
-        totals,
       });
       const blob = await composeSketchPng({ mapImage: mapState.image, mapUrl: mapState.url, model });
       const result = await putLayout(estimateId, payload, blob);

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-// The glass designer's spray directions: arrows, numbers, near-water, aiming by dragging an arrow tip,
+// The designer's spray directions: arrows, numbers, near-water, aiming by dragging an arrow tip,
 // Reset aim, the clear-on-line-change rule, the spray modes, and that a manual aim is saved and reopened.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MISTING_LEGEND_KEYS } from '../../lib/mistingLayoutCounts';
 import { placeNozzles } from '../../lib/mistingLayoutGeometry';
 
 const loadBestMapImage = vi.hoisted(() => vi.fn());
@@ -247,36 +248,27 @@ describe('aiming in Edit nozzles', () => {
   }
 });
 
-describe('glass panels', () => {
-  it('lets a tap through the empty space around the panels: slots ignore pointers, only panels take them', async () => {
-    await open();
-    const stage = screen.getByTestId('layout-stage');
-    const slots = [...stage.children].filter((el) => !el.contains(screen.getByTestId('layout-map')));
-    expect(slots).toHaveLength(3);
-    slots.forEach((slot) => {
-      expect(slot.className).toContain('lg:pointer-events-none');
-      [...slot.children].forEach((panel) => expect(panel.className).toContain('pointer-events-auto'));
-    });
+describe('a plain photo', () => {
+  it('holds only the photo, the spray canvas and the drawing: every control, count and word sits outside it', async () => {
+    const frame = await drawLine();
+    expect([...frame.children].map((el) => el.tagName)).toEqual(['IMG', 'CANVAS', 'svg']);
+    [
+      screen.getByRole('group', { name: 'Drawing tool' }),
+      screen.getByRole('group', { name: 'Preview controls' }),
+      screen.getByTestId('layout-counts'),
+      screen.getByTestId('layout-legend'),
+      screen.getByText('Concept layout — final placement at the design visit and install.'),
+    ].forEach((el) => expect(frame.contains(el)).toBe(false));
+    // Nothing floats over the photo: no frosted-glass class anywhere in the designer.
+    expect(document.querySelector('[class*="backdrop-blur"]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Panels' })).not.toBeInTheDocument();
   });
 
-  it('Panels clears the title, tools, counts and legend off the photo and leaves the controls', async () => {
-    await open();
-    expect(screen.getByRole('group', { name: 'Drawing tool' })).toBeInTheDocument();
-    expect(screen.getByTestId('layout-counts')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Panels' }));
-    expect(screen.queryByRole('group', { name: 'Drawing tool' })).not.toBeInTheDocument();
-    expect(screen.queryByTestId('layout-counts')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('layout-legend')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Finish line' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Panels' })).toHaveAttribute('aria-pressed', 'false');
-    fireEvent.click(screen.getByRole('button', { name: 'Panels' }));
-    expect(screen.getByTestId('layout-counts')).toBeInTheDocument();
-  });
-
-  it('keeps every panel off the photo\'s bottom strip: the bottom slot sits above 4.6% plus 10px', async () => {
-    await open();
-    const bottom = [...screen.getByTestId('layout-stage').children].find((el) => /calc\(4\.6%/.test(el.getAttribute('style') || ''));
-    expect(bottom).toBeTruthy();
+  it('explains the marks in a legend and counts near-water nozzles beside it', async () => {
+    await drawLine();
+    const legend = screen.getByTestId('layout-legend');
+    expect([...legend.querySelectorAll('li')].map((li) => li.textContent)).toEqual(MISTING_LEGEND_KEYS.map((k) => k.label));
+    expect(screen.getByTestId('layout-counts')).toHaveTextContent('Near water: 0');
   });
 });
 

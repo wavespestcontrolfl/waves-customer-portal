@@ -11,7 +11,8 @@ import {
 import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
-import { mistingLayoutCountsLine } from '../lib/mistingLayoutCounts';
+import { MISTING_LEGEND_KEYS, mistingLayoutCountsLine } from '../lib/mistingLayoutCounts';
+import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { FieldDocument, FieldMasthead, FieldTitle } from '../components/FieldDocument';
 import { ACCEPT_MODE_LABELS, NextSteps, acceptanceModeOf, mailtoHref, resolveDocNextSteps } from './estimateDocumentNextSteps';
@@ -168,6 +169,16 @@ function SectionHeader({ children }) {
     }}>{children}</div>
   );
 }
+
+// The little marks in the misting layout's legend, matching the drawing's own colors.
+const MISTING_SWATCH = {
+  nozzle: { background: '#0b6fb8', border: '2px solid #fff', outline: '1px solid #D9D3C4', borderRadius: '50%' },
+  near: { background: '#f59e0b', border: '2px solid #92400e', borderRadius: '50%' },
+  arrow: { background: '#7dd3fc', outline: '1px solid #7a8a99', height: 3, width: 16, border: 0, borderRadius: 2 },
+  riser: { background: '#b87333', border: '2px solid #fff', outline: '1px solid #D9D3C4', borderRadius: '50%' },
+  pump: { background: '#1d4ed8', border: '2px solid #fff', outline: '1px solid #D9D3C4', borderRadius: 2 },
+  zone: { background: 'rgba(220,38,38,0.35)', border: '2px dashed #dc2626', borderRadius: '50%' },
+};
 
 function Bullet({ children }) {
   return (
@@ -768,19 +779,30 @@ export default function EstimateProposalDocument({ data, token }) {
         ) : null}
 
         {/* GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn concept sketch of the misting system (server /data `mistingLayout`,
-            document render only; absent with the gate off or no saved layout). A sketch that fails to load drops the whole
+            document render only; absent with the gate off or no saved layout). The drawing is plain; its title, counts, legend and concept note
+            sit in the estimate card around it (the estimate template's card and inner box). A sketch that fails to load drops the whole
             section and counts as a failed image. */}
         {mistingLayout && !mistingFailed ? (
-          <div className="doc-keep" data-testid="doc-misting-layout">
+          <div className="doc-keep" data-testid="doc-misting-layout" style={estimateCard({ padding: 16, marginBottom: 0, marginTop: 14 })}>
             <SectionHeader>Proposed misting layout</SectionHeader>
-            <img
-              src={mistingLayout.imageUrl}
-              alt={`Proposed misting layout for ${mistingLayout.address || estimate.address || 'the property'}`}
-              style={{ marginTop: 6, width: '100%', maxHeight: 640, objectFit: 'contain', borderRadius: 10, border: `1px solid ${LINE}` }}
-              onError={() => setMistingFailed(true)}
-            />
-            <p style={{ margin: '4px 0 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{mistingLayoutCountsLine(mistingLayout.counts)}</p>
-            <p style={{ margin: '2px 0 0', fontSize: 11, lineHeight: 1.5, color: MUTED }}>Concept layout — final placement at the design visit and install.</p>
+            <div style={estimateInnerBox({ marginTop: 8, padding: 6 })}>
+              <img
+                src={mistingLayout.imageUrl}
+                alt={`Proposed misting layout for ${mistingLayout.address || estimate.address || 'the property'}`}
+                style={{ display: 'block', width: '100%', maxHeight: 640, objectFit: 'contain', borderRadius: 8 }}
+                onError={() => setMistingFailed(true)}
+              />
+            </div>
+            <p style={{ margin: '8px 0 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{mistingLayoutCountsLine(mistingLayout.counts)}</p>
+            <ul data-testid="doc-misting-legend" aria-label="Legend" style={{ listStyle: 'none', margin: '6px 0 0', padding: 0, display: 'flex', flexWrap: 'wrap', gap: '3px 16px' }}>
+              {MISTING_LEGEND_KEYS.map((k) => (
+                <li key={k.key} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, lineHeight: 1.4, color: MUTED }}>
+                  <i aria-hidden="true" style={{ display: 'inline-block', flexShrink: 0, boxSizing: 'content-box', width: 8, height: 8, ...MISTING_SWATCH[k.key] }} />
+                  {k.label}
+                </li>
+              ))}
+            </ul>
+            <p style={{ margin: '6px 0 0', fontSize: 11, lineHeight: 1.5, color: MUTED }}>Concept layout — final placement at the design visit and install.</p>
           </div>
         ) : null}
 

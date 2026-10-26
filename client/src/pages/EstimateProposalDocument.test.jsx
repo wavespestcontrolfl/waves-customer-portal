@@ -4,6 +4,7 @@ import { fireEvent, render } from '@testing-library/react';
 import EstimateProposalDocument from './EstimateProposalDocument';
 import { GLASS_COPY } from '../lib/estimate-glass-copy';
 import { RATE_REVIEW_TERMS_LINE } from '@estimate-copy-claims';
+import { MISTING_LEGEND_KEYS } from '../lib/mistingLayoutCounts';
 
 afterEach(() => {
   delete window.__WAVES_PDF_IMAGE_FAILURES;
@@ -1149,6 +1150,20 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
       expect(section.textContent).toContain('Concept layout — final placement at the design visit and install.');
       expect(section.querySelector('img').getAttribute('src')).toBe(layout.imageUrl);
       expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(0);
+    });
+
+    it('holds the plain picture in the estimate template\'s card, with a legend in text beside the counts', () => {
+      const { container } = render(<EstimateProposalDocument data={{ ...BASE_DATA, mistingLayout: layout }} token="tok-123" />);
+      const section = container.querySelector('[data-testid="doc-misting-layout"]');
+      // The estimate card (tan, bordered, shadowed) around the section, and the white inner box around the picture.
+      expect(section.style.background).toBe('rgb(242, 238, 224)'); // ESTIMATE_CARD_BG
+      expect(section.style.boxShadow).not.toBe('');
+      expect(section.querySelector('img').parentElement.style.background).toBe('rgb(255, 255, 255)');
+      // The legend explains the marks in HTML, not baked into the picture.
+      const legend = section.querySelector('[data-testid="doc-misting-legend"]');
+      expect([...legend.querySelectorAll('li')].map((li) => li.textContent)).toEqual(MISTING_LEGEND_KEYS.map((k) => k.label));
+      expect(legend.textContent).toContain('Near water or in a no-mist zone');
+      expect(legend.textContent).toContain('Arrow = spray direction');
     });
 
     it('adds no section and no text when the key is absent, so the document is unchanged', () => {

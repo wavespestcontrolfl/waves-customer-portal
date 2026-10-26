@@ -3,13 +3,11 @@ import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../components/tech/treatmentZon
 import { applyNozzleEdits, placeNozzles } from './mistingLayoutGeometry';
 import {
   SKETCH_ATTRIBUTION_H,
-  SKETCH_CONCEPT,
   SKETCH_HEIGHT,
   SKETCH_WIDTH,
   buildSketchModel,
   numberNozzles,
   scaleBar,
-  sketchDateLabel,
   zoneLabel,
 } from './mistingLayoutSketch';
 import { legendRows, mistingLayoutCountsLine } from './mistingLayoutCounts';
@@ -113,23 +111,10 @@ describe('text', () => {
     expect(rows[5]).toBe('In a no-mist zone: 2 (aim away or move)');
   });
 
-  it('adds the near-water row after the nozzle row whenever a count is given, 0 included, and never for the saved counts', () => {
-    const base = { nozzleCount: 12, eaveCount: 8, fenceCount: 4, riserCount: 3, hasPump: true, zoneCount: 2, linearFt: 118.6 };
-    expect(legendRows({ ...base, nearWaterCount: 4 })[1]).toBe('Near water: 4');
-    expect(legendRows({ ...base, nearWaterCount: 0 })[1]).toBe('Near water: 0');
-    expect(legendRows({ ...base, nearWaterCount: 4 })).toHaveLength(6);
-    expect(mistingLayoutCountsLine({ nozzles: 5, eave: 5, fence: 0, risers: 0, zones: 1, linearFt: 40, pump: false })).not.toMatch(/near water/i);
-  });
-
   it('prints the saved-counts line without a flagged row, because the server counts carry none', () => {
     const line = mistingLayoutCountsLine({ nozzles: 5, eave: 5, fence: 0, risers: 0, zones: 1, linearFt: 40, pump: false });
     expect(line).not.toMatch(/no-mist zone:/i);
     expect(line.split(' · ')).toHaveLength(5);
-  });
-
-  it('dates the sketch in Eastern time', () => {
-    // 03:30 UTC on Oct 27 is still Oct 26 in Eastern time.
-    expect(sketchDateLabel(new Date('2026-10-27T03:30:00Z'))).toBe('October 26, 2026');
   });
 
   it('labels a zone by its kind', () => {
@@ -138,27 +123,20 @@ describe('text', () => {
 });
 
 describe('buildSketchModel', () => {
-  it('carries the concept note, numbered nozzles, scale and legend', () => {
+  it('carries the numbered nozzles, scale and drawing parts, and none of the words the estimate card now owns', () => {
     const lines = [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 100 }, { x: 400, y: 100 }] }];
     const model = buildSketchModel({
       lat: LAT,
       zoom: ZOOM,
-      address: '500 Example Court',
-      date: new Date('2026-10-26T15:00:00Z'),
       lines,
       nozzles: [{ x: 400, y: 100, kind: 'eave', lineIndex: 0 }, { x: 100, y: 100, kind: 'eave', lineIndex: 0 }],
       risers: [{ x: 10, y: 10 }],
       pump: { x: 20, y: 20 },
       zones: [{ kind: 'pool', x: 50, y: 50, radiusFt: 15, radiusPx: 60 }],
-      totals: { eaveCount: 2, fenceCount: 0, linearFt: 55 },
     });
-    expect(model.concept).toBe(SKETCH_CONCEPT);
-    expect(model.concept).toBe('Concept layout — final placement at the design visit and install.');
     expect(model.nozzles.map((n) => [n.number, n.x])).toEqual([[1, 100], [2, 400]]);
-    expect(model.dateLabel).toBe('October 26, 2026');
-    expect(model.legend[0]).toBe('Nozzles: 2 (eave 2, fence 0)');
-    expect(model.legend).toContain('Pump: placed');
     expect(model.scale.feet).toBeGreaterThan(0);
+    expect(Object.keys(model).sort()).toEqual(['lines', 'nozzles', 'pump', 'risers', 'scale', 'zones']);
   });
 
   describe('nozzles inside a no-mist zone', () => {
@@ -174,7 +152,6 @@ describe('buildSketchModel', () => {
       risers: [],
       pump: null,
       zones,
-      totals: { eaveCount: nozzles.length, fenceCount: 0, linearFt: 100 },
     });
     const n = (key, x) => ({ key, x, y: 500, kind: 'eave', lineIndex: 0 });
 
@@ -187,25 +164,12 @@ describe('buildSketchModel', () => {
       expect([...flagInZones(nozzles, [withPx], LAT, ZOOM)].sort()).toEqual([...flaggedKeys].sort());
       expect(model.nozzles.every((m) => typeof m.flagged === 'boolean')).toBe(true);
     });
-
-    it('adds the legend row with the count when some are flagged, and none when all are clear', () => {
-      const some = build([n('a', 100), n('b', 500), n('c', 510)]);
-      expect(some.legend).toContain('In a no-mist zone: 2 (aim away or move)');
-      expect(some.legend[0]).toBe('Nozzles: 3 (eave 3, fence 0)');
-      const none = build([n('a', 100), n('b', 900)]);
-      expect(none.legend.some((row) => row.startsWith('In a no-mist zone'))).toBe(false);
-      expect(none.legend).toHaveLength(6); // the five counts and Near water
-      const noZones = build([n('a', 500)], []);
-      expect(noZones.nozzles[0].flagged).toBe(false);
-      expect(noZones.legend).toHaveLength(6);
-    });
   });
 
   describe('spray aim', () => {
     const lines = [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 500 }, { x: 900, y: 500 }] }];
     const build = (nozzles, zones = []) => buildSketchModel({
       lat: LAT, zoom: ZOOM, lines, nozzles, risers: [], pump: null, zones,
-      totals: { eaveCount: nozzles.length, fenceCount: 0, linearFt: 100 },
     });
     const n = (x, extra = {}) => ({ x, y: 500, kind: 'eave', lineIndex: 0, ...extra });
 
@@ -230,12 +194,11 @@ describe('buildSketchModel', () => {
       expect(model.nozzles.map((m) => m.arrowPx)).toEqual([26, 26, 40]);
     });
 
-    it('prefers a manual aim, and counts near-water nozzles in the legend', () => {
+    it('prefers a manual aim, and keeps the near-water mark with the position', () => {
       const pool = { kind: 'water', x: 150, y: 400, radiusFt: 15, radiusPx: feetToPx(15, LAT, ZOOM) };
       const model = build([n(150, { aim: 45 }), n(850, { aim: 0 })], [pool]);
       expect(model.nozzles.map((m) => m.aimHeading)).toEqual([45, 0]);
       expect(model.nozzles[0].nearWater).toBe(true); // the position decides this, not the aim
-      expect(model.legend).toContain('Near water: 1');
     });
   });
 

@@ -1,16 +1,24 @@
 // Misting layout counts as text (GATE_MISTING_LAYOUT_DESIGNER, step 3). No imports, so the customer estimate
 // document can use it without pulling in the map engine.
 
+/** What each mark on the drawing means; the estimate document and the staff designer show these next to the picture. */
+export const MISTING_LEGEND_KEYS = Object.freeze([
+  { key: 'nozzle', label: 'Nozzle (number = walking order)' },
+  { key: 'near', label: 'Near water or in a no-mist zone' },
+  { key: 'arrow', label: 'Arrow = spray direction' },
+  { key: 'riser', label: 'Riser' },
+  { key: 'pump', label: 'Pump' },
+  { key: 'zone', label: 'No-mist zone' },
+]);
+
 /**
  * The legend lines printed on the sketch and shown under it. `flaggedCount` is the nozzles inside a
- * no-mist zone; its row appears only when there are some. `nearWaterCount` is the nozzles within 30 ft of
- * water or a pool; its row appears whenever a number is given, 0 included. The saved server counts carry
- * neither, so the estimate PDF's counts line leaves both out.
+ * no-mist zone; its row appears only when there are some (the saved server counts carry no such count,
+ * so the estimate PDF's counts line leaves it out).
  */
-export function legendRows({ nozzleCount, eaveCount, fenceCount, riserCount, hasPump, zoneCount, linearFt, flaggedCount = 0, nearWaterCount }) {
+export function legendRows({ nozzleCount, eaveCount, fenceCount, riserCount, hasPump, zoneCount, linearFt, flaggedCount = 0 }) {
   const rows = [
     `Nozzles: ${nozzleCount} (eave ${eaveCount}, fence ${fenceCount})`,
-    ...(Number.isFinite(nearWaterCount) ? [`Near water: ${nearWaterCount}`] : []),
     `Risers: ${riserCount}`,
     `Pump: ${hasPump ? 'placed' : 'not placed'}`,
     `No-mist zones: ${zoneCount}`,

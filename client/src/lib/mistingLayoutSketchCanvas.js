@@ -1,10 +1,10 @@
 // Misting layout sketch, step 3: the canvas drawing and PNG export (GATE_MISTING_LAYOUT_DESIGNER).
 //
-// Draws the model from mistingLayoutSketch.js as one still frame of the glass designer: the satellite photo
-// fills the frame, with frosted-glass panels floating over it (title, address and date with the logo; the counts
-// and a key; the concept note; the scale bar). Over the photo go the no-mist zones, lines, risers, pump, and each
-// nozzle's numbered dot with its aim arrow and a translucent mist wedge (a PNG cannot animate, so no particles).
-// No panel reaches into the photo's bottom strip, where Google's own attribution sits.
+// Draws the model from mistingLayoutSketch.js as a plain drawing: the satellite photo fills the frame, with the
+// no-mist zones, lines, risers, pump, and each nozzle's numbered dot with its aim arrow and a translucent mist
+// wedge (a PNG cannot animate, so no particles). A small scale bar sits in the bottom right corner. There is no
+// title, legend or count on the picture: the estimate document shows those in its card around it. Nothing is drawn
+// on the photo's bottom strip, where Google's own attribution sits.
 import { MAP_HEIGHT, MAP_WIDTH } from '../components/tech/treatmentZoneSpray';
 import { SKETCH_ATTRIBUTION_H, SKETCH_HEIGHT, SKETCH_WIDTH, zoneLabel } from './mistingLayoutSketch';
 import { drawAimArrow, drawMistWedge } from './mistingLayoutMistDraw';
@@ -18,7 +18,6 @@ const NOZZLE_BLUE = '#0b6fb8';
 const AMBER = '#f59e0b';
 const AMBER_DARK = '#92400e';
 const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-export const LOGO_URL = '/waves-logo.png';
 
 function outlinedText(ctx, text, x, y, size, { fill = '#000', align = 'center', weight = 700 } = {}) {
   ctx.font = `${weight} ${size}px ${FONT}`;
@@ -96,9 +95,9 @@ function drawLabelNear(ctx, text, around, nozzles, placed) {
   outlinedText(ctx, text, best.x, best.y, LABEL_SIZE);
 }
 
-// `panels` are the glass panels' rectangles: a label never lands on one.
-function drawLabels(ctx, model, panels) {
-  const placed = panels.map((r) => ({ x0: r.x, x1: r.x + r.w, y0: r.y, y1: r.y + r.h }));
+// `obstacles` are rectangles ({x, y, w, h}, here the scale bar) a label never lands on.
+function drawLabels(ctx, model, obstacles) {
+  const placed = obstacles.map((r) => ({ x0: r.x, x1: r.x + r.w, y0: r.y, y1: r.y + r.h }));
   model.zones.forEach((z) => drawLabelNear(ctx, zoneLabel(z), { x: z.x, y: z.y, gap: z.radiusPx + 6 }, model.nozzles, placed));
   if (model.pump) drawLabelNear(ctx, 'Pump', { x: model.pump.x, y: model.pump.y, gap: 22 }, model.nozzles, placed);
 }
@@ -188,197 +187,51 @@ function drawPump(ctx, pump) {
   ctx.restore();
 }
 
-// ── Glass panels ─────────────────────────────────────────────────────────────
-// White at 16% with a 1px white 38% border and a blurred, more saturated copy of the photo behind it, as the
-// designer's CSS glass. A browser canvas with no `filter` (older Safari) cannot blur, so it gets a darker tint
-// instead, which keeps the white text readable.
-const MARGIN = 24;
-const PANEL_R = 16;
-const PAD = 18;
-const ROW_H = 28;
-// White 16% over a thin navy tint, as the designer: the tint keeps white text readable on a bright roof or road.
-const GLASS_TINT = 'rgba(10, 25, 50, 0.16)';
-const GLASS_FILL = 'rgba(255, 255, 255, 0.16)';
-const GLASS_FALLBACK_FILL = 'rgba(15, 30, 50, 0.4)';
-const GLASS_BORDER = 'rgba(255, 255, 255, 0.38)';
-const KEY_ROWS = [
-  'Nozzle (number = walking order)',
-  'Near water or in a no-mist zone',
-  'Arrow and mist = spray direction',
-  'Riser',
-  'Pump',
-  'No-mist zone',
-];
+// ── Scale bar ────────────────────────────────────────────────────────────────
+// A small white bar with a dark outline, in the bottom right corner above the attribution strip.
+const SCALE_MARGIN = 24;
 
-function roundedRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+// Where the scale bar and its label sit, as a rectangle (labels keep clear of it).
+export function scaleBarRect(model) {
+  const w = Math.max(model.scale.px, 60) + 24;
+  const h = 56;
+  return { x: SKETCH_WIDTH - SCALE_MARGIN - w, y: BOTTOM_LIMIT - 12 - h, w, h };
 }
 
-function glassBody(ctx, r, photo) {
-  ctx.save();
-  roundedRect(ctx, r.x, r.y, r.w, r.h, PANEL_R);
-  ctx.clip();
-  if ('filter' in ctx) {
-    ctx.filter = 'blur(12px) saturate(1.4)';
-    ctx.drawImage(photo, 0, 0, MAP_WIDTH, MAP_HEIGHT);
-    ctx.filter = 'none';
-    ctx.fillStyle = GLASS_TINT;
-    ctx.fillRect(r.x, r.y, r.w, r.h);
-    ctx.fillStyle = GLASS_FILL;
-  } else {
-    ctx.fillStyle = GLASS_FALLBACK_FILL;
-  }
-  ctx.fillRect(r.x, r.y, r.w, r.h);
-  ctx.restore();
-  ctx.save();
-  roundedRect(ctx, r.x, r.y, r.w, r.h, PANEL_R);
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = GLASS_BORDER;
-  ctx.stroke();
-  ctx.restore();
-}
-
-// White text with a soft shadow, left aligned on a middle baseline. Squeezed to `maxWidth` if it would overrun.
-function glassText(ctx, text, x, y, size, { weight = 400, maxWidth, align = 'left' } = {}) {
-  ctx.save();
-  ctx.font = `${weight} ${size}px ${FONT}`;
-  ctx.textAlign = align;
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#fff';
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
-  ctx.shadowBlur = 4;
-  ctx.shadowOffsetY = 1;
-  if (maxWidth) ctx.fillText(text, x, y, maxWidth);
-  else ctx.fillText(text, x, y);
-  ctx.restore();
-}
-
-// Where each panel sits. All of them stay above BOTTOM_LIMIT, clear of the attribution strip.
-// Exported for the tests, which check that and that no two panels overlap.
-export function glassPanelRects(model, hasLogo) {
-  const titleW = 600;
-  const countsW = 410;
-  const countsH = PAD * 2 + model.legend.length * ROW_H + 14 + KEY_ROWS.length * ROW_H;
-  const lowest = BOTTOM_LIMIT - 12; // panels end a little above the attribution strip
-  const concept = { x: MARGIN, y: lowest - 46, w: 800, h: 46 };
-  const scaleW = Math.max(model.scale.px + 2 * PAD, 130);
-  const scale = { x: SKETCH_WIDTH - MARGIN - scaleW, y: lowest - 78, w: scaleW, h: 78 };
-  return {
-    title: { x: MARGIN, y: MARGIN, w: titleW, h: hasLogo ? 112 : 96 },
-    counts: { x: SKETCH_WIDTH - MARGIN - countsW, y: MARGIN, w: countsW, h: countsH },
-    concept,
-    scale,
-  };
-}
-
-function drawTitlePanel(ctx, model, r, logo) {
-  const left = r.x + PAD + (logo ? 92 : 0);
-  if (logo) ctx.drawImage(logo, r.x + PAD, r.y + 14, 84, 84);
-  const width = r.x + r.w - PAD - left;
-  glassText(ctx, model.title, left, r.y + 32, 36, { weight: 700, maxWidth: width });
-  glassText(ctx, model.address, left, r.y + 66, 24, { maxWidth: width });
-  if (logo) glassText(ctx, model.dateLabel, left, r.y + 94, 22, { maxWidth: width });
-  else glassText(ctx, model.dateLabel, left, r.y + 84, 22, { maxWidth: width });
-}
-
-// The key's little symbols, each centered at (x, y).
-function drawKeySymbol(ctx, index, x, y) {
-  ctx.save();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = '#fff';
-  ctx.lineJoin = 'round';
-  if (index <= 1) {
-    ctx.beginPath();
-    ctx.arc(x, y, 9, 0, Math.PI * 2);
-    ctx.fillStyle = index === 0 ? NOZZLE_BLUE : AMBER;
-    ctx.fill();
-    ctx.strokeStyle = index === 0 ? '#fff' : AMBER_DARK;
-    ctx.stroke();
-  } else if (index === 2) {
-    drawAimArrow(ctx, { x: x - 14, y }, 90, false);
-  } else if (index === 3) {
-    triangle(ctx, x, y, 10);
-    ctx.fillStyle = COPPER;
-    ctx.fill();
-    ctx.stroke();
-  } else if (index === 4) {
-    ctx.fillStyle = PUMP;
-    ctx.fillRect(x - 9, y - 9, 18, 18);
-    ctx.strokeRect(x - 9, y - 9, 18, 18);
-  } else {
-    ctx.beginPath();
-    ctx.arc(x, y, 10, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(220, 38, 38, 0.35)';
-    ctx.fill();
-    ctx.setLineDash([5, 3]);
-    ctx.strokeStyle = WARN;
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function drawCountsPanel(ctx, model, r) {
-  const textW = r.w - 2 * PAD;
-  model.legend.forEach((row, i) => glassText(ctx, row, r.x + PAD, r.y + PAD + ROW_H / 2 + i * ROW_H, 20, { maxWidth: textW }));
-  const rule = r.y + PAD + model.legend.length * ROW_H + 7;
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(r.x + PAD, rule);
-  ctx.lineTo(r.x + r.w - PAD, rule);
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = GLASS_BORDER;
-  ctx.stroke();
-  ctx.restore();
-  KEY_ROWS.forEach((row, i) => {
-    const y = rule + 7 + ROW_H / 2 + i * ROW_H;
-    drawKeySymbol(ctx, i, r.x + PAD + 22, y);
-    glassText(ctx, row, r.x + PAD + 54, y, 20, { maxWidth: textW - 54 });
-  });
-}
-
-function drawScalePanel(ctx, model, r) {
+function drawScaleBar(ctx, model) {
+  const r = scaleBarRect(model);
   const x = r.x + (r.w - model.scale.px) / 2;
-  const y = r.y + 28;
+  const y = r.y + 20;
+  const bar = () => {
+    ctx.beginPath();
+    ctx.moveTo(x, y - 10);
+    ctx.lineTo(x, y);
+    ctx.lineTo(x + model.scale.px, y);
+    ctx.lineTo(x + model.scale.px, y - 10);
+  };
   ctx.save();
+  ctx.lineJoin = 'round';
+  bar();
+  ctx.lineWidth = 9;
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.stroke();
+  bar();
+  ctx.lineWidth = 4;
   ctx.strokeStyle = '#fff';
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
-  ctx.shadowBlur = 4;
-  ctx.lineWidth = 5;
-  ctx.beginPath();
-  ctx.moveTo(x, y - 10);
-  ctx.lineTo(x, y);
-  ctx.lineTo(x + model.scale.px, y);
-  ctx.lineTo(x + model.scale.px, y - 10);
   ctx.stroke();
   ctx.restore();
-  glassText(ctx, `${model.scale.feet} ft`, r.x + r.w / 2, r.y + 54, 24, { weight: 700, align: 'center' });
+  outlinedText(ctx, `${model.scale.feet} ft`, r.x + r.w / 2, r.y + 44, 24);
 }
 
 /**
  * Draw the whole sketch on a 2D context of SKETCH_WIDTH x SKETCH_HEIGHT.
- * Order: the photo, the glass panel bodies (blurred photo behind them), a light darkening so white text and
- * white lines read on bright roofs, the map marks, then the panel text. The marks go over the glass bodies and
- * the text over the marks, so a nozzle under a panel is still drawn whole.
+ * Order: the photo, the map marks (zones, lines, risers, pump, mist wedges, dots, arrows, numbers), the labels, the scale bar.
  * @param {CanvasRenderingContext2D} ctx
  * @param {object} model from buildSketchModel
- * @param {{map: CanvasImageSource, logo?: CanvasImageSource|null}} images
+ * @param {{map: CanvasImageSource}} images
  */
-export function drawSketch(ctx, model, { map, logo = null }) {
-  const rects = glassPanelRects(model, Boolean(logo));
+export function drawSketch(ctx, model, { map }) {
   ctx.drawImage(map, 0, 0, MAP_WIDTH, MAP_HEIGHT);
-  Object.values(rects).forEach((r) => glassBody(ctx, r, map));
-  ctx.fillStyle = 'rgba(8, 20, 40, 0.12)';
-  ctx.fillRect(0, 0, MAP_WIDTH, BOTTOM_LIMIT); // not over the attribution strip
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, MAP_WIDTH, MAP_HEIGHT);
-  ctx.clip();
   model.zones.forEach((z) => drawZone(ctx, z));
   model.lines.forEach((l) => drawLine(ctx, l));
   model.risers.forEach((r) => drawRiser(ctx, r));
@@ -389,24 +242,8 @@ export function drawSketch(ctx, model, { map, logo = null }) {
   // next dot); the digits over the arrows, so an arrow never hides a number.
   model.nozzles.forEach((n) => drawAimArrow(ctx, n, n.aimHeading, n.nearWater, NOZZLE_R + 3, n.arrowPx));
   model.nozzles.forEach((n) => drawNozzleNumber(ctx, n));
-  drawLabels(ctx, model, Object.values(rects));
-  ctx.restore();
-  drawTitlePanel(ctx, model, rects.title, logo);
-  drawCountsPanel(ctx, model, rects.counts);
-  glassText(ctx, model.concept, rects.concept.x + PAD, rects.concept.y + rects.concept.h / 2, 22, {
-    weight: 700,
-    maxWidth: rects.concept.w - 2 * PAD,
-  });
-  drawScalePanel(ctx, model, rects.scale);
-}
-
-function loadLogo() {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => resolve(null);
-    img.src = LOGO_URL;
-  });
+  drawLabels(ctx, model, [scaleBarRect(model)]);
+  drawScaleBar(ctx, model);
 }
 
 function renderToBlob(model, images) {
@@ -424,18 +261,17 @@ function renderToBlob(model, images) {
 }
 
 /**
- * Compose the branded sketch into a PNG Blob. The satellite image loads with crossOrigin="anonymous"; if
+ * Compose the sketch into a PNG Blob. The satellite image loads with crossOrigin="anonymous"; if
  * the canvas still taints, the tile is re-fetched (CORS-checked) and composed on a FRESH canvas, the same
- * fallback the Treatment Zone Mapper's export uses. A logo that fails to load is left out; it never blocks a save.
+ * fallback the Treatment Zone Mapper's export uses.
  */
 export async function composeSketchPng({ mapImage, mapUrl, model }) {
-  const logo = await loadLogo();
   try {
     if (!mapImage) throw new Error('no loaded map image');
-    return await renderToBlob(model, { map: mapImage, logo });
+    return await renderToBlob(model, { map: mapImage });
   } catch {
     const res = await fetch(mapUrl);
     const bitmap = await createImageBitmap(await res.blob());
-    return renderToBlob(model, { map: bitmap, logo });
+    return renderToBlob(model, { map: bitmap });
   }
 }

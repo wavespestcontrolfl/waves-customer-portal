@@ -1,19 +1,14 @@
-// Misting layout sketch, step 3 (GATE_MISTING_LAYOUT_DESIGNER): the pure layout math behind the branded PNG.
+// Misting layout sketch, step 3 (GATE_MISTING_LAYOUT_DESIGNER): the pure layout math behind the saved PNG.
 //
 // DOM-free so it is unit-testable. The canvas drawing lives in mistingLayoutSketchCanvas.js and only
-// consumes the model built here: numbered nozzles in walking order with their spray aim, the scale bar,
-// the legend rows and the title text.
+// consumes the model built here: numbered nozzles in walking order with their spray aim, and the scale bar.
+// The picture is the plain drawing; its title, counts, legend and concept note belong to the estimate document's card.
 import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../components/tech/treatmentZoneSpray';
 import { aimArrowLength, aimReachPx, effectiveAim } from './mistingLayoutAim';
 import { insideAnyZone, zoneKindDef } from './mistingLayoutExtras';
-import { legendRows } from './mistingLayoutCounts';
-import { formatETDate } from './timezone';
 
-export const SKETCH_TITLE = 'Proposed misting layout';
-export const SKETCH_CONCEPT = 'Concept layout — final placement at the design visit and install.';
-
-// Sketch canvas: the satellite photo at its native size, filling the frame, with glass panels floating over
-// it. The photo's bottom strip is where Google prints its attribution; no panel reaches into it.
+// Sketch canvas: the satellite photo at its native size, filling the frame, with the drawing over it. The photo's
+// bottom strip is where Google prints its attribution; nothing of ours is drawn on it.
 export const SKETCH_WIDTH = MAP_WIDTH;
 export const SKETCH_HEIGHT = MAP_HEIGHT;
 export const SKETCH_ATTRIBUTION_H = 44;
@@ -82,11 +77,6 @@ export function scaleBar(lat, zoom, maxPx = 300) {
   return { feet, px: feet / ftPerPx };
 }
 
-/** "October 26, 2026" in Eastern time, the portal's frame. */
-export function sketchDateLabel(date = new Date()) {
-  return formatETDate(date, { year: 'numeric', month: 'long', day: 'numeric' });
-}
-
 export function zoneLabel(zone) {
   return `No mist: ${zoneKindDef(zone.kind).label}`;
 }
@@ -96,13 +86,13 @@ export function zoneLabel(zone) {
  * Nozzles come back with `flagged` true when inside a zone, and with their spray aim: `aimHeading`
  * (degrees, a manual aim when the nozzle has one), `nearWater`, `reachPx` (the throw in map pixels) and `arrowPx`
  * (the arrow's length).
- * @param {{lat:number, zoom:number, address?:string, date?:Date, lines:Array, nozzles:Array, risers:Array,
- *          pump:object|null, zones:Array<{kind,x,y,radiusFt,radiusPx}>, totals:{eaveCount,fenceCount,linearFt}}} layout
+ * @param {{lat:number, zoom:number, lines:Array, nozzles:Array, risers:Array,
+ *          pump:object|null, zones:Array<{kind,x,y,radiusFt,radiusPx}>}} layout
  */
 export function buildSketchModel(layout) {
   const zones = layout.zones || [];
   // A nozzle inside a no-mist zone (the designer's own rule, insideAnyZone) is flagged, so the sketch
-  // draws it amber and the legend counts it instead of printing it as any other nozzle.
+  // draws it amber, with a ring and a "!", instead of printing it as any other nozzle.
   const map = { lat: layout.lat, zoom: layout.zoom };
   const numbered = numberNozzles(layout.nozzles, layout.lines);
   const nozzles = numbered.map((n) => {
@@ -117,26 +107,11 @@ export function buildSketchModel(layout) {
     };
   });
   return {
-    title: SKETCH_TITLE,
-    concept: SKETCH_CONCEPT,
-    address: layout.address || '',
-    dateLabel: sketchDateLabel(layout.date),
     lines: layout.lines || [],
     nozzles,
     risers: layout.risers || [],
     pump: layout.pump || null,
     zones,
     scale: scaleBar(layout.lat, layout.zoom),
-    legend: legendRows({
-      nozzleCount: nozzles.length,
-      eaveCount: layout.totals.eaveCount,
-      fenceCount: layout.totals.fenceCount,
-      riserCount: (layout.risers || []).length,
-      hasPump: Boolean(layout.pump),
-      zoneCount: zones.length,
-      linearFt: layout.totals.linearFt,
-      flaggedCount: nozzles.filter((n) => n.flagged).length,
-      nearWaterCount: nozzles.filter((n) => n.nearWater).length,
-    }),
   };
 }
