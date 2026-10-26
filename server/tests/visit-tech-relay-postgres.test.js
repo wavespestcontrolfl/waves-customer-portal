@@ -25,9 +25,9 @@ postgres('visit tech relay (real Postgres)', () => {
   let today;
   const made = { techIds: [], customerIds: [], visitIds: [] };
 
-  async function makeTech(name, { role = 'technician', status = 'active' } = {}) {
+  async function makeTech(name, { role = 'technician', status = 'active', dispatchable = true } = {}) {
     const [row] = await db('technicians')
-      .insert({ name: `${name} ${randomUUID().slice(0, 8)}`, role, employment_status: status, field_dispatchable: true, active: true })
+      .insert({ name: `${name} ${randomUUID().slice(0, 8)}`, role, employment_status: status, field_dispatchable: dispatchable, active: true })
       .returning(['id', 'name']);
     made.techIds.push(row.id);
     return row;
@@ -149,16 +149,20 @@ postgres('visit tech relay (real Postgres)', () => {
     expect(await relay.visitTechniciansFor(later.id)).toEqual([]);
   });
 
-  test('an admin technician (the owner) and an inactive technician get no copy', async () => {
+  test('an admin technician (the owner), an inactive technician and an office-only account get no copy', async () => {
     const owner = await makeTech('Synthetic Owner', { role: 'admin' });
     const former = await makeTech('Synthetic Former', { status: 'inactive' });
+    const office = await makeTech('Synthetic Office', { dispatchable: false });
     const ownersCustomer = await makeCustomer('Owners');
     const formersCustomer = await makeCustomer('Formers');
+    const officesCustomer = await makeCustomer('Offices');
     await visit(ownersCustomer, owner, 'on_site', '09:00');
     await visit(formersCustomer, former, 'on_site', '09:00');
+    await visit(officesCustomer, office, 'on_site', '09:00');
 
     expect(await relay.visitTechniciansFor(ownersCustomer.id)).toEqual([]);
     expect(await relay.visitTechniciansFor(formersCustomer.id)).toEqual([]);
+    expect(await relay.visitTechniciansFor(officesCustomer.id)).toEqual([]);
   });
 
   test('a saved service-contact number held by ONE customer resolves to that customer; a shared one resolves to nobody (Codex #6760 r1)', async () => {

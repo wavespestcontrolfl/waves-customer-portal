@@ -1106,9 +1106,10 @@ router.post('/sms', async (req, res) => {
     // consumes it (Codex #6760 r1); started on response finish. A known caller
     // record covers the service-contact and second phones too; the relay
     // itself resolves the number to its ONE customer across every phone slot
-    // (a shared number relays nothing). The office path is unchanged; nothing
-    // is sent to the customer.
-    if (numberConfig.type !== 'tech_line' && (customer || knownCallerRecord) && (Body || inboundMedia.length)
+    // (a shared number relays nothing). The AI customer-chat line stays AI-only
+    // (Codex #6760 security review). The office path is unchanged; nothing is
+    // sent to the customer.
+    if (numberConfig.type !== 'tech_line' && !isAiNumber && (customer || knownCallerRecord) && (Body || inboundMedia.length)
       && !smsReaction && !courtesyOnly && !staffSender && !detectSmsOptCommand(Body || '').action
       && require('../config/feature-gates').customerTextToVisitTechLive?.()) {
       const relayInput = { from: From, body: Body, mediaCount: inboundMedia.length };

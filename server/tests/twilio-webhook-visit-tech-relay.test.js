@@ -229,6 +229,13 @@ describe('a known customer\'s text to an office line (GATE_CUSTOMER_TEXT_TO_VISI
     expect(relayCustomerTextToVisitTech).not.toHaveBeenCalled();
   });
 
+  test('gate on: a text to the AI customer-chat line is not relayed (Codex #6760 security review)', async () => {
+    process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH = 'true';
+    mockCustomersRows = [KNOWN];
+    await receive('The gate is open', { from: CUSTOMER_CELL, to: numbers.tollFree.number });
+    expect(relayCustomerTextToVisitTech).not.toHaveBeenCalled();
+  });
+
   test('gate on: a STOP keyword is not relayed', async () => {
     process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH = 'true';
     mockCustomersRows = [KNOWN];

@@ -32,7 +32,8 @@
  * next one (tech-track moves rows by id).
  *
  * An admin technician (the owner) already gets the office bell for the same
- * text, so an admin gets no copy. The office inbox, bell and owner forward are
+ * text, so an admin gets no copy; neither does an inactive or office-only
+ * (not field-dispatchable) account. The AI customer-chat line is not relayed. The office inbox, bell and owner forward are
  * unchanged. Sends nothing to a customer. Fails soft: an error is logged and
  * the inbound webhook carries on.
  */
@@ -41,6 +42,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { NOT_A_STOP_STATUSES } = require('./stops-ahead');
 const { KNOWN_CALLER_PHONE_COLS, customerPhoneLookupKey } = require('../utils/known-caller-phone');
+const { applyAssignable } = require('./technician-eligibility');
 
 const ACTIVE_STATUSES = ['en_route', 'on_site'];
 const ACTIVE_TRACK_STATES = ['en_route', 'on_property'];
@@ -80,9 +82,11 @@ async function visitTechniciansFor(customerId, { conn = db, today = etDateString
   if (!visits.length) return [];
 
   const techIds = [...new Set(visits.map((v) => String(v.technician_id)))];
-  const techs = await conn('technicians')
+  // Assignable field staff only (technician-eligibility.js applyAssignable:
+  // active AND field_dispatchable): an office-only account keeps its visits
+  // but gets no field relay (Codex #6760 security review).
+  const techs = await applyAssignable(conn('technicians'))
     .whereIn('id', techIds)
-    .where({ employment_status: 'active' })
     .whereNot('role', 'admin')
     .select('id', 'name');
   const out = [];
