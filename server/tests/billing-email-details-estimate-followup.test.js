@@ -29,10 +29,6 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/estimate-service-lines', () => ({
   inferEstimateServiceInterest: jest.fn(() => ''),
 }));
-jest.mock('../services/estimate-deposits', () => ({
-  assessDepositFollowUpEligibility: jest.fn(async () => ({ eligible: false })),
-  DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
-}));
 jest.mock('../services/estimate-conversion-guard', () => ({
   customerConvertedSince: jest.fn(async () => ({ converted: false })),
 }));

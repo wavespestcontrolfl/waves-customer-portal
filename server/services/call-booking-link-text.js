@@ -589,7 +589,7 @@ function computeSendAt(callEnd) {
 // the SAME line the caller reached instead of deriveOutboundNumber's
 // location-based fallback (a Bradenton default when no fromNumber/
 // customerId narrows it — codex r1 P2). Mirrors outbound-voicemail-sms.js's
-// own replyFromNumber and dropped-call-sms.js's existing 8/20 fence in
+// own replyFromNumber in
 // spirit: reuse the line the customer already saw. Validated against the
 // registry — never a tech line (owner ruling: automated texts stay on the
 // location lines), a staff-forward/CSR cell, or the AI toll-free line. A

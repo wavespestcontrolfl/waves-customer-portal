@@ -106,12 +106,6 @@ const OPERATOR_ENTRY_POINTS = new Set([
 // (owner-confirmed 2026-08-29: the friend gets it immediately, not at
 // 8 AM). Same fail-closed posture as OPERATOR_ENTRY_POINTS: new
 // customer-action surfaces must opt in here. Deliberately ABSENT:
-//   - dropped_call_sms — serves BOTH inbound drops and eligible OUTBOUND
-//     return / lead-auto-bridge calls (owner ruling 2026-09-26). The
-//     inbound leg is the caller reaching us and passes at night under the
-//     2026-09-30 ruling via the customerInitiated marker the sender sets
-//     for inbound calls only; the outbound leg is our contact and stays
-//     fenced (pre-push codex P1).
 //   - stripe_webhook and invoice_receipt_sms — those entry points serve
 //     BOTH the customer's own payments AND machine-initiated off-session
 //     charges (autopay debits, completion/balance-sweep card-on-file

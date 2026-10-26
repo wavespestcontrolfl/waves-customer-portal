@@ -55,10 +55,6 @@ jest.mock('../services/estimate-conversion-guard', () => ({
 jest.mock('../services/estimate-lead-linkage', () => ({
   leadIdForEstimate: jest.fn(async () => 'lead-9'),
 }));
-jest.mock('../services/estimate-deposits', () => ({
-  assessDepositFollowUpEligibility: jest.fn(async () => ({ eligible: false })),
-  DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
-}));
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');

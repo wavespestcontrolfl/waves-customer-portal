@@ -143,7 +143,6 @@
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
  *   GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE=true (portal GET /api/billing/cards stamps holdsAppointment on a card holding a future secured visit, so Remove opens the call-us disclaimer; removal itself is never blocked — off = field absent, payload unchanged)
  *   GATE_PAYMENT_METHOD_CHANGE_EMAILS=true (customer lifecycle emails for Auto Pay turned OFF and saved method REMOVED — portal, and Stripe-dashboard detaches via webhook)
- *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
@@ -1859,11 +1858,6 @@ const gates = {
   // regardless. Complements the reactive competitor harvest (backlink-deep-harvest.js).
   localOpportunityProspector: isProd ? process.env.GATE_LOCAL_OPPORTUNITY_PROSPECTOR === 'true' : true,
 
-  // Marchex Auto-Block — reject inbound calls the Marchex Clean Call
-  // Marketplace add-on flags as spam. Explicit opt-in everywhere: until the
-  // gate is on, verdicts are only logged (shadow) and never block a caller.
-  marchexAutoBlock: process.env.GATE_MARCHEX_AUTO_BLOCK === 'true',
-
   // Lead Alert Call — the business-hours phone call to Adam's cell when a
   // website quote form lands (announce, or Press-1 bridge under
   // leadAutoBridge). Owner 2026-10-14: off for now. Off unless exactly
@@ -1989,14 +1983,6 @@ const gates = {
   // GATE_MOVE_NOTICE_EMAIL (the email version of a reschedule or cancellation text that reached nobody, dark). Boot-log entry only; the call-time reader is moveNoticeEmailLive().
   moveNoticeEmail: process.env.GATE_MOVE_NOTICE_EMAIL === 'true',
 
-  // Estimate Deposit-Abandonment SMS — texts customers who started the
-  // deposit payment step on a public estimate (a pending Stripe
-  // PaymentIntent in estimate_deposits) but never completed it. Customer-
-  // facing auto-send: explicit opt-in in EVERY environment. Until the gate
-  // is on, the follow-up cron only logs candidate counts (shadow) and never
-  // claims or sends.
-  estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
-
   // Pre-connect caller screen — inbound callers with NO customer match AND
   // STIR/SHAKEN attestation B (spoofed-number robocall profile; 67% dead-air
   // in 60d of prod signal, ~2% of lead calls) must press a key before staff
@@ -2042,16 +2028,6 @@ const gates = {
   // GATE_BOOKING_ABANDON_RECOVERY=true on prod at merge to go live (effectively
   // "live on merge", one env flip). Off → the cron only shadow-logs candidates.
   bookingAbandonRecovery: process.env.GATE_BOOKING_ABANDON_RECOVERY === 'true',
-
-  // Click-followup action queue — turns human short-link clicks on estimate /
-  // booking links that DIDN'T convert into PENDING message_drafts (intent
-  // 'click_followup') for owner review in /admin/drafts. This lane NEVER
-  // sends anything itself — the draft is the terminal artifact and only the
-  // owner's approval in /admin/drafts puts a message on the wire. The gate
-  // covers the queue writes (action rows + drafts): off → the cron only
-  // shadow-logs candidate counts so volume can be judged first. Flip
-  // GATE_CLICK_FOLLOWUP=true to start queueing drafts.
-  clickFollowup: process.env.GATE_CLICK_FOLLOWUP === 'true',
 
   // Estimate Clarify Asks — when automated quote drafting dead-ends on a
   // machine-readable missing item (no address / no concrete service), park
@@ -2322,7 +2298,7 @@ const gates = {
   callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
   // Owner ruling 2026-09-26: the four customer-facing call-processor features
   // #4912 deliberately kept inbound-only (booking-confirmation implied
-  // consent, the dropped-mid-intake address text, customer-less lead
+  // consent, the dropped-mid-intake call-back card, customer-less lead
   // creation, the approval-gated unit/address clarify draft) may run the
   // same on an OUTBOUND call ONLY when the person contacted Waves FIRST —
   // a prior inbound call/text, a lead record, or an existing customer
@@ -2583,15 +2559,6 @@ const gates = {
   // GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the voicemail
   // still becomes a Needs-Review lead; only the SMS is skipped.
   voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
-
-  // Dropped-call address-request text (services/dropped-call-sms.js): a NEW
-  // prospect whose intake call died mid-conversation before the service
-  // address was captured gets ONE text asking for it. Same fail-CLOSED rule
-  // as voicemailLeadSms — customer-facing auto-send, explicit opt-in in
-  // every environment. Owner sets GATE_DROPPED_CALL_SMS=true to go live.
-  // Off → the dropped call still opens its call-back triage card; only the
-  // SMS is skipped.
-  droppedCallSms: process.env.GATE_DROPPED_CALL_SMS === 'true',
 
   // Outbound voicemail text-back (services/outbound-voicemail-sms.js): an
   // admin click-to-call that reaches the CUSTOMER'S voicemail hangs up the

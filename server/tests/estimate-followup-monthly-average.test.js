@@ -32,10 +32,6 @@ jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(async (
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/estimate-conversion-guard', () => ({ customerConvertedSince: jest.fn(async () => ({ converted: false })) }));
 jest.mock('../services/estimate-lead-linkage', () => ({ leadIdForEstimate: jest.fn(async () => 'lead-9') }));
-jest.mock('../services/estimate-deposits', () => ({
-  assessDepositFollowUpEligibility: jest.fn(async () => ({ eligible: false })),
-  DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
-}));
 const mockPdf = { copy: { attachments: [], payload: {} } };
 jest.mock('../services/estimate-email-pdf', () => ({
   openEstimateEmailPdf: jest.fn(async () => mockPdf.copy),
