@@ -34,7 +34,7 @@ function spawn(parts, nozzles, aims, lat, zoom) {
       vy: (v.x * s + v.y * c) * speed,
       life: 0,
       max: 60 + Math.random() * 30,
-      r: 3 + Math.random() * 5,
+      r: 5 + Math.random() * 6,
     });
   });
 }
@@ -75,10 +75,15 @@ export default function MistingSprayLayer({ nozzles, aims, lat, zoom, animate, w
         p.vx *= drag;
         p.vy *= drag;
         p.r += 0.12 * k;
+        // White mist with a faint blue edge, so it reads on bright lawn and pale roofs as well as on shade.
+        const a = Math.sin((Math.PI * p.life) / p.max);
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(225, 243, 255, ${Math.sin((Math.PI * p.life) / p.max) * 0.32})`;
+        ctx.fillStyle = `rgba(236, 248, 255, ${a * 0.55})`;
         ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = `rgba(0, 120, 190, ${a * 0.35})`;
+        ctx.stroke();
       }
     };
     const start = () => {
