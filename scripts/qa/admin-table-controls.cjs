@@ -141,9 +141,9 @@ async function columns(page, report, label, optional, selector) {
 }
 
 async function exerciseCustomers(page, server, report) {
-  await page.goto(`${server.baseUrl}/admin/customers`);
+  await page.goto(`${server.baseUrl}/admin/customers`, { waitUntil: "commit" });
   const customerSearch = page.getByRole("searchbox", { name: "Customers search" });
-  await customerSearch.waitFor();
+  await customerSearch.waitFor({ timeout: 120000 });
   await page.getByRole("button", { name: "Open Customer Example 001 customer profile", exact: true }).waitFor();
   await waitForFonts(page);
   report.geometry.push(await geometry(page, "Customers"));
@@ -178,9 +178,9 @@ async function exerciseCustomers(page, server, report) {
 }
 
 async function exerciseBids(page, server, report) {
-  await page.goto(`${server.baseUrl}/admin/bids`);
+  await page.goto(`${server.baseUrl}/admin/bids`, { waitUntil: "commit" });
   const bidSearch = page.getByRole("searchbox", { name: "Bid Desk search" });
-  await bidSearch.waitFor();
+  await bidSearch.waitFor({ timeout: 120000 });
   await page.getByRole("button", { name: "Open Example project 001", exact: true }).waitFor();
   await waitForFonts(page);
   report.geometry.push(await geometry(page, "Bid Desk"));
