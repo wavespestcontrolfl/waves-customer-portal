@@ -27,6 +27,12 @@
  * PUT  /checks/:id/check-number      { checkNumber } on a finalized paper check.
  * GET  /checks/:id/stub              the printable pay stub (employee view, no employer taxes).
  *
+ * Tax form figures (layer 3a, GATE_PAYROLL_FORM_FIGURES, also dark).
+ * GET  /forms?year=YYYY&quarter=N    { year, quarter, f941, rt6, f940, w2, w3 }: the line-by-line
+ *                                    figures for Form 941 and RT-6 (the quarter), Form 940 and
+ *                                    W-2/W-3 (the year) from finalized, not-voided checks.
+ *                                    400 on a bad year or quarter. Off answers 404.
+ *
  * Admin only. Off answers 404 { enabled: false } on every route but /status,
  * before any query. The portal never stores an SSN or a bank account number:
  * this router returns and logs neither. Responses are no-store.
@@ -34,9 +40,10 @@
 const express = require('express');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { payrollLive } = require('../config/feature-gates');
+const { payrollLive, payrollFormFiguresLive } = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
 const payrollRuns = require('../services/payroll-runs');
+const payrollFormFigures = require('../services/payroll-form-figures');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -59,6 +66,16 @@ function fail(res, what, err) {
   logger.error(`[admin-payroll] ${what} failed (${(err && (err.code || err.name)) || 'error'})`);
   return res.status(500).json({ error: 'Payroll failed. Try again.' });
 }
+
+router.get('/forms', async (req, res) => {
+  if (!payrollFormFiguresLive()) {
+    res.status(404).json({ enabled: false });
+    return;
+  }
+  try {
+    res.json(await payrollFormFigures.readFormFigures(payrollFormFigures.parseFormPeriod(req.query)));
+  } catch (err) { fail(res, 'read tax form figures', err); }
+});
 
 router.get('/technicians', async (req, res) => {
   try {

@@ -264,4 +264,17 @@ function computePaycheck({
   };
 }
 
-module.exports = { computePaycheck, TAX_YEARS, PAY_PERIODS_PER_YEAR };
+// The rates and bases, exported so the tax form figures read the same numbers
+// the paychecks were worked out with (never a second copy). Basis points and
+// cents are plain Numbers here.
+const RATES = {
+  socialSecurityBp: Number(SOCIAL_SECURITY_BP),
+  medicareBp: Number(MEDICARE_BP),
+  additionalMedicareBp: Number(ADDITIONAL_MEDICARE_BP),
+  additionalMedicareThresholdCents: Number(ADDITIONAL_MEDICARE_THRESHOLD_CENTS),
+  futaBp: Number(FUTA_BP),
+  futaAndStateWageBaseCents: Number(STATE_AND_FUTA_WAGE_BASE_CENTS),
+  floridaNewEmployerBp: FLORIDA_NEW_EMPLOYER_RATE_BP,
+};
+
+module.exports = { computePaycheck, TAX_YEARS, PAY_PERIODS_PER_YEAR, RATES };

@@ -14,6 +14,7 @@ import { adminFetch } from '../../lib/adminFetch';
 import { etDateString } from '../../lib/timezone';
 import { dayLabel, dollars } from './payrollFormat';
 import PayRuns from './PayRuns';
+import PayrollForms from './PayrollForms';
 
 // Staff page, Payroll tab (owner 2026-10-25, basic payroll layer 1b-2a). An admin
 // types the W-4 elections from the signed PAPER form and records how each W-2
@@ -37,7 +38,7 @@ async function call(path, { raw = false, ...options } = {}) {
   const response = await adminFetch(`/admin/payroll${path}`, options);
   if (raw && response.ok) return response;
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Payroll request failed (${response.status}).`);
+  if (!response.ok) throw Object.assign(new Error(data.error || `Payroll request failed (${response.status}).`), { status: response.status });
   return data;
 }
 
@@ -274,6 +275,7 @@ export default function PayrollSettings() {
       </Table>
     </Card>}
     <PayRuns call={call} />
+    <PayrollForms call={call} />
     {dialog?.kind === 'w4' && <W4Dialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'pay' && <PayMethodDialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'history' && <W4HistoryDialog technician={dialog.tech} onClose={close} />}
