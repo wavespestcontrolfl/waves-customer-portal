@@ -18,6 +18,11 @@
  * - Deposits (941 line 13, 940 line 13) are the Tax page calendar rows of layer
  *   2 that the owner marked paid. Layer 2 writes no Form 940 deposit row, so
  *   940 line 13 reads rows keyed 'payroll:940_deposit:<year>' and finds none.
+ * - Form 940 line 10 is 0 only when every quarter's Florida reemployment tax
+ *   is marked paid in full on the Tax page by the Form 940 due date. Else
+ *   lines 10, 12, 14, 15 and Part 5 read "Needs your check": tax paid late or
+ *   not paid cuts the FUTA credit (IRS line 10 worksheet), and the portal does
+ *   not work that worksheet.
  * - The 12th rule: a check counts for a month's 12th when week_start <= the
  *   12th <= week_start + 6. Only checks paid in the quarter are counted.
  * - No full SSN, EIN, bank or routing number is held or shown. Every form field
@@ -27,10 +32,12 @@
 const db = require('../models/db');
 const { TAX_YEARS, RATES } = require('./payroll-calc');
 const { PayrollError } = require('./payroll-w4');
+const { rollIrs } = require('./payroll-tax-calendar');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
 
 const FROM_RECORDS = 'Enter from your records';
 const DEPOSIT_LABEL = 'deposits recorded as paid on the Tax page';
+const NEEDS_CHECK = 'Needs your check';
 const FORM_941_SCHEDULE_THRESHOLD_CENTS = 250000;
 const FORM_940_PART_5_THRESHOLD_CENTS = 50000;
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -203,17 +210,20 @@ function rt6Rate(quarterChecks) {
   return { bp, distinct: [...rates.keys()].sort((a, b) => a - b) };
 }
 
-function formRt6(year, quarter, quarterChecks) {
-  const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
+// RT-6 line 5 is line 4 times the rate, rounded once on the quarter's taxable
+// wages (Florida RT-6 instructions), not the sum of per-paycheck rounding.
+function rt6Tax(quarterChecks) {
   const gross = sum(quarterChecks, 'gross');
   const excess = sum(quarterChecks, 'excessWages');
   const checkTax = sum(quarterChecks, 'flReemployment');
   const { bp, distinct } = rt6Rate(quarterChecks);
-  // RT-6 line 5 is line 4 times the rate, rounded once on the quarter's taxable
-  // wages (Florida RT-6 instructions), not the sum of per-paycheck rounding.
-  const taxable = gross - excess;
-  const rateBp = bp;
-  const tax = rateBp == null ? 0 : pct(taxable, rateBp);
+  const tax = bp == null ? 0 : pct(gross - excess, bp);
+  return { gross, excess, checkTax, rateBp: bp, distinct, tax };
+}
+
+function formRt6(year, quarter, quarterChecks) {
+  const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
+  const { gross, excess, checkTax, rateBp, distinct, tax } = rt6Tax(quarterChecks);
   const rows = months.map((month, index) => count(`1 month ${index + 1}`, `Covered employees, ${MONTH_NAMES[month - 1]}`, employeesOnTwelfth(quarterChecks, year, month)));
   rows.push(
     cents('2', 'Gross wages', gross),
@@ -244,7 +254,36 @@ function formRt6(year, quarter, quarterChecks) {
   return { form: 'RT-6', year, quarter, rows, employees, notes };
 }
 
-function form940(year, yearChecks, depositsCents) {
+const quarterChecksOf = (yearChecks, q) => yearChecks.filter((c) => quarterOfMonth(monthOf(c)) === q);
+
+/**
+ * Form 940 line 10 (IRS Form 940 instructions): state unemployment tax paid
+ * after the due date for filing Form 940, or not paid, cuts the credit. The
+ * quarters whose Florida tax is NOT marked paid in full on the Tax page by that
+ * date (January 31 of the next year, moved past a weekend or legal holiday).
+ * A quarter's Florida tax is the RT-6 line 5 figure, or what the paychecks
+ * charged when that is less (they differ only by per-paycheck rounding).
+ * rt6Paid: the year's RT-6 calendar rows marked paid (base and balance rows)
+ * as { source_key, amount_paid, paid_date }.
+ */
+function floridaQuartersNotPaidOnTime(year, yearChecks, rt6Paid) {
+  const dueDate = rollIrs(`${year + 1}-01-31`);
+  const open = [];
+  for (const q of [1, 2, 3, 4]) {
+    const { tax, checkTax } = rt6Tax(quarterChecksOf(yearChecks, q));
+    const owed = checkTax > 0 ? Math.min(tax, checkTax) : tax;
+    if (owed <= 0) continue;
+    const prefix = `payroll:rt6:${year}-Q${q}`;
+    const paid = rt6Paid
+      .filter((r) => (r.source_key === prefix || String(r.source_key).startsWith(`${prefix}:balance:`))
+        && r.paid_date && String(r.paid_date).slice(0, 10) <= dueDate)
+      .reduce((acc, r) => acc + Math.round(num(r.amount_paid) * 100), 0);
+    if (paid < owed) open.push(q);
+  }
+  return { dueDate, open };
+}
+
+function form940(year, yearChecks, depositsCents, rt6Paid = []) {
   const total = sum(yearChecks, 'gross');
   const byEmployee = new Map();
   for (const c of yearChecks) byEmployee.set(c.technicianId, (byEmployee.get(c.technicianId) || 0) + c.gross);
@@ -255,6 +294,19 @@ function form940(year, yearChecks, depositsCents) {
   const line12 = line8;
   const line14 = max0(line12 - depositsCents);
   const line15 = max0(depositsCents - line12);
+  const florida = floridaQuartersNotPaidOnTime(year, yearChecks, rt6Paid);
+  // Line 10 is 0 only when every quarter's Florida tax is marked paid on time.
+  // Otherwise lines 10, 12, 14, 15 and Part 5 are not final, so they show no
+  // amount to copy (pre-push audit P1).
+  const verified = florida.open.length === 0;
+  const dueText = florida.dueDate;
+  const line10 = verified
+    ? cents('10', 'Adjustment if you did not pay all state unemployment tax by the due date', 0,
+      yearChecks.length ? { note: `Florida reemployment tax for every quarter is marked paid on the Tax page by ${dueText}.` } : undefined)
+    : text('10', 'Adjustment if you did not pay all state unemployment tax by the due date', NEEDS_CHECK, {
+      note: `Florida reemployment tax for ${florida.open.map((q) => `Q${q}`).join(', ')} is not marked paid in full on the Tax page by ${dueText}. Tax paid late or not paid cuts the credit: use the line 10 worksheet in the Form 940 instructions.`,
+    });
+  const dependent = (line, label, value) => (verified ? cents(line, label, value) : text(line, label, NEEDS_CHECK, { note: 'Depends on line 10.' }));
   const rows = [
     text('1a', 'State where you paid wages', 'FL'),
     cents('3', 'Total payments to all employees', total),
@@ -264,16 +316,21 @@ function form940(year, yearChecks, depositsCents) {
     cents('7', 'Total taxable FUTA wages (line 3 minus line 6)', line7),
     cents('8', 'FUTA tax before adjustments', line8, { rate: pctText(RATES.futaBp) }),
     cents('9', 'Adjustment if some state wages were exempt from state unemployment tax', 0),
-    cents('10', 'Adjustment if you did not pay all state unemployment tax by the due date', 0),
+    line10,
     cents('11', 'Credit reduction for employees in a credit reduction state', 0, { note: 'Check Florida against the IRS credit reduction list every year. This line stays 0 unless Florida is on it.' }),
-    cents('12', 'Total FUTA tax after adjustments (lines 8 + 9 + 10 + 11)', line12),
+    dependent('12', 'Total FUTA tax after adjustments (lines 8 + 9 + 10 + 11)', line12),
     cents('13', `FUTA tax deposited for the year (${DEPOSIT_LABEL})`, depositsCents),
-    cents('14', 'Balance due (line 12 minus line 13, if line 12 is more)', line14),
-    cents('15', 'Overpayment (line 13 minus line 12, if line 13 is more)', line15),
+    dependent('14', 'Balance due (line 12 minus line 13, if line 12 is more)', line14),
+    dependent('15', 'Overpayment (line 13 minus line 12, if line 13 is more)', line15),
   ];
   const notes = ['Line 13 counts only deposits you marked paid on the Tax page. The Tax page calendar does not yet write a Form 940 deposit row, so this is 0 unless a row was added.'];
-  if (line12 > FORM_940_PART_5_THRESHOLD_CENTS) {
-    const byQuarter = [1, 2, 3, 4].map((q) => sum(yearChecks.filter((c) => quarterOfMonth(monthOf(c)) === q), 'futa'));
+  if (!verified) {
+    // Part 5 totals line 12, so it waits for line 10 too.
+    notes.push(line12 > FORM_940_PART_5_THRESHOLD_CENTS
+      ? 'Part 5 (lines 16 and 17) is needed because line 8 is more than $500. Fill it in after line 10 is checked: line 17 must equal line 12.'
+      : 'Part 5 is needed only if line 12 is more than $500. Decide after line 10 is checked.');
+  } else if (line12 > FORM_940_PART_5_THRESHOLD_CENTS) {
+    const byQuarter = [1, 2, 3, 4].map((q) => sum(quarterChecksOf(yearChecks, q), 'futa'));
     // The checks round FUTA per paycheck; line 12 rounds the year's taxable
     // wages once. The cent difference goes to the LAST quarter that carries
     // FUTA (never to a quarter with no FUTA wages), so line 17 equals line 12
@@ -345,7 +402,7 @@ function w3Totals(forms) {
  * `year`, dates as YYYY-MM-DD text); deposits are paid calendar rows as
  * { source_key, amount_paid, amount_due }.
  */
-function buildFormFigures({ year, quarter, rows = [], deposits941 = [], deposits940 = [], addresses = new Map() }) {
+function buildFormFigures({ year, quarter, rows = [], deposits941 = [], deposits940 = [], rt6Paid = [], addresses = new Map() }) {
   const wageBase = rows.length ? socialSecurityWageBaseCents(year) : 0;
   const yearChecks = rows.map((r) => normalize(r, wageBase));
   const quarterChecks = yearChecks.filter((c) => quarterOfMonth(monthOf(c)) === quarter);
@@ -357,7 +414,7 @@ function buildFormFigures({ year, quarter, rows = [], deposits941 = [], deposits
     employer: { name: WAVES_BUSINESS_NAME, address: WAVES_ADDRESS_LINE, ein: FROM_RECORDS },
     f941: form941(year, quarter, quarterChecks, depositTotal(deposits941)),
     rt6: formRt6(year, quarter, quarterChecks),
-    f940: form940(year, yearChecks, depositTotal(deposits940)),
+    f940: form940(year, yearChecks, depositTotal(deposits940), rt6Paid),
     w2,
     w3: w3Totals(w2),
   };
@@ -379,6 +436,15 @@ async function paidDeposits(conn, kind, periods) {
     .select('source_key', 'amount_paid', 'amount_due');
 }
 
+// The year's RT-6 rows marked paid (base and balance rows; a review row holds
+// no payment), with the day each was marked paid, for Form 940 line 10.
+async function paidRt6Rows(conn, year) {
+  return conn('tax_filing_calendar')
+    .where({ status: 'paid' })
+    .whereRaw('source_key ~ ?', [`^payroll:rt6:${year}-Q[1-4](:balance:[0-9]+)?$`])
+    .select('source_key', 'amount_paid', conn.raw("to_char(paid_date, 'YYYY-MM-DD') AS paid_date"));
+}
+
 /** The route's read: year and quarter are already validated integers. */
 async function readFormFigures({ year, quarter, conn = db }) {
   const rows = await conn('payroll_checks')
@@ -393,6 +459,7 @@ async function readFormFigures({ year, quarter, conn = db }) {
   const quarterMonths = [1, 2, 3].map((n) => `${year}-${pad((quarter - 1) * 3 + n)}`);
   const deposits941 = await paidDeposits(conn, '941_deposit', quarterMonths);
   const deposits940 = await paidDeposits(conn, '940_deposit', [String(year)]);
+  const rt6Paid = await paidRt6Rows(conn, year);
   const ids = [...new Set(rows.map((r) => r.technician_id))];
   const addresses = new Map();
   if (ids.length) {
@@ -402,7 +469,7 @@ async function readFormFigures({ year, quarter, conn = db }) {
       if (address) addresses.set(t.id, address);
     }
   }
-  return buildFormFigures({ year, quarter, rows, deposits941, deposits940, addresses });
+  return buildFormFigures({ year, quarter, rows, deposits941, deposits940, rt6Paid, addresses });
 }
 
 /** Query-string check: a 4-digit year from 2020 on and a quarter 1 to 4. */

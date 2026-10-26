@@ -31,6 +31,8 @@ const check = (weekStart, payDate, patch = {}) => ({
   ...patch,
 });
 const build = (rows, extra = {}) => buildFormFigures({ year: 2026, quarter: 4, rows, ...extra });
+// RT-6 rows marked paid on the Tax page well before the Form 940 due date, in full.
+const paidOnTime = (...quarters) => quarters.map((q) => ({ source_key: `payroll:rt6:2026-Q${q}`, amount_paid: '100000.00', paid_date: '2026-12-31' }));
 const line = (form, id) => form.rows.find((r) => r.line === id);
 
 describe('constants come from the calculator', () => {
@@ -236,7 +238,7 @@ describe('Form 940', () => {
       check('2026-01-05', '2026-01-16', { tech: 1, gross_cents: 500000, ytd_gross_before_cents: 0 }),
       check('2026-06-01', '2026-06-12', { tech: 1, gross_cents: 400000, ytd_gross_before_cents: 500000 }),
       check('2026-06-01', '2026-06-12', { tech: 2, gross_cents: 300000 }),
-    ]);
+    ], { rt6Paid: paidOnTime(1, 2) });
     expect(line(out.f940, '3').value).toBe(1200000);
     expect(line(out.f940, '5').value).toBe(200000); // 9,000 less 7,000 for tech 1
     expect(line(out.f940, '6').value).toBe(200000);
@@ -249,22 +251,22 @@ describe('Form 940', () => {
 
   test('line 13 reads paid 940 deposits; lines 14 and 15 follow', () => {
     const rows = [check('2026-01-05', '2026-01-16', { tech: 1, gross_cents: 700000 })];
-    const out = build(rows, { deposits940: [{ amount_paid: '10.00' }] });
+    const out = build(rows, { deposits940: [{ amount_paid: '10.00' }], rt6Paid: paidOnTime(1) });
     expect(line(out.f940, '12').value).toBe(4200);
     expect(line(out.f940, '13').value).toBe(1000);
     expect(line(out.f940, '14').value).toBe(3200);
-    expect(build(rows).f940.rows.find((r) => r.line === '13').value).toBe(0);
+    expect(build(rows, { rt6Paid: paidOnTime(1) }).f940.rows.find((r) => r.line === '13').value).toBe(0);
   });
 
   test('Part 5 is left out when line 12 is $500 or less', () => {
-    const out = build(fourteen().slice(0, 3));
+    const out = build(fourteen().slice(0, 3), { rt6Paid: paidOnTime(1) });
     expect(line(out.f940, '12').value).toBe(12600);
     expect(line(out.f940, '16a')).toBeUndefined();
     expect(out.f940.notes.join(' ')).toMatch(/Part 5 is not needed/);
   });
 
   test('Part 5 appears over $500, by quarter, and line 17 equals line 12', () => {
-    const out = build(fourteen());
+    const out = build(fourteen(), { rt6Paid: paidOnTime(1, 3) });
     expect(line(out.f940, '12').value).toBe(58800);
     // The per-check rounding cent (-1) goes to the last quarter WITH FUTA (Q3),
     // never to a quarter with no FUTA wages: no quarter shows a negative liability.
@@ -275,12 +277,85 @@ describe('Form 940', () => {
 
   test('a line 12 of exactly $500.00 is not over $500', () => {
     // 500.00 / 0.6% = 83,333.33 taxable: 83,334 gives 500.004 -> 50000 cents.
-    const out = build([check('2026-01-05', '2026-01-16', { tech: 1, gross_cents: 700000 }), ...Array.from({ length: 12 }, (_v, i) => check('2026-01-05', '2026-01-16', { tech: i + 2, gross_cents: 700000 }))]);
+    const out = build([check('2026-01-05', '2026-01-16', { tech: 1, gross_cents: 700000 }), ...Array.from({ length: 12 }, (_v, i) => check('2026-01-05', '2026-01-16', { tech: i + 2, gross_cents: 700000 }))], { rt6Paid: paidOnTime(1) });
     expect(line(out.f940, '12').value).toBe(54600); // 13 employees at $7,000
     expect(line(out.f940, '16a')).toBeDefined();
-    const edge = build([check('2026-01-05', '2026-01-16', { tech: 1, gross_cents: 700000 }), ...Array.from({ length: 10 }, (_v, i) => check('2026-01-05', '2026-01-16', { tech: i + 2, gross_cents: 700000 })), check('2026-01-05', '2026-01-16', { tech: 20, gross_cents: 633334 })]);
+    const edge = build([check('2026-01-05', '2026-01-16', { tech: 1, gross_cents: 700000 }), ...Array.from({ length: 10 }, (_v, i) => check('2026-01-05', '2026-01-16', { tech: i + 2, gross_cents: 700000 })), check('2026-01-05', '2026-01-16', { tech: 20, gross_cents: 633334 })], { rt6Paid: paidOnTime(1) });
     expect(line(edge.f940, '12').value).toBe(50000);
     expect(line(edge.f940, '16a')).toBeUndefined();
+  });
+});
+
+// Pre-push audit P1: line 10 was always 0, even with Florida tax unpaid or
+// paid late, which cuts the FUTA credit (IRS Form 940 line 10 worksheet).
+describe('Form 940 line 10: Florida tax paid on time', () => {
+  // One employee per quarter at $7,000 (RT-6 line 5 at 2.7% = $189.00), and
+  // the checks charged the same.
+  const year = () => [1, 4, 7, 10].map((month, i) => check(`2026-${String(month).padStart(2, '0')}-05`, `2026-${String(month).padStart(2, '0')}-16`, {
+    tech: i + 1, gross_cents: 700000, futa_cents: 4200, fl_reemployment_cents: 18900,
+  }));
+  const rt6 = (q, amount, paidDate, suffix = '') => ({ source_key: `payroll:rt6:2026-Q${q}${suffix}`, amount_paid: amount, paid_date: paidDate });
+  const allPaid = (q4Date = '2027-01-20') => [rt6(1, '189.00', '2026-04-20'), rt6(2, '189.00', '2026-07-20'), rt6(3, '189.00', '2026-10-20'), rt6(4, '189.00', q4Date)];
+  const needsCheck = (out, id) => expect(line(out.f940, id)).toMatchObject({ kind: 'text', value: 'Needs your check' });
+
+  test('every quarter marked paid in full by the due date: line 10 is $0 and lines 12 to 17 are final', () => {
+    const out = build(year(), { rt6Paid: allPaid() });
+    expect(line(out.f940, '10')).toMatchObject({ kind: 'cents', value: 0 });
+    expect(line(out.f940, '10').note).toMatch(/marked paid on the Tax page by 2027-02-01/);
+    expect(line(out.f940, '12')).toMatchObject({ kind: 'cents', value: 16800 });
+    expect(line(out.f940, '14')).toMatchObject({ kind: 'cents', value: 16800 });
+  });
+
+  test('a quarter not marked paid: lines 10, 12, 14 and 15 read "Needs your check" with no amount, and Part 5 waits', () => {
+    const rows = [...year(), ...Array.from({ length: 10 }, (_v, i) => check('2026-01-05', '2026-01-16', { tech: i + 10, gross_cents: 700000, futa_cents: 4200, fl_reemployment_cents: 18900 }))];
+    const out = build(rows, { rt6Paid: allPaid().slice(0, 3) });
+    expect(line(out.f940, '8').value).toBe(58800); // line 8 stays final
+    for (const id of ['10', '12', '14', '15']) needsCheck(out, id);
+    expect(line(out.f940, '10').note).toMatch(/Q4 is not marked paid in full on the Tax page by 2027-02-01/);
+    expect(line(out.f940, '12').note).toBe('Depends on line 10.');
+    expect(line(out.f940, '13')).toMatchObject({ kind: 'cents', value: 0 });
+    expect(line(out.f940, '16a')).toBeUndefined();
+    expect(line(out.f940, '17')).toBeUndefined();
+    expect(out.f940.notes.join(' ')).toMatch(/Part 5 \(lines 16 and 17\) is needed because line 8 is more than \$500\. Fill it in after line 10 is checked/);
+  });
+
+  test('under $500 before line 10, Part 5 is left to decide after line 10', () => {
+    const out = build(year(), { rt6Paid: [] });
+    expect(line(out.f940, '10').note).toMatch(/Q1, Q2, Q3, Q4 is not marked paid/);
+    expect(out.f940.notes.join(' ')).toMatch(/Part 5 is needed only if line 12 is more than \$500\. Decide after line 10 is checked/);
+  });
+
+  test('paid after the due date is late; the due date moves past a weekend (Jan 31, 2027 is a Sunday)', () => {
+    expect(line(build(year(), { rt6Paid: allPaid('2027-02-01') }).f940, '10')).toMatchObject({ kind: 'cents', value: 0 });
+    needsCheck(build(year(), { rt6Paid: allPaid('2027-02-02') }), '10');
+    // A paid row with no paid date cannot show it was on time.
+    needsCheck(build(year(), { rt6Paid: [...allPaid().slice(0, 3), rt6(4, '189.00', null)] }), '10');
+  });
+
+  test('a partial payment is not in full; a balance row paid on time completes it; a review row pays nothing', () => {
+    const part = [...allPaid().slice(0, 3), rt6(4, '100.00', '2027-01-20')];
+    needsCheck(build(year(), { rt6Paid: part }), '10');
+    needsCheck(build(year(), { rt6Paid: [...part, rt6(4, '89.00', '2027-01-25', ':review:1')] }), '10');
+    expect(line(build(year(), { rt6Paid: [...part, rt6(4, '89.00', '2027-01-25', ':balance:1')] }).f940, '10').value).toBe(0);
+    // Another year's row does not pay this year.
+    needsCheck(build(year(), { rt6Paid: [...allPaid().slice(0, 3), { source_key: 'payroll:rt6:2027-Q4', amount_paid: '189.00', paid_date: '2027-01-20' }] }), '10');
+  });
+
+  test('per-paycheck rounding: paying the smaller of RT-6 line 5 and what the checks charged is in full', () => {
+    // Three $100.10 checks: RT-6 line 5 = $8.11 (rounded once), the checks charged $8.10.
+    const rows = Array.from({ length: 3 }, (_v, i) => check('2026-01-05', '2026-01-16', { tech: i + 1, gross_cents: 10010, fl_reemployment_cents: 270 }));
+    expect(line(build(rows, { rt6Paid: [rt6(1, '8.10', '2026-04-20')] }).f940, '10').value).toBe(0);
+    needsCheck(build(rows, { rt6Paid: [rt6(1, '8.09', '2026-04-20')] }), '10');
+    // Checks that stored no Florida tax still owe the RT-6 figure.
+    const noStored = rows.map((r) => ({ ...r, fl_reemployment_cents: 0 }));
+    needsCheck(build(noStored, { rt6Paid: [rt6(1, '8.10', '2026-04-20')] }), '10');
+    expect(line(build(noStored, { rt6Paid: [rt6(1, '8.11', '2026-04-20')] }).f940, '10').value).toBe(0);
+  });
+
+  test('a year with no Florida tax needs no payment', () => {
+    const out = build([]);
+    expect(line(out.f940, '10')).toMatchObject({ kind: 'cents', value: 0 });
+    expect(line(out.f940, '10').note).toBeUndefined();
   });
 });
 

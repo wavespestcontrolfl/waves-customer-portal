@@ -191,7 +191,7 @@ function VoidForm({ busy, onVoid, onCancel }) {
   </form>;
 }
 
-export function RunDetail({ call, run, onChanged, onMessage }) {
+export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
   const [confirming, setConfirming] = useState(false);
   const [voiding, setVoiding] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -210,6 +210,9 @@ export function RunDetail({ call, run, onChanged, onMessage }) {
       // A changed draft was already saved by the server: show it.
       if (action === 'finalize') { setConfirming(false); await onChanged(run.id); }
     }
+    // A finalized or voided run changes the tax form figures on this page. Refetch them after a
+    // failure too: the server may have committed before the error reached the page.
+    if ((action === 'finalize' || action === 'void') && onRunsChanged) onRunsChanged();
     setBusy(false);
   }
 
@@ -279,7 +282,7 @@ export function RunDetail({ call, run, onChanged, onMessage }) {
   </Card>;
 }
 
-export default function PayRuns({ call }) {
+export default function PayRuns({ call, onRunsChanged }) {
   const weeks = useMemo(() => {
     const last = lastFinishedWeekStart();
     return Array.from({ length: WEEK_CHOICES }, (_, n) => addStaffCalendarDays(last, -7 * n));
@@ -348,7 +351,7 @@ export default function PayRuns({ call }) {
 
     {run && <RunDetail
       key={run.id} call={call} run={run}
-      onChanged={open} onMessage={setMessage}
+      onChanged={open} onMessage={setMessage} onRunsChanged={onRunsChanged}
     />}
 
     {runs && runs.length === 0 && <p className="m-0">No pay runs yet.</p>}

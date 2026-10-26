@@ -140,7 +140,7 @@ function Rt6Employees({ employees }) {
   </Table>;
 }
 
-export default function PayrollForms({ call }) {
+export default function PayrollForms({ call, refreshKey = 0 }) {
   const thisYear = Number(etDateString(new Date()).slice(0, 4));
   const thisQuarter = Math.ceil(Number(etDateString(new Date()).slice(5, 7)) / 3);
   const [year, setYear] = useState(Math.max(thisYear, FIRST_YEAR));
@@ -161,7 +161,8 @@ export default function PayrollForms({ call }) {
         else { setError(failure.message); setAnswered(true); }
       });
     return () => { live = false; };
-  }, [call, year, quarter]);
+    // refreshKey: PayrollSettings bumps it when a pay run is finalized or voided.
+  }, [call, year, quarter, refreshKey]);
 
   // Nothing shows until the server answers, so a dark gate never flashes the section.
   if (off || !answered) return null;

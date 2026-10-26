@@ -231,6 +231,8 @@ export default function PayrollSettings() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [dialog, setDialog] = useState(null);
+  // Bumped when a pay run is finalized or voided, so the tax form figures refetch.
+  const [formsVersion, setFormsVersion] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -274,8 +276,8 @@ export default function PayrollSettings() {
         </TBody>
       </Table>
     </Card>}
-    <PayRuns call={call} />
-    <PayrollForms call={call} />
+    <PayRuns call={call} onRunsChanged={() => setFormsVersion(v => v + 1)} />
+    <PayrollForms call={call} refreshKey={formsVersion} />
     {dialog?.kind === 'w4' && <W4Dialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'pay' && <PayMethodDialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'history' && <W4HistoryDialog technician={dialog.tech} onClose={close} />}

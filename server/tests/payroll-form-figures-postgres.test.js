@@ -1,7 +1,8 @@
 // Real PostgreSQL transactions (rolled back): the tax form figures read only
 // finalized pay checks (a draft and a voided check are left out), sum the paid
-// Tax page deposit rows for 941 line 13 and 940 line 13, carry the technician
-// address onto the W-2, and answer through the route. All names synthetic.
+// Tax page deposit rows for 941 line 13 and 940 line 13, read the paid RT-6
+// rows for 940 line 10, carry the technician address onto the W-2, and answer
+// through the route. All names synthetic.
 // DATABASE_URL-gated like the other *-postgres suites.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
@@ -171,6 +172,26 @@ postgres('payroll tax form figures', () => {
       filing_type: 'payroll_940_deposit', title: 'Sample FUTA deposit', due_date: '2026-10-31', source_key: 'payroll:940_deposit:2026', status: 'paid', amount_paid: '5.00',
     });
     expect(line((await readFormFigures({ year: 2026, quarter: 4, conn: trx })).f940, '13').value).toBe(500);
+  });
+
+  it('940 line 10 reads the year\'s RT-6 rows marked paid with the day marked: balance rows count; filed, review and other-year rows do not', async () => {
+    await addCheck('2026-10-05', '2026-10-16'); // Q4: $1,000.00 gross, $27.00 Florida tax
+    const addRt6 = (key, status, amountPaid, paidDate) => trx('tax_filing_calendar').insert({
+      filing_type: 'payroll_rt6', title: 'Sample RT-6', due_date: '2027-02-01', source_key: key, status, amount_paid: amountPaid, paid_date: paidDate,
+    });
+    await addRt6('payroll:rt6:2026-Q4', 'filed', '27.00', null); // filed is not paid
+    await addRt6('payroll:rt6:2025-Q4', 'paid', '27.00', '2026-01-20'); // another year
+    await addRt6('payroll:rt6:2026-Q4:review:1', 'paid', '27.00', '2027-01-20'); // a review row pays nothing
+    let out = await readFormFigures({ year: 2026, quarter: 4, conn: trx });
+    expect(line(out.f940, '10')).toMatchObject({ kind: 'text', value: 'Needs your check' });
+    expect(line(out.f940, '12')).toMatchObject({ kind: 'text', value: 'Needs your check' });
+    await addRt6('payroll:rt6:2026-Q4:balance:1', 'paid', '27.00', '2027-02-02'); // after the due date
+    out = await readFormFigures({ year: 2026, quarter: 4, conn: trx });
+    expect(line(out.f940, '10').kind).toBe('text');
+    await trx('tax_filing_calendar').where({ source_key: 'payroll:rt6:2026-Q4:balance:1' }).update({ paid_date: '2027-02-01' });
+    out = await readFormFigures({ year: 2026, quarter: 4, conn: trx });
+    expect(line(out.f940, '10')).toMatchObject({ kind: 'cents', value: 0 });
+    expect(line(out.f940, '12')).toMatchObject({ kind: 'cents', value: 600 });
   });
 
   it('answers through the route, and 404 while the gate is off', async () => {

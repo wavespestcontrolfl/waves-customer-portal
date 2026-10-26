@@ -182,6 +182,28 @@ describe('Pay runs section', () => {
     expect(writes()[1]).toMatchObject({ path: '/admin/payroll/runs/run-1/recompute', method: 'POST' });
   });
 
+  // Pre-push audit P1: the tax form figures below the pay runs went stale after a finalize or a void.
+  it('asks for the tax form figures again after it finalizes, and after a void, even a failed one', async () => {
+    const formReads = () => calls.filter(c => c.path.startsWith('/admin/payroll/forms')).length;
+    const detail = await startRun();
+    const view = within(detail);
+    await waitFor(() => expect(formReads()).toBe(1));
+    fireEvent.click(view.getByRole('button', { name: 'Recompute' }));
+    await screen.findByText('Pay run recomputed.');
+    expect(formReads()).toBe(1);
+    fireEvent.click(view.getByRole('button', { name: 'Finalize' }));
+    current = run({ status: 'finalized', checks: [check({ status: 'finalized' })] });
+    fireEvent.click(within(view.getByRole('group', { name: 'Confirm finalize' })).getByRole('button', { name: 'Yes, finalize' }));
+    await screen.findByText('Pay run finalized.');
+    await waitFor(() => expect(formReads()).toBe(2));
+    writeReply = () => reply({ error: 'Network trouble' }, false, 502);
+    fireEvent.click(view.getByRole('button', { name: 'Void' }));
+    const form = view.getByRole('form', { name: 'Void pay run' });
+    fireEvent.change(within(form).getByLabelText(/Why are you voiding/), { target: { value: 'Wrong hours' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Void pay run' }));
+    await waitFor(() => expect(formReads()).toBe(3));
+  });
+
   it('needs a reason before it voids, then sends it', async () => {
     const detail = await startRun();
     const view = within(detail);

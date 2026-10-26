@@ -149,6 +149,16 @@ describe('Tax forms section', () => {
     expect(Array.from(screen.getByLabelText('Year').querySelectorAll('option')).map(o => o.textContent)).toEqual(['2026']);
   });
 
+  it('asks again when the page says the pay runs changed (refreshKey)', async () => {
+    const call = callWith(() => FIGURES);
+    const { rerender } = render(<PayrollForms call={call} refreshKey={0} />);
+    await screen.findByRole('heading', { name: 'Tax forms' });
+    expect(call).toHaveBeenCalledTimes(1);
+    rerender(<PayrollForms call={call} refreshKey={1} />);
+    await waitFor(() => expect(call).toHaveBeenCalledTimes(2));
+    expect(call).toHaveBeenLastCalledWith('/forms?year=2026&quarter=4');
+  });
+
   it('shows the server message when the figures cannot load', async () => {
     const call = vi.fn(() => Promise.reject(Object.assign(new Error('Payroll failed. Try again.'), { status: 500 })));
     render(<PayrollForms call={call} />);
