@@ -1215,26 +1215,10 @@ async function planPostCommitSteps(trx, ctx, outcome) {
     } catch { termiteProgram = null; }
   }
   const consumerNoticeLive = require('../config/feature-gates').manualAcceptConsumerNoticeSendLive();
-  let consumerNoticeSends = null;
-  let consumerNoticeRecipients = null;
   const noticeCustomerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
-  if (collecting && consumerNoticeLive && noticeCustomerId) {
-    // The card says whether the Florida consumer notice goes out: gate on, a termite line, no signed notice on file.
-    // An unreadable state reads as "sends" so the card never hides a text it might send.
-    try {
-      const notice = require('./estimate-consumer-notice');
-      consumerNoticeSends = notice.estimateNeedsConsumerNotice(acceptedEstimate)
-        // A savepoint, so a failed read never aborts the accept (as the taxability read below).
-        && (trx.isTransaction
-          ? await trx.transaction((sp) => notice.consumerNoticeState(noticeCustomerId, sp))
-          : await notice.consumerNoticeState(noticeCustomerId, trx)) !== 'signed';
-      if (consumerNoticeSends) {
-        consumerNoticeRecipients = trx.isTransaction
-          ? await trx.transaction((sp) => notice.consumerNoticeRecipients(sp, noticeCustomerId))
-          : await notice.consumerNoticeRecipients(trx, noticeCustomerId);
-      }
-    } catch { consumerNoticeSends = true; consumerNoticeRecipients = null; }
-  }
+  const { sends: consumerNoticeSends, recipients: consumerNoticeRecipients } = collecting && consumerNoticeLive && noticeCustomerId
+    ? await require('./estimate-consumer-notice').consumerNoticeCardFacts(trx, acceptedEstimate, noticeCustomerId)
+    : { sends: null, recipients: null };
   const plan = AcceptEffects.planPostCommit({
     billingTerm: ctx.billingTerm, acceptedEstimate, conversion, proposalCustomer, emailInputs, termiteProgram, consumerNoticeLive, consumerNoticeSends, consumerNoticeRecipients,
   });

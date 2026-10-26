@@ -93,3 +93,10 @@ test('without expected keys, delivery is unchanged', async () => {
   expect(result.ok).toBe(true);
   expect(sendgrid.sendOne.mock.calls[0][0]).toMatchObject({ to: 'someone.else@example.com' });
 });
+
+test('a text held for the send window records the send that queued it, so the replay can recheck its gate', async () => {
+  sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-10-27T12:00:00.000Z' });
+  await deliverDocumentRequestChannels('contract-1', { actorType: 'system' }, { channels: ['sms'], smsEntryPoint: 'manual_accept_consumer_notice' });
+  const queued = mockWrites.find((w) => w.table === 'sms_log' && w.op === 'insert');
+  expect(JSON.parse(queued.payload.metadata)).toMatchObject({ entry_point: 'document_request_reminder_deferred', origin_entry_point: 'manual_accept_consumer_notice' });
+});

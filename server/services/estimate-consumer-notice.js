@@ -244,6 +244,19 @@ async function consumerNoticeTarget(conn, estimateId, customerId) {
   };
 }
 
+// What the Intelligence Bar card says about the notice, read inside the accept: `sends` (a termite line and no
+// signed notice) and, when it sends, the recipients. Savepoints, so a failed read never aborts the accept; an
+// unreadable state reads as "sends" with no recipients, which the card refuses rather than hide a text.
+async function consumerNoticeCardFacts(trx, estimate, customerId) {
+  const read = (fn) => (trx.isTransaction ? trx.transaction((sp) => fn(sp)) : fn(trx));
+  try {
+    const sends = estimateNeedsConsumerNotice(estimate) && (await read((c) => consumerNoticeState(customerId, c))) !== 'signed';
+    return { sends, recipients: sends ? await read((c) => consumerNoticeRecipients(c, customerId)) : null };
+  } catch {
+    return { sends: true, recipients: null };
+  }
+}
+
 // What the office reads on the bell when the notice did not go out, by refusal or delivery code.
 const SEND_FAILURE_WHY = {
   no_representative: 'No active office name to print on the form, so it was not sent.',
@@ -384,6 +397,7 @@ module.exports = {
   ensureEstimateConsumerNotice,
   consumerNoticeRecipients,
   consumerNoticeTarget,
+  consumerNoticeCardFacts,
   sendManualAcceptConsumerNotice,
   alertManualAcceptConsumerNoticeSkipped,
 };

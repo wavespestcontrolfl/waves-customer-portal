@@ -642,12 +642,22 @@ function membershipEmailStep({ conversion, billingTerm, emailInputs }) {
   };
 }
 
+// GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND: `sends` and the masked recipients are read on a carded accept (null on
+// the page's own accept, where the step decides when it runs).
+function consumerNoticeStep({ sends, recipients }) {
+  return {
+    step: 'consumer_notice',
+    sends: sends ?? null,
+    ...(recipients ? { to_email: maskEmail(recipients.email), to_phone: maskPhone(recipients.phone) } : {}),
+  };
+}
+
 // The work after the commit, as an ordered list of steps (pure). Inputs are
 // the committed-state facts: the accepted row, the conversion result and the
 // recipient facts. A step is listed whenever the page attempts it.
 function planPostCommit({
   billingTerm, acceptedEstimate, conversion, proposalCustomer = null, emailInputs = null, termiteProgram = null,
-  consumerNoticeLive = false, consumerNoticeSends = null, consumerNoticeRecipients = null,
+  consumerNoticeLive, consumerNoticeSends, consumerNoticeRecipients,
 }) {
   const customerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
   const steps = [
@@ -658,15 +668,8 @@ function planPostCommit({
   if (billingTerm !== 'prepay_annual' && conversion?.membershipEmail) steps.push(membershipEmailStep({ conversion, billingTerm, emailInputs }));
   if (conversion?.welcomeSms) steps.push({ step: 'welcome_sms' });
   if (customerId) steps.push({ step: 'termite_agreement', applies: termiteProgram });
-  // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND (off = no step, the plan unchanged): `sends` and the masked
-  // recipients are read on a carded accept (null on the page's own accept, where the step decides when it runs).
-  if (customerId && consumerNoticeLive) {
-    steps.push({
-      step: 'consumer_notice',
-      sends: consumerNoticeSends,
-      ...(consumerNoticeRecipients ? { to_email: maskEmail(consumerNoticeRecipients.email), to_phone: maskPhone(consumerNoticeRecipients.phone) } : {}),
-    });
-  }
+  // Gate off: no step, the plan unchanged.
+  if (customerId && consumerNoticeLive) steps.push(consumerNoticeStep({ sends: consumerNoticeSends, recipients: consumerNoticeRecipients }));
   for (const [bell, field] of BELLS) {
     if (conversion?.[field]) steps.push({ step: 'admin_bell', bell, title: String(conversion[field].title || '') });
   }
