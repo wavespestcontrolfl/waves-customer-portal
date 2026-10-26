@@ -146,3 +146,11 @@ describe('GET /api/documents/contract/:id/download', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('POST /api/documents/share/:id', () => {
+  test('a signed contract never gets a public share link', async () => {
+    const res = await fetch(`${base}/api/documents/share/contract_${SIGNED_AGREEMENT.id}`, { method: 'POST' });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'Document not found' });
+  });
+});

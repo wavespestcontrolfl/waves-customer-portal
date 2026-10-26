@@ -1,6 +1,8 @@
 // Real PostgreSQL transactions (rolled back): the office reminder before a new
 // construction termite warranty renews. Names and addresses are synthetic.
-const postgres = process.env.DATABASE_URL ? describe : describe.skip;
+// The exact marker line CI's DB-gated step greps for (.github/workflows/tests.yml); any other gate form never runs there.
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
 let mockConnection;
 jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), {
   get(_target, key) {

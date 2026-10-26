@@ -1134,7 +1134,8 @@ router.get('/:id/download', authenticate, async (req, res, next) => {
 router.post('/share/:id', authenticate, async (req, res, next) => {
   try {
     const docId = req.params.id;
-    if (typeof docId === 'string' && docId.startsWith('annual_plan_')) {
+    // Annual-plan summaries and signed contracts are served to the account's own session only: never a share link.
+    if (typeof docId === 'string' && (docId.startsWith('annual_plan_') || docId.startsWith(CONTRACT_DOCUMENT_ID_PREFIX))) {
       return res.status(404).json({ error: 'Document not found' });
     }
     const isAutoGen = typeof docId === 'string' && docId.startsWith('auto_report_');
