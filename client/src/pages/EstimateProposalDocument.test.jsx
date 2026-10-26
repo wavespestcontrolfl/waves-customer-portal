@@ -1218,6 +1218,28 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
       });
     });
 
+    it('adds the pump notice under the counts when the load (nozzles plus risers) is over what one pump runs, and not before', () => {
+      const text = (counts) => {
+        const { container } = render(<EstimateProposalDocument data={{ ...BASE_DATA, mistingLayout: { ...layout, counts: { ...layout.counts, ...counts } } }} token="tok-123" />);
+        const el = container.querySelector('[data-testid="doc-misting-pump-notice"]');
+        cleanup();
+        return el ? { text: el.textContent, color: el.style.color } : null;
+      };
+      expect(text({ nozzles: 50, risers: 10 })).toBeNull(); // 60 exactly: the pump runs it
+      expect(text({ nozzles: 50, risers: 11 })).toEqual({ text: 'Over 60 nozzles: needs a Pynamite Zone Kit (up to 120)', color: 'rgb(146, 64, 14)' });
+      expect(text({ nozzles: 100, risers: 20 })).toMatchObject({ text: 'Over 60 nozzles: needs a Pynamite Zone Kit (up to 120)' });
+      expect(text({ nozzles: 100, risers: 21 })).toEqual({ text: 'Over 120 nozzles: needs a second system', color: 'rgb(185, 28, 28)' });
+    });
+
+    it('shows the pump as its cabinet and a bed line in the legend, and no blue square', () => {
+      const { container } = render(<EstimateProposalDocument data={{ ...BASE_DATA, mistingLayout: layout }} token="tok-123" />);
+      const legend = container.querySelector('[data-testid="doc-misting-legend"]');
+      expect(legend.textContent).toContain('Pump (cabinet)');
+      expect(legend.textContent).toContain('Bed line (risers about every 8 ft)');
+      expect(legend.innerHTML).not.toContain('#1d4ed8');
+      expect(legend.innerHTML.toLowerCase()).toContain('rgb(216, 197, 155)'); // the cabinet's tan
+    });
+
     it('adds no section and no text when the key is absent, so the document is unchanged', () => {
       const without = render(<EstimateProposalDocument data={BASE_DATA} token="tok-123" />).container.innerHTML;
       expect(without).not.toContain('doc-misting-layout');

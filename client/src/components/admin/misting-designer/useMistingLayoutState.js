@@ -8,11 +8,16 @@
 // A manual spray direction (aim) is one more manual edit: `aimed` for an automatic nozzle, `aim` on an added
 // one. A line change that re-places the nozzles clears it with the rest, under the same notice and Undo.
 //
+// A bed line (a landscape bed edge) gets risers about every 8 ft instead of nozzles. Those risers are derived like the automatic
+// nozzles, and moving or deleting one is the same kind of manual edit (`riserMoved`, `riserRemoved`): cleared with the rest,
+// under the same notice and Undo, when the lines change.
+//
 // Risers, the pump and no-mist zones are not part of the lines. They live in useMistingLayoutExtras, are
 // never cleared by a line change, and are merged into the object this hook returns.
 import { useMemo, useRef, useState } from 'react';
-import { MAP_HEIGHT, MAP_WIDTH } from '../../tech/treatmentZoneSpray';
+import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../../tech/treatmentZoneSpray';
 import { aimArrowLength, effectiveAim, headingFromVector, normalizeAim } from '../../../lib/mistingLayoutAim';
+import { applyRiserEdits, nozzleLines, placeBedRisers } from '../../../lib/mistingLayoutBeds';
 import { layoutForExport } from '../../../lib/mistingLayoutPersist';
 import {
   applyNozzleEdits,
@@ -26,8 +31,9 @@ import useMistingLayoutExtras from './useMistingLayoutExtras';
 const LINE_HIT_CSS_PX = 12;
 const VERTEX_HIT_CSS_PX = 14;
 
-const NO_EDITS = Object.freeze({ removed: [], moved: {}, added: [], aimed: {} });
-export const editCount = (e) => e.removed.length + Object.keys(e.moved).length + e.added.length + Object.keys(e.aimed || {}).length;
+const NO_EDITS = Object.freeze({ removed: [], moved: {}, added: [], aimed: {}, riserRemoved: [], riserMoved: {} });
+export const editCount = (e) => e.removed.length + Object.keys(e.moved).length + e.added.length + Object.keys(e.aimed || {}).length
+  + (e.riserRemoved || []).length + Object.keys(e.riserMoved || {}).length;
 const prefersReducedMotion = () => {
   try { return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch { return false; }
 };
@@ -99,12 +105,18 @@ export default function useMistingLayoutState(mapState, initial = null) {
   const ready = mapState.status === 'ready';
   const allLines = useMemo(() => (hasPoints(draft) ? [...lines, draft] : lines), [lines, draft]);
   const placed = useMemo(
-    () => (ready ? placeNozzles(allLines, { lat: mapState.center.lat, zoom: mapState.zoom }) : null),
+    () => (ready ? placeNozzles(nozzleLines(allLines), { lat: mapState.center.lat, zoom: mapState.zoom }) : null),
     [ready, allLines, mapState],
   );
+  // The risers along the bed lines, less the ones staff deleted and with the ones they moved where they put them.
+  const autoBedRisers = useMemo(
+    () => (ready ? placeBedRisers(allLines, { lat: mapState.center.lat, zoom: mapState.zoom }) : []),
+    [ready, allLines, mapState],
+  );
+  const bedRisers = useMemo(() => applyRiserEdits(autoBedRisers, edits), [autoBedRisers, edits]);
   const nozzles = useMemo(() => (placed ? applyNozzleEdits(placed.nozzles, edits) : []), [placed, edits]);
   const totals = useMemo(() => computeTotals(placed ? placed.lines : [], nozzles), [placed, nozzles]);
-  const extras = useMistingLayoutExtras(mapState, nozzles, initial ? initial.extras : null);
+  const extras = useMistingLayoutExtras(mapState, nozzles, bedRisers, initial ? initial.extras : null);
   // Walking-order numbers, the same ones the saved sketch prints, by nozzle key.
   const numbers = useMemo(
     () => new Map(layoutForExport(allLines, nozzles).nozzles.map((n) => [n.key, n.number])),
@@ -119,6 +131,21 @@ export default function useMistingLayoutState(mapState, initial = null) {
       return [n.key, { ...aim, tipPx: aimArrowLength(n, aim.heading, nozzles) }];
     }));
   }, [ready, mapState, nozzles, allLines, extras.zones]);
+  // Each riser carries a nozzle, so it sprays too: the same default aim (away from the house, along its line near water).
+  const riserAims = useMemo(() => {
+    if (!ready) return new Map();
+    const map = { lat: mapState.center.lat, zoom: mapState.zoom };
+    return new Map(extras.risers.map((r) => [r.key, effectiveAim(r, allLines, extras.zones, map)]));
+  }, [ready, mapState, extras.risers, allLines, extras.zones]);
+  // Everything that sprays, and the aim of each: the nozzles and the risers.
+  const sprayers = useMemo(() => [...nozzles, ...extras.risers], [nozzles, extras.risers]);
+  const sprayAims = useMemo(() => new Map([...aims, ...riserAims]), [aims, riserAims]);
+  // How far the pump is from the nearest drawn line (eave, fence or bed), in feet.
+  const pumpToLineFt = useMemo(() => {
+    if (!ready || !extras.pump) return null;
+    const hit = nearestPointOnLines(allLines, extras.pump, Infinity);
+    return hit ? pxToFeet(hit.distance, mapState.center.lat, mapState.zoom) : null;
+  }, [ready, mapState, extras.pump, allLines]);
   const nearWaterCount = useMemo(() => [...aims.values()].filter((a) => a.nearWater).length, [aims]);
   const aimedNozzle = aimKey ? nozzles.find((n) => n.key === aimKey) || null : null;
 
@@ -167,7 +194,7 @@ export default function useMistingLayoutState(mapState, initial = null) {
 
   // A tap in a drawing tool: a point, or the end of the line (last point again), or a closed loop (first point).
   const addDraftPoint = (p, scale) => {
-    const kind = mode === 'fence' ? 'fence' : 'eave';
+    const kind = mode === 'fence' || mode === 'bed' ? mode : 'eave';
     // Switching tools finishes the draft, so a draft here is always of this tool's kind.
     const current = draft && draft.kind === kind ? draft : { id: nextId('L'), kind, points: [] };
     const pts = current.points;
@@ -222,8 +249,23 @@ export default function useMistingLayoutState(mapState, initial = null) {
 
   const resetAim = (n) => editOverlay((prev) => clearAimIn(prev, n));
 
+  // A bed riser is moved or deleted through the edit overlay; a manual one through the extras.
+  const moveRiserTo = (riser, p) => {
+    if (riser.source !== 'bed') { extras.moveRiserTo(riser, p); return; }
+    const to = { x: Math.max(0, Math.min(MAP_WIDTH, p.x)), y: Math.max(0, Math.min(MAP_HEIGHT, p.y)) };
+    editOverlay((prev) => ({ ...prev, riserMoved: { ...withoutKey(prev.riserMoved || {}, riser.key), [riser.key]: to } }));
+  };
+  const deleteRiserOf = (riser) => {
+    if (riser.source !== 'bed') { extras.deleteRiserOf(riser); return; }
+    editOverlay((prev) => ({
+      ...prev,
+      riserMoved: withoutKey(prev.riserMoved || {}, riser.key),
+      riserRemoved: [...(prev.riserRemoved || []), riser.key],
+    }));
+  };
+
   const addNozzleOnLine = (p, scale) => {
-    const hit = nearestPointOnLines(allLines, p, LINE_HIT_CSS_PX * scale);
+    const hit = nearestPointOnLines(nozzleLines(allLines), p, LINE_HIT_CSS_PX * scale);
     setAddMiss(!hit);
     if (!hit) return;
     const key = nextId('m');
@@ -268,8 +310,13 @@ export default function useMistingLayoutState(mapState, initial = null) {
     deleteNozzle,
     moveNozzle,
     addNozzleOnLine,
+    moveRiserTo,
+    deleteRiserOf,
     numbers,
     aims,
+    sprayers,
+    sprayAims,
+    pumpToLineFt,
     nearWaterCount,
     directions,
     setDirections,

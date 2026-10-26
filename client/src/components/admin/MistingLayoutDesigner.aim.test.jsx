@@ -81,6 +81,11 @@ async function drawLine() {
   fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
   return frame;
 }
+// The pump is required before a layout can be saved.
+const placePump = (frame) => {
+  fireEvent.click(screen.getByRole('button', { name: 'Pump' }));
+  tap(frame, 320, 360);
+};
 const placed = placeNozzles([{ kind: 'eave', points: [{ x: 200, y: 200 }, { x: 600, y: 200 }] }], { lat: LAT, zoom: ZOOM });
 // Nozzle 4 of the walk, in css px, and where its arrow tip is while it points down the photo (heading 180, 40 map px from the nozzle).
 const middle = placed.nozzles[3];
@@ -305,6 +310,7 @@ describe('save and reopen', () => {
     const frame = await drawLine();
     fireEvent.click(screen.getByRole('button', { name: 'Edit nozzles' }));
     drag(frame, tipAt, { x: bodyAt.x + 30, y: bodyAt.y });
+    placePump(frame);
     adminFetch.mockResolvedValueOnce({ layout: { savedAt: '2026-10-26T15:30:00Z' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
     await waitFor(() => expect(screen.getByTestId('layout-save-status').textContent).toMatch(/^Saved /));
@@ -325,7 +331,8 @@ describe('save and reopen', () => {
   });
 
   it('sends no aim at all when nothing was aimed by hand', async () => {
-    await drawLine();
+    const frame = await drawLine();
+    placePump(frame);
     adminFetch.mockResolvedValueOnce({ layout: { savedAt: '2026-10-26T15:30:00Z' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
     await waitFor(() => expect(screen.getByTestId('layout-save-status').textContent).toMatch(/^Saved /));

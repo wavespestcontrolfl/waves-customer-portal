@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { applyRiserEdits, nozzleLines, placeBedRisers } from './mistingLayoutBeds';
 import { applyNozzleEdits, computeTotals, placeNozzles } from './mistingLayoutGeometry';
 import {
-  buildLayoutPayload, diffNozzleEdits, fetchSavedLayout, layoutForExport, putLayout, restoreLayout, savedLayoutIsForOtherAddress,
+  buildLayoutPayload, diffNozzleEdits, diffRiserEdits, fetchSavedLayout, layoutForExport, putLayout, restoreLayout, savedLayoutIsForOtherAddress,
 } from './mistingLayoutPersist';
 
 const adminFetch = vi.hoisted(() => vi.fn());
@@ -62,7 +63,7 @@ describe('save then reopen round trip', () => {
       address: null, center: CENTER, zoom: ZOOM, lines, nozzles: placed.nozzles, risers: [], pump: null, zones: [], mapWidth: 1280, mapHeight: 960,
     });
     const restored = restoreLayout(asSaved(payload));
-    expect(restored.edits).toEqual({ removed: [], moved: {}, added: [], aimed: {} });
+    expect(restored.edits).toEqual({ removed: [], moved: {}, added: [], aimed: {}, riserRemoved: [], riserMoved: {} });
     expect(restored.extras).toMatchObject({ risers: [], pump: null, zones: [] });
   });
 
@@ -73,6 +74,84 @@ describe('save then reopen round trip', () => {
     }));
     expect(restored.edits.added.map((n) => [n.x, n.y, n.kind])).toEqual([[10, 20, 'eave'], [30, 40, 'fence']]);
     expect(restored.edits.removed).toEqual([]);
+  });
+});
+
+describe('bed lines and their risers: save then reopen', () => {
+  const lines = () => [
+    { id: 'L1', kind: 'eave', points: [{ x: 100, y: 200 }, { x: 700, y: 200 }] },
+    { id: 'L2', kind: 'bed', points: [{ x: 150, y: 600 }, { x: 750, y: 600 }, { x: 750, y: 800 }] },
+  ];
+  const keyOf = (r) => `${r.x.toFixed(2)},${r.y.toFixed(2)}`;
+  const finalRisers = (restored) => [
+    ...applyRiserEdits(placeBedRisers(restored.lines, { lat: LAT, zoom: ZOOM }), restored.edits),
+    ...restored.extras.risers,
+  ];
+
+  it('sends every final riser with where it came from, and the bed line as a line', () => {
+    const ls = lines();
+    const auto = placeBedRisers(ls, { lat: LAT, zoom: ZOOM });
+    expect(auto.length).toBeGreaterThan(8);
+    const risers = [...auto.slice(1).map((r, i) => (i === 0 ? { ...r, x: r.x + 9, y: r.y + 4 } : r)), { key: 'R1', x: 40, y: 50, source: 'manual' }];
+    const payload = buildLayoutPayload({
+      address: null, center: CENTER, zoom: ZOOM, lines: ls, nozzles: placeNozzles(nozzleLines(ls), { lat: LAT, zoom: ZOOM }).nozzles,
+      risers, pump: { x: 5, y: 6 }, zones: [], mapWidth: 1280, mapHeight: 960,
+    });
+    expect(payload.lines.map((l) => l.kind)).toEqual(['eave', 'bed']);
+    expect(payload.risers).toHaveLength(auto.length); // all but one bed riser, plus the manual one
+    expect(payload.risers.filter((r) => r.source === 'bed')).toHaveLength(auto.length - 1);
+    expect(payload.risers[payload.risers.length - 1]).toEqual({ x: 40, y: 50, source: 'manual' });
+    expect(payload.nozzles.every((n) => n.lineIndex === 0)).toBe(true); // the bed line carries no nozzle
+  });
+
+  it('reopens with the same risers: the bed ones derived from the bed line, a deleted one still gone, a moved one still moved', () => {
+    const ls = lines();
+    const auto = placeBedRisers(ls, { lat: LAT, zoom: ZOOM });
+    const finals = [
+      ...auto.filter((_, i) => i !== 2).map((r, i) => (i === 4 ? { ...r, x: r.x + 12, y: r.y - 7 } : r)),
+      { key: 'R1', x: 300, y: 400, source: 'manual' },
+      { key: 'R2', x: 310, y: 410, source: 'manual' },
+    ];
+    const payload = buildLayoutPayload({
+      address: null, center: CENTER, zoom: ZOOM, lines: ls, nozzles: placeNozzles(nozzleLines(ls), { lat: LAT, zoom: ZOOM }).nozzles,
+      risers: finals, pump: { x: 5, y: 6 }, zones: [], mapWidth: 1280, mapHeight: 960,
+    });
+    const restored = restoreLayout(asSaved(payload));
+    expect(restored.lines.map((l) => l.kind)).toEqual(['eave', 'bed']);
+    expect(restored.edits.riserRemoved).toEqual([auto[2].key]);
+    expect(Object.keys(restored.edits.riserMoved)).toHaveLength(1);
+    expect(restored.extras.risers.map((r) => [r.x, r.y])).toEqual([[300, 400], [310, 410]]);
+    expect(finalRisers(restored).map(keyOf).sort()).toEqual(payload.risers.map(keyOf).sort());
+    // The nozzles reopen as they were: the bed line added none.
+    const placed = placeNozzles(nozzleLines(restored.lines), { lat: LAT, zoom: ZOOM });
+    expect(applyNozzleEdits(placed.nozzles, restored.edits)).toHaveLength(payload.nozzles.length);
+    expect(restored.edits.removed).toEqual([]);
+  });
+
+  it('an unedited bed reopens with no riser edits, and a layout saved before risers had a source reopens them all as manual', () => {
+    const ls = lines();
+    const auto = placeBedRisers(ls, { lat: LAT, zoom: ZOOM });
+    const payload = buildLayoutPayload({
+      address: null, center: CENTER, zoom: ZOOM, lines: ls, nozzles: [], risers: auto, pump: { x: 1, y: 1 }, zones: [], mapWidth: 1280, mapHeight: 960,
+    });
+    const restored = restoreLayout(asSaved(payload));
+    expect(restored.edits).toMatchObject({ riserRemoved: [], riserMoved: {} });
+    expect(restored.extras.risers).toEqual([]);
+
+    const old = restoreLayout(asSaved({ ...payload, risers: payload.risers.map(({ x, y }) => ({ x, y })) }));
+    // Every one is a manual riser where it was saved, so the derived ones are all set aside: the same risers, in the same places.
+    expect(old.extras.risers).toHaveLength(auto.length);
+    expect(old.edits.riserRemoved).toHaveLength(auto.length);
+    expect(finalRisers(old).map(keyOf).sort()).toEqual(payload.risers.map(keyOf).sort());
+  });
+
+  it('diffRiserEdits: a saved bed riser with no automatic one to pair with comes back as a manual riser', () => {
+    const auto = [{ key: 'bed:a', x: 0, y: 0 }, { key: 'bed:b', x: 100, y: 0 }];
+    const edits = diffRiserEdits(auto, [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 500, y: 500 }]);
+    expect(edits.riserRemoved).toEqual([]);
+    expect(edits.riserMoved).toEqual({});
+    expect(edits.manual).toEqual([{ x: 500, y: 500 }]);
+    expect(diffRiserEdits(auto, [{ x: 0, y: 0 }]).riserRemoved).toEqual(['bed:b']);
   });
 });
 
@@ -229,7 +308,7 @@ describe('buildLayoutPayload', () => {
       zones: [{ key: 'Z1', kind: 'ac', x: 5, y: 6, radiusFt: 8, radiusPx: 40 }], mapWidth: 1280, mapHeight: 960,
     });
     expect(payload.nozzles).toEqual([{ x: 100, y: 0, kind: 'eave', lineIndex: 0 }, { x: 300, y: 0, kind: 'eave', lineIndex: 0 }]);
-    expect(payload.risers).toEqual([{ x: 1, y: 2 }]);
+    expect(payload.risers).toEqual([{ x: 1, y: 2, source: 'manual' }]);
     expect(payload.zones).toEqual([{ kind: 'ac', x: 5, y: 6, radiusFt: 8 }]);
     expect(payload).toMatchObject({ mapWidth: 1280, mapHeight: 960, zoom: ZOOM, center: CENTER });
   });

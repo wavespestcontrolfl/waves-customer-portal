@@ -1,6 +1,6 @@
 // Pointer handling for the misting layout map (mouse, pen and touch share it), keyed by tool.
 // Each tool names what it does and nothing else, so a tap never means two things in one tool:
-//   eave / fence   a tap adds a point (or ends the line, or closes the loop)
+//   eave / fence / bed   a tap adds a point (or ends the line, or closes the loop)
 //   edit           a tap on a nozzle deletes it, a drag moves it, a tap elsewhere does nothing.
 //                  The tip of a nozzle's aim arrow is a separate handle: a drag turns the nozzle's
 //                  spray, a tap only selects it for Reset aim (it never deletes). Where a body and a tip
@@ -54,6 +54,7 @@ const drawTool = { tap: (layout, p) => layout.addDraftPoint(p, p.scale) };
 const TOOLS = {
   eave: drawTool,
   fence: drawTool,
+  bed: drawTool,
   add: { tap: (layout, p) => layout.addNozzleOnLine(p, p.scale) },
   edit: {
     grab: (layout, p, mapState) => nearer(p, grabFrom(layout.nozzles, p, mapState), grabTip(layout, p, mapState)),

@@ -11,7 +11,9 @@ import { MIST_TRACE_STROKES, drawAimArrow, drawMistWedge } from './mistingLayout
 
 const COPPER = '#b87333';
 const WARN = '#dc2626';
-const PUMP = '#1d4ed8';
+const CABINET_BODY = '#d8c59b';
+const CABINET_LID = '#9a7f46';
+const CABINET_EDGE = '#6b5428';
 const NOZZLE_BLUE = '#0b6fb8';
 // A nozzle near water or inside a no-mist zone: amber with a dark ring. One inside a zone also gets a dashed
 // ring and a "!", so that warning does not rely on color alone.
@@ -102,9 +104,28 @@ function drawLabels(ctx, model, obstacles) {
   if (model.pump) drawLabelNear(ctx, 'Pump', { x: model.pump.x, y: model.pump.y, gap: 22 }, model.nozzles, placed);
 }
 
+// A bed line (a landscape bed edge, with risers along it) is a thin dashed copper line with a white halo, not a mist trace.
+function drawBedLine(ctx, line) {
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  polyline(ctx, line.points);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.lineWidth = 7;
+  ctx.setLineDash([]);
+  ctx.stroke();
+  polyline(ctx, line.points);
+  ctx.strokeStyle = COPPER;
+  ctx.lineWidth = 3.5;
+  ctx.setLineDash([10, 7]);
+  ctx.stroke();
+  ctx.restore();
+}
+
 // The Treatment Zone Mapper's layered blue glow; a fence is dashed on the top stroke only.
 function drawLine(ctx, line) {
   if (line.points.length < 2) return;
+  if (line.kind === 'bed') { drawBedLine(ctx, line); return; }
   ctx.save();
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
@@ -176,13 +197,19 @@ function drawRiser(ctx, riser) {
   ctx.restore();
 }
 
+// The pump is drawn as its cabinet (Pynamite's Cube Pro): a tan box with a darker lid line.
 function drawPump(ctx, pump) {
   ctx.save();
-  ctx.fillStyle = PUMP;
-  ctx.fillRect(pump.x - 14, pump.y - 14, 28, 28);
+  ctx.fillStyle = CABINET_BODY;
+  ctx.fillRect(pump.x - 17, pump.y - 14, 34, 28);
+  ctx.fillStyle = CABINET_LID;
+  ctx.fillRect(pump.x - 17, pump.y - 14, 34, 9);
   ctx.lineWidth = 4;
   ctx.strokeStyle = '#fff';
-  ctx.strokeRect(pump.x - 14, pump.y - 14, 28, 28);
+  ctx.strokeRect(pump.x - 17, pump.y - 14, 34, 28);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = CABINET_EDGE;
+  ctx.strokeRect(pump.x - 17, pump.y - 14, 34, 28);
   ctx.restore();
 }
 
@@ -233,24 +260,25 @@ export function drawSketch(ctx, model, { map }) {
   ctx.drawImage(map, 0, 0, MAP_WIDTH, MAP_HEIGHT);
   model.zones.forEach((z) => drawZone(ctx, z));
   model.lines.forEach((l) => drawLine(ctx, l));
-  model.risers.forEach((r) => drawRiser(ctx, r));
-  if (model.pump) drawPump(ctx, model.pump);
   // The aim marks (wedges, arrows) are ours to keep off the photo's bottom strip, where Google's attribution sits:
   // a nozzle near the bottom edge can aim down past it. The staff's own points (dots, risers, pump) are not clipped,
   // so a point they placed there is never lost from the picture.
-  const aimMarks = (draw) => {
+  const aimMarks = (list, draw) => {
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, 0, MAP_WIDTH, BOTTOM_LIMIT);
     ctx.clip();
-    model.nozzles.forEach(draw);
+    list.forEach(draw);
     ctx.restore();
   };
-  aimMarks((n) => drawMistWedge(ctx, n, n.aimHeading, n.reachPx));
+  // Every riser carries a nozzle, so it sprays like one: a wedge under its triangle.
+  aimMarks([...model.nozzles, ...model.risers], (n) => drawMistWedge(ctx, n, n.aimHeading, n.reachPx));
+  model.risers.forEach((r) => drawRiser(ctx, r));
+  if (model.pump) drawPump(ctx, model.pump);
   model.nozzles.forEach((n) => drawNozzle(ctx, n));
   // Arrows over the dots, so a neighbour's dot never hides one (a nozzle aimed along its line points at the
   // next dot); the digits over the arrows, so an arrow never hides a number.
-  aimMarks((n) => drawAimArrow(ctx, n, n.aimHeading, n.nearWater, NOZZLE_R + 3, n.arrowPx));
+  aimMarks(model.nozzles, (n) => drawAimArrow(ctx, n, n.aimHeading, n.nearWater, NOZZLE_R + 3, n.arrowPx));
   model.nozzles.forEach((n) => drawNozzleNumber(ctx, n));
   drawLabels(ctx, model, [scaleBarRect(model)]);
   drawScaleBar(ctx, model);

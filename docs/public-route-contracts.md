@@ -5697,7 +5697,8 @@ estimate carries the misting system by the same reader the accept guards use
 (`estimateDataCarriesMosquitoMisting`, which honors an authored proposal and ignores stale
 engine rows) and the layout was drawn for the estimate's current address (case, spacing and punctuation blind; a trailing ZIP or state is ignored; a changed house number or street omits it), so every other response stays byte-identical. A storage failure omits the key,
 never the response. `EstimateProposalDocument` prints it as a "Proposed misting layout"
-card (in the estimate card, with the counts, a legend and the concept note) in the place of the
+card (in the estimate card, with the counts, a pump notice when nozzles plus risers pass 60 (a Zone Kit)
+or 120 (a second system), a legend and the concept note) in the place of the
 satellite photo, which is then not shown, and counts a sketch that fails to load as a failed image
 (the satellite photo is not counted when a layout is present); the interactive estimate
 page ignores it.

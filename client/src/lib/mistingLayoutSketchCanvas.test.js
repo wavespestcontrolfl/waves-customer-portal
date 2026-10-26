@@ -33,6 +33,21 @@ const model = () => buildSketchModel({
   zones: [{ kind: 'pool', x: 500, y: 500, radiusFt: 15, radiusPx: 60 }],
 });
 
+// Records the fill style at each fillRect and the width and color at each stroke.
+function styleRecordingContext2() {
+  const calls = [];
+  const ctx = new Proxy({ measureText: (t) => ({ width: String(t).length * 14 }) }, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (prop === 'fillRect') return (...a) => { calls.push(['fillRect', target.fillStyle, ...a]); };
+      if (prop === 'stroke') return () => { calls.push(['stroke', target.lineWidth, target.strokeStyle]); };
+      return (...a) => { calls.push([prop, ...a]); };
+    },
+    set(target, prop, value) { target[prop] = value; return true; },
+  });
+  return { ctx, calls };
+}
+
 describe('drawSketch', () => {
   it('draws the photo across the whole frame, then the marks, and no title, legend, counts or note on it', () => {
     const { ctx, calls } = recordingContext();
@@ -56,8 +71,8 @@ describe('drawSketch', () => {
     // No glass panels: no rounded box is drawn or clipped to.
     expect(calls.filter((c) => c[0] === 'arcTo')).toHaveLength(0);
     expect(calls.filter((c) => c[0] === 'clip')).toHaveLength(2); // the clips that keep wedges and arrows off the strip
-    expect(calls.some((c) => c[0] === 'fillRect')).toBe(true); // the pump square
-    expect(calls.filter((c) => c[0] === 'fillRect' && !(c[3] === 28 && c[4] === 28))).toHaveLength(0);
+    // The only rectangles are the pump cabinet's body and lid.
+    expect(calls.filter((c) => c[0] === 'fillRect').map((c) => [c[3], c[4]])).toEqual([[34, 28], [34, 9]]);
   });
 
   it('keeps everything of ours off the photo\'s bottom strip where the Google attribution sits', () => {
@@ -140,10 +155,37 @@ describe('drawSketch', () => {
     expect(lineStrokes('fence').map((s) => s[2])).toEqual([[], [], [18, 12]]);
   });
 
-  it('draws the pump as one square', () => {
+  it('draws the pump as its cabinet: a tan box with a darker lid line, not a blue square', () => {
+    const { ctx, calls } = styleRecordingContext2();
+    drawSketch(ctx, model(), { map: {} });
+    const rects = calls.filter((c) => c[0] === 'fillRect');
+    expect(rects.map((c) => [c[1], c[4], c[5]])).toEqual([['#d8c59b', 34, 28], ['#9a7f46', 34, 9]]);
+    expect(rects[0].slice(1)).toEqual(['#d8c59b', 600 - 17, 300 - 14, 34, 28]);
+    expect(calls.some((c) => c[0] === 'fillRect' && c[1] === '#1d4ed8')).toBe(false);
+  });
+
+  it('draws a bed line as a thin dashed copper line, not the blue mist trace, and its risers with a mist wedge each', () => {
+    const { ctx, calls } = styleRecordingContext2();
+    const m = buildSketchModel({
+      lat: 26.95, zoom: 20,
+      lines: [{ id: 'B1', kind: 'bed', points: [{ x: 100, y: 700 }, { x: 400, y: 700 }] }],
+      nozzles: [{ x: 700, y: 300, kind: 'eave', lineIndex: null }],
+      risers: [{ x: 100, y: 700, source: 'bed', lineIndex: 0 }, { x: 250, y: 700, source: 'bed', lineIndex: 0 }, { x: 600, y: 600, source: 'manual', lineIndex: null }],
+      pump: { x: 50, y: 50 }, zones: [],
+    });
+    drawSketch(ctx, m, { map: {} });
+    const strokes = calls.filter((c) => c[0] === 'stroke').slice(0, 2);
+    expect(strokes.map((c) => [c[1], c[2]])).toEqual([[7, 'rgba(255, 255, 255, 0.85)'], [3.5, '#b87333']]);
+    expect(calls.some((c) => c[0] === 'stroke' && c[2] === 'rgba(10,126,194,0.28)')).toBe(false); // no mist glow on a bed
+    // Three risers and one nozzle spray alike: four wedges, all the same 10 ft long.
+    expect(m.risers.every((r) => Number.isFinite(r.aimHeading) && r.reachPx > 0)).toBe(true);
+    expect(calls.filter((c) => c[0] === 'arc' && c[3] === m.risers[0].reachPx)).toHaveLength(4);
+  });
+
+  it('draws the pump as one cabinet', () => {
     const { ctx, calls } = recordingContext();
     drawSketch(ctx, model(), { map: {} });
-    expect(calls.filter((c) => c[0] === 'fillRect' && c[3] === 28 && c[4] === 28)).toHaveLength(1);
+    expect(calls.filter((c) => c[0] === 'fillRect' && c[3] === 34 && c[4] === 28)).toHaveLength(1);
   });
 
   it('draws the labels after the nozzles, beside the pump when a nozzle sits under it, and never on top of each other', () => {

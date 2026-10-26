@@ -50,7 +50,8 @@ export function headingFromVector(dx, dy) {
   return normalizeAim((Math.atan2(dx, -dy) * 180) / Math.PI);
 }
 
-const lineKind = (line) => (line && line.kind === 'fence' ? 'fence' : 'eave');
+// The house is the eave lines: a fence or a bed line is not part of it.
+const isEave = (line) => Boolean(line) && (line.kind === undefined || line.kind === 'eave');
 const validPoint = (p) => p && Number.isFinite(p.x) && Number.isFinite(p.y);
 
 // Mean of the eave-line vertices. A loop's closing vertex repeats its first, so it is counted once.
@@ -59,7 +60,7 @@ function houseCenter(lines) {
   let sy = 0;
   let n = 0;
   (Array.isArray(lines) ? lines : []).forEach((line) => {
-    if (lineKind(line) !== 'eave') return;
+    if (!isEave(line)) return;
     const pts = (line.points || []).filter(validPoint);
     const closed = pts.length >= 4 && distance(pts[0], pts[pts.length - 1]) < EPS;
     (closed ? pts.slice(0, -1) : pts).forEach((p) => { sx += p.x; sy += p.y; n += 1; });

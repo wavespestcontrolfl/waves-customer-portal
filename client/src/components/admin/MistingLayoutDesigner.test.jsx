@@ -509,7 +509,7 @@ describe('MistingLayoutDesigner', () => {
       tap(frame, 300, 200);
       expect(pumps()).toHaveLength(1);
       expect(pumps()[0]).toHaveTextContent('Pump');
-      expect(pumps()[0].querySelector('rect').getAttribute('x')).toBe(String(600 - 12));
+      expect(pumps()[0].querySelector('rect').getAttribute('x')).toBe(String(600 - 17)); // the cabinet is 34 wide
       expect(countsText()).toContain('Pump: placed');
     });
 

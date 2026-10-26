@@ -36,17 +36,17 @@ export default function useMistingLayoutSave({ estimateId, mapState, address, la
   }, [saved, payload, signature]);
 
   const save = async () => {
-    if (!payload || !estimateId || phase.state === 'saving') return;
+    if (!payload || !estimateId || !pump || phase.state === 'saving') return;
     setPhase({ state: 'saving', message: '' });
     const sentSignature = signature;
     try {
-      const exported = layoutForExport(allLines, nozzles);
+      const exported = layoutForExport(allLines, nozzles, risers);
       const model = buildSketchModel({
         lat: mapState.center.lat,
         zoom: mapState.zoom,
         lines: exported.lines,
         nozzles: exported.nozzles,
-        risers,
+        risers: exported.risers,
         pump,
         zones,
       });
@@ -70,6 +70,7 @@ export default function useMistingLayoutSave({ estimateId, mapState, address, la
     saving: phase.state === 'saving',
     error: phase.state === 'error' ? phase.message : '',
     hasEstimate: Boolean(estimateId),
-    canSave: Boolean(estimateId && payload) && phase.state !== 'saving',
+    hasPump: Boolean(pump),
+    canSave: Boolean(estimateId && payload && pump) && phase.state !== 'saving',
   };
 }

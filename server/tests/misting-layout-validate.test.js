@@ -35,9 +35,9 @@ describe('validateLayoutPayload', () => {
     expect(out.zones).toEqual([{ kind: 'pool', x: 300, y: 300, radiusFt: 15 }]);
   });
 
-  test('a layout with no lines, risers, pump or zones is fine if it has a nozzle (placed by hand)', () => {
-    const out = validateLayoutPayload(valid({ lines: [], risers: [], pump: null, zones: [] }));
-    expect(out).toMatchObject({ riserCount: 0, linearFt: 0, pump: null });
+  test('a layout with no lines, risers or zones is fine if it has a nozzle (placed by hand) and the pump', () => {
+    const out = validateLayoutPayload(valid({ lines: [], risers: [], zones: [] }));
+    expect(out).toMatchObject({ riserCount: 0, linearFt: 0, pump: { x: 70, y: 80 } });
     expect(out.nozzles.every((n) => n.lineIndex === null)).toBe(true);
   });
 
@@ -61,6 +61,33 @@ describe('validateLayoutPayload', () => {
     [360, 361, -1, -0.01, NaN, Infinity, 'north', '', [], {}, true].forEach((aim) => {
       problem({ nozzles: [{ x: 1, y: 1, kind: 'eave', lineIndex: 0, aim }] }, /nozzles\[0\] aim must be a heading/);
     });
+  });
+
+  test('requires the pump', () => {
+    problem({ pump: null }, /needs the pump placed/);
+    problem({ pump: undefined }, /needs the pump placed/);
+    expect(() => validateLayoutPayload(valid())).not.toThrow();
+  });
+
+  test('accepts bed lines, which add no nozzles and no eave or fence length, and counts every riser', () => {
+    const base = validateLayoutPayload(valid());
+    const out = validateLayoutPayload(valid({
+      lines: [
+        ...valid().lines,
+        { id: 'B1', kind: 'bed', points: [{ x: 100, y: 800 }, { x: 900, y: 800 }] },
+      ],
+      risers: [{ x: 50, y: 60, source: 'manual' }, { x: 100, y: 800, source: 'bed' }, { x: 180, y: 800, source: 'bed' }, { x: 5, y: 5 }],
+    }));
+    expect(out.lines).toHaveLength(3);
+    expect(out.lines[2]).toMatchObject({ id: 'B1', kind: 'bed' });
+    expect(out.linearFt).toBe(base.linearFt); // the bed line's 800 px are not eave or fence feet
+    expect(out).toMatchObject({ nozzleCount: 3, eaveCount: 2, fenceCount: 1, riserCount: 4 });
+    expect(out.risers).toEqual([{ x: 50, y: 60, source: 'manual' }, { x: 100, y: 800, source: 'bed' }, { x: 180, y: 800, source: 'bed' }, { x: 5, y: 5 }]);
+  });
+
+  test('a riser source is bed or manual or absent, nothing else', () => {
+    ['wall', '', 1, true].forEach((source) => problem({ risers: [{ x: 1, y: 1, source }] }, /risers\[0\] source must be bed or manual/));
+    expect(validateLayoutPayload(valid({ risers: [{ x: 1, y: 1, source: null }] })).risers).toEqual([{ x: 1, y: 1 }]);
   });
 
   test('drops a line index that points past the lines', () => {
@@ -101,7 +128,8 @@ describe('validateLayoutPayload', () => {
 
   test('rejects unknown kinds and a line with fewer than two points', () => {
     problem({ nozzles: [{ x: 1, y: 1, kind: 'roof' }] }, /kind must be eave or fence/);
-    problem({ lines: [{ kind: 'wall', points: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }] }, /kind must be eave or fence/);
+    problem({ nozzles: [{ x: 1, y: 1, kind: 'bed' }] }, /kind must be eave or fence/); // a bed line carries risers, never nozzles
+    problem({ lines: [{ kind: 'wall', points: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }] }, /kind must be eave, fence or bed/);
     problem({ lines: [{ kind: 'eave', points: [{ x: 1, y: 1 }] }] }, /at least 2 points/);
     problem({ zones: [{ kind: 'garden', x: 1, y: 1, radiusFt: 8 }] }, /known no-mist kind/);
   });

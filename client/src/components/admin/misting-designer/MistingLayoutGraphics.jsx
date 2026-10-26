@@ -18,7 +18,16 @@ const pointList = (points) => points.map((p) => `${p.x},${p.y}`).join(' ');
 
 // A traced line is the Treatment Zone Mapper's layered blue glow (wide soft blue, white core, strong blue on top);
 // a fence is dashed on the top stroke only, so the glow stays whole.
+// A bed line (a landscape bed edge, risers along it) is not a mist trace: a thin dashed copper line with a white halo.
 export function LineGraphic({ line }) {
+  if (line.kind === 'bed') {
+    return (
+      <g data-testid="layout-line-bed">
+        <polyline points={pointList(line.points)} fill="none" stroke="#fff" strokeOpacity="0.85" strokeWidth="7" strokeLinejoin="round" strokeLinecap="round" />
+        <polyline points={pointList(line.points)} fill="none" stroke={COPPER} strokeWidth="3.5" strokeDasharray="10 7" strokeLinejoin="round" />
+      </g>
+    );
+  }
   return (
     <g data-testid={`layout-line-${line.kind}`}>
       {MIST_TRACE_STROKES.map((stroke, i) => (
@@ -140,10 +149,15 @@ function MapLabel({ x, y, children }) {
   );
 }
 
+// The pump is drawn as its cabinet (Pynamite's Cube Pro): a tan box with a darker lid line.
+export const CABINET = { body: '#d8c59b', lid: '#9a7f46', edge: '#6b5428' };
+
 export function PumpGraphic({ pump }) {
   return (
     <g data-testid="layout-pump">
-      <rect x={pump.x - 12} y={pump.y - 12} width="24" height="24" fill="#1d4ed8" stroke="#fff" strokeWidth="4" />
+      <rect x={pump.x - 17} y={pump.y - 14} width="34" height="28" rx="2" fill={CABINET.body} stroke="#fff" strokeWidth="4" />
+      <rect x={pump.x - 17} y={pump.y - 14} width="34" height="9" rx="2" fill={CABINET.lid} />
+      <rect x={pump.x - 17} y={pump.y - 14} width="34" height="28" rx="2" fill="none" stroke={CABINET.edge} strokeWidth="1.5" />
       <MapLabel x={pump.x} y={pump.y + 40}>Pump</MapLabel>
     </g>
   );

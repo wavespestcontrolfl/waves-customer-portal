@@ -3,6 +3,7 @@
 import { Button } from '../../ui';
 import { MAP_HEIGHT, MAP_WIDTH } from '../../tech/treatmentZoneSpray';
 import { MISTING_LEGEND_KEYS } from '../../../lib/mistingLayoutCounts';
+import { pumpLoad, pumpLoadLine, pumpNotice } from '../../../lib/mistingLayoutLimits';
 import { ZONE_KINDS, zoneKindDef } from '../../../lib/mistingLayoutExtras';
 import {
   AimArrow,
@@ -20,6 +21,7 @@ export const CONCEPT_LABEL = 'Concept layout — final placement at the design v
 const MODES = [
   { key: 'eave', label: 'Eave line' },
   { key: 'fence', label: 'Fence line' },
+  { key: 'bed', label: 'Bed line' },
   { key: 'edit', label: 'Edit nozzles' },
   { key: 'add', label: 'Add nozzle' },
   { key: 'riser', label: 'Riser' },
@@ -30,12 +32,15 @@ const MODES = [
 const HINTS = {
   edit: 'Tap a nozzle to delete it. Drag a nozzle to move it. Drag the tip of its arrow to aim it.',
   add: 'Tap a drawn line to add a nozzle.',
-  riser: 'Tap the photo to add a riser. Tap a riser to delete it, or drag it to move it. A tap only deletes when it lands on a riser.',
+  riser: 'Tap the photo to add a riser. Tap a riser to delete it, or drag it to move it. A tap only deletes when it lands on a riser. Risers along a bed line can be moved or deleted too.',
   pump: 'Tap the photo to place the pump. Tap again to move it. There is one pump.',
   zone: 'Pick what the mist must avoid, then tap the photo to mark it. Tap inside a zone to delete it.',
 };
 
 export function toolHint(mode) {
+  if (mode === 'bed') {
+    return 'Tap the photo to drop points along the edge of a landscape bed. Risers go along it about every 8 ft, with one at each end. Tap the last point again, or press Finish line, to end it.';
+  }
   return HINTS[mode]
     || `Tap the photo to drop points along the ${mode === 'fence' ? 'fence' : 'eave'}. Tap the last point again, or press Finish line, to end it. Tap the first point to close a loop.`;
 }
@@ -162,8 +167,8 @@ export function MapCanvas({ frameRef, handlers, layout, mapUrl, address, map }) 
         className="absolute inset-0 w-full h-full block"
       />
       <MistingSprayLayer
-        nozzles={nozzles}
-        aims={aims}
+        nozzles={layout.sprayers}
+        aims={layout.sprayAims}
         lat={map.lat}
         zoom={map.zoom}
         animate={animate}
@@ -257,8 +262,10 @@ export function zoneWarnings(flags) {
 }
 
 export function CountsPanel({ layout, note, riserNote }) {
-  const { totals, risers, pump, zones, flags, nearWaterCount } = layout;
+  const { totals, risers, pump, zones, flags, nearWaterCount, pumpToLineFt } = layout;
   const warnings = zoneWarnings(flags);
+  const load = pumpLoad(totals.count, risers.length);
+  const loadNotice = pumpNotice(load);
   return (
     <div aria-live="polite" data-testid="layout-counts" className="text-14 text-zinc-900">
       <div className="font-medium">
@@ -269,11 +276,23 @@ export function CountsPanel({ layout, note, riserNote }) {
         Line: {Math.round(totals.linearFt)} ft <span>(eave {Math.round(totals.eaveFt)} ft, fence {Math.round(totals.fenceFt)} ft)</span>
       </div>
       <div className="font-medium">Risers: {risers.length}</div>
+      <div className="text-zinc-600">{pumpLoadLine(load)}</div>
       <div className="text-zinc-600">Pump: {pump ? 'placed' : 'not placed'}</div>
+      {pumpToLineFt !== null && <div className="text-zinc-600">Pump to nearest line: {Math.round(pumpToLineFt)} ft</div>}
       <div className="text-zinc-600">No-mist zones: {zones.length}</div>
       {warnings.map((w) => (
         <div key={w} data-testid="layout-zone-warning" className="mt-1 text-alert-fg font-medium">{`Warning: ${w}`}</div>
       ))}
+      {loadNotice ? (
+        <div
+          role="status"
+          data-testid="layout-pump-notice"
+          data-level={loadNotice.level}
+          className={`mt-1 font-medium ${loadNotice.level === 'red' ? 'text-alert-fg' : 'text-amber-800'}`}
+        >
+          {loadNotice.text}
+        </div>
+      ) : null}
       {note ? <div role="status" className="mt-1 text-amber-800">{note}</div> : null}
       {riserNote ? <div role="status" className="mt-1 text-amber-800">{riserNote}</div> : null}
     </div>
@@ -286,7 +305,8 @@ const SWATCH = {
   near: { background: '#f59e0b', border: '2px solid #92400e', borderRadius: '50%' },
   arrow: { background: '#7dd3fc', borderRadius: 2, height: 4, width: 18, border: 0, alignSelf: 'center' },
   riser: { background: '#b87333', border: '2px solid #fff', borderRadius: '50%' },
-  pump: { background: '#1d4ed8', border: '2px solid #fff', borderRadius: 2 },
+  pump: { background: '#d8c59b', border: '2px solid #9a7f46', borderTopWidth: 4, borderRadius: 2 },
+  bed: { background: '#b87333', borderRadius: 2, height: 3, width: 16, border: 0, alignSelf: 'center' },
   zone: { background: 'rgba(220,38,38,0.35)', border: '2px dashed #dc2626', borderRadius: '50%' },
 };
 

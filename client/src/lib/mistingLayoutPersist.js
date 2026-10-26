@@ -7,6 +7,7 @@
 // ones, and the overlay follows the step 1 rule: changing the lines re-places the nozzles and clears it.
 import { adminFetch } from '../utils/admin-fetch';
 import { normalizeAim } from './mistingLayoutAim';
+import { nozzleLines, placeBedRisers } from './mistingLayoutBeds';
 import { nearestPointOnLines, placeNozzles } from './mistingLayoutGeometry';
 import { numberNozzles } from './mistingLayoutSketch';
 
@@ -19,7 +20,7 @@ const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
  * `lineIndex` pointing into the kept lines (null when their line was dropped). A nozzle keeps its
  * `key`, and its `aim` only when staff aimed it by hand.
  */
-export function layoutForExport(allLines, nozzles) {
+export function layoutForExport(allLines, nozzles, risers = []) {
   const remap = new Map();
   const lines = [];
   (allLines || []).forEach((line, i) => {
@@ -38,12 +39,20 @@ export function layoutForExport(allLines, nozzles) {
       ...(aim === null ? {} : { aim }),
     };
   });
-  return { lines, nozzles: numberNozzles(prepared, lines) };
+  // A bed riser keeps the bed line it was placed on (its aim follows that line); a manual one names no line.
+  const exportedRisers = (risers || []).map((r) => ({
+    key: r.key,
+    x: r.x,
+    y: r.y,
+    source: r.source === 'bed' ? 'bed' : 'manual',
+    lineIndex: remap.has(r.lineIndex) ? remap.get(r.lineIndex) : null,
+  }));
+  return { lines, nozzles: numberNozzles(prepared, lines), risers: exportedRisers };
 }
 
-/** The JSON part of the save request. Nozzles are in walking order. */
+/** The JSON part of the save request. Nozzles are in walking order; risers carry where they came from (bed or manual). */
 export function buildLayoutPayload({ address, center, zoom, lines, nozzles, risers, pump, zones, mapWidth, mapHeight }) {
-  const exported = layoutForExport(lines, nozzles);
+  const exported = layoutForExport(lines, nozzles, risers);
   return {
     address: address || null,
     center: { lat: center.lat, lng: center.lng },
@@ -52,7 +61,7 @@ export function buildLayoutPayload({ address, center, zoom, lines, nozzles, rise
     mapHeight,
     lines: exported.lines,
     nozzles: exported.nozzles.map(({ x, y, kind, lineIndex, aim }) => ({ x, y, kind, lineIndex, ...(aim === undefined ? {} : { aim }) })),
-    risers: (risers || []).map(({ x, y }) => ({ x, y })),
+    risers: exported.risers.map(({ x, y, source }) => ({ x, y, source })),
     pump: pump ? { x: pump.x, y: pump.y } : null,
     zones: (zones || []).map(({ kind, x, y, radiusFt }) => ({ kind, x, y, radiusFt })),
   };
@@ -128,6 +137,17 @@ export function diffNozzleEdits(auto, saved, lines, nextKey) {
 }
 
 /**
+ * Express the saved bed-sourced risers as an edit overlay on the automatic ones (the same pairing as the nozzles: those in
+ * place, then the nearest as moved). A saved bed riser with no automatic one to pair with is a riser staff added by hand, so
+ * it comes back as a manual riser. Returns { riserRemoved, riserMoved, manual: [{x, y}] }.
+ */
+export function diffRiserEdits(autoRisers, savedBed) {
+  const tag = (list) => list.map((r) => ({ ...r, kind: 'riser' }));
+  const { removed, moved, added } = diffNozzleEdits(tag(autoRisers), tag(savedBed), [], () => 'unused');
+  return { riserRemoved: removed, riserMoved: moved, manual: added.map(({ x, y }) => ({ x, y })) };
+}
+
+/**
  * Turn a saved layout (the GET response) into the designer's starting state: lines with fresh ids,
  * the edit overlay, risers, pump and zones with fresh keys, and the id counters to continue from.
  */
@@ -136,11 +156,19 @@ export function restoreLayout(saved) {
   const nextNumber = () => { counter += 1; return counter; };
   const lines = (saved.lines || []).map((line) => ({
     id: `L${nextNumber()}`,
-    kind: line.kind === 'fence' ? 'fence' : 'eave',
+    kind: line.kind === 'fence' || line.kind === 'bed' ? line.kind : 'eave',
     points: (line.points || []).map((p) => ({ x: p.x, y: p.y })),
   }));
-  const placed = placeNozzles(lines, { lat: saved.center.lat, zoom: saved.zoom });
-  const edits = diffNozzleEdits(placed.nozzles, saved.nozzles || [], lines, () => `m${nextNumber()}`);
+  const map = { lat: saved.center.lat, zoom: saved.zoom };
+  const forNozzles = nozzleLines(lines);
+  const placed = placeNozzles(forNozzles, map);
+  const nozzleEdits = diffNozzleEdits(placed.nozzles, saved.nozzles || [], forNozzles, () => `m${nextNumber()}`);
+  // Bed risers come back from the bed lines, with staff's moves and deletions as an overlay on them; every other saved
+  // riser (manual, or saved before risers had a source) is a riser staff dropped.
+  const savedRisers = saved.risers || [];
+  const bedEdits = diffRiserEdits(placeBedRisers(lines, map), savedRisers.filter((r) => r.source === 'bed'));
+  const edits = { ...nozzleEdits, riserRemoved: bedEdits.riserRemoved, riserMoved: bedEdits.riserMoved };
+  const manualRisers = [...savedRisers.filter((r) => r.source !== 'bed'), ...bedEdits.manual];
 
   let extras = 0;
   const key = (prefix) => { extras += 1; return `${prefix}${extras}`; };
@@ -149,7 +177,7 @@ export function restoreLayout(saved) {
     edits,
     idCounter: counter,
     extras: {
-      risers: (saved.risers || []).map((r) => ({ key: key('R'), x: r.x, y: r.y })),
+      risers: manualRisers.map((r) => ({ key: key('R'), x: r.x, y: r.y })),
       pump: saved.pump ? { x: saved.pump.x, y: saved.pump.y } : null,
       zones: (saved.zones || []).map((z) => ({ key: key('Z'), kind: z.kind, x: z.x, y: z.y, radiusFt: z.radiusFt })),
       idCounter: extras,

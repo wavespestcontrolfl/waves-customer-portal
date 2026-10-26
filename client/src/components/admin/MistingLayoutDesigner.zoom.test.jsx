@@ -161,7 +161,7 @@ describe('scaling the layout with the photo', () => {
     expect(arrows().filter((a) => a.getAttribute('data-manual') === 'true')).toHaveLength(1); // the aim stayed with its nozzle
     const riserOut = screen.getByTestId('layout-riser');
     expect(Number(riserOut.getAttribute('cx'))).toBeCloseTo(640 + (riserAt[0] - 640) / 2, 6);
-    expect(Number(screen.getByTestId('layout-pump').querySelector('rect').getAttribute('x'))).toBeCloseTo(640 + (pumpAt[0] + 12 - 640) / 2 - 12, 6);
+    expect(Number(screen.getByTestId('layout-pump').querySelector('rect').getAttribute('x'))).toBeCloseTo(640 + (pumpAt[0] + 17 - 640) / 2 - 17, 6);
     // The zone's radius is in feet, so on the photo it is half as wide one zoom out.
     expect(Number(screen.getByTestId('layout-zone').querySelector('circle').getAttribute('r'))).toBeCloseTo(radiusBefore / 2, 6);
   });
@@ -273,6 +273,8 @@ describe('a saved layout', () => {
     tap(frame, 400, 150);
     fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
     await stepped(zoomOut(), 20);
+    fireEvent.click(screen.getByRole('button', { name: 'Pump' }));
+    tap(frame, 320, 360);
     adminFetch.mockResolvedValueOnce({ layout: { savedAt: '2026-10-26T15:30:00Z' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
     await waitFor(() => expect(screen.getByTestId('layout-save-status').textContent).toMatch(/^Saved /));

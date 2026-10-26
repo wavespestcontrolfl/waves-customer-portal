@@ -198,6 +198,21 @@ describe('PUT', () => {
     expect((await put(EST, { body: payload({ nozzles: [{ x: 1, y: 1, kind: 'eave', lineIndex: 0, aim: 400 }] }) })).status).toBe(400);
   });
 
+  test('stores bed lines and riser sources, and counts every riser but no bed length', async () => {
+    const lines = [...payload().lines, { id: 'B1', kind: 'bed', points: [{ x: 100, y: 800 }, { x: 300, y: 800 }] }];
+    const risers = [{ x: 100, y: 800, source: 'bed' }, { x: 200, y: 800, source: 'bed' }, { x: 50, y: 60, source: 'manual' }];
+    expect((await put(EST, { body: payload({ lines, risers }) })).status).toBe(200);
+    const row = mockLayouts[0];
+    expect(row.riser_count).toBe(3);
+    expect(JSON.parse(row.lines)[1]).toMatchObject({ kind: 'bed' });
+    expect(JSON.parse(row.risers)).toEqual(risers);
+    const { json } = await get(EST);
+    expect(json.layout.risers).toEqual(risers);
+    expect(json.layout.counts).toMatchObject({ nozzles: 2, risers: 3 });
+    const baseline = (await put(EST, { body: payload() }), (await get(EST)).json.layout.counts.linearFt);
+    expect(json.layout.counts.linearFt).toBe(baseline);
+  });
+
   test('a second save replaces the one row and deletes the old picture only after the row is written', async () => {
     await put(EST);
     const firstKey = mockLayouts[0].snapshot_s3_key;
@@ -237,6 +252,8 @@ describe('PUT', () => {
       payload({ mapWidth: 10 }),
       payload({ nozzles: [{ x: 'a', y: 1, kind: 'eave' }] }),
       payload({ nozzles: [{ x: 1, y: 1, kind: 'roof' }] }),
+      payload({ pump: null }),
+      payload({ risers: [{ x: 1, y: 1, source: 'wall' }] }),
       payload({ zones: [{ kind: 'pool', x: 1, y: 1, radiusFt: 9999 }] }),
     ]) {
       const { status, json } = await put(EST, { body });

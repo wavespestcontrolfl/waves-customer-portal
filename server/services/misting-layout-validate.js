@@ -25,7 +25,12 @@ const MAX_ZONE_RADIUS_FT = 100;
 const MAX_ADDRESS = 300;
 const MAX_ID = 40;
 
-const LINE_KINDS = Object.freeze(['eave', 'fence']);
+// Eave and fence lines carry nozzles. A bed line (a landscape bed edge) carries risers instead, placed by the designer about
+// every 8 ft, so it never counts toward nozzles or the line length.
+const NOZZLE_KINDS = Object.freeze(['eave', 'fence']);
+const LINE_KINDS = Object.freeze(['eave', 'fence', 'bed']);
+// A riser is either one staff dropped (manual) or one placed along a bed line (bed); reopening re-derives the second kind.
+const RISER_SOURCES = Object.freeze(['bed', 'manual']);
 // Same keys as client/src/lib/mistingLayoutExtras.js ZONE_KINDS.
 const ZONE_KINDS = Object.freeze(['pool', 'water', 'door', 'dining', 'ac']);
 
@@ -61,8 +66,8 @@ function point(p, label) {
   return { x: round2(clamp(x, 0, MAP_WIDTH)), y: round2(clamp(y, 0, MAP_HEIGHT)) };
 }
 
-function lineKind(kind, label) {
-  if (!LINE_KINDS.includes(kind)) throw operationalError(`${label} kind must be eave or fence`);
+function lineKind(kind, label, allowed = LINE_KINDS) {
+  if (!allowed.includes(kind)) throw operationalError(`${label} kind must be ${allowed.slice(0, -1).join(', ')} or ${allowed[allowed.length - 1]}`);
   return kind;
 }
 
@@ -96,7 +101,7 @@ function normalizeNozzles(raw, lineCount) {
   if (list.length === 0) throw operationalError('A layout needs at least one nozzle');
   return list.map((n, i) => {
     const p = point(n, `nozzles[${i}]`);
-    const kind = lineKind(n.kind, `nozzles[${i}]`);
+    const kind = lineKind(n.kind, `nozzles[${i}]`, NOZZLE_KINDS);
     const idx = Number(n.lineIndex);
     const lineIndex = Number.isInteger(idx) && idx >= 0 && idx < lineCount ? idx : null;
     return { ...p, kind, lineIndex, ...aimOf(n, `nozzles[${i}]`) };
@@ -104,11 +109,17 @@ function normalizeNozzles(raw, lineCount) {
 }
 
 function normalizeRisers(raw) {
-  return asArray(raw, 'risers', MAX_RISERS).map((r, i) => point(r, `risers[${i}]`));
+  return asArray(raw, 'risers', MAX_RISERS).map((r, i) => {
+    const p = point(r, `risers[${i}]`);
+    if (r.source === undefined || r.source === null) return p;
+    if (!RISER_SOURCES.includes(r.source)) throw operationalError(`risers[${i}] source must be bed or manual`);
+    return { ...p, source: r.source };
+  });
 }
 
+// The pump is required: the layout shows where the cabinet sits and how far it is from the lines.
 function normalizePump(raw) {
-  if (raw === undefined || raw === null) return null;
+  if (raw === undefined || raw === null) throw operationalError('A layout needs the pump placed');
   return point(raw, 'pump');
 }
 
@@ -148,6 +159,7 @@ function feetPerPixel(lat, zoom) {
 function linearFeet(lines, lat, zoom) {
   let px = 0;
   lines.forEach((line) => {
+    if (line.kind === 'bed') return; // a bed line is not eave or fence length
     for (let i = 1; i < line.points.length; i += 1) {
       px += Math.hypot(line.points[i].x - line.points[i - 1].x, line.points[i].y - line.points[i - 1].y);
     }

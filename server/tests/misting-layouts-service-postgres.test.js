@@ -71,10 +71,12 @@ postgres('misting layout service (PostgreSQL)', () => {
     expect(first.snapshotUrl).toBe('https://signed.example/x.png');
 
     const second = await saveLayout({
-      estimateId, payload: payload({ nozzles: [{ x: 10, y: 10, kind: 'eave', lineIndex: 0 }], pump: null, zones: [] }), pngBuffer: PNG, actorId: actor, knex: app,
+      estimateId, payload: payload({ nozzles: [{ x: 10, y: 10, kind: 'eave', lineIndex: 0 }], pump: { x: 20, y: 30 }, zones: [] }), pngBuffer: PNG, actorId: actor, knex: app,
     });
     expect(second.counts.nozzles).toBe(1);
-    expect(second.pump).toBeNull();
+    expect(second.pump).toEqual({ x: 20, y: 30 });
+    // The pump is required: a layout without one is refused before anything is written.
+    await expect(saveLayout({ estimateId, payload: payload({ pump: null }), pngBuffer: PNG, actorId: actor, knex: app })).rejects.toThrow(/pump/);
     const rows = await app('misting_layouts').where({ estimate_id: estimateId });
     expect(rows).toHaveLength(1);
     expect(rows[0].updated_by).toBe(actor);

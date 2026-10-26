@@ -4,7 +4,7 @@
 // pure scale by 2^delta about the frame's center, the same as the Treatment Zone Mapper's rescalePointsForZoom.
 // Everything staff placed in map pixels is scaled with it so it stays on the same ground: the drawn lines and the
 // line in progress, the manual edits (moved and added nozzles; a removed nozzle or a manual aim names a nozzle, not a
-// position, so it stays as it is), risers, the pump and the centers of no-mist zones. A zone's radius is kept in
+// position, so it stays as it is; a moved bed riser is scaled like a moved nozzle), risers, the pump and the centers of no-mist zones. A zone's radius is kept in
 // feet, so it follows by itself. The automatic nozzles are re-placed from the scaled lines, 10 ft apart as before.
 //
 // A zoom IN pushes points outward, and a point outside the 1280 by 960 frame cannot be tapped or dragged, so a
@@ -20,7 +20,12 @@ const scaleMap = (object, delta) => Object.fromEntries(Object.entries(object || 
 
 export const scaleLines = (lines, delta) => (lines || []).map((l) => ({ ...l, points: scaleAll(l.points, delta) }));
 export const scaleDraft = (draft, delta) => (draft ? { ...draft, points: scaleAll(draft.points, delta) } : draft);
-export const scaleEdits = (edits, delta) => ({ ...edits, moved: scaleMap(edits.moved, delta), added: scaleAll(edits.added, delta) });
+export const scaleEdits = (edits, delta) => ({
+  ...edits,
+  moved: scaleMap(edits.moved, delta),
+  added: scaleAll(edits.added, delta),
+  riserMoved: scaleMap(edits.riserMoved, delta),
+});
 export const scaleExtras = (extras, delta) => ({
   ...extras,
   risers: scaleAll(extras.risers, delta),
@@ -34,6 +39,7 @@ export function layoutPoints({ lines, draft, edits, extras }) {
     ...(lines || []).flatMap((l) => l.points || []),
     ...((draft && draft.points) || []),
     ...Object.values((edits && edits.moved) || {}),
+    ...Object.values((edits && edits.riserMoved) || {}),
     ...((edits && edits.added) || []),
     ...((extras && extras.risers) || []),
     ...(extras && extras.pump ? [extras.pump] : []),

@@ -13,6 +13,8 @@ const state = () => ({
     moved: { 'L1:v1': { x: 770, y: 410 } },
     added: [{ key: 'm1', manual: true, x: 650, y: 400, kind: 'eave', lineIndex: 0, aim: 120 }],
     aimed: { 'L1:v0': 45 },
+    riserRemoved: ['bed:L3:s0:1'],
+    riserMoved: { 'bed:L3:v0': { x: CX + 20, y: CY + 10 } },
   },
   extras: {
     risers: [{ key: 'R1', x: 640, y: 480 }],
@@ -35,9 +37,11 @@ describe('scaling a layout with the photo\'s zoom', () => {
     expect(out.lines[0]).toMatchObject({ id: 'L1', kind: 'eave' });
     expect(out.draft.points[0]).toEqual({ x: CX + 120, y: CY + 240 });
     expect(out.edits.moved['L1:v1']).toEqual({ x: CX + 260, y: CY - 140 });
+    expect(out.edits.riserMoved['bed:L3:v0']).toEqual({ x: CX + 40, y: CY + 20 });
     expect(out.edits.added[0]).toMatchObject({ key: 'm1', x: CX + 20, y: CY - 160, aim: 120, manual: true });
     // A removed nozzle and a manual aim name a nozzle, not a position.
     expect(out.edits.removed).toEqual(['L1:s0:1']);
+    expect(out.edits.riserRemoved).toEqual(['bed:L3:s0:1']);
     expect(out.edits.aimed).toEqual({ 'L1:v0': 45 });
     expect(out.extras.risers[0]).toMatchObject({ key: 'R1', x: CX, y: CY });
     expect(out.extras.pump).toEqual({ x: CX + 120, y: CY - 80 });
@@ -60,7 +64,7 @@ describe('scaling a layout with the photo\'s zoom', () => {
   it('survives a pump, a draft and edits that are absent', () => {
     expect(scaleDraft(null, 1)).toBeNull();
     expect(scaleExtras({ risers: [], pump: null, zones: [] }, 1)).toEqual({ risers: [], pump: null, zones: [] });
-    expect(scaleEdits({ removed: [], moved: {}, added: [], aimed: {} }, -1)).toEqual({ removed: [], moved: {}, added: [], aimed: {} });
+    expect(scaleEdits({ removed: [], moved: {}, added: [], aimed: {} }, -1)).toEqual({ removed: [], moved: {}, added: [], aimed: {}, riserMoved: {} });
     expect(layoutPoints({})).toEqual([]);
   });
 });
@@ -79,6 +83,7 @@ describe('fitsAfterZoom', () => {
     [
       { draft: { points: [far] } },
       { edits: { moved: { a: far } } },
+      { edits: { riserMoved: { r: far } } },
       { edits: { added: [far] } },
       { extras: { risers: [far] } },
       { extras: { pump: far } },

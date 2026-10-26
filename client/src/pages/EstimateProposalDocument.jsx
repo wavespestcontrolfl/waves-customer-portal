@@ -12,6 +12,7 @@ import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-se
 import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
 import { MISTING_LEGEND_KEYS, mistingLayoutCountsLine } from '../lib/mistingLayoutCounts';
+import { pumpLoad, pumpNotice } from '../lib/mistingLayoutLimits';
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { FieldDocument, FieldMasthead, FieldTitle } from '../components/FieldDocument';
@@ -176,7 +177,8 @@ const MISTING_SWATCH = {
   near: { background: '#f59e0b', border: '2px solid #92400e', borderRadius: '50%' },
   arrow: { background: '#7dd3fc', outline: '1px solid #7a8a99', height: 3, width: 16, border: 0, borderRadius: 2 },
   riser: { background: '#b87333', border: '2px solid #fff', outline: '1px solid #D9D3C4', borderRadius: '50%' },
-  pump: { background: '#1d4ed8', border: '2px solid #fff', outline: '1px solid #D9D3C4', borderRadius: 2 },
+  pump: { background: '#d8c59b', border: '2px solid #9a7f46', borderTopWidth: 4, borderRadius: 2 },
+  bed: { background: '#b87333', height: 3, width: 16, border: 0, borderRadius: 2 },
   zone: { background: 'rgba(220,38,38,0.35)', border: '2px dashed #dc2626', borderRadius: '50%' },
 };
 
@@ -448,6 +450,8 @@ export default function EstimateProposalDocument({ data, token }) {
   // plain; its title, counts, legend and concept note sit in the estimate card around it (the estimate template's card
   // and inner box). It takes the satellite photo's place in the document, same position, and the separate satellite photo
   // is not shown then. A layout image that fails to load drops the whole card and counts as a failed image.
+  // Over what one pump runs (Pynamite: 60 nozzles, 120 with a Zone Kit): every nozzle plus every riser, from the saved counts.
+  const mistingPumpNotice = mistingLayout ? pumpNotice(pumpLoad(mistingLayout.counts?.nozzles, mistingLayout.counts?.risers)) : null;
   const misting = mistingLayout && !mistingFailed ? (
     <div className="doc-keep" data-testid="doc-misting-layout" style={estimateCard({ padding: 16, marginBottom: 0, marginTop: 14 })}>
       <SectionHeader>Proposed misting layout</SectionHeader>
@@ -460,6 +464,9 @@ export default function EstimateProposalDocument({ data, token }) {
         />
       </div>
       <p style={{ margin: '8px 0 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{mistingLayoutCountsLine(mistingLayout.counts)}</p>
+      {mistingPumpNotice ? (
+        <p data-testid="doc-misting-pump-notice" style={{ margin: '4px 0 0', fontSize: 11.5, lineHeight: 1.5, fontWeight: 700, color: mistingPumpNotice.level === 'red' ? '#B91C1C' : '#92400E' }}>{mistingPumpNotice.text}</p>
+      ) : null}
       <ul data-testid="doc-misting-legend" aria-label="Legend" style={{ listStyle: 'none', margin: '6px 0 0', padding: 0, display: 'flex', flexWrap: 'wrap', gap: '3px 16px' }}>
         {MISTING_LEGEND_KEYS.map((k) => (
           <li key={k.key} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, lineHeight: 1.4, color: MUTED }}>

@@ -44,6 +44,11 @@ const tap = (frame, x, y) => {
   fireEvent.pointerDown(frame, { clientX: x, clientY: y, pointerId: 1, button: 0 });
   fireEvent.pointerUp(frame, { clientX: x, clientY: y, pointerId: 1, button: 0 });
 };
+// The pump is required before a layout can be saved.
+const placePump = (frame) => {
+  fireEvent.click(screen.getByRole('button', { name: 'Pump' }));
+  tap(frame, 320, 360);
+};
 const nozzleCount = () => screen.queryAllByTestId('layout-nozzle').length;
 const props = (extra = {}) => ({ address: '500 Example Court', lat: LAT, lng: LNG, onClose: () => {}, ...extra });
 
@@ -88,6 +93,12 @@ describe('Save layout', () => {
     const total = nozzleCount();
     expect(total).toBeGreaterThan(1);
 
+    // The pump is required: until it is placed, Save layout is off and says why.
+    expect(screen.getByRole('button', { name: 'Save layout' })).toBeDisabled();
+    expect(screen.getByTestId('layout-save-status')).toHaveTextContent('Place the pump first');
+    placePump(frame);
+    expect(screen.getByRole('button', { name: 'Save layout' })).toBeEnabled();
+
     adminFetch.mockResolvedValueOnce({ layout: { savedAt: '2026-10-26T15:30:00Z' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
     await waitFor(() => expect(screen.getByTestId('layout-save-status').textContent).toMatch(/^Saved /));
@@ -100,6 +111,7 @@ describe('Save layout', () => {
     expect(sent.nozzles).toHaveLength(total);
     expect(sent).toMatchObject({ zoom: ZOOM, mapWidth: 1280, mapHeight: 960, address: '500 Example Court' });
     expect(sent.lines).toHaveLength(1);
+    expect(sent.pump).toEqual({ x: 640, y: 720 });
     expect(options.body.get('snapshot')).toBeInstanceOf(Blob);
 
     // An edit after the save makes the saved state stale.
@@ -114,6 +126,7 @@ describe('Save layout', () => {
     const frame = await screen.findByTestId('layout-map');
     tap(frame, 100, 100);
     tap(frame, 300, 100);
+    placePump(frame);
     adminFetch.mockRejectedValueOnce(new Error('Snapshot exceeds the 8MB limit'));
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
     expect(await screen.findByTestId('layout-save-error')).toHaveTextContent('Snapshot exceeds the 8MB limit');
@@ -165,6 +178,7 @@ describe('reopening a saved layout', () => {
     expect(loadBestMapImage).toHaveBeenCalledWith(LAT, LNG, 'test-key', [21, 20, 19]); // the Treatment Zone Mapper's order: as close as the imagery goes
     tap(frame, 100, 100);
     tap(frame, 300, 100);
+    placePump(frame);
     adminFetch.mockResolvedValueOnce({ layout: { savedAt: '2026-10-26T16:00:00Z' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
     await waitFor(() => expect(screen.getByTestId('layout-save-status').textContent).toMatch(/^Saved /));

@@ -1,7 +1,7 @@
 // Misting layout sketch, step 3 (GATE_MISTING_LAYOUT_DESIGNER): the pure layout math behind the saved PNG.
 //
 // DOM-free so it is unit-testable. The canvas drawing lives in mistingLayoutSketchCanvas.js and only
-// consumes the model built here: numbered nozzles in walking order with their spray aim, and the scale bar.
+// consumes the model built here: numbered nozzles in walking order with their spray aim, risers with theirs, and the scale bar.
 // The picture is the plain drawing; its title, counts, legend and concept note belong to the estimate document's card.
 import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../components/tech/treatmentZoneSpray';
 import { aimArrowLength, aimReachPx, effectiveAim } from './mistingLayoutAim';
@@ -106,10 +106,15 @@ export function buildSketchModel(layout) {
       arrowPx: aimArrowLength(n, aim.heading, numbered),
     };
   });
+  // A riser carries a nozzle, so it sprays too: the same default aim, along the bed line it stands on when it has one.
+  const risers = (layout.risers || []).map((r) => {
+    const aim = effectiveAim(r, layout.lines, zones, map);
+    return { ...r, aimHeading: aim.heading, nearWater: aim.nearWater, reachPx: aimReachPx(aim, layout.lat, layout.zoom) };
+  });
   return {
     lines: layout.lines || [],
     nozzles,
-    risers: layout.risers || [],
+    risers,
     pump: layout.pump || null,
     zones,
     scale: scaleBar(layout.lat, layout.zoom),
