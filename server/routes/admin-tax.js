@@ -1849,7 +1849,10 @@ router.get('/export/tax-package', async (req, res, next) => {
     archive.append(csv.pnlToCSV(pnlData), { name: 'pnl.csv' });
     if (homeOffice) archive.append(csv.homeOfficeToCSV(homeOffice, sharedBills.homeOfficeDeduction(homeOffice)), { name: 'home-office.csv' });
     if (sharedBillRows && sharedBillRows.length) archive.append(csv.sharedBillsToCSV(sharedBillRows), { name: 'shared-bills.csv' });
-    archive.append(csv.generateReadme(year, pnlData, { w2Labor }), { name: 'README.txt' });
+    // GATE_PNL_PAY_RUN_WAGES: the README says the P&L counts the same pay runs. Guarded
+    // so a suite that mocks feature-gates without this reader keeps today's README.
+    const payRunWages = typeof pnlPayRunWagesLive === 'function' && pnlPayRunWagesLive();
+    archive.append(csv.generateReadme(year, pnlData, { w2Labor, payRunWages }), { name: 'README.txt' });
 
     await archive.finalize();
   } catch (err) { next(err); }
@@ -1870,7 +1873,7 @@ const sharedBills = require('../services/tax-shared-bills');
 const taxYears = require('../services/tax-years');
 const returnEngine = require('../services/tax-return-engine');
 const { hasYearConstants, YEARS: TAX_YEAR_CONSTANTS } = require('../services/tax-year-constants');
-const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive, taxPackageW2LaborLive } = require('../config/feature-gates');
+const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive, taxPackageW2LaborLive, pnlPayRunWagesLive } = require('../config/feature-gates');
 const taxPackageW2 = require('../services/tax-package-w2');
 const worksheets = require('../services/tax-worksheets');
 

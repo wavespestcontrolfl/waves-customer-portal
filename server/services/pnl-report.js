@@ -21,7 +21,14 @@
  *   labor        — NO imputed labor: the sole technician is the OWNER, and
  *                  an owner/sole-proprietor's own labor is not a deductible
  *                  expense. Real payroll/contract-labor spend flows through
- *                  expense categories like every other paid cost. The
+ *                  expense categories like every other paid cost.
+ *                  GATE_PNL_PAY_RUN_WAGES on (census M11): W-2 wages and
+ *                  employer payroll taxes come from FINALIZED pay runs
+ *                  (pay-run-books.js, by pay date) as the labor line, and the
+ *                  bank payroll payments in the "Payroll (counted from pay
+ *                  runs)" category are left out of opex so nothing counts
+ *                  twice; a `payroll` block discloses the figures. Off = the
+ *                  labor line is 0 and no `payroll` key, as before. The
  *                  job-costing helpers (rateAsOf/costLaborByDay) remain
  *                  exported for management surfaces and the informational
  *                  time-tracking CSV.
@@ -68,6 +75,12 @@
  */
 
 const { etParts, etDateString } = require('../utils/datetime-et');
+const { pnlPayRunWagesLive } = require('../config/feature-gates');
+const { payRunTotals, leaveOutPayRunCategory, bankLinesLeftOut } = require('./pay-run-books');
+
+// GATE_PNL_PAY_RUN_WAGES, read at call time. Guarded so a suite that mocks
+// feature-gates without this reader keeps today's behavior.
+const payRunWagesOn = () => typeof pnlPayRunWagesLive === 'function' && pnlPayRunWagesLive();
 
 const COGS_CATEGORIES = ['Supplies', 'Materials', 'Cost of Goods Sold', 'Chemicals'];
 const VEHICLE_METHODS = ['standard_mileage', 'actual_expenses'];
@@ -1039,10 +1052,16 @@ async function computeQuarterlyEstimate(db, { year, qNum, today }) {
     monthsElapsed = (m - 1) + (d / daysInMonth);
   }
 
+  // GATE_PNL_PAY_RUN_WAGES on: rows in the "Payroll (counted from pay runs)"
+  // category are left out (uncategorized rows stay) and the year-to-date wages and
+  // employer payroll taxes from finalized pay runs are added below.
+  const payRunWages = payRunWagesOn();
   const [paidRevenue, salesTaxCollected, expensesRow, priorRows] = await Promise.all([
     paidRevenueForWindow(db, ytdStart, endDate),
     salesTaxCollectedForWindow(db, ytdStart, endDate),
-    db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [ytdStart, endDate])
+    (payRunWages ? leaveOutPayRunCategory : (q) => q)(
+      db('expenses').where('tax_year', String(year)).whereBetween('expense_date', [ytdStart, endDate]),
+    )
       .select(db.raw("COALESCE(SUM(LEAST(amount, GREATEST(0, COALESCE(tax_deductible_amount, amount))))::text, '0') as total"))
       // Missing table tolerated in dev ONLY — any real DB failure must
       // propagate. Swallowing it to $0 would inflate taxable income silently.
@@ -1062,11 +1081,17 @@ async function computeQuarterlyEstimate(db, { year, qNum, today }) {
         .first().catch(missingTableOnly({ total: '0' })),
   ]);
 
+  let ytdExpenses = parseFloat(expensesRow?.total || 0);
+  if (payRunWages) {
+    const payRun = await payRunTotals(db, ytdStart, endDate);
+    ytdExpenses = round2(ytdExpenses + payRun.total);
+  }
+
   const est = buildQuarterlyEstimate({
     qNum,
     monthsElapsed,
     ytdRevenue: paidRevenue - salesTaxCollected,
-    ytdExpenses: parseFloat(expensesRow?.total || 0),
+    ytdExpenses,
     priorPayments: parseFloat(priorRows?.total || 0),
   });
   return { startDate, endDate, salesTaxCollected, ...est };
@@ -1120,6 +1145,8 @@ function costLaborByDay(summaryRows, rateRows) {
 }
 
 async function buildPnlReport(db, startDate, endDate) {
+  // GATE_PNL_PAY_RUN_WAGES, read once per report.
+  const payRunWages = payRunWagesOn();
   const [paidRevenue, salesTaxCollected, matRow, opexRows, feeRow, mileageRow, assets,
     financialsRow, barredVehicles] = await Promise.all([
     paidRevenueForWindow(db, startDate, endDate),
@@ -1144,15 +1171,19 @@ async function buildPnlReport(db, startDate, endDate) {
       )
       .first()
       .catch(missingTableOnly({ total: '0', non_deductible: '0' })),
-    db('expenses')
-      .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
-      .whereBetween('expenses.expense_date', [startDate, endDate])
-      // Uncategorized (NULL name) rows are opex too — a bare whereNotIn drops
-      // them (SQL NOT IN + NULL), which zeroed the whole opex section in prod.
-      .where(function cogsOrNull() {
-        this.whereNull('expense_categories.name')
-          .orWhereNotIn('expense_categories.name', COGS_CATEGORIES);
-      })
+    // Gate on: also leave out the counted_from_pay_runs category (NOT EXISTS, so
+    // uncategorized rows stay — see leaveOutPayRunCategory).
+    (payRunWages ? leaveOutPayRunCategory : (q) => q)(
+      db('expenses')
+        .leftJoin('expense_categories', 'expenses.category_id', 'expense_categories.id')
+        .whereBetween('expenses.expense_date', [startDate, endDate])
+        // Uncategorized (NULL name) rows are opex too — a bare whereNotIn drops
+        // them (SQL NOT IN + NULL), which zeroed the whole opex section in prod.
+        .where(function cogsOrNull() {
+          this.whereNull('expense_categories.name')
+            .orWhereNotIn('expense_categories.name', COGS_CATEGORIES);
+        }),
+    )
       .select(
         'expense_categories.name as category',
         'expense_categories.irs_line',
@@ -1270,6 +1301,14 @@ async function buildPnlReport(db, startDate, endDate) {
   // Flag MACRS mid-quarter years (fail closed → CPA) before depreciating.
   const depreciableAssets = annotateMidQuarter(assets);
 
+  // Gate on: W-2 wages + employer payroll taxes from finalized pay runs (by pay date).
+  let payRun = null;
+  let leftOut = null;
+  if (payRunWages) {
+    payRun = await payRunTotals(db, startDate, endDate);
+    leftOut = await bankLinesLeftOut(db, startDate, endDate);
+  }
+
   const report = assemblePnl({
     serviceRevenue: round2(paidRevenue - salesTaxCollected),
     otherRevenue: 0,
@@ -1281,7 +1320,10 @@ async function buildPnlReport(db, startDate, endDate) {
     // exists, flows through expense categories (opex) like every other
     // paid cost. costLaborByDay stays exported for job-costing surfaces
     // and the informational time-tracking CSV.
-    laborCost: 0,
+    // GATE_PNL_PAY_RUN_WAGES OFF: 0, as above. ON: the W-2 wages plus the
+    // employer payroll taxes from finalized pay runs (a real W-2 hire is not the
+    // owner), and the bank payroll payments are left out of opex above.
+    laborCost: payRun ? payRun.total : 0,
     materialsCost: parseFloat(matRow?.total || 0),
     cogsNonDeductible: parseFloat(matRow?.non_deductible || 0),
     opexRows,
@@ -1294,6 +1336,20 @@ async function buildPnlReport(db, startDate, endDate) {
     // the disclosure below.
     vehicleMileageBarred: (barredVehicles || []).length > 0,
   });
+
+  if (payRun) {
+    report.payroll = {
+      source: 'finalized pay runs',
+      checks: payRun.checks,
+      wages: payRun.wages,
+      employerTaxes: payRun.employerTaxes,
+      total: payRun.total,
+      bankLinesLeftOut: leftOut,
+      note: 'Wages and employer payroll taxes come from finalized pay runs, by pay date. '
+        + 'Bank payroll payments in the "Payroll (counted from pay runs)" category are left out '
+        + 'so nothing counts twice. A deposit paid in January for December wages stays in December.',
+    };
+  }
 
   // Disclosure when standard mileage is elected — the P&L is on the actual-
   // expenses basis (the disclosed mileage figure is NOT in the total), because

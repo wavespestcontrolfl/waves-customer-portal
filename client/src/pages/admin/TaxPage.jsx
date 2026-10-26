@@ -4018,6 +4018,20 @@ function PnlTab() {
           />{" "}
           <PnlRow label="COST OF GOODS SOLD" value={null} bold />{" "}
           <PnlRow label="Labor" value={pnl.cogs?.labor} indent />{" "}
+          {pnl.payroll ? (
+            <div
+              style={{
+                fontSize: 12,
+                color: "#71717A",
+                marginLeft: 20,
+                padding: "2px 0 4px",
+              }}
+            >
+              From {pnl.payroll.checks} pay {pnl.payroll.checks === 1 ? "check" : "checks"}: wages{" "}
+              {fmtM(pnl.payroll.wages)}, employer taxes{" "}
+              {fmtM(pnl.payroll.employerTaxes)}
+            </div>
+          ) : null}{" "}
           <PnlRow
             label="Materials & Supplies"
             value={pnl.cogs?.materials}
