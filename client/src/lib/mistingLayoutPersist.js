@@ -61,7 +61,8 @@ export function buildLayoutPayload({ address, center, zoom, lines, nozzles, rise
     mapHeight,
     lines: exported.lines,
     nozzles: exported.nozzles.map(({ x, y, kind, lineIndex, aim }) => ({ x, y, kind, lineIndex, ...(aim === undefined ? {} : { aim }) })),
-    risers: exported.risers.map(({ x, y, source }) => ({ x, y, source })),
+    // A bed riser also names its bed line, so reopening gives it back to that line (it decides which way the riser aims).
+    risers: exported.risers.map(({ x, y, source, lineIndex }) => ({ x, y, source, ...(source === 'bed' && lineIndex !== null ? { lineIndex } : {}) })),
     pump: pump ? { x: pump.x, y: pump.y } : null,
     zones: (zones || []).map(({ kind, x, y, radiusFt }) => ({ kind, x, y, radiusFt })),
   };

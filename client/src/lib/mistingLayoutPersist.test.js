@@ -145,6 +145,36 @@ describe('bed lines and their risers: save then reopen', () => {
     expect(finalRisers(old).map(keyOf).sort()).toEqual(payload.risers.map(keyOf).sort());
   });
 
+  it('keeps each bed riser on its own bed line: one moved onto another bed\'s deleted spot is still its own bed\'s riser on reopen', () => {
+    const ls = [
+      { id: 'L1', kind: 'eave', points: [{ x: 100, y: 200 }, { x: 700, y: 200 }] },
+      { id: 'B1', kind: 'bed', points: [{ x: 100, y: 500 }, { x: 400, y: 500 }] },
+      { id: 'B2', kind: 'bed', points: [{ x: 100, y: 800 }, { x: 400, y: 800 }] },
+    ];
+    const auto = placeBedRisers(ls, { lat: LAT, zoom: ZOOM });
+    const b1 = auto.filter((r) => r.lineIndex === 1);
+    const b2 = auto.filter((r) => r.lineIndex === 2);
+    // The first riser of bed 2 is deleted, and the first of bed 1 is dragged onto exactly that spot.
+    const finals = [{ ...b1[0], x: b2[0].x, y: b2[0].y }, ...b1.slice(1), ...b2.slice(1)];
+    const payload = buildLayoutPayload({
+      address: null, center: CENTER, zoom: ZOOM, lines: ls, nozzles: placeNozzles(nozzleLines(ls), { lat: LAT, zoom: ZOOM }).nozzles,
+      risers: finals, pump: { x: 1, y: 1 }, zones: [], mapWidth: 1280, mapHeight: 960,
+    });
+    expect(payload.risers.filter((r) => r.source === 'bed').every((r) => [1, 2].includes(r.lineIndex))).toBe(true);
+    expect(payload.risers[0]).toMatchObject({ x: b2[0].x, y: b2[0].y, lineIndex: 1 });
+    const restored = restoreLayout(asSaved(payload));
+    // (Reopened lines get fresh ids, so find the reopened risers by where they were.)
+    const reopened = placeBedRisers(restored.lines, { lat: LAT, zoom: ZOOM });
+    const at = (r) => reopened.find((x) => keyOf(x) === keyOf(r)).key;
+    expect(restored.edits.riserRemoved).toEqual([at(b2[0])]);
+    expect(Object.keys(restored.edits.riserMoved)).toEqual([at(b1[0])]);
+    const shown = applyRiserEdits(placeBedRisers(restored.lines, { lat: LAT, zoom: ZOOM }), restored.edits);
+    const moved = shown.find((r) => keyOf(r) === keyOf(b2[0]));
+    expect(moved.lineIndex).toBe(1); // still bed 1's riser, so it still aims along bed 1
+    expect(shown).toHaveLength(finals.length);
+    expect(restored.extras.risers).toEqual([]);
+  });
+
   it('diffRiserEdits: a saved bed riser with no automatic one to pair with comes back as a manual riser', () => {
     const auto = [{ key: 'bed:a', x: 0, y: 0 }, { key: 'bed:b', x: 100, y: 0 }];
     const edits = diffRiserEdits(auto, [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 500, y: 500 }]);

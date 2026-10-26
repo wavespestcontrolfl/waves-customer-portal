@@ -85,6 +85,27 @@ describe('validateLayoutPayload', () => {
     expect(out.risers).toEqual([{ x: 50, y: 60, source: 'manual' }, { x: 100, y: 800, source: 'bed' }, { x: 180, y: 800, source: 'bed' }, { x: 5, y: 5 }]);
   });
 
+  test('a bed riser keeps the bed line it stands on; a line index past the lines, or on a manual riser, is dropped', () => {
+    const lines = [...valid().lines, { id: 'B1', kind: 'bed', points: [{ x: 100, y: 800 }, { x: 900, y: 800 }] }];
+    const out = validateLayoutPayload(valid({
+      lines,
+      risers: [
+        { x: 100, y: 800, source: 'bed', lineIndex: 2 },
+        { x: 150, y: 800, source: 'bed', lineIndex: 9 },
+        { x: 160, y: 800, source: 'bed', lineIndex: -1 },
+        { x: 170, y: 800, source: 'bed', lineIndex: null },
+        { x: 50, y: 60, source: 'manual', lineIndex: 2 },
+      ],
+    }));
+    expect(out.risers).toEqual([
+      { x: 100, y: 800, source: 'bed', lineIndex: 2 },
+      { x: 150, y: 800, source: 'bed' },
+      { x: 160, y: 800, source: 'bed' },
+      { x: 170, y: 800, source: 'bed' },
+      { x: 50, y: 60, source: 'manual' },
+    ]);
+  });
+
   test('a riser source is bed or manual or absent, nothing else', () => {
     ['wall', '', 1, true].forEach((source) => problem({ risers: [{ x: 1, y: 1, source }] }, /risers\[0\] source must be bed or manual/));
     expect(validateLayoutPayload(valid({ risers: [{ x: 1, y: 1, source: null }] })).risers).toEqual([{ x: 1, y: 1 }]);

@@ -108,12 +108,16 @@ function normalizeNozzles(raw, lineCount) {
   });
 }
 
-function normalizeRisers(raw) {
+// A bed riser also names the bed line it stands on (`lineIndex`, like a nozzle's): the line decides which way it aims, so
+// reopening must give it back to the same line. A line index that points past the lines is dropped, as for nozzles.
+function normalizeRisers(raw, lineCount) {
   return asArray(raw, 'risers', MAX_RISERS).map((r, i) => {
     const p = point(r, `risers[${i}]`);
     if (r.source === undefined || r.source === null) return p;
     if (!RISER_SOURCES.includes(r.source)) throw operationalError(`risers[${i}] source must be bed or manual`);
-    return { ...p, source: r.source };
+    const idx = Number(r.lineIndex);
+    const onLine = r.source === 'bed' && r.lineIndex !== null && r.lineIndex !== '' && Number.isInteger(idx) && idx >= 0 && idx < lineCount;
+    return { ...p, source: r.source, ...(onLine ? { lineIndex: idx } : {}) };
   });
 }
 
@@ -180,7 +184,7 @@ function validateLayoutPayload(payload) {
   const address = payload.address == null ? null : String(payload.address).trim().slice(0, MAX_ADDRESS) || null;
   const lines = normalizeLines(payload.lines);
   const nozzles = normalizeNozzles(payload.nozzles, lines.length);
-  const risers = normalizeRisers(payload.risers);
+  const risers = normalizeRisers(payload.risers, lines.length);
   const pump = normalizePump(payload.pump);
   const zones = normalizeZones(payload.zones);
   const fence = nozzles.filter((n) => n.kind === 'fence').length;
