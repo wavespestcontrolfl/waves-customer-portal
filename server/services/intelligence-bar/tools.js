@@ -4460,6 +4460,20 @@ async function rescheduleAppointment(input, actionContext = {}) {
         .returning(['id', 'technician_id']);
       updatedRows = committed.length;
       committedTechId = committed[0]?.technician_id || null;
+      // The probe above was scoped to the technician read before this
+      // transaction. The CAS does not pin technician_id (the notice follows
+      // the stop), so a concurrent reassignment can commit the row onto
+      // another route: when scoping is on (techScopedConfirmActive), check
+      // the committed route too. Tech-blind probes need no second look.
+      if (updatedRows && probeWindowStart && probeWindowEnd
+        && String(committedTechId || '') !== String(appt.technician_id || '')
+        && require('../scheduling/occupancy').techScopedConfirmActive()) {
+        const again = await probeSlotOverlap({
+          trx, date: dateStr, windowStart: probeWindowStart, windowEnd: probeWindowEnd,
+          excludeServiceIds: [appointment_id], technicianId: committedTechId,
+        });
+        overlapAdvisory = again.length ? slotOverlapWarning(dateStr) : null;
+      }
   }).catch((err) => {
     // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.
     thrownRefusal = require('./outcomes').moveRefusalFromThrown(err);

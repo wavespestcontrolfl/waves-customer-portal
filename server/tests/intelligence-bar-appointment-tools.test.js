@@ -2308,4 +2308,29 @@ describe('IB overlap probes pass the saved row\'s technician', () => {
     expect(probeCalls()).toHaveLength(1);
     expect(probeCalls()[0]).toMatchObject({ technicianId: 'tech-7', excludeServiceIds: ['svc-1'] });
   });
+
+  test('scoped (techScopedConfirmActive): a row a concurrent reassignment committed onto another route is probed again on that route (pre-push audit P1)', async () => {
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      const baseAppt = {
+        id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-07-01',
+        window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control', technician_id: 'tech-7',
+      };
+      // The CAS row comes back on tech-1 (updateResult's committed row).
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue(baseAppt) }), chain(), chain(), chain()],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+        reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+      });
+      const result = await executeTool('reschedule_appointment', {
+        appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00', reason: 'customer asked',
+      });
+      expect(result).toMatchObject({ success: true });
+      expect(probeCalls().map((c) => c.technicianId)).toEqual(['tech-7', 'tech-1']);
+    } finally {
+      delete process.env.GATE_MULTI_TECH_CONFIRM;
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+    }
+  });
 });

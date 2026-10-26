@@ -1506,6 +1506,26 @@ async function moveBatchTrx(trx, classified, dateStr, reason) {
     { techId: c.s.technician_id, date: dateStr },
   ]));
   for (const c of classified) await writeMovedStop(trx, c, dateStr, reason);
+  // The probe ran on the technician each stop was read with. The CAS does not
+  // pin technician_id (the notice follows the stop), so a concurrent
+  // reassignment can commit a stop onto another route: when scoping is on
+  // (techScopedConfirmActive), check that stop on its committed route, with
+  // the batch's other stops excluded as in the first probe (they were not on
+  // this date then). Tech-blind probes need no second look.
+  if (require('../scheduling/occupancy').techScopedConfirmActive()) {
+    const batchIds = classified.map((c) => String(c.s.id));
+    for (const c of classified) {
+      if (String(c.committedTechId || '') === String(c.s.technician_id || '')) continue;
+      const { start, end } = probeWindowOf(c.s);
+      if (!start || !end) continue;
+      const again = await probeSlotOverlap({
+        trx, date: dateStr, windowStart: start, windowEnd: end, excludeServiceIds: batchIds, technicianId: c.committedTechId,
+      });
+      const at = overlappedIds.indexOf(c.s.id);
+      if (again.length && at === -1) overlappedIds.push(c.s.id);
+      if (!again.length && at !== -1) overlappedIds.splice(at, 1);
+    }
+  }
   return overlappedIds;
 }
 

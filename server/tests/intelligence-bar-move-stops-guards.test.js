@@ -567,3 +567,39 @@ test('each stop is probed with the technician it stays on (a move never reassign
     ['svc-b', undefined],
   ]);
 });
+
+test('scoped (techScopedConfirmActive): a stop a concurrent reassignment committed onto another route is probed again there, the batch excluded (pre-push audit P1)', async () => {
+  process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  try {
+    const listChain = chain({
+      select: jest.fn().mockResolvedValue([
+        stop('svc-a', 'confirmed', { technician_id: 'tech-3' }),
+        stop('svc-b', 'confirmed', { technician_id: 'tech-1', window_start: '11:00:00', window_end: '12:00:00' }),
+      ]),
+    });
+    // Every write commits on tech-1 (updateResult): svc-a moved from tech-3, svc-b stayed.
+    const svcChains = Array.from({ length: 12 }, () => chain());
+    let svcIdx = 0;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        if (listChain.select.mock.calls.length === 0) return listChain;
+        return svcChains[svcIdx++];
+      }
+      if (table === 'reschedule_log') return chain();
+      throw new Error(`Unexpected db('${table}') call`);
+    });
+
+    const result = await executeScheduleTool('move_stops_to_day', {
+      service_ids: ['svc-a', 'svc-b'], new_date: '2099-01-15', confirmed: true,
+    });
+
+    expect(result).toMatchObject({ success: true, moved_count: 2 });
+    const calls = findConflictingVisits.mock.calls.map(([a]) => a);
+    expect(calls.map((a) => a.technicianId)).toEqual(['tech-3', 'tech-1', 'tech-1']);
+    expect(calls[2].excludeServiceIds).toEqual(['svc-a', 'svc-b']);
+  } finally {
+    delete process.env.GATE_MULTI_TECH_CONFIRM;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+  }
+});

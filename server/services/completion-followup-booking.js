@@ -436,6 +436,7 @@ function followupConflict(message, code) {
 
 async function commitFollowup({ svc, date, cols, insertData, technicianOverride, expectedTechnicianId, expectedCustomerId, sourceAction }) {
   let overlapWarning = null;
+  let probedTechnicianId = null;
   const [appointment] = await db.transaction(async (trx) => {
     // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT): the date-wide
     // occupancy lock + tech-blind probe FIRST, before the comms key (rung
@@ -446,10 +447,10 @@ async function commitFollowup({ svc, date, cols, insertData, technicianOverride,
       // The technician the follow-up is saved with: the override or the
       // source visit's (insertData.technician_id), null = unassigned and
       // tech-blind. Read BEFORE the assignability fallback below, which row-
-      // locks the technician and so must follow this rung-1 probe; a source
-      // technician who turns out unassignable lands the row unassigned and
-      // this advisory probe was scoped to them (techScopedConfirmActive()
-      // only; tech-blind otherwise).
+      // locks the technician and so must follow this rung-1 probe. When that
+      // fallback lands the row unassigned, the probe runs again tech-blind
+      // (below), so a scoped probe never hides a clash an unassigned row has.
+      probedTechnicianId = insertData.technician_id || null;
       const overlap = await probeSlotOverlap({
         trx, date, windowStart: insertData.window_start, windowEnd: insertData.window_end,
         technicianId: insertData.technician_id || null,
@@ -490,6 +491,15 @@ async function commitFollowup({ svc, date, cols, insertData, technicianOverride,
         if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
         logger.warn(`[dispatch] follow-up inherits technician ${insertData.technician_id} who is not assignable; booking unassigned`);
         insertData.technician_id = null;
+        // The rung-1 probe above was scoped to that technician; an unassigned
+        // row clashes with every route, so check again tech-blind (the date
+        // lock is already held and re-entrant).
+        if (probedTechnicianId && insertData.window_start && insertData.window_end) {
+          const blind = await probeSlotOverlap({
+            trx, date, windowStart: insertData.window_start, windowEnd: insertData.window_end,
+          });
+          if (blind.length && !overlapWarning) overlapWarning = slotOverlapWarning(date);
+        }
       }
       if (technicianOverride && insertData.technician_id && techWorkDaysLive()) {
         const offDay = await require('./technician-eligibility').offDayWarningFor(insertData.technician_id, String(date).slice(0, 10), { conn: trx });

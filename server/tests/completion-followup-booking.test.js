@@ -229,6 +229,23 @@ test('the write probes with the technician the follow-up is saved with: inherite
   expect(probeSlotOverlap).toHaveBeenLastCalledWith(expect.objectContaining({ technicianId: 'tech-2' }));
 });
 
+test('an inherited technician who turns out unassignable: the write probes again tech-blind and warns for that clash (pre-push audit P1)', async () => {
+  const { writes } = install();
+  // Scoped probe (tech-1's route) is clear; the tech-blind recheck finds another technician's visit.
+  probeSlotOverlap.mockImplementationOnce(async () => []);
+  probeSlotOverlap.mockImplementationOnce(async () => [{ id: 'other-tech-visit' }]);
+  assertAssignableTechnician.mockRejectedValueOnce(Object.assign(new Error('out'), { code: 'TECH_NOT_ASSIGNABLE' }));
+
+  const out = await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: false });
+
+  expect(out.status).toBe(200);
+  expect(writes[0].row.technician_id).toBeNull();
+  expect(probeSlotOverlap).toHaveBeenCalledTimes(2);
+  expect(probeSlotOverlap.mock.calls[0][0].technicianId).toBe('tech-1');
+  expect(probeSlotOverlap.mock.calls[1][0]).not.toHaveProperty('technicianId');
+  expect(out.body.overlapWarning).toBe('overlap on 2026-10-05');
+});
+
 test('a source visit with no technician probes tech-blind (technicianId null)', async () => {
   const { writes } = install();
   const db = require('../models/db');
