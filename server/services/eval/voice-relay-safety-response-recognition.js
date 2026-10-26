@@ -86,7 +86,7 @@ const SAFETY_MIGRATION_PRODUCT_NAMES = Object.freeze([
   "Suspend Polyzone", "Demand CS Insecticide", "Demand CS",
   "Cyzmic CS", "Atticus Talak", "Scion Insecticide",
   "Onslaught Fastcap", "Permethrin SFR", "Temprid FX",
-  "Alpine WSG", "Delta Dust", "Elector PSP",
+  "Alpine WSG", "Atticus Antapex WSG", "Delta Dust", "Elector PSP",
   "Gentrol IGR", "Gentrol Complete EC3", "Tekko Pro IGR", "LESCO Crosscheck Plus",
   "Talstar P", "Aprehend", "Topchoice Granular Insecticide",
   "Acelepryn Insecticide", "Acelepryn Xtra", "Dylox 420 SL T&O Insecticide",
