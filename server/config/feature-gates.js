@@ -4706,6 +4706,11 @@ const gates = {
   // consumers read serviceLineMapMode() at CALL time. Kill switch: unset.
   serviceLineMapShadow: String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow',
 
+  // Customer-contact admin alerts close themselves once a person answers (owner 2026-10-24,
+  // approved 2026-10-26). Tri-state: 'shadow' records what would close, 'true' closes. Registered
+  // for logGateStatus only; consumers read alertContactCloseMode() at CALL time. Kill switch: unset.
+  alertContactClose: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_CONTACT_CLOSE || '').trim().toLowerCase()),
+
   // Unassigned-visit guard (owner 2026-10-25). Ships DARK: exactly 'true'. Registered for
   // logGateStatus only; consumers read unassignedVisitGuardLive() at CALL time. Kill switch: unset.
   unassignedVisitGuard: process.env.GATE_UNASSIGNED_VISIT_GUARD === 'true',
@@ -6953,6 +6958,17 @@ function adminAlertRelevanceLive() {
   return !['off', 'false', '0'].includes(String(process.env.ADMIN_ALERT_RELEVANCE ?? '').trim().toLowerCase());
 }
 
+// GATE_ALERT_CONTACT_CLOSE read at CALL time: 'shadow', 'true' or 'off'. The
+// customer-contact classes of admin-alert-relevance.js (a text, a voicemail, a
+// missed call or an email from a customer, and a new lead a person reached).
+// 'shadow' judges them and records what would close in audit_log, changing no
+// bell; 'true' closes them like every other class. Any other value, unset
+// included, is off: these classes are not judged at all. Ships dark.
+function alertContactCloseMode() {
+  const value = String(process.env.GATE_ALERT_CONTACT_CLOSE || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // ALERT_EPISODES read at CALL time — ships LIVE: on unless set to exactly
 // 'off', 'false' or '0' (case-insensitive), so an unset env is the live state
 // and the env is a pure kill switch (owner-approved scope 2026-09-29, rule
@@ -8027,6 +8043,8 @@ module.exports.lawnWaterInRainLive = lawnWaterInRainLive;
 module.exports.onSiteCallerDemoteLive = onSiteCallerDemoteLive;
 // GATE_PREPAY_MINT_PRICE_HOLD reader, on its own line so gate PRs never conflict.
 module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
+// GATE_ALERT_CONTACT_CLOSE reader, on its own line so gate PRs never conflict.
+module.exports.alertContactCloseMode = alertContactCloseMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.

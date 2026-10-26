@@ -1,9 +1,12 @@
 /**
  * admin-alert-relevance.js against live Postgres, the SQL as the sweep runs
  * it: the re-arm pass (this module's stamp and its window, the put-back fenced
- * on the version read — a millisecond done_at compared exactly) and a new
- * lead's booking evidence (after the bell, never a visit that did not run).
- * The rules themselves are covered by admin-alert-relevance.test.js.
+ * on the version read — a millisecond done_at compared exactly), a new
+ * lead's booking evidence (after the bell, never a visit that did not run) and
+ * the customer-contact classes behind GATE_ALERT_CONTACT_CLOSE (the shared
+ * witnesses as SQL: the Messages reader, a person's text and call, a visit, a
+ * quote, a person's email reply). The rules themselves are covered by
+ * admin-alert-relevance.test.js.
  */
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
@@ -15,18 +18,20 @@ const DAY = 24 * 60 * 60 * 1000;
 maybeDescribe('alert relevance re-arm (live Postgres)', () => {
   let db;
   let relevance;
-  const made = { notifications: [], scheduled_services: [], estimates: [], leads: [], customers: [] };
+  const made = { notifications: [], sms_log: [], call_log: [], emails: [], scheduled_services: [], estimates: [], leads: [], customers: [] };
 
   beforeAll(() => {
     db = require('../models/db');
     relevance = require('../services/admin-alert-relevance');
   });
+  afterEach(() => { delete process.env.GATE_ALERT_CONTACT_CLOSE; });
   afterAll(async () => {
-    for (const table of ['notifications', 'scheduled_services', 'leads', 'estimates', 'customers']) {
+    if (made.notifications.length) await db('audit_log').where({ resource_type: 'notification' }).whereIn('resource_id', made.notifications).del();
+    for (const table of ['notifications', 'sms_log', 'call_log', 'emails', 'scheduled_services', 'leads', 'estimates', 'customers']) {
       if (made[table].length) await db(table).whereIn('id', made[table]).del();
     }
     await db.destroy();
-  });
+  }, 120000);
 
   const insert = async (table, row) => {
     const [r] = await db(table).insert(row).returning('*');
@@ -214,5 +219,295 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     await relevance.runAdminAlertRelevanceSweep({ now: new Date() });
     const kept = await get(leadBell.id);
     expect([kept.read_at, kept.done_at]).toEqual([retired.read_at, retired.done_at]);
+  });
+  // ---- customer-contact classes (GATE_ALERT_CONTACT_CLOSE) -------------------
+  describe('customer-contact classes', () => {
+    const BIZ = '+15555559000';
+    let n = 0;
+    const sid = (prefix) => `${prefix}${String(Date.now()).slice(-8)}${String((n += 1)).padStart(6, '0')}`;
+    const mins = (base, m) => new Date(base.getTime() + m * 60 * 1000);
+    const gate = (mode) => { process.env.GATE_ALERT_CONTACT_CLOSE = mode; };
+    const sweep = (now = new Date()) => relevance.runAdminAlertRelevanceSweep({ now });
+    const wouldClose = (id) => db('audit_log').where({ action: 'notification.alert_relevance.would_close', resource_type: 'notification', resource_id: id });
+    const customerWith = (phone, extra = {}) => insert('customers', { first_name: 'Contact', phone, ...extra });
+    // An inbound text and the bell that rang for it (a known sender's shared thread row, or an unknown sender's per-text row).
+    const text = async ({ customer = null, phone, at, body = 'Can you come out on Tuesday?', known = true }) => {
+      const messageSid = sid('SMI');
+      await insert('sms_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer?.id || null, message_body: body,
+        message_type: 'customer_reply', status: 'received', twilio_sid: messageSid, created_at: at });
+      const row = await bell({ category: 'inbound_sms', created_at: mins(at, 1),
+        link: known && customer ? `/admin/communications?thread=${customer.id}&message=${messageSid}` : `/admin/communications?message=${messageSid}`,
+        metadata: { triggerKey: 'sms_reply', ...(known && customer ? { dedupeKey: `sms-thread:${customer.id}` } : { dedupeKey: `sms-reply:${messageSid}` }),
+          payload: { twilioSid: messageSid, threadId: known && customer ? customer.id : null } } });
+      return { messageSid, row };
+    };
+    const staffText = (customer, phone, at, over = {}) => insert('sms_log', { direction: 'outbound', from_phone: BIZ, to_phone: phone, customer_id: customer?.id || null,
+      message_body: 'Yes, Tuesday works.', message_type: 'manual', status: 'delivered', twilio_sid: sid('SMO'), metadata: JSON.stringify({ human_authored: true }), created_at: at, ...over });
+    const staffCall = (customer, phone, at, over = {}) => insert('call_log', { direction: 'outbound', from_phone: BIZ, to_phone: phone, customer_id: customer?.id || null,
+      status: 'completed', source: 'admin-click', duration_seconds: 180, v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: 'false' } }),
+      twilio_call_sid: sid('CAO'), created_at: at, ...over });
+
+    test('gate off: a customer-contact bell is not judged at all, however answered it is', async () => {
+      const t0 = mins(new Date(), -120);
+      const customer = await customerWith('+15555558001');
+      const { row } = await text({ customer, phone: customer.phone, at: t0 });
+      await staffText(customer, customer.phone, mins(t0, 5));
+      const result = await sweep();
+      expect(result.byClass.inbound_sms).toBeUndefined();
+      expect((await get(row.id)).done_at).toBeNull();
+      expect(await wouldClose(row.id)).toHaveLength(0);
+    });
+
+    test('shadow: records what would close once per ET day and changes nothing on the bell; true closes it with the reason', async () => {
+      const t0 = mins(new Date(), -120);
+      const customer = await customerWith('+15555558002');
+      const { row } = await text({ customer, phone: customer.phone, at: t0 });
+      await staffText(customer, customer.phone, mins(t0, 5));
+      const before = await get(row.id);
+
+      gate('shadow');
+      const first = await sweep();
+      expect(first.wouldClose).toBeGreaterThanOrEqual(1);
+      const after = await get(row.id);
+      expect([after.read_at, after.done_at, after.done_by, after.resolution]).toEqual([null, null, null, null]);
+      expect(after.metadata).toEqual(before.metadata);
+      const rows = await wouldClose(row.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].metadata).toMatchObject({ class: 'inbound_sms', reason: 'Answered by text', etDay: etDateString(new Date()) });
+      await sweep();
+      expect(await wouldClose(row.id)).toHaveLength(1);
+
+      gate('true');
+      await sweep();
+      const closed = await get(row.id);
+      expect([closed.done_by, closed.resolution]).toEqual(['relevance', 'Answered by text']);
+      expect(closed.read_at).toBeInstanceOf(Date);
+      expect(closed.metadata.retired).toMatchObject({ by: 'alert-relevance', reason: 'Answered by text' });
+    });
+
+    test('a text: answered by a person\'s text, by a person\'s call, or no reply needed (a courtesy text) closes it; an unanswered one, a reply from before the text and an automated text do not', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -240);
+      const answeredBy = await customerWith('+15555558003');
+      const calledBy = await customerWith('+15555558004');
+      const courtesy = await customerWith('+15555558005');
+      const unanswered = await customerWith('+15555558006');
+      const earlierReply = await customerWith('+15555558007');
+      const automated = await customerWith('+15555558008');
+      const a = await text({ customer: answeredBy, phone: answeredBy.phone, at: t0 });
+      const b = await text({ customer: calledBy, phone: calledBy.phone, at: t0 });
+      // A courtesy text counts as one only after something we sent that asked nothing (the Messages reader's prior-context rule).
+      await insert('sms_log', { direction: 'outbound', from_phone: BIZ, to_phone: courtesy.phone, customer_id: courtesy.id, message_body: 'Your visit is complete.',
+        message_type: 'service_complete', status: 'delivered', twilio_sid: sid('SMO'), created_at: mins(t0, -60) });
+      const c = await text({ customer: courtesy, phone: courtesy.phone, at: t0, body: 'Thank you!' });
+      const d = await text({ customer: unanswered, phone: unanswered.phone, at: t0 });
+      const e = await text({ customer: earlierReply, phone: earlierReply.phone, at: t0 });
+      const f = await text({ customer: automated, phone: automated.phone, at: t0 });
+      await staffText(answeredBy, answeredBy.phone, mins(t0, 10));
+      await staffCall(calledBy, calledBy.phone, mins(t0, 10));
+      await staffText(earlierReply, earlierReply.phone, mins(t0, -30));
+      await staffText(automated, automated.phone, mins(t0, 10), { message_type: 'review_request', metadata: JSON.stringify({}) });
+      await sweep();
+      expect(await get(a.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+      expect(await get(b.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by a call' });
+      expect(await get(c.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered, or no reply needed' });
+      for (const open of [d, e, f]) expect((await get(open.row.id)).done_at).toBeNull();
+    });
+
+    test('a text from an unknown sender is judged by its phone: a person\'s text to that number closes it', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -240);
+      const phone = '+15555558009';
+      const answered = await text({ phone, at: t0, known: false });
+      const other = await text({ phone: '+15555558010', at: t0, known: false });
+      await staffText(null, phone, mins(t0, 10));
+      await sweep();
+      expect(await get(answered.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+      expect((await get(other.row.id)).done_at).toBeNull();
+    });
+
+    test('a new text after a close rings the sender\'s thread bell again, and a new unanswered text puts an unknown sender\'s bell back', async () => {
+      gate('true');
+      const NotificationService = require('../services/notification-service');
+      const t0 = mins(new Date(), -240);
+      const customer = await customerWith('+15555558011');
+      const first = await text({ customer, phone: customer.phone, at: t0 });
+      await staffText(customer, customer.phone, mins(t0, 10));
+      await sweep();
+      expect((await get(first.row.id)).done_by).toBe('relevance');
+      // The emitter's own refresh for the sender's next text (sms-reply-alert-delivery.js ringSmsReplyBell).
+      const next = await text({ customer, phone: customer.phone, at: mins(t0, 60), body: 'Also, can you spray the garage?' });
+      await db('notifications').where({ id: next.row.id }).del();
+      const refreshed = await NotificationService.notifyAdmin('inbound_sms', 'SMS from Contact', 'Also, can you spray the garage?', {
+        link: `/admin/communications?thread=${customer.id}&message=${next.messageSid}`,
+        metadata: { triggerKey: 'sms_reply', payload: { twilioSid: next.messageSid, threadId: customer.id } },
+        dedupeKey: `sms-thread:${customer.id}`, refreshOnDedupe: true, bumpOnRefresh: true,
+      });
+      expect(refreshed.id).toBe(first.row.id);
+      const rung = await get(first.row.id);
+      expect([rung.read_at, rung.done_at, rung.done_by, rung.resolution]).toEqual([null, null, null, null]);
+      expect(rung.metadata.retired).toBeUndefined();
+      // Unanswered: the next sweep leaves it ringing. A staff reply closes it again.
+      await sweep();
+      expect((await get(first.row.id)).done_at).toBeNull();
+      await staffText(customer, customer.phone, mins(t0, 70));
+      await sweep();
+      expect((await get(first.row.id)).done_by).toBe('relevance');
+
+      // An unknown sender answered, then texting again unanswered: the re-arm pass puts the bell back.
+      const phone = '+15555558012';
+      const unknown = await text({ phone, at: t0, known: false });
+      await staffText(null, phone, mins(t0, 10));
+      await sweep();
+      expect((await get(unknown.row.id)).done_by).toBe('relevance');
+      await insert('sms_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, message_body: 'Hello? Anyone there?', message_type: 'customer_reply',
+        status: 'received', twilio_sid: sid('SMI'), created_at: mins(t0, 120) });
+      const result = await sweep();
+      expect(result.rearmed).toBeGreaterThanOrEqual(1);
+      expect((await get(unknown.row.id)).done_at).toBeNull();
+    });
+
+    test('a missed call or voicemail callback request: a person\'s call back, a person-answered call in, a person\'s text, a booked visit or a handed-off quote after the call closes it; earlier contact, an unanswered callback and an automated bell do not', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -300);
+      const callRow = (phone, customer, over = {}) => insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer?.id || null,
+        status: 'no-answer', twilio_call_sid: sid('CAI'), created_at: t0, ...over });
+      const missed = async (phone, customer, { category = 'missed_call', triggerKey = 'customer_missed_call' } = {}) => {
+        const call = await callRow(phone, customer);
+        const row = await bell({ category, created_at: mins(t0, 3),
+          metadata: { triggerKey, payload: { callLogId: call.id, customerId: customer?.id || null, phone, name: 'Caller' } } });
+        return { call, row };
+      };
+      const cases = {};
+      const make = async (key, phone, withCustomer = true, opts) => {
+        const customer = withCustomer ? await customerWith(phone) : null;
+        cases[key] = { customer, phone, ...(await missed(phone, customer, opts)) };
+        return cases[key];
+      };
+      await make('callBack', '+15555558020');
+      await make('inbound', '+15555558021');
+      await make('textBack', '+15555558022');
+      await make('visit', '+15555558023');
+      await make('quote', '+15555558024');
+      await make('unknown', '+15555558025', false);
+      await make('earlier', '+15555558026');
+      await make('voicemail', '+15555558027', true, { category: 'voicemail_callback', triggerKey: 'customer_voicemail_callback' });
+      await make('unspoken', '+15555558028');
+      await make('automated', '+15555558029');
+
+      await staffCall(cases.callBack.customer, cases.callBack.phone, mins(t0, 20));
+      await insert('call_log', { direction: 'inbound', from_phone: cases.inbound.phone, to_phone: BIZ, customer_id: cases.inbound.customer.id, status: 'completed',
+        answered_by: 'human', twilio_call_sid: sid('CAI'), created_at: mins(t0, 30), duration_seconds: 90 });
+      await staffText(cases.textBack.customer, cases.textBack.phone, mins(t0, 15));
+      await insert('scheduled_services', { customer_id: cases.visit.customer.id, scheduled_date: etDateString(new Date(Date.now() + 7 * DAY)),
+        service_type: 'General Pest Control', status: 'confirmed', created_at: mins(t0, 40) });
+      await insert('estimates', { status: 'sent', customer_id: cases.quote.customer.id, sent_at: mins(t0, 50),
+        estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: mins(t0, 50).toISOString(), lastDeliveredAt: mins(t0, 50).toISOString() } }) });
+      await staffText(null, cases.unknown.phone, mins(t0, 12));
+      // A text and a call back from BEFORE the call never answer it.
+      await staffText(cases.earlier.customer, cases.earlier.phone, mins(t0, -60));
+      await staffCall(cases.earlier.customer, cases.earlier.phone, mins(t0, -60));
+      await staffText(cases.voicemail.customer, cases.voicemail.phone, mins(t0, 25));
+      // A call back that rang out (no live conversation heard) and a bare dialer row prove no person spoke.
+      await staffCall(cases.unspoken.customer, cases.unspoken.phone, mins(t0, 20), { v2_extraction_status: null, ai_extraction_enriched: null });
+      await insert('call_log', { direction: 'outbound', from_phone: BIZ, to_phone: cases.unspoken.phone, customer_id: cases.unspoken.customer.id, status: 'completed',
+        source: 'collections_voice', twilio_call_sid: sid('CAO'), created_at: mins(t0, 22), duration_seconds: 120, metadata: JSON.stringify({ bridged_at: mins(t0, 22).toISOString() }) });
+      // An automated text is not a person's.
+      await staffText(cases.automated.customer, cases.automated.phone, mins(t0, 20), { message_type: 'missed_call_followup', metadata: JSON.stringify({}) });
+      // The promise chaser shares the category and is not this class's: untouched.
+      const chaser = await bell({ category: 'missed_call', created_at: mins(t0, 3), metadata: { triggerKey: 'promise_chaser', dedupeKey: 'promise_chaser:x:y', payload: { phone: cases.callBack.phone } } });
+
+      await sweep();
+      const reason = async (key) => { const r = await get(cases[key].row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
+      expect(await reason('callBack')).toEqual(['relevance', 'A person called back']);
+      expect(await reason('inbound')).toEqual(['relevance', 'A person answered their call']);
+      expect(await reason('textBack')).toEqual(['relevance', 'Answered by text']);
+      expect(await reason('visit')).toEqual(['relevance', 'A visit was booked']);
+      expect(await reason('quote')).toEqual(['relevance', 'Estimate was sent']);
+      expect(await reason('unknown')).toEqual(['relevance', 'Answered by text']);
+      expect(await reason('voicemail')).toEqual(['relevance', 'Answered by text']);
+      for (const open of ['earlier', 'unspoken', 'automated']) expect(await reason(open)).toBeNull();
+      expect((await get(chaser.id)).done_at).toBeNull();
+    });
+
+    test('an email from a customer: a person\'s reply in its thread closes it; a forward to someone else, a reply on another thread and an earlier reply do not', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -300);
+      const mail = async (key, extra = {}) => {
+        const customer = await customerWith(`+1555555803${key}`, { email: `contact${key}-${Date.now()}@example.invalid` });
+        const thread = sid('TH');
+        const inbound = await insert('emails', { gmail_id: sid('GM'), gmail_thread_id: thread, from_address: customer.email, to_address: 'office@waves.example.invalid',
+          cc_address: '', bcc_address: '', label_ids: JSON.stringify(['INBOX']), received_at: t0, customer_id: customer.id, ...extra });
+        const row = await bell({ category: 'inbound_email', created_at: mins(t0, 2), link: `/admin/email?id=${inbound.id}`,
+          metadata: { triggerKey: 'customer_email_received', payload: { emailId: inbound.id, customerId: customer.id, fromName: 'Contact' } } });
+        return { customer, thread, row };
+      };
+      const sent = (m, at, to = null) => insert('emails', { gmail_id: sid('GM'), gmail_thread_id: m.thread, from_address: 'office@waves.example.invalid',
+        to_address: to || m.customer.email, cc_address: '', bcc_address: '', label_ids: JSON.stringify(['SENT']), received_at: at });
+      const replied = await mail('1');
+      const forwarded = await mail('2');
+      const elsewhere = await mail('3');
+      const earlier = await mail('4');
+      const textOnly = await mail('5');
+      await sent(replied, mins(t0, 30));
+      await sent(forwarded, mins(t0, 30), 'someone-else@example.invalid');
+      await sent({ ...elsewhere, thread: sid('TH') }, mins(t0, 30));
+      await sent(earlier, mins(t0, -30));
+      await staffText(textOnly.customer, textOnly.customer.phone, mins(t0, 20));
+      await sweep();
+      expect(await get(replied.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by email' });
+      expect(await get(textOnly.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+      for (const open of [forwarded, elsewhere, earlier]) expect((await get(open.row.id)).done_at).toBeNull();
+    });
+
+    test('a new lead: a person\'s text or call back after the bell closes it as contacted; contact from before the bell and a ring-out do not; shadow only records', async () => {
+      const bellAt = mins(new Date(), -240);
+      const lead = async (phone, withCustomer = true) => {
+        const customer = withCustomer ? await customerWith(phone) : null;
+        const row = await insert('leads', { first_name: 'Lead', phone, status: 'new', customer_id: customer?.id || null });
+        const note = await bell({ category: 'new_lead', link: `/admin/leads?lead=${row.id}`, created_at: bellAt,
+          metadata: { triggerKey: 'new_lead', payload: { leadId: row.id } } });
+        return { customer, phone, note };
+      };
+      const texted = await lead('+15555558041');
+      const called = await lead('+15555558042');
+      const phoneOnly = await lead('+15555558043', false);
+      const earlier = await lead('+15555558044');
+      const ringOut = await lead('+15555558045');
+      await staffText(texted.customer, texted.phone, mins(bellAt, 20));
+      await staffCall(called.customer, called.phone, mins(bellAt, 20));
+      await staffText(null, phoneOnly.phone, mins(bellAt, 20));
+      await staffText(earlier.customer, earlier.phone, mins(bellAt, -60));
+      await staffCall(ringOut.customer, ringOut.phone, mins(bellAt, 20), { v2_extraction_status: null, ai_extraction_enriched: null });
+
+      gate('shadow');
+      await sweep();
+      expect((await get(texted.note.id)).done_at).toBeNull();
+      expect(await wouldClose(texted.note.id)).toHaveLength(1);
+      expect((await wouldClose(texted.note.id))[0].metadata).toMatchObject({ class: 'new_lead', reason: 'Lead was contacted' });
+
+      gate('true');
+      await sweep();
+      for (const closed of [texted, called, phoneOnly]) {
+        expect(await get(closed.note.id)).toMatchObject({ done_by: 'relevance', resolution: 'Lead was contacted' });
+      }
+      for (const open of [earlier, ringOut]) expect((await get(open.note.id)).done_at).toBeNull();
+    });
+
+    test('rollback: gate off puts back, unread, what the contact classes closed in the window', async () => {
+      const t0 = mins(new Date(), -120);
+      const customer = await customerWith('+15555558051');
+      const { row } = await text({ customer, phone: customer.phone, at: t0 });
+      await staffText(customer, customer.phone, mins(t0, 5));
+      gate('true');
+      await sweep();
+      expect((await get(row.id)).done_by).toBe('relevance');
+      delete process.env.GATE_ALERT_CONTACT_CLOSE;
+      const result = await sweep();
+      expect(result.rearmed).toBeGreaterThanOrEqual(1);
+      const back = await get(row.id);
+      expect([back.read_at, back.done_at, back.done_by]).toEqual([null, null, null]);
+      expect(back.metadata.retired).toBeUndefined();
+    });
   });
 });
