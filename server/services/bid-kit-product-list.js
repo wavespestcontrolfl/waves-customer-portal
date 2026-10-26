@@ -29,7 +29,7 @@ const logger = require('./logger');
 const { errorTag } = require('./bid-kit-log');
 const { composeAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { fitAction } = require('./admin-alert-names');
-const { validEpaRegNumber } = require('./epa-reg-number');
+const { validEpaRegNumber, PESTICIDE_CATEGORIES, isPesticideCategory } = require('./epa-reg-number');
 const { normalizeForMatch } = require('./purchase-receipts/product-matcher');
 const { buildProductListPdf, fileNameFor } = require('./pdf/product-list-pdf');
 const { WAVES_BUSINESS_NAME, WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
@@ -45,20 +45,6 @@ const AUTO_SIGN_OFF = 'siteone_purchases';
 // better (it defaults to the insert time), so the visit date is the one date that is reliably the visit's.
 const WINDOW_SQL = "sr.service_date > ((now() AT TIME ZONE 'America/New_York')::date - 365)";
 const MAX_NAMED = 2; // names in the bell's one sentence; the rest go to its full text
-
-// A category that must carry an EPA registration number (a row here with the "N/A" placeholder makes the list incomplete).
-// Adjuvants are left out on purpose: they carry no registration.
-const PESTICIDE_CATEGORIES = new Set([
-  'insecticide', 'herbicide', 'fungicide', 'termiticide', 'rodenticide', 'miticide', 'nematicide', 'pgr', 'igr',
-  'bait', 'mole bait', 'termite bait', 'mosquito',
-]);
-// A category NAMING a pesticide class also counts: the catalog has compound names ("termiticide / insecticide") and a growth
-// regulator can be filed as "insect growth regulator" or "plant growth regulator". "termite monitoring" names none of them.
-const PESTICIDE_CATEGORY_WORDS = /\b(insecticide|herbicide|fungicide|termiticide|rodenticide|miticide|nematicide|larvicide|pgr|igr|growth regulator|bait|mosquito)\b/;
-const isPesticideCategory = (category) => {
-  const name = String(category || '').trim().toLowerCase();
-  return PESTICIDE_CATEGORIES.has(name) || PESTICIDE_CATEGORY_WORDS.test(name);
-};
 
 // ---- the list ----
 

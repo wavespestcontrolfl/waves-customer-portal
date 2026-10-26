@@ -25,10 +25,12 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { savepointRead } = require('../../utils/savepoint-read');
-const { gateEnvValue, gateEnvTimestamp } = require('../../config/feature-gates');
+const { gateEnvValue, gateEnvTimestamp, productIntakeGuardLive } = require('../../config/feature-gates');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
-const { normalizeForMatch, containsWholeWords } = require('./product-matcher');
+const { normalizeForMatch, containsWholeWords, variantWordsMissingFromName } = require('./product-matcher');
+const { isPesticideCategory } = require('../epa-reg-number');
+const { findEpaRegistrationByName } = require('../epa-product-label');
 const { parsePackSize, parsePackCount, countUnitsCompatible } = require('../product-costing');
 const { baseQuantityUnit, convertInventoryQuantity, isValidRateUnit, normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
 const inventoryOperations = require('../inventory-operations');
@@ -580,6 +582,19 @@ function productNamedByTitle(titleWords, product, aliasesByProduct) {
   return (aliasesByProduct[product.id] || []).some((alias) => everyWordInTitle(titleWords, normalizeForMatch(alias).split(' ').filter(Boolean)));
 }
 
+// GATE_PRODUCT_INTAKE_GUARD (dark): the product-line words ("NXT", "Complete", "EC3") the title carries that the candidate does
+// not. The candidate's words are its catalog NAME plus every PRE-EXISTING alias whose words all appear in the title (the alias
+// that names it: a person confirmed that alias, so its words are the product's own). [] with the gate off.
+function missingVariantWords(titleWords, candidate, aliasesByProduct) {
+  if (!productIntakeGuardLive()) return [];
+  const own = new Set(normalizeForMatch(candidate.name).split(' ').filter(Boolean));
+  for (const alias of (aliasesByProduct || {})[candidate.id] || []) {
+    const words = normalizeForMatch(alias).split(' ').filter(Boolean);
+    if (everyWordInTitle(titleWords, words)) words.forEach((word) => own.add(word));
+  }
+  return variantWordsMissingFromName(titleWords.join(' '), [...own]);
+}
+
 // A validated 'existing' decision, or 'agent_unsure' with why — every
 // 'unsure' outcome from here on carries a `suggestion` (item 2, hold-alert
 // lane, 2026-09-27): the proposal named a REAL catalog product (raw.product_id
@@ -617,6 +632,8 @@ function existingGuess(candidate, ctx) {
   const titleWords = normalizeForMatch(ctx.rawTitle).split(' ').filter(Boolean);
   const aliases = ctx.aliasesByProduct || {};
   if (!productNamedByTitle(titleWords, candidate, aliases)) return null;
+  // A product refused for a product-line word is never recommended either.
+  if (missingVariantWords(titleWords, candidate, aliases).length) return null;
   // The same test validateExistingCandidate's "names more than one product"
   // rule runs: every active product against every active alias
   // (activeProductAliases), plus the offered candidates' own aliases.
@@ -655,6 +672,10 @@ function validateExistingCandidate(raw, ctx, candidate) {
     const otherMatch = (ctx.allActiveProducts || []).some((p) => p.id !== candidate.id
       && productNamedByTitle(titleWords, p, ctx.activeProductAliases || {}));
     if (otherMatch) return unsureResult('the title names more than one product');
+    const variantWords = missingVariantWords(titleWords, candidate, ctx.aliasesByProduct || {});
+    if (variantWords.length) {
+      return unsureResult(`the title has a product-line word ("${variantWords[0]}") that "${candidate.name}" does not`);
+    }
   }
 
   const reading = validateReading(raw.reading, { rawTitle, lineQuantity });
@@ -1142,14 +1163,28 @@ async function callDecision(dispatch, userMessage) {
 
 // ---- applying a validated decision (one transaction per line) -----------
 
+// The EPA lookup evidence saved on a new pesticide's line (GATE_PRODUCT_INTAKE_GUARD): what EPA's label system answered, never
+// the raw response.
+function epaLookupEvidence(lookup) {
+  if (!lookup) return null;
+  return {
+    status: lookup.status, registration: lookup.registration || null, matchedName: lookup.matchedName || null,
+    labelFile: lookup.labelUrl ? String(lookup.labelUrl).split('/').pop() : null, via: lookup.via || null,
+    listingMismatch: lookup.listingMismatch === true, reason: lookup.reason || null,
+    registrations: Array.isArray(lookup.registrations) ? lookup.registrations.slice(0, 10) : null,
+  };
+}
+
 function decisionRecord(decision, extra = {}) {
+  const { epaLookup, ...newProduct } = decision.kind === 'new_product' ? decision.newProduct : {};
   return {
     kind: decision.kind,
     reason: decision.reason || null,
     productId: decision.kind === 'existing' ? decision.product.id : null,
     amount: decision.amount ?? null,
     unit: decision.unit ?? null,
-    newProduct: decision.kind === 'new_product' ? decision.newProduct : null,
+    newProduct: decision.kind === 'new_product' ? (epaLookup === undefined ? decision.newProduct : newProduct) : null,
+    ...(decision.kind === 'new_product' && epaLookup !== undefined ? { epaLookup: epaLookupEvidence(epaLookup) } : {}),
     reading: decision.reading || null,
     // The "closest guess" a refused proposal still carried (item 2,
     // hold-alert lane, 2026-09-27) — persisted so it's queryable later, not
@@ -1386,6 +1421,9 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
   // decision was validated against. A hit is never a hard failure: the line
   // stays pending, and the next run sees the now-existing product as a
   // candidate and very likely resolves to 'existing'.
+  const intake = productIntakeGuardLive();
+  const pesticide = intake && isPesticideCategory(decision.newProduct.category);
+  const lookup = pesticide ? decision.newProduct.epaLookup || { status: 'unavailable' } : null;
   const created = await inventoryOperations.createCatalogProduct({
     name: decision.newProduct.name,
     category: decision.newProduct.category,
@@ -1398,6 +1436,8 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
     defaultUnit: decision.newProduct.inventoryUnit,
     bestVendor: VENDOR_BEST[vendor] || null,
     autoReorderEnabled: false,
+    // A pesticide EPA proved by name gets its number and label; any other pesticide keeps the number BLANK (never "N/A").
+    ...(lookup ? (lookup.status === 'found' ? { epaRegNumber: lookup.registration, labelUrl: lookup.labelUrl } : { leaveEpaBlank: true }) : {}),
   }, {
     trx,
     source: 'inventory_agent_create',
@@ -1415,11 +1455,41 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
   if (!created) return { ok: false, stop: { outcome: { applied: false, reason: 'name_collision_retry' } } };
   return {
     ok: true, productId: created.id, createdProductId: created.id,
-    catalogChangeNote: `added "${created.name}" to the catalog${decision.newProduct.listingEpaRegNumber
-      ? `; the listing gives EPA Reg. No. ${decision.newProduct.listingEpaRegNumber}, so confirm it from the label and enter it on the product`
-      : ''}`,
+    catalogChangeNote: intake
+      ? intakeChangeNote(created, decision.newProduct, lookup)
+      : `added "${created.name}" to the catalog${decision.newProduct.listingEpaRegNumber
+        ? `; the listing gives EPA Reg. No. ${decision.newProduct.listingEpaRegNumber}, so confirm it from the label and enter it on the product`
+        : ''}`,
+    // The "logged a purchase" bell opens the new product (the products tab expands ?productId=).
+    bellLink: intake ? `${INVENTORY_LINK}&productId=${created.id}` : null,
     originalProductFields: null,
   };
+}
+
+// Chemicals that carry no EPA registration but still need a safety data sheet; any other non-pesticide category (a trap) has
+// nothing to chase.
+const SDS_ONLY_CATEGORIES = new Set(['fertilizer', 'micronutrient fertilizer', 'adjuvant', 'soil_amendment']);
+
+// GATE_PRODUCT_INTAKE_GUARD: the "added to the catalog" part of the bell names what EPA filled and what a person still has to add.
+function intakeChangeNote(created, newProduct, lookup) {
+  const sentences = [`added "${created.name}" to the catalog`];
+  if (!lookup) {
+    if (SDS_ONLY_CATEGORIES.has(String(newProduct.category || '').toLowerCase())) sentences.push('Still missing: SDS; add it on the product');
+    return sentences.join('. ');
+  }
+  if (lookup.status === 'found') {
+    sentences.push(`EPA Reg. No. ${lookup.registration} and its EPA label came from EPA's label system`);
+    sentences.push('Still missing: SDS and active ingredient; add them on the product');
+  } else {
+    sentences.push(lookup.status === 'unavailable' || lookup.status == null
+      ? "EPA's label system did not answer"
+      : "EPA's label system could not prove one EPA number for this name");
+    sentences.push('Still missing: EPA number, label, SDS and active ingredient; add them on the product');
+  }
+  const listed = newProduct.listingEpaRegNumber;
+  if (listed && lookup.listingMismatch) sentences.push(`The listing gives EPA Reg. No. ${listed}; it does not match this name in EPA's records`);
+  else if (listed && lookup.status !== 'found') sentences.push(`The listing gives EPA Reg. No. ${listed}; confirm it from the label`);
+  return sentences.join('. ');
 }
 
 // PHASE 2 — resolves 'existing'/'new_product' to one concrete, LOCKED
@@ -1529,7 +1599,7 @@ class StagedStop extends Error {
 // fingerprint the undo CLI checks against, the line's own final 'logged'
 // write, and the success bell — all still inside the ONE transaction the
 // caller opened.
-async function commitStockMovement(trx, { line, lineId, vendor, email, decision, productId, createdProductId, createdAliasId, catalogChangeNote, originalProductFields }, notifyAdmin) {
+async function commitStockMovement(trx, { line, lineId, vendor, email, decision, productId, createdProductId, createdAliasId, catalogChangeNote, bellLink, originalProductFields }, notifyAdmin) {
   const result = await inventoryOperations.adjustStock(productId, { movementType: 'restock', quantity: decision.amount, unit: decision.unit }, {
     source: SOURCES[vendor],
     extraMetadata: { inventoryAgent: true, orderNumber: line.order_number, emailId: email.id, rawTitle: line.raw_title, reading: decision.reading || null },
@@ -1563,7 +1633,7 @@ async function commitStockMovement(trx, { line, lineId, vendor, email, decision,
     body: `${result.product.name} +${decision.amount} ${displayUnit(decision.unit)}`
       + `${catalogChangeNote ? ` — ${catalogChangeNote}` : ''} (line ${String(lineId).slice(0, 8)}).`
       + `${liveRequest ? ` ${openRestockRequestNote(result.product.name)}` : ''}`,
-    trx,
+    link: bellLink || null, trx,
   });
   return { applied: true, status: 'logged' };
 }
@@ -1660,8 +1730,8 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
       if (!(err instanceof StagedStop)) throw err;
       return err.stop.hold ? recordHold(trx, { line, lineId, email, decision, hold: err.stop.hold }, notifyAdmin) : err.stop.outcome;
     }
-    const { productId, createdProductId, createdAliasId, catalogChangeNote, originalProductFields } = staged;
-    return commitStockMovement(trx, { line, lineId, vendor, email, decision, productId, createdProductId, createdAliasId, catalogChangeNote, originalProductFields }, notifyAdmin);
+    const { productId, createdProductId, createdAliasId, catalogChangeNote, bellLink, originalProductFields } = staged;
+    return commitStockMovement(trx, { line, lineId, vendor, email, decision, productId, createdProductId, createdAliasId, catalogChangeNote, bellLink, originalProductFields }, notifyAdmin);
   });
 }
 
@@ -1945,6 +2015,14 @@ async function closeBeforeCutoff(conn, lineId) {
   });
 }
 
+// GATE_PRODUCT_INTAKE_GUARD: a validated new pesticide asks EPA's label system for its registration number and label BEFORE
+// applyDecision opens its transaction (a network call never runs inside one; decideForTitle stays free of it so the read-only
+// replay makes no EPA call). Never throws: findEpaRegistrationByName answers 'unavailable' instead. No-op with the gate off.
+async function attachEpaLookup(decision) {
+  if (!productIntakeGuardLive() || decision?.kind !== 'new_product' || !isPesticideCategory(decision.newProduct.category)) return;
+  decision.newProduct.epaLookup = await findEpaRegistrationByName(decision.newProduct.name, { listingRegistration: decision.newProduct.listingEpaRegNumber });
+}
+
 async function processOneLine(conn, line, { dispatch, notifyAdmin, activeProducts, activeProductAliases, since }) {
   // Every pass over a pending line either resolves it or spends an attempt,
   // so no line can sit at the head of the oldest-first queue forever. A line
@@ -1972,6 +2050,7 @@ async function processOneLine(conn, line, { dispatch, notifyAdmin, activeProduct
     return recordAttemptFailure(conn, line.id, notifyAdmin, 'the receipt rules no longer resolve this title under lock');
   }
 
+  await attachEpaLookup(outcome.decision);
   const applied = await applyDecision(conn, { lineId: line.id, vendor: line.vendor, shipmentKey: line.shipment_key, email, decision: outcome.decision }, notifyAdmin);
   if (applied.applied) return { status: applied.status };
   if (applied.reason === 'no_longer_pending') return { status: 'no_longer_pending' };
@@ -2144,6 +2223,8 @@ module.exports = {
   // re-classification already resolves the title (item 2a, 2026-09-27 round
   // 9 review).
   decideForTitle,
+  // The EPA registration lookup processOneLine runs between decideForTitle and applyDecision (GATE_PRODUCT_INTAKE_GUARD).
+  attachEpaLookup, processOneLine, intakeChangeNote, resolveNewProduct, decisionRecord,
   // The same catalog view the live agent decides against, for the read-only
   // replay tool (ops/agents/inventory-agent-replay.js).
   loadActiveCatalog,
