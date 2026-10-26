@@ -11096,8 +11096,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const slotUnchanged = bulkTargetDate === normalizeDateOnly(svc.scheduled_date)
                   && effStart === storedStart && effEnd === storedEnd;
                 if (!slotUnchanged && effStart && effEnd) {
+                  // A bulk edit never reassigns: the row is saved with the
+                  // technician it already carries (null = tech-blind).
                   const bulkOverlap = await probeSlotOverlap({
                     trx, date: bulkTargetDate, windowStart: effStart, windowEnd: effEnd, excludeServiceIds: [id],
+                    technicianId: svc.technician_id || null,
                   });
                   if (bulkOverlap.length) {
                     pendingOverlapWarning = { id, warning: slotOverlapWarning(bulkTargetDate) };
@@ -20568,6 +20571,8 @@ async function reconcileRecurringSeriesVisitCount(trx, {
       date: nd,
       windowStart: parent.window_start,
       serviceType: childIdentity.service_type,
+      // The technician the row was saved with (reseed overlap probe).
+      technicianId: row.technician_id || null,
     });
   }
   if (result.added.length < need) {
@@ -22077,6 +22082,10 @@ async function probeReseedOverlaps(trx, { parent, parentId, added }) {
     const clash = await findConflictingVisits({
       db: trx, date: child.date, windowStart: block.start, windowEnd: block.end,
       excludeServiceIds: [child.id], excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+      // The technician the re-added row was SAVED with (the template's, or
+      // null when it was seeded unassigned): scopes only when
+      // techScopedConfirmActive(); otherwise tech-blind as before.
+      technicianId: child.technicianId || null,
     });
     if (clash.length) {
       overlapDates.push(child.date);

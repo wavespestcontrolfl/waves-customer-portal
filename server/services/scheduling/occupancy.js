@@ -22,7 +22,11 @@
  * or capacity off: the tech-blind behavior above, byte for byte. Callers that
  * pass it (owner 2026-10-03: the /book commit, the public-reschedule probe,
  * admin-schedule.js create/series, the phone agent's commit, call follow-up
- * re-spacing, staff lead booking, and the completion follow-up dry-run) do so
+ * re-spacing, staff lead booking, and the completion follow-up dry-run;
+ * also, through probeSlotOverlap, the office bulk edit, the Intelligence Bar
+ * create/move tools and the create card's preview pin, the completion
+ * follow-up write, and the new-caller booking; and the cancel-reseed probe
+ * and the /book plan activation's seeded-follow-up sweep) do so
  * only where the row being saved already carries its technician. Moves too
  * (owner 2026-10-03, "Moves"): rebooker.js probeMoveConflicts passes the
  * technician the moved row is SAVED with (kept, or the destination of a
@@ -30,9 +34,9 @@
  * builder and the series disclosure check; a grouped-visit move that names a
  * technician, and the tech-out preview, opt out (`occupancyTechBlind`) and
  * stay tech-blind. Callers that never pass it (availability.js,
- * slot-reservation.js, visit-groups.js' own destination probe, the completion
- * follow-up write, auto-dispatch's all-day candidate read) are unaffected by
- * the gate. Concurrency is unchanged: every writer behind this
+ * slot-reservation.js, visit-groups.js' own destination probe,
+ * annual-prepay-renewals.js, auto-dispatch's all-day candidate read) are
+ * unaffected by the gate. Concurrency is unchanged: every writer behind this
  * probe takes the date-wide rung-1 lock (`occupancy:<date>`, below) first, so
  * two confirms for DIFFERENT technicians — or one assigned and one unassigned
  * — still serialize per calendar date, and an unassigned row can never be

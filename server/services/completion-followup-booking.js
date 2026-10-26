@@ -406,8 +406,8 @@ async function followupPreview({ date, insertData, technicianOverride }) {
       // The technician the write would land with (wouldTechnicianId, after
       // the assignability fallback above). Gate-dark (occupancy.js header).
       // The write's own advisory probe (commitFollowup → probeSlotOverlap)
-      // still runs tech-blind, so with the gate on this preview can read
-      // "no overlap" where the write warns.
+      // passes the same technician, read before the assignability fallback
+      // (that check takes a row lock, which must follow rung 1).
       technicianId: wouldTechnicianId || null,
     })
     : [];
@@ -443,7 +443,17 @@ async function commitFollowup({ svc, date, cols, insertData, technicianOverride,
     // hit is advisory (owner ruling 2026-08-25 — staff-side saves never
     // block on schedule conflicts): the booking commits with a warning.
     if (insertData.window_start && insertData.window_end) {
-      const overlap = await probeSlotOverlap({ trx, date, windowStart: insertData.window_start, windowEnd: insertData.window_end });
+      // The technician the follow-up is saved with: the override or the
+      // source visit's (insertData.technician_id), null = unassigned and
+      // tech-blind. Read BEFORE the assignability fallback below, which row-
+      // locks the technician and so must follow this rung-1 probe; a source
+      // technician who turns out unassignable lands the row unassigned and
+      // this advisory probe was scoped to them (techScopedConfirmActive()
+      // only; tech-blind otherwise).
+      const overlap = await probeSlotOverlap({
+        trx, date, windowStart: insertData.window_start, windowEnd: insertData.window_end,
+        technicianId: insertData.technician_id || null,
+      });
       if (overlap.length) overlapWarning = slotOverlapWarning(date);
     }
     // Rung 6: comms-lock the customer around the insert (a bare

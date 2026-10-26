@@ -197,9 +197,109 @@ describe('wiring', () => {
   test('completion follow-up dry-run probe passes the resolved technician; the write path is unchanged', () => {
     const src = read('services/completion-followup-booking.js');
     expect(probeBlock(src, 'const overlap = insertData.window_start && insertData.window_end')).toContain('technicianId: wouldTechnicianId || null');
-    // commitFollowup still probes through window-rules' probeSlotOverlap
-    // (tech-blind, runs before the inherited technician is final).
-    expect(src).toContain('await probeSlotOverlap({ trx, date,');
+    // commitFollowup probes through window-rules' probeSlotOverlap with the
+    // technician the row is saved with (read before the assignability
+    // fallback, which row-locks the technician and must follow rung 1).
+    expect(probeBlock(src, 'const overlap = await probeSlotOverlap({')).toContain('technicianId: insertData.technician_id || null');
+  });
+
+  // Overlap probes behind probeSlotOverlap (and the two direct sweeps) pass the
+  // technician the row is SAVED with. Dark by construction: occupancy.js
+  // ignores it unless techScopedConfirmActive() (off in production).
+  describe('probeSlotOverlap callers pass the saved row\'s technician', () => {
+    test('office bulk edit: the row keeps the technician it has (a bulk edit never reassigns)', () => {
+      const src = read('routes/admin-schedule.js');
+      const block = probeBlock(src, 'const bulkOverlap = await probeSlotOverlap({');
+      expect(block).toContain('technicianId: svc.technician_id || null');
+      expect(block).toContain('excludeServiceIds: [id]');
+    });
+
+    test('Intelligence Bar: the preview pin and the confirm probe the SAME technician', () => {
+      const tools = read('services/intelligence-bar/tools.js');
+      // Confirm: technician_id resolved (by pinned id or name) before the transaction.
+      expect(probeBlock(tools, 'const overlap = await probeSlotOverlap({\n        trx, date: dateStr, windowStart: win.start, windowEnd, technicianId'))
+        .toContain('technicianId: technician_id || null');
+      // Preview: the rows read takes the technician and forwards it.
+      expect(probeBlock(tools, 'return db.transaction((trx) => probeSlotOverlap({')).toContain('technicianId: technicianId || null');
+      const route = read('routes/admin-intelligence-bar.js');
+      expect(route).toContain('ibBookingOverlapProposal(params.scheduled_date, params.time_window, params.technician_id || null)');
+      expect(route).toContain('ibBookingOverlapWho(params.scheduled_date, params.time_window, params.technician_id || null)');
+      // The route pins params.technician_id (line "params.technician_id = tech.id") BEFORE the overlap pin.
+      expect(route.indexOf('params.technician_id = tech.id;')).toBeGreaterThan(-1);
+      expect(route.indexOf('params.technician_id = tech.id;')).toBeLessThan(route.indexOf('ibBookingOverlapProposal(params.scheduled_date'));
+      // Move: the visit keeps its technician.
+      expect(probeBlock(tools, 'excludeServiceIds: [appointment_id],\n          // A move keeps')).toContain('technicianId: appt.technician_id || null');
+      expect(probeBlock(read('services/intelligence-bar/schedule-tools.js'), 'const overlap = await probeSlotOverlap({')).toContain('technicianId: s.technician_id || null');
+    });
+
+    test('new-caller booking: the technician the visit is inserted with', () => {
+      const src = read('services/booking/new-caller-visit.js');
+      expect(probeBlock(src, 'const clash = await probeSlotOverlap({')).toContain('technicianId: v.technicianId || null');
+      expect(src).toContain('technician_id: v.technicianId,');
+    });
+
+    test('cancel-reseed probe: the added row carries the technician it was inserted with', () => {
+      const src = read('routes/admin-schedule.js');
+      expect(src).toContain('technicianId: row.technician_id || null,\n    });\n  }\n  if (result.added.length < need)');
+      expect(probeBlock(src, 'const clash = await findConflictingVisits({\n      db: trx, date: child.date')).toContain('technicianId: child.technicianId || null');
+    });
+
+    test('/book plan activation: the seeded follow-up sweep passes the seeded row\'s technician (dropped only after a clash)', () => {
+      const src = read('routes/booking.js');
+      const i = src.indexOf('const clashes = await findConflictingVisits({');
+      expect(i).toBeGreaterThan(-1);
+      const block = src.slice(i, src.indexOf('if (clashes.length > 0)', i));
+      expect(block).toContain('technicianId: row.technician_id || null');
+      // The drop to unassigned happens after the probe, never before it.
+      expect(src.indexOf("technician_id: null,\n                  window_start: null,", i)).toBeGreaterThan(i + block.length);
+    });
+  });
+
+  // The change is dark by construction: with techScopedConfirmActive() false
+  // (production today), a probe that now passes a technician builds exactly
+  // the query it built without one, so a row on ANOTHER technician's route
+  // still clashes.
+  describe('probeSlotOverlap with a technician, scope off: identical to before', () => {
+    const { probeSlotOverlap } = require('../services/scheduling/window-rules');
+    const trace = async (extra, env = {}) => {
+      Object.entries(env).forEach(([k, v]) => { process.env[k] = v; });
+      const q = makeQuery();
+      const rows = [{ id: 'other-tech-row', technician_id: 'tech-a', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '10:00', status: 'confirmed' }];
+      q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+      q.orderBy = jest.fn(() => ({ then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) }));
+      db.mockReturnValue(q);
+      const trx = db; trx.raw = jest.fn().mockResolvedValue({});
+      const out = await probeSlotOverlap({ trx, date: '2099-01-05', windowStart: '09:00', windowEnd: '10:00', ...extra });
+      const calls = {};
+      Object.entries(q).forEach(([k, v]) => { if (v && v.mock) calls[k] = v.mock.calls.map((c) => c.filter((x) => typeof x !== 'function')); });
+      return { out, calls, raw: trx.raw.mock.calls };
+    };
+
+    test('scope off (production): a row on another technician\'s route still clashes, and every query call is identical', async () => {
+      expect(techScopedConfirmActive()).toBe(false);
+      const blind = await trace({});
+      const withTech = await trace({ technicianId: 'tech-b' });
+      expect(withTech.out).toEqual(blind.out);
+      expect(withTech.out.map((r) => r.id)).toEqual(['other-tech-row']);
+      expect(withTech.calls).toEqual(blind.calls);
+      expect(withTech.raw).toEqual(blind.raw);
+      expect(withTech.calls.whereNull).not.toContainEqual(['technician_id']);
+    });
+
+    test('gate on but capacity off: still identical (offer side is tech-blind too)', async () => {
+      const blind = await trace({}, { GATE_MULTI_TECH_CONFIRM: 'true' });
+      const withTech = await trace({ technicianId: 'tech-b' }, { GATE_MULTI_TECH_CONFIRM: 'true' });
+      expect(techScopedConfirmActive()).toBe(false);
+      expect(withTech.calls).toEqual(blind.calls);
+    });
+
+    test('scope ON: the same call now scopes to that technician (so the plumbing is live once D1 is decided)', async () => {
+      const blind = await trace({}, { GATE_MULTI_TECH_CONFIRM: 'true', GATE_SCHEDULING_CAPACITY: 'true' });
+      const withTech = await trace({ technicianId: 'tech-b' }, { GATE_MULTI_TECH_CONFIRM: 'true', GATE_SCHEDULING_CAPACITY: 'true' });
+      expect(blind.calls.whereNull).not.toContainEqual(['technician_id']);
+      expect(withTech.calls.whereNull).toContainEqual(['technician_id']);
+      expect(withTech.calls.orWhere).toContainEqual(['technician_id', 'tech-b']);
+    });
   });
 
   test('after-call booking: the picked technician is the one fenced, probed and saved', () => {
@@ -232,7 +332,7 @@ describe('wiring', () => {
   });
 
   test('callers that must stay tech-blind never pass technicianId', () => {
-    for (const p of ['services/scheduling/window-rules.js',
+    for (const p of [
       'services/availability.js', 'services/slot-reservation.js', 'services/visit-groups.js',
       'services/annual-prepay-renewals.js']) {
       expect(read(p)).not.toMatch(/findConflictingVisits\(\{[^}]*technicianId/s);

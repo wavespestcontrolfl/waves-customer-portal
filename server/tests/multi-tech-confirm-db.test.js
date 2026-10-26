@@ -16,6 +16,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const knex = require('knex');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { probeMoveConflicts } = require('../services/rebooker');
+const { probeSlotOverlap } = require('../services/scheduling/window-rules');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const connection = process.env.BOOK_CAPACITY_COMMIT_TEST_DATABASE_URL;
@@ -122,6 +123,35 @@ describeDb('tech-aware confirm scope on real PostgreSQL', () => {
     test('gate off: tech-blind whatever technician the row keeps (current behavior)', async () => {
       process.env.GATE_SCHEDULING_CAPACITY = 'true';
       await expect(move(TECH_B, '09:00', '10:00')).resolves.toEqual([ROW_A]);
+    });
+  });
+
+  // The admin / Intelligence Bar / follow-up / new-caller overlap probe passes the technician the
+  // row is SAVED with. Advisory (it returns the clashes), date-wide lock first.
+  describe('probeSlotOverlap (admin overlap probe) with a technician', () => {
+    const adminProbe = (windowStart, windowEnd, extra = {}) => probeSlotOverlap({
+      trx: mockConn, date: DAY, windowStart, windowEnd, ...extra,
+    }).then((rows) => rows.map((r) => r.id).sort());
+
+    test('scope off (production): passing a technician changes nothing — another technician\'s overlapping stop still clashes', async () => {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      await expect(adminProbe('09:00', '10:00')).resolves.toEqual([ROW_A]);
+      await expect(adminProbe('09:00', '10:00', { technicianId: TECH_B })).resolves.toEqual([ROW_A]);
+      await expect(adminProbe('15:00', '16:00', { technicianId: TECH_A })).resolves.toEqual([ROW_B]);
+      // Gate alone (capacity off) is also tech-blind.
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      await expect(adminProbe('09:00', '10:00', { technicianId: TECH_B })).resolves.toEqual([ROW_A]);
+    });
+
+    test('scope on: a stop on another technician\'s route no longer reads as an overlap; unassigned and same-technician stops still do', async () => {
+      scopeOn();
+      await expect(adminProbe('09:00', '10:00', { technicianId: TECH_B })).resolves.toEqual([]);
+      await expect(adminProbe('09:00', '10:00', { technicianId: TECH_A })).resolves.toEqual([ROW_A]);
+      await expect(adminProbe('13:00', '14:00', { technicianId: TECH_B })).resolves.toEqual([ROW_UNASSIGNED]);
+      await expect(adminProbe('15:00', '16:00', { technicianId: TECH_B })).resolves.toEqual([ROW_B]);
+      // No technician (unassigned row, or a caller that never passes one) stays tech-blind.
+      await expect(adminProbe('09:00', '10:00')).resolves.toEqual([ROW_A]);
     });
   });
 

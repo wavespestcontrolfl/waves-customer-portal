@@ -220,6 +220,30 @@ test('rung 1 before rung 6: the overlap probe runs first and a hit is advisory â
   expect(writes).toHaveLength(1);
 });
 
+test('the write probes with the technician the follow-up is saved with: inherited, or the admin override', async () => {
+  install();
+  await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true });
+  expect(probeSlotOverlap).toHaveBeenLastCalledWith(expect.objectContaining({ date: '2026-10-05', technicianId: 'tech-1' }));
+  install();
+  await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true, technicianId: 'tech-2' });
+  expect(probeSlotOverlap).toHaveBeenLastCalledWith(expect.objectContaining({ technicianId: 'tech-2' }));
+});
+
+test('a source visit with no technician probes tech-blind (technicianId null)', async () => {
+  const { writes } = install();
+  const db = require('../models/db');
+  const inner = db.getMockImplementation();
+  db.mockImplementation((table) => {
+    const q = inner(table);
+    const first = q.first;
+    q.first = async () => { const r = await first(); return table === 'scheduled_services' && r && r.id === 'svc-1' ? { ...r, technician_id: null } : r; };
+    return q;
+  });
+  await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true });
+  expect(writes).toHaveLength(1);
+  expect(probeSlotOverlap.mock.calls.at(-1)[0].technicianId).toBeNull();
+});
+
 test('the preview reports an overlap the write would warn about, without taking any lock', async () => {
   install();
   findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);

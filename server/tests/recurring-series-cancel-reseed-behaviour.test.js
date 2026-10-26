@@ -430,6 +430,19 @@ describe('probeReseedOverlaps + stampReseed', () => {
     expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
+  test('each probe carries the technician the added row was SAVED with (null = unassigned, tech-blind)', async () => {
+    findConflictingVisits.mockResolvedValue([]);
+    const trx = makeConn(scenario().handler);
+    await probeReseedOverlaps(trx, { parent: PARENT, parentId: 10, added: [
+      { id: 901, date: '2027-07-23', technicianId: 'tech-5' },
+      { id: 902, date: '2027-11-05', technicianId: null },
+      { id: 903, date: '2027-12-05' },
+    ] });
+    expect(findConflictingVisits.mock.calls.map(([a]) => [a.excludeServiceIds[0], a.technicianId])).toEqual([
+      [901, 'tech-5'], [902, null], [903, null],
+    ]);
+  });
+
   test('a windowless template probes nothing', async () => {
     const dates = await probeReseedOverlaps(makeConn(scenario().handler), { parent: { ...PARENT, window_start: null }, parentId: 10, added: [{ id: 901, date: '2027-07-23' }] });
     expect(dates).toEqual([]);

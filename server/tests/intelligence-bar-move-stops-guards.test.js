@@ -32,7 +32,14 @@ jest.mock('../utils/datetime-et', () => {
   return { ...actual, sameDayWindowElapsed: jest.fn(actual.sameDayWindowElapsed) };
 });
 
+// Spy over the REAL occupancy probe (existing cases keep the real SQL builder).
+jest.mock('../services/scheduling/occupancy', () => {
+  const actual = jest.requireActual('../services/scheduling/occupancy');
+  return { ...actual, findConflictingVisits: jest.fn((...args) => actual.findConflictingVisits(...args)) };
+});
+
 const db = require('../models/db');
+const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { clearTechCurrentJob } = require('../services/tech-status');
 const datetimeEt = require('../utils/datetime-et');
 const logger = require('../services/logger');
@@ -530,4 +537,33 @@ test('assign_technician refuses the whole bulk assign when the tech is out on an
   // The bulk update never ran — the refused stop must not leak a partial
   // reassignment onto the tech's clean-date stop either.
   expect(bulkUpdateChain.update).not.toHaveBeenCalled();
+});
+
+test('each stop is probed with the technician it stays on (a move never reassigns); an unassigned stop probes tech-blind', async () => {
+  const listChain = chain({
+    select: jest.fn().mockResolvedValue([
+      stop('svc-a', 'confirmed', { technician_id: 'tech-3' }),
+      stop('svc-b', 'confirmed', { technician_id: null, window_start: '11:00:00', window_end: '12:00:00' }),
+    ]),
+  });
+  const svcChains = [chain(), chain(), chain(), chain()];
+  let svcIdx = 0;
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_services') {
+      if (listChain.select.mock.calls.length === 0) return listChain;
+      return svcChains[svcIdx++];
+    }
+    if (table === 'reschedule_log') return chain();
+    throw new Error(`Unexpected db('${table}') call`);
+  });
+
+  const result = await executeScheduleTool('move_stops_to_day', {
+    service_ids: ['svc-a', 'svc-b'], new_date: '2099-01-15', confirmed: true,
+  });
+
+  expect(result).toMatchObject({ success: true, moved_count: 2 });
+  expect(findConflictingVisits.mock.calls.map(([a]) => [a.excludeServiceIds[0], a.technicianId])).toEqual([
+    ['svc-a', 'tech-3'],
+    ['svc-b', undefined],
+  ]);
 });

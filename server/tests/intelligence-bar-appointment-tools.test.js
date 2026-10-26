@@ -56,6 +56,14 @@ jest.mock('../services/waveguard-existing-services', () => ({
   loadLiveRecurringObligationRows: jest.fn(),
 }));
 
+// Spy over the REAL occupancy probe: every existing case below still runs the
+// real SQL builder on its chain mocks; the technician-scope cases read what the
+// probe was handed.
+jest.mock('../services/scheduling/occupancy', () => {
+  const actual = jest.requireActual('../services/scheduling/occupancy');
+  return { ...actual, findConflictingVisits: jest.fn((...args) => actual.findConflictingVisits(...args)) };
+});
+
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { clearTechCurrentJob } = require('../services/tech-status');
@@ -2236,5 +2244,68 @@ describe('reschedule_appointment — end-less rows: probe the DERIVED block, CAS
     await executeTool('reschedule_appointment', { appointment_id: 'svc-1', new_date: '2099-01-15' });
     const casObject = updateChain.where.mock.calls.map((c) => c[0]).find((a) => a && typeof a === 'object' && 'scheduled_date' in a);
     expect(casObject).not.toHaveProperty('estimated_duration_minutes');
+  });
+});
+
+// Overlap probes hand findConflictingVisits the technician the row is SAVED
+// with (occupancy.js scopes on it only when techScopedConfirmActive(); off in
+// production, so passing it changes nothing today).
+describe('IB overlap probes pass the saved row\'s technician', () => {
+  const { findConflictingVisits } = require('../services/scheduling/occupancy');
+  const probeCalls = () => findConflictingVisits.mock.calls.map(([args]) => args);
+  const adaCustomer = () => chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) });
+
+  test('the card preview pin probes with the pinned technician; none = tech-blind', async () => {
+    const { ibBookingOverlapProposal, ibBookingOverlapWho } = require('../services/intelligence-bar/tools');
+    wireDb({ scheduled_services: [chain(), chain(), chain()] });
+    await ibBookingOverlapProposal('2099-01-15', '10:00 AM', 'tech-1');
+    await ibBookingOverlapProposal('2099-01-15', '10:00 AM');
+    await ibBookingOverlapWho('2099-01-15', '10:00 AM', 'tech-2');
+    expect(probeCalls().map((c) => c.technicianId)).toEqual(['tech-1', undefined, 'tech-2']);
+  });
+
+  test('create_appointment confirm probes with the technician it saves the row with (same one the preview pinned)', async () => {
+    const insertChain = chain();
+    wireDb({
+      customers: [adaCustomer(), adaCustomer()],
+      // Resolved at the pin and again inside the booking (assignability).
+      technicians: [1, 2, 3].map(() => chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true }) })),
+      technician_absences: [chain(), chain()],
+      scheduled_services: [chain(), insertChain],
+    });
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM', technician_id: 'tech-1',
+    });
+    expect(result).toMatchObject({ success: true });
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ technician_id: 'tech-1' });
+    expect(probeCalls()).toHaveLength(1);
+    expect(probeCalls()[0]).toMatchObject({ technicianId: 'tech-1', date: '2099-01-15', windowStart: '10:00', windowEnd: '11:00' });
+  });
+
+  test('create_appointment with no technician probes tech-blind', async () => {
+    wireDb({ customers: [adaCustomer(), adaCustomer()], scheduled_services: [chain(), chain()] });
+    await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM',
+    });
+    expect(probeCalls()).toHaveLength(1);
+    expect(probeCalls()[0]).not.toHaveProperty('technicianId');
+  });
+
+  test('reschedule_appointment probes with the visit\'s own technician (a move never reassigns)', async () => {
+    const baseAppt = {
+      id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-07-01',
+      window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control', technician_id: 'tech-7',
+    };
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(baseAppt) }), chain(), chain()],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00', reason: 'customer asked',
+    });
+    expect(result).toMatchObject({ success: true });
+    expect(probeCalls()).toHaveLength(1);
+    expect(probeCalls()[0]).toMatchObject({ technicianId: 'tech-7', excludeServiceIds: ['svc-1'] });
   });
 });

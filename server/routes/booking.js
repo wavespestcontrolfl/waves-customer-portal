@@ -5703,6 +5703,10 @@ async function createSelfBooking(payload = {}) {
               windowStart: row.window_start,
               windowEnd: row.window_end,
               excludeServiceIds: sweepExcludeIds,
+              // The technician the seeded row is saved with (the sweep below
+              // drops it only AFTER a clash): scopes the probe to that route
+              // only when techScopedConfirmActive(); null stays tech-blind.
+              technicianId: row.technician_id || null,
               // Travel gap (GATE_SLOT_TRAVEL_GAP): the follow-up's own
               // stamped pin (the seeder copies the parent's lat/lng), else
               // the booking pin the parent commit measured with — the

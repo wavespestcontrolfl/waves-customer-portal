@@ -3611,7 +3611,7 @@ const BOOKING_NEW_OVERLAP_ERROR = 'Another visit now overlaps this time. Nothing
 // true/false, or null when there is no timed window to probe (the executor
 // probes nothing then either). A read error THROWS so the proposal fails
 // closed; an invalid date or window returns null (the executor refuses it).
-async function ibBookingOverlapRows(scheduledDate, timeWindow) {
+async function ibBookingOverlapRows(scheduledDate, timeWindow, technicianId = null) {
   const dateStr = validScheduleDate(scheduledDate);
   if (!dateStr) return null;
   const win = parseTimeWindowStart(timeWindow);
@@ -3624,11 +3624,13 @@ async function ibBookingOverlapRows(scheduledDate, timeWindow) {
     if (err?.status === 422) return null;
     throw err;
   }
-  return db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
+  return db.transaction((trx) => probeSlotOverlap({
+    trx, date: dateStr, windowStart: win.start, windowEnd, technicianId: technicianId || null,
+  }));
 }
 
-async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
-  const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow);
+async function ibBookingOverlapProposal(scheduledDate, timeWindow, technicianId = null) {
+  const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow, technicianId);
   return overlap == null ? null : overlap.length > 0;
 }
 
@@ -3669,8 +3671,8 @@ async function bookingOverlapFacts(conn, rows, dateStr) {
 // pinned `fact` of each (the executor refuses an overlapping visit whose fact
 // is not in the pinned set). Every overlapping visit is returned; [] when
 // there is no overlap or no timed window.
-async function ibBookingOverlapWho(scheduledDate, timeWindow) {
-  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
+async function ibBookingOverlapWho(scheduledDate, timeWindow, technicianId = null) {
+  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow, technicianId);
   if (!rows || !rows.length) return [];
   return bookingOverlapFacts(db, rows, validScheduleDate(scheduledDate));
 }
@@ -3841,7 +3843,11 @@ async function createAppointment(input, actionContext = {}) {
     // is advisory (owner ruling 2026-08-25 — staff-side saves never block
     // on schedule conflicts): the booking commits with a warning.
     if (win.start && windowEnd) {
-      const overlap = await probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd });
+      // Same technician the card pinned (technician_id resolved above), so a
+      // preview and its confirm check the slot the same way.
+      const overlap = await probeSlotOverlap({
+        trx, date: dateStr, windowStart: win.start, windowEnd, technicianId: technician_id || null,
+      });
       // A card that pinned "no overlap" approved a free slot (owner
       // 2026-10-05): an overlap that appeared since is NEW. Throwing here
       // rolls the transaction back before the insert, so nothing is booked
@@ -4374,6 +4380,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
           windowStart: probeWindowStart,
           windowEnd: probeWindowEnd,
           excludeServiceIds: [appointment_id],
+          // A move keeps the visit's technician (this tool never reassigns).
+          technicianId: appt.technician_id || null,
         });
         if (overlap.length) overlapAdvisory = slotOverlapWarning(dateStr);
       }

@@ -1433,7 +1433,12 @@ async function probeMoveOverlaps(trx, classified, dateStr) {
   for (const { s } of classified) {
     const { start, end } = probeWindowOf(s);
     if (!start || !end) continue;
-    const overlap = await probeSlotOverlap({ trx, date: dateStr, windowStart: start, windowEnd: end, excludeServiceIds: [String(s.id)] });
+    // A move keeps the stop's technician (it never reassigns): the probe
+    // passes the technician the row is saved with; null stays tech-blind.
+    const overlap = await probeSlotOverlap({
+      trx, date: dateStr, windowStart: start, windowEnd: end, excludeServiceIds: [String(s.id)],
+      technicianId: s.technician_id || null,
+    });
     if (overlap.length) overlappedIds.push(s.id);
   }
   return overlappedIds;

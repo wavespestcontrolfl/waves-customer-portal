@@ -1343,12 +1343,29 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book pest at 10', context: 'schedule' });
-      expect(mockIbBookingOverlapProposal).toHaveBeenCalledWith('2099-01-05', '10:00 AM');
+      expect(mockIbBookingOverlapProposal).toHaveBeenCalledWith('2099-01-05', '10:00 AM', null);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._booking_overlap).toBe(false);
       const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
       expect(labels.some((l) => /already overlaps this time/.test(l))).toBe(false);
       expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
+    });
+  });
+
+  test('create_appointment with a technician: the overlap pin and the card line probe with that pinned technician (the confirm probes with the same one)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockResolveTechnician.mockResolvedValue({ id: 'tech-uuid-9', name: 'Testd Tech' });
+    mockIbBookingOverlapProposal.mockResolvedValueOnce(true);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM', technician_name: 'testd' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'book pest at 10 with testd', context: 'schedule' });
+      expect(mockIbBookingOverlapProposal).toHaveBeenCalledWith('2099-01-05', '10:00 AM', 'tech-uuid-9');
+      expect(mockIbBookingOverlapWho).toHaveBeenCalledWith('2099-01-05', '10:00 AM', 'tech-uuid-9');
+      expect(mockCreatePendingAction.mock.calls[0][0].params.technician_id).toBe('tech-uuid-9');
     });
   });
 
