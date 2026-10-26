@@ -133,6 +133,12 @@ describe('a check of the visit where it is saved keeps today\'s answer', () => {
       delete process.env.GATE_STAFF_ROUTE_INSERTION;
       expect(evaluateArrivalPlacement(stays(), at('13:00')).feasible).toBe(false);
     });
+
+    test('a hand-built context with no saved place (the gap tool) keeps the saved order', () => {
+      const input = stays();
+      delete input.placedAt;
+      expect(evaluateArrivalPlacement(input, at('13:00')).feasible).toBe(false);
+    });
   });
 
   test('the save writer\'s own placement (place:true) does try every place', () => {

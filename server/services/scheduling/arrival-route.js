@@ -89,14 +89,17 @@ function staffRouteInsertionLive() {
 // fit (owner 2026-10-25).
 const INSERTION_MARGIN_MINUTES = 15;
 
-/** True when this evaluation puts the visit somewhere it is not stored: a new
- *  visit, or another day, technician or start than its saved row. */
-function movesVisit(context, date, technicianId, windowStart) {
-  if (context.prospective) return true;
+/** Where a check stands under GATE_STAFF_ROUTE_INSERTION: 'move' for a new
+ *  visit, the save writer's own placement (`place`), or another day,
+ *  technician or start than the saved row; 'saved' for the visit where it is
+ *  saved; null for a hand-built context with no saved place (the gap tool),
+ *  which keeps the saved order. */
+function staffPlacement(context, place, date, technicianId, windowStart) {
+  if (place || context.prospective) return 'move';
   const at = context.placedAt;
-  if (!at) return false;
+  if (!at) return null;
   return at.date !== date || at.technicianId !== (technicianId || null)
-    || at.windowStart !== String(windowStart || '').slice(0, 5);
+    || at.windowStart !== String(windowStart || '').slice(0, 5) ? 'move' : 'saved';
 }
 
 /** The whole visit as ONE target: the tapped row carrying its members'
@@ -272,7 +275,7 @@ async function loadArrivalRouteContext({
   date, now, grouped, activeTarget, prospective: !!prospective,
   insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
     || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
-  // Where the visit is saved now (movesVisit, GATE_STAFF_ROUTE_INSERTION).
+  // Where the visit is saved now (staffPlacement, GATE_STAFF_ROUTE_INSERTION).
   placedAt: prospective ? null : { date: dateOnly(stored.scheduled_date),
     technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
   routeOrderPinned,
@@ -576,12 +579,13 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (capacity) dayEndMin = Math.min(dayEndMin, SHIFT.endMinutes);
   const target = buildPlacementTarget(context, windowStart, windowEnd, durationMinutes);
   if (targetUnroutable(capacity, target, windowStart, windowEnd, grouped)) return unverified(target, date);
-  // Staff route insertion (GATE_STAFF_ROUTE_INSERTION, capacity off): a moved
-  // visit, or the save writer's own placement (`place`), tries every place. A
-  // whole shared stop (`unit`) and a route number the office typed keep
-  // today's rule: their save keeps that place.
-  const staffRoute = !capacity && staffRouteInsertionLive() && !target.memberIds && !context.routeOrderPinned;
-  const staffInsert = staffRoute && (place || movesVisit(context, date, target.technician_id, windowStart));
+  // Staff route insertion (GATE_STAFF_ROUTE_INSERTION, capacity off): a move
+  // tries every place (staffPlacement). A whole shared stop (`unit`) and a
+  // route number the office typed keep today's rule: their save keeps that
+  // place.
+  const placement = !capacity && staffRouteInsertionLive() && !target.memberIds && !context.routeOrderPinned
+    ? staffPlacement(context, place, date, target.technician_id, windowStart) : null;
+  const staffInsert = placement === 'move';
   const own = rows.filter(row => row.technician_id === target.technician_id && (capacity || row.reservation_expires_at == null));
   const resolvedOrigin = resolvePlacementOrigin(context, capacity, departureMin, target, own);
   if (!resolvedOrigin) return unverified(target, date);
@@ -594,9 +598,9 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // certify whichever fits better; commit persists the certified order. A
   // complete, window-ordered dispatch order stays the only baseline. Under
   // GATE_STAFF_ROUTE_INSERTION a staff move follows the same rule, and so does
-  // a visit that stays put, so its own hour reads like every other hour
+  // the visit where it is saved, so its own hour reads like every other hour
   // (nothing is written for it: only a move's result carries an order).
-  const sequencers = (capacity || staffRoute) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
+  const sequencers = (capacity || placement) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
   const simulate = (order, usedLegs) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
