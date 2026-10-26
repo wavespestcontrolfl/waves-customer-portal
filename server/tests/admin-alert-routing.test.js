@@ -159,3 +159,37 @@ describe('refresh merge', () => {
     expect(out).toEqual({ dedupeKey: 'k', note: 'x' });
   });
 });
+
+describe("Claude's queue in the Activity feed (buildActivity)", () => {
+  const { buildActivity } = require('../services/agent-activity');
+  const row = (over) => ({ id: 'r1', title: 'Fixture', body: 'Why.', detail: null, link: '/admin/reviews', read_at: null, done_at: null,
+    created_at: '2026-10-26T10:00:00Z', version: 'v1', ...over });
+  const routed = (severity, className, over) => row({ metadata: { feed: 'activity', who: 'claude', severity, claudeQueue: className }, ...over });
+
+  test('a routed needs-you row and a routed fyi row both render, labelled, with title, link, detail and a Done version', () => {
+    const feed = buildActivity({ claudeQueue: [
+      routed('needs-you', 'ops-job', { id: 'ask', title: 'PR 6407 is live: check it', detail: 'Full text.' }),
+      routed('fyi', 'ops-job', { id: 'fyi', title: 'Tech tips: weekly count' }),
+      routed('broken', 'sms-draft-canary', { id: 'bad', title: 'SMS draft route FAILING' }),
+    ] });
+    const byId = Object.fromEntries(feed.items.map((i) => [i.notificationId, i]));
+    expect(feed.items).toHaveLength(3);
+    expect(byId.ask).toMatchObject({ kind: 'digest', agent: "Claude's queue", status: 'awaiting_review', title: 'PR 6407 is live: check it', link: '/admin/reviews', detail: 'Full text.', version: 'v1' });
+    expect(byId.ask.subtitle).toBe('ops job \u00b7 needs Claude');
+    expect(byId.fyi).toMatchObject({ agent: "Claude's queue", status: 'completed', title: 'Tech tips: weekly count' });
+    expect(byId.fyi.subtitle).toMatch(/FYI$/);
+    expect(byId.bad).toMatchObject({ status: 'failed' });
+    expect(byId.bad.subtitle).toBe('sms draft canary \u00b7 needs a fix');
+  });
+
+  test('a done routed row reads Done and carries no Done version; a bell-only row is not passed in', () => {
+    const feed = buildActivity({ claudeQueue: [routed('broken', 'sms-draft-canary', { id: 'closed', done_at: '2026-10-26T12:00:00Z', resolution: 'Recovered.', version: 'v2' })] });
+    expect(feed.items[0]).toMatchObject({ status: 'completed', version: null, doneAt: expect.any(String), resolution: 'Recovered.' });
+    expect(feed.items[0].subtitle).toMatch(/done$/);
+  });
+
+  test('digests render exactly as before when no routed rows exist', () => {
+    const digest = { id: 'd1', title: 'ACT: look', created_at: '2026-10-26T09:00:00Z', read_at: null, done_at: null, metadata: { kind: 'ACT' }, link: '/admin' };
+    expect(buildActivity({ digests: [digest] })).toEqual(buildActivity({ digests: [digest], claudeQueue: [] }));
+  });
+});

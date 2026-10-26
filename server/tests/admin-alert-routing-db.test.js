@@ -107,6 +107,36 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
     expect(person.items.find((i) => i.id === f.id)).toBeUndefined();
   });
 
+  test('the Activity feed loads routed rows (a needs-you ask and an fyi), and not an ordinary bell row', async () => {
+    process.env.GATE_AGENT_ACTIVITY = 'true';
+    const { getActivity } = require('../services/agent-activity');
+    const ask = await macRow('feed-ask');
+    const fyi = await macRow('feed-fyi', { opsKind: 'fyi' });
+    const ownerAsk = await macRow('feed-owner-ask', { opsWho: 'person' });
+    delete process.env.GATE_ALERT_CLAUDE_QUEUE;
+    const plain = await NotificationService.notifyAdmin('system', 'Plain bell row', 'Body.', { link: '/admin', bell: true, dedupeKey: key('feed-plain') });
+    process.env.GATE_ALERT_CLAUDE_QUEUE = 'true';
+    try {
+      const feed = await getActivity({ windowHours: 24 });
+      const ids = feed.items.map((i) => i.notificationId);
+      expect(ids).toEqual(expect.arrayContaining([ask.id, fyi.id]));
+      expect(ids).not.toContain(plain.id);
+      expect(ids).not.toContain(ownerAsk.id);
+      expect(feed.items.find((i) => i.notificationId === ask.id)).toMatchObject({ agent: "Claude's queue", status: 'awaiting_review', link: '/admin' });
+      expect(feed.items.find((i) => i.notificationId === fyi.id)).toMatchObject({ agent: "Claude's queue", status: 'completed' });
+      // An old open routed row still shows, and the focus id finds a done one outside the window.
+      await db('notifications').where({ id: ask.id }).update({ created_at: new Date('2026-01-01T00:00:00Z') });
+      await db('notifications').where({ id: fyi.id }).update({ created_at: new Date('2026-01-01T00:00:00Z'), done_at: new Date('2026-01-02T00:00:00Z'), done_by: 'ops-bells' });
+      const old = await getActivity({ windowHours: 24 });
+      expect(old.items.map((i) => i.notificationId)).toContain(ask.id);
+      expect(old.items.map((i) => i.notificationId)).not.toContain(fyi.id);
+      const focused = await getActivity({ windowHours: 24, focus: fyi.id });
+      expect(focused.items.map((i) => i.notificationId)).toContain(fyi.id);
+    } finally {
+      delete process.env.GATE_AGENT_ACTIVITY;
+    }
+  });
+
   describe('the one-time mover', () => {
     const insert = (trx, name, over) => trx('notifications').insert({
       recipient_type: 'admin', category: 'system', title: `Fixture ${name}`, body: 'Fixture body', link: '/admin',

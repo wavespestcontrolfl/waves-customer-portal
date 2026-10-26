@@ -142,7 +142,7 @@ bell policy would silence a ring, because it is no longer a ring, and a refresh 
 back in the bell. Never routed: a customer-contact category (`inbound_sms`, `inbound_email`,
 `missed_call`, `voicemail_callback`, `new_lead`), a trigger-registry row, a row tied to a
 customer, and an `ops_digest` row (owner 2026-09-11: ACT / FIX exceptions from the Mac ops
-checks stay in the bell). Rows already open in the bell move once with
+checks stay in the bell). The Agents Activity feed shows every routed row (`metadata.claudeQueue`: open ones however old, plus ones created or closed in the window) under the agent "Claude's queue", fyi rows included (`needs-me` leaves fyi out because it is never work); the feed's Done is the same fenced done write. Rows already open in the bell move once with
 `server/scripts/reroute-claude-queue-rows.js` (dry run by default).
 
 ## 6. What is enforced today
