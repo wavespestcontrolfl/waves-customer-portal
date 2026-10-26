@@ -245,8 +245,16 @@ describe('_private.threadQuoteSignal', () => {
       jsonMode: true,
       // The Twilio handler awaits this classifier — the dispatcher's
       // default multi-minute budget must never hold the webhook open.
-      timeoutMs: 3500,
+      timeoutMs: 5000,
     }));
+  });
+
+  test('the resume scope check (hintGate off) keeps the shorter 3.5 s ceiling', async () => {
+    // It fails open, so a longer wait buys nothing, and one webhook can run it
+    // before the primary check: both ceilings together stay under Twilio's wait.
+    await _private.threadQuoteSignal('power wash my yard', null, { hintGate: false });
+    expect(mockDispatch).toHaveBeenCalledWith('fast-structured-policy', expect.objectContaining({ timeoutMs: 3500 }));
+    expect(mockDispatch).not.toHaveBeenCalledWith('fast-structured-policy', expect.objectContaining({ timeoutMs: 5000 }));
   });
 
   test('a vendor pitch to Waves is a terminal veto before triage or any model call', async () => {

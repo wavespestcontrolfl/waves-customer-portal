@@ -149,7 +149,14 @@ Message: ${JSON.stringify(text)}`;
       // before returning TwiML, and without it the dispatcher's default
       // multi-minute fallback budget could hold the webhook past Twilio's
       // retry window. Timeout ⇒ fail-closed "not a quote request".
-      timeoutMs: 3500,
+      // The primary check (hintGate on) gets 5 s (was 3.5 s, owner
+      // 2026-10-26): on GPT-6.1 Sol, 2 of 135 replayed real texts hit 3.5 s
+      // (p90 2.6 s), and there a timeout drops the quote draft. The resume
+      // scope check (hintGate off) keeps 3.5 s: it fails OPEN, so a longer
+      // wait buys nothing, and one webhook can run it before the primary
+      // check. Worst case, two triage passes (1.2 s each) + 3.5 s + 5 s stay
+      // under Twilio's 15 s webhook wait.
+      timeoutMs: hintGate ? 5000 : 3500,
     });
     if (!response.ok || !response.json) return { quoteRequest: false, method: 'ai_failed' };
     const j = response.json;
