@@ -25835,6 +25835,9 @@ CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 // not from_phone). It lived only under `_test` — every real caller outside
 // this file got `undefined`.
 CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
+// Read by csr-coach (lazy require): a spoken callback within 1-2 digits of the ANI is a
+// mistranscription, not a replacement number. One rule, not a second copy.
+CallRecordingProcessor.phoneNearMissOfAni = phoneNearMissOfAni;
 // Read by call-family-name-link (lazy require) for the callback_spoken_number basis.
 CallRecordingProcessor.findCustomerViaCallbackSpokenNumber = findCustomerViaCallbackSpokenNumber;
 CallRecordingProcessor.findCustomerForCallContact = findCustomerForCallContact;

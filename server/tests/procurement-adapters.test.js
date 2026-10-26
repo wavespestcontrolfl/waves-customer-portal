@@ -477,6 +477,25 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.loggedIn).toBe(false);
   });
 
+  test('readSignedIn: signs in with the same login, hands the page to fn, never touches the cart, and ALWAYS closes the browser (success and throw)', async () => {
+    const ok = fakeSiteOne();
+    const out = await s1.readSignedIn({ credentials: creds, ...ok.deps }, async (page) => { expect(ok.st.loggedIn).toBe(true); await page.goto('https://www.siteone.com/eop'); return 'read'; });
+    expect(out).toBe('read');
+    expect(ok.browser.close).toHaveBeenCalledTimes(1);
+    expect(ok.st.addClicked).toBe(0);
+    expect(ok.st.placeClicked).toBe(0);
+
+    const boom = fakeSiteOne();
+    await expect(s1.readSignedIn({ credentials: creds, ...boom.deps }, async () => { throw new Error('read boom'); })).rejects.toThrow('read boom');
+    expect(boom.browser.close).toHaveBeenCalledTimes(1);
+
+    const rejected = fakeSiteOne({ loginRejects: true });
+    const fn = jest.fn();
+    await expect(s1.readSignedIn({ credentials: creds, ...rejected.deps }, fn).catch((e) => e)).resolves.toMatchObject({ refuse: 'login_rejected' });
+    expect(fn).not.toHaveBeenCalled();
+    expect(rejected.browser.close).toHaveBeenCalledTimes(1);
+  });
+
   test.each([
     ['account_mismatch', { accountText: 'Account # 99999' }],
     ['account_mismatch', { accountText: 'Account # 912345' }], // superstring is not a match

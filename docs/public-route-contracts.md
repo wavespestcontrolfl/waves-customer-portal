@@ -5683,6 +5683,22 @@ to this estimate, already chosen and trimmed to one printed page by
 Fixed owner copy, no prices, no customer data. The key is ABSENT on an accepted,
 declined or expired estimate. Only the browser-rendered estimate PDF (`EstimateProposalDocument`)
 prints it, on its own last page; the interactive estimate page ignores it.
+`/data?mode=pdf` (the document render pass only; never a normal page load) may carry an
+optional top-level `mistingLayout` block (GATE_MISTING_LAYOUT_DESIGNER, dark): `{ imageUrl,
+revision, address|null, counts: { nozzles, eave, fence, risers, linearFt, zones, pump } }`, the
+staff-drawn concept sketch saved for this estimate (`services/misting-layouts.js`).
+`imageUrl` is a signed S3 link that lasts 20 minutes (the render pin lasts 15); `revision` is a
+16-hex-character tag that changes on every save (a hash of the picture key, never the key), which the
+emailed-PDF fingerprint reads in place of the expiring link; counts are
+numbers and `pump` is a boolean. No prices and no customer data beyond the property
+address the document already prints. The key is ABSENT unless BOTH `GATE_MOSQUITO_MISTING`
+and `GATE_MISTING_LAYOUT_DESIGNER` are on, a layout is saved for the estimate, and the
+estimate carries the misting system by the same reader the accept guards use
+(`estimateDataCarriesMosquitoMisting`, which honors an authored proposal and ignores stale
+engine rows) and the layout was drawn for the estimate's current address (case, spacing and punctuation blind; a trailing ZIP or state is ignored; a changed house number or street omits it), so every other response stays byte-identical. A storage failure omits the key,
+never the response. `EstimateProposalDocument` prints it as a "Proposed misting layout"
+section and counts a sketch that fails to load as a failed image; the interactive estimate
+page ignores it.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that
@@ -6137,7 +6153,9 @@ is set, and the self-serve notice window):
     series policy until it has a placement disclosure. Success copy keeps
     the unchanged-commitment caveat. The confirmation SMS uses the separate
     `appointment_recurring_placement_confirmed` template when the recorded
-    operation has deferred placement, including on retries; it states the
+    operation has deferred placement, including on retries; it names the
+    anchor visit's service (the reminders' label, or "visit" when there is no
+    clean name) and states the
     ±3-day placement and unchanged-commitment caveat. Authentication is unchanged. Untimed
     reminder windows are preclosed atomically until placement. Gate off
     preserves legacy conflict checks; already-recorded due dates remain

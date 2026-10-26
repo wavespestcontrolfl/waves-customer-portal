@@ -19,14 +19,14 @@
  * The server enforces that guard too; this page never auto-bills. (Paused
  * autopay accounts DO appear in the at-risk MRR list — that's the point.)
  */
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Banknote } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   Button, Badge, Card, CardHeader, CardTitle, CardBody,
   Table, THead, TBody, TR, TH, TD, Select, Textarea,
-  Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter,
+  TablePagination, TableToolbar, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter,
   ActionFeedback, Field, Input, UiSurface, buttonStyles, cn,
 } from "../../components/ui";
 
@@ -124,6 +124,17 @@ export function completionDeepLink(visit) {
   return `/admin/dispatch?${params.toString()}`;
 }
 
+const VISIT_PAGE_SIZE = 25;
+
+function visitSearchText(visit) {
+  return [
+    visit.customer,
+    visit.service_type,
+    visit.voided_invoice_number,
+    visit.billed_elsewhere_invoice_number,
+  ].filter(Boolean).join(" ").toLocaleLowerCase();
+}
+
 function VisitRow({ visit, busy, billing, onBill, onFree, onElsewhere }) {
   const statusOnly = visit.leak_kind === "completed_no_service_record";
   const ago = daysSince(visit.completed_at);
@@ -199,17 +210,48 @@ function VisitRow({ visit, busy, billing, onBill, onFree, onElsewhere }) {
   );
 }
 
-function VisitTable({ visits, busyId, freeFor, elsewhereFor, confirmBill, onBill, onFree, onElsewhere }) {
+function VisitTable({ label, visits, controlsEnabled, busyId, freeFor, elsewhereFor, confirmBill, onBill, onFree, onElsewhere }) {
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const shown = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return query ? visits.filter((visit) => visitSearchText(visit).includes(query)) : visits;
+  }, [search, visits]);
+  const totalPages = Math.max(1, Math.ceil(shown.length / VISIT_PAGE_SIZE));
+  const displayed = controlsEnabled
+    ? shown.slice((page - 1) * VISIT_PAGE_SIZE, page * VISIT_PAGE_SIZE)
+    : visits;
+
+  useEffect(() => {
+    if (!controlsEnabled) return;
+    setPage((current) => Math.min(Math.max(1, current), totalPages));
+  }, [controlsEnabled, totalPages]);
+
   return (
-    <Table layout="records">
-      <THead><TR><TH>Customer</TH><TH>Visit</TH><TH>Service</TH><TH align="right">Price</TH><TH align="right">Action</TH></TR></THead>
-      <TBody>{visits.map((visit) => (
-        <VisitRow key={visit.scheduled_service_id} visit={visit} busy={!!busyId}
-          billing={busyId === visit.scheduled_service_id && !freeFor && !elsewhereFor}
-          onBill={(selected) => onBill(selected, confirmBill ? { confirm: true } : undefined)}
-          onFree={onFree} onElsewhere={onElsewhere} />
-      ))}</TBody>
-    </Table>
+    <>
+      {controlsEnabled && (
+        <div className="mb-3 grid gap-2">
+          <TableToolbar label={label} search={search}
+            onSearchChange={(value) => { setSearch(value); setPage(1); }}
+            searchPlaceholder="Search customer, service, or invoice"
+            onReset={() => { setSearch(""); setPage(1); }} canReset={Boolean(search)} />
+          <p className="text-ui-caption text-ink-secondary">Search and page counts apply only to this queue.</p>
+        </div>
+      )}
+      {displayed.length ? (
+        <Table layout="records" aria-label={controlsEnabled ? label : undefined}>
+          <THead><TR><TH>Customer</TH><TH>Visit</TH><TH>Service</TH><TH align="right">Price</TH><TH align="right">Action</TH></TR></THead>
+          <TBody>{displayed.map((visit) => (
+            <VisitRow key={visit.scheduled_service_id} visit={visit} busy={!!busyId}
+              billing={busyId === visit.scheduled_service_id && !freeFor && !elsewhereFor}
+              onBill={(selected) => onBill(selected, confirmBill ? { confirm: true } : undefined)}
+              onFree={onFree} onElsewhere={onElsewhere} />
+          ))}</TBody>
+        </Table>
+      ) : <ActionFeedback className="justify-center py-6 text-center">No visits match these controls.</ActionFeedback>}
+      {controlsEnabled && <TablePagination label={label} page={page} totalPages={totalPages}
+        total={shown.length} pageSize={VISIT_PAGE_SIZE} onPageChange={setPage} itemLabel="visits" />}
+    </>
   );
 }
 
@@ -219,7 +261,7 @@ function EmptyFeedback({ feedbackEnabled, children, className }) {
     : <div className={cn("text-ui-body text-ink-secondary", className)}>{children}</div>;
 }
 
-function VisitQueues({ feedbackEnabled, loading, error, onRetry, data, busyId, freeFor, elsewhereFor, onBill, onFree, onElsewhere }) {
+function VisitQueues({ feedbackEnabled, controlsEnabled, loading, error, onRetry, data, busyId, freeFor, elsewhereFor, onBill, onFree, onElsewhere }) {
   return (
     <>
       {feedbackEnabled && loading && <ActionFeedback className="mb-5 min-h-20">Loading uninvoiced visits and review queue…</ActionFeedback>}
@@ -234,7 +276,7 @@ function VisitQueues({ feedbackEnabled, loading, error, onRetry, data, busyId, f
             <CardHeader><CardTitle>Uninvoiced completed visits</CardTitle></CardHeader>
             <CardBody>
               {data.leaks?.length ? (
-                <VisitTable visits={data.leaks}
+                <VisitTable label="Uninvoiced visits" visits={data.leaks} controlsEnabled={controlsEnabled}
                   busyId={busyId} freeFor={freeFor} elsewhereFor={elsewhereFor}
                   onBill={onBill} onFree={onFree} onElsewhere={onElsewhere} />
               ) : (
@@ -249,7 +291,7 @@ function VisitQueues({ feedbackEnabled, loading, error, onRetry, data, busyId, f
                 <p className="text-ui-caption text-ink-secondary mt-1">These have a monthly rate, a partial prepayment, or bill per application — confirm they aren't already billed (cadence or completion auto-charge), and bill partial-prepay visits manually so the credit is applied.</p>
               </CardHeader>
               <CardBody>
-                <VisitTable visits={data.needs_review}
+                <VisitTable label="Needs review visits" visits={data.needs_review} controlsEnabled={controlsEnabled}
                   busyId={busyId} freeFor={freeFor} elsewhereFor={elsewhereFor} confirmBill
                   onBill={onBill} onFree={onFree} onElsewhere={onElsewhere} />
               </CardBody>
@@ -335,6 +377,7 @@ function AtRiskSection({ feedbackEnabled, loading, error, onRetry, atRiskMrr }) 
 export default function BillingRecoveryPage() {
   const [searchParams] = useSearchParams();
   const feedbackEnabled = searchParams.get("feedback") === "1";
+  const tableControlsEnabled = searchParams.get("tableControls") === "1";
   const [days, setDays] = useState(90);
   const [data, setData] = useState(null);
   const [aging, setAging] = useState(null);
@@ -591,7 +634,8 @@ export default function BillingRecoveryPage() {
       ) : !feedbackEnabled && error ? null : (
         <>
           <VisitQueues feedbackEnabled={feedbackEnabled} loading={leaksLoading} error={leaksError}
-            onRetry={loadLeaks} data={data} busyId={busyId} freeFor={freeFor} elsewhereFor={elsewhereFor}
+            controlsEnabled={tableControlsEnabled} onRetry={loadLeaks} data={data}
+            busyId={busyId} freeFor={freeFor} elsewhereFor={elsewhereFor}
             onBill={bill} onFree={showFree} onElsewhere={showElsewhere} />
           <AgingSection feedbackEnabled={feedbackEnabled} loading={agingLoading} error={agingError}
             onRetry={loadAging} aging={aging} />

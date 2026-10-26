@@ -90,9 +90,14 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
   }
 
   if (state === 'quote_required') {
+    // A proposal's card is glass UI (owner 2026-10-26): the glass card, a real heading on the glass
+    // heading scale, and the gold call button. Every other quote card keeps its layout.
+    const { cardProps, Heading, callProps } = isProposal
+      ? { cardProps: { 'data-glass': 'card', 'data-testid': 'proposal-next-steps' }, Heading: 'h2', callProps: { 'data-glass-accent': '' } }
+      : { cardProps: {}, Heading: 'div', callProps: {} };
     return (
-      <div {...(isProposal ? { 'data-glass': 'card', 'data-testid': 'proposal-next-steps' } : {})} style={{ ...estimateCard(), borderTop: '4px solid #F97316' }}>
-        <div style={{ fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
+      <div {...cardProps} style={{ ...estimateCard(), borderTop: '4px solid #F97316' }}>
+        <Heading style={{ fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: W.navy, margin: '0 0 8px' }}>
           {isProposal
             // The proposal card renders directly under the hero, which already
             // announces "your formal proposal is ready" — repeating it here
@@ -102,7 +107,7 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
             : isAccountManagerFinalize
             ? 'Your account manager will finalize this.'
             : 'This treatment needs an inspection.'}
-        </div>
+        </Heading>
         <div style={{ fontSize: 15, color: W.textBody, lineHeight: 1.5 }}>
           {isProposal ? (
             // A commercial proposal carries the SAME next-step wording as the
@@ -143,7 +148,7 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
             {quoteReasonText}
           </div>
         ) : null}
-        <a href={`tel:${WAVES_TEL}`} style={callCtaStyle}>Call {WAVES_PHONE}</a>
+        <a href={`tel:${WAVES_TEL}`} {...callProps} style={callCtaStyle}>Call {WAVES_PHONE}</a>
       </div>
     );
   }

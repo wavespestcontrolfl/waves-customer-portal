@@ -3002,7 +3002,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // services/reservice-fixed-recap.js. Honored only below, once the live
       // completion profile and both dark gates are known.
       customerRecapMode,
-      requestReview,
+      requestReview: requestReviewPosted,
+      // "Complaint on site" (GATE_REVIEW_FIRST_ASK_LOCK): the one reason a never-asked customer's review ask
+      // may be turned off. Read only below, through ReviewService.firstAskLockChoice.
+      reviewOptOutReason,
       // Set by the Fast Complete Wrap-up beside requestReview:true on the re-service sheets (owner 2026-10-10):
       // refused below once GATE_FAST_COMPLETE_WRAP_UP is off. Absent on the full form.
       wrapUpReviewAsk,
@@ -3103,6 +3106,36 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Re-checked under the visit row lock against the registry's active stations.
       stationRosterSeen,
     } = completionInput.body;
+    // First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a never-asked customer's ask turned off
+    // WITHOUT the "Complaint on site" reason stays on. Only a tech's explicit requestReview:false on a real,
+    // completed, loud, non-re-service visit is looked at; system closeouts, backdated, incomplete, concern and
+    // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior. Gate
+    // off: no read at all, requestReview is the posted value.
+    let requestReview = requestReviewPosted;
+    let reviewFirstAskLock = null;
+    let reviewTimingBody = completionInput.body || {};
+    if (requestReviewPosted === false && visitOutcome === 'completed' && !oneTimeRecapOnly && backfill !== true
+      && (!reviewSuppression || reviewSuppression === 'invoice_created')
+      && customerRecapMode !== require('./reservice-fixed-recap').MODE
+      && !completionInput.issuedInvoiceCloseout && completionInput.systemQuietCloseout !== true
+      // A sheet that pins every customer text off (no completion text, no pay link, no ask) means "send nothing".
+      && !(sendCompletionSmsRequested === false && includePayLink === false)
+      && require('../config/feature-gates').reviewFirstAskLockLive()) {
+      const reviewRequest = require('./review-request');
+      // `db` is the packet transaction in a visit-closeout records phase: the reads ride it.
+      const lockVisit = await reviewRequest.firstAskLockVisit(completionInput.serviceId, db);
+      if (lockVisit) {
+        reviewFirstAskLock = await reviewRequest.firstAskLockChoice({
+          customerId: lockVisit.customer_id, requestReview: requestReviewPosted, optOutReason: reviewOptOutReason,
+        }, db);
+      }
+      if (reviewFirstAskLock?.forcedOn) {
+        requestReview = true;
+        // The tech cleared the box, so a timing left in the form is not a choice: Automatic.
+        const { reviewTiming: _t, reviewDelayMinutes: _d, reviewScheduledFor: _s, ...rest } = reviewTimingBody;
+        reviewTimingBody = { ...rest, requestReview: true };
+      }
+    }
     // An oversized products array is refused before anything reads it (no claim, no writes).
     const tooManyProducts = rawProductsTooManyPayload(products);
     if (tooManyProducts) return ({ status: 400, body: tooManyProducts });
@@ -3325,7 +3358,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let completionReviewDelayMinutes;
     let customerRequestedReview = null;
     try {
-      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
+      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(reviewTimingBody);
       // The timing selector can be retained after the review checkbox is
       // cleared or a client suppression turns the ask off; the stamp must not
       // claim the customer asked when nothing was authorized (codex #4140
@@ -5984,6 +6017,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
         && typeof resumedStructuredNotes.customerRequestedReview === 'object'
         ? resumedStructuredNotes.customerRequestedReview
         : null;
+      // A kept-on first review ask was frozen with the record: a resumed retry (the customer may have been
+      // asked since) finishes the choice the record holds (GATE_REVIEW_FIRST_ASK_LOCK).
+      if (resumedStructuredNotes.reviewFirstAskLock?.forcedOn === true) {
+        requestReview = true;
+        completionReviewDelayMinutes = undefined;
+      } else if (reviewFirstAskLock?.forcedOn) {
+        // The committed record decides. It holds no kept-on marker (the gate was off then, or the customer
+        // was asked since), so this run's preflight override is undone: the posted choice and the posted
+        // timing stand, as for any committed retry.
+        requestReview = requestReviewPosted;
+        reviewFirstAskLock = null;
+        try {
+          completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
+        } catch {
+          // A chosen time that has passed by now means "due now", as the committed-retry catch above does.
+          completionReviewDelayMinutes = 0;
+        }
+      }
       durableCompletionCommitted = true;
       // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
       // its address — released only now that the completion is durably committed (a rejected
@@ -6940,9 +6991,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
-            reviewTiming: reviewTiming || null,
+            // GATE_REVIEW_FIRST_ASK_LOCK audit: a never-asked customer's "no ask" was kept on (forcedOn) or
+            // turned off with the "Complaint on site" reason. Absent when the lock did not act.
+            ...(reviewFirstAskLock && (reviewFirstAskLock.forcedOn || reviewFirstAskLock.optOutReason)
+              ? { reviewFirstAskLock: { neverAsked: true, forcedOn: reviewFirstAskLock.forcedOn, optOutReason: reviewFirstAskLock.optOutReason } }
+              : {}),
+            reviewTiming: (!reviewFirstAskLock?.forcedOn && reviewTiming) || null,
             reviewDelayMinutes: completionReviewDelayMinutes == null ? null : completionReviewDelayMinutes,
-            reviewScheduledFor: reviewScheduledFor || null,
+            reviewScheduledFor: (!reviewFirstAskLock?.forcedOn && reviewScheduledFor) || null,
             // Who captured "Customer asked for the link", when, and where —
             // carried through the paid-invoice deferral (enrollForPaidInvoice).
             // Frozen off with requestReview: an incomplete / internal-only /
@@ -7621,7 +7677,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             throw err;
           }
           // The billing lane likewise (Codex #4365 P2): lawnPlanProgramApplies
-          // lets an explicit per_visit / one_time lane defeat the tier, so a
+          // lets an explicit one_time lane defeat the tier (per_visit does not, owner 2026-10-26), so a
           // billing_mode edit that committed between the plan build and this
           // customer share lock would stamp attribution the current lane
           // denies (or omit attribution it now allows). Same retryable shape;
@@ -8368,7 +8424,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // carrier is still the visit's measured carrier (Codex #4113 P2).
             // The legacy (gate-off) writer keeps its attribution rules but
             // shares the program predicate with the lawn_protocol_* stamp: a
-            // per_visit / one_time customer's lingering tier is not a program
+            // one_time customer's lingering tier is not a program
             // there either (Codex #4365 r6 P2).
             plan: waveguardPlan && !(lawnLedgerVisit ? lawnPlanAttributesVisit(waveguardPlan) : lawnPlanProgramApplies(waveguardPlan))
               ? { ...waveguardPlan, protocol: null } : waveguardPlan,
@@ -8543,7 +8599,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           scheduledServiceUpdate.field_confirmed_at = svc.field_confirmed_at || new Date();
         }
         // The closeout stamp follows the same program-attribution predicate
-        // as the ledger (Codex #4365 r2 P2): a per_visit / one_time customer
+        // as the ledger (Codex #4365 r2 P2): a one_time customer
         // keeping a legacy tier is a WaveGuard closeout for the completion
         // lockouts, but the calendar-resolved plan is not a protocol the
         // technician was assigned. Stamping it would mint a COMPLETE

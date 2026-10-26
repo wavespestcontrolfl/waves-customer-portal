@@ -5,9 +5,13 @@
  * snapshotted into auto_dispatch_runs.config_snapshot on every run so a past
  * run's behavior is always reconstructable even after the env changes.
  *
- * Safety posture: dry_run by default, lock window 14 days, capped changes per
- * run, customer notifications OFF (the move itself is silent — comms are a
- * separate, gated step).
+ * Safety posture: dry_run by default, capped changes per run, customer
+ * notifications OFF (the move itself is silent — comms are a separate, gated
+ * step). The day-move guard (guardMode) is one of three: 'legacy' = the flat
+ * lock window (lockWindowDays, 14 days by default); 'tiers' (GATE_ROUTE_TIERS) =
+ * the days-out tier ladder with a 5-day destination floor; 'flex'
+ * (GATE_AUTO_DISPATCH_FLEX_TIER, wins over tiers) = a 73-hour freeze and a
+ * 5-day destination floor.
  */
 
 function intEnv(name, def, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
