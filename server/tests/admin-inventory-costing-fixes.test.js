@@ -128,6 +128,7 @@ describe('POST /restock-requests/:id/action', () => {
         if (q.called('update')) { orderUpdates.push(q.args('update')[0]); return 1; } // settleLandedAfterReceive
         return requestRow.ledger || null; // assertManualActionAllowed's one read
       }
+      if (q._table === 'vendor_order_emails') return requestRow.emailOrder || null; // assertNoEmailOrderOut's one read on cancel
       if (q._table === 'product_inventory_movements') {
         movements.push(q.args('insert')[0]);
         return [{ id: 'movement-1', ...q.args('insert')[0] }];
@@ -157,6 +158,23 @@ describe('POST /restock-requests/:id/action', () => {
       expect(stockUpdates[0].inventory_on_hand).toBe(12);
       expect(movements).toHaveLength(1);
       expect(statusUpdates.some((u) => u.status === 'received')).toBe(true);
+    });
+  });
+
+  test('cancel of a request whose order email went to SiteOne → 409 email_order_out, nothing written', async () => {
+    const { statusUpdates } = wireRestock({
+      id: 'req-1', product_id: 'prod-1', status: 'ordered', requested_quantity: 2, unit: 'gal',
+      emailOrder: { po: 'WAVES-REQ00001', status: 'sent' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/WAVES-REQ00001/);
+      expect(statusUpdates).toHaveLength(0);
     });
   });
 

@@ -116,8 +116,8 @@ describe('siteone-email routes', () => {
   });
   afterAll(() => { delete process.env.GATE_SITEONE_EMAIL_ORDER; });
 
-  const call = (method, role) => fetch(`${base}/admin/inventory/restock-requests/${REQUEST_ID}/siteone-email`, {
-    method, headers: { 'x-test-role': role, 'content-type': 'application/json' }, ...(method === 'POST' ? { body: '{}' } : {}),
+  const call = (method, role, body = '{}') => fetch(`${base}/admin/inventory/restock-requests/${REQUEST_ID}/siteone-email`, {
+    method, headers: { 'x-test-role': role, 'content-type': 'application/json' }, ...(method === 'POST' ? { body } : {}),
   });
 
   test.each(['GET', 'POST'])('a technician gets 403 on %s, even with the gate on', async (method) => {
@@ -147,10 +147,10 @@ describe('siteone-email routes', () => {
   test('an admin send passes the actor and returns the result', async () => {
     process.env.GATE_SITEONE_EMAIL_ORDER = 'true';
     emailSvc.sendOrderEmail.mockResolvedValue({ ok: true, email: { id: 'e1', po: 'WAVES-A1B2C3D4' }, messageId: 'm1', requestMarked: true });
-    const res = await call('POST', 'admin');
+    const res = await call('POST', 'admin', JSON.stringify({ version: 'v-abc123' }));
     expect(res.status).toBe(200);
     expect((await res.json()).email.po).toBe('WAVES-A1B2C3D4');
-    expect(emailSvc.sendOrderEmail).toHaveBeenCalledWith(REQUEST_ID, { actor: 'Test Admin', actorId: 'tech-1' });
+    expect(emailSvc.sendOrderEmail).toHaveBeenCalledWith(REQUEST_ID, { actor: 'Test Admin', actorId: 'tech-1', version: 'v-abc123' });
   });
 
   test('a refusal answers its status with the message and code', async () => {

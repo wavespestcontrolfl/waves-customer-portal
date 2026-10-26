@@ -21,7 +21,12 @@ maybeDescribe('vendor-order-email (live Postgres)', () => {
   const ENV = { SITEONE_ORDER_EMAIL: 'orders@siteone.example', SENDGRID_FROM_EMAIL: 'contact@wavespestcontrol.com' };
 
   const mailer = (impl) => ({ isConfigured: jest.fn(() => true), sendOne: jest.fn(impl || (async () => ({ messageId: 'sg-msg-1' }))) });
-  const send = (id, m, extra = {}) => svc.sendOrderEmail(id, { actor: 'Test Admin', actorId: null }, { sendgrid: m, env: ENV, ...extra });
+  // Like the dialog: open the preview, then send what it showed (its version).
+  const send = async (id, m, extra = {}) => {
+    const env = extra.env || ENV;
+    const { version } = await svc.previewOrderEmail(id, { env });
+    return svc.sendOrderEmail(id, { actor: 'Test Admin', actorId: null, version }, { sendgrid: m, env, ...extra });
+  };
   const preview = (id, env = ENV) => svc.previewOrderEmail(id, { env });
   const reject = async (promise) => promise.then(() => { throw new Error('expected a refusal'); }, (e) => e);
 
@@ -184,6 +189,8 @@ maybeDescribe('vendor-order-email (live Postgres)', () => {
         subject: `Pickup order: Waves Pest Control, account 123456, PO WAVES-${request.id.slice(0, 8).toUpperCase()}`,
       });
       expect(m.sendOne.mock.calls[0][0].cc).toBeUndefined();
+      // SendGrid's raw error body can echo an address: the call opts out of sendOne's own error log.
+      expect(m.sendOne.mock.calls[0][0].suppressErrorLog).toBe(true);
 
       const row = await emailRow(request.id);
       expect(row).toMatchObject({ status: 'sent', provider_message_id: 'sg-msg-1', sent_by: 'Test Admin', packages: 6, estimate_cents: 14700 });
@@ -268,6 +275,73 @@ maybeDescribe('vendor-order-email (live Postgres)', () => {
       const lost = results.find((r) => r.status === 'rejected');
       expect(lost.reason.statusCode).toBe(409);
       expect((await requestRow(request.id)).status).toBe('ordered');
+    });
+  });
+
+  describe('bound to the preview, and the bot', () => {
+    const sendWith = (id, m, version, extra = {}) => svc.sendOrderEmail(id, { actor: 'Test Admin', actorId: null, version }, { sendgrid: m, env: ENV, ...extra });
+
+    test('Send without a preview version is refused', async () => {
+      const { request } = await fixture();
+      const m = mailer();
+      expect(await reject(sendWith(request.id, m, undefined))).toMatchObject({ statusCode: 409, code: 'preview_required' });
+      expect(m.sendOne).not.toHaveBeenCalled();
+      expect(await emailRow(request.id)).toBeUndefined();
+    });
+
+    test.each([
+      ['the item number', (pricingId) => db('vendor_pricing').where({ id: pricingId }).update({ vendor_sku: '111111' })],
+      ['the pack size', (pricingId) => db('vendor_pricing').where({ id: pricingId }).update({ quantity: '25 lb' })],
+    ])('a change to %s after the preview is refused and sends nothing', async (_label, change) => {
+      const { request, product } = await fixture();
+      const m = mailer();
+      const { version } = await preview(request.id);
+      const pricing = await db('vendor_pricing').where({ product_id: product.id }).first();
+      await change(pricing.id);
+      expect(await reject(sendWith(request.id, m, version))).toMatchObject({ statusCode: 409, code: 'preview_changed' });
+      expect(m.sendOne).not.toHaveBeenCalled();
+      expect(await emailRow(request.id)).toBeUndefined();
+      // a fresh preview shows the new order and can be sent
+      const fresh = await preview(request.id);
+      expect(fresh.version).not.toBe(version);
+      expect(await sendWith(request.id, m, fresh.version)).toMatchObject({ ok: true });
+    });
+
+    test('a changed recipient or payment setting after the preview is refused', async () => {
+      const { request } = await fixture();
+      const m = mailer();
+      const { version } = await preview(request.id);
+      expect(await reject(sendWith(request.id, m, version, { env: { ...ENV, SITEONE_ORDER_EMAIL: 'other@siteone.example' } }))).toMatchObject({ code: 'preview_changed' });
+      expect(await reject(sendWith(request.id, m, version, { env: { ...ENV, SITEONE_ORDER_PAYMENT: 'card_on_file', SITEONE_ORDER_CARD_LAST4: '4242' } }))).toMatchObject({ code: 'preview_changed' });
+      expect(m.sendOne).not.toHaveBeenCalled();
+    });
+
+    test('while the order bot would place an auto-reorder request for real, the email is refused', async () => {
+      const { request } = await fixture({ request: { source: 'auto_reorder' } });
+      const dispatch = require('../services/procurement/order-dispatch');
+      const spy = jest.spyOn(dispatch, 'canAutoOrder').mockResolvedValue(true);
+      try {
+        expect(await reject(preview(request.id))).toMatchObject({ statusCode: 409, code: 'bot_can_order' });
+        // a dry run submits nothing, so it does not block
+        expect((await preview(request.id, { ...ENV, SITEONE_BOT_DRY_RUN: 'true' })).packages).toBe(6);
+        // a manual request is never the bot's
+        const manual = await fixture();
+        expect((await preview(manual.request.id)).packages).toBe(6);
+        spy.mockResolvedValue(false);
+        expect((await preview(request.id)).packages).toBe(6);
+      } finally { spy.mockRestore(); }
+    });
+
+    test('a request with an emailed order cannot be cancelled until the email row is dismissed', async () => {
+      const { request } = await fixture();
+      await send(request.id, mailer(), {});
+      const ops = require('../services/inventory-operations');
+      const cancel = () => ops.updateRestockRequest(request.id, { action: 'cancel', note: 'test' }, { actorId: null });
+      expect(await reject(cancel())).toMatchObject({ statusCode: 409, code: 'email_order_out' });
+      expect((await requestRow(request.id)).status).toBe('ordered');
+      expect(await reject(ops.previewRestockAction(request.id, { action: 'cancel' }))).toMatchObject({ code: 'email_order_out' });
+      await db('vendor_order_emails').where({ restock_request_id: request.id }).update({ status: 'dismissed' });
+      expect((await cancel()).request.status).toBe('cancelled');
     });
   });
 

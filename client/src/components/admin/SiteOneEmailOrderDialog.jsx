@@ -14,7 +14,7 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // The Restock tab's "Email order to SiteOne" (GATE_SITEONE_EMAIL_ORDER). It
 // fetches the preview when it opens, shows exactly what will go to SiteOne,
 // and sends only on Send email. A refusal (409) shows the server's message.
-async function siteOneEmailFetch(requestId, method) {
+async function siteOneEmailFetch(requestId, method, payload = {}) {
   const res = await fetch(
     `${API_BASE}/admin/inventory/restock-requests/${encodeURIComponent(requestId)}/siteone-email`,
     {
@@ -23,7 +23,7 @@ async function siteOneEmailFetch(requestId, method) {
         Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
         "Content-Type": "application/json",
       },
-      ...(method === "POST" ? { body: "{}" } : {}),
+      ...(method === "POST" ? { body: JSON.stringify(payload) } : {}),
     },
   );
   const body = await res.json().catch(() => ({}));
@@ -62,7 +62,8 @@ export default function SiteOneEmailOrderDialog({ request, onClose, onSent }) {
     setSending(true);
     setError("");
     try {
-      const result = await siteOneEmailFetch(request.id, "POST");
+      // Send what was previewed: the server refuses if the order changed since.
+      const result = await siteOneEmailFetch(request.id, "POST", { version: preview.version });
       onSent(result);
     } catch (err) {
       setError(err.message);

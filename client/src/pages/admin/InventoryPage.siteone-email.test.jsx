@@ -25,6 +25,7 @@ const OPEN_REQUEST = {
   inventoryUnit: 'lb',
 };
 const PREVIEW = {
+  version: 'v-abc123',
   requestId,
   to: 'orders@siteone.example',
   cc: null,
@@ -116,6 +117,8 @@ describe('Email order to SiteOne', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send email' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(siteOneCalls('POST')).toHaveLength(1);
+    // Send carries the version of the preview the admin saw.
+    expect(JSON.parse(siteOneCalls('POST')[0][1].body)).toEqual({ version: 'v-abc123' });
     expect(queue.mock.calls.filter(([url]) => String(url).includes('/restock-requests?')).length).toBeGreaterThan(loadsBefore);
   });
 

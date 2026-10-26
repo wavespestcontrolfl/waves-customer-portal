@@ -3200,7 +3200,7 @@ router.post('/restock-requests/:id/siteone-email', requireAdmin, async (req, res
   try {
     if (!featureGates.siteOneEmailOrderLive()) return res.status(404).json({ error: 'Not found' });
     const actor = (req.technician && (req.technician.name || req.technician.email)) || null;
-    const result = await siteOneEmailOrder().sendOrderEmail(req.params.id, { actor, actorId: req.technicianId });
+    const result = await siteOneEmailOrder().sendOrderEmail(req.params.id, { actor, actorId: req.technicianId, version: req.body && req.body.version });
     // IDs only, no addresses (PII).
     const fields = { requestId: req.params.id, technicianId: req.technicianId, emailId: result.email.id, messageId: result.messageId };
     if (result.reconcile || !result.requestMarked) logger.error('siteone order email sent but not fully recorded, reconcile', { ...fields, requestMarked: result.requestMarked });
