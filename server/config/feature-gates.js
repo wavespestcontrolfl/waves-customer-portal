@@ -329,6 +329,7 @@
  *   GATE_TS_TECH_FINDINGS_COPY=true (Tree & Shrub tech findings in customer copy, parity with the lawn rulings, owner 2026-10-02: the technician's keep/confirm/hide/edit decisions on the photo-read findings are FROZEN on the service record (structured_notes.treeShrubTechFindings) whether or not the signed preview is accepted, and the customer report + AI report prompt obey them (a hidden finding never appears, a confirmed one reads as the technician's finding, an edit uses the technician's text; the photo read stays stored for the office). Also the palm-crown rule (owner 2026-10-01: photos are ground level, so no customer copy may call a palm's crown, spear leaf or newest fronds healthy). Customer copy, so strict opt-in: exactly 'true' in every environment, read at call time via tsTechFindingsCopyLive(). Ships DARK; off = nothing is stored and every report/prompt is byte-identical to before.)
  *   GATE_TS_LIGHTING=true (Tree & Shrub lighting-aware color, owner 2026-10-23, "add to tree and shrub", the lawn rule of GATE_LAWN_LIGHTING applied to plants: sun, shade and cloud change how green a plant looks in a photo, so (1) the T&S photo read (both models) also answers the photo's light (`lighting`: full_sun, overcast, open_shade, mixed_sun_shade, low_light, unknown; `hard_shadows`: yes, no, unknown); a missing or invalid answer becomes unknown and NEVER fails the read; (2) each visit's light is stored inside the assessment's existing composite_scores jsonb (`light`, `photo_lights`), no migration; the tech's Fast Complete / closeout preview carries the visit light back to Generate under its own signature (`lightSignature`), a missing or unsigned light is unknown; (3) the report's "Leaf Color & Vigor" trend is left out unless the latest two visits that carry a color score are in known, compatible light (lawn-lighting.js, owner 2026-10-22 option B: full sun and sun with shadows with each other, overcast and open shade with each other, sun never with diffuse light, a visit whose photos disagree is mixed light and compared with nothing). Overall, foliage, pest and water trends stay. A visit with no light read (every visit before this gate) is unknown and its color is never compared. Strict opt-in: exactly 'true' in every environment, read at call time via tsLightingLive(). Ships DARK; off = the prompt, schema, validation, stored data, preview response and report payload are byte-identical to before)
  *   GATE_TS_WATCH_LIST=true (Tree & Shrub seasonal watch list, owner DRAFT 2026-10-01, tech-facing and storage only: the photo read gains this month's watch list (server/config/tree-shrub-watch-list.js, month in America/New_York) and may name an item as a possible SIGNAL (an optional watch_signals field that never changes a score), GET /:serviceId/tree-shrub/fast-context adds `watchList`, the Fast Complete sheet shows a "This month's watch list" block (Seen / Not seen, Add from watch list, an extent) that never blocks Done, and the technician's choices are FROZEN on the service record (structured_notes.treeShrubWatchItems). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsWatchListLive(). Ships DARK; off = the prompt and every result are byte-identical to before, fast-context has no watchList key and nothing is stored.)
+ *   GATE_TS_OUTLINE=true (Tree & Shrub program overview, owner 2026-10-26 "also we need to go through other related outlines, etc and make sure they are more aligned like lawn outline", decision D4-A "do whatever you recommend": staff can build, preview, regenerate and send a Tree & Shrub outline from an estimate with a Tree & Shrub line (server/services/tree-shrub-service-outline.js, routes/admin-service-outlines.js serviceLine 'tree_shrub', the Estimates menu item, the composer), the lawn outline's customer page with the Tree & Shrub month list from the protocol's month cards, its products with the active ingredient and no rate, and its own text and email; packets stored with service_line tree_shrub and stamped content ts-v1-copy-1; ships DARK, read at call time via tsOutlineLive(); off = no Tree & Shrub outline can be built, regenerated or sent, the lawn outline and the Estimates list exactly as before, and a stored Tree & Shrub outline still opens from its link; the outline is sent only when staff press Send)
  *   GATE_TS_PEST_CHECK=true (Tree & Shrub live-insect check, owner 2026-10-05, tech-facing and storage only: GET /:serviceId/tree-shrub/fast-context adds `pestCheck`, the Fast Complete sheet shows a "Live insects found?" Yes / No block with insect-type chips, blocks Merit when only armored scale is picked, notes a live-finds-only product on a No, and the answers are FROZEN on the service record (structured_notes.treeShrubPestCheck). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsPestCheckLive(). Ships DARK; off = fast-context has no pestCheck key and nothing is stored.)
  *   GATE_ASSESSMENT_FAST_COMPLETE=true (Waves Assessment Fast Complete, owner 2026-10-09: the schedule payload carries `assessmentFastCompleteEnabled` for a visit whose completion profile is the assessment key, and admin Dispatch opens a one-screen sheet (talk note, photos, warm/cold/lost, recommended interests, the inspection credit toggle where the full form shows it) in place of the full form. Complete records the consultation outcome, then posts /complete with texts and the review ask off. Strict opt-in: exactly 'true', read at call time via assessmentFastCompleteLive(). Ships DARK; off = the full form as before.)
  *   GATE_LEAD_SERVICE_DISPLAY=true (Lead service names, owner 2026-10-09: the lead list and lead detail responses carry `service_display`, the lead's service named the way the booking catalog names it, and the Leads screen shows it with the stored text as a tooltip; lead search also matches the shown name. Display only: `leads.service_interest` is never rewritten and nothing is sent to a customer. Strict opt-in: exactly 'true', read at call time via leadServiceDisplayLive(). Ships DARK; off = the screen shows the stored text.)
@@ -4906,6 +4907,9 @@ const gates = {
   // the fast-context answer and the completion freeze read GATE_TS_WATCH_LIST
   // at call time via tsWatchListLive().
   tsWatchList: process.env.GATE_TS_WATCH_LIST === 'true',
+  // Tree & Shrub program overview (owner 2026-10-26). Boot-log entry only: the outline routes, the composer's
+  // Estimates entry and tree-shrub-service-outline.js read GATE_TS_OUTLINE at call time via tsOutlineLive().
+  tsOutline: process.env.GATE_TS_OUTLINE === 'true',
   // Tree & Shrub lighting-aware color (owner 2026-10-23). Boot-log entry only:
   // every caller reads GATE_TS_LIGHTING at call time via tsLightingLive().
   tsLighting: process.env.GATE_TS_LIGHTING === 'true',
@@ -5490,6 +5494,13 @@ function tsTechFindingsCopyLive() {
 // the fast-context `watchList` and the completion freeze of watch items.
 function tsWatchListLive() {
   return process.env.GATE_TS_WATCH_LIST === 'true';
+}
+
+// GATE_TS_OUTLINE read at CALL time — strict `=== 'true'`, so an unset variable is the kill switch. The canonical reader
+// for building, regenerating and sending a Tree & Shrub outline and for its Estimates entry; off = no Tree & Shrub
+// outline can be made or sent.
+function tsOutlineLive() {
+  return process.env.GATE_TS_OUTLINE === 'true';
 }
 
 // GATE_TS_LIGHTING read at CALL time — strict `=== 'true'`, dark in every
@@ -8138,6 +8149,8 @@ module.exports.tsLightingLive = tsLightingLive;
 module.exports.tsWatchListLive = tsWatchListLive;
 // GATE_TS_PEST_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.tsPestCheckLive = tsPestCheckLive;
+// GATE_TS_OUTLINE reader, on its own line so gate PRs never conflict.
+module.exports.tsOutlineLive = tsOutlineLive;
 // GATE_TS_NEONIC_CAP reader, on its own line so gate PRs never conflict.
 module.exports.tsNeonicCapLive = tsNeonicCapLive;
 // GATE_TS_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.

@@ -1331,4 +1331,15 @@ module.exports = {
   resolveJurisdictionId,
   resolveSeasonBand,
   validateContent,
+  // Shared with the Tree & Shrub outline (tree-shrub-service-outline.js, GATE_TS_OUTLINE).
+  V13_COPY,
+  WATERING_ORDER,
+  addressSummary,
+  estimateSnapshot,
+  estimateViewPath,
+  firstNonEmpty,
+  isRestrictedSeason,
+  loadFertilizerRule,
+  makeSection,
+  parseJsonMaybe,
 };

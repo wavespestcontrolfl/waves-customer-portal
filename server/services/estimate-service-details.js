@@ -754,18 +754,10 @@ const SERVICE_DETAILS_COPY = {
   // fertilization"/"season-long protection" claims.
   tree_shrub: {
     title: 'Tree & Shrub Care — Service Details',
-    // Products from the T&S protocols: Dominion 2L is the primary systemic
-    // (is_primary in the protocol usage seed). TriTek replaced SuffOil-X as
-    // the horticultural spray oil (SiteOne repricing, owner-approved
-    // 2026-07-16) — no TriTek artwork yet, so the packet shows Dominion only
-    // rather than advertising a product the protocol no longer uses.
-    productImages: {
-      heading: 'A few of the products doing the work',
-      images: [
-        { file: 'product-dominion-2l.png', product: 'Dominion', caption: 'Dominion® 2L — systemic insecticide (imidacloprid)' },
-      ],
-      note: 'Stylized product illustrations — product selection follows the plant, the diagnosis, and the label, and your service report names the exact products applied at your home.',
-    },
+    // No productImages block: the T&S protocol never names Dominion and keeps
+    // neonicotinoids "Selective use only", and TriTek (which replaced
+    // SuffOil-X as the horticultural spray oil, owner-approved 2026-07-16)
+    // has no artwork yet. Aligned to the protocol 2026-10-26.
     tagline: 'Your ornamentals are not lawn grass — plant-specific inspection, treatment, and honest diagnosis, documented every visit.',
     systemBox: {
       heading: 'Your program at a glance',
@@ -774,7 +766,7 @@ const SERVICE_DETAILS_COPY = {
         ['Watch list', 'Scale, whiteflies, aphids, mealybugs, mites, lace bugs, caterpillars, thrips & other covered ornamental pests'],
         ['Every visit', 'Plant-by-plant inspection first — treatment only where the evidence and the label support it'],
         ['Disease', 'Symptoms evaluated before fungicide — some problems need a sample or lab work, and some are cultural, not chemical'],
-        ['Plant nutrition', 'A combination of foliar feeding and root-zone feeding (soil drenches / deep-root applications), selected per plant species, soil, and diagnosis — palms get palm-specific care, never lawn fertilizer pointed at a palm'],
+        ['Plant nutrition', 'Slow-release granular feedings: palm fertilizer spread under the canopy, and a bed and shrub feeding in spring and late fall, outside the summer limits. Iron or manganese only where new growth shows a shortage — palms get palm-specific care, never lawn fertilizer pointed at a palm'],
         ['Pollinators & edibles', 'Blooms, foraging bees, and food plants are checked before treatment — tell us about hives, butterfly gardens, and edibles'],
         ['Documentation', 'Digital report every visit: plants inspected, findings, exact products, photos, watering & re-entry instructions'],
         ['Separate services', 'Pruning, hedge shaping, tree removal, structural tree-risk assessment, irrigation repair, bed weed control, palm trunk injections (own program), plant replacement'],
@@ -815,11 +807,11 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'Which plants are included?',
-        a: 'The plants and areas covered by your written estimate — that is the honest boundary. Ask us specifically about palms, mature canopy trees, newly installed plants, container plants, and anything edible: each has its own coverage answer. On tree size: there is no fixed height limit for root-zone and systemic treatment — a mature oak can be treated through its root system — but foliar and contact applications are limited to canopy we can reach safely and effectively from the ground. We do not climb, spray from bucket trucks, prune, or remove trees; large trees are inspected before treatment is accepted, and anything beyond the program gets documented and referred rather than half-treated.',
+        a: 'The plants and areas covered by your written estimate — that is the honest boundary. Ask us specifically about palms, mature canopy trees, newly installed plants, container plants, and anything edible: each has its own coverage answer. On tree size: root-zone insect treatments reach large trees, and we use them only where a pest history calls for it, within each product\'s yearly label limit; foliar and contact applications are limited to canopy we can reach safely and effectively from the ground. We do not climb, spray from bucket trucks, prune, or remove trees; large trees are inspected before treatment is accepted, and anything beyond the program gets documented and referred rather than half-treated.',
       },
       {
         q: 'How do you feed plants — through the leaves or the roots?',
-        a: 'Both, chosen per plant. Foliar feeding delivers targeted nutrients directly through the leaves; soil drenches and deep-root applications deliver nutrients and systemic protection through the root system. The method follows the plant species, soil conditions, pest pressure, and the diagnosed deficiency — not a one-method routine. And feeding follows diagnosis: we do not fertilize a yellow plant until we know why it is yellow.',
+        a: 'Mostly through the soil: slow-release palm fertilizer under the canopy, a bed and shrub feeding in spring and late fall, and iron or manganese only where new growth shows a shortage. A yellow plant gets a look before any extra nutrient, because yellow has a dozen causes and most are not hunger.',
       },
       {
         q: 'Do you spray every plant at every visit?',
@@ -835,7 +827,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What about my palms specifically?',
-        a: 'Palms get palm care, not shrub care. Their most common problems in our area are nutritional — potassium, magnesium, manganese, boron — and those deficiencies can mimic disease, which is why palm discoloration should never automatically trigger fungicide. When supplemental nutrition is warranted, we use palm-specific controlled-release analyses in line with UF/IFAS guidance, not lawn fertilizer. Palms are inspected and coordinated with this program, but trunk injections are their own program: diagnosed first, then quoted by palm species, condition, the treatment needed, and the number of palms — never automatically included. And we are straight about the hard cases: some palm diseases, like Ganoderma butt rot, have no effective treatment — a suspected lethal disease or trunk decay gets documented and referred promptly instead of being dressed up as a treatable condition.',
+        a: 'Palms get palm care, not shrub care. Their most common problems in our area are nutritional — potassium, magnesium, manganese, boron — and those deficiencies can mimic disease, which is why palm discoloration should never automatically trigger fungicide. Palms get controlled-release palm fertilizer on the program, at least three months apart, using analyses in line with UF/IFAS guidance, not lawn fertilizer. Palms are inspected and coordinated with this program, but trunk injections are their own program: diagnosed first, then quoted by the treatment needed, palm size, and the number of palms — never automatically included. And we are straight about the hard cases: some palm diseases, like Ganoderma butt rot, have no effective treatment — a suspected lethal disease or trunk decay gets documented and referred promptly instead of being dressed up as a treatable condition.',
       },
       {
         q: 'Can you save a dying plant?',

@@ -6,6 +6,8 @@
  *    `staffPreviewable` (whether the staff preview renders the row).
  *  - GET /admin/estimates/:id/acceptance serves the recorded acceptance to the
  *    owner only, 404 when there is none, 500 when the read fails.
+ *  - The rows' outline summaries keep lawn and Tree & Shrub packets apart
+ *    (GATE_TS_OUTLINE, owner 2026-10-26).
  * Synthetic data only.
  */
 jest.mock('../models/db', () => {
@@ -116,12 +118,12 @@ const base = (id, over = {}) => ({
   ...over,
 });
 
-function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], customers = [] }) {
+function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], customers = [], outlines = [] }) {
   const queries = [];
   const builderFor = (table) => {
     const b = {};
     const chain = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereILike', 'orWhereIn', 'orWhere',
-      'select', 'orderBy', 'limit', 'offset', 'leftJoin', 'groupBy', 'sum', 'max', 'distinct'];
+      'select', 'orderBy', 'limit', 'offset', 'leftJoin', 'groupBy', 'sum', 'max', 'count', 'distinct'];
     for (const m of chain) {
       b[m] = jest.fn((...args) => {
         queries.push({ table, m, args });
@@ -130,7 +132,7 @@ function tableDb({ estimates, acceptances = [], single = {}, prepaid = [], custo
       });
     }
     b.first = jest.fn(async () => single[table]);
-    const rows = { estimates, estimate_acceptances: acceptances, annual_prepay_terms: prepaid, customers }[table] || [];
+    const rows = { estimates, estimate_acceptances: acceptances, annual_prepay_terms: prepaid, customers, service_outline_packets: outlines }[table] || [];
     b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
     return b;
   };
@@ -383,6 +385,58 @@ describe('GET /admin/estimates list shape', () => {
     });
     // one batched call_log read for the page (callSideBlocksForEstimates), not one per row
     expect(queries.filter((q) => q.table === 'call_log' && q.m === 'whereIn')).toHaveLength(1);
+  });
+});
+
+describe('GET /admin/estimates outline summaries', () => {
+  const saved = process.env.GATE_TS_OUTLINE;
+  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_OUTLINE; else process.env.GATE_TS_OUTLINE = saved;
+  });
+
+  // Newest first, as the route orders them: the Tree & Shrub packet is newer than the lawn one.
+  const outline = (id, serviceLine, createdAt, over = {}) => ({
+    id, estimate_id: 'e-ts', service_line: serviceLine, status: 'sent', validation_status: 'passed', created_at: createdAt,
+    summary_json: {}, content_json: {}, template_version: 'mvp-1', product_registry_version: 'public-facts-v1', ...over,
+  });
+  const rows = () => [
+    base('e-ts', { service_interest: 'Lawn Care + Tree & Shrub' }),
+    base('e-pest', { service_interest: 'Pest Control' }),
+  ];
+  const outlines = [
+    outline('ts-packet', 'tree_shrub', '2026-10-26T12:00:00Z', { content_library_version: 'ts-v1-copy-1', protocol_version: 'old-ts-protocol' }),
+    outline('lawn-packet', 'lawn_care', '2026-10-25T12:00:00Z'),
+  ];
+
+  test('off: a newer Tree & Shrub packet never stands in for the lawn outline, and no Tree & Shrub key is sent', async () => {
+    delete process.env.GATE_TS_OUTLINE;
+    tableDb({ estimates: rows(), outlines });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-ts'].lawnServiceOutline.id).toBe('lawn-packet');
+      expect(byId['e-ts']).not.toHaveProperty('treeShrubOutlineAvailable');
+      expect(byId['e-ts']).not.toHaveProperty('treeShrubServiceOutline');
+    });
+  });
+
+  test('on: a Tree & Shrub estimate offers its outline, with its own stale check', async () => {
+    process.env.GATE_TS_OUTLINE = 'true';
+    tableDb({ estimates: rows(), outlines });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-ts'].lawnServiceOutline.id).toBe('lawn-packet');
+      expect(byId['e-ts'].treeShrubOutlineAvailable).toBe(true);
+      expect(byId['e-ts'].treeShrubServiceOutline).toEqual(expect.objectContaining({
+        id: 'ts-packet',
+        currentContentLibraryVersion: 'ts-v1-copy-1',
+        staleReasons: ['protocol updated'],
+      }));
+      expect(byId['e-pest'].treeShrubOutlineAvailable).toBe(false);
+      expect(byId['e-pest'].treeShrubServiceOutline).toBeNull();
+    });
   });
 });
 
