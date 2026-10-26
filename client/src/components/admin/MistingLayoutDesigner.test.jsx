@@ -4,6 +4,8 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { placeNozzles } from '../../lib/mistingLayoutGeometry';
+import { flagInZones } from '../../lib/mistingLayoutExtras';
+import { pxToFeet } from '../tech/treatmentZoneSpray';
 
 const loadBestMapImage = vi.hoisted(() => vi.fn());
 vi.mock('../tech/treatmentZoneSpray', async (importOriginal) => ({
@@ -115,7 +117,7 @@ describe('MistingLayoutDesigner', () => {
     expect(countsText()).toMatch(/Line: \d+ ft/);
 
     fireEvent.click(screen.getByRole('button', { name: 'Use counts' }));
-    expect(onUseCounts).toHaveBeenCalledWith(expected.totals.count);
+    expect(onUseCounts).toHaveBeenCalledWith(expected.totals.count, { risers: 0 });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -206,7 +208,7 @@ describe('MistingLayoutDesigner', () => {
     expect(Number(moved.getAttribute('cy'))).toBeCloseTo(280, 0);
 
     fireEvent.click(screen.getByRole('button', { name: 'Use counts' }));
-    expect(onUseCounts).toHaveBeenCalledWith(total);
+    expect(onUseCounts).toHaveBeenCalledWith(total, { risers: 0 });
   });
 
   it('still adds between nozzles and deletes on a nozzle on a small phone-width map at the zoom-19 fallback', async () => {
@@ -387,6 +389,275 @@ describe('MistingLayoutDesigner', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Fence line' }));
       tap(frame, 100, 300);
       expect(cleared()).toHaveTextContent('Your 1 manual edit was cleared.');
+    });
+  });
+
+  describe('risers, pump and no-mist zones (step 2)', () => {
+    const FT_PX = 1 / pxToFeet(1, LAT, ZOOM); // map pixels in one foot
+    const risers = () => screen.queryAllByTestId('layout-riser');
+    const zonesNow = () => screen.queryAllByTestId('layout-zone');
+    const pumps = () => screen.queryAllByTestId('layout-pump');
+    const tool = (name) => fireEvent.click(screen.getByRole('button', { name }));
+    const warnings = () => screen.queryAllByTestId('layout-zone-warning').map((w) => w.textContent);
+    const cxs = (id) => screen.getAllByTestId(id).map((n) => Number(n.getAttribute('cx'))).sort((a, b) => a - b);
+
+    async function withLine() {
+      const utils = await open();
+      tap(utils.frame, 100, 100);
+      tap(utils.frame, 300, 100);
+      fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+      return { ...utils, total: nozzleCount() };
+    }
+
+    it('Riser tool: a tap adds, a tap on a riser deletes, a tap elsewhere adds, a drag moves', async () => {
+      const { frame } = await open();
+      tool('Riser');
+      tap(frame, 100, 300);
+      tap(frame, 200, 300);
+      expect(risers()).toHaveLength(2);
+      expect(countsText()).toContain('Risers: 2');
+      tap(frame, 102, 301); // within the hit radius of the first riser: deletes it, adds nothing
+      expect(risers()).toHaveLength(1);
+      expect(cxs('layout-riser')).toEqual([400]);
+      tap(frame, 100, 340); // empty photo: adds
+      expect(risers()).toHaveLength(2);
+      // drag the riser at css (200, 300) to (250, 350): a drag moves, never deletes or adds
+      fireEvent.pointerDown(frame, { clientX: 200, clientY: 300, pointerId: 2, button: 0 });
+      fireEvent.pointerMove(frame, { clientX: 225, clientY: 325, pointerId: 2 });
+      fireEvent.pointerMove(frame, { clientX: 250, clientY: 350, pointerId: 2 });
+      fireEvent.pointerUp(frame, { clientX: 250, clientY: 350, pointerId: 2, button: 0 });
+      expect(risers()).toHaveLength(2);
+      expect(cxs('layout-riser')).toContain(500);
+      expect(cxs('layout-riser')).not.toContain(400);
+    });
+
+    it('a tap just outside the riser hit radius adds a riser instead of deleting', async () => {
+      const { frame } = await open();
+      tool('Riser');
+      tap(frame, 100, 300);
+      tap(frame, 100, 330); // 30 css px away, well beyond the hit radius
+      expect(risers()).toHaveLength(2);
+    });
+
+    it('Edit nozzles never touches risers, and the Riser tool never touches nozzles', async () => {
+      const { frame, total } = await withLine();
+      tool('Riser');
+      tap(frame, 100, 100); // on the first corner nozzle: adds a riser on top, the nozzle stays
+      expect(nozzleCount()).toBe(total);
+      expect(risers()).toHaveLength(1);
+      tap(frame, 200, 100); // mid-line, no nozzle there: adds
+      expect(risers()).toHaveLength(2);
+      expect(nozzleCount()).toBe(total);
+
+      tool('Edit nozzles');
+      tap(frame, 200, 100); // on a riser, not on a nozzle: nothing
+      expect(risers()).toHaveLength(2);
+      tap(frame, 100, 100); // on the corner nozzle (and the riser under it): deletes the nozzle only
+      expect(nozzleCount()).toBe(total - 1);
+      expect(risers()).toHaveLength(2);
+      // dragging in Edit moves nozzles only
+      const riserXs = cxs('layout-riser');
+      const nozzleXs = cxs('layout-nozzle');
+      fireEvent.pointerDown(frame, { clientX: nozzleXs[1] / 2, clientY: 100, pointerId: 4, button: 0 });
+      fireEvent.pointerMove(frame, { clientX: nozzleXs[1] / 2, clientY: 130, pointerId: 4 });
+      fireEvent.pointerMove(frame, { clientX: nozzleXs[1] / 2, clientY: 160, pointerId: 4 });
+      fireEvent.pointerUp(frame, { clientX: nozzleXs[1] / 2, clientY: 160, pointerId: 4, button: 0 });
+      expect(cxs('layout-riser')).toEqual(riserXs);
+      expect(risers()).toHaveLength(2);
+    });
+
+    it('Add nozzle and the line tools never add or delete risers', async () => {
+      const { frame } = await withLine();
+      tool('Riser');
+      tap(frame, 100, 300);
+      tool('Add nozzle');
+      tap(frame, 100, 300); // off every line
+      tool('Eave line');
+      tap(frame, 100, 300);
+      expect(risers()).toHaveLength(1);
+    });
+
+    it('Use counts writes the nozzle count and the riser count', async () => {
+      const { frame, total, onUseCounts, onClose } = await withLine();
+      tool('Riser');
+      tap(frame, 100, 300);
+      tap(frame, 200, 300);
+      tap(frame, 300, 300);
+      fireEvent.click(screen.getByRole('button', { name: 'Use counts' }));
+      expect(onUseCounts).toHaveBeenCalledWith(total, { risers: 3 });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('warns when the riser count is above the estimator limit', async () => {
+      const { frame } = await open({ limits: { maxRisers: 1 } });
+      tool('Riser');
+      tap(frame, 100, 300);
+      tap(frame, 200, 300);
+      expect(within(screen.getByTestId('layout-counts')).getByRole('status')).toHaveTextContent(/up to 1 risers/);
+    });
+
+    it('Pump tool: one pump, a second tap moves it, and it is drawn labeled Pump', async () => {
+      const { frame } = await open();
+      expect(countsText()).toContain('Pump: not placed');
+      tool('Pump');
+      tap(frame, 100, 100);
+      expect(pumps()).toHaveLength(1);
+      expect(countsText()).toContain('Pump: placed');
+      tap(frame, 300, 200);
+      tap(frame, 300, 200);
+      expect(pumps()).toHaveLength(1);
+      expect(pumps()[0]).toHaveTextContent('Pump');
+      expect(pumps()[0].querySelector('rect').getAttribute('x')).toBe(String(600 - 12));
+      expect(countsText()).toContain('Pump: placed');
+    });
+
+    it('the pump is optional for Use counts', async () => {
+      const { total, onUseCounts } = await withLine();
+      expect(pumps()).toHaveLength(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Use counts' }));
+      expect(onUseCounts).toHaveBeenCalledWith(total, { risers: 0 });
+    });
+
+    it('No-mist zone: kinds are a labeled select, a tap adds a circle at the kind default, a tap inside deletes it', async () => {
+      const { frame } = await open();
+      tool('No-mist zone');
+      const picker = screen.getByLabelText('No-mist kind');
+      expect([...picker.options].map((o) => o.textContent)).toEqual(['Pool', 'Water', 'Door/window', 'Dining/grill', 'AC intake']);
+      tap(frame, 150, 150);
+      expect(zonesNow()).toHaveLength(1);
+      expect(zonesNow()[0]).toHaveTextContent('No mist: Pool');
+      expect(Number(zonesNow()[0].querySelector('circle').getAttribute('r'))).toBeCloseTo(15 * FT_PX, 6);
+      expect(countsText()).toContain('No-mist zones: 1');
+
+      fireEvent.change(picker, { target: { value: 'door' } });
+      tap(frame, 500, 400);
+      expect(zonesNow()).toHaveLength(2);
+      expect(zonesNow()[1]).toHaveTextContent('No mist: Door/window');
+      expect(Number(zonesNow()[1].querySelector('circle').getAttribute('r'))).toBeCloseTo(8 * FT_PX, 6);
+
+      tap(frame, 150 + 5, 150); // inside the pool zone: deletes it and adds nothing
+      expect(zonesNow()).toHaveLength(1);
+      expect(zonesNow()[0]).toHaveTextContent('Door/window');
+    });
+
+    it('flags nozzles and risers inside a zone with visible text, and never touches the nozzle count', async () => {
+      const { frame, total } = await withLine();
+      expect(warnings()).toEqual([]);
+      tool('No-mist zone');
+      tap(frame, 100, 100); // a pool at the first corner
+      const inZone = flagInZones(
+        placeNozzles([{ kind: 'eave', points: EAVE_POINTS }], { lat: LAT, zoom: ZOOM }).nozzles,
+        [{ key: 'z', x: 200, y: 200, radiusFt: 15 }],
+        LAT,
+        ZOOM,
+      ).size;
+      expect(inZone).toBeGreaterThanOrEqual(1);
+      expect(inZone).toBeLessThan(total); // the far end is outside
+      expect(warnings()).toEqual([`Warning: ${inZone === 1 ? '1 nozzle' : `${inZone} nozzles`} inside a no-mist zone: aim away or remove`]);
+      expect(screen.getAllByTestId('layout-nozzle').filter((n) => n.dataset.flagged === 'true')).toHaveLength(inZone);
+      expect(nozzleCount()).toBe(total);
+
+      tool('Riser');
+      tap(frame, 110, 120); // inside the pool: tap adds (no riser there yet)
+      tap(frame, 500, 400); // outside
+      expect(warnings()).toContain('Warning: 1 riser inside a no-mist zone: move or remove');
+      expect(risers().filter((r) => r.dataset.flagged === 'true')).toHaveLength(1);
+    });
+
+    it('flags follow moves: dragging a nozzle out of a zone and a riser into one', async () => {
+      const { frame } = await withLine();
+      tool('No-mist zone');
+      fireEvent.change(screen.getByLabelText('No-mist kind'), { target: { value: 'ac' } });
+      tap(frame, 100, 100); // 8 ft AC zone on the first corner
+      const flaggedNozzles = () => screen.getAllByTestId('layout-nozzle').filter((n) => n.dataset.flagged === 'true');
+      expect(flaggedNozzles()).toHaveLength(1);
+
+      tool('Edit nozzles');
+      fireEvent.pointerDown(frame, { clientX: 100, clientY: 100, pointerId: 5, button: 0 });
+      fireEvent.pointerMove(frame, { clientX: 100, clientY: 130, pointerId: 5 });
+      fireEvent.pointerMove(frame, { clientX: 100, clientY: 200, pointerId: 5 });
+      fireEvent.pointerUp(frame, { clientX: 100, clientY: 200, pointerId: 5, button: 0 });
+      expect(flaggedNozzles()).toHaveLength(0);
+      expect(warnings()).toEqual([]);
+
+      tool('Riser');
+      tap(frame, 100, 100);
+      expect(warnings()).toEqual(['Warning: 1 riser inside a no-mist zone: move or remove']);
+      fireEvent.pointerDown(frame, { clientX: 100, clientY: 100, pointerId: 6, button: 0 });
+      fireEvent.pointerMove(frame, { clientX: 100, clientY: 150, pointerId: 6 });
+      fireEvent.pointerMove(frame, { clientX: 100, clientY: 250, pointerId: 6 });
+      fireEvent.pointerUp(frame, { clientX: 100, clientY: 250, pointerId: 6, button: 0 });
+      expect(warnings()).toEqual([]);
+    });
+
+    it('line Undo, line Clear and redrawing leave risers, the pump and zones alone', async () => {
+      const { frame } = await withLine();
+      tool('Riser');
+      tap(frame, 100, 300);
+      tool('Pump');
+      tap(frame, 300, 300);
+      tool('No-mist zone');
+      tap(frame, 500, 400);
+      fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+      expect(nozzleCount()).toBe(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+      tool('Eave line');
+      tap(frame, 100, 200);
+      tap(frame, 300, 200);
+      fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
+      expect(risers()).toHaveLength(1);
+      expect(pumps()).toHaveLength(1);
+      expect(zonesNow()).toHaveLength(1);
+      expect(screen.queryByTestId('layout-edits-cleared')).not.toBeInTheDocument();
+    });
+
+    it('Clear risers, zones and pump clears only those, and its notice restores them in one step', async () => {
+      const { frame, total } = await withLine();
+      expect(screen.getByRole('button', { name: 'Clear risers, zones and pump' })).toBeDisabled(); // nothing to clear yet
+      tool('Riser');
+      tap(frame, 100, 300);
+      tool('Pump');
+      tap(frame, 300, 300);
+      tool('No-mist zone');
+      tap(frame, 500, 400);
+      fireEvent.click(screen.getByRole('button', { name: 'Clear risers, zones and pump' }));
+      expect(risers()).toHaveLength(0);
+      expect(pumps()).toHaveLength(0);
+      expect(zonesNow()).toHaveLength(0);
+      expect(nozzleCount()).toBe(total); // the lines stay
+      expect(screen.getByTestId('layout-extras-cleared')).toHaveTextContent('Cleared 3 items');
+      expect(screen.getByRole('button', { name: 'Clear risers, zones and pump' })).toBeDisabled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Undo and restore the cleared risers, zones and pump' }));
+      expect(risers()).toHaveLength(1);
+      expect(pumps()).toHaveLength(1);
+      expect(zonesNow()).toHaveLength(1);
+      expect(screen.queryByTestId('layout-extras-cleared')).not.toBeInTheDocument();
+    });
+
+    it('a new riser edit hides the cleared notice, and the Clear lines button leaves the extras button alone', async () => {
+      const { frame } = await open();
+      tool('Riser');
+      tap(frame, 100, 300);
+      fireEvent.click(screen.getByRole('button', { name: 'Clear risers, zones and pump' }));
+      expect(screen.getByTestId('layout-extras-cleared')).toBeInTheDocument();
+      tap(frame, 200, 300);
+      expect(screen.queryByTestId('layout-extras-cleared')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Clear' })).toBeDisabled(); // no lines, no nozzle edits
+    });
+
+    it('the extra tools have hints, and switching tools keeps what was placed', async () => {
+      const { frame } = await open();
+      tool('Riser');
+      expect(screen.getByText(/A tap only deletes when it lands on a riser/)).toBeInTheDocument();
+      tap(frame, 100, 300);
+      tool('Pump');
+      expect(screen.getByText(/There is one pump/)).toBeInTheDocument();
+      tool('No-mist zone');
+      expect(screen.getByText(/Tap inside a zone to delete it/)).toBeInTheDocument();
+      tool('Riser');
+      expect(risers()).toHaveLength(1);
+      expect(screen.queryByLabelText('No-mist kind')).not.toBeInTheDocument();
     });
   });
 
