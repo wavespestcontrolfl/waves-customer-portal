@@ -62,6 +62,7 @@ import {
   savedAreaAddOns,
 } from "../../lib/areaAddOns";
 import { MISTING_FORM_DEFAULTS, NO_MISTING, defaultMistingLabel, mistingOption, readMistingAvailability } from "../../lib/mosquitoMisting";
+import MistingLayoutDesigner from "../../components/admin/MistingLayoutDesigner";
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
@@ -1143,6 +1144,18 @@ function mistingReasonNotes(item = {}) {
   return (Array.isArray(item.manualReviewReasons) ? item.manualReviewReasons : []).map(humanizeQuoteReason).filter(Boolean);
 }
 
+// The misting Nozzles field, with the "Design on map" button under it when GATE_MISTING_LAYOUT_DESIGNER is on.
+// Off, it returns the field untouched, so the screen is unchanged.
+function MistingNozzlesCell({ withDesigner, onDesign, children }) {
+  if (!withDesigner) return children;
+  return (
+    <div>
+      {children}
+      <Button variant="secondary" data-testid="misting-design-on-map" onClick={onDesign}>Design on map</Button>
+    </div>
+  );
+}
+
 function InputV2({ k, id = `estimate-${k}`, ...rest }) {
   const { form, set } = useContext(FormCtx);
   return <Input id={id} value={form[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...rest} />;
@@ -1559,6 +1572,10 @@ export default function EstimateToolViewV2({
       const p = ac.getPlace();
       if (p && p.formatted_address) {
         set("address", p.formatted_address);
+        const loc = p.geometry?.location;
+        pickedPlaceRef.current = loc && typeof loc.lat === "function"
+          ? { address: p.formatted_address, lat: loc.lat(), lng: loc.lng() }
+          : null;
       }
     });
     autocompleteRef.current = ac;
@@ -1893,6 +1910,9 @@ export default function EstimateToolViewV2({
   // Misting system availability + labels (GATE_MOSQUITO_MISTING), read from the
   // mosquito_misting_pricing row. Declared here because the preview counts it.
   const [mistingAvailability, setMistingAvailability] = useState(NO_MISTING);
+  // Layout designer (GATE_MISTING_LAYOUT_DESIGNER): open flag, and the coordinates Places gave for the typed address.
+  const [mistingDesignerOpen, setMistingDesignerOpen] = useState(false);
+  const pickedPlaceRef = useRef(null);
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
     const commercialDetected = isCommercialEstimateInput(form);
@@ -3943,6 +3963,8 @@ export default function EstimateToolViewV2({
           data.aiAnalysis?.aiSources || data.aiAnalysis?._sources,
         );
         setSatelliteData({
+          lat: data.satellite.lat,
+          lng: data.satellite.lng,
           imageUrl: data.satellite.closeUrl,
           microCloseUrl: data.satellite.microCloseUrl,
           ultraCloseUrl: data.satellite.ultraCloseUrl,
@@ -6953,6 +6975,7 @@ export default function EstimateToolViewV2({
                             ]}
                           />
                         </Field>
+                        <MistingNozzlesCell withDesigner={mistingAvailability.layoutDesigner === true} onDesign={() => setMistingDesignerOpen(true)}>
                         <Field
                           label="Nozzles"
                           id="estimate-mistingNozzles"
@@ -6961,6 +6984,7 @@ export default function EstimateToolViewV2({
                         >
                           <InputV2 k="mistingNozzles" type="number" inputMode="numeric" min={String(mistingAvailability.limits.minNozzles ?? "")} step="1" />
                         </Field>
+                        </MistingNozzlesCell>
                         <Field
                           label="Risers"
                           id="estimate-mistingRisers"
@@ -6979,6 +7003,16 @@ export default function EstimateToolViewV2({
                         </Field>
                       </div>
                     </div>
+                  )}
+                  {mistingDesignerOpen && mistingAvailability.layoutDesigner === true && form.svcMisting && (
+                    <MistingLayoutDesigner
+                      address={form.address}
+                      lat={(pickedPlaceRef.current?.address === form.address ? pickedPlaceRef.current : satelliteData)?.lat}
+                      lng={(pickedPlaceRef.current?.address === form.address ? pickedPlaceRef.current : satelliteData)?.lng}
+                      limits={mistingAvailability.limits}
+                      onUseCounts={(count) => set("mistingNozzles", String(count))}
+                      onClose={() => setMistingDesignerOpen(false)}
+                    />
                   )}
                 </>
               )}

@@ -15,6 +15,15 @@ import EstimateToolViewV2 from "./EstimateToolViewV2";
 // A full estimator render per test: slow on a loaded runner.
 vi.setConfig({ testTimeout: 30000 });
 vi.mock("../../components/admin/EstimateSendDialog", () => ({ useEstimateSend: () => vi.fn() }));
+// The layout designer has its own tests; here it is a stub that reports its props and hands back a count.
+vi.mock("../../components/admin/MistingLayoutDesigner", () => ({
+  default: ({ address, lat, lng, limits, onUseCounts, onClose }) => (
+    <div role="dialog" aria-label="Layout designer stub" data-address={address} data-lat={String(lat)} data-lng={String(lng)} data-max={String(limits?.maxNozzles)}>
+      <button type="button" onClick={() => { onUseCounts(17); onClose(); }}>Stub use 17</button>
+      <button type="button" onClick={onClose}>Stub close</button>
+    </div>
+  ),
+}));
 
 const ADDRESS = "500 Example Court, Venice, FL 34285";
 
@@ -89,8 +98,10 @@ let fetchMock;
 let mistingRead;
 let calculateResult;
 let editSource;
+let lookupSatellite;
 beforeEach(() => {
   editSource = null;
+  lookupSatellite = null;
   localStorage.setItem("waves_admin_token", "qa-token");
   vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.spyOn(window, "alert").mockImplementation(() => {});
@@ -103,7 +114,7 @@ beforeEach(() => {
     }
     if (path.endsWith("/edit-source")) return Promise.resolve(jsonResponse(structuredClone(editSource)));
     if (path.endsWith("/estimator/property-lookup")) {
-      return Promise.resolve(jsonResponse({ enriched: { homeSqFt: 2000, lotSqFt: 9000, stories: 1 }, errors: [] }));
+      return Promise.resolve(jsonResponse({ enriched: { homeSqFt: 2000, lotSqFt: 9000, stories: 1 }, errors: [], ...(lookupSatellite ? { satellite: lookupSatellite } : {}) }));
     }
     if (path.endsWith("/calculate-estimate")) return Promise.resolve(jsonResponse(structuredClone(calculateResult)));
     if (path.includes("/discounts")) return Promise.resolve(jsonResponse([]));
@@ -389,5 +400,77 @@ describe("what the result shows", () => {
     await screen.findByText("1 recurring service —", { exact: false });
     expect(screen.queryByTestId("misting-plan")).not.toBeInTheDocument();
     expect(screen.getAllByText("Mosquito Misting Service Plan")).toHaveLength(1);
+  });
+});
+
+describe("layout designer button (GATE_MISTING_LAYOUT_DESIGNER)", () => {
+  const withDesigner = () => ({ ...structuredClone(MISTING_READ), misting: { ...MISTING_READ.misting, layoutDesigner: true } });
+
+  it("is not shown when the misting block does not carry layoutDesigner: true", async () => {
+    for (const reply of [MISTING_READ, { ...MISTING_READ, misting: { ...MISTING_READ.misting, layoutDesigner: false } },
+      { ...MISTING_READ, misting: { ...MISTING_READ.misting, layoutDesigner: "true" } }]) {
+      mistingRead = reply;
+      const { unmount } = renderNew();
+      fireEvent.click(await toggle());
+      expect(screen.getByLabelText("Nozzles")).toBeInTheDocument();
+      expect(screen.queryByTestId("misting-design-on-map")).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("is not shown when misting itself is unavailable, even if layoutDesigner is set", async () => {
+    mistingRead = { featureAvailable: false, misting: { ...withDesigner().misting, enabled: false } };
+    renderNew();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByTestId("misting-design-on-map")).not.toBeInTheDocument();
+  });
+
+  it("shows Design on map beside the Nozzles input once the system is ticked", async () => {
+    mistingRead = withDesigner();
+    renderNew();
+    await toggle();
+    expect(screen.queryByTestId("misting-design-on-map")).not.toBeInTheDocument();
+    fireEvent.click(await toggle());
+    const button = screen.getByRole("button", { name: "Design on map" });
+    expect(button.parentElement).toContainElement(screen.getByLabelText("Nozzles"));
+  });
+
+  it("opens the designer with the address and limits, and Use counts fills the Nozzles input without touching the rest", async () => {
+    mistingRead = withDesigner();
+    renderNew();
+    fireEvent.click(await toggle());
+    typeInto("Risers", "3");
+    fireEvent.click(screen.getByRole("button", { name: "Design on map" }));
+    const stub = screen.getByRole("dialog", { name: "Layout designer stub" });
+    expect(stub).toHaveAttribute("data-address", ADDRESS);
+    expect(stub).toHaveAttribute("data-max", "80");
+    fireEvent.click(screen.getByRole("button", { name: "Stub use 17" }));
+    expect(screen.queryByRole("dialog", { name: "Layout designer stub" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Nozzles")).toHaveValue(17);
+    expect(screen.getByLabelText("Risers")).toHaveValue(3);
+    const body = await generate();
+    expect(body.options.mosquitoMisting).toMatchObject({ nozzles: "17", risers: "3" });
+  });
+
+  it("leaves the Nozzles input alone when the designer is closed without counts", async () => {
+    mistingRead = withDesigner();
+    renderNew();
+    fireEvent.click(await toggle());
+    typeInto("Nozzles", "22");
+    fireEvent.click(screen.getByRole("button", { name: "Design on map" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stub close" }));
+    expect(screen.getByLabelText("Nozzles")).toHaveValue(22);
+  });
+
+  it("passes the property lookup's coordinates to the designer", async () => {
+    mistingRead = withDesigner();
+    lookupSatellite = { lat: 27.1, lng: -82.4, closeUrl: "https://maps.example/close.png" };
+    renderNew();
+    fireEvent.click(await toggle());
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Design on map" }));
+    const stub = screen.getByRole("dialog", { name: "Layout designer stub" });
+    expect(stub).toHaveAttribute("data-lat", "27.1");
+    expect(stub).toHaveAttribute("data-lng", "-82.4");
   });
 });
