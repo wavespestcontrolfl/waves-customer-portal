@@ -338,10 +338,13 @@ async function obtainBaseline({ dbi, patch, runner, lock, now }) {
   return sat;
 }
 
-/** { run, baseline } for a decision, or { skipped } / { failed }. */
+/** { run, baseline } for a decision, or { skipped } / { failed } / { rejected } (attempts used up). */
 async function runCandidateExam({ dbi, patch, runner, lock, now }) {
   let existing = await candidateRunRow(dbi, patch.id);
   if (!existing || existing.status !== 'complete') {
+    // The attempt limit guards another paid sitting, never a finished exam: a sitting that completed
+    // before the process exited is decided above without one.
+    if (patch.exam_attempts >= MAX_EXAM_ATTEMPTS) return recordRejection({ dbi, patch, reason: 'exam_unavailable', detail: { attempts: patch.exam_attempts }, now });
     const closed = existing ? null : await examWindowReason({ dbi, patch, now });
     if (closed) return { skipped: closed };
     let baselineId = existing && existing.baseline_run_id;
@@ -389,10 +392,10 @@ async function examineCandidate({ dbi = db, now = new Date(), runner, lock } = {
     return recordRejection({ dbi, patch, reason: 'base_changed', detail: null, now });
   }
 
-  if (patch.exam_attempts >= MAX_EXAM_ATTEMPTS) return recordRejection({ dbi, patch, reason: 'exam_unavailable', detail: { attempts: patch.exam_attempts }, now });
   const ran = await runCandidateExam({
     dbi, patch, now, runner: runner || require('./sms-sealed-eval').runSealedExam, lock: lock || require('../utils/cron-lock').runExclusive,
   });
+  if (ran.rejected) return ran;
   if (ran.skipped) return { skipped: ran.skipped };
   if (ran.failed) return { failed: ran.failed };
   const [candidateResults, baselineResults] = await Promise.all([

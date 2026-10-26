@@ -579,6 +579,18 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(runner).not.toHaveBeenCalled();
     });
 
+    test('a finished exam is decided even when its sitting used the last attempt (the limit guards the next sitting, not the evidence)', async () => {
+      const items = await seedItems();
+      const patch = await insertPatch({ over: { exam_attempts: 2 } });
+      const baseline = await insertRun({ items, version: drafter.currentPromptVersion(), over: { finished_at: new Date(NOW.getTime() - DAY) } });
+      await insertRun({
+        items, version: patchLib.stampPatchVersion(baseVersion(), patch.version_tag), patchId: patch.id, baselineId: baseline.id, overall: 7, actions: 7,
+      });
+      const runner = jest.fn();
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ decided: 'would_promote', patchId: patch.id });
+      expect(runner).not.toHaveBeenCalled();
+    });
+
     test('a decision left unacted for two weeks expires so the loop can move on', async () => {
       setMode('observe');
       const items = await seedItems();
