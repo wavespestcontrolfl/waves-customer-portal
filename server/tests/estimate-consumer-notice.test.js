@@ -479,6 +479,17 @@ describe('sendManualAcceptConsumerNotice', () => {
     expect(() => jest.requireActual('../services/admin-alert-compose').composeAdminAlert(raiseAdminAlert.mock.calls[0][1])).not.toThrow();
   });
 
+  test('the first read failing still rings the bell for the accepted estimate', async () => {
+    const database = jest.fn((table) => {
+      if (table === 'estimates') return { where: () => ({ first: async () => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); } }) };
+      return makeDb().database(table);
+    });
+    expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', conn: database })).toEqual({ sent: false, reason: 'error' });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert.mock.calls[0][1]).toMatchObject({ subject: { type: 'estimate', id: 'est-1' } });
+    expect(raiseAdminAlert.mock.calls[0][1].action).toContain('Pat Owner');
+  });
+
   test('a read error never throws: it rings the bell', async () => {
     const { database } = makeDb({ estimateRow: accepted, technicians: [TECH] });
     findConsumerNotice.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));

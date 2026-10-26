@@ -1575,7 +1575,7 @@ describe('the post-commit plan (pure)', () => {
     const send = jest.spyOn(notice, 'sendManualAcceptConsumerNotice').mockImplementation(() => new Promise((r) => { release = r; }));
     try {
       await Effects.POST_COMMIT_STEPS.consumer_notice.run({ step: 'consumer_notice' }, { acceptedEstimate: { id: 'est-9', customer_id: 'cust-1' } });
-      expect(send).toHaveBeenCalledWith({ estimateId: 'est-9' });
+      expect(send).toHaveBeenCalledWith({ estimateId: 'est-9', customerId: 'cust-1' });
       release({ sent: true });
     } finally {
       send.mockRestore();

@@ -253,8 +253,9 @@ async function alertNoticeNotSent(estimate, reason, conn = db) {
 // estimate whose customer has no signed notice gets one by email and text. An open, unsigned notice from any source is
 // resent with a fresh link; otherwise one is issued. Nothing is sent when the gate is off, the estimate is not an
 // accepted termite estimate or a notice is already signed. A refusal or a delivery that reached no channel rings
-// the office bell. Never throws.
-async function sendManualAcceptConsumerNotice({ estimateId, conn = db }) {
+// the office bell. Never throws. `customerId` is the accept's committed customer: a failed first read can still
+// name them on the bell.
+async function sendManualAcceptConsumerNotice({ estimateId, customerId = null, conn = db }) {
   const { manualAcceptConsumerNoticeSendLive } = require('../config/feature-gates');
   if (!manualAcceptConsumerNoticeSendLive()) return { skipped: 'gate_off' };
   let estimate = null;
@@ -303,7 +304,8 @@ async function sendManualAcceptConsumerNotice({ estimateId, conn = db }) {
     return { sent: true, contractId, channels: delivery.deliveries.filter((d) => d.ok).map((d) => d.channel) };
   } catch (err) {
     logger.warn(`[estimate-consumer-notice] manual-accept send failed for estimate ${estimateId}: ${err.code || err.message}`);
-    if (estimate) await alertNoticeNotSent(estimate, 'error', conn).catch(() => {});
+    const subject = estimate || { id: estimateId, customer_id: customerId };
+    await alertNoticeNotSent(subject, 'error', conn).catch(() => {});
     return { sent: false, reason: 'error' };
   }
 }

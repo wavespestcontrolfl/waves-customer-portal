@@ -933,7 +933,7 @@ const POST_COMMIT_STEPS = {
     async run(_step, ctx) {
       // Detached like the termite agreement: the send (and its bell on failure) never holds the accept's response.
       const { sendManualAcceptConsumerNotice } = require('./estimate-consumer-notice');
-      void sendManualAcceptConsumerNotice({ estimateId: ctx.acceptedEstimate.id })
+      void sendManualAcceptConsumerNotice({ estimateId: ctx.acceptedEstimate.id, customerId: customerIdOf(ctx) })
         .catch((err) => logger.warn(`[estimate-manual-acceptance] consumer notice send failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
     },
   },
