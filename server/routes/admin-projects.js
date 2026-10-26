@@ -4552,26 +4552,14 @@ router.get('/:id/wdo-filings/:index/url', requireAdmin, async (req, res, next) =
 // field). Body: { signature (PNG/JPEG data URL), signer_name?, signer_id_card?,
 // attestation? }. DELETE clears it.
 // ---------------------------------------------------------------------------
-const MAX_SIGNATURE_BYTES = 2 * 1024 * 1024; // 2MB
-
 // A valid PNG/JPEG can still be a blank (all-white or fully transparent) canvas,
 // which would flip the WDO send gate to "signed" and emit an officially signed
-// FDACS-13645 with no actual signature. Reject any image with ~zero variance on
-// every channel — a real signature, even a faint one, moves at least one channel
-// well past this floor. Can't decode? Fail closed: an image sharp can't read
-// here will also fail at PDF stamp time, and saving it would assert "signed"
-// on an unverifiable image — reject now while the signer is still holding the
-// pen instead of at send time.
-async function signatureHasInk(buffer) {
-  try {
-    const sharp = require('sharp');
-    const stats = await sharp(buffer).stats();
-    return stats.channels.some((ch) => ch.stdev > 1.5);
-  } catch (err) {
-    logger.warn(`[projects] signature ink check failed (decode error): ${err.message}`);
-    return false;
-  }
-}
+// FDACS-13645 with no actual signature. parseSignatureImage (services/
+// signature-image.js, shared with the customer contract signature pad) refuses
+// any image with ~zero variance on every channel, an oversized body, or one
+// that is not a real PNG/JPEG — while the signer is still holding the pen
+// instead of at send time.
+const { parseSignatureImage } = require('../services/signature-image');
 
 router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => {
   try {
@@ -4586,30 +4574,14 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
       return res.status(503).json({ error: 'Signature capture is not available yet (pending migration)' });
     }
 
-    const image = String(req.body?.signature || '').trim();
-    const m = image.match(/^data:(image\/(?:png|jpeg));base64,(.+)$/i);
-    if (!m) return res.status(400).json({ error: 'signature must be a PNG or JPEG data URL' });
-    const approxBytes = Math.floor((m[2].length * 3) / 4);
-    if (approxBytes > MAX_SIGNATURE_BYTES) {
-      return res.status(413).json({ error: 'Signature image too large (max 2MB)' });
-    }
-    // Validate the decoded bytes are a real PNG/JPEG (magic bytes) so a
-    // malformed data URL can't be saved and later fail silently at stamp time
-    // while the send gate still treats the project as signed.
-    const decoded = Buffer.from(m[2], 'base64');
-    const isPng = decoded[0] === 0x89 && decoded[1] === 0x50 && decoded[2] === 0x4e && decoded[3] === 0x47;
-    const isJpeg = decoded[0] === 0xff && decoded[1] === 0xd8 && decoded[2] === 0xff;
-    if (!isPng && !isJpeg) {
-      return res.status(400).json({ error: 'signature image is not a valid PNG or JPEG' });
-    }
-    if (!(await signatureHasInk(decoded))) {
-      return res.status(400).json({ error: 'Signature looks blank or unreadable — please clear the pad and sign again', code: 'signature_blank' });
-    }
+    // Type, size (2MB), magic bytes and visible ink, with the same answers as before.
+    const parsed = await parseSignatureImage(req.body?.signature);
+    if (!parsed.ok) return res.status(parsed.status).json({ error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) });
 
     const applicator = await resolveProjectApplicator(project);
     const signature = {
-      image,
-      content_type: m[1].toLowerCase(),
+      image: parsed.image,
+      content_type: parsed.contentType,
       signer_name: String(req.body?.signer_name || applicator.name || '').trim().slice(0, 120),
       signer_id_card: String(req.body?.signer_id_card || applicator.idCardNo || '').trim().slice(0, 60),
       attestation: String(req.body?.attestation || 'I certify I performed this inspection and the findings are accurate.').trim().slice(0, 500),

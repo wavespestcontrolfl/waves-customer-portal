@@ -147,7 +147,7 @@ beforeAll((done) => {
   app.use('/api/billing/autopay', standIn([['GET', '/'], ['PUT', '/'], ['POST', '/pause']]));
   app.use('/api/schedule', standIn([['GET', '/'], ['GET', '/next'], ['POST', '/:id/confirm'], ['POST', '/:id/reschedule']]));
   app.use('/api/services', standIn([['GET', '/'], ['GET', '/stats/summary']]));
-  app.use('/api/documents', standIn([['GET', '/'], ['GET', '/service-report/:id'], ['GET', '/annual-plan/:id'], ['GET', '/:id/download'], ['POST', '/share/:id']]));
+  app.use('/api/documents', standIn([['GET', '/'], ['GET', '/service-report/:id'], ['GET', '/annual-plan/:id'], ['GET', '/contract/:id/download'], ['GET', '/:id/download'], ['POST', '/share/:id']]));
   app.use('/api/property', standIn([['GET', '/termite-bond'], ['GET', '/preferences'], ['PUT', '/preferences'], ['GET', '/station-map']]));
   app.use('/api/notifications', standIn([['GET', '/preferences'], ['PUT', '/preferences'], ['GET', '/property-preferences'], ['PUT', '/property-preferences/:id']]));
   app.use('/api/requests', standIn([['POST', '/restart-plan'], ['POST', '/cancel-resolution'], ['GET', '/']]));
@@ -192,6 +192,7 @@ const WIDENED_READS = [
   ['GET', '/api/services?limit=50'], ['GET', '/api/services/stats/summary'],
   ['GET', '/api/documents'], ['GET', '/api/documents/service-report/svc-1'], ['GET', '/api/documents/doc-1/download'],
   ['GET', '/api/documents/annual-plan/annual_plan_22222222-2222-4222-8222-222222222222'],
+  ['GET', '/api/documents/contract/22222222-2222-4222-8222-222222222222/download'],
   ['GET', '/api/property/termite-bond'],
   ['POST', '/api/requests/restart-plan'],
   // Native sign-out's device-token deactivation (codex GH r12 P1).
