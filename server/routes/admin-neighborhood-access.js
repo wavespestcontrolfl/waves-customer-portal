@@ -12,7 +12,11 @@
  *                                     ({ neighborhoodId: null }); an office pick is never
  *                                     overwritten by the county lookup
  * POST   /:neighborhoodId/entries   — office adds an entry (active, confirmed now;
- *                                     other live codes there then need confirming)
+ *                                     other live codes there then need confirming).
+ *                                     { unconfirmed: true } under GATE_NEIGHBORHOOD_UNPLACED:
+ *                                     needs_confirm, no confirmation date, nothing demoted
+ * GET    /unplaced                  — homes the directory cannot place (owner ruling
+ *                                     2026-10-26; GATE_NEIGHBORHOOD_UNPLACED, off = 404)
  * PATCH  /entries/:id               — edit an entry (a new value counts as confirmed),
  *                                     or { action: 'confirm' | 'retire' }
  *                                     Both take gate_location (a Google Maps link or
@@ -51,7 +55,9 @@ const express = require('express');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { neighborhoodAccessLive, neighborhoodTechActionsLive, neighborhoodMergeLive } = require('../config/feature-gates');
+const {
+  neighborhoodAccessLive, neighborhoodTechActionsLive, neighborhoodMergeLive, neighborhoodUnplacedLive,
+} = require('../config/feature-gates');
 const {
   isKeypadCode, lockCommunity, matchKey, visitNeighborhoodIds, parseGateLocation,
 } = require('../services/neighborhood-access');
@@ -60,6 +66,7 @@ const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const {
   mergeNeighborhood, undoMerge, mergesInto, suggestMerges, dismissSuggestion,
 } = require('../services/neighborhood-merge');
+const { unplacedHomes } = require('../services/neighborhood-naming');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -550,7 +557,7 @@ router.get('/', async (req, res) => {
           .map((r) => serializeEntry(r, { cutoff, conflicted, staffNames })),
       };
     });
-    res.json({ neighborhoods, total, limit, offset, mergeEnabled });
+    res.json({ neighborhoods, total, limit, offset, mergeEnabled, unplacedEnabled: neighborhoodUnplacedLive() });
   } catch (err) {
     logFailure('list', err);
     res.status(500).json({ error: 'Could not load gate codes' });
@@ -700,6 +707,12 @@ router.post('/:neighborhoodId/entries', async (req, res) => {
   const checked = validateEntry(req.body, { gate_label: 'Main gate' });
   if (checked.error) return res.status(400).json({ error: checked.error });
   const entry = checked.value;
+  // "I have not seen this work" (owner ruling 2026-10-26): an old code is not
+  // a confirmation. It files needs_confirm with no date and leaves every other
+  // code as it is. Honoured only under GATE_NEIGHBORHOOD_UNPLACED.
+  const flag = req.body && req.body.unconfirmed;
+  if (flag !== undefined && typeof flag !== 'boolean') return res.status(400).json({ error: 'unconfirmed must be true or false' });
+  const unconfirmed = flag === true && neighborhoodUnplacedLive();
   try {
     const result = await db.transaction(async (trx) => {
       const hood = await trx('neighborhoods').where({ id: neighborhoodId }).forUpdate().first('id', 'active');
@@ -713,16 +726,16 @@ router.post('/:neighborhoodId/entries', async (req, res) => {
       const [ins] = await trx('neighborhood_access').insert({
         neighborhood_id: neighborhoodId,
         ...entry,
-        status: 'active',
+        status: unconfirmed ? 'needs_confirm' : 'active',
         source: 'office',
-        last_confirmed_at: trx.fn.now(),
+        last_confirmed_at: unconfirmed ? null : trx.fn.now(),
       }).returning('id');
       const newId = ins.id ?? ins;
       // The office's new code is the confirmed one: any other live code in
       // the neighborhood now needs confirming, as when the filer sees a new
       // code (the day feed then flags it "confirm on site").
-      if (entry.code) await demoteOtherActiveCodes(trx, neighborhoodId, newId);
-      return { status: 201, body: { id: newId } };
+      if (entry.code && !unconfirmed) await demoteOtherActiveCodes(trx, neighborhoodId, newId);
+      return { status: 201, body: { id: newId, status: unconfirmed ? 'needs_confirm' : 'active' } };
     });
     return res.status(result.status).json(result.body);
   } catch (err) {
@@ -907,6 +920,19 @@ router.post('/merge-suggestions/dismiss', mergeLive, async (req, res) => {
   } catch (err) {
     logFailure('dismiss suggestion', err);
     return res.status(500).json({ error: 'Could not save that answer' });
+  }
+});
+
+// Homes not placed (owner ruling 2026-10-26): a list for the office. Linking
+// one is the office pick above (PUT /properties/:id/neighborhood); nothing
+// here links.
+router.get('/unplaced', async (req, res) => {
+  if (!neighborhoodUnplacedLive()) return res.status(404).json({ enabled: false });
+  try {
+    return res.json({ homes: await unplacedHomes() });
+  } catch (err) {
+    logFailure('unplaced homes', err);
+    return res.status(500).json({ error: 'Could not load homes not placed' });
   }
 });
 

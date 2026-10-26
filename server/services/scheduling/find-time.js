@@ -195,10 +195,12 @@ async function findCapacitySlots(opts) {
   // findArrivalWindowSlots above.
   const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
   const { getBlackoutLayers } = require('./blackout-dates');
+  // `service_key`: the new job's catalog identity, when it is the one service asked about
+  // (GATE_TECH_JOB_TYPE_CHECKS reads it; the name-only path ignores it).
   let requestedServices = (opts.serviceTypes || [opts.serviceType || opts.serviceKey || ''])
-    .filter(Boolean).map(service_type => ({ service_type }));
+    .filter(Boolean).map(service_type => ({ service_type, ...(!opts.serviceTypes && opts.serviceKey ? { service_key: opts.serviceKey } : {}) }));
   if (!requestedServices.length && opts.excludeServiceIds?.length) {
-    requestedServices = await db('scheduled_services').whereIn('id', opts.excludeServiceIds).select('service_type');
+    requestedServices = await db('scheduled_services').whereIn('id', opts.excludeServiceIds).select('service_type', 'service_id', 'service_key_snapshot');
   }
   const inactive = opts.arrivalWindow?.serviceId ? []
     : await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);

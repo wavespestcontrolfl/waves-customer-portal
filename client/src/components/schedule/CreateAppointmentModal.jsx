@@ -4253,6 +4253,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Same order as serviceTypes: the selected catalog row's key.
     serviceKeys: services.filter((svc) => svc?.name).map((svc) => (svc?.service_key ?? svc?.serviceKey) || ''),
     bestRows: true,
+    // The open-times box (GATE_OPEN_TIMES_BOX): a row books its technician
+    // (adoptChipTechnician), so the list ranks every technician's route.
+    // Address-only: no row pins a technician, so no tech pick.
+    openTimes: true,
+    techPick: !addressOnlyTimes,
   });
 
   // Submit
@@ -5955,6 +5960,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <AvailabilityStrip
             availability={availability}
             bestRows
+            techPick={!addressOnlyTimes}
             currentDate={apptDate ? String(apptDate).split('T')[0] : null}
             currentStart={windowStart}
             currentTechnicianId={techMode === 'choose' ? techId : null}
@@ -5969,8 +5975,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             // A partly committed booking is locked to retry or close: the
             // remaining groups must keep the technician already chosen.
             // Address-only: no rows, since each one pins its technician and
-            // no service is known yet (see adoptChipTechnician).
-            rows={partialCommitLocked || addressOnlyTimes ? [] : pickedByTech}
+            // no service is known yet (see adoptChipTechnician). The
+            // open-times box lists each technician's hours itself.
+            rows={partialCommitLocked || addressOnlyTimes || availability?.openTimes ? [] : pickedByTech}
             onPick={(row) => {
               // The drive was priced on this technician's route: picking
               // the row books them, as the hint chips do.

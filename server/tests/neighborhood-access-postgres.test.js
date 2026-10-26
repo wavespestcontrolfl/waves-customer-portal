@@ -126,7 +126,7 @@ postgres('neighborhood access directory', () => {
   test('a pin that lands on another house links nothing and writes nothing', async () => {
     const p = await property();
     const r = await resolvePropertyNeighborhood(p, { conn: trx, lookup: stub('OAKWOOD GLEN PH IV PB66/57', 'Manatee', '700 OTHER ST') });
-    expect(r).toEqual({ status: 'situs_mismatch', wrote: false });
+    expect(r).toEqual({ status: 'situs_mismatch', wrote: false, zipOnly: null });
     const row = await trx('customer_properties').where({ id: p.id }).first();
     expect([row.neighborhood_id, row.neighborhood_checked_at]).toEqual([null, null]);
   });

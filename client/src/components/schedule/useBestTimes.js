@@ -15,8 +15,15 @@
 //   pickedByTech — with `compareTechsAt` (an HH:MM, all-tech searches only):
 //                 that hour on every technician's route that fits it, least
 //                 added drive first (owner 2026-10-05).
+//
+// With `openTimes` and GATE_OPEN_TIMES_BOX on (owner 2026-10-25, layout A;
+// GET /find-time/ui answers which box to draw), the search is the open-times
+// box's list instead: every open hour of the next four weeks from today, on
+// every technician's route when the screen can change the technician
+// (`techPick`), with no picked-hour verdict. Picking a time or a date inside
+// those weeks searches nothing; a date past them asks for that one day too.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -35,6 +42,32 @@ const SUMMARY_FORWARD = 7;
 // The best-times week row: today and the six days after it.
 const WEEK_DAYS = 7;
 const HINTS_GATED_RETRY_MS = 10 * 60 * 1000;
+// The open-times list: today and the 27 days after it (the server's cap).
+const OPEN_TIMES_DAYS = 28;
+// Which box the pickers draw (GET /find-time/ui), asked again after this long.
+const OPEN_TIMES_UI_MS = 10 * 60 * 1000;
+let openTimesUi = { value: null, at: 0, pending: null };
+// Test seam: forget the answer.
+export function resetOpenTimesUi() { openTimesUi = { value: null, at: 0, pending: null }; }
+function cachedOpenTimesUi() {
+  return openTimesUi.value != null && Date.now() - openTimesUi.at < OPEN_TIMES_UI_MS ? openTimesUi.value : null;
+}
+// One request for every picker on the page. A failed answer reads as off:
+// the strip, as before.
+function loadOpenTimesUi() {
+  const cached = cachedOpenTimesUi();
+  if (cached != null) return Promise.resolve(cached);
+  if (!openTimesUi.pending) {
+    openTimesUi.pending = fetch(`${API_BASE}/admin/schedule/find-time/ui`, { headers: authHeaders() })
+      .then((res) => (res.ok ? res.json() : null))
+      .catch(() => null)
+      .then((data) => {
+        openTimesUi = { value: data?.openTimes === true, at: Date.now(), pending: null };
+        return openTimesUi.value;
+      });
+  }
+  return openTimesUi.pending;
+}
 // The kill switch (GATE_BEST_TIME_HINTS off answers `gated: true`): every
 // search would come back empty, so none is sent for the same window.
 let hintsGatedUntil = 0;
@@ -88,6 +121,30 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
     } : null,
   };
 }
+
+// The open-times list in the box's shape: the strip's day rows, every hour
+// with its technician's name and its rain tier (null = drive order only). A
+// far day whose lookup failed arrives as status 'unchecked'.
+export function normalizeOpenTimes(data, { date }) {
+  const days = Array.isArray(data?.summary?.days) && data.summary.open_times ? data.summary.days : null;
+  if (!days) return null;
+  return {
+    pickedDate: date,
+    openTimes: { from: data.summary.open_times.from, to: data.summary.open_times.to },
+    days: days.map((day) => ({
+      date: day.date,
+      status: day.status || (day.hours?.length ? 'open' : 'full'),
+      ...(day.closed === true ? { closed: true } : {}),
+      ...(day.last_resort === true ? { last_resort: true } : {}),
+      hours: (day.hours || []).map((h) => ({ ...summaryHour({ ...h, date: day.date }, false), rainTier: h.rain_tier ?? null })),
+    })),
+    best: null,
+    picked: null,
+  };
+}
+
+// What the box shows while the first list search runs.
+const OPEN_TIMES_PENDING = Object.freeze({ openTimes: { pending: true }, days: [], best: null, picked: null });
 
 // One summary hour (a day's row or a best-times chip) in the strip's shape.
 function summaryHour(h, scopedToTech) {
@@ -152,6 +209,32 @@ async function searchSummary(search, { date, today, pickedArgs, bestRows, rainAr
   return { ...data, summary: { ...data.summary, best: { ...data.summary.best, week: weekRow.week || [], week_covered: true } } };
 }
 
+// The open-times list from today for four weeks, held while the picker stays
+// open (a date inside it asks nothing more), and for a date past it that one
+// day. A day whose lookup failed is 'unchecked', never shown as a day with no
+// open times. An answer with no list means the box was turned off since the
+// page asked: `boxOff`, and the picker draws the strip.
+async function searchOpenTimes(search, { held, listKey, list, today, listTo, farDate }) {
+  const [data, extra] = await Promise.all([
+    held.get(listKey) || search({ ...list, dateFrom: today, dateTo: listTo }),
+    farDate ? search({ ...list, dateFrom: farDate, dateTo: farDate }).catch(() => null) : null,
+  ]);
+  if (!data?.summary) return null;
+  if (!data.summary.open_times) {
+    openTimesUi = { value: false, at: Date.now(), pending: null };
+    return { boxOff: true };
+  }
+  held.clear();
+  held.set(listKey, data);
+  if (!farDate) return data;
+  const farDays = extra?.summary?.open_times ? extra.summary.days : [{ date: farDate, status: 'unchecked', hours: [] }];
+  return { ...data, summary: { ...data.summary, days: [...data.summary.days, ...farDays] } };
+}
+
+// Which box a picker draws, from GET /find-time/ui: still asking, the
+// open-times list, or the strip.
+const BOX_MODE = { null: 'ui', true: 'list', false: 'strip' };
+
 // The request fields every find-time hint search shares; `undefined` drops
 // a field from the JSON.
 function hintRequestBody({
@@ -209,6 +292,11 @@ export function useBestTimes({
   // The Dispatch "Find a time" panel (a new caller, no record yet): a search
   // may stand on `address` / `lat` / `lng` alone, with no customer or visit.
   addressOnly = false,
+  // The open-times box (GATE_OPEN_TIMES_BOX): asked for by every staff
+  // picker; the server decides. `techPick`: the screen can change the
+  // technician, so the list covers every technician's route.
+  openTimes,
+  techPick,
 }) {
   const [pickedByTech, setPickedByTech] = useState([]);
   // The last summary answer, with the request it answered: { data, requestKey, subjectKey }.
@@ -218,6 +306,24 @@ export function useBestTimes({
   // The server declined to answer (hints are off), as opposed to a search
   // that failed or found nothing.
   const [gated, setGated] = useState(false);
+  // Which box this picker draws (BOX_MODE), asked once per page.
+  const [boxMode, setBoxMode] = useState(() => BOX_MODE[openTimes && cachedOpenTimesUi()] || 'strip');
+  useEffect(() => {
+    if (!openTimes) { setBoxMode('strip'); return undefined; }
+    // A closed picker (the drag-and-drop confirm between drags) asks nothing.
+    if (!enabled) return undefined;
+    let alive = true;
+    loadOpenTimesUi().then((value) => { if (alive) setBoxMode(BOX_MODE[value]); });
+    return () => { alive = false; };
+  }, [openTimes, enabled]);
+  const listMode = boxMode === 'list';
+  const today = etDateString();
+  const listTo = addDays(today, OPEN_TIMES_DAYS - 1);
+  // A date past the list's four weeks: its own day is asked for too (list
+  // mode only; the strip searches around the date itself).
+  const farDate = date > listTo ? date : '';
+  // Tech pick: the list covers every technician's route.
+  const listTech = techPick ? undefined : technicianId;
   // Stable dep for the (usually tiny) id array.
   const excludeKey = (excludeServiceIds || []).map(String).join(',');
   // Only a complete value is worth scoring; a half-typed field would 400
@@ -246,23 +352,47 @@ export function useBestTimes({
   // blink off and on with every pick. Staleness is derived in RENDER from
   // these keys, not set in the effect: the first paint after an input
   // changes must already treat the old answer as stale (Codex #5746 r1).
-  const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
-  const requestKey = [
-    enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
+  const subjectKey = [boxMode, serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
+  // Every input the search reads, so the effect below runs on exactly these.
+  // The list's key leaves out the picked date (inside the four weeks) and
+  // hour: picking one changes nothing the list shows. While the box is
+  // still being asked for, nothing is searched.
+  const listKey = [
+    'list', enabled, today, serviceId, customerId, durationMinutes, durationEdit, listTech, excludeKey, arrivalWindows,
+    address, lat, lng, propertyId, sameDayFloorMin, moveScope, serviceTypesKey, serviceKeysKey, addressOnly,
+  ].map((v) => v ?? '').join('|');
+  const stripKey = [
+    'strip', enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
     address, lat, lng, propertyId, pickedKey, pickedEndKey, sameDayFloorMin, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows, addressOnly,
   ].map((v) => v ?? '').join('|');
+  const requestKey = { ui: 'ui', list: `${listKey}|${farDate}`, strip: stripKey }[boxMode];
+  // The last list answer, while the picker stays open.
+  const heldList = useRef(new Map());
   const availability = useMemo(() => {
-    if (!answer || !enabled) return null;
-    if (answer.requestKey === requestKey) return answer.data;
-    return answer.subjectKey === subjectKey ? { ...answer.data, stale: true } : null;
-  }, [answer, enabled, requestKey, subjectKey]);
+    if (!enabled) return null;
+    if (answer && answer.requestKey === requestKey) return answer.data;
+    if (answer && answer.subjectKey === subjectKey) return { ...answer.data, stale: true };
+    return listMode && checking ? OPEN_TIMES_PENDING : null;
+  }, [answer, enabled, requestKey, subjectKey, listMode, checking]);
+  // The booking's services ride every best-rows or list request, so the
+  // server's rain ranking (GATE_BOOKING_RAIN_RANK) classifies each one
+  // (Codex #6102 r1).
+  const rainArgs = useMemo(() => (bestRows && serviceTypesKey ? {
+    serviceTypes: serviceTypesKey.split('\n'),
+    serviceKeys: serviceKeysKey.split('\n').some(Boolean) ? serviceKeysKey.split('\n') : undefined,
+  } : {}), [bestRows, serviceTypesKey, serviceKeysKey]);
   useEffect(() => {
     setPickedByTech([]);
+    // A closed picker forgets its list: reopened (the drag-and-drop confirm
+    // stays mounted between drags), it searches the schedule as it is now.
+    if (!enabled) heldList.current.clear();
+    if (boxMode === 'ui') return undefined;
     const hasSubject = hasSearchSubject({ customerId, serviceId, addressOnly, address, lat, lng });
     const hintsGated = () => Date.now() < hintsGatedUntil;
     // A summary starts today at the earliest (the engine never searches
-    // before today), so a past date has no days around it to offer.
-    if (!enabled || !hasSubject || !YMD.test(String(date || '')) || date < etDateString() || hintsGated()) {
+    // before today), so a past date has no days around it to offer. The
+    // open-times list always starts today, whatever date is picked.
+    if (!enabled || !hasSubject || (!listMode && (!YMD.test(String(date || '')) || date < etDateString())) || hintsGated()) {
       setAvailability(null);
       setChecking(false);
       setGated(enabled && hasSubject && hintsGated());
@@ -293,28 +423,30 @@ export function useBestTimes({
         return data;
       };
       try {
-        const scopedToTech = !!technicianId;
-        const today = etDateString();
-        const rainArgs = bestRows && serviceTypesKey ? {
-          serviceTypes: serviceTypesKey.split('\n'),
-          serviceKeys: serviceKeysKey.split('\n').some(Boolean) ? serviceKeysKey.split('\n') : undefined,
-        } : {};
-        const data = await searchSummary(search, { date, today, pickedArgs, bestRows, rainArgs });
+        const data = await (listMode
+          ? searchOpenTimes(search, {
+            held: heldList.current, listKey, today, listTo, farDate,
+            list: { summary: true, openTimes: true, technicianId: listTech, ...rainArgs },
+          })
+          : searchSummary(search, { date, today, pickedArgs, bestRows, rainArgs }));
         if (controller.signal.aborted) return;
-        const summarized = normalizeAvailability(data, { date, scopedToTech });
+        if (data?.boxOff) { setBoxMode('strip'); return; }
+        const summarized = listMode
+          ? normalizeOpenTimes(data, { date })
+          : normalizeAvailability(data, { date, scopedToTech: !!technicianId });
         if (summarized) setPickedByTech(normalizePickedByTech(data?.pickedByTech));
-        // A search that failed or answered with no summary clears the strip:
+        // A search that failed or answered with no summary clears the box:
         // a held (stale) answer must not outlive it.
         setAvailability(summarized, { requestKey, subjectKey });
         setGated(hintsGated());
       } catch {
-        // Advisory only — a failed search just shows no strip (and drops a
+        // Advisory only — a failed search just shows no box (and drops a
         // held summary, unless a newer pick already owns the state).
         if (!controller.signal.aborted) setAvailability(null);
       }
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, sameDayFloorMin, moveScope, compareKey, serviceTypesKey, serviceKeysKey, bestRows, addressOnly]);
+  }, [requestKey]);
   return { pickedByTech, availability, checking, gated };
 }

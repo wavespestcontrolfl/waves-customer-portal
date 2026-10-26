@@ -195,6 +195,13 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   const offDayLine = newTechId && (job.technician_id || null) !== newTechId && techWorkDaysLive()
     ? await require('./technician-eligibility').offDayWarningFor(newTechId, eligibilityDate, { conn })
     : null;
+  // Job type (GATE_TECH_JOB_TYPE_CHECKS): the same office paths also say so when the
+  // technician is set to Off for this visit's job type. Warns, never blocks; the helper
+  // returns [] with the gate off (no read).
+  const capabilityLines = newTechId && (job.technician_id || null) !== newTechId
+    ? await require('./technician-eligibility').capabilityOffWarningsFor(newTechId, [job], { conn })
+    : [];
+  const assignWarnings = [offDayLine, ...capabilityLines].filter(Boolean);
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -373,7 +380,10 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     job: updatedRow,
     technicianName: tech?.name || null,
     changed: true,
-    ...(offDayLine ? { warnings: [offDayLine] } : {}),
+    ...(assignWarnings.length ? { warnings: assignWarnings } : {}),
+    // The job-type lines alone, for a caller that warns for some visits itself
+    // (assignScheduleJobs' series siblings). Gate off: [] and no key.
+    ...(capabilityLines.length ? { capabilityWarnings: capabilityLines } : {}),
   };
 }
 

@@ -21,9 +21,13 @@
 // Warn-only like the advisories it replaced: picking a chip only fills fields
 // (onPick), never submits, and no consumer disables a save on this data.
 // Renders nothing without an availability answer (hints gated, search failed).
+// With GATE_OPEN_TIMES_BOX on the answer is the open-times list
+// (useBestTimes `openTimes`), and the open-times box draws in its place
+// (owner 2026-10-25, layout A: only open times, no verdict).
 
 import { useEffect, useState } from 'react';
 import { etDateString } from '../../lib/timezone';
+import OpenTimesBox from './OpenTimesBox';
 
 const OFFER_COUNT = 3;
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -127,7 +131,8 @@ function closestHours(days, pickedDate, count) {
  * or already booked). Exported for tests and for consumers' save labels.
  */
 export function availabilityVerdict(availability, current) {
-  if (!availability) return null;
+  // The open-times box states no verdict (owner 2026-10-25): Save stays "Save".
+  if (!availability || availability.openTimes) return null;
   // A re-check is in flight: the previous answer is for another pick. Hold
   // the strip (and the route warning it replaces) rather than flash the old
   // advisories back for the length of one request.
@@ -218,8 +223,10 @@ function verdictFor(availability, { currentDate, currentStart }) {
  *  drop the slot-check's route warning instead of saying it twice. */
 export function stripCoversRouteWarning(availability, current) {
   // Mid re-check the strip is about to answer: keep the warning it replaces
-  // off screen for the length of the request.
-  if (availability?.stale) return true;
+  // off screen for the length of the request. The open-times box lists only
+  // the hours that fit, so a route warning there would be the "doesn't fit"
+  // the owner ruled out (2026-10-25); the double-booking notice stays.
+  if (availability?.stale || availability?.openTimes) return true;
   const verdict = availabilityVerdict(availability, current);
   return !!verdict && verdict.tone !== 'ok';
 }
@@ -353,10 +360,25 @@ function BestRows({ availability, currentDate, isCurrent, onPick, showRain }) {
   );
 }
 
-export default function AvailabilityStrip({ availability, currentDate, currentStart, currentTechnicianId, onPick, style, bestRows = false, showRain = false }) {
+export default function AvailabilityStrip({ availability, currentDate, currentStart, currentTechnicianId, onPick, style, bestRows = false, showRain = false, techPick = false }) {
   const [viewDate, setViewDate] = useState(currentDate);
   // A new pick (typed, or filled by a chip) brings the browse row back to it.
   useEffect(() => { setViewDate(currentDate); }, [currentDate]);
+  // `techPick`: the screen can change the technician, so a row's technician
+  // rides the pick (the open-times box only).
+  if (availability?.openTimes) {
+    return (
+      <OpenTimesBox
+        availability={availability}
+        currentDate={currentDate}
+        currentStart={currentStart}
+        currentTechnicianId={currentTechnicianId}
+        onPick={onPick}
+        techPick={techPick}
+        style={style}
+      />
+    );
+  }
   const verdict = availabilityVerdict(availability, { currentDate, currentStart });
   if (!verdict) return null;
   const ink = TONE_INK[verdict.tone];

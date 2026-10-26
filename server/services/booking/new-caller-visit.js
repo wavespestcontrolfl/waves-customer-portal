@@ -320,6 +320,13 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
     const offDayWarnings = v.technicianId && techWorkDaysLive()
       ? await require('../technician-eligibility').offDayWarningsFor(v.technicianId, [v.scheduledDate], { conn: trx })
       : [];
+    // Job type (GATE_TECH_JOB_TYPE_CHECKS): the technician is set to Off for this service's
+    // category. Advisory, never a block ([] with the gate off).
+    const jobTypeWarnings = v.technicianId
+      ? await require('../technician-eligibility').capabilityOffWarningsFor(
+        v.technicianId, [{ service_type: serviceRecord.name, service_id: serviceRecord.id, service_key: serviceRecord.service_key }], { conn: trx },
+      )
+      : [];
 
     const cols = await trx('scheduled_services').columnInfo();
     const insertData = {
@@ -368,7 +375,7 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
       description: `Visit ${visit.id} booked by address for a new caller${callLogId ? ` (call ${callLogId})` : ' (no live call found)'}.`,
       metadata: JSON.stringify({ scheduled_service_id: visit.id, call_log_id: callLogId }),
     });
-    return { visit, warnings: [...(clash.length ? [slotOverlapWarning(v.scheduledDate)] : []), ...offDayWarnings] };
+    return { visit, warnings: [...(clash.length ? [slotOverlapWarning(v.scheduledDate)] : []), ...offDayWarnings, ...jobTypeWarnings] };
   });
 }
 
