@@ -4045,7 +4045,12 @@ and `categories` sections whose keys are `problems`, `products`,
 `common_questions`. A `tiles` item may carry `until` (`YYYY-MM-DD`): the page
 hides that tile after that ET day (the watering-order tile, which a stored
 packet keeps after the order ends). Product names in `products` are public
-label names with an active ingredient; no rate, price or PII),
+label names with an active ingredient; no rate, price or PII. A Tree & Shrub
+packet (`GATE_TS_OUTLINE`, stamped `ts-v1-copy-1`) has the same shape: its
+`content` adds `serviceLine: 'tree_shrub'`, which the page reads for its program
+badge and tab title (absent = lawn), `property` carries `programLabel` and
+`turfType: null`, and its sections use the same visual types; a `categories`
+item's `key` is its icon and may repeat, so the page keys a card by its label),
 `/api/public/estimates/:token/deposit-intent` (RETIRED VERDICT STUB —
 owner ruling 2026-08-10: acceptance deposits are permanently
 not-enforced. Token format gate + deposit rate limit, then an
