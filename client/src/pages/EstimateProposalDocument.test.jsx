@@ -67,6 +67,14 @@ const BASE_DATA = {
 };
 
 describe('EstimateProposalDocument', () => {
+  it('marks only an admin draft preview as an internal unsent draft', () => {
+    const { rerender } = render(<EstimateProposalDocument data={{ ...BASE_DATA, adminDraftPreview: true }} token="tok-123" />);
+    expect(document.querySelector('[data-testid="estimate-document-draft-mark"]')?.textContent).toContain('DRAFT — INTERNAL PREVIEW · NOT SENT TO CUSTOMER');
+
+    rerender(<EstimateProposalDocument data={{ ...BASE_DATA, verifiedStaffPreview: true }} token="tok-123" />);
+    expect(document.querySelector('[data-testid="estimate-document-draft-mark"]')).toBeNull();
+  });
+
   it('shows the tax row with its rate and amount when the proposal carries tax, and none when it does not', () => {
     const taxed = render(<EstimateProposalDocument data={{
       ...BASE_DATA, proposal: { ...BASE_DATA.proposal, totals: { ...BASE_DATA.proposal.totals, taxRate: 0.07 } },

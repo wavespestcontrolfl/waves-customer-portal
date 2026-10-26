@@ -8,8 +8,10 @@ import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { Table, TBody, TD, TH, THead, TR } from '../ui/Table';
 import { Textarea } from '../ui/Textarea';
+import { FieldDocumentBody, FieldFooter, FieldMasthead, FieldTitle } from '../FieldDocument';
 import { centsToDollars, dayLabel, defaultPayDate, lastFinishedWeekStart, weekLabel } from './payrollFormat';
 import { addStaffCalendarDays } from '../../lib/staffTimeDate';
+import './pay-runs-print.css';
 
 // Staff page, Payroll tab, "Pay runs" (owner 2026-10-25, basic payroll layer
 // 1b-2b). The portal works out each paycheck from the approved weekly hours.
@@ -30,9 +32,6 @@ function StatusChip({ status }) {
 
 const hoursWord = hours => `${hours} h`;
 
-// The stub is printed from the page: only the stub shows on paper.
-const PRINT_CSS = '@media print { body * { visibility: hidden !important; } .pay-stub, .pay-stub * { visibility: visible !important; } .pay-stub { position: absolute; left: 0; top: 0; width: 100%; } .pay-stub-actions { display: none !important; } }';
-
 function StubLine({ label, value, strong = false }) {
   return <div className={`flex justify-between gap-4 py-0.5 ${strong ? 'font-medium' : ''}`}>
     <span>{label}</span><span className="tabular-nums">{value}</span>
@@ -50,44 +49,60 @@ export function StubDialog({ call, check, onClose }) {
     return () => { live = false; };
   }, [call, check.id]);
 
-  return <Dialog open onClose={onClose} size="lg">
-    <style>{PRINT_CSS}</style>
-    <DialogHeader><DialogTitle>Pay stub for {check.name}</DialogTitle></DialogHeader>
-    <DialogBody>
+  return <Dialog open onClose={onClose} size="lg" className="pay-stub-dialog">
+    <DialogHeader className="waves-field-no-print"><DialogTitle>Pay stub for {check.name}</DialogTitle></DialogHeader>
+    <DialogBody className="pay-stub-dialog-body">
       {error && <p role="alert" className="text-ui-caption text-alert-fg">{error}</p>}
       {!stub && !error && <p role="status">Loading…</p>}
-      {stub && <div className="pay-stub grid gap-3 text-ui-body" aria-label="Pay stub">
-        <div>
-          <p className="m-0 font-medium">{stub.employer.name}</p>
-          <p className="m-0 text-ui-caption text-ink-secondary">{stub.employer.addressLine}</p>
-        </div>
-        <div>
-          <p className="m-0 font-medium">{stub.employee.name}</p>
-          {stub.employee.ssnLast4 && <p className="m-0 text-ui-caption text-ink-secondary">SSN ending {stub.employee.ssnLast4}</p>}
-          <p className="m-0 text-ui-caption text-ink-secondary">
-            Pay period {dayLabel(stub.payPeriod.start)} to {dayLabel(stub.payPeriod.end)} · Pay date {dayLabel(stub.payDate)}
-          </p>
-        </div>
-        <Table aria-label="Pay stub amounts">
-          <THead><TR><TH>Item</TH><TH align="right">This pay</TH><TH align="right">Year to date</TH></TR></THead>
-          <TBody>
-            <TR><TD>Regular pay ({stub.hours.regular} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.regularPayCents)}</TD><TD nums align="right" /></TR>
-            <TR><TD>Overtime pay ({stub.hours.overtime} h)</TD><TD nums align="right">{centsToDollars(stub.earnings.overtimePayCents)}</TD><TD nums align="right" /></TR>
-            <TR><TD><strong>Gross pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.earnings.grossCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.grossCents)}</TD></TR>
-            <TR><TD>Federal income tax</TD><TD nums align="right">{centsToDollars(stub.taxes.federalIncomeTaxCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.federalIncomeTaxCents)}</TD></TR>
-            <TR><TD>Social Security</TD><TD nums align="right">{centsToDollars(stub.taxes.socialSecurityCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.socialSecurityCents)}</TD></TR>
-            <TR><TD>Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.medicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.medicareCents)}</TD></TR>
-            {stub.taxes.additionalMedicareCents > 0 && <TR><TD>Additional Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.additionalMedicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.additionalMedicareCents)}</TD></TR>}
-            <TR><TD><strong>Net pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.netCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.netCents)}</TD></TR>
-          </TBody>
-        </Table>
-        <div>
-          <StubLine label="Paid by" value={stub.payMethod === 'bank_transfer' ? 'Bank transfer' : 'Paper check'} />
-          {stub.payMethod === 'check' && <StubLine label="Check number" value={stub.checkNumber || 'Not entered'} />}
-        </div>
+      {stub && <div aria-label="Pay stub">
+        <FieldDocumentBody className="pay-stub field-document-scroll">
+          <FieldMasthead variant="staff" />
+          <FieldTitle
+            eyebrow="Payroll record"
+            title="Pay stub"
+            reference={`Pay date ${dayLabel(stub.payDate)}`}
+          />
+
+          <h2 className="field-section-heading">Employer and employee</h2>
+          <div className="field-info-grid pay-stub-meta grid sm:grid-cols-2">
+            <div>
+              <p className="m-0 font-medium">{stub.employer.name}</p>
+              <p className="m-0 text-ui-caption text-ink-secondary">{stub.employer.addressLine}</p>
+            </div>
+            <div>
+              <p className="m-0 font-medium">{stub.employee.name}</p>
+              {stub.employee.ssnLast4 && <p className="m-0 text-ui-caption text-ink-secondary">SSN ending {stub.employee.ssnLast4}</p>}
+              <p className="m-0 text-ui-caption text-ink-secondary">
+                Pay period {dayLabel(stub.payPeriod.start)} to {dayLabel(stub.payPeriod.end)} · Pay date {dayLabel(stub.payDate)}
+              </p>
+            </div>
+          </div>
+
+          <h2 className="field-section-heading">Earnings and withholding</h2>
+          <Table aria-label="Pay stub amounts" containerClassName="pay-stub-table-wrap">
+            <THead><TR><TH>Item</TH><TH align="right">This pay</TH><TH align="right">Year to date</TH></TR></THead>
+            <TBody>
+              <TR><TD>Regular pay ({stub.hours.regular} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.regularPayCents)}</TD><TD nums align="right" /></TR>
+              <TR><TD>Overtime pay ({stub.hours.overtime} h)</TD><TD nums align="right">{centsToDollars(stub.earnings.overtimePayCents)}</TD><TD nums align="right" /></TR>
+              <TR><TD><strong>Gross pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.earnings.grossCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.grossCents)}</TD></TR>
+              <TR><TD>Federal income tax</TD><TD nums align="right">{centsToDollars(stub.taxes.federalIncomeTaxCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.federalIncomeTaxCents)}</TD></TR>
+              <TR><TD>Social Security</TD><TD nums align="right">{centsToDollars(stub.taxes.socialSecurityCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.socialSecurityCents)}</TD></TR>
+              <TR><TD>Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.medicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.medicareCents)}</TD></TR>
+              {stub.taxes.additionalMedicareCents > 0 && <TR><TD>Additional Medicare</TD><TD nums align="right">{centsToDollars(stub.taxes.additionalMedicareCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.additionalMedicareCents)}</TD></TR>}
+              <TR><TD><strong>Net pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.netCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.netCents)}</TD></TR>
+            </TBody>
+          </Table>
+
+          <h2 className="field-section-heading">Payment record</h2>
+          <div className="pay-stub-meta">
+            <StubLine label="Paid by" value={stub.payMethod === 'bank_transfer' ? 'Bank transfer' : 'Paper check'} />
+            {stub.payMethod === 'check' && <StubLine label="Check number" value={stub.checkNumber || 'Not entered'} />}
+          </div>
+          <FieldFooter label="Payroll record" reference={`Pay date ${dayLabel(stub.payDate)}`} />
+        </FieldDocumentBody>
       </div>}
     </DialogBody>
-    <DialogFooter>
+    <DialogFooter className="waves-field-no-print">
       <div className="pay-stub-actions flex gap-2">
         <Button type="button" variant="secondary" onClick={onClose}>Close</Button>
         <Button type="button" disabled={!stub} onClick={() => window.print()}>Print</Button>
