@@ -79,11 +79,11 @@ function stopsFromTrips(trips, { maxGapMeters, minMinutes = MIN_STOP_MINUTES }) 
 }
 
 /**
- * The stops of one vehicle that START inside [fromMs, toMs).
- * Reads only that vehicle's trip-data events received from fromMs to toMs + 12 hours (never later than now).
+ * Every trip of one vehicle read from its trip-data events received from fromMs to toMs + 12 hours (never later
+ * than now): a Map of trip id -> first and last timestamped point. The ONE read behind loadTruckStops and
+ * loadTruckTrips, so both see the same trips under the same paging, late-arrival and dedupe rules.
  */
-async function loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters, now = Date.now() }) {
-  if (!imei) return [];
+async function readTripMap(conn, imei, { fromMs, toMs, now = Date.now() }) {
   const until = new Date(Math.min(now, toMs + LATE_ARRIVAL_MS));
   const trips = new Map();
   for (let afterId = 0; ;) {
@@ -100,8 +100,58 @@ async function loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters, now = Da
     if (rows.length < PAGE_SIZE) break;
     afterId = rows[rows.length - 1].id;
   }
+  return trips;
+}
+
+/**
+ * Trips as { tripId, startMs, endMs, startLat, startLng, endLat, endLng }, in time order (start, then id).
+ * @param {Map<string,{first:object,last:object}>} trips
+ */
+function tripList(trips) {
+  return [...trips.entries()].filter(([, trip]) => trip.first && trip.last)
+    .map(([tripId, trip]) => ({
+      tripId, startMs: trip.first.ms, endMs: trip.last.ms,
+      startLat: trip.first.lat, startLng: trip.first.lng, endLat: trip.last.lat, endLng: trip.last.lng,
+    }))
+    .sort((a, b) => a.startMs - b.startMs || (a.tripId < b.tripId ? -1 : a.tripId > b.tripId ? 1 : 0));
+}
+
+/**
+ * The stops of one vehicle that START inside [fromMs, toMs).
+ * Reads only that vehicle's trip-data events received from fromMs to toMs + 12 hours (never later than now).
+ */
+async function loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters, now = Date.now() }) {
+  if (!imei) return [];
+  const trips = await readTripMap(conn, imei, { fromMs, toMs, now });
   return stopsFromTrips(trips, { maxGapMeters })
     .filter((stop) => stop.startMs >= fromMs && stop.startMs < toMs);
 }
 
-module.exports = { loadTruckStops, stopsFromTrips, tripPointsFromPayload, addToTrips, MIN_STOP_MINUTES };
+/**
+ * The trips of one vehicle that START inside [fromMs, toMs), in time order, from the same read as loadTruckStops.
+ * A trip whose events were received before fromMs is not seen; its later batches would look like a late start.
+ */
+async function loadTruckTrips(conn, imei, { fromMs, toMs, now = Date.now() }) {
+  if (!imei) return [];
+  return tripList(await readTripMap(conn, imei, { fromMs, toMs, now }))
+    .filter((trip) => trip.startMs >= fromMs && trip.startMs < toMs);
+}
+
+/**
+ * A vehicle's trips AND stops that start inside [fromMs, toMs), from ONE read. The stops are derived over every trip
+ * the read saw, exactly as loadTruckStops does, so a stop at the end of the window's last trip (its next trip begins
+ * after toMs) is kept.
+ */
+async function loadTruckDay(conn, imei, { fromMs, toMs, maxGapMeters, now = Date.now() }) {
+  if (!imei) return { trips: [], stops: [] };
+  const trips = await readTripMap(conn, imei, { fromMs, toMs, now });
+  const inWindow = (startMs) => startMs >= fromMs && startMs < toMs;
+  return {
+    trips: tripList(trips).filter((trip) => inWindow(trip.startMs)),
+    stops: stopsFromTrips(trips, { maxGapMeters }).filter((stop) => inWindow(stop.startMs)),
+  };
+}
+
+module.exports = {
+  loadTruckStops, loadTruckTrips, loadTruckDay, stopsFromTrips, tripList, tripPointsFromPayload, addToTrips, MIN_STOP_MINUTES,
+};
