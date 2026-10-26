@@ -178,7 +178,7 @@ async function computeUnreadCount({ adminUserId, role } = {}, trx = null, precom
   const liveCtx = isBellPolicyEnabled() || role !== 'admin'
     ? { live: [], liveKeys: new Set() }
     : await liveAlertNotifications(adminUserId, trx, precomputedAlerts);
-  let persistedCount = await NotificationService.getAdminUnreadCount({ role }, trx);
+  let persistedCount = await NotificationService.getAdminUnreadCount({ role, technicianId: adminUserId }, trx);
   if (liveCtx.liveKeys.size > 0) {
     try {
       const unreadDashboardAlerts = await (trx || db)('notifications')

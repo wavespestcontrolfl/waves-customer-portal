@@ -270,7 +270,7 @@ describe('PUT /:id/done and /:id/reopen', () => {
   test('done: marks the persisted row by the caller, under their role, with an optional resolution', async () => {
     const done = jest.spyOn(NotificationService, 'markAdminDone').mockResolvedValue(1);
     const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body: { resolution: 'Called back', version: VERSION }, techRole: 'technician', technicianId: 42 });
-    expect(done).toHaveBeenCalledWith(['n1'], { by: '42', resolution: 'Called back', role: 'technician', expectedVersion: VERSION });
+    expect(done).toHaveBeenCalledWith(['n1'], { by: '42', resolution: 'Called back', role: 'technician', technicianId: 42, expectedVersion: VERSION });
     expect(res.json).toHaveBeenCalledWith({ success: true, updated: true });
   });
 
@@ -306,7 +306,7 @@ describe('PUT /:id/done and /:id/reopen', () => {
     jest.spyOn(NotificationService, 'markAdminDone').mockResolvedValue(0);
     const state = jest.spyOn(NotificationService, 'getAdminNotificationState').mockResolvedValue({ done: false, version: 'f'.repeat(32) });
     const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body: { version: VERSION }, techRole: 'admin', technicianId: 1 });
-    expect(state).toHaveBeenCalledWith('n1', { role: 'admin' });
+    expect(state).toHaveBeenCalledWith('n1', { role: 'admin', technicianId: 1 });
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ error: 'changed' });
   });
