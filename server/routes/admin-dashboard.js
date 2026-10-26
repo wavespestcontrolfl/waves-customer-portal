@@ -5,6 +5,8 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
 const { cacheRoute } = require('../utils/route-cache');
+const featureGates = require('../config/feature-gates');
+const { applyAssignable, normalizeWorkDays } = require('../services/technician-eligibility');
 const { whereNotSandboxCall } = require('../services/voice-agent/relay-protocol');
 const { computeOpsScoreboard } = require('../services/ops-scoreboard');
 const {
@@ -554,15 +556,37 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     // Fail loud (null) instead of pretending we have 3 techs when the query
     // breaks — silent fallbacks distort utilization for weeks before anyone
     // notices.
+    const secondTechLows = typeof featureGates.secondTechLowsLive === 'function' && featureGates.secondTechLowsLive();
     let numTechs = null;
+    let techWorkDays = null;
     try {
-      const techCount = await db('technicians').where({ active: true }).count('* as c').first();
-      numTechs = parseInt(techCount?.c || 0) || null;
+      if (secondTechLows) {
+        // GATE_SECOND_TECH_LOWS (census L1): only assignable field staff, and
+        // below only the days each one works.
+        techWorkDays = (await applyAssignable(db('technicians')).select('technicians.id', 'technicians.work_days'))
+          .map((row) => normalizeWorkDays(row.work_days));
+        numTechs = techWorkDays.length || null;
+      } else {
+        const techCount = await db('technicians').where({ active: true }).count('* as c').first();
+        numTechs = parseInt(techCount?.c || 0) || null;
+      }
     } catch (err) {
       logger.error(`[admin-dashboard] active techs count failed: ${err.message}`);
     }
     const daysInPeriod = Math.max(1, Math.ceil((now - new Date(start)) / 86400000) + 1);
-    const availableHours = numTechs ? numTechs * 8 * daysInPeriod : 0;
+    let availableHours = numTechs ? numTechs * 8 * daysInPeriod : 0;
+    if (secondTechLows && numTechs) {
+      // Same window as daysInPeriod (daysInPeriod calendar dates ending today).
+      // A technician with no work-days list keeps every day.
+      const todayMs = Date.parse(`${todayStr}T00:00:00Z`);
+      const windowDows = [];
+      for (let i = 0; i < daysInPeriod; i++) windowDows.push(new Date(todayMs - i * 86400000).getUTCDay());
+      let techDays = 0;
+      for (const days of techWorkDays) {
+        techDays += days ? windowDows.filter((dow) => days.includes(dow)).length : daysInPeriod;
+      }
+      availableHours = techDays * 8;
+    }
     const utilization = availableHours > 0 && laborHoursTotal > 0
       ? Math.round((laborHoursTotal / availableHours) * 100) : null;
 
