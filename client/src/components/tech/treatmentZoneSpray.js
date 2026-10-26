@@ -244,7 +244,9 @@ const BAND_JITTER = 12;
 const STAMP_STEP = 4;
 const STAMP_ALPHA_CORE = 0.075;
 const STAMP_ALPHA_EDGE = 0.05;
-const MIST_LIGHT_MIX = 0.45;
+export const MIST_LIGHT_MIX = 0.45;
+// The brand mist blue (the Treatment Zone Mapper's MIST_COLOR); the misting layout designer draws with it too.
+export const MIST_COLOR = '#0A7EC2';
 // Interior wash alphas — the baked footprint fill for interior-spray traces.
 const INTERIOR_FILL_ALPHA = 0.12;
 const INTERIOR_FILL_LIGHT_ALPHA = 0.05;
@@ -454,14 +456,14 @@ export function buildLawnHighlightMask({ source, points, closed, width = MAP_WID
 const PULSE_MS = 1200;
 const BREATH_MS = 2400;
 
-function hexToRgb(hex) {
+export function hexToRgb(hex) {
   const h = hex.replace('#', '');
   const full = h.length === 3 ? h.split('').map((ch) => ch + ch).join('') : h;
   const n = parseInt(full, 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-function mixWithWhite([r, g, b], amt) {
+export function mixWithWhite([r, g, b], amt) {
   return [
     Math.round(r + (255 - r) * amt),
     Math.round(g + (255 - g) * amt),
@@ -469,7 +471,7 @@ function mixWithWhite([r, g, b], amt) {
   ];
 }
 
-const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+export const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 
 export function startSprayEngine({
   canvas,

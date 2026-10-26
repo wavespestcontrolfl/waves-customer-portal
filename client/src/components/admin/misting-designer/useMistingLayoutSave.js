@@ -1,4 +1,4 @@
-// Save layout for the misting layout designer (step 3): compose the branded sketch, send it with the
+// Save layout for the misting layout designer (step 3): compose the plain sketch, send it with the
 // geometry, and track whether what is on screen is what is saved.
 //
 // "Saved" shows only while the current layout still matches the last saved one (compared as the exact JSON
@@ -12,7 +12,7 @@ import { composeSketchPng } from '../../../lib/mistingLayoutSketchCanvas';
 
 export default function useMistingLayoutSave({ estimateId, mapState, address, layout, saved }) {
   const ready = mapState.status === 'ready';
-  const { allLines, nozzles, risers, pump, zones, totals } = layout;
+  const { allLines, nozzles, risers, pump, zones } = layout;
 
   const payload = useMemo(() => (ready && nozzles.length > 0
     ? buildLayoutPayload({
@@ -36,21 +36,19 @@ export default function useMistingLayoutSave({ estimateId, mapState, address, la
   }, [saved, payload, signature]);
 
   const save = async () => {
-    if (!payload || !estimateId || phase.state === 'saving') return;
+    if (!payload || !estimateId || !pump || phase.state === 'saving') return;
     setPhase({ state: 'saving', message: '' });
     const sentSignature = signature;
     try {
-      const exported = layoutForExport(allLines, nozzles);
+      const exported = layoutForExport(allLines, nozzles, risers);
       const model = buildSketchModel({
         lat: mapState.center.lat,
         zoom: mapState.zoom,
-        address,
         lines: exported.lines,
         nozzles: exported.nozzles,
-        risers,
+        risers: exported.risers,
         pump,
         zones,
-        totals,
       });
       const blob = await composeSketchPng({ mapImage: mapState.image, mapUrl: mapState.url, model });
       const result = await putLayout(estimateId, payload, blob);
@@ -72,6 +70,7 @@ export default function useMistingLayoutSave({ estimateId, mapState, address, la
     saving: phase.state === 'saving',
     error: phase.state === 'error' ? phase.message : '',
     hasEstimate: Boolean(estimateId),
-    canSave: Boolean(estimateId && payload) && phase.state !== 'saving',
+    hasPump: Boolean(pump),
+    canSave: Boolean(estimateId && payload && pump) && phase.state !== 'saving',
   };
 }
