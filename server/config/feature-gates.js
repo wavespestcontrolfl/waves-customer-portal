@@ -94,6 +94,7 @@
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_TECH_WORK_DAYS=true (owner 2026-10-25, work days per technician: a technician row may carry technicians.work_days, the weekdays that person works (the Team tab "Work days" row; empty = every day). On, slot offers, automatic booking and automatic moves skip that technician on a day they do not work, and an automatic booking that lands on such a day stays unassigned for the owner; office saves (schedule create and edit, board assign and drag) still go through and add a plain warning line. Strict opt-in: exactly 'true', read at call time via techWorkDaysLive(). Ships DARK; off = work_days is ignored everywhere and the Team tab shows no editor. Sends nothing to a customer.)
+ *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; anything else, including 'true', = off, no resolver call and no query. 'true' is not a value yet: live mode is a separate later change. Never changes a booking, sends nothing to a customer or staff member.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
@@ -4677,6 +4678,11 @@ const gates = {
   // CALL time. Kill switch: unset - work_days is ignored everywhere.
   techWorkDays: process.env.GATE_TECH_WORK_DAYS === 'true',
 
+  // Job type from the service catalog (owner 2026-10-25). Ships DARK: exactly 'true'.
+  // Registered for logGateStatus only; consumers read techJobTypeChecksLive() at
+  // CALL time. Kill switch: unset - capability checks classify by visit name only.
+  techJobTypeChecks: process.env.GATE_TECH_JOB_TYPE_CHECKS === 'true',
+
   // Service-line map (owner 2026-10-25), SHADOW ONLY. Registered for logGateStatus only;
   // consumers read serviceLineMapMode() at CALL time. Kill switch: unset.
   serviceLineMapShadow: String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow',
@@ -6379,6 +6385,14 @@ function techWorkDaysLive() {
   return process.env.GATE_TECH_WORK_DAYS === 'true';
 }
 
+// GATE_TECH_JOB_TYPE_CHECKS read at CALL time - strict `=== 'true'`. The one reader for the
+// catalog-first job type of a visit (services/technician-capabilities.js) and the office
+// "set to Off for this job type" warning (services/technician-eligibility.js): off, both
+// are byte-identical to before.
+function techJobTypeChecksLive() {
+  return process.env.GATE_TECH_JOB_TYPE_CHECKS === 'true';
+}
+
 // GATE_SERVICE_LINE_MAP read at CALL time: 'shadow' or 'off'. 'shadow' (exactly, trimmed, any
 // case) lets the six booking choice points record what the service-line map
 // (services/scheduling/line-technician.js) would pick next to what was actually chosen, in
@@ -7685,6 +7699,8 @@ module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
 // GATE_TECH_WORK_DAYS reader, on its own line so gate PRs never conflict.
 module.exports.techWorkDaysLive = techWorkDaysLive;
+// GATE_TECH_JOB_TYPE_CHECKS reader, on its own line so gate PRs never conflict.
+module.exports.techJobTypeChecksLive = techJobTypeChecksLive;
 // GATE_SERVICE_LINE_MAP reader, on its own line so gate PRs never conflict.
 module.exports.serviceLineMapMode = serviceLineMapMode;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;

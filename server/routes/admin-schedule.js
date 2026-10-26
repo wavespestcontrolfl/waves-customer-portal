@@ -9412,6 +9412,15 @@ async function scheduleCreateHandler(req, res, next) {
         const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
         bookingWarnings.push(...await offDayWarningsFor(resolvedTechId, offDayDates, { conn: trx }));
       }
+      // Job type (GATE_TECH_JOB_TYPE_CHECKS): the chosen technician is set to Off for this
+      // service's category - the same advisory path, never a block ([] with the gate off).
+      if (resolvedTechId) {
+        bookingWarnings.push(...await require('../services/technician-eligibility').capabilityOffWarningsFor(
+          resolvedTechId,
+          [{ service_type: serviceType, service_id: serviceId || null, service_key: pricing.primaryServiceKey || null }],
+          { conn: trx },
+        ));
+      }
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -14877,7 +14886,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // as the create-appointment path.
       if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
         const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
-          .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
         const finalTechnicianId = hasTechnicianIdUpdate
           ? requestedTechnicianId
           : (eligibilityRow?.technician_id || null);
@@ -14898,6 +14907,16 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             const { offDayWarningFor } = require('../services/technician-eligibility');
             const offDayLine = await offDayWarningFor(finalTechnicianId, finalDate, { conn: trx });
             if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
+          }
+          // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
+          // category. Advisory, never a block ([] with the gate off).
+          if (finalTechChanging) {
+            const capabilityLines = await require('../services/technician-eligibility').capabilityOffWarningsFor(finalTechnicianId, [{
+              service_type: updates.service_type !== undefined ? updates.service_type : eligibilityRow?.service_type,
+              service_id: updates.service_id !== undefined ? updates.service_id : eligibilityRow?.service_id,
+              service_key: updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : eligibilityRow?.service_key_snapshot,
+            }], { conn: trx });
+            for (const line of capabilityLines) if (!editWarnings.includes(line)) editWarnings.push(line);
           }
         }
       }

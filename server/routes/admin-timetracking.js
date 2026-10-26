@@ -12,13 +12,13 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const {
+  categoriesForServices,
   listCapabilities,
   normalizeCapabilityEntries,
   seedNewHireCapabilities,
   summarizeCapabilities,
   writeCapabilities,
 } = require('../services/technician-capabilities');
-const { classifyServiceCategory } = require('../services/auto-dispatch/service-category');
 const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 const {
   addStaffWorkDays,
@@ -856,7 +856,7 @@ function listFutureAssignedVisits(conn, technicianId) {
     .where('s.scheduled_date', '>=', etDateString(new Date()))
     .whereNotIn('s.status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
     .orderBy('s.scheduled_date')
-    .select('s.id', 's.scheduled_date', 's.service_type', 'c.first_name', 'c.last_name');
+    .select('s.id', 's.scheduled_date', 's.service_type', 's.service_id', 's.service_key_snapshot', 'c.first_name', 'c.last_name');
 }
 
 function formatFutureAssignedVisits(rows) {
@@ -1486,10 +1486,13 @@ async function putTechnicianCapabilities(req, res, next) {
         if (!target) return { notFound: true };
         await writeCapabilities(trx, target.id, entries, req.technicianId);
         const turnedOff = new Set(entries.filter((e) => e.state === 'off').map((e) => e.service_category));
-        const futureAssignedVisits = turnedOff.size
-          ? (await listFutureAssignedVisits(trx, target.id))
-            .filter((v) => turnedOff.has(classifyServiceCategory(v.service_type)))
-          : [];
+        let futureAssignedVisits = [];
+        if (turnedOff.size) {
+          // The same category the capability checks use (catalog first with GATE_TECH_JOB_TYPE_CHECKS).
+          const future = await listFutureAssignedVisits(trx, target.id);
+          const categories = await categoriesForServices(trx, future);
+          futureAssignedVisits = future.filter((v, i) => turnedOff.has(categories[i]));
+        }
         const capabilities = await listCapabilities(trx, target.id);
         return { capabilities, futureAssignedVisits };
       });

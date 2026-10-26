@@ -39,6 +39,27 @@ const LAWN_FAMILY = new Set(['lawn']);
 // derive from this list; a new category is a migration, not just a regex.
 const CAPABILITY_CATEGORIES = ['general', 'mosquito', 'lawn', 'rodent', 'termite'];
 
+// services.category (the service library) -> capability category / service line.
+// inspection / specialty / other / anything unknown names no category of its own:
+// the caller falls through to the visit NAME (classifyServiceCategory). One table,
+// shared by the service-line map (scheduling/line-technician.js) and the
+// capability readers (technician-capabilities.js, GATE_TECH_JOB_TYPE_CHECKS).
+const CATALOG_CATEGORY_LINES = Object.freeze({
+  pest_control: 'general',
+  mosquito: 'mosquito',
+  lawn_care: 'lawn',
+  tree_shrub: 'lawn',
+  rodent: 'rodent',
+  termite: 'termite',
+  wdo: 'termite',
+});
+
+/** The capability category a services.category names, or null when it names none. */
+function categoryForCatalogCategory(catalogCategory) {
+  const key = String(catalogCategory || '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(CATALOG_CATEGORY_LINES, key) ? CATALOG_CATEGORY_LINES[key] : null;
+}
+
 function classifyServiceCategory(serviceType) {
   const s = String(serviceType || '').toLowerCase();
   for (const [cat, re] of CATEGORY_PATTERNS) {
@@ -102,6 +123,8 @@ function timeWindowForPreferenceKey(key) {
 module.exports = {
   TIME_WINDOWS,
   CAPABILITY_CATEGORIES,
+  CATALOG_CATEGORY_LINES,
+  categoryForCatalogCategory,
   classifyServiceCategory,
   serviceFamily,
   serviceFamilyPreference,

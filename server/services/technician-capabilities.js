@@ -16,7 +16,14 @@
  * category becomes Qualified only when someone marks it so. verified_by /
  * verified_at record who made that call.
  */
-const { CAPABILITY_CATEGORIES, classifyServiceCategory } = require('./auto-dispatch/service-category');
+const { CAPABILITY_CATEGORIES, categoryForCatalogCategory, classifyServiceCategory } = require('./auto-dispatch/service-category');
+const featureGates = require('../config/feature-gates');
+const logger = require('./logger');
+
+// GATE_TECH_JOB_TYPE_CHECKS, looked up on the module at call time: this file is
+// loaded under many partial feature-gates mocks, and a missing reader must read as off.
+const jobTypeChecksLive = () => typeof featureGates.techJobTypeChecksLive === 'function' && featureGates.techJobTypeChecksLive();
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CAPABILITY_LEVELS = ['qualified', 'review_required'];
 const CAPABILITY_STATES = ['qualified', 'review_required', 'off'];
@@ -212,25 +219,75 @@ async function writeCapabilities(conn, technicianId, entries, actorId) {
 }
 
 
+/**
+ * The capability category of each row, in order. A row carries `service_type`
+ * (the visit name) and, where the caller has them, `service_id` and
+ * `service_key` (or `service_key_snapshot`).
+ *   GATE_TECH_JOB_TYPE_CHECKS off: the NAME only (classifyServiceCategory), as before.
+ *   On: the service library first (service_id, else the service key, to
+ *   services.category, mapped by the table the service-line map uses), so
+ *   "Palm Tree Nutritional Treatment" and "Top Dress" read lawn; the name only
+ *   when the catalog names no category. An unreadable catalog falls to the name.
+ */
+async function categoriesForServices(conn, rows) {
+  const byName = rows.map((row) => classifyServiceCategory(row.service_type));
+  if (!jobTypeChecksLive()) return byName;
+  const keyOf = (row) => String(row.service_key || row.service_key_snapshot || '').trim() || null;
+  const idOf = (row) => (typeof row.service_id === 'string' && UUID_RE.test(row.service_id) ? row.service_id : null);
+  const ids = [...new Set(rows.map(idOf).filter(Boolean))];
+  const keys = [...new Set(rows.map(keyOf).filter(Boolean))];
+  if (!ids.length && !keys.length) return byName;
+  let catalog;
+  try {
+    // On a transaction the read rides a savepoint, so a failed read can never
+    // abort the caller's transaction.
+    const read = (c) => c('services')
+      .where((q) => {
+        if (ids.length) q.whereIn('id', ids);
+        if (keys.length) q.orWhereIn('service_key', keys);
+      })
+      .select('id', 'service_key', 'category');
+    catalog = conn.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction((sp) => read(sp))
+      : await read(conn);
+  } catch (err) {
+    logger.warn(`[technician-capabilities] catalog category lookup failed: ${err.message}`);
+    return byName;
+  }
+  const byId = new Map(catalog.map((c) => [c.id, c.category]));
+  const byKey = new Map(catalog.map((c) => [c.service_key, c.category]));
+  return rows.map((row, i) => {
+    const id = idOf(row);
+    const key = keyOf(row);
+    const category = (id && byId.get(id)) || (key && byKey.get(key)) || null;
+    return categoryForCatalogCategory(category) || byName[i];
+  });
+}
+
 async function assertCapabilitiesActive(trx, technicianId, rows, refuse) {
   if (!technicianId) return;
-  const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
+  const rowCategories = await categoriesForServices(trx, rows);
+  const categories = [...new Set(rowCategories.filter(Boolean))];
   if (!categories.length) return;
   // Serialize with the Team tab's editor, which writes capabilities under
   // FOR UPDATE on the technician row: a share lock here holds until this move
   // commits, so an Off cannot land between the read below and the commit (the
   // same technician-row lock assertAssignableTechnician takes).
   await trx('technicians').where({ id: technicianId }).forShare().first('id');
-  const caps = await inactiveCapabilitiesForServices(trx, [technicianId], rows);
+  const caps = await inactiveForCategories(trx, [technicianId], categories);
   const deactivated = new Set(caps.map((c) => c.service_category));
-  const hit = rows.find((r) => deactivated.has(classifyServiceCategory(r.service_type)));
-  if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
+  const hitIndex = rowCategories.findIndex((category) => deactivated.has(category));
+  if (hitIndex >= 0) throw refuse(rows[hitIndex].id, `cannot be assigned to a technician deactivated for ${rowCategories[hitIndex]}`);
 }
 
 
 // The offer filter and transactional save fence read the same category rules.
 async function inactiveCapabilitiesForServices(conn, technicianIds, rows) {
-  const categories = [...new Set(rows.map((row) => classifyServiceCategory(row.service_type)))];
+  const categories = [...new Set(await categoriesForServices(conn, rows))];
+  return inactiveForCategories(conn, technicianIds, categories);
+}
+
+async function inactiveForCategories(conn, technicianIds, categories) {
   const capabilities = await conn('technician_capabilities')
     .whereIn('technician_id', technicianIds).whereIn('service_category', categories)
     .select('technician_id', 'service_category', 'active');
@@ -239,6 +296,7 @@ async function inactiveCapabilitiesForServices(conn, technicianIds, rows) {
 
 module.exports = {
   assertCapabilitiesActive,
+  categoriesForServices,
   inactiveCapabilitiesForServices,
   CAPABILITY_CATEGORIES,
   CAPABILITY_LEVELS,
