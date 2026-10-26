@@ -236,7 +236,7 @@ describe('Customer 360 Access section', () => {
   it('an admin sees the Neighborhood block under the read view', async () => {
     stubFetch(route);
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Property' }));
     expect(await screen.findByText('Synthetic Oaks')).toBeInTheDocument();
   });
 
@@ -244,7 +244,7 @@ describe('Customer 360 Access section', () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
     stubFetch(route);
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Property' }));
     expect(await screen.findByText('Access & Preferences')).toBeInTheDocument();
     expect(screen.queryByText('Synthetic Oaks')).toBeNull();
     expect(calls.some((c) => c.path === PROPS_URL)).toBe(false);
