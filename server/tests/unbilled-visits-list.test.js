@@ -123,6 +123,15 @@ describe('the list', () => {
     }
   });
 
+  test('one visit whose name the headline rule refuses: the headline counts instead, and the bell is still written', () => {
+    for (const customer of ['Pat Synthetic [VIP]', 'Pat Synthetic!', 'Pat Synthetic \u{1F41C}']) {
+      const composed = composeList(listItems(pageList({ leaks: [visit({ customer, completed_at: '2026-10-23T15:00:00Z' })] })));
+      const alert = composeAdminAlert(composed.spec);
+      expect(alert.headline).toBe('Billing — bill or mark free 1 unbilled visit');
+      expect(alert.why).toBe('One visit done Oct 23 has no invoice; $97.00 is not billed.');
+    }
+  });
+
   test('a long list stays rule-clean and the detail names how many more there are', () => {
     const leaks = Array.from({ length: 30 }, (_, i) => visit({ scheduled_service_id: `id-${String(i).padStart(2, '0')}`, price: 12345.67, completed_at: new Date(Date.UTC(2026, 9, 1, 15) + i * 3600 * 1000).toISOString() }));
     const composed = composeList(listItems(pageList({ leaks })));

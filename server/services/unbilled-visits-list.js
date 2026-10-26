@@ -96,9 +96,13 @@ function composeList(items) {
   const count = items.length;
   const total = items.reduce((sum, item) => sum + item.price, 0);
   const plural = count === 1 ? '' : 's';
-  const action = count === 1
+  // One visit names its customer in the headline. A name the rule cannot carry
+  // (brackets, an exclamation mark, an emoji, a second sentence) would make
+  // composeAdminAlert throw and fail every run, so it falls back to the count.
+  const named = count === 1
     ? fitAction('Billing', items[0].customerName, [(name) => `bill or mark free ${name}'s visit`, (name) => `bill ${name}'s visit`])
-    : `bill or mark free ${count} unbilled visits`;
+    : null;
+  const action = named && !breaksAlertRules(`Billing — ${named}`) ? named : `bill or mark free ${count} unbilled visit${plural}`;
   const toReview = items.filter((item) => item.review).length;
   const lines = items.slice(0, DETAIL_MAX_LINES).map((item) => (
     `${item.customerName} · ${item.serviceType} · done ${shortDateET(item.completedAt)} · ${moneyCents(item.price)} · ${nextStepWords(item)}`
