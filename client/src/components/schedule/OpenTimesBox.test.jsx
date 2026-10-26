@@ -163,6 +163,24 @@ describe('the box', () => {
     fireEvent.click(row);
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-02', start: '08:00', technicianId: 't1', pickTech: true }));
   });
+  it('a picked technician missing from a refreshed list no longer filters it', () => {
+    const THIRD = { technicianId: 't3', technicianName: 'Third Fixture' };
+    const before = [day('2035-01-01', [hour('2035-01-01', '09:00', 4), hour('2035-01-01', '10:00', 6, NEW), hour('2035-01-01', '11:00', 8, THIRD)])];
+    const { rerender } = render(<OpenTimesBox availability={answer(before)} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} techPick />);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Tech' }), { target: { value: 't2' } });
+    expect(rowTexts()).toEqual(['Mon Jan 1Second Fixture10 AMadds ~6 min']);
+    // New services: the second technician cannot take the visit any more.
+    const after = [day('2035-01-01', [hour('2035-01-01', '09:00', 4), hour('2035-01-01', '11:00', 8, THIRD)])];
+    rerender(<OpenTimesBox availability={answer(after)} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} techPick />);
+    expect(screen.getByRole('combobox', { name: 'Tech' }).value).toBe('');
+    expect(rowTexts()).toEqual(['Mon Jan 1Fixture Tech9 AMadds ~4 min']);
+  });
+  it('a far date still being looked up reads as being found, not as a day with no open times', () => {
+    const { rerender } = render(<OpenTimesBox availability={answer()} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    rerender(<OpenTimesBox availability={answer(DAYS, { stale: true })} currentDate="2035-03-01" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('Finding open times…')).toBeTruthy();
+    expect(screen.queryByText('No open times this day')).toBeNull();
+  });
   it('while the first search runs it says so; the strip hands over to the box', () => {
     render(<AvailabilityStrip availability={{ openTimes: { pending: true }, days: [], best: null, picked: null }} currentDate="2035-01-04" currentStart="09:00" />);
     expect(screen.getByRole('status').textContent).toBe('Finding open times…');

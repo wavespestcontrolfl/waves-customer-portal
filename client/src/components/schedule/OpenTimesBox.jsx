@@ -131,9 +131,15 @@ export default function OpenTimesBox({
   const days = availability.days || [];
   const techs = techsOf(days);
   const showTech = techPick && techs.length > 1;
-  const { rows, empty } = openTimesRows(days, { mode, band, techId: showTech ? techId : '', focusDate });
-  // Mid re-check the rows were found for the previous inputs: show them, take none.
+  // The picked technician applies only while the answer still lists them: a
+  // refreshed list (new services, address or length) may not.
+  const activeTech = showTech && techs.some((tech) => String(tech.id) === String(techId)) ? techId : '';
+  const { rows, empty } = openTimesRows(days, { mode, band, techId: activeTech, focusDate });
+  // Mid re-check the rows were found for the previous inputs: show them, take
+  // none. A day the held answer does not cover yet (a far date being looked
+  // up) is still being found, not a day with no open times.
   const pick = availability.stale ? undefined : onPick;
+  const emptyText = availability.stale && focusDate && !days.some((d) => d.date === focusDate) ? 'Finding open times…' : empty;
   // A row is "current" only when taking it would change nothing: an hour on
   // another technician's route (or any route, for an unassigned visit) stays
   // tappable, as the strip's chips do.
@@ -161,7 +167,7 @@ export default function OpenTimesBox({
           Tech
           <select
             aria-label="Tech"
-            value={techId}
+            value={activeTech}
             onChange={(e) => setTechId(e.target.value)}
             style={{ flex: 1, minHeight: 40, fontFamily: 'inherit', fontSize: 14, color: '#18181B', border: '0.5px solid #D4D4D8', borderRadius: 6, background: '#FFFFFF', padding: '0 8px' }}
           >
@@ -205,7 +211,7 @@ export default function OpenTimesBox({
           );
         }) : (
           <div role="listitem" style={{ minHeight: 48, display: 'flex', alignItems: 'center', padding: '0 14px', borderRadius: 10, background: '#F4F4F5', color: '#52525B' }}>
-            {empty}
+            {emptyText}
           </div>
         )}
       </div>
