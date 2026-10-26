@@ -24,6 +24,10 @@
  * track_state ('complete' / 'cancelled'; NULL-safe), and no expired
  * estimate-slot hold. En route or on site reads from the status OR the
  * tracker (track_state 'en_route' / 'on_property'), since either can lead.
+ * The next stop is a physical stop: the rows of one appointment (stops-ahead.js
+ * sibling identity: technician, date, customer, window) are one stop, so a row
+ * whose sibling is already underway is part of the CURRENT stop, never the
+ * next one (tech-track moves rows by id).
  *
  * An admin technician (the owner) already gets the office bell for the same
  * text, so an admin gets no copy. The office inbox, bell and owner forward are
@@ -86,6 +90,12 @@ async function visitTechniciansFor(customerId, { conn = db, today = etDateString
         .where({ technician_id: tech.id, scheduled_date: today })
         .whereNotIn('status', ACTIVE_STATUSES)
         .where((q) => q.whereNull('track_state').orWhereNotIn('track_state', ACTIVE_TRACK_STATES))
+        .whereNotExists((sib) => sib.select(conn.raw('1')).from('scheduled_services as sib')
+          .whereRaw('sib.technician_id = scheduled_services.technician_id')
+          .whereRaw('sib.scheduled_date = scheduled_services.scheduled_date')
+          .whereRaw('sib.customer_id = scheduled_services.customer_id')
+          .whereRaw('sib.window_start IS NOT DISTINCT FROM scheduled_services.window_start')
+          .where((q) => q.whereIn('sib.status', ACTIVE_STATUSES).orWhereIn('sib.track_state', ACTIVE_TRACK_STATES)))
         .orderByRaw(DAY_PLAN_ORDER)
         .first('id');
       relay = !!next && own.some((v) => String(v.id) === String(next.id));

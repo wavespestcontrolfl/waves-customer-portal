@@ -122,6 +122,18 @@ postgres('visit tech relay (real Postgres)', () => {
     expect(idsOf(await relay.visitTechniciansFor(trackerActive.id))).toEqual([String(other.id)]);
   });
 
+  test('one appointment is one stop (pre-push audit P1): a confirmed row beside an on-site sibling is the current stop, so the next customer is next', async () => {
+    const hire = await makeTech('Synthetic Hire');
+    const twoServices = await makeCustomer('Twoservices');
+    const nextCustomer = await makeCustomer('Nextcustomer');
+    await visit(twoServices, hire, 'on_site', '08:00');
+    await visit(twoServices, hire, 'confirmed', '08:00');
+    await visit(nextCustomer, hire, 'confirmed', '10:00');
+
+    expect(idsOf(await relay.visitTechniciansFor(twoServices.id))).toEqual([String(hire.id)]);
+    expect(idsOf(await relay.visitTechniciansFor(nextCustomer.id))).toEqual([String(hire.id)]);
+  });
+
   test('an admin technician (the owner) and an inactive technician get no copy', async () => {
     const owner = await makeTech('Synthetic Owner', { role: 'admin' });
     const former = await makeTech('Synthetic Former', { status: 'inactive' });
