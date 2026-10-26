@@ -2,8 +2,13 @@ const { randomUUID } = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
-const { isEnabled } = require('../../config/feature-gates');
-const { applyAssignable } = require('../technician-eligibility');
+const featureGates = require('../../config/feature-gates');
+const { isEnabled } = featureGates;
+const { applyAssignable, absentTechDays } = require('../technician-eligibility');
+
+// Looked up on the module at call time: this file is loaded under many partial
+// feature-gates mocks, and a missing reader must read as "gate off".
+const adsCapacityWorkDaysLive = () => typeof featureGates.adsCapacityWorkDaysLive === 'function' && featureGates.adsCapacityWorkDaysLive();
 
 // Lazy so requiring budget-manager (e.g. from the scheduler at boot) doesn't
 // load the google-ads-api client until a push is actually attempted.
@@ -313,7 +318,7 @@ class BudgetManager {
     };
   }
 
-  async getTechCountForArea(_area, _dateStr) {
+  async getTechCountForArea(_area, dateStr) {
     // Capacity is driven by the real assignable-technician count (active AND
     // field-dispatchable — a prospective placeholder or an office-only account
     // can take no slot, so it adds no capacity). There is no per-area tech
@@ -321,8 +326,20 @@ class BudgetManager {
     // every area uses the same live count — the old hardcoded {area: [names]}
     // map invented 2–3 phantom techs per zone and overstated capacity, holding
     // budgets at full base while the real schedule was full.
+    //
+    // With GATE_ADS_CAPACITY_WORK_DAYS on AND a date given, a technician counts
+    // only on a date they are not absent and not off that weekday (the shared
+    // absentTechDays helper; weekdays off only while GATE_TECH_WORK_DAYS is on
+    // too). Gate off or no date = every assignable technician, as before.
     const techs = await applyAssignable(db('technicians'));
-    return techs.length;
+    if (!dateStr || !adsCapacityWorkDaysLive() || !techs.length) return techs.length;
+    const day = String(dateStr).slice(0, 10);
+    const away = await absentTechDays(db, {
+      dateFrom: day,
+      dateTo: day,
+      technicianIds: techs.map((t) => t.id),
+    });
+    return techs.filter((t) => !away.has(`${t.id}:${day}`)).length;
   }
 
   /**

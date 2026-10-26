@@ -148,6 +148,7 @@
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
+ *   GATE_ADS_CAPACITY_WORK_DAYS=true (ads capacity counts a technician only on dates they work: absences and, with GATE_TECH_WORK_DAYS, off weekdays; strict 'true', read at call time via adsCapacityWorkDaysLive(); off = every assignable technician every day; changes ad budgets only, sends nothing to a customer)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
@@ -2108,6 +2109,11 @@ const gates = {
   // preview env with copied Google Ads creds + cronJobs open must never
   // mutate live campaign budgets by default.
   adsBudgetLivePush: process.env.GATE_ADS_BUDGET_LIVE_PUSH === 'true',
+
+  // Ads capacity by work day (owner 2026-10-25). Registered for logGateStatus
+  // only; BudgetManager reads adsCapacityWorkDaysLive() at CALL time. Ships
+  // DARK. Kill switch: unset - capacity counts every assignable technician.
+  adsCapacityWorkDays: process.env.GATE_ADS_CAPACITY_WORK_DAYS === 'true',
 
   // Booking "pay per application" — LINKED-ESTIMATE, PEST-ONLY BY DESIGN: prices
   // ONLY a booking explicitly linked to an estimate (estimate_id), and only for
@@ -6387,6 +6393,14 @@ function multiTechConfirmLive() {
   return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
 }
 
+// GATE_ADS_CAPACITY_WORK_DAYS read at CALL time - strict `=== 'true'`. The one
+// reader for BudgetManager.getTechCountForArea: on, a dated capacity count skips
+// a technician on a date they are absent or do not work; off, every assignable
+// technician counts every day (byte-identical to before).
+function adsCapacityWorkDaysLive() {
+  return process.env.GATE_ADS_CAPACITY_WORK_DAYS === 'true';
+}
+
 // GATE_TECH_WORK_DAYS read at CALL time - strict `=== 'true'`. The one reader for
 // technicians.work_days (services/technician-eligibility.js): on, a technician
 // is skipped by slot offers and automatic placement on a day they do not work;
@@ -7706,6 +7720,8 @@ module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
+// GATE_ADS_CAPACITY_WORK_DAYS reader, on its own line so gate PRs never conflict.
+module.exports.adsCapacityWorkDaysLive = adsCapacityWorkDaysLive;
 // GATE_TECH_WORK_DAYS reader, on its own line so gate PRs never conflict.
 module.exports.techWorkDaysLive = techWorkDaysLive;
 // GATE_SERVICE_LINE_MAP reader, on its own line so gate PRs never conflict.
