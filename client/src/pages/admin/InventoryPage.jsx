@@ -1713,7 +1713,7 @@ function WaveGuardForecastTab({
   refreshId,
   canAuthor = false,
 }) {
-  const [days, setDays] = useState(14);
+  const [days, setDays] = useState(7);
   const [forecast, setForecast] = useState(null);
   const [loading, setLoading] = useState(true);
   const loadSequence = useRef(0);
@@ -2024,7 +2024,7 @@ function UnitReviewTab({ showToast }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await adminFetch("/admin/inventory/unit-review?days=14");
+      const result = await adminFetch("/admin/inventory/unit-review?days=7");
       setData(result);
     } catch (err) {
       showToast(`Unit review failed: ${err.message}`);
