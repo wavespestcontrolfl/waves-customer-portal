@@ -105,11 +105,11 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         return { runId: args.runId, status: candidateStatus };
       }
       if (!args.promptPatch) {
-        const run = await insertRun({ items, version: drafter.currentPromptVersion(), ...baseline, over: { finished_at: NOW } });
+        const run = await insertRun({ items, version: drafter.currentPromptVersion(), ...baseline, over: { finished_at: NOW, triggered_by: args.triggeredBy } });
         return { runId: run.id, status: 'complete' };
       }
       const version = patchLib.stampPatchVersion(baseVersion(), args.promptPatch.tag);
-      const run = await insertRun({ items, version, patchId: args.promptPatch.id, baselineId: args.baselineRunId, ...candidate, status: candidateStatus });
+      const run = await insertRun({ items, version, patchId: args.promptPatch.id, baselineId: args.baselineRunId, ...candidate, status: candidateStatus, over: { triggered_by: args.triggeredBy } });
       return { runId: run.id, status: candidateStatus };
     });
     return { runner, calls };
@@ -297,6 +297,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
 
     test('with an active patch under mode true the new rule stacks on it; observe mode stacks on nothing', async () => {
       const parent = await activate(await insertPatch({ rules: [GOOD_RULE] }));
+      await patchLib.refreshActivePatch({ dbi: trx });
       await insertProposal();
       const out = await auto.createCandidate({ dbi: trx, now: NOW, distill: distillWith(SECOND_RULE) });
       const row = await rowOf(out.created);
@@ -306,6 +307,8 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       await trx('sms_prompt_patch_events').del();
 
       setMode('observe');
+      // Observe leaves the drafter unpatched, so the live version is the base one again.
+      await trx('sms_patch_proposals').update({ prompt_version: drafter.currentPromptVersion() });
       const observed = await auto.createCandidate({ dbi: trx, now: NOW, distill: distillWith(SECOND_RULE) });
       const observedRow = await rowOf(observed.created);
       expect(observedRow.parent_patch_id).toBeNull();
@@ -313,9 +316,19 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(observedRow.mode_at_creation).toBe('observe');
     });
 
+    test('an active row the live drafter ignores (built on another base) is never stacked on', async () => {
+      const stale = await insertPatch({ rules: ['One: '.concat(GOOD_RULE)], over: { base_version: 'house_voice_v12_real_answers24_n' } });
+      await trx('sms_prompt_patches').where({ id: stale.id }).update({ status: 'active', activated_at: NOW });
+      await patchLib.refreshActivePatch({ dbi: trx });
+      await insertProposal();
+      const out = await auto.createCandidate({ dbi: trx, now: NOW, distill: distillWith(SECOND_RULE) });
+      expect(await rowOf(out.created)).toMatchObject({ parent_patch_id: null, rules: [SECOND_RULE] });
+    });
+
     test('a stack past the rule cap is stored rejected', async () => {
       const rules = ['One', 'Two', 'Three', 'Four', 'Five'].map((w) => `${w}: ${GOOD_RULE}`);
       await activate(await insertPatch({ rules }));
+      await patchLib.refreshActivePatch({ dbi: trx });
       await insertProposal();
       const out = await auto.createCandidate({ dbi: trx, now: NOW, distill: distillWith(SECOND_RULE) });
       expect(out).toMatchObject({ reason: 'too_many_rules' });
@@ -441,6 +454,25 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect((await rowOf(second.id)).exam_attempts).toBe(0);
       await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 8 * DAY), runner, lock: lockThrough });
       expect(runner).toHaveBeenCalled();
+    });
+
+    test('a sitting that failed still uses the week: the next candidate waits, while the first one resumes freely', async () => {
+      const items = await seedItems();
+      const first = await insertPatch();
+      const { runner } = stubRunner({ items, candidateStatus: 'failed' });
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ failed: 'exam_not_complete' });
+      // The failed candidate's own resume is not a new sitting.
+      runner.mockClear();
+      await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + DAY), runner, lock: lockThrough });
+      expect(runner).toHaveBeenCalledWith(expect.objectContaining({ runId: expect.any(String) }));
+      expect((await rowOf(first.id)).status).toBe('candidate');
+      await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 2 * DAY), runner, lock: lockThrough });
+      expect((await rowOf(first.id))).toMatchObject({ status: 'rejected', decision_reason: 'exam_unavailable' });
+      // A replacement inside the week pays for nothing.
+      await insertPatch({ rules: [SECOND_RULE] });
+      runner.mockClear();
+      expect(await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 3 * DAY), runner, lock: lockThrough })).toEqual({ skipped: 'interval' });
+      expect(runner).not.toHaveBeenCalled();
     });
 
     test('a pool over the nightly spend cap, or under the promotion minimum, starts no new sitting', async () => {

@@ -61,6 +61,10 @@ const MIN_ACTIONS_GAIN = envNum('PROMPT_AUTOPROMOTE_MIN_ACTIONS_GAIN', 0.1);
 const DECISION_FRESH_DAYS = envNum('PROMPT_AUTOPROMOTE_DECISION_FRESH_DAYS', 14);
 
 const PATCHES = 'sms_prompt_patches';
+// sms_sealed_eval_runs.triggered_by of the loop's own sittings (the weekly window counts them).
+const CANDIDATE_TRIGGER = 'auto:autopromote';
+const BASELINE_TRIGGER = 'auto:autopromote-baseline';
+const LOOP_TRIGGERS = [CANDIDATE_TRIGGER, BASELINE_TRIGGER];
 const EVENTS = 'sms_prompt_patch_events';
 
 const mean = (arr) => (arr.length ? arr.reduce((a, x) => a + x, 0) / arr.length : null);
@@ -152,8 +156,12 @@ async function createCandidate({ dbi = db, now = new Date(), distill = distillRu
 
   const distilled = await distill({ proposalText: proposal.proposal });
   if (distilled === null) return { skipped: 'distill_unavailable' };
-  // The parent is the patch the live drafter applies right now: only in 'true' mode.
-  const parent = mode === 'true' ? await dbi(PATCHES).where({ status: 'active' }).first('id', 'rules') : null;
+  // The parent is the patch the live drafter applies right now: the validated snapshot (getActivePatch is
+  // null outside 'true' mode), re-read by id and only on this base identity. A row the drafter ignores
+  // (built on another base, or one that failed its integrity check) is never stacked on: its rules would
+  // come back under the new base.
+  const live = patchLib.getActivePatch();
+  const parent = live ? await dbi(PATCHES).where({ id: live.id, status: 'active', base_version: baseVersion }).first('id', 'rules') : null;
   const rule = patchLib.sanitizeRuleText(distilled);
   const rules = [...(parent ? parent.rules : []), rule];
   const verdict = rule ? patchLib.buildBlock(rules) : { ok: false, reason: 'no_rule' };
@@ -292,9 +300,15 @@ async function sitExam({ dbi, runner, lock, args }) {
   return run && run.status === 'complete' ? { run } : { failed: 'exam_not_complete', runId: result && result.runId };
 }
 
+// Read from the run rows the loop's sittings created (candidate or baseline): a row exists before any
+// item is paid for, so a sitting that failed or crashed still uses the week. This candidate's own
+// baseline run is left out (resuming it is not a new sitting); resumes create no row.
 async function examWindowReason({ dbi, patch, now }) {
-  const last = await dbi(EVENTS).where({ event: 'exam_started' }).max('created_at as at').first();
-  const recent = last?.at && now.getTime() - new Date(last.at).getTime() < EXAM_MIN_INTERVAL_DAYS * DAY_MS;
+  const recent = await dbi('sms_sealed_eval_runs')
+    .whereIn('triggered_by', LOOP_TRIGGERS)
+    .where('started_at', '>', new Date(now.getTime() - EXAM_MIN_INTERVAL_DAYS * DAY_MS))
+    .modify((q) => { if (patch.baseline_run_id) q.whereNot('id', patch.baseline_run_id); })
+    .first('id');
   return recent ? 'interval' : null;
 }
 
@@ -320,7 +334,7 @@ async function obtainBaseline({ dbi, patch, runner, lock, now }) {
   if (fresh) return { baseline: fresh };
   const prior = patch.baseline_run_id ? await dbi('sms_sealed_eval_runs').where({ id: patch.baseline_run_id }).first() : null;
   const resume = prior && prior.status !== 'complete' && !prior.prompt_patch_id;
-  const sat = await sitExam({ dbi, runner, lock, args: resume ? { runId: prior.id } : { triggeredBy: 'auto:autopromote-baseline' } });
+  const sat = await sitExam({ dbi, runner, lock, args: resume ? { runId: prior.id } : { triggeredBy: BASELINE_TRIGGER } });
   if (sat.run) return { baseline: sat.run };
   if (sat.failed) await recordFailedSitting({ dbi, patch, now, stage: 'baseline', runId: sat.runId || (resume ? prior.id : null), failed: sat.failed });
   return sat;
@@ -340,7 +354,7 @@ async function runCandidateExam({ dbi, patch, runner, lock, now }) {
     }
     const sitting = existing
       ? { runId: existing.id }
-      : { baselineRunId: baselineId, triggeredBy: 'auto:autopromote', promptPatch: { id: patch.id, patchNo: patch.patch_no, tag: patch.version_tag, baseVersion: patch.base_version, text: patch.patch_text } };
+      : { baselineRunId: baselineId, triggeredBy: CANDIDATE_TRIGGER, promptPatch: { id: patch.id, patchNo: patch.patch_no, tag: patch.version_tag, baseVersion: patch.base_version, text: patch.patch_text } };
     const sat = await sitExam({ dbi, runner, lock, args: sitting });
     if (sat.skipped) return sat;
     await dbi.transaction(async (trx) => {
