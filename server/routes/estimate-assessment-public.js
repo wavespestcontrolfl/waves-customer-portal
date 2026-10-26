@@ -353,6 +353,13 @@ async function assessmentFirstFor(estimate, { open = false, estimateData = null 
     if (!estimateAssessmentFirstLive() || !open || !estimate?.token) return null;
     const eligibility = await assessmentEligibility(estimate, estimateData || parseEstimateData(estimate.estimate_data));
     if (eligibility.state !== 'ok') return null;
+    // The service area at the customer's stored pin, with no network call (service-area.js isInServiceAreaBox, the
+    // canonical no-lookup check; the booking page adds the county lookup), so the page never offers a property the
+    // booking page refuses for its location. A customer with no saved pin is judged by the booking page.
+    const { latitude, longitude, zip } = eligibility.customer;
+    if (latitude != null && longitude != null && !require('../services/service-area').isInServiceAreaBox(latitude, longitude, { zip })) {
+      return null;
+    }
     return { url: `/estimate/${encodeURIComponent(estimate.token)}/assessment` };
   } catch (err) {
     logger.warn(`[estimate-assessment] offer skipped for estimate ${estimate?.id}: ${err.code || 'error'}`);

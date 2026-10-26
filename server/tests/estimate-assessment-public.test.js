@@ -337,6 +337,16 @@ describe('assessmentFirstFor (/data)', () => {
     expect(await assessmentFirstFor(estimate(), { open: true })).toEqual({ url: `/estimate/${TOKEN}/assessment` });
   });
 
+  // Local audit P1: the offer matches the booking page's location verdict where it can without a network call.
+  test('a stored pin outside the service area: nothing; inside it or with no saved pin: the offer', async () => {
+    customerRow = { ...CUSTOMER, latitude: 25.7617, longitude: -80.1918 };
+    expect(await assessmentFirstFor(estimate(), { open: true })).toBeNull();
+    customerRow = { ...CUSTOMER, latitude: 27.4989, longitude: -82.5748 };
+    expect(await assessmentFirstFor(estimate(), { open: true })).toEqual({ url: `/estimate/${TOKEN}/assessment` });
+    customerRow = { ...CUSTOMER, latitude: null, longitude: null };
+    expect(await assessmentFirstFor(estimate(), { open: true })).toEqual({ url: `/estimate/${TOKEN}/assessment` });
+  });
+
   test('gate off, a staff or document view, an open assessment, another property: nothing', async () => {
     expect(await assessmentFirstFor(estimate(), { open: false })).toBeNull();
     mockInspection.findOpenVisit.mockResolvedValueOnce({ id: 'visit-1', scheduled_date: '2026-11-03' });
