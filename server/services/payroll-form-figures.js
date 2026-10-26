@@ -261,8 +261,9 @@ const quarterChecksOf = (yearChecks, q) => yearChecks.filter((c) => quarterOfMon
  * after the due date for filing Form 940, or not paid, cuts the credit. The
  * quarters whose Florida tax is NOT marked paid in full on the Tax page by that
  * date (January 31 of the next year, moved past a weekend or legal holiday).
- * A quarter's Florida tax is the RT-6 line 5 figure, or what the paychecks
- * charged when that is less (they differ only by per-paycheck rounding).
+ * A quarter's Florida tax is the RT-6 line 5 figure, in full: the IRS gives
+ * the full credit only when all of it is paid (pre-push audit P1; a cent short
+ * of line 5 is not paid in full, even when the paychecks charged that much).
  * rt6Paid: the year's RT-6 calendar rows marked paid (base and balance rows)
  * as { source_key, amount_paid, paid_date }.
  */
@@ -270,8 +271,7 @@ function floridaQuartersNotPaidOnTime(year, yearChecks, rt6Paid) {
   const dueDate = rollIrs(`${year + 1}-01-31`);
   const open = [];
   for (const q of [1, 2, 3, 4]) {
-    const { tax, checkTax } = rt6Tax(quarterChecksOf(yearChecks, q));
-    const owed = checkTax > 0 ? Math.min(tax, checkTax) : tax;
+    const owed = rt6Tax(quarterChecksOf(yearChecks, q)).tax;
     if (owed <= 0) continue;
     const prefix = `payroll:rt6:${year}-Q${q}`;
     const paid = rt6Paid
@@ -304,7 +304,7 @@ function form940(year, yearChecks, depositsCents, rt6Paid = []) {
     ? cents('10', 'Adjustment if you did not pay all state unemployment tax by the due date', 0,
       yearChecks.length ? { note: `Florida reemployment tax for every quarter is marked paid on the Tax page by ${dueText}.` } : undefined)
     : text('10', 'Adjustment if you did not pay all state unemployment tax by the due date', NEEDS_CHECK, {
-      note: `Florida reemployment tax for ${florida.open.map((q) => `Q${q}`).join(', ')} is not marked paid in full on the Tax page by ${dueText}. Tax paid late or not paid cuts the credit: use the line 10 worksheet in the Form 940 instructions.`,
+      note: `Florida reemployment tax for ${florida.open.map((q) => `Q${q}`).join(', ')} is not marked paid in full (RT-6 line 5) on the Tax page by ${dueText}. Tax paid late or not paid cuts the credit: use the line 10 worksheet in the Form 940 instructions.`,
     });
   const dependent = (line, label, value) => (verified ? cents(line, label, value) : text(line, label, NEEDS_CHECK, { note: 'Depends on line 10.' }));
   const rows = [

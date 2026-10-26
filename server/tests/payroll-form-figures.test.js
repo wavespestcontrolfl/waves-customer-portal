@@ -311,7 +311,7 @@ describe('Form 940 line 10: Florida tax paid on time', () => {
     const out = build(rows, { rt6Paid: allPaid().slice(0, 3) });
     expect(line(out.f940, '8').value).toBe(58800); // line 8 stays final
     for (const id of ['10', '12', '14', '15']) needsCheck(out, id);
-    expect(line(out.f940, '10').note).toMatch(/Q4 is not marked paid in full on the Tax page by 2027-02-01/);
+    expect(line(out.f940, '10').note).toMatch(/Q4 is not marked paid in full \(RT-6 line 5\) on the Tax page by 2027-02-01/);
     expect(line(out.f940, '12').note).toBe('Depends on line 10.');
     expect(line(out.f940, '13')).toMatchObject({ kind: 'cents', value: 0 });
     expect(line(out.f940, '16a')).toBeUndefined();
@@ -341,11 +341,11 @@ describe('Form 940 line 10: Florida tax paid on time', () => {
     needsCheck(build(year(), { rt6Paid: [...allPaid().slice(0, 3), { source_key: 'payroll:rt6:2027-Q4', amount_paid: '189.00', paid_date: '2027-01-20' }] }), '10');
   });
 
-  test('per-paycheck rounding: paying the smaller of RT-6 line 5 and what the checks charged is in full', () => {
+  test('in full means all of RT-6 line 5 (pre-push audit P1): a cent short is not paid, even when the checks charged that much', () => {
     // Three $100.10 checks: RT-6 line 5 = $8.11 (rounded once), the checks charged $8.10.
     const rows = Array.from({ length: 3 }, (_v, i) => check('2026-01-05', '2026-01-16', { tech: i + 1, gross_cents: 10010, fl_reemployment_cents: 270 }));
-    expect(line(build(rows, { rt6Paid: [rt6(1, '8.10', '2026-04-20')] }).f940, '10').value).toBe(0);
-    needsCheck(build(rows, { rt6Paid: [rt6(1, '8.09', '2026-04-20')] }), '10');
+    needsCheck(build(rows, { rt6Paid: [rt6(1, '8.10', '2026-04-20')] }), '10');
+    expect(line(build(rows, { rt6Paid: [rt6(1, '8.11', '2026-04-20')] }).f940, '10').value).toBe(0);
     // Checks that stored no Florida tax still owe the RT-6 figure.
     const noStored = rows.map((r) => ({ ...r, fl_reemployment_cents: 0 }));
     needsCheck(build(noStored, { rt6Paid: [rt6(1, '8.10', '2026-04-20')] }), '10');
