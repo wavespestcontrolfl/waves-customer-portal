@@ -15,9 +15,15 @@
  * and was removed outright — an early start is the operator's call).
  *
  * Overlap (probeSlotOverlap) reuses the shared occupancy mechanism
- * (scheduling/occupancy.js — tech-blind findConflictingVisits under the
- * date-wide advisory lock) exactly as routes/booking.js createSelfBooking
- * does. It runs unconditionally: a hit is ADVISORY (owner ruling 2026-08-25
+ * (scheduling/occupancy.js — findConflictingVisits under the date-wide
+ * advisory lock) exactly as routes/booking.js createSelfBooking does. It is
+ * tech-blind unless the caller passes `technicianId` AND
+ * techScopedConfirmActive() (GATE_MULTI_TECH_CONFIRM + capacity mode, off in
+ * production): then only unassigned rows and that technician's own route
+ * count. Callers pass the technician the row is SAVED with: the office bulk
+ * edit, the Intelligence Bar create/move tools (and the create card's
+ * preview pin), the completion follow-up write, the new-caller booking.
+ * It runs unconditionally: a hit is ADVISORY (owner ruling 2026-08-25
  * — staff-side saves never block on schedule conflicts), so the probe
  * returns the conflicts for the caller to surface via slotOverlapWarning
  * and never throws. (The former GATE_ADMIN_SLOT_OVERLAP_GUARD dark gate was
@@ -131,7 +137,8 @@ function slotOverlapWarning(date) {
  * ship behind a gate; the former GATE_ADMIN_SLOT_OVERLAP_GUARD is removed).
  * Takes the date-wide occupancy lock on `trx` first (rung 1 of occupancy.js's
  * ORDERING CONTRACT — callers must invoke this before any other lock in the
- * transaction), then runs the tech-blind findConflictingVisits probe. A hit
+ * transaction), then runs findConflictingVisits (tech-blind when
+ * `technicianId` is omitted or the technician gate is off). A hit
  * is ADVISORY: the conflicting rows are RETURNED for the caller to surface
  * via slotOverlapWarning; nothing throws.
  */
@@ -139,6 +146,7 @@ async function probeSlotOverlap({
   trx, date, windowStart, windowEnd, excludeServiceIds = [],
   excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   arrivalWindow,
+  technicianId = null,
 } = {}) {
   if (!trx || !date || !windowStart || !windowEnd) return [];
   const dateStr = String(date).split('T')[0];
@@ -151,6 +159,9 @@ async function probeSlotOverlap({
     excludeServiceIds,
     excludeStatuses,
     arrivalWindow,
+    // Only when given: an omitted technician reaches the probe exactly as it
+    // did before this argument existed.
+    ...(technicianId != null && technicianId !== '' ? { technicianId } : {}),
   });
   return clash.map((row) => ({
     id: row.id,

@@ -313,6 +313,9 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
     // Rung 1 (occupancy.js ordering contract), then the row locks.
     const clash = await probeSlotOverlap({
       trx, date: v.scheduledDate, windowStart: window.window_start, windowEnd: window.window_end,
+      // The technician the visit is saved with (v.technicianId; a non-
+      // assignable one throws below, so it is never silently dropped).
+      technicianId: v.technicianId || null,
     });
     if (v.technicianId) await assertAssignableTechnician(v.technicianId, { conn: trx, date: v.scheduledDate });
     // Work days (GATE_TECH_WORK_DAYS): an office pick of a day the technician

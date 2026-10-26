@@ -913,6 +913,47 @@ describe('always-on advisory occupancy probe', () => {
     expect(probe.whereNotIn).toHaveBeenCalledWith('id', ['svc-1']);
   });
 
+  test('scoped (techScopedConfirmActive): a row a concurrent reassignment committed onto another route is probed again there (pre-push audit P1)', async () => {
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      const updateChain = chain(); // commits on tech-1 (updateResult)
+      const firstProbe = probeChain([]); // tech-7's route: clear
+      const secondProbe = probeChain([{
+        id: 'svc-other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00',
+        status: 'confirmed', technician_id: 'tech-1', service_type: 'Pest Control',
+      }]);
+      // The scoped probe adds the unassigned-or-own-route predicate (whereNull().orWhere()).
+      for (const p of [firstProbe, secondProbe]) {
+        p.whereNull = jest.fn().mockReturnThis();
+        p.orWhere = jest.fn().mockReturnThis();
+      }
+      wireTrx({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', technician_id: 'tech-7' }) }),
+          firstProbe,
+          updateChain,
+          secondProbe,
+        ],
+        reschedule_log: [chain()],
+      });
+
+      const { status, body } = await bulk({
+        action: 'reschedule',
+        serviceIds: ['svc-1'],
+        payload: { scheduledDate: '2099-01-15', windowStart: '10:00' },
+      });
+
+      expect(status).toBe(200);
+      expect(body.updated).toEqual(['svc-1']);
+      expect(secondProbe.whereNotIn).toHaveBeenCalledWith('id', ['svc-1']);
+      expect(body.overlapWarnings).toEqual([{ id: 'svc-1', warning: expect.stringContaining('2099-01-15') }]);
+    } finally {
+      delete process.env.GATE_MULTI_TECH_CONFIRM;
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+    }
+  });
+
   test('no overlap → the move persists with no warnings', async () => {
     const updateChain = chain();
     wireTrx({

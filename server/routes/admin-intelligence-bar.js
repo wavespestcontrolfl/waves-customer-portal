@@ -1085,7 +1085,7 @@ const VERIFIED_VERSION_PARAMS = {
 // (the plain line shows and only the boolean pin applies).
 async function bookingOverlapWithBestEffort(params) {
   try {
-    return await ibBookingOverlapWho(params.scheduled_date, params.time_window);
+    return await ibBookingOverlapWho(params.scheduled_date, params.time_window, params.technician_id || null);
   } catch (err) {
     logger.warn(`[intelligence-bar] booking overlap names unavailable: ${err.message}`);
     return [];
@@ -1730,7 +1730,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // neither does one whose probe could not be read.
       let overlapNow = null;
       try {
-        overlapNow = await ibBookingOverlapProposal(params.scheduled_date, params.time_window);
+        overlapNow = await ibBookingOverlapProposal(params.scheduled_date, params.time_window, params.technician_id || null);
       } catch (err) {
         // A transient read error is less than a conflict, and a staff save
         // never blocks on a conflict (owner 2026-08-25): no pin, so the

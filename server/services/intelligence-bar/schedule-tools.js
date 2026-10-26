@@ -22,6 +22,14 @@ const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-r
 const { TRANSIENT_FROZEN_REASONS } = require('./outcomes');
 const { techStartPoint, homeFromMap, assertStartPointUnchanged } = require('../scheduling/tech-start-point');
 
+// Whether overlap probes are technician-scoped (occupancy.js techScopedConfirmActive). Looked
+// up at call time and guarded: suites mock the occupancy module down to a few functions, and a
+// missing reader reads as off (tech-blind), today's behavior.
+function techScopedProbes() {
+  const occupancy = require('../scheduling/occupancy');
+  return typeof occupancy.techScopedConfirmActive === 'function' && occupancy.techScopedConfirmActive();
+}
+
 const SCHEDULE_TOOLS = [
   {
     name: 'switch_appointment_property',
@@ -1433,7 +1441,12 @@ async function probeMoveOverlaps(trx, classified, dateStr) {
   for (const { s } of classified) {
     const { start, end } = probeWindowOf(s);
     if (!start || !end) continue;
-    const overlap = await probeSlotOverlap({ trx, date: dateStr, windowStart: start, windowEnd: end, excludeServiceIds: [String(s.id)] });
+    // A move keeps the stop's technician (it never reassigns): the probe
+    // passes the technician the row is saved with; null stays tech-blind.
+    const overlap = await probeSlotOverlap({
+      trx, date: dateStr, windowStart: start, windowEnd: end, excludeServiceIds: [String(s.id)],
+      technicianId: s.technician_id || null,
+    });
     if (overlap.length) overlappedIds.push(s.id);
   }
   return overlappedIds;
@@ -1501,6 +1514,26 @@ async function moveBatchTrx(trx, classified, dateStr, reason) {
     { techId: c.s.technician_id, date: dateStr },
   ]));
   for (const c of classified) await writeMovedStop(trx, c, dateStr, reason);
+  // The probe ran on the technician each stop was read with. The CAS does not
+  // pin technician_id (the notice follows the stop), so a concurrent
+  // reassignment can commit a stop onto another route: when scoping is on
+  // (techScopedConfirmActive), check that stop on its committed route, with
+  // the batch's other stops excluded as in the first probe (they were not on
+  // this date then). Tech-blind probes need no second look.
+  if (techScopedProbes()) {
+    const batchIds = classified.map((c) => String(c.s.id));
+    for (const c of classified) {
+      if (String(c.committedTechId || '') === String(c.s.technician_id || '')) continue;
+      const { start, end } = probeWindowOf(c.s);
+      if (!start || !end) continue;
+      const again = await probeSlotOverlap({
+        trx, date: dateStr, windowStart: start, windowEnd: end, excludeServiceIds: batchIds, technicianId: c.committedTechId,
+      });
+      const at = overlappedIds.indexOf(c.s.id);
+      if (again.length && at === -1) overlappedIds.push(c.s.id);
+      if (!again.length && at !== -1) overlappedIds.splice(at, 1);
+    }
+  }
   return overlappedIds;
 }
 

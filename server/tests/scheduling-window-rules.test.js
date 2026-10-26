@@ -4,6 +4,12 @@
  * reschedule) runs a window through before persisting it.
  */
 jest.mock('../models/db', () => jest.fn());
+// Spy over the REAL occupancy probe: existing cases keep the real SQL builder;
+// the technician cases read what probeSlotOverlap hands it.
+jest.mock('../services/scheduling/occupancy', () => {
+  const actual = jest.requireActual('../services/scheduling/occupancy');
+  return { ...actual, findConflictingVisits: jest.fn((...args) => actual.findConflictingVisits(...args)) };
+});
 
 const {
   assertAdminAppointmentWindow,
@@ -109,6 +115,47 @@ describe('probeSlotOverlap (unconditional advisory probe)', () => {
     expect(conflicts[0]).not.toHaveProperty('customer_id');
     // Rung 1 was still taken before the probe.
     expect(trx.raw.mock.calls.some(([sql, b]) => /pg_advisory_xact_lock/.test(sql) && b?.includes('occupancy:2099-01-15'))).toBe(true);
+  });
+
+  describe('technicianId (the technician the saved row carries)', () => {
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    const cleanTrx = () => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn().mockReturnThis(),
+        whereRaw: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockResolvedValue([]),
+      };
+      const trx = jest.fn(() => chain);
+      trx.raw = jest.fn().mockResolvedValue({});
+      return trx;
+    };
+    beforeEach(() => findConflictingVisits.mockClear());
+
+    test('reaches findConflictingVisits', async () => {
+      await probeSlotOverlap({ trx: cleanTrx(), date: '2099-01-15', windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-1' });
+      expect(findConflictingVisits).toHaveBeenCalledTimes(1);
+      expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ technicianId: 'tech-1', date: '2099-01-15' });
+    });
+
+    test('omitted, null or empty is NOT passed (the probe is called exactly as before)', async () => {
+      for (const extra of [{}, { technicianId: null }, { technicianId: '' }]) {
+        findConflictingVisits.mockClear();
+        await probeSlotOverlap({ trx: cleanTrx(), date: '2099-01-15', windowStart: '09:00', windowEnd: '10:00', ...extra });
+        expect(findConflictingVisits.mock.calls[0][0]).not.toHaveProperty('technicianId');
+      }
+    });
+
+    test('the lock, statuses and return shape do not change with a technician', async () => {
+      const trx = cleanTrx();
+      await expect(probeSlotOverlap({ trx, date: '2099-01-15T08:00', windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-1', excludeServiceIds: ['x'] }))
+        .resolves.toEqual([]);
+      expect(trx.raw.mock.calls.some(([sql, b]) => /pg_advisory_xact_lock/.test(sql) && b?.includes('occupancy:2099-01-15'))).toBe(true);
+      expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({
+        excludeServiceIds: ['x'], excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+      });
+    });
   });
 
   test('slotOverlapWarning names the date (date-only, no customer data)', () => {

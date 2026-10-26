@@ -45,6 +45,15 @@ const PRICE_NOTICE_DISCLOSURE = require('../../config/feature-gates').ibTierUpgr
   ? 'No price-change notice is sent to the customer, with one exception: a card that changes only waveguard_tier and monthly_rate, moves the customer to a higher tier, and leaves a monthly-billed rate above zero emails the customer the tier upgrade notice after Confirm. The preview result and the card say when that email applies; tell the operator.'
   : 'No price-change notice is sent to the customer.';
 const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require('../customer-contact-fanout');
+
+// Whether overlap probes are technician-scoped (occupancy.js techScopedConfirmActive). Looked
+// up at call time and guarded: suites mock the occupancy module down to a few functions, and a
+// missing reader reads as off (tech-blind), today's behavior.
+function techScopedProbes() {
+  const occupancy = require('../scheduling/occupancy');
+  return typeof occupancy.techScopedConfirmActive === 'function' && occupancy.techScopedConfirmActive();
+}
+
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -3611,7 +3620,7 @@ const BOOKING_NEW_OVERLAP_ERROR = 'Another visit now overlaps this time. Nothing
 // true/false, or null when there is no timed window to probe (the executor
 // probes nothing then either). A read error THROWS so the proposal fails
 // closed; an invalid date or window returns null (the executor refuses it).
-async function ibBookingOverlapRows(scheduledDate, timeWindow) {
+async function ibBookingOverlapRows(scheduledDate, timeWindow, technicianId = null) {
   const dateStr = validScheduleDate(scheduledDate);
   if (!dateStr) return null;
   const win = parseTimeWindowStart(timeWindow);
@@ -3624,11 +3633,13 @@ async function ibBookingOverlapRows(scheduledDate, timeWindow) {
     if (err?.status === 422) return null;
     throw err;
   }
-  return db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
+  return db.transaction((trx) => probeSlotOverlap({
+    trx, date: dateStr, windowStart: win.start, windowEnd, technicianId: technicianId || null,
+  }));
 }
 
-async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
-  const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow);
+async function ibBookingOverlapProposal(scheduledDate, timeWindow, technicianId = null) {
+  const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow, technicianId);
   return overlap == null ? null : overlap.length > 0;
 }
 
@@ -3669,8 +3680,8 @@ async function bookingOverlapFacts(conn, rows, dateStr) {
 // pinned `fact` of each (the executor refuses an overlapping visit whose fact
 // is not in the pinned set). Every overlapping visit is returned; [] when
 // there is no overlap or no timed window.
-async function ibBookingOverlapWho(scheduledDate, timeWindow) {
-  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
+async function ibBookingOverlapWho(scheduledDate, timeWindow, technicianId = null) {
+  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow, technicianId);
   if (!rows || !rows.length) return [];
   return bookingOverlapFacts(db, rows, validScheduleDate(scheduledDate));
 }
@@ -3841,7 +3852,11 @@ async function createAppointment(input, actionContext = {}) {
     // is advisory (owner ruling 2026-08-25 — staff-side saves never block
     // on schedule conflicts): the booking commits with a warning.
     if (win.start && windowEnd) {
-      const overlap = await probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd });
+      // Same technician the card pinned (technician_id resolved above), so a
+      // preview and its confirm check the slot the same way.
+      const overlap = await probeSlotOverlap({
+        trx, date: dateStr, windowStart: win.start, windowEnd, technicianId: technician_id || null,
+      });
       // A card that pinned "no overlap" approved a free slot (owner
       // 2026-10-05): an overlap that appeared since is NEW. Throwing here
       // rolls the transaction back before the insert, so nothing is booked
@@ -4374,6 +4389,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
           windowStart: probeWindowStart,
           windowEnd: probeWindowEnd,
           excludeServiceIds: [appointment_id],
+          // A move keeps the visit's technician (this tool never reassigns).
+          technicianId: appt.technician_id || null,
         });
         if (overlap.length) overlapAdvisory = slotOverlapWarning(dateStr);
       }
@@ -4452,6 +4469,20 @@ async function rescheduleAppointment(input, actionContext = {}) {
         .returning(['id', 'technician_id']);
       updatedRows = committed.length;
       committedTechId = committed[0]?.technician_id || null;
+      // The probe above was scoped to the technician read before this
+      // transaction. The CAS does not pin technician_id (the notice follows
+      // the stop), so a concurrent reassignment can commit the row onto
+      // another route: when scoping is on (techScopedConfirmActive), check
+      // the committed route too. Tech-blind probes need no second look.
+      if (updatedRows && probeWindowStart && probeWindowEnd
+        && String(committedTechId || '') !== String(appt.technician_id || '')
+        && techScopedProbes()) {
+        const again = await probeSlotOverlap({
+          trx, date: dateStr, windowStart: probeWindowStart, windowEnd: probeWindowEnd,
+          excludeServiceIds: [appointment_id], technicianId: committedTechId,
+        });
+        overlapAdvisory = again.length ? slotOverlapWarning(dateStr) : null;
+      }
   }).catch((err) => {
     // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.
     thrownRefusal = require('./outcomes').moveRefusalFromThrown(err);
