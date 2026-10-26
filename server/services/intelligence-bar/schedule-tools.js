@@ -636,11 +636,16 @@ async function optimizeAllRoutes(input) {
 // (tools.js) - assignable technicians only, and a name that fits two of them
 // comes back as { error, ambiguous, candidates } so the caller refuses
 // instead of guessing. Returns a row, null (no match) or that ambiguity object.
+// These tools take a name, not technician_id, so the retry asks for the full name.
 async function technicianByName(name) {
   if (!(typeof secondTechLowsLive === 'function' && secondTechLowsLive())) {
     return db('technicians').whereILike('name', `%${name}%`).first();
   }
-  return require('./tools').resolveTechnicianByName(name);
+  const found = await require('./tools').resolveTechnicianByName(name);
+  if (found && found.ambiguous) {
+    return { ...found, error: 'Multiple technicians match that name. Ask the operator which one, then retry with their full name.' };
+  }
+  return found;
 }
 
 async function optimizeTechRoute(input) {

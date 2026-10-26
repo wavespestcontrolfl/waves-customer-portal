@@ -79,7 +79,8 @@ beforeEach(() => {
 
 afterEach(() => { delete process.env.GATE_SECOND_TECH_LOWS; });
 
-const AMBIGUOUS = /Multiple technicians match that name/;
+// These tools take no technician_id, so the retry asks for the full name.
+const AMBIGUOUS = /^Multiple technicians match that name\. Ask the operator which one, then retry with their full name\.$/;
 
 const SITES = {
   optimize_tech_route: {
