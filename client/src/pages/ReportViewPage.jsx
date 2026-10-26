@@ -60,6 +60,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
+import { FieldDocumentBody, FieldMasthead } from '../components/FieldDocument';
 import CustomerReportHeader, { sharedReportTemplateActive } from '../components/report/CustomerReportHeader';
 import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
@@ -10121,6 +10122,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* GATE_LAWN_REPORT_STORY: the story order prints Ask Waves in the page (its "ask" section) instead. */}
         {!storyLayout && <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />}
 
+        {/* The customer controls above remain portal chrome. From here through
+            the closing record line, the live/static report is the authored
+            document and shares the same Field paper presentation as the PDF
+            renderer. Lawn story layouts intentionally retain their in-flow
+            Ask/engagement slots so their approved ordering does not change. */}
+        <FieldDocumentBody className="service-report-document-body">
+        <FieldMasthead />
+
         {/* GATE_LAWN_REPORT_LAYOUT: from the status card down to the review ask the page body is the
             standard one, unless the payload carries the lawn layout key on a live lawn report: then
             LawnLayoutBody prints the same sections in the phone order (LAYOUT_ORDER), built from the
@@ -10777,6 +10786,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
+        </FieldDocumentBody>
       </CustomerColumn>
     </div>
   );

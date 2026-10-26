@@ -253,6 +253,120 @@ html[data-glass-theme] .waves-field-document-body p,
   vertical-align: top;
 }
 
+.waves-field-document-body [data-glass='card'],
+html[data-glass-theme] .waves-field-document-body [data-glass='card'],
+html[data-glass-theme] .waves-field-document-body [data-glass='soft'],
+html[data-glass-theme] .waves-field-document-body .sr-cell,
+html[data-glass-theme] .waves-field-document-body .applied-product-card {
+  border-color: var(--field-rule) !important;
+  border-radius: 0 !important;
+  background: var(--field-paper) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html[data-glass-theme] .waves-field-document-body [data-glass='soft'],
+html[data-glass-theme] .waves-field-document-body .sr-cell {
+  background: var(--field-soft) !important;
+}
+
+html[data-glass-theme] .waves-field-document-body [data-glass='card']::before,
+html[data-glass-theme] .waves-field-document-body [data-glass='soft']::before {
+  display: none !important;
+}
+
+.waves-field-document-body .project-report-field-title {
+  margin-bottom: 20px;
+}
+
+.waves-field-document-body .project-report-field-title .report-header,
+.waves-field-document-body .project-report-field-title > div {
+  padding: 0 !important;
+}
+
+.waves-field-document-body .project-report-field-title h1 {
+  margin: 0 !important;
+  color: var(--field-navy) !important;
+  font-family: inherit !important;
+  font-size: var(--field-title-size) !important;
+  font-weight: 700 !important;
+  line-height: 1.15 !important;
+  letter-spacing: -0.025em !important;
+}
+
+.waves-field-document-body .project-report-field-title [data-gt='eyebrow'],
+.waves-field-document-body .project-report-field-title .section-eyebrow {
+  margin: 0 0 6px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--field-muted) !important;
+  font-size: var(--field-meta-size) !important;
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+}
+
+.waves-field-document-body .project-report-field-title .report-header-contact,
+.waves-field-document-body .project-report-field-title > div > div:last-child {
+  margin-top: 12px !important;
+  color: var(--field-muted) !important;
+  font-size: var(--field-meta-size) !important;
+  line-height: 1.45 !important;
+}
+
+.waves-field-document-body > [data-glass='card'] > div > [data-gt='eyebrow'],
+.waves-field-document-body > [data-glass='card'] > [data-gt='eyebrow'] {
+  margin: 20px 0 12px !important;
+  padding: 8px 12px !important;
+  border-top: 1px solid var(--field-rule) !important;
+  border-bottom: 1px solid var(--field-rule) !important;
+  background: var(--field-soft) !important;
+  color: var(--field-navy) !important;
+  font-size: var(--field-section-size) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+}
+
+/* The established browser-PDF renderers predate the customer screen floor
+   and carry paper-sized inline typography. The scoped Field boundary raises
+   styled document content to the meta floor, then promotes prose to the body
+   size. The print block maps the same roles to a separate paper scale. */
+@media screen {
+  .waves-field-document .field-document-sheet [style]:where(:not(.doc-station-pin)) {
+    font-size: var(--field-meta-size) !important;
+  }
+
+  .waves-field-document .field-document-sheet p[style],
+  .waves-field-document .field-document-sheet [style*='white-space: pre-wrap'],
+  .waves-field-document .field-document-sheet [style*='line-height: 1.5'],
+  .waves-field-document .field-document-bullet,
+  .waves-field-document .doc-byb .doc-keep > div {
+    font-size: var(--field-prose-size) !important;
+  }
+
+  .waves-field-document .field-document-h1 {
+    font-size: var(--field-title-size) !important;
+  }
+
+  .waves-field-document .field-document-sheet .field-section-heading,
+  .waves-field-document .field-document-brand-name {
+    font-size: var(--field-section-size) !important;
+  }
+
+  .waves-field-document .field-info-label,
+  .waves-field-document .field-info-value,
+  .waves-field-document .field-document-license,
+  .waves-field-document .field-document-contact,
+  .waves-field-document .field-document-reference,
+  .waves-field-document .field-document-doctype,
+  .waves-field-document .field-document-subtitle {
+    font-size: var(--field-meta-size) !important;
+  }
+}
+
 @media screen and (max-width: 700px) {
   .waves-field-document {
     padding: 0;
