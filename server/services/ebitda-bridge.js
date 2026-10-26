@@ -54,7 +54,9 @@ function pct(part, whole) {
  *   prorates the MONTHLY overhead figures onto the window (marketing and
  *   cogsSplit amounts are actuals for the window and are never prorated)
  */
-function buildEbitdaBridge({ revenue, grossProfit, marketing = {}, overhead = null, cogsSplit = null, monthFraction = 1 } = {}) {
+function buildEbitdaBridge({
+  revenue, grossProfit, marketing = {}, overhead = null, cogsSplit = null, monthFraction = 1, allocated = {},
+} = {}) {
   const rev = money(revenue);
   const gp = money(grossProfit);
   const cogs = money(rev - gp);
@@ -79,8 +81,16 @@ function buildEbitdaBridge({ revenue, grossProfit, marketing = {}, overhead = nu
   };
   const components = {};
   for (const [k, v] of Object.entries(rawComponents)) components[k] = money((Number(v) || 0) * frac);
-  const componentSum = money(Object.values(components).reduce((t, v) => t + v, 0));
-  const overheadEntered = overheadBasis === 'entered' ? true : componentSum > 0;
+  const sumOf = (parts) => money(Object.values(parts).reduce((t, v) => t + v, 0));
+  const overheadEntered = overheadBasis === 'entered' ? true : sumOf(components) > 0;
+  // Vehicle fixed cost the window's visits already carry in COGS (vehicle cost cards,
+  // GATE_TECH_COST_RATES; job_costs.vehicle_fixed_cost): the vehicle overhead keeps only the
+  // rest, so it is counted once. It nets at most the vehicle overhead itself; none allocated
+  // (or no vehicle line) leaves the overhead as it was.
+  // (money() reads anything that is not a number, such as a missing amount or line, as 0.)
+  const vehicleFixedInCogs = money(Math.min(Math.max(0, allocated.vehicle), Math.max(0, components.vehicle)));
+  if (vehicleFixedInCogs > 0) components.vehicle = money(components.vehicle - vehicleFixedInCogs);
+  const componentSum = sumOf(components);
   const overheadTotal = overheadEntered ? componentSum : null;
 
   // COGS detail (job-costing actuals). The headline COGS row stays revenue −
@@ -143,6 +153,7 @@ function buildEbitdaBridge({ revenue, grossProfit, marketing = {}, overhead = nu
     ebitda,
     ebitdaMarginPct: overheadEntered ? pct(ebitda, rev) : null,
     monthFraction: frac,
+    vehicleFixedInCogs,
   };
 }
 

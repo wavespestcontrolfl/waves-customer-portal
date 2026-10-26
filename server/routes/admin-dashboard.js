@@ -1320,6 +1320,22 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
       };
     } catch { /* job_costs absent — headline COGS only */ }
 
+    // Vehicle fixed cost the window's completed visits already carry in their
+    // drive cost (vehicle cost cards, GATE_TECH_COST_RATES): the bridge takes it
+    // out of the vehicle overhead so it counts once. Its own guarded read, so an
+    // environment before the column's migration keeps the COGS split above.
+    let vehicleFixedInCogs = 0;
+    try {
+      const v = await db('job_costs as jc')
+        .join('scheduled_services as ss', 'ss.id', 'jc.scheduled_service_id')
+        .where('ss.status', 'completed')
+        .where('jc.service_date', '>=', monthStart)
+        .where('jc.service_date', '<=', today)
+        .sum({ v: 'jc.vehicle_fixed_cost' })
+        .first();
+      vehicleFixedInCogs = Number(v.v); // NULL sum = none; the bridge reads it as 0
+    } catch { /* vehicle_fixed_cost absent — nothing allocated */ }
+
     const bridge = buildEbitdaBridge({
       revenue: parseFloat(fin?.rev) || 0,
       grossProfit: parseFloat(fin?.gp) || 0,
@@ -1327,6 +1343,7 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
       overhead,
       cogsSplit,
       monthFraction,
+      allocated: { vehicle: vehicleFixedInCogs },
     });
     res.json({
       ...bridge,

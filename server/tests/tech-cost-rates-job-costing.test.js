@@ -179,7 +179,8 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
       expect(res.labor_cost).toBe(35);
       expect(res.drive_cost).toBe(6);
       expect(res.total_cost).toBe(41);
-      expect(res.costRates).toBeUndefined();
+      expect(res.costRates).toBeNull();
+      expect(db.writes.jobCosts[0].vehicle_fixed_cost).toBeNull();
       // Nothing about cost cards is read at all.
       expect(db.writes.hasTableCalls).toBe(0);
       expect(db.writes.legQueries).toBe(0);
@@ -249,6 +250,9 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
       expect(res.costRates).toMatchObject({ onJobMinutes: 60, driveMinutes: 20, driveMiles: 8, driveSource: 'gps_leg' });
       expect(db.writes.serviceRecordUpdates[0]).toMatchObject({ labor_cost: 36.33, drive_cost: 8.88, labor_hours: 1 });
       expect(db.writes.jobCosts[0]).toMatchObject({ labor_cost: 36.33, drive_cost: 8.88 });
+      // The vehicle fixed part of drive_cost, kept for the EBITDA bridge: 5.28 x 1.3333 h.
+      expect(db.writes.jobCosts[0].vehicle_fixed_cost).toBe(7.04);
+      expect(res.costRates.vehicleFixedCost).toBe(7.04);
     });
 
     test('a stop shared by two physical visits splits its drive two ways', async () => {

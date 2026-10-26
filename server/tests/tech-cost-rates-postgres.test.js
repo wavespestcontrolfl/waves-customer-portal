@@ -222,7 +222,8 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       const res = await jobCosting.calculateJobCost(visitId, trx);
       expect(res.labor_cost).toBe(35);
       expect(res.drive_cost).toBe(6);
-      expect(res.costRates).toBeUndefined();
+      expect(res.costRates).toBeNull();
+      expect((await costRow()).vehicle_fixed_cost).toBeNull();
       expect(num((await costRow()).labor_cost)).toBe(35);
       expect(num((await costRow()).drive_cost)).toBe(6);
     });
@@ -322,6 +323,20 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       expect(res.labor_cost).toBe(42); // $30.00 x 84 minutes
       const later = await addVisit({ scheduled_date: '2026-10-28', actual_start_time: '2026-10-28T14:00:00Z', actual_end_time: '2026-10-28T15:00:00Z' });
       expect((await jobCosting.calculateJobCost(later, trx)).labor_cost).toBe(56);
+    });
+
+    it('job_costs keeps the vehicle fixed share of drive_cost; a recalculation without the card clears it', async () => {
+      await addTechCard();
+      await addVehicleCard();
+      process.env[GATE] = 'true';
+      await jobCosting.calculateJobCost(visitId, trx);
+      const withCard = await trx('job_costs').where({ scheduled_service_id: visitId }).first();
+      expect(Number(withCard.vehicle_fixed_cost)).toBe(7.39); // 5.28 x 1.4 h (60 on site + 24 drive)
+      delete process.env[GATE];
+      await jobCosting.calculateJobCost(visitId, trx);
+      const without = await trx('job_costs').where({ scheduled_service_id: visitId }).first();
+      expect(without.vehicle_fixed_cost).toBeNull();
+      expect(Number(without.drive_cost)).toBe(6);
     });
 
     it('a raise after the card does not re-cost a visit the card covers (the card keeps its wage)', async () => {

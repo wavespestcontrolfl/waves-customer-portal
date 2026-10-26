@@ -177,40 +177,40 @@ async function visitGpsLegsTableExists(db) {
   return visitGpsLegsTableKnown;
 }
 
-// The drive to a visit: its matched GPS leg when there is one, else the
-// measured per-stop defaults. A matched leg with no miles (a trip without a
-// mileage log) takes the default miles; no minutes takes the default minutes.
-// A stop that served several physical visits (one parking spot,
+// The drive one visit is charged (GATE_TECH_COST_RATES). None for a visit
+// that is not completed (it has driven nowhere) or that does not own the
+// stop's drive (`ownsDriveCost`, the combined-closeout owner rule
+// drive_cost_per_stop follows). Else its matched GPS leg when there is one,
+// else the measured per-stop defaults; a matched leg with no miles (a trip
+// without a mileage log) takes the default miles, no minutes the default
+// minutes. A stop that served several physical visits (one parking spot,
 // shared_stop_count N) splits its drive N ways. The members of one grouped
-// visit share one leg (one leg_group_key): groupOwnerId names the member that
-// carries it (the lowest service id), for the caller to apply when no
-// combined-closeout marker names an owner.
-async function loadDriveLeg(db, scheduledServiceId) {
-  const fallback = {
-    minutes: DEFAULT_DRIVE_MINUTES_PER_STOP, miles: DEFAULT_DRIVE_MILES_PER_STOP, source: 'default', groupOwnerId: null,
-  };
+// visit share one leg (one leg_group_key): with no closeout marker
+// (`marked` false) only the lowest service id of the group carries it.
+async function loadDriveLeg(db, svc, { ownsDriveCost, marked }) {
+  const none = { minutes: 0, miles: 0, source: 'none' };
+  if (!ownsDriveCost || svc.status !== 'completed') return none;
+  const fallback = { minutes: DEFAULT_DRIVE_MINUTES_PER_STOP, miles: DEFAULT_DRIVE_MILES_PER_STOP, source: 'default' };
   try {
     if (!(await visitGpsLegsTableExists(db))) return fallback;
     const leg = await db('visit_gps_legs')
-      .where({ scheduled_service_id: scheduledServiceId, status: 'matched' })
+      .where({ scheduled_service_id: svc.id, status: 'matched' })
       .first('drive_minutes', 'drive_miles', 'shared_stop_count', 'leg_group_key');
     if (!leg) return fallback;
-    const minutes = leg.drive_minutes == null ? NaN : Number(leg.drive_minutes);
-    const miles = leg.drive_miles == null ? NaN : Number(leg.drive_miles);
-    const sharedBy = Math.max(1, Math.floor(Number(leg.shared_stop_count)) || 1);
-    let groupOwnerId = null;
-    if (leg.leg_group_key != null && String(leg.leg_group_key) !== String(scheduledServiceId)) {
+    if (!marked && String(leg.leg_group_key) !== String(svc.id)) {
       const first = await db('visit_gps_legs')
         .where({ leg_group_key: leg.leg_group_key, status: 'matched' })
         .orderBy('scheduled_service_id')
         .first('scheduled_service_id');
-      groupOwnerId = first ? String(first.scheduled_service_id) : null;
+      if (String(first.scheduled_service_id) !== String(svc.id)) return { ...none, source: 'group_member' };
     }
+    const minutes = leg.drive_minutes == null ? NaN : Number(leg.drive_minutes);
+    const miles = leg.drive_miles == null ? NaN : Number(leg.drive_miles);
+    const sharedBy = Math.max(1, Math.floor(Number(leg.shared_stop_count)) || 1);
     return {
       minutes: (Number.isFinite(minutes) && minutes >= 0 ? minutes : DEFAULT_DRIVE_MINUTES_PER_STOP) / sharedBy,
       miles: (Number.isFinite(miles) && miles >= 0 ? miles : DEFAULT_DRIVE_MILES_PER_STOP) / sharedBy,
       source: 'gps_leg',
-      groupOwnerId,
     };
   } catch {
     return fallback;
@@ -707,7 +707,8 @@ async function calculateJobCost(scheduledServiceId, db, {
     : null;
   // GATE_TECH_COST_RATES: null unless the gate is on AND the visit's technician
   // has a cost card in effect on the visit date. Null = today's path below.
-  const costRates = techCostRatesOn() && svc.technician_id
+  // (loadVisitRates answers null for a visit with no technician.)
+  const costRates = techCostRatesOn()
     ? await require('./tech-cost-rates').loadVisitRates(db, svc.technician_id, visitDateString(svc.scheduled_date))
     : null;
   const {
@@ -726,41 +727,37 @@ async function calculateJobCost(scheduledServiceId, db, {
   // Unmarked records outside a new packet retain the legacy one-cost-per-visit
   // behavior; same-stop retained reports receive the packet marker at save.
   const driveAllocation = recordNotes.visitDriveCostAllocation;
-  const ownsDriveCost = driveAllocation?.version === 1
-    ? svc.id === driveAllocation.ownerServiceId
-    : true;
+  const marked = driveAllocation?.version === 1;
+  const ownsDriveCost = marked ? svc.id === driveAllocation.ownerServiceId : true;
   let laborCost = baseLaborCost;
   let driveCost = ownsDriveCost ? driveCostPerStop : 0;
   let costRatesApplied = null;
+  // The vehicle fixed cost inside drive_cost (NULL = no cost card applied).
+  // job_costs keeps it so the adjusted-EBITDA bridge takes it out of the
+  // vehicle overhead (counted once); written every time, so a recalculation
+  // without a card clears an earlier share.
+  let vehicleFixedCost = null;
   if (costRates) {
-    // The drive to the stop (minutes, miles) is charged once per physical stop,
-    // by the same owner rule as drive_cost_per_stop above, and only for a
-    // completed visit: a pending one has driven nowhere. Each visit's own
-    // on-site minutes (its allocated share in a combined closeout) carry the
-    // technician's labor and the vehicle's fixed cost, so a stop's members add
-    // up to the stop's real minutes with nothing counted twice.
-    let driven = ownsDriveCost && svc.status === 'completed'
-      ? await loadDriveLeg(db, scheduledServiceId)
-      : { minutes: 0, miles: 0, source: 'none' };
-    // A grouped visit with no closeout marker: its one GPS leg goes to one
-    // member, never to each of them.
-    if (driveAllocation?.version !== 1 && driven.groupOwnerId && driven.groupOwnerId !== String(svc.id)) {
-      driven = { minutes: 0, miles: 0, source: 'group_member' };
-    }
-    const chargedMinutes = laborMinutes + driven.minutes;
-    const vehicle = costRates.vehicle;
-    laborCost = (costRates.laborPerWorkedHourCents / 100) * (chargedMinutes / 60);
-    driveCost = vehicle
-      ? (vehicle.perMileTenThousandths / 10000) * driven.miles
-        + (vehicle.fixedPerWorkedHourCents / 100) * (chargedMinutes / 60)
-      : 0;
+    // Each visit's own on-site minutes (its allocated share in a combined
+    // closeout) carry the technician's labor and the vehicle's fixed cost; the
+    // drive to the stop is charged once per physical stop (loadDriveLeg), so a
+    // stop's members add up to the stop's real minutes with nothing counted
+    // twice. A card that names no vehicle has zero vehicle rates.
+    const driven = await loadDriveLeg(db, svc, { ownsDriveCost, marked });
+    const chargedHours = (laborMinutes + driven.minutes) / 60;
+    const { vehicle } = costRates;
+    laborCost = (costRates.laborPerWorkedHourCents / 100) * chargedHours;
+    const fixedPart = (vehicle.fixedPerWorkedHourCents / 100) * chargedHours;
+    driveCost = (vehicle.perMileTenThousandths / 10000) * driven.miles + fixedPart;
+    vehicleFixedCost = round2(fixedPart);
     costRatesApplied = {
       technicianCardId: costRates.cardId,
-      vehicleCardId: vehicle ? vehicle.cardId : null,
+      vehicleCardId: vehicle.cardId,
       onJobMinutes: laborMinutes,
       driveMinutes: driven.minutes,
       driveMiles: driven.miles,
       driveSource: driven.source,
+      vehicleFixedCost,
     };
   }
   const recordDriveStamp = serviceRecordDriveAllocationStamp({
@@ -789,6 +786,7 @@ async function calculateJobCost(scheduledServiceId, db, {
     gross_profit: fin.gross_profit,
     margin_pct: fin.gross_margin_pct,
     products_used: JSON.stringify(breakdown),
+    vehicle_fixed_cost: vehicleFixedCost,
   };
 
   // Correction-stamp fence, ATOMIC with the financial writes (codex P2
@@ -883,8 +881,7 @@ async function calculateJobCost(scheduledServiceId, db, {
   logger.info(
     `[job-costing] ${scheduledServiceId} — revenue $${fin.revenue} cost $${fin.total_job_cost} `
     + `profit $${fin.gross_profit} (${fin.gross_margin_pct ?? '—'}%)`
-    + `${laborEstimated ? ' — labor from the scheduled estimate' : ''}`
-    + `${costRatesApplied ? ' — costed from the technician cost card' : ''}`,
+    + `${laborEstimated ? ' — labor from the scheduled estimate' : ''}`,
   );
 
   // Bridge the customer's realized revenue/profit/LTV onto their ad-attribution
@@ -907,7 +904,7 @@ async function calculateJobCost(scheduledServiceId, db, {
     ...row,
     laborHours: fin.labor_hours,
     serviceRecordId: wroteThrough ? record.id : null,
-    ...(costRatesApplied ? { costRates: costRatesApplied } : {}),
+    costRates: costRatesApplied, // null = today's path (gate off or no card)
   };
 }
 

@@ -303,14 +303,14 @@ describe('loadVisitRates', () => {
     });
   });
 
-  test('no vehicle on the card: vehicle is null', async () => {
+  test('no vehicle on the card: zero vehicle rates', async () => {
     const t = tables({ technician_cost_cards: [{ ...techCard, vehicle_equipment_id: null }] });
-    expect((await loadVisitRates(fakeCardDb(t), 't1', '2026-10-26')).vehicle).toBeNull();
+    expect((await loadVisitRates(fakeCardDb(t), 't1', '2026-10-26')).vehicle).toEqual({ cardId: null, equipmentId: null, perMileTenThousandths: 0, fixedPerWorkedHourCents: 0 });
   });
 
-  test('a vehicle with no card yet: vehicle is null', async () => {
+  test('a vehicle with no card yet: zero vehicle rates', async () => {
     const t = tables({ vehicle_cost_cards: [] });
-    expect((await loadVisitRates(fakeCardDb(t), 't1', '2026-10-26')).vehicle).toBeNull();
+    expect((await loadVisitRates(fakeCardDb(t), 't1', '2026-10-26')).vehicle).toEqual({ cardId: null, equipmentId: null, perMileTenThousandths: 0, fixedPerWorkedHourCents: 0 });
   });
 
   test('a visit before the first card, or a W-2 card with no pay rate, gives null', async () => {

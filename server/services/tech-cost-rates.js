@@ -225,7 +225,8 @@ async function loadVisitRates(conn, technicianId, onDate) {
     }
     const labor = computeTechnicianRate(card, payRate);
     if (!labor.ok) return null;
-    let vehicle = null;
+    // No vehicle on the card (or no vehicle card in effect): zero vehicle rates.
+    let vehicle = { cardId: null, equipmentId: null, perMileTenThousandths: 0, fixedPerWorkedHourCents: 0 };
     if (card.vehicle_equipment_id) {
       const vehicleCard = await cardInEffect(conn, 'vehicle_cost_cards', 'equipment_id', card.vehicle_equipment_id, onDate);
       const rate = vehicleCard
