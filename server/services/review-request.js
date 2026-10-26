@@ -8280,6 +8280,43 @@ const ReviewService = {
   },
 };
 
+// "Never asked" (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): the customer has no
+// review_requests row that was texted (sms_sent_at) or emailed (sent_at), and is not
+// marked customers.has_left_google_review. The ONE reader: the completion panel's
+// "First review ask" flag and the completion's saved review choice both call it.
+// A missing customer, a marked-reviewed customer or a read failure is NOT never-asked
+// (false): the lock only ever adds an ask for a customer we can prove was never asked.
+async function customerNeverAskedForReview(customerId, database = db) {
+  if (!customerId) return false;
+  try {
+    const customer = await database("customers").where({ id: customerId }).first("id", "has_left_google_review");
+    if (!customer || customer.has_left_google_review) return false;
+    const asked = await database("review_requests")
+      .where({ customer_id: customerId })
+      .where((q) => q.whereNotNull("sms_sent_at").orWhereNotNull("sent_at"))
+      .first("id");
+    return !asked;
+  } catch (err) {
+    logger.warn(`[review-request] never-asked read failed for ${customerId}: ${err.message}`);
+    return false;
+  }
+}
+
+// GATE_REVIEW_FIRST_ASK_LOCK, the rule for a saved review choice: with the gate on and a
+// never-asked customer, "no ask" is honored ONLY with the "Complaint on site" reason; any other
+// "no ask" stays an ask. Returns null when the lock does not apply (gate off, or the customer
+// was asked before, is marked reviewed or cannot be read): the caller's choice stands as it was.
+// Otherwise { requestReview, forcedOn, optOutReason }. The one place the rule lives: the
+// completion, the status route and the visit-closeout packet all call it.
+const FIRST_ASK_OPT_OUT_REASON = "complaint_on_site";
+async function firstAskLockChoice({ customerId, requestReview, optOutReason }, database = db) {
+  if (!require("../config/feature-gates").reviewFirstAskLockLive()) return null;
+  if (!(await customerNeverAskedForReview(customerId, database))) return null;
+  if (requestReview !== false) return { requestReview: true, forcedOn: false, optOutReason: null };
+  const reasoned = optOutReason === FIRST_ASK_OPT_OUT_REASON;
+  return { requestReview: !reasoned, forcedOn: !reasoned, optOutReason: reasoned ? FIRST_ASK_OPT_OUT_REASON : null };
+}
+
 ReviewService.__private = {
   lastDeliveredAskAt,
   retryAtForDeferredSend,
@@ -8307,6 +8344,9 @@ ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES = REVIEW_AFTER_REPORT_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
+ReviewService.customerNeverAskedForReview = customerNeverAskedForReview;
+ReviewService.firstAskLockChoice = firstAskLockChoice;
+ReviewService.FIRST_ASK_OPT_OUT_REASON = FIRST_ASK_OPT_OUT_REASON;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 
 // The review page reads the same delivered-ask evidence the sender trusts.

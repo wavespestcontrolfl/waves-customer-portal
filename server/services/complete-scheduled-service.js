@@ -3002,7 +3002,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // services/reservice-fixed-recap.js. Honored only below, once the live
       // completion profile and both dark gates are known.
       customerRecapMode,
-      requestReview,
+      requestReview: requestReviewPosted,
+      // "Complaint on site" (GATE_REVIEW_FIRST_ASK_LOCK): the one reason a never-asked customer's review ask
+      // may be turned off. Read only below, through ReviewService.firstAskLockChoice.
+      reviewOptOutReason,
       // Set by the Fast Complete Wrap-up beside requestReview:true on the re-service sheets (owner 2026-10-10):
       // refused below once GATE_FAST_COMPLETE_WRAP_UP is off. Absent on the full form.
       wrapUpReviewAsk,
@@ -3103,6 +3106,34 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Re-checked under the visit row lock against the registry's active stations.
       stationRosterSeen,
     } = completionInput.body;
+    // First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a never-asked customer's ask turned off
+    // WITHOUT the "Complaint on site" reason stays on. Only a tech's explicit requestReview:false on a real,
+    // completed, loud, non-re-service visit is looked at; system closeouts, backdated, incomplete, concern and
+    // declined visits, the fixed re-service text and callback re-services keep today's behavior. Gate off: no
+    // read at all, requestReview is the posted value.
+    let requestReview = requestReviewPosted;
+    let reviewFirstAskLock = null;
+    let reviewTimingBody = completionInput.body || {};
+    if (requestReviewPosted === false && visitOutcome === 'completed' && !oneTimeRecapOnly && backfill !== true
+      && (!reviewSuppression || reviewSuppression === 'invoice_created')
+      && customerRecapMode !== require('./reservice-fixed-recap').MODE
+      && !completionInput.issuedInvoiceCloseout && completionInput.systemQuietCloseout !== true
+      // A sheet that pins every customer text off (no completion text, no pay link, no ask) means "send nothing".
+      && !(sendCompletionSmsRequested === false && includePayLink === false)
+      && require('../config/feature-gates').reviewFirstAskLockLive()) {
+      const lockVisit = await db('scheduled_services').where({ id: completionInput.serviceId }).first('customer_id', 'is_callback');
+      if (lockVisit && lockVisit.is_callback !== true) {
+        reviewFirstAskLock = await require('./review-request').firstAskLockChoice({
+          customerId: lockVisit.customer_id, requestReview: requestReviewPosted, optOutReason: reviewOptOutReason,
+        });
+      }
+      if (reviewFirstAskLock?.forcedOn) {
+        requestReview = true;
+        // The tech cleared the box, so a timing left in the form is not a choice: Automatic.
+        const { reviewTiming: _t, reviewDelayMinutes: _d, reviewScheduledFor: _s, ...rest } = reviewTimingBody;
+        reviewTimingBody = { ...rest, requestReview: true };
+      }
+    }
     // An oversized products array is refused before anything reads it (no claim, no writes).
     const tooManyProducts = rawProductsTooManyPayload(products);
     if (tooManyProducts) return ({ status: 400, body: tooManyProducts });
@@ -3325,7 +3356,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let completionReviewDelayMinutes;
     let customerRequestedReview = null;
     try {
-      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
+      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(reviewTimingBody);
       // The timing selector can be retained after the review checkbox is
       // cleared or a client suppression turns the ask off; the stamp must not
       // claim the customer asked when nothing was authorized (codex #4140
@@ -5984,6 +6015,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         && typeof resumedStructuredNotes.customerRequestedReview === 'object'
         ? resumedStructuredNotes.customerRequestedReview
         : null;
+      // A kept-on first review ask was frozen with the record: a resumed retry (the customer may have been
+      // asked since) finishes the choice the record holds (GATE_REVIEW_FIRST_ASK_LOCK).
+      if (resumedStructuredNotes.reviewFirstAskLock?.forcedOn === true) {
+        requestReview = true;
+        completionReviewDelayMinutes = undefined;
+      }
       durableCompletionCommitted = true;
       // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
       // its address — released only now that the completion is durably committed (a rejected
@@ -6940,9 +6977,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
-            reviewTiming: reviewTiming || null,
+            // GATE_REVIEW_FIRST_ASK_LOCK audit: a never-asked customer's "no ask" was kept on (forcedOn) or
+            // turned off with the "Complaint on site" reason. Absent when the lock did not act.
+            ...(reviewFirstAskLock && (reviewFirstAskLock.forcedOn || reviewFirstAskLock.optOutReason)
+              ? { reviewFirstAskLock: { neverAsked: true, forcedOn: reviewFirstAskLock.forcedOn, optOutReason: reviewFirstAskLock.optOutReason } }
+              : {}),
+            reviewTiming: (!reviewFirstAskLock?.forcedOn && reviewTiming) || null,
             reviewDelayMinutes: completionReviewDelayMinutes == null ? null : completionReviewDelayMinutes,
-            reviewScheduledFor: reviewScheduledFor || null,
+            reviewScheduledFor: (!reviewFirstAskLock?.forcedOn && reviewScheduledFor) || null,
             // Who captured "Customer asked for the link", when, and where —
             // carried through the paid-invoice deferral (enrollForPaidInvoice).
             // Frozen off with requestReview: an incomplete / internal-only /

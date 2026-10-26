@@ -5,7 +5,7 @@
 // scheduled visit, and the server preview of the "Automatic" review send time.
 import { useEffect, useRef, useState } from 'react';
 import { adoptSeed, reentrySeedsFrom, stepReentry } from '../lib/fast-complete-wrap-up';
-import { reviewPreviewSubmitVerdict, reviewSendPreviewPath } from '../lib/completion-review-timing';
+import { firstReviewAskFrom, reviewPreviewSubmitVerdict, reviewSendPreviewPath } from '../lib/completion-review-timing';
 
 const PREVIEW_POLL_MS = 60 * 1000;
 
@@ -59,10 +59,13 @@ export function useNextVisit({ enabled, customerId, requestRef }) {
 // (null to go on, else { message }), per the full form's guards (codex #4140 r3, r13, r18).
 export function useReviewPreview({ enabled, willReview, serviceId, serviceType, requestRef }) {
   const [preview, setPreview] = useState(null);
+  // GATE_REVIEW_FIRST_ASK_LOCK: the server's read that this customer was never asked. Kept when the
+  // preview is cleared (box off), since the box still needs its label and its reason then.
+  const [firstAsk, setFirstAsk] = useState(false);
   const previewRef = useRef(null);
   previewRef.current = preview;
   const failureNoticedRef = useRef(false);
-  const fetchPreview = () => requestRef.current(reviewSendPreviewPath(serviceType)).catch(() => null);
+  const fetchPreview = () => requestRef.current(reviewSendPreviewPath(serviceType, serviceId)).catch(() => null);
   useEffect(() => {
     if (!enabled || !willReview) {
       setPreview(null);
@@ -70,6 +73,10 @@ export function useReviewPreview({ enabled, willReview, serviceId, serviceType, 
     }
     let cancelled = false;
     const load = () => fetchPreview().then((data) => {
+      // The first-ask verdict lands even if the box was just turned off (that stops the poll): the box
+      // then turns itself back on unless the one reason was confirmed.
+      const verdict = firstReviewAskFrom(data);
+      if (verdict !== null) setFirstAsk(verdict);
       if (cancelled) return;
       setPreview(data);
       if (data) failureNoticedRef.current = false;
@@ -88,5 +95,5 @@ export function useReviewPreview({ enabled, willReview, serviceId, serviceType, 
     if (verdict?.dropShown) setPreview(null);
     return verdict;
   };
-  return { preview, previewRef, recheck };
+  return { preview, previewRef, recheck, firstAsk };
 }

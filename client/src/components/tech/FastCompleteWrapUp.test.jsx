@@ -205,6 +205,82 @@ describe('review request', () => {
   });
 });
 
+describe('first review ask (GATE_REVIEW_FIRST_ASK_LOCK)', () => {
+  const FIRST = { ...PREVIEW, firstReviewAsk: true };
+  const showFirst = async (preview = FIRST) => {
+    const request = makeRequest({ previews: [preview] });
+    render(<Harness request={request} />);
+    return request;
+  };
+
+  test('a customer never asked sees "First review ask", on, and untouched it posts the same four flags', async () => {
+    const request = await showFirst();
+    const box = await screen.findByRole('checkbox', { name: 'First review ask' });
+    expect(box.checked).toBe(true);
+    expect(request.mock.calls.some(([path]) => path.includes('serviceId=svc-1'))).toBe(true);
+    expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
+  });
+
+  test('turning it off asks to confirm the one reason; cancelling keeps it on', async () => {
+    await showFirst();
+    const box = await screen.findByRole('checkbox', { name: 'First review ask' });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(box);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toMatch(/Complaint on site/);
+    expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(true);
+    expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
+  });
+
+  test('confirming turns it off and posts the reason; turning it back on drops the reason', async () => {
+    await showFirst();
+    const box = await screen.findByRole('checkbox', { name: 'First review ask' });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    fireEvent.click(box);
+    expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(false);
+    expect(wrapUp.fields()).toMatchObject({ requestReview: false, reviewOptOutReason: 'complaint_on_site' });
+    expect(screen.queryByLabelText('Review request timing')).toBeNull();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'First review ask' }));
+    expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
+  });
+
+  test('a verdict that lands after the box was turned off turns it back on, with no reason', async () => {
+    let answer;
+    const pending = new Promise((resolve) => { answer = resolve; });
+    const request = vi.fn(async (path) => {
+      if (path.startsWith('/admin/reviews/send-time-preview')) return pending;
+      if (path.includes('/reentry-defaults')) return { exteriorMinutes: 0, interiorMinutes: 0 };
+      return {};
+    });
+    render(<Harness request={request} />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    expect(wrapUp.fields().requestReview).toBe(false);
+    await act(async () => { answer(FIRST); await pending; });
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'First review ask' }).checked).toBe(true));
+    expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
+  });
+
+  test('a customer asked before (firstReviewAsk false) keeps today\'s box: no confirm, no reason', async () => {
+    await showFirst({ ...PREVIEW, firstReviewAsk: false });
+    const box = await screen.findByRole('checkbox', { name: 'Send review request' });
+    const confirm = vi.spyOn(window, 'confirm');
+    fireEvent.click(box);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(wrapUp.fields().requestReview).toBe(false);
+    expect(wrapUp.fields()).not.toHaveProperty('reviewOptOutReason');
+  });
+
+  test('a customer concern still suppresses the box (its own reason) and the label stays "suppressed"', async () => {
+    await showFirst();
+    await screen.findByRole('checkbox', { name: 'First review ask' });
+    cleanup();
+    render(<Harness request={makeRequest({ previews: [FIRST] })} customerConcern />);
+    expect(await screen.findByRole('checkbox', { name: 'Review request suppressed' })).toBeTruthy();
+    expect(wrapUp.fields().requestReview).toBe(false);
+    expect(wrapUp.fields()).not.toHaveProperty('reviewOptOutReason');
+  });
+});
+
 describe('custom review time', () => {
   const future = () => {
     const d = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);

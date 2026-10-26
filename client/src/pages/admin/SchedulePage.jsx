@@ -67,6 +67,7 @@ import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/sche
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import {
   MAX_REVIEW_DELAY_MS,
+  FIRST_ASK_OPT_OUT_PROMPT,
   REVIEW_TIMING_DEFAULT,
   REVIEW_TIMING_OPTIONS,
   completionReportTextExpected,
@@ -75,9 +76,13 @@ import {
   completionTimeOnSiteBody,
   completionWillReview,
   customReviewTimeProblem,
+  firstReviewAskFrom,
   formatReentryStepperMinutes,
+  nextReviewChoice,
   normalizeReviewTiming,
+  reviewBoxLabel,
   reviewDelayMinutesOf,
+  reviewOptOutFields,
   reviewPreviewSubmitVerdict,
   reviewScheduledForOf,
 } from "../../lib/completion-review-timing";
@@ -12367,6 +12372,10 @@ export function CompletionPanel({
   // identically.
   const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
+  // First review ask (GATE_REVIEW_FIRST_ASK_LOCK): the server's read that this visit's customer was
+  // never asked, and the one reason the tech confirmed for turning the box off.
+  const [reviewFirstAsk, setReviewFirstAsk] = useState(false);
+  const [reviewOptOutReason, setReviewOptOutReason] = useState(null);
   const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
   const [reviewCustomAt, setReviewCustomAt] = useState("");
   // Server preview of the "Automatic" send time + whether cadence mode owns
@@ -14172,13 +14181,13 @@ export function CompletionPanel({
   // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
   const previewFailureNoticedRef = useRef(false);
   const fetchReviewSendPreview = useCallback(() => {
-    const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
+    const qs = new URLSearchParams({ serviceType: service?.serviceType || "", ...(service?.id ? { serviceId: String(service.id) } : {}) });
     return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
       headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
     })
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
-  }, [service?.serviceType]);
+  }, [service?.id, service?.serviceType]);
   useEffect(() => {
     if (!willReview || oneTimeRecapOnly) {
       // Polling stops here; a preview cached from before must not survive
@@ -14190,6 +14199,10 @@ export function CompletionPanel({
     }
     let cancelled = false;
     const load = () => fetchReviewSendPreview().then((data) => {
+      // The first-ask verdict lands even if the box was just turned off (that stops the poll): the box
+      // then turns itself back on unless the one reason was confirmed.
+      const firstAsk = firstReviewAskFrom(data);
+      if (firstAsk !== null) setReviewFirstAsk(firstAsk);
       if (cancelled) return;
       setReviewSendPreview(data);
       if (data) previewFailureNoticedRef.current = false;
@@ -14201,6 +14214,17 @@ export function CompletionPanel({
     const timer = setInterval(load, 60 * 1000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [service?.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly]);
+  // A first ask stays on: a draft restored with the box off, or a verdict that lands late, turns it
+  // back on unless the tech already confirmed the one reason.
+  useEffect(() => {
+    if (reviewFirstAsk && !requestReview && !reviewOptOutReason) setRequestReview(true);
+  }, [reviewFirstAsk, requestReview, reviewOptOutReason]);
+  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk });
+  const handleReviewToggle = (checked) => {
+    const next = nextReviewChoice({ checked, firstAsk: reviewFirstAsk, confirmOptOut: () => window.confirm(FIRST_ASK_OPT_OUT_PROMPT) });
+    setRequestReview(next.requestReview);
+    setReviewOptOutReason(next.reviewOptOutReason);
+  };
   const recapStatusText = recapLoading
     ? "Drafting customer recap..."
     : recapError
@@ -16907,6 +16931,7 @@ export function CompletionPanel({
     if (checked) {
       setSendSms(true);
       setRequestReview(true);
+      setReviewOptOutReason(null);
     }
   }
   function addProduct(product) {
@@ -18413,6 +18438,7 @@ export function CompletionPanel({
           ? undefined
           : (isInspectionVisit ? offerInspectionCredit : true),
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
+        ...reviewOptOutFields({ firstAsk: reviewFirstAsk, willReview, reviewOptOutReason }),
         reviewTiming: oneTimeRecapOnly ? "now" : reviewTiming,
         reviewDelayMinutes: selectedReviewDelayMinutes,
         reviewScheduledFor: oneTimeRecapOnly
@@ -21867,15 +21893,11 @@ export function CompletionPanel({
                   type="checkbox"
                   checked={willReview}
                   disabled={!!reviewSuppressionReason || oneTimeRecapOnly}
-                  onChange={(e) => setRequestReview(e.target.checked)}
+                  onChange={(e) => handleReviewToggle(e.target.checked)}
                   style={{ width: 18, height: 18, accentColor: M.ink }}
                 />{" "}
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
-                  {reviewSuppressionReason
-                    ? "Review request suppressed"
-                    : oneTimeRecapOnly
-                      ? "Review request included"
-                      : "Send review request"}
+                  {reviewBoxText}
                 </span>{" "}
               </label>{" "}
               {willReview && !oneTimeRecapOnly && (
@@ -24152,15 +24174,9 @@ export function CompletionPanel({
               type="checkbox"
               checked={willReview}
               disabled={!!reviewSuppressionReason || oneTimeRecapOnly}
-              onChange={(e) => setRequestReview(e.target.checked)}
+              onChange={(e) => handleReviewToggle(e.target.checked)}
             />{" "}
-            <span>
-              {reviewSuppressionReason
-                ? "Review request suppressed"
-                : oneTimeRecapOnly
-                  ? "Review request included"
-                  : "Send review request"}
-            </span>{" "}
+            <span>{reviewBoxText}</span>{" "}
           </label>
           {willReview && !oneTimeRecapOnly && (
             <div
