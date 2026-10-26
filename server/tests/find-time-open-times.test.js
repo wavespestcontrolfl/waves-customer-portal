@@ -276,3 +276,11 @@ test('GATE_BOARD_OPEN_TIMES is off unless set and rides the admin schedule day v
   const day = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
   expect(day).toContain("boardOpenTimes: isEnabled('boardOpenTimes')");
 });
+
+test("a technician's own list (paidRoads: false) never asks Google (Codex #6881 security)", async () => {
+  priceOpenTimesOnRoads.mockClear();
+  const days = [{ date: '2026-09-01', status: 'open', hours: [{ start_time: '09:00', end_time: '10:00', detour_minutes: 4, technician: ADAM }] }];
+  const listed = await buildOpenTimes(days, { today: '2026-08-31', lat: 27.4, lng: -82.5, paidRoads: false });
+  expect(priceOpenTimesOnRoads).not.toHaveBeenCalled();
+  expect(listed[0].hours[0]).toMatchObject({ start_time: '09:00', detour_minutes: 4 });
+});

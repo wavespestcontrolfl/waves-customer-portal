@@ -350,7 +350,11 @@ router.post('/', async (req, res) => {
     // used the gap check, which offers no start after 4 PM), and the check
     // drives this week on Google road times (find-time.js
     // findArrivalWindowSlots). Off = byte-identical.
-    const pickerRoadCheck = hint && gateEnvValue('GATE_PICKER_ROAD_CHECK');
+    // Paid Google road times are staff-only (Codex #6881 security): a
+    // technician's own picker keeps the model, so the tech portal can never
+    // spend the shared allowance.
+    const paidRoads = !isTech;
+    const pickerRoadCheck = hint && paidRoads && gateEnvValue('GATE_PICKER_ROAD_CHECK');
     const routeCheck = arrivalWindows === true || (pickerRoadCheck && req.body?.quickMove === true);
     const useArrivalWindows = hint && serviceId && routeCheck && arrivalWindowRoutingEnabled();
     // New Appointment has no visit yet (GATE_NEW_APPT_ROUTE_TIMES, owner
@@ -497,6 +501,7 @@ router.post('/', async (req, res) => {
       // stop reaches around this service (rain-fit.js bookingRainPlan).
       serviceTypes: rainPlan.services,
       rainSpan: rainPlan.rainSpan,
+      paidRoads,
     });
     const pickedOut = built.picked;
 

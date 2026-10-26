@@ -680,9 +680,11 @@ function withChipValues(days, rows, hourly) {
 // first), so the box's Best order puts an outdoor job's wet hours after its
 // dry ones, as the best-times rows do. Both lookups fail open: no tiers,
 // drive order only; or the model's numbers, marked as estimates.
-async function buildOpenTimes(days, { today, lat, lng, serviceTypes = [], rainSpan = null, deps = {} }) {
+// `paidRoads: false` (a technician's own picker) keeps the model's numbers.
+async function buildOpenTimes(days, { today, lat, lng, serviceTypes = [], rainSpan = null, paidRoads = true, deps = {} }) {
   const fit = bookingRainFit(serviceTypes);
-  const priceOnRoads = deps.priceOpenTimesOnRoads || require('./hint-road-times').priceOpenTimesOnRoads;
+  const priceOnRoads = !paidRoads ? async (list) => list
+    : deps.priceOpenTimesOnRoads || require('./hint-road-times').priceOpenTimesOnRoads;
   const [hourly, priced] = await Promise.all([
     rankingNeedsForecast(fit, days, today, null)
       ? (deps.hourlyRain || boundedHourlyRain)(lat, lng, true).catch(() => null) : null,
@@ -702,12 +704,12 @@ const OPEN_TIMES_SLOW_MS = 3000;
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
   rejectionsByDate, startedAt, closedDates, offDates, lastResortDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
-  serviceTypes = [], rainSpan = null,
+  serviceTypes = [], rainSpan = null, paidRoads = true,
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates, lastResortDates });
   if (plan.openTimes) {
-    const listed = await buildOpenTimes(days, { today, lat: target?.lat, lng: target?.lng, serviceTypes, rainSpan });
+    const listed = await buildOpenTimes(days, { today, lat: target?.lat, lng: target?.lng, serviceTypes, rainSpan, paidRoads });
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs > OPEN_TIMES_SLOW_MS) logger.warn(`[find-time] open times search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
     return { summary: { days: listed, open_times: { from: plan.from, to: plan.to }, elapsed_ms: elapsedMs }, picked: undefined };

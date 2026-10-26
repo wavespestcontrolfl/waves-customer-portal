@@ -167,7 +167,7 @@ describe('priceOpenTimesOnRoads (owner 2026-10-26: the list was straight-line on
     })]),
   ];
 
-  test('every gap on the list is priced once; its hours share the Google numbers', async () => {
+  test('every hour on the list is priced at its own departures (Codex #6881)', async () => {
     process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
     const preloaded = [];
     const factory = () => ({
@@ -185,8 +185,12 @@ describe('priceOpenTimesOnRoads (owner 2026-10-26: the list was straight-line on
     ]);
     // Oct 9's gap ends at another stop Google did not answer: the model's numbers, marked.
     expect(oct9.hours[0]).toMatchObject({ drive_in_minutes: 18, detour_minutes: 30, drive_source: 'estimate' });
-    // Two gaps, three legs each: the 1 PM hour asked Google nothing of its own.
-    expect(preloaded).toHaveLength(6);
+    // The 1 PM hour shares the noon hour's drive in and base leg (same
+    // departure) and asks only its own drive out, an hour later.
+    const keys = new Set(preloaded.map((leg) => `${leg.date}|${leg.departureMin}|${leg.from === NEW ? 'new' : 'prev'}>${leg.to === NEW ? 'new' : (leg.to === NEXT ? 'next' : 'x')}`));
+    // Oct 8: in, base, and two drives out; Oct 9: its own three.
+    expect(keys.size).toBe(7);
+    expect(preloaded.filter((leg) => leg.from === NEW && leg.to === NEXT).map((leg) => leg.departureMin).sort()).toEqual([12 * 60 + 30, 13 * 60 + 30]);
   });
 
   test('gate off: every hour is marked an estimate and Google is never asked', async () => {

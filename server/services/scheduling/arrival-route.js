@@ -954,8 +954,11 @@ async function recordCapacityDecision(conn, fit, targetId) {
       finish_minute: fit.finishMinute, occupied_minutes: fit.occupiedMinutes } });
 }
 
+// Staff checks agree with the pickers' list (GATE_PICKER_ROAD_CHECK): a
+// route under way today continues from the tech's current stop. A caller
+// may pass fromActiveStop itself (the automatic tech-out mover keeps false).
 async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, ...options }) {
-  const context = await loadArrivalRouteContext(options);
+  const context = await loadArrivalRouteContext({ fromActiveStop: gateEnvValue('GATE_PICKER_ROAD_CHECK'), ...options });
   return evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, allowInsertion: false });
 }
 

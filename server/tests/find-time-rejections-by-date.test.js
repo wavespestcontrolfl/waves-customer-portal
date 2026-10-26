@@ -144,9 +144,11 @@ test('the picker road check: Google this week, a later day re-checks its best ho
   const [near, far] = [ymd(1), ymd(10)];
   try {
     const result = await findAvailableSlots({ ...BASE, dateFrom: near, dateTo: far, pickerRoadCheck: true });
-    const calls = loadArrivalRouteContext.mock.calls.map(([opts]) => opts);
-    expect(calls.find((opts) => opts.date === near)).toMatchObject({ travel: roadTravel, fromActiveStop: true });
-    expect(calls.find((opts) => opts.date === far)).toMatchObject({ travel: undefined, fromActiveStop: true });
+    expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === true)).toBe(true);
+    // Enumerated on Google this week only.
+    const enumerated = enumerateArrivalPlacements.mock.calls.filter(([, opts]) => !opts.collectLegs).map(([context]) => context);
+    expect(enumerated.find((context) => context.date === near).travel).toBe(roadTravel);
+    expect(enumerated.find((context) => context.date === far).travel).toBeUndefined();
     const at = (date) => result.slots.filter((slot) => slot.date === date)
       .map((slot) => [slot.start_time, slot.detour_minutes, slot.drive_source]).sort();
     expect(at(near)).toEqual([['09:00', 9, 'google'], ['14:00', 4, 'google']]);
