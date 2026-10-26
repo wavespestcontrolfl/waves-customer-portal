@@ -237,6 +237,13 @@ async function handleLiveRequest(ctx, p, existing) {
   // owns the request (Codex r31 P2).
   if (!(await settleParkedLedgerBell(ctx, p, request))) return;
   await bellOrWarn(ctx, p, request, 'renotified');
+  // An email claim that landed while the bell was being written retired the bells that existed
+  // then, not this one: retire it too (the dispatcher hand-off's post-ring re-check, pre-push
+  // audit P1 on e60861f599). The claim retires inside its own transaction, so a claim that lands
+  // after this read retires the bell itself.
+  if (await require('./vendor-order-email').findEmailOrderOut(ctx.conn, request.id)) {
+    await require('./order-dispatch').retireRequestBell(ctx.conn, request.id);
+  }
 }
 
 async function settleParkedLedgerBell(ctx, product, request) {

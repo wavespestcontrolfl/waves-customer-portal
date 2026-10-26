@@ -63,10 +63,16 @@ jest.mock('../services/procurement/order-dispatch', () => ({
   findLiveAutoOrder: jest.fn(async () => mockState.liveAutoOrder || null), // the product's unreconciled automatic order
   // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2).
   settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
+  retireRequestBell: jest.fn(async (_conn, requestId) => { (mockState.retiredBells = mockState.retiredBells || []).push(requestId); }),
 }));
 
 jest.mock('../services/procurement/vendor-order-email', () => ({
-  findEmailOrderOut: jest.fn(async () => mockState.emailOut || null), // a SiteOne order email sent, or sending
+  // a SiteOne order email sent, or sending; emailOutAfterRing = one that lands while the bell is written
+  findEmailOrderOut: jest.fn(async () => {
+    mockState.emailReads = (mockState.emailReads || 0) + 1;
+    if (mockState.emailOutAfterRing && mockState.emailReads > 1) return mockState.emailOutAfterRing;
+    return mockState.emailOut || null;
+  }),
 }));
 
 const { runSuppliesAutoReorderSweep, sweepFailureError } = require('../services/procurement/auto-reorder');
@@ -495,4 +501,33 @@ test('an open auto request whose SiteOne order email is SENDING (outcome unknown
     expect(r.deduped).toEqual([expect.objectContaining({ requestId: 'req-auto' }), expect.objectContaining({ requestId: 'req-auto', reason: 'email_order_out' })]);
     expect(notify).not.toHaveBeenCalled();
   } finally { mockState.emailOut = null; }
+});
+
+test('an email claim that lands while the sweep re-rings "order manually" gets that bell retired right after', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'SiteOne', metadata: { vendorId: 'vend-siteone' } };
+  mockState.autoOrder = false;
+  mockState.emailOut = null; // no email when the sweep checks...
+  mockState.emailOutAfterRing = { po: 'WAVES-REQAUTO1', status: 'sending' }; // ...one claimed while it rings
+  mockState.emailReads = 0;
+  mockState.retiredBells = [];
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+    expect(mockState.retiredBells).toEqual(['req-auto']);
+  } finally { mockState.emailOutAfterRing = null; mockState.emailReads = 0; }
+});
+
+test('the sweep re-ring retires nothing when no email claim landed', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', metadata: { vendorId: 'vend-gemplers' } };
+  mockState.autoOrder = false;
+  mockState.emailOut = null;
+  mockState.retiredBells = [];
+  const notify = jest.fn(async () => ({}));
+  await runSuppliesAutoReorderSweep({ notify });
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(mockState.retiredBells).toEqual([]);
 });
