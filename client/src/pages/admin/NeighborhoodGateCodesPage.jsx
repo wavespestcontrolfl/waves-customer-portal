@@ -252,7 +252,7 @@ function mergeSummary(source, target, preview) {
 // Merge one neighborhood into another of its county (GATE_NEIGHBORHOOD_MERGE,
 // owner 2026-10-25): find the entry it joins, read what moves (a dry run that
 // writes nothing), then merge.
-function MergeIntoPanel({ neighborhood, busy, error, onSearch, onPreview, onMerge, onCancel }) {
+function MergeIntoPanel({ neighborhood, initialTarget = null, busy, error, onSearch, onPreview, onMerge, onCancel }) {
   const [search, setSearch] = useState("");
   const [results, setResults] = useState([]);
   const [searched, setSearched] = useState(false);
@@ -284,7 +284,7 @@ function MergeIntoPanel({ neighborhood, busy, error, onSearch, onPreview, onMerg
     return () => clearTimeout(timer);
   }, [search, neighborhood.id, neighborhood.county, onSearch]);
 
-  const pick = async (target) => {
+  const pick = useCallback(async (target) => {
     const seq = ++pickSeq.current;
     setPicked(target);
     setPreview(null);
@@ -297,7 +297,14 @@ function MergeIntoPanel({ neighborhood, busy, error, onSearch, onPreview, onMerg
       setPicked(null);
       setLocalError(err.message || "Could not check this merge");
     }
-  };
+  }, [onPreview]);
+  // A suggested merge opens on its pair: the dry run starts at once.
+  const started = useRef(false);
+  useEffect(() => {
+    if (!initialTarget || started.current) return;
+    started.current = true;
+    pick(initialTarget);
+  }, [initialTarget, pick]);
   const unpick = () => { pickSeq.current += 1; setPicked(null); setPreview(null); };
 
   return (
@@ -338,6 +345,50 @@ function MergeIntoPanel({ neighborhood, busy, error, onSearch, onPreview, onMerg
         {picked && <Button size="sm" variant="ghost" disabled={busy} onClick={unpick}>Pick another</Button>}
         <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel}>Cancel</Button>
       </div>
+    </div>
+  );
+}
+
+const SUGGESTIONS_SHOWN = 5;
+
+// Entries whose names read as one community (server rules: a phase, a
+// spelling, "X at Y"). The office merges one or marks it Not the same; a
+// person always decides (owner ruling 2026-10-25).
+// Empty while the merge switch is off (the page clears the list); hidden on a
+// linked single-neighborhood view.
+function SuggestedMerges({ items, hidden, reviewing, disabled, onReview, onDismiss, renderPanel }) {
+  const [all, setAll] = useState(false);
+  if (hidden || !items.length) return null;
+  const shown = all ? items : items.slice(0, SUGGESTIONS_SHOWN);
+  const side = (n) => `${n.name} · ${plural(n.propertyCount || 0, "property", "properties")}`;
+  return (
+    <div className="mb-3 grid gap-2 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-3">
+      <div className="text-ui-body font-medium text-zinc-900">{`Possible duplicates (${items.length})`}</div>
+      <div className="text-ui-body text-ink-secondary">
+        These names read as one community. Merge when they share a gate; otherwise mark them Not the same.
+      </div>
+      {shown.map((s) => {
+        const key = `${s.source.id}|${s.target.id}`;
+        return (
+          <div key={key} className="grid gap-2 rounded-sm border-hairline border-zinc-200 px-3 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="min-w-0 break-words text-ui-body text-zinc-900">{`${side(s.source)} → ${side(s.target)}`}</span>
+              {reviewing !== key && (
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onReview(key)}>Review merge</Button>
+                  <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onDismiss(s)}>Not the same</Button>
+                </div>
+              )}
+            </div>
+            {reviewing === key && renderPanel(s)}
+          </div>
+        );
+      })}
+      {items.length > SUGGESTIONS_SHOWN && (
+        <div>
+          <Button size="sm" variant="ghost" onClick={() => setAll(!all)}>{all ? "Show fewer" : `Show all (${items.length})`}</Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -393,6 +444,8 @@ export default function NeighborhoodGateCodesPage() {
   const [addingTo, setAddingTo] = useState("");
   const [mergingFrom, setMergingFrom] = useState("");
   const [mergeEnabled, setMergeEnabled] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [reviewing, setReviewing] = useState("");
   const [formError, setFormError] = useState("");
 
   // "Found in messages": codes customers texted, waiting for the office. The
@@ -501,7 +554,21 @@ export default function NeighborhoodGateCodesPage() {
   const loadRef = useRef(load);
   loadRef.current = load;
 
-  const closeForms = () => { setEditingId(""); setAddingTo(""); setMergingFrom(""); setFormError(""); };
+  const closeForms = () => { setEditingId(""); setAddingTo(""); setMergingFrom(""); setReviewing(""); setFormError(""); };
+
+  const loadSuggestions = useCallback(async () => {
+    try {
+      const data = await api("/admin/neighborhood-access/merge-suggestions");
+      setSuggestions(data.suggestions || []);
+    } catch {
+      // The list is a help, not the page: on any failure it is just not shown.
+      setSuggestions([]);
+    }
+  }, []);
+  useEffect(() => {
+    if (mergeEnabled) loadSuggestions();
+    else setSuggestions([]);
+  }, [mergeEnabled, loadSuggestions]);
 
   const mutate = async ({ key, path, method, body, successText, onError }) => {
     setBusyKey(key);
@@ -511,6 +578,7 @@ export default function NeighborhoodGateCodesPage() {
       const result = await api(path, { method, body: JSON.stringify(body) });
       closeForms();
       await loadRef.current();
+      if (mergeEnabled) await loadSuggestions();
       setToast(typeof successText === "function" ? successText(result) : successText);
     } catch (err) {
       if (onError) onError(err.message || "Action failed");
@@ -579,6 +647,13 @@ export default function NeighborhoodGateCodesPage() {
       },
     });
   };
+  const onDismissSuggestion = (s) => mutate({
+    key: `${s.source.id}:dismiss`,
+    path: "/admin/neighborhood-access/merge-suggestions/dismiss",
+    method: "POST",
+    body: { sourceId: s.source.id, targetId: s.target.id },
+    successText: `Marked ${s.source.name} and ${s.target.name} as not the same`,
+  });
 
   const showEmpty = !loading && !readError && !disabled && neighborhoods.length === 0;
 
@@ -615,6 +690,27 @@ export default function NeighborhoodGateCodesPage() {
         <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Gate codes are not turned on yet.</div>
       ) : (
         <>
+          <SuggestedMerges
+            items={suggestions}
+            hidden={Boolean(onlyNeighborhood)}
+            reviewing={reviewing}
+            disabled={busyKey !== ""}
+            onReview={(key) => { closeForms(); setReviewing(key); }}
+            onDismiss={onDismissSuggestion}
+            renderPanel={(s) => (
+              <MergeIntoPanel
+                neighborhood={s.source}
+                initialTarget={s.target}
+                busy={busyKey === `${s.source.id}:merge`}
+                error={formError}
+                onSearch={searchNeighborhoods}
+                onPreview={(targetId) => previewMerge(s.source, targetId)}
+                onMerge={(target) => onMerge(s.source, target)}
+                onCancel={closeForms}
+              />
+            )}
+          />
+
           <div className="mb-3 flex flex-wrap items-end gap-3">
             <div className="min-w-0 basis-full md:basis-80">
               <Field id="gate-code-search" label="Search neighborhoods">

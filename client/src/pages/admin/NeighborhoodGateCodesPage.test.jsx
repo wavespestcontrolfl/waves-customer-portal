@@ -473,6 +473,7 @@ it("shows no merge controls while the merge switch is off", async () => {
   await screen.findByText("Synthetic Oaks");
   expect(screen.queryByRole("button", { name: "Merge into…" })).toBeNull();
   expect(screen.queryByText("Also named:")).toBeNull();
+  expect(rawAdminFetch.mock.calls.some(([p]) => p.includes("merge-suggestions"))).toBe(false);
 });
 
 it("Merge into… offers only other neighborhoods of the same county, shows what moves from a dry run, then merges", async () => {
@@ -539,4 +540,50 @@ it("Undo merge asks first, posts the undo and says what stayed", async () => {
   expect(await screen.findByText("Undid the merge of Synthetic Oaks Lwr. 1 item changed since stays here.")).toBeInTheDocument();
   const post = rawAdminFetch.mock.calls.find(([, o]) => o?.method === "POST");
   expect(post[0]).toBe("/admin/neighborhood-access/merges/m1/undo");
+});
+
+const SUGGESTED = {
+  suggestions: [{
+    source: { id: "n7", name: "Synthetic Oaks Lwr", county: "Manatee", propertyCount: 2, liveEntries: 0 },
+    target: { id: "n1", name: "Synthetic Oaks", county: "Manatee", propertyCount: 3, liveEntries: 1 },
+  }],
+};
+
+it("Possible duplicates lists a pair; Review merge runs the dry run on that pair, then merges", async () => {
+  rawAdminFetch.mockImplementation((path, options) => {
+    if (path.endsWith("/merge-suggestions")) return response(SUGGESTED);
+    if (options?.method === "POST" && path.endsWith("/merge")) {
+      const { dryRun } = JSON.parse(options.body);
+      return response({ mergeId: dryRun ? null : "m8", homes: 2, entries: 0, duplicatesRetired: 0, relabeled: 0, dryRun: !!dryRun });
+    }
+    return response(MERGE_LIST);
+  });
+  renderPage();
+  expect(await screen.findByText("Possible duplicates (1)")).toBeInTheDocument();
+  expect(screen.getByText("Synthetic Oaks Lwr · 2 properties → Synthetic Oaks · 3 properties")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Review merge" }));
+  expect(await screen.findByText(
+    'Moves 2 homes and 0 gate entries into Synthetic Oaks. "Synthetic Oaks Lwr" becomes another name for it. Undo merge puts it back.',
+  )).toBeInTheDocument();
+  const dry = rawAdminFetch.mock.calls.find(([p, o]) => p.endsWith("/merge") && JSON.parse(o.body).dryRun);
+  expect(dry[0]).toBe("/admin/neighborhood-access/n7/merge");
+  expect(JSON.parse(dry[1].body)).toEqual({ into: "n1", dryRun: true });
+  fireEvent.click(screen.getByRole("button", { name: "Merge" }));
+  expect(await screen.findByText("Merged Synthetic Oaks Lwr into Synthetic Oaks")).toBeInTheDocument();
+});
+
+it("Not the same posts the pair, and the list reloads without it", async () => {
+  let dismissed = false;
+  rawAdminFetch.mockImplementation((path, options) => {
+    if (path.endsWith("/merge-suggestions/dismiss")) { dismissed = true; return response({ dismissed: true }); }
+    if (path.endsWith("/merge-suggestions")) return response(dismissed ? { suggestions: [] } : SUGGESTED);
+    return response(MERGE_LIST);
+  });
+  renderPage();
+  await screen.findByText("Possible duplicates (1)");
+  fireEvent.click(screen.getByRole("button", { name: "Not the same" }));
+  expect(await screen.findByText("Marked Synthetic Oaks Lwr and Synthetic Oaks as not the same")).toBeInTheDocument();
+  const post = rawAdminFetch.mock.calls.find(([p]) => p.endsWith("/merge-suggestions/dismiss"));
+  expect(JSON.parse(post[1].body)).toEqual({ sourceId: "n7", targetId: "n1" });
+  await waitFor(() => expect(screen.queryByText("Possible duplicates (1)")).toBeNull());
 });

@@ -220,8 +220,9 @@ postgres('neighborhood access directory', () => {
     const { rows } = await trx.raw("SELECT 1 FROM pg_indexes WHERE indexname = 'customer_properties_neighborhood_id_index'");
     expect(rows).toHaveLength(1);
     // …so the original's down() (which drops that index by name) still works
-    // (the later merge history and filings ledger reference neighborhoods:
+    // (the later merge dismissals, merge history and filings ledger reference neighborhoods:
     // they go first, as a real rollback would take them).
+    await require('../models/migrations/20261025233000_neighborhood_merge_dismissals').down(trx);
     await require('../models/migrations/20261025230000_neighborhood_merges').down(trx);
     await require('../models/migrations/20261002100000_neighborhood_access_filings').down(trx);
     await migration.down(trx);
@@ -230,7 +231,8 @@ postgres('neighborhood access directory', () => {
 
   test('migration up is idempotent and down removes everything it added', async () => {
     await migration.up(trx);
-    // The later merge history and filings ledger reference neighborhoods; a real rollback takes them first.
+    // The later merge dismissals, merge history and filings ledger reference neighborhoods; a real rollback takes them first.
+    await require('../models/migrations/20261025233000_neighborhood_merge_dismissals').down(trx);
     await require('../models/migrations/20261025230000_neighborhood_merges').down(trx);
     await require('../models/migrations/20261002100000_neighborhood_access_filings').down(trx);
     await migration.down(trx);
