@@ -109,3 +109,38 @@ it("offers Call via Waves only when the page supplies a call handler", () => {
   expect(screen.queryByRole("button", { name: "Call via Waves" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /Messages/ })).toBeInTheDocument();
 });
+
+it("omits hidden record columns and spans inline rows across the visible columns", () => {
+  const customer = {
+    id: "fixture-columns",
+    firstName: "Dana",
+    lastName: "Sample",
+    address: "10 Palm Ave",
+    tier: "Gold",
+    nextServiceDate: "2026-11-10",
+    overdueInvoiceCount: 1,
+    approximate: true,
+  };
+  render(
+    <CustomerDirectoryTable
+      customers={[customer]}
+      onOpen={vi.fn()}
+      onSort={vi.fn()}
+      sortBy="lastName"
+      sortDir="asc"
+      visibleColumns={["customer", "attention", "actions"]}
+      editingId="fixture-columns"
+      editor={<div>Edit fixture</div>}
+    />,
+  );
+
+  expect(screen.getByRole("columnheader", { name: /Customer/ })).toHaveAttribute("data-column", "customer");
+  expect(screen.getByRole("columnheader", { name: "Attention" })).toHaveAttribute("data-column", "attention");
+  expect(screen.queryByRole("columnheader", { name: "Property" })).not.toBeInTheDocument();
+  expect(screen.queryByText("10 Palm Ave")).not.toBeInTheDocument();
+  expect(screen.queryByText("Gold")).not.toBeInTheDocument();
+  expect(screen.queryByText("Nov 10")).not.toBeInTheDocument();
+  expect(screen.getByText("1 overdue invoice")).toBeInTheDocument();
+  expect(screen.getByTestId("did-you-mean").closest("td")).toHaveAttribute("colspan", "3");
+  expect(screen.getByText("Edit fixture").closest("td")).toHaveAttribute("colspan", "3");
+});

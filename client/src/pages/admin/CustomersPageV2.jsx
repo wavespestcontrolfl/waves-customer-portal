@@ -1,7 +1,7 @@
 import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 // client/src/pages/admin/CustomersPageV2.jsx
 // Monochrome V2 of CustomersPage. Strict 1:1 on data, endpoints, behavior:
-//   - GET  /admin/customers?search=&stage=&tier=&city=&page=&limit=100
+//   - GET  /admin/customers?search=&stage=&tier=&city=&page=&limit=
 //   - POST /admin/customers
 //   - PUT  /admin/customers/:id
 //   - DELETE /admin/customers/:id
@@ -11,7 +11,8 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 // Recorded health and retention segments compose with Directory filters.
 //
 // Daily driver: Virginia (CSR) + the owner. ~700 active customers + ~70
-// new leads, paginated 100 per page. Search + stage + tier + city
+// new leads. Legacy loads 500 per page; the ?tableControls=1 workspace
+// Directory preview starts at 100 with selectable page sizes. Search + stage + tier + city
 // filters compose into the query string. Mobile uses a stage-picker UX
 // instead of the desktop Kanban.
 //
@@ -21,7 +22,7 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 // - Filter composability: search + stage + tier + city all hit the
 //   same endpoint. Confirm changing one filter clears stale rows
 //   instead of mixing old + new pages.
-// - Pagination at scale: limit=100 with ~700 customers = 7 pages.
+// - Pagination at scale: preview limit=100 with ~700 customers = 7 pages.
 //   Verify the page state resets when filters change (otherwise
 //   a filter that returns 50 results but page=4 will show empty).
 // - Customer360 panel open/close: clicking a row opens the V2
@@ -70,12 +71,16 @@ import { Select, Textarea,
   Badge,
   Card,
   CardBody,
+  Field,
   Dialog,
   DialogHeader,
   DialogTitle,
   DialogBody,
   DialogFooter,
   Input,
+  TableColumnPicker,
+  TablePagination,
+  TableToolbar,
   inputStyles,
   UiSurface,
   useUiDensity,
@@ -923,6 +928,91 @@ function CustomersCommandHeader({ view, onViewChange, onAddCustomer, isAdmin }) 
   );
 }
 
+function CustomerDirectoryToolbar({
+  enabled,
+  search,
+  onSearchChange,
+  activeFilterCount,
+  onFilter,
+  sortDir,
+  onSortDirChange,
+  workspaceMode,
+  visibleColumns,
+  onVisibleColumnsChange,
+  onReset,
+}) {
+  const filterButton = (
+    <Button
+      variant="secondary"
+      onClick={onFilter}
+      aria-label="Filter customers"
+      className="shrink-0 gap-2"
+    >
+      <Filter size={16} strokeWidth={1.75} />
+      Filter
+      {activeFilterCount > 0 && (
+        <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded-full bg-zinc-900 text-white font-mono text-14">
+          {activeFilterCount}
+        </span>
+      )}
+    </Button>
+  );
+
+  if (!enabled) {
+    return (
+      <div className="customer-directory-tools flex items-center gap-2 mb-4">
+        <label className="c360-search-field min-w-0 flex-1 sm:max-w-md">
+          <Search size={17} aria-hidden />
+          <Input
+            id="customers-search"
+            name="customerSearch"
+            type="search"
+            aria-label="Search customers"
+            value={search}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="Search customers..."
+            className="pl-10"
+          />
+        </label>
+        {filterButton}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-4">
+      <TableToolbar
+        label="Customers"
+        search={search}
+        onSearchChange={onSearchChange}
+        searchPlaceholder="Search customers..."
+        onReset={onReset}
+        canReset={Boolean(search.trim()) || activeFilterCount > 0}
+      >
+        {filterButton}
+        <Field label="Sort" className="w-40">
+          <Select
+            aria-label="Customers sort"
+            value={sortDir}
+            onChange={(event) => onSortDirChange(event.target.value)}
+          >
+            <option value="asc">Name A–Z</option>
+            <option value="desc">Name Z–A</option>
+          </Select>
+        </Field>
+        {workspaceMode && (
+          <TableColumnPicker
+            label="Customers"
+            columns={CUSTOMER_TABLE_COLUMNS}
+            visibleColumns={visibleColumns}
+            onChange={onVisibleColumnsChange}
+          />
+        )}
+      </TableToolbar>
+    </div>
+  );
+}
+
 // --- Filter pill ---
 function FilterPill({ active, onClick, alert = false, children }) {
   return (
@@ -1012,6 +1102,31 @@ const SERVER_SORT_KEYS = {
   monthlyRate: "rate",
   lastContactDate: "last_contact",
 };
+const CUSTOMER_TABLE_COLUMNS = [
+  { id: "customer", label: "Customer", required: true },
+  { id: "property", label: "Property" },
+  { id: "tier", label: "WaveGuard Tier" },
+  { id: "nextService", label: "Next service" },
+  { id: "attention", label: "Attention" },
+  { id: "actions", label: "Actions", required: true },
+];
+const ALL_CUSTOMER_TABLE_COLUMNS = CUSTOMER_TABLE_COLUMNS.map((column) => column.id);
+
+function customerDirectoryPageSize(tableControlsActive, previewPageSize) {
+  return tableControlsActive ? previewPageSize : 500;
+}
+
+function customerTableControlsActive(tableControlsRequested, workspaceMode, view) {
+  return tableControlsRequested && workspaceMode && view === "directory";
+}
+
+function customerDirectoryPath(customerId, tableControlsRequested) {
+  const params = new URLSearchParams();
+  if (customerId) params.set("customerId", customerId);
+  if (tableControlsRequested) params.set("tableControls", "1");
+  const query = params.toString();
+  return `/admin/customers${query ? `?${query}` : ""}`;
+}
 
 function customerSortValue(customer, key) {
   // First name only; missing names sort last, matching the server reader.
@@ -1050,6 +1165,12 @@ function CustomerDirectoryView({
   totalPages,
   page,
   setPage,
+  pageSize,
+  setPageSize,
+  tableControlsEnabled,
+  visibleColumns,
+  loading,
+  searchActive,
 }) {
   return (
     view === "directory" && (
@@ -1143,6 +1264,7 @@ function CustomerDirectoryView({
             onSort={handleSort}
             editingId={editingId}
             editor={customerEditor}
+            visibleColumns={tableControlsEnabled ? visibleColumns : ALL_CUSTOMER_TABLE_COLUMNS}
           />
         ) : (
           filteredSorted.map((c, at) => {
@@ -1337,7 +1459,22 @@ function CustomerDirectoryView({
           })
         )}
         {/* Pagination */}
-        {totalPages > 1 && (
+        {tableControlsEnabled ? (
+          <TablePagination
+            label="Customers"
+            page={page}
+            totalPages={totalPages}
+            total={totalCustomers}
+            pageSize={pageSize}
+            disabled={loading}
+            itemLabel={searchActive ? "exact matches" : "customers"}
+            onPageChange={(nextPage) => {
+              setPage(nextPage);
+              loadCustomers(nextPage);
+            }}
+            onPageSizeChange={setPageSize}
+          />
+        ) : totalPages > 1 && (
           <div className="flex items-center justify-center gap-3 mt-5 py-3">
             {" "}
             <Button
@@ -1811,6 +1948,7 @@ export default function CustomersPageV2() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  const tableControlsRequested = searchParams.get("tableControls") === "1";
   // Default is Directory on both mobile and desktop (list-first).
   // Explicit ?view=… URLs win — deep-links still work.
   const rawView = searchParams.get("view");
@@ -1867,9 +2005,13 @@ export default function CustomersPageV2() {
   // Customers defaults to the workspace; ?customer360=overlay is the rollback.
   // Profile sheets on other surfaces keep their current presentation.
   const workspaceMode = searchParams.get("customer360") !== "overlay";
+  const tableControlsEnabled = customerTableControlsActive(tableControlsRequested, workspaceMode, view);
   const PagePresentation = CUSTOMER_PAGE_PRESENTATIONS[workspaceMode];
   usePublishIntelligenceBarPageData({ customer_id: selected360Id });
   const [page, setPage] = useState(1);
+  const [previewPageSize, setPreviewPageSize] = useState(100);
+  const pageSize = customerDirectoryPageSize(tableControlsEnabled, previewPageSize);
+  const [visibleColumns, setVisibleColumns] = useState(ALL_CUSTOMER_TABLE_COLUMNS);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [approximateCount, setApproximateCount] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -1977,9 +2119,7 @@ export default function CustomersPageV2() {
       // bare directory). Cancelling without creating still goes to the
       // directory.
       navigate(
-        createdId
-          ? `/admin/customers?customerId=${encodeURIComponent(createdId)}`
-          : "/admin/customers",
+        customerDirectoryPath(createdId, tableControlsRequested),
         { replace: true },
       );
     }
@@ -2153,21 +2293,25 @@ export default function CustomersPageV2() {
     params.set("sort", SERVER_SORT_KEYS[sortBy] || "name");
     params.set("order", sortDir);
     params.set("page", String(pg));
-    // Load up to the server's max so the full customer list lands in a
-    // single alphabetical scroll rather than A-H on page 1, I-Q on
-    // page 2, etc. Server caps at 500; any customer base above that
-    // will still paginate (Prev/Next controls stay wired below).
-    params.set("limit", "500");
+    // Legacy, Map and overlay mode keep the single-scroll limit=500 contract.
+    // The workspace Directory preview uses the selected size (server max: 500).
+    params.set("limit", String(pageSize));
     // Ask for "Did you mean" rows: this page marks them (server gate decides).
     params.set("suggest", "1");
     adminFetch(`/admin/customers?${params.toString()}`, { signal: ctrl.signal })
       .then((data) => {
         if (seq !== loadSeqRef.current) return;
+        const responseTotalPages = Math.max(1, Number(data?.totalPages) || 1);
+        if (pg > responseTotalPages) {
+          setPage(responseTotalPages);
+          loadCustomers(responseTotalPages);
+          return;
+        }
         hasLoadedRef.current = true;
         setCustomers(Array.isArray(data) ? data : data.customers || []);
         setTotalCustomers(data.total || 0);
         setApproximateCount(Number(data.approximateCount) || 0);
-        setTotalPages(data.totalPages || 1);
+        setTotalPages(responseTotalPages);
         setLoading(false);
       })
       .catch((e) => {
@@ -2228,6 +2372,7 @@ export default function CustomersPageV2() {
     healthFilters,
     sortBy,
     sortDir,
+    pageSize,
     view,
   ]);
 
@@ -2328,6 +2473,25 @@ export default function CustomersPageV2() {
       ? Object.values(healthFilters).filter((value) => value !== "").length
       : 0);
 
+  const resetTableFilters = () => {
+    setSearch("");
+    setHealthFilters({});
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("healthRisk");
+        return next;
+      },
+      { replace: true },
+    );
+    setFilterTier("all");
+    setFilterStage("all");
+    setFilterLastVisited("all");
+    setFilterCards("all");
+    setFilterHasBalance(false);
+    setPage(1);
+  };
+
   return (
     <PagePresentation
       selectedId={selected360Id}
@@ -2402,35 +2566,23 @@ export default function CustomersPageV2() {
         isAdmin={isAdmin}
       />
       {view === "directory" && (
-        <div className="customer-directory-tools flex items-center gap-2 mb-4">
-          <label className="c360-search-field min-w-0 flex-1 sm:max-w-md">
-            <Search size={17} aria-hidden />
-            <Input
-              id="customers-search"
-              name="customerSearch"
-              type="search"
-              aria-label="Search customers"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search customers..."
-              className="pl-10"
-            />
-          </label>
-          <Button
-            variant="secondary"
-            onClick={() => setShowFilters(true)}
-            aria-label="Filter customers"
-            className="shrink-0 gap-2"
-          >
-            <Filter size={16} strokeWidth={1.75} />
-            Filter
-            {activeFilterCount > 0 && (
-              <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded-full bg-zinc-900 text-white font-mono text-14">
-                {activeFilterCount}
-              </span>
-            )}
-          </Button>
-        </div>
+        <CustomerDirectoryToolbar
+          enabled={tableControlsEnabled}
+          search={search}
+          onSearchChange={setSearch}
+          activeFilterCount={activeFilterCount}
+          onFilter={() => setShowFilters(true)}
+          sortDir={sortDir}
+          onSortDirChange={(nextSortDir) => {
+            setSortBy("lastName");
+            setSortDir(nextSortDir);
+            setPage(1);
+          }}
+          workspaceMode={workspaceMode}
+          visibleColumns={visibleColumns}
+          onVisibleColumnsChange={setVisibleColumns}
+          onReset={resetTableFilters}
+        />
       )}
 
       {/* Context-specific mobile stage picker */}
@@ -2500,6 +2652,15 @@ export default function CustomersPageV2() {
         totalPages={totalPages}
         page={page}
         setPage={setPage}
+        pageSize={pageSize}
+        setPageSize={(nextPageSize) => {
+          setPreviewPageSize(nextPageSize);
+          setPage(1);
+        }}
+        tableControlsEnabled={tableControlsEnabled}
+        visibleColumns={visibleColumns}
+        loading={loading}
+        searchActive={Boolean(search.trim())}
       />
 
       {/* ======================= MAP ======================= */}

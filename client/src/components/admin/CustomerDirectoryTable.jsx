@@ -5,8 +5,10 @@ import { ArrowDown, ArrowUp, MoreHorizontal, Phone, MessageSquare, PenLine, Tras
 import { Button, buttonStyles, Table, THead, TBody, TR, TH, TD } from "../ui";
 import { formatETDateOnly } from "../../lib/timezone";
 
-export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDelete, onCall, canEdit, sortBy, sortDir, onSort, editingId, editor }) {
+export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDelete, onCall, canEdit, sortBy, sortDir, onSort, editingId, editor, visibleColumns = ["customer", "property", "tier", "nextService", "attention", "actions"] }) {
   const root = useRef(null);
+  const visible = new Set(visibleColumns);
+  const visibleColumnCount = 2 + ["property", "tier", "nextService", "attention"].filter((column) => visible.has(column)).length;
   useEffect(() => {
     let pointerTarget = null;
     const endPointer = () => { pointerTarget = null; };
@@ -42,17 +44,21 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
   return <section ref={root} className="customer-directory-table" aria-label="Customer results">
     <Table layout="records" overflow="visible" className="table-fixed bg-white">
       <THead><TR>
-        <TH aria-sort={sortBy === "lastName" ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
+        <TH data-column="customer" aria-sort={sortBy === "lastName" ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
           <button type="button" onClick={() => onSort("lastName")} className="customer-directory-sort u-focus-ring">Customer{sortBy === "lastName" && (sortDir === "asc" ? <ArrowUp size={15} /> : <ArrowDown size={15} />)}</button>
         </TH>
-        <TH>Property</TH><TH>WaveGuard Tier</TH><TH>Next service</TH><TH>Attention</TH><TH><span className="sr-only">Actions</span></TH>
+        {visible.has("property") && <TH data-column="property">Property</TH>}
+        {visible.has("tier") && <TH data-column="tier">WaveGuard Tier</TH>}
+        {visible.has("nextService") && <TH data-column="nextService">Next service</TH>}
+        {visible.has("attention") && <TH data-column="attention">Attention</TH>}
+        <TH data-column="actions"><span className="sr-only">Actions</span></TH>
       </TR></THead>
       <TBody>{customers.map((customer, at) => {
         const name = [customer.firstName, customer.lastName].filter(Boolean).join(" ") || "Unnamed customer";
         const address = customer.address;
         const tier = ["Bronze", "Silver", "Gold", "Platinum"].find((label) => label.toLowerCase() === String(customer.tier || "").trim().toLowerCase());
         return <Fragment key={customer.id}>
-          {isApproximateRow(customer) && !isApproximateRow(customers[at - 1]) && <TR className="customer-directory-did-you-mean"><TD colSpan={6} className="p-0"><DidYouMean /></TD></TR>}
+          {isApproximateRow(customer) && !isApproximateRow(customers[at - 1]) && <TR className="customer-directory-did-you-mean"><TD colSpan={visibleColumnCount} className="p-0"><DidYouMean /></TD></TR>}
           <TR className="customer-directory-record">
             <TD className="customer-directory-identity">
               <div className="flex items-center gap-2">
@@ -61,13 +67,13 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
               </div>
               {customer.profileLabel && customer.profileLabel !== "Primary" && <span>{customer.profileLabel}</span>}
             </TD>
-            <TD data-label="Property" className="customer-directory-property">{address ? <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer" className="u-focus-ring">{address}</a> : "No address on file"}</TD>
-            <TD data-label="WaveGuard Tier">{tier}</TD>
-            <TD data-label="Next service">{customer.nextServiceDate ? formatETDateOnly(customer.nextServiceDate, { month: "short", day: "numeric" }) : "Not scheduled"}</TD>
-            <TD data-label="Attention" className="customer-directory-attention">
+            {visible.has("property") && <TD data-label="Property" className="customer-directory-property">{address ? <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer" className="u-focus-ring">{address}</a> : "No address on file"}</TD>}
+            {visible.has("tier") && <TD data-label="WaveGuard Tier">{tier}</TD>}
+            {visible.has("nextService") && <TD data-label="Next service">{customer.nextServiceDate ? formatETDateOnly(customer.nextServiceDate, { month: "short", day: "numeric" }) : "Not scheduled"}</TD>}
+            {visible.has("attention") && <TD data-label="Attention" className="customer-directory-attention">
               {customer.overdueInvoiceCount > 0 && <span className="text-alert-fg">{customer.overdueInvoiceCount} overdue invoice{customer.overdueInvoiceCount === 1 ? "" : "s"}</span>}
               {!(customer.overdueInvoiceCount > 0) && <span>—</span>}
-            </TD>
+            </TD>}
             <TD className="customer-directory-actions">
               <details onKeyDown={(event) => {
                 if (event.key === "Escape") {
@@ -95,7 +101,7 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
               </details>
             </TD>
           </TR>
-          {editingId === customer.id && <TR className="customer-directory-editor"><TD colSpan={6}>{editor}</TD></TR>}
+          {editingId === customer.id && <TR className="customer-directory-editor"><TD colSpan={visibleColumnCount}>{editor}</TD></TR>}
         </Fragment>;
       })}</TBody>
     </Table>
