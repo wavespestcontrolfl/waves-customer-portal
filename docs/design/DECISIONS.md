@@ -3366,3 +3366,7 @@ Owner, on a commercial proposal page: "the new copy should have only been the at
 ## 2026-10-26 — Customer web pages stay as they were; Field is the PDF layout
 
 Owner, after #6837 fixed the estimate page: "so the glass UI, should have stayed as glass UI, like it was before", and, pointing at the Field receipt web page, "this layout, should have been the pdfs". **Decisions.** (1) The web views #6750 and #6803 moved to Field go back to their earlier layout: service report, project report, receipt, statement, invoice pay page, agreement, prep guide, rate notice and service outline. (2) Every generated PDF keeps Field (`EstimateProposalDocument`, `ServiceReportDocument`, the pdfkit builders). (3) Staff printouts (staff documents, pay stubs, tank sheets, staff estimate print) keep Field. (4) The three page style files #6803 added for the web Field layout are removed with it.
+
+## 2026-10-26 — Commercial proposal: What happens next sits below the proposal
+
+Owner: "the what happens next should be below the proposal". **Decision.** On an authored commercial proposal page the order is hero → proposal card → What happens next → Accept & sign → Ask Waves. It replaces the 2026-08-08 slot directly under the hero; the card keeps its "What happens next" title, and its wording ("tap Accept & sign agreement below") still points down to the sign card.

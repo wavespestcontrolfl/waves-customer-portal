@@ -99,10 +99,9 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
       <div {...cardProps} style={{ ...estimateCard(), borderTop: '4px solid #F97316' }}>
         <Heading style={{ fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: W.navy, margin: '0 0 8px' }}>
           {isProposal
-            // The proposal card renders directly under the hero, which already
-            // announces "your formal proposal is ready" — repeating it here
-            // read as a duplicate (owner 2026-08-08). This card answers the
-            // next question instead.
+            // The hero already announces "your formal proposal is ready" —
+            // repeating it here read as a duplicate (owner 2026-08-08). This
+            // card answers the next question instead.
             ? 'What happens next'
             : isAccountManagerFinalize
             ? 'Your account manager will finalize this.'
