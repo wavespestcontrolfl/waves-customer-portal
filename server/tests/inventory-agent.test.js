@@ -1486,8 +1486,8 @@ describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number 
   });
 
   test.each([
-    ['not_found', { status: 'not_found', reason: 'no_exact_name' }, "EPA's label system has no single match for this name"],
-    ['ambiguous', { status: 'ambiguous', registrations: ['1-2', '3-4'] }, "EPA's label system has no single match for this name"],
+    ['not_found', { status: 'not_found', reason: 'no_exact_name' }, "EPA's label system could not prove one EPA number for this name"],
+    ['ambiguous', { status: 'ambiguous', registrations: ['1-2', '3-4'] }, "EPA's label system could not prove one EPA number for this name"],
     ['unavailable', { status: 'unavailable' }, "EPA's label system did not answer"],
   ])('gate on, %s: the pesticide is still created with the EPA number left blank, never "N/A", and the bell says what is missing', async (_label, lookup, sentence) => {
     gateOn();

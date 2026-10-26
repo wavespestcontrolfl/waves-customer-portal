@@ -1483,7 +1483,7 @@ function intakeChangeNote(created, newProduct, lookup) {
   } else {
     sentences.push(lookup.status === 'unavailable' || lookup.status == null
       ? "EPA's label system did not answer"
-      : "EPA's label system has no single match for this name");
+      : "EPA's label system could not prove one EPA number for this name");
     sentences.push('Still missing: EPA number, label, SDS and active ingredient; add them on the product');
   }
   const listed = newProduct.listingEpaRegNumber;
