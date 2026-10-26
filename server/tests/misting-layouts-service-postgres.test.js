@@ -15,7 +15,7 @@ jest.mock('@aws-sdk/client-s3', () => ({
 }));
 jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn().mockResolvedValue('https://signed.example/x.png') }));
 
-const migration = require('../models/migrations/20261026130000_misting_layouts');
+const migration = require('../models/migrations/20261026170000_misting_layouts');
 const { saveLayout, getLayoutForEstimate } = require('../services/misting-layouts');
 
 const connection = process.env.APP_TEST_DATABASE_URL;

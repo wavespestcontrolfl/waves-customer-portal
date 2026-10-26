@@ -3,7 +3,7 @@
 // (skipped without APP_TEST_DATABASE_URL, run for real in CI).
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
-const migration = require('../models/migrations/20261026130000_misting_layouts');
+const migration = require('../models/migrations/20261026170000_misting_layouts');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
