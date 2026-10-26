@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// The Bed line tool (risers about every 8 ft), the pump load notices, the pump cabinet and its distance to the nearest line,
+// The Bed line tool (risers about every 10 ft), the pump load notices, the pump cabinet and its distance to the nearest line,
 // and the pump being required before a layout can be saved (GATE_MISTING_LAYOUT_DESIGNER).
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
@@ -84,7 +84,7 @@ async function drawEave(frame) {
 const bedAuto = () => placeBedRisers([{ id: 'x', kind: 'bed', points: [{ x: 200, y: 200 }, { x: 600, y: 200 }] }], { lat: LAT, zoom: 21 });
 
 describe('the Bed line tool', () => {
-  it('places risers along the bed, at both ends and about every 8 ft, and no nozzles', async () => {
+  it('places risers along the bed, at both ends and about every 10 ft, and no nozzles', async () => {
     const frame = await open();
     await drawBed(frame);
     const expected = bedAuto();
@@ -94,7 +94,7 @@ describe('the Bed line tool', () => {
     const xs = risers().map((r) => riserXY(r)[0]).sort((a, b) => a - b);
     expect(xs[0]).toBeCloseTo(200, 6);
     expect(xs[xs.length - 1]).toBeCloseTo(600, 6);
-    for (let i = 1; i < xs.length; i += 1) expect(pxToFeet(xs[i] - xs[i - 1], LAT, 21)).toBeLessThanOrEqual(8 + 1e-6);
+    for (let i = 1; i < xs.length; i += 1) expect(pxToFeet(xs[i] - xs[i - 1], LAT, 21)).toBeLessThanOrEqual(10 + 1e-6);
     expect(counts()).toContain(`Risers: ${expected.length}`);
     expect(counts()).toContain('Nozzles: 0');
     expect(counts()).toMatch(/Line: 0 ft \(eave 0 ft, fence 0 ft\)/); // a bed is not eave or fence length
@@ -207,8 +207,8 @@ describe('pump load', () => {
     const frame = await open();
     await stepOut(3); // zoom 18: 1 px is about 0.9 ft, so a long bed line takes many risers
     tool('Bed line');
-    tap(frame, 40, 100);
-    tap(frame, 360, 100); // about 560 ft
+    tap(frame, 20, 100);
+    tap(frame, 420, 100); // about 700 ft: about 71 risers at 10 ft
     fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
     const load = () => Number(/Pump load: (\d+) of 60/.exec(counts())[1]);
     expect(load()).toBeGreaterThan(60);
@@ -218,8 +218,8 @@ describe('pump load', () => {
     expect(amber.dataset.level).toBe('amber');
 
     tool('Bed line');
-    tap(frame, 40, 200);
-    tap(frame, 360, 200);
+    tap(frame, 20, 200);
+    tap(frame, 420, 200);
     fireEvent.click(screen.getByRole('button', { name: 'Finish line' }));
     expect(load()).toBeGreaterThan(120);
     const red = screen.getByTestId('layout-pump-notice');

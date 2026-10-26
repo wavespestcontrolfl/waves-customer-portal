@@ -14,29 +14,29 @@ const bed = (id, feet, y = 600) => ({ id, kind: 'bed', points: [{ x: 100, y }, {
 const eave = { id: 'E', kind: 'eave', points: [{ x: 100, y: 200 }, { x: 100 + 40 * FT, y: 200 }] };
 
 describe('risers along a bed line', () => {
-  it('puts one at each end and never more than 8 ft between neighbours', () => {
+  it('puts one at each end and never more than 10 ft between neighbours', () => {
     const risers = placeBedRisers([bed('B', 40)], map);
-    expect(risers).toHaveLength(6); // 40 ft in five 8 ft gaps
+    expect(risers).toHaveLength(5); // 40 ft in four 10 ft gaps
     const xs = risers.map((r) => r.x).sort((a, b) => a - b);
     expect(xs[0]).toBeCloseTo(100, 6);
     expect(xs[xs.length - 1]).toBeCloseTo(100 + 40 * FT, 6);
-    for (let i = 1; i < xs.length; i += 1) expect(pxToFeet(xs[i] - xs[i - 1], LAT, ZOOM)).toBeLessThanOrEqual(8 + 1e-6);
+    for (let i = 1; i < xs.length; i += 1) expect(pxToFeet(xs[i] - xs[i - 1], LAT, ZOOM)).toBeLessThanOrEqual(10 + 1e-6);
   });
 
-  it('spaces them tighter than nozzles: 8 ft against 10 ft on the same line', () => {
+  it('spaces them like nozzles: 10 ft on the same line (the manual)', () => {
     const line = { id: 'X', kind: 'eave', points: bed('X', 80).points };
     const nozzles = placeNozzles([line], map).nozzles;
     const risers = placeBedRisers([{ ...line, kind: 'bed' }], map);
     expect(nozzles).toHaveLength(9); // 80 ft in 10 ft gaps
-    expect(risers).toHaveLength(11); // 80 ft in 8 ft gaps
+    expect(risers).toHaveLength(9); // 80 ft in 10 ft gaps, the same as nozzles
   });
 
-  it('a short bed line still gets a riser at each end, and a corner closer than 4 ft to the last one is merged away', () => {
+  it('a short bed line still gets a riser at each end, and a corner closer than 5 ft to the last one is merged away', () => {
     expect(placeBedRisers([bed('S', 5)], map)).toHaveLength(2);
     const jog = { id: 'J', kind: 'bed', points: [{ x: 100, y: 600 }, { x: 100 + 20 * FT, y: 600 }, { x: 100 + 20 * FT + 3 * FT, y: 600 + 2 * FT }, { x: 100 + 40 * FT, y: 600 + 2 * FT }] };
     const risers = placeBedRisers([jog], map);
     for (let i = 0; i < risers.length; i += 1) {
-      for (let j = i + 1; j < risers.length; j += 1) expect(ftBetween(risers[i], risers[j])).toBeGreaterThanOrEqual(4 - 1e-6);
+      for (let j = i + 1; j < risers.length; j += 1) expect(ftBetween(risers[i], risers[j])).toBeGreaterThanOrEqual(5 - 1e-6);
     }
   });
 

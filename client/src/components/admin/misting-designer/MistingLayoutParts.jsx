@@ -39,7 +39,7 @@ const HINTS = {
 
 export function toolHint(mode) {
   if (mode === 'bed') {
-    return 'Tap the photo to drop points along the edge of a landscape bed. Risers go along it about every 8 ft, with one at each end. Tap the last point again, or press Finish line, to end it.';
+    return 'Tap the photo to drop points along the edge of a landscape bed. Risers go along it about every 10 ft, with one at each end. Tap the last point again, or press Finish line, to end it.';
   }
   return HINTS[mode]
     || `Tap the photo to drop points along the ${mode === 'fence' ? 'fence' : 'eave'}. Tap the last point again, or press Finish line, to end it. Tap the first point to close a loop.`;
