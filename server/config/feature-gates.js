@@ -98,6 +98,7 @@
  *   GATE_TECH_WORK_DAYS=true (owner 2026-10-25, work days per technician: a technician row may carry technicians.work_days, the weekdays that person works (the Team tab "Work days" row; empty = every day). On, slot offers, automatic booking and automatic moves skip that technician on a day they do not work, and an automatic booking that lands on such a day stays unassigned for the owner; office saves (schedule create and edit, board assign and drag) still go through and add a plain warning line. Strict opt-in: exactly 'true', read at call time via techWorkDaysLive(). Ships DARK; off = work_days is ignored everywhere and the Team tab shows no editor. Sends nothing to a customer.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; anything else, including 'true', = off, no resolver call and no query. 'true' is not a value yet: live mode is a separate later change. Never changes a booking, sends nothing to a customer or staff member.)
+ *   GATE_UNASSIGNED_VISIT_GUARD=true (owner 2026-10-25, second technician starts early 2027: an office visit must not silently land with no technician. On, the office create modal's "Auto" technician choice picks a real technician: the one technician assignable that day (active, field-dispatchable, not off that day or absent, not Off for the service category), or, when several qualify, the existing scheduling pick when that is active; otherwise the visit is saved unassigned and the response and modal say so (the old tech-matcher path never existed, so Auto always saved it unassigned). A daily 6:10 PM ET check also reports timed visits tomorrow through 3 days out that have no technician as one standing Schedule bell (rings when a new visit joins, clears at zero). Strict opt-in: exactly 'true', read at call time via unassignedVisitGuardLive(). Ships DARK; off = Auto behaves exactly as before and the check does nothing, no query. Sends nothing to a customer.)
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
@@ -149,6 +150,7 @@
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
+ *   GATE_ADS_CAPACITY_WORK_DAYS=true (ads capacity counts a technician only on dates they work: absences and, with GATE_TECH_WORK_DAYS, off weekdays; strict 'true', read at call time via adsCapacityWorkDaysLive(); off = every assignable technician every day; changes ad budgets only, sends nothing to a customer)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
@@ -2109,6 +2111,11 @@ const gates = {
   // preview env with copied Google Ads creds + cronJobs open must never
   // mutate live campaign budgets by default.
   adsBudgetLivePush: process.env.GATE_ADS_BUDGET_LIVE_PUSH === 'true',
+
+  // Ads capacity by work day (owner 2026-10-25). Registered for logGateStatus
+  // only; BudgetManager reads adsCapacityWorkDaysLive() at CALL time. Ships
+  // DARK. Kill switch: unset - capacity counts every assignable technician.
+  adsCapacityWorkDays: process.env.GATE_ADS_CAPACITY_WORK_DAYS === 'true',
 
   // Booking "pay per application" — LINKED-ESTIMATE, PEST-ONLY BY DESIGN: prices
   // ONLY a booking explicitly linked to an estimate (estimate_id), and only for
@@ -4109,6 +4116,16 @@ const gates = {
   // never changes neighbours' promises or sends notifications. Call-time
   // kill switch in scheduling/arrival-route.js; off in every environment.
   adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
+  // Staff route insertion (owner 2026-10-25, "go" + "save order"): with
+  // capacity mode off, a staff check of a MOVED visit (another day,
+  // technician or start) tries it at every place in the technician's stored
+  // order instead of after the last numbered stop, keeps every later stop 15
+  // minutes inside its arrival window, and the staff save numbers that day in
+  // the certified order. Never changes a customer's time or sends a message.
+  // Dark in every environment; scheduling/arrival-route.js reads it through
+  // gateEnvValue() at call time. Kill switch: unset. This entry is for
+  // logGateStatus only.
+  staffRouteInsertion: gateEnvValue('GATE_STAFF_ROUTE_INSERTION'),
   // Shared 08:00–18:00 capacity, catalog durations and complete-route booking.
   // Dark in every environment; callers read at operation time. Owner activation.
   schedulingCapacity: gateEnvValue('GATE_SCHEDULING_CAPACITY'),
@@ -4691,6 +4708,10 @@ const gates = {
   // Service-line map (owner 2026-10-25), SHADOW ONLY. Registered for logGateStatus only;
   // consumers read serviceLineMapMode() at CALL time. Kill switch: unset.
   serviceLineMapShadow: String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow',
+
+  // Unassigned-visit guard (owner 2026-10-25). Ships DARK: exactly 'true'. Registered for
+  // logGateStatus only; consumers read unassignedVisitGuardLive() at CALL time. Kill switch: unset.
+  unassignedVisitGuard: process.env.GATE_UNASSIGNED_VISIT_GUARD === 'true',
 
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
@@ -6382,6 +6403,14 @@ function multiTechConfirmLive() {
   return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
 }
 
+// GATE_ADS_CAPACITY_WORK_DAYS read at CALL time - strict `=== 'true'`. The one
+// reader for BudgetManager.getTechCountForArea: on, a dated capacity count skips
+// a technician on a date they are absent or do not work; off, every assignable
+// technician counts every day (byte-identical to before).
+function adsCapacityWorkDaysLive() {
+  return process.env.GATE_ADS_CAPACITY_WORK_DAYS === 'true';
+}
+
 // GATE_TECH_WORK_DAYS read at CALL time - strict `=== 'true'`. The one reader for
 // technicians.work_days (services/technician-eligibility.js): on, a technician
 // is skipped by slot offers and automatic placement on a day they do not work;
@@ -6397,6 +6426,13 @@ function techWorkDaysLive() {
 // query. Live mode is a separate later change. Unset is the kill, no redeploy.
 function serviceLineMapMode() {
   return String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow' ? 'shadow' : 'off';
+}
+
+// GATE_UNASSIGNED_VISIT_GUARD read at CALL time - strict `=== 'true'`. On: the office create
+// modal's Auto technician choice resolves a real technician (or says it could not), and the
+// daily 6:10 PM ET check reports timed unassigned visits in the next 3 days. Off = byte-identical.
+function unassignedVisitGuardLive() {
+  return process.env.GATE_UNASSIGNED_VISIT_GUARD === 'true';
 }
 
 // Fresh annual contracts require the term-aware cancellation path. Read both
@@ -7707,10 +7743,14 @@ module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
+// GATE_ADS_CAPACITY_WORK_DAYS reader, on its own line so gate PRs never conflict.
+module.exports.adsCapacityWorkDaysLive = adsCapacityWorkDaysLive;
 // GATE_TECH_WORK_DAYS reader, on its own line so gate PRs never conflict.
 module.exports.techWorkDaysLive = techWorkDaysLive;
 // GATE_SERVICE_LINE_MAP reader, on its own line so gate PRs never conflict.
 module.exports.serviceLineMapMode = serviceLineMapMode;
+// GATE_UNASSIGNED_VISIT_GUARD reader, on its own line so gate PRs never conflict.
+module.exports.unassignedVisitGuardLive = unassignedVisitGuardLive;
 module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
 module.exports.autoDispatchDayRulesLive = autoDispatchDayRulesLive;
 module.exports.autoDispatchKeepTechLive = autoDispatchKeepTechLive;

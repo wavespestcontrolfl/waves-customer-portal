@@ -1465,6 +1465,22 @@ export function composeAppointmentSuccessToast({ resultsCount, createdCount, est
   ].filter(Boolean).join(' ');
 }
 
+// GATE_UNASSIGNED_VISIT_GUARD: the server's Auto technician choice found nobody to
+// take the visit and saved it with no technician (response `autoAssign.result`).
+// The save is never blocked; this is the plain line the office sees after it.
+const AUTO_UNASSIGNED_REASONS = {
+  none_assignable: 'No technician is available that day.',
+  several_assignable: 'More than one technician could take it.',
+  none_free: 'No technician is free at that time.',
+  absent_on_series_date: 'The technician is out on a later date of the series.',
+};
+export function autoAssignWarning(results) {
+  const miss = (Array.isArray(results) ? results : []).find((r) => r?.autoAssign?.result === 'unassigned');
+  if (!miss) return null;
+  const why = AUTO_UNASSIGNED_REASONS[miss.autoAssign.reason];
+  return `Saved with no technician: it is on no technician's route yet.${why ? ` ${why}` : ''} Assign one on the schedule board.`;
+}
+
 // The appointment-level slot's discount types accepted by the shared stack
 // (server/services/discount-stack.js + client mirror discountStack.js):
 // percentage/fixed_amount plus their operator-entered "custom" siblings and
@@ -4665,7 +4681,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
       releaseSubmit();
       assertSubmitCurrent();
-      const committedWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
+      const committedWarnings = [
+        ...results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : [])),
+        ...[autoAssignWarning(results)].filter(Boolean),
+      ];
       if (firstError) {
         const created = createdGroupKeysRef.current.size;
         const total = groups.length;
