@@ -13,11 +13,7 @@
  * Two steps, both called from the Twilio inbound webhook AFTER the TwiML ack:
  *   assessPhotoTriageCandidacy — every cheap guard, then the intent check
  *     (regex fast path; the paid FAST classifier only with budget left).
- *     Awaited once, BEFORE the legacy AI draft step, whose gate reads the
- *     result (legacyAiDraftsAllowed): a triage candidate never also gets a
- *     legacy draft that would then block its own photo-triage draft.
- *     A candidate has already RESERVED its vision slot, so suppressing the
- *     legacy draft always leaves the text with a triage run.
+ *     A candidate has already RESERVED its vision slot.
  *   runPhotoTriage — takes that candidacy (the classifier is never re-run),
  *     runs the assessment, parks the draft. A failure before the paid
  *     analysis starts clears the stamp again (released, logged at error);
@@ -64,7 +60,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { gateEnvValue, isEnabled } = require('../config/feature-gates');
+const { gateEnvValue } = require('../config/feature-gates');
 const { classifyPhotoDiagnosisIntent } = require('./sms-service-intent');
 const {
   createAdminAssessment,
@@ -299,11 +295,6 @@ function buildDraftText({ firstName, type, analysis, opportunity }) {
 // per-contact advisory lock, so two photo texts from one contact whose vision
 // calls finish at the same moment can never both park a draft. Returns the
 // draft id, or null when a pending draft already exists.
-// The one pending-draft dedupe path for this lane's writers — the photo
-// triage draft and its legacy AI draft fallback: the final check and the
-// insert commit together under a per-contact advisory lock, so no two
-// pending drafts can land for one conversation. Returns the draft id, or
-// null when a pending draft already exists.
 async function insertDraftUnlessPending({ from, customer }, row) {
   return db.transaction(async (trx) => {
     // Keyed like hasPendingDraft's widest match: the customer when the text
@@ -389,25 +380,11 @@ async function assessPhotoTriageCandidacy({
   if (intent.intent !== 'photo_diagnosis') {
     return notCandidate(classifierClaim && classifierClaim !== 'claimed' ? classifierClaim : 'not_diagnosis');
   }
-  // Reserve the vision slot HERE, before this result suppresses the legacy
-  // draft: a message is a candidate only when its assessment is guaranteed
-  // a slot, so losing the last slot to a concurrent text falls back to the
-  // legacy path instead of leaving the customer with no draft at all.
+  // Reserve the vision slot HERE: a message is a candidate only when its
+  // assessment is guaranteed a slot.
   const visionClaim = await claimSlot('vision', messageId);
   if (visionClaim !== 'claimed') return notCandidate(visionClaim);
   return { candidate: true, intent, messageId, smsLogId, images, body, from, customer };
-}
-
-// The legacy AI draft step's gate. A photo-triage candidate's own draft is
-// the reply for that text; a legacy draft on the same inbound would sit in
-// the queue first and make the triage skip as "pending draft".
-function legacyAiDraftsAllowed(candidacy) {
-  if (!isEnabled('legacyAiDrafts')) return false;
-  if (candidacy?.candidate) {
-    logger.info(`[photo-triage] legacy AI draft deferred to photo triage for message ${candidacy.messageId}`);
-    return false;
-  }
-  return true;
 }
 
 // Draft for a finished assessment (the paid vision already ran).
@@ -434,21 +411,10 @@ async function parkForAssessment({ intent, messageId, smsLogId, body, from, cust
 /**
  * @returns {Promise<{ status: 'skipped', reason: string } | { status: 'drafted', draftId, assessmentId, type }>}
  */
-async function runPhotoTriage(candidacy, { legacyFallback = null } = {}) {
+async function runPhotoTriage(candidacy) {
   if (!candidacy?.candidate) return { status: 'skipped', reason: candidacy?.reason || 'not_candidate' };
-  const result = await assessAndDraft(candidacy);
-  // A candidate suppressed the legacy AI draft; a terminal failure hands the
-  // text back to it so the customer still gets a reply draft to approve.
-  // The fallback parks through the same contact-locked dedupe as the
-  // triage draft, so it never lands beside another pending draft.
-  if (FALLBACK_REASONS.has(result.reason) && legacyFallback) {
-    logger.info(`[photo-triage] message ${candidacy.messageId} ${result.reason}; parking the legacy AI draft instead`);
-    await legacyFallback({ park: (row) => insertDraftUnlessPending(candidacy, row) });
-  }
-  return result;
+  return assessAndDraft(candidacy);
 }
-
-const FALLBACK_REASONS = new Set(['assessment_failed', 'draft_failed']);
 
 async function assessAndDraft(candidacy) {
   const { intent, messageId, images } = candidacy;
@@ -488,7 +454,6 @@ async function assessAndDraft(candidacy) {
 
 module.exports = {
   assessPhotoTriageCandidacy,
-  legacyAiDraftsAllowed,
   runPhotoTriage,
   DRAFT_INTENT,
   _test: {

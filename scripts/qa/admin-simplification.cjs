@@ -93,7 +93,6 @@ async function main() {
       else if (api === '/admin/customers/intelligence') body = { totalCustomers: 0, distribution: {}, atRiskCustomers: [], pendingOutreach: [], upsells: [] };
       else if (api === '/admin/communications/log') body = { messages: [], page: 1, hasMore: false };
       else if (api === '/admin/communications/stats') body = {};
-      else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
       else if (api === '/admin/call-recordings/commitments/open') body = { commitments: [], enabled: true, has_more: false };
       else if (api === '/admin/notification-events') body = { events: [], catalog: [] };
       else { status = 404; body = { error: 'Unmatched synthetic fixture' }; report.unmatched.push({ stage, method: request.method(), path: api, search: url.search }); }

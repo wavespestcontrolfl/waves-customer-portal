@@ -11,14 +11,6 @@
       "hash": "9810ab5a0ab988cfa154ff1627e60e0e"
     },
     {
-      "endpoint": "/admin/communications/ai-auto-reply-status",
-      "reviewed": "Handler: one system_config key (ai_sms_auto_reply), returns a boolean; read end to end.",
-      "scope": "broad",
-      "signals": [],
-      "unresolved": [],
-      "hash": "a8fa6893717eb523829bc9004766c049"
-    },
-    {
       "endpoint": "/admin/communications/blocked-numbers",
       "reviewed": "Handler: blocked_numbers select mapped to number, type, reason, auto flag, time; read end to end.",
       "scope": "broad",

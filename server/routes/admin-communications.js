@@ -3753,47 +3753,6 @@ router.post('/link-library/sync', requireAdmin, async (req, res) => {
   }
 });
 
-// Admin-only (ADMIN-BUG-R38): a system-wide switch that turns automated
-// AI-composed customer SMS replies on or off company-wide is owner-only,
-// consistent with every other owner-only route in this file
-// (/reschedule-link, /customer-link, /link-library*, /collections-cases/:id/dial).
-// A technician login must get 403, not silently flip customer-facing
-// automation with no audit trail (system_config has no actor column).
-// GET /api/admin/communications/ai-auto-reply-status
-router.get('/ai-auto-reply-status', requireAdmin, async (req, res) => {
-  try {
-    const row = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
-    res.json({ enabled: row?.value === 'true' });
-  } catch (err) {
-    // ADMIN-BUG-R29: a read failure must never come back as a confident 200
-    // {enabled:false} — that reads as "AI auto-reply is off" when the true
-    // value is unknown. Answer non-2xx so the client leaves the switch at
-    // its last confirmed state instead of adopting a guess.
-    res.status(503).json({ error: err.message });
-  }
-});
-
-// POST /api/admin/communications/ai-auto-reply — toggle
-router.post('/ai-auto-reply', requireAdmin, async (req, res) => {
-  try {
-    const { enabled } = req.body;
-    const value = enabled ? 'true' : 'false';
-    const existing = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
-    if (existing) {
-      await db('system_config').where({ key: 'ai_sms_auto_reply' }).update({ value, updated_at: new Date() });
-    } else {
-      await db('system_config').insert({ key: 'ai_sms_auto_reply', value });
-    }
-    res.json({ enabled: value === 'true' });
-  } catch (err) {
-    // ADMIN-BUG-R29: never answer a failed write with HTTP 200 {enabled:false}
-    // — the operator's client would adopt that as the real (now-off) state
-    // although nothing was written and the server may still have it on.
-    // Non-2xx forces the client to treat this as a failed toggle instead.
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Marketing/retention purposes require a real stored consent record per
 // server/services/messaging/policy.js. This conversational-compose endpoint
 // is not a marketing send path — reject any messageType whose scheduler

@@ -153,8 +153,6 @@ const SHAPES = {
     body: { totalRecordings: 40, processed: 30, pending: 2, failed: 1, oldestUnfinishedMinutes: null, sourceBreakdown: [{ number: '+15555550101', count: 12 }] },
     kept: { totalRecordings: 40, 'sourceBreakdown.0.count': 12 },
   },
-  // admin-communications.js:3766 `{ enabled }` (system_config boolean).
-  '/admin/communications/ai-auto-reply-status': { body: { enabled: true }, kept: { enabled: true } },
   // csr-coach.js:685-698: csrStats[] (names and counts), lossReasons[{ reason, count, pct }] where `reason` is the
   // csrEnum loss_reason (csr-coach.js:224, a closed set), so it is system text. The wrapper key `lossReasons`
   // (csr-coach.js:692) is a name-match for the same reason, so both are declared content.

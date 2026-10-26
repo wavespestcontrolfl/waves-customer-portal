@@ -90,7 +90,6 @@ async function main() {
       else if (api === '/admin/communications/send-prep') { record.payload = request.postDataJSON(); body = { success: true, message: 'Synthetic guide delivered by email.' }; }
       else if (api === '/admin/communications/log') body = { messages: [], page: 1, hasMore: false };
       else if (api === '/admin/communications/stats') body = {};
-      else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
       else if (api === '/admin/communications/blocked-numbers') body = { blocked: [] };
       else if (api === '/admin/communications/agent-draft') body = { draft: null };
       // The SMS composer's mic asks whether server dictation is on (GATE_SERVER_DICTATION, off here).
