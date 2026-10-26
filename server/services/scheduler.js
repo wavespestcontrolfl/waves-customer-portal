@@ -4959,6 +4959,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:23AM — Unbilled visits (GATE_UNBILLED_VISITS_LIST; returns before
+  // any read when off). Owner 2026-10-25 (Air Jobs Plan step 3): one standing
+  // Billing bell lists the visits done in the last 30 days with no invoice,
+  // read from the Billing recovery page's own list, so the bell and the page
+  // never disagree. It replaces the c02 check that ran on the owner's MacBook
+  // Air. Rings only when a visit joins and closes itself when the list is
+  // empty. Bills nothing and sends nothing to a customer.
+  // =========================================================================
+  cron.schedule('23 7 * * *', async () => {
+    if (!require('../config/feature-gates').unbilledVisitsListLive()) return;
+    try {
+      await runExclusive('unbilled-visits-list', async () => {
+        const result = await require('./unbilled-visits-list').runUnbilledVisitsList();
+        logger.info(`Unbilled visits: ${result.count ?? 0} listed (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Unbilled visits failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN (offset one minute) — Delayed gratitude replies
   // Independent of the scheduled-SMS sweep: queued operational sends never
   // wait behind courtesy replies, and a stalled scheduled-SMS recovery never
