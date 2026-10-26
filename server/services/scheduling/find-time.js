@@ -102,7 +102,8 @@ function enumerateDates(from, to, { includeWeekends = false } = {}) {
   return dates;
 }
 
-// Staff existing-appointment pickers can use the slack in each promised
+// Staff existing-appointment pickers (and New Appointment's box, a new stop,
+// under GATE_NEW_APPT_ROUTE_TIMES) can use the slack in each promised
 // arrival window. Evaluate every on-the-hour promise against the COMPLETE
 // resulting route, not just the gap between two stored service-end blocks.
 async function findArrivalWindowSlots(opts) {
@@ -133,14 +134,18 @@ async function findArrivalWindowSlots(opts) {
       // checker, so the ranking simulates the visit being saved, not the
       // one stored.
       const context = await loadArrivalRouteContext({
-        serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,
-        excludeServiceIds: opts.excludeServiceIds, changes: opts.arrivalWindow.changes, now,
+        // A new visit (New Appointment, GATE_NEW_APPT_ROUTE_TIMES) is a new
+        // stop at the searched address; an existing one loads its saved row.
+        ...(opts.arrivalWindow.prospective ? { prospective: opts.arrivalWindow.prospective } : {
+          serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
+          // The staff availability box asks for the whole stop, or for this
+          // service alone when the operator chose to separate it
+          // (GATE_COMBO_ROUTE_CHECK; ignored when off or when the visit is alone).
+          unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
+        }),
+        date, technicianId: tech.id, excludeServiceIds: opts.excludeServiceIds, now,
         // Staff callers only (GATE_TECH_START_POINTS; tech-start-point.js).
         startPoints: opts.techStartPoints === true,
-        // The staff availability box asks for the whole stop, or for this
-        // service alone when the operator chose to separate it
-        // (GATE_COMBO_ROUTE_CHECK; ignored when off or when the visit is alone).
-        unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
       });
       if (!context) continue;
       // A whole visit: the technician must be able to do every service on it
@@ -1467,7 +1472,7 @@ async function findAvailableSlots(opts) {
     return { error: 'dateFrom and dateTo required', slots: [] };
   }
 
-  if (opts.arrivalWindow?.serviceId && arrivalWindowRoutingEnabled()) {
+  if ((opts.arrivalWindow?.serviceId || opts.arrivalWindow?.prospective) && arrivalWindowRoutingEnabled()) {
     return findArrivalWindowSlots(opts);
   }
 
