@@ -404,7 +404,8 @@ describe('unvoid: the bar restores the row and nothing else (structural refusal 
       // The restore's linked-visit guard asks the schema first.
       db.schema = { hasColumn: jest.fn(async () => false), hasTable: jest.fn(async () => false) };
       const voided = visitInvoice();
-      cfg.reads.invoices = [voided];
+      // The load; the one-live-bill guard's read (no other invoice bills the visit); the in-transaction re-read.
+      cfg.reads.invoices = [voided, undefined, voided];
       cfg.updateReturning.invoices = [voided];
       await expect(InvoiceService.unvoidInvoice('inv-1', { expected: { status: 'void', updatedAt: UPDATED.getTime() } })).rejects.toThrow(/^Cannot unvoid from the bar/);
     });

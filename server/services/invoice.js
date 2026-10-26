@@ -648,6 +648,69 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
       "Cannot unvoid — this invoice also bills other upcoming visits whose prices may have changed since it was voided; create a new invoice instead",
     );
   }
+  await assertNoOtherLiveVisitInvoice(conn, invoiceRow, svc.id);
+}
+
+// One visit, one live bill (Billing Recovery audit, owner 2026-10-25): a voided
+// invoice comes back only while nothing else bills its visit. Another invoice
+// that bills a visit this one bills — linked directly, through the visit's
+// service record, as a combined-visit (packet) invoice, as the combined
+// first-application invoice stamped on the visit, or as the covering invoice of
+// a "Billed elsewhere" record — refuses the restore. A refunded invoice counts,
+// whichever way it is linked: a failed refund brings it back (the completion
+// mint treats it the same way, codex #3456). Fails CLOSED, like every guard above.
+async function assertNoOtherLiveVisitInvoice(conn, invoiceRow, visitId) {
+  const visitIds = [visitId];
+  let other = null;
+  try {
+    // A combined-visit invoice also bills every packet member stamped with it.
+    if (invoiceRow.visit_completion_packet_id && invoiceRow.id) {
+      const members = await conn("visit_completion_packet_items")
+        .where({ invoice_id: invoiceRow.id })
+        .select("scheduled_service_id");
+      for (const member of members || []) {
+        if (member?.scheduled_service_id && !visitIds.includes(member.scheduled_service_id)) visitIds.push(member.scheduled_service_id);
+      }
+    }
+    // The stamp column postdates some schemas, as in invoiceBillsAnotherUpcomingVisit.
+    const hasStamp = await conn.schema.hasColumn("scheduled_services", "first_application_invoice_id");
+    const query = conn("invoices")
+      .whereNotIn("status", ["void", "canceled", "cancelled"])
+      .where(function billsTheVisit() {
+        this.whereIn("scheduled_service_id", visitIds)
+          .orWhereIn("service_record_id", function visitRecords() {
+            this.select("id").from("service_records").whereIn("scheduled_service_id", visitIds);
+          })
+          .orWhereIn("id", function packetInvoices() {
+            this.select("invoice_id").from("visit_completion_packet_items")
+              .whereIn("scheduled_service_id", visitIds).whereNotNull("invoice_id");
+          })
+          .orWhereIn("id", function billedElsewhereInvoices() {
+            this.select("invoice_id").from("visit_billing_dispositions")
+              .whereIn("scheduled_service_id", visitIds).where("disposition", "billed_elsewhere").whereNotNull("invoice_id");
+          });
+        if (hasStamp) {
+          this.orWhereIn("id", function firstApplicationInvoices() {
+            this.select("first_application_invoice_id").from("scheduled_services")
+              .whereIn("id", visitIds).whereNotNull("first_application_invoice_id");
+          });
+        }
+      });
+    if (invoiceRow.id) query.whereNot("id", invoiceRow.id);
+    other = await query.first("invoice_number", "status");
+  } catch (err) {
+    throw new Error(`Could not verify the visit's other invoices — refusing to unvoid (${err.message})`);
+  }
+  if (other?.status === "refunded") {
+    throw new Error(
+      `Cannot unvoid — this visit already has refunded invoice ${other.invoice_number}; a failed refund would bring it back, so put anything owed on a new invoice`,
+    );
+  }
+  if (other) {
+    throw new Error(
+      `Cannot unvoid — this visit already has live invoice ${other.invoice_number} (${other.status}); void that one first, or put any extra charge on a new invoice`,
+    );
+  }
 }
 
 function appendPayUrlParams(url, params = null) {
