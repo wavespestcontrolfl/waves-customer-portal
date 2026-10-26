@@ -297,10 +297,7 @@
         "current_flags_include": [
           "voicemail"
         ],
-        "current_recommended_disposition_in": [
-          "callback_task_created",
-          "lead_response_flow_triggered"
-        ]
+        "current_callback_asked": true
       },
       "gold_reviewed_at": "2026-08-31",
       "gold": {

@@ -3944,6 +3944,16 @@ const gates = {
   // for logGateStatus only.
   newApptStopOrder: gateEnvValue('GATE_NEW_APPT_STOP_ORDER'),
 
+  // Phone agent stop order (owner 2026-10-26, "go d"): a fresh call-pipeline
+  // booking numbers its technician's day the same way (placeMovedVisit, audit
+  // source 'phone_call'), so the tech app lists it in its place instead of
+  // last. A street-level pending row stays as it was. Needs
+  // GATE_STAFF_ROUTE_INSERTION and GATE_ADMIN_ARRIVAL_WINDOWS. Never changes a
+  // time or sends a message. call-recording-processor.js reads it through
+  // gateEnvValue() at call time. Dark in every environment. Kill switch:
+  // unset. This entry is for logGateStatus only.
+  callBookingStopOrder: gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER'),
+
   // New Appointment address-first best times (owner 2026-10-24, replacing the
   // 2026-10-21 Dispatch "Find a time" drawer): office staff on a call with a
   // NEW caller open New Appointment, pick the address in its New customer

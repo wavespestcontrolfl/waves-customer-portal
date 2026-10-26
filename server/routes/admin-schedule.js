@@ -7216,6 +7216,8 @@ router.get('/week', async (req, res, next) => {
     const effectiveBillToSql = hasSelfPayCol
       ? 'COALESCE(scheduled_services.payer_id, CASE WHEN COALESCE(scheduled_services.self_pay_override, false) THEN NULL ELSE customers.payer_id END)'
       : 'COALESCE(scheduled_services.payer_id, customers.payer_id)';
+    // Every visit of the week, in the shape the gate lookup after the loop reads.
+    const weekGateVisits = [];
 
     for (let i = 0; i < 7; i++) {
       const d = new Date(start);
@@ -7277,6 +7279,12 @@ router.get('/week', async (req, res, next) => {
           db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
           db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
           db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+          // The stamped premise alone, for the gate lookup below
+          // (neighborhood-access.js visitNeighborhoodIds): a visit stamped at
+          // another address than the customer's property gets that property's
+          // gate on neither feed. Read only there, never put on the row.
+          'scheduled_services.service_address_line1 as stamped_address_line1',
+          'scheduled_services.service_address_zip as stamped_address_zip',
           'customers.phone as customer_phone',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
@@ -7303,6 +7311,12 @@ router.get('/week', async (req, res, next) => {
           'customers.service_paused_at',
           'technicians.name as tech_name')
         .orderByRaw('COALESCE(route_order, 999)');
+      for (const s of services) {
+        weekGateVisits.push({
+          id: s.id, property_id: s.property_id, customer_id: s.customer_id,
+          service_address_line1: s.stamped_address_line1, service_address_zip: s.stamped_address_zip,
+        });
+      }
 
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
@@ -7685,6 +7699,22 @@ router.get('/week', async (req, res, next) => {
         day.outTechIds = [...absent].filter((k) => k.endsWith(suffix)).map((k) => k.slice(0, -suffix.length));
       }
     } catch { /* absences are optional here */ }
+
+    // The neighborhood's pinned gate per visit, as the day feed carries it
+    // (owner 2026-10-24, #6653): the mobile dispatch list and appointment
+    // sheet route Directions through it before the house. One lookup for the
+    // week; only a visit with a pin gets the key, so every other row is
+    // byte-identical. Dark behind GATE_NEIGHBORHOOD_ACCESS; a failed read
+    // routes plainly.
+    try {
+      if (require('../config/feature-gates').neighborhoodAccessLive()) {
+        const pins = await require('../services/neighborhood-access').neighborhoodGateWaypointsForVisits(db, weekGateVisits);
+        days.flatMap((day) => day.services).filter((row) => pins.has(row.id))
+          .forEach((row) => { row.gateWaypoint = pins.get(row.id); });
+      }
+    } catch (err) {
+      logger.warn(`[admin-schedule] week gate waypoint lookup failed (${err.code || err.name || 'error'})`);
+    }
 
     res.json({ startDate, days, visitCloseout: visitCloseoutEnabled, bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay() });
   } catch (err) { next(err); }

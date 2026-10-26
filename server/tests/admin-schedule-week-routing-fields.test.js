@@ -170,4 +170,53 @@ postgres('GET /week rows carry the Fast Complete routing fields the day rows car
     expect(week.address).toBe(day.address);
     expect(week.address).toContain('9 Example Ct');
   });
+
+  // The neighborhood's pinned gate (#6653): the mobile dispatch list and
+  // appointment sheet build Directions from the week row's gateWaypoint, so
+  // it must be on the week row exactly when it is on the day row.
+  describe("the neighborhood's pinned gate", () => {
+    const PIN = { lat: 27.4321, lng: -82.4567 };
+    let savedAccess;
+    beforeEach(async () => {
+      savedAccess = process.env.GATE_NEIGHBORHOOD_ACCESS;
+      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
+      const [{ id: neighborhoodId }] = await trx('neighborhoods').insert({
+        name: 'Synthetic Week Gate', county: 'Manatee', match_key: `manatee|synthetic week gate ${randomUUID()}`,
+        source: 'office', subdivision_names: JSON.stringify([]),
+      }).returning('id');
+      await trx('neighborhood_access').insert({
+        neighborhood_id: neighborhoodId, access_type: 'keypad', code: '4242', status: 'active', source: 'office',
+        gate_lat: PIN.lat, gate_lng: PIN.lng,
+      });
+      await trx('customer_properties').where({ id: propertyId }).update({ neighborhood_id: neighborhoodId, neighborhood_source: 'office' });
+    });
+    afterEach(() => {
+      if (savedAccess === undefined) delete process.env.GATE_NEIGHBORHOOD_ACCESS; else process.env.GATE_NEIGHBORHOOD_ACCESS = savedAccess;
+    });
+    const dayRow = async (id) => (await get('/', { date: DATE })).services.find((s) => s.id === id);
+    const weekRow = async (id) => (await get('/week', { start: DATE })).days.find((d) => d.date === DATE).services.find((s) => s.id === id);
+
+    test('reaches the week row as on the day row; no key with the directory gate off', async () => {
+      const row = await visit(VISITS.pest);
+      expect((await dayRow(row.id)).gateWaypoint).toEqual(PIN);
+      expect((await weekRow(row.id)).gateWaypoint).toEqual(PIN);
+      delete process.env.GATE_NEIGHBORHOOD_ACCESS;
+      expect(await weekRow(row.id)).not.toHaveProperty('gateWaypoint');
+    });
+
+    test.each([
+      ['unstamped (the customer\'s one property)', {}, true],
+      ['stamped at another address', { service_address_line1: '9 Example Ct', service_address_city: 'Other City', service_address_state: 'FL', service_address_zip: '11111' }, false],
+    ])('a visit with no property link, %s: the week row agrees with the day row', async (_label, stamp, routed) => {
+      const row = await visit({ ...VISITS.pest, property_id: null, ...stamp });
+      const day = await dayRow(row.id);
+      const week = await weekRow(row.id);
+      expect('gateWaypoint' in day).toBe(routed);
+      expect('gateWaypoint' in week).toBe(routed);
+      expect(week.gateWaypoint).toEqual(day.gateWaypoint);
+      // The stamped-premise aliases feed the lookup only; they never reach the row.
+      expect(week).not.toHaveProperty('stamped_address_line1');
+      expect(week).not.toHaveProperty('stampedAddressLine1');
+    });
+  });
 });
