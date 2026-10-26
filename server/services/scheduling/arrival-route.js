@@ -955,11 +955,25 @@ async function recordCapacityDecision(conn, fit, targetId) {
 }
 
 // Staff checks agree with the pickers' list (GATE_PICKER_ROAD_CHECK): a
-// route under way today continues from the tech's current stop. A caller
-// may pass fromActiveStop itself (the automatic tech-out mover keeps false).
-async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, ...options }) {
-  const context = await loadArrivalRouteContext({ fromActiveStop: gateEnvValue('GATE_PICKER_ROAD_CHECK'), ...options });
-  return evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, allowInsertion: false });
+// route under way today continues from the tech's current stop, and the
+// placement is driven on the same Google road times (`roads`; the pickers'
+// hour-rounded cache, so an hour the list offered is mostly answered from
+// it). A caller may opt out of either (the automatic tech-out mover, a
+// technician's own picker).
+async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, roads, ...options }) {
+  const live = gateEnvValue('GATE_PICKER_ROAD_CHECK');
+  const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
+  const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false };
+  if (context && live && roads !== false) {
+    context.travel = require('./hint-road-times').createPickerTravel();
+    // Three passes, as certifyArrivalPlacement: a re-timed leg is asked again.
+    for (let pass = 0; pass < 3; pass++) {
+      const legs = [];
+      evaluateArrivalPlacement(context, { ...placement, collectLegs: legs });
+      await context.travel.preload(legs);
+    }
+  }
+  return evaluateArrivalPlacement(context, placement);
 }
 
 

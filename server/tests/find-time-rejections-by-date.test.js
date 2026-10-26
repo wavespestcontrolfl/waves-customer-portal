@@ -159,3 +159,29 @@ test('the picker road check: Google this week, a later day re-checks its best ho
     spy.mockRestore();
   }
 });
+
+// Codex #6881 r2 (P1): with the road check off, no route gets the travel
+// source and nothing is preloaded or re-checked — the gate-off search is the
+// model, exactly as before, for staff and technicians alike.
+test('the picker road check off: no Google, no re-check', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date, travel }) => ({
+    date, travel, target: { id: 'candidate', service_type: 'pest_control' }, rows: [],
+  }));
+  // A model-only fit carries no travelSource (only a road-checked one does).
+  const modelFit = { ...fit, travelSource: undefined };
+  enumerateArrivalPlacements.mockReturnValue({ placements: [{ windowStart: '09:00', windowEnd: '10:00', fit: modelFit }], evaluated: 1, rejections: {} });
+  try {
+    const result = await findAvailableSlots({ ...BASE, dateFrom: ymd(1), dateTo: ymd(10) });
+    expect(roadTravel.preload).not.toHaveBeenCalled();
+    expect(evaluateArrivalPlacement).not.toHaveBeenCalled();
+    expect(enumerateArrivalPlacements.mock.calls.every(([context]) => context.travel === undefined)).toBe(true);
+    expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.fromActiveStop === false)).toBe(true);
+    expect(result.slots.every((slot) => slot.drive_source === undefined)).toBe(true);
+  } finally {
+    spy.mockRestore();
+  }
+});

@@ -111,7 +111,6 @@ function enumerateDates(from, to, { includeWeekends = false } = {}) {
 // checked on Google road times; a later day is checked on the model and its
 // best hour re-checked on Google, so the times shown carry road numbers.
 const ROAD_CHECK_DAYS = 7;
-const NO_ROAD_LIMIT = '9999-12-31';
 
 function plusDays(ymd, days) {
   const d = new Date(`${ymd}T12:00:00Z`);
@@ -158,9 +157,11 @@ async function findArrivalWindowSlots(opts) {
   const now = new Date();
   const today = etDateString(now);
   const parts = etParts(now);
-  // No road check: no day is driven on Google, and none is re-checked (the
-  // travel source asks Google for nothing until a route preloads through it).
-  const roadUntil = opts.pickerRoadCheck === true ? plusDays(today, ROAD_CHECK_DAYS - 1) : NO_ROAD_LIMIT;
+  // Off (Codex #6881 r2): no route gets a travel source, so nothing is
+  // driven on Google or re-checked (the source itself asks Google for
+  // nothing until a route preloads through it).
+  const roadCheck = opts.pickerRoadCheck === true;
+  const roadUntil = plusDays(today, ROAD_CHECK_DAYS - 1);
   const roadTravel = require('./hint-road-times').createPickerTravel();
   const slots = [];
   // Refusal counts per date (same shape as findCapacitySlots'), so the
@@ -192,7 +193,7 @@ async function findArrivalWindowSlots(opts) {
         startPoints: opts.techStartPoints === true,
         // GATE_PICKER_ROAD_CHECK: today's route under way continues from
         // the tech's current stop.
-        fromActiveStop: opts.pickerRoadCheck === true,
+        fromActiveStop: roadCheck,
       });
       if (!context) continue;
       // A whole visit: the technician must be able to do every service on it
@@ -204,7 +205,7 @@ async function findArrivalWindowSlots(opts) {
     }
   }
   // This week's routes are driven on Google (GATE_PICKER_ROAD_CHECK).
-  const onRoads = routes.filter((route) => route.date <= roadUntil);
+  const onRoads = routes.filter((route) => roadCheck && route.date <= roadUntil);
   onRoads.forEach((route) => { route.context.travel = roadTravel; });
   await preloadRouteLegs(roadTravel, onRoads,
     (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs }));
@@ -221,7 +222,7 @@ async function findArrivalWindowSlots(opts) {
   }
   // The model decided which hours fit on a later day; Google gives its best
   // hour road numbers. An hour Google cannot certify keeps the model's, marked.
-  const recheck = routes.filter((route) => route.date > roadUntil && route.slots.length).map((route) => ({
+  const recheck = routes.filter((route) => roadCheck && route.date > roadUntil && route.slots.length).map((route) => ({
     context: { ...route.context, travel: roadTravel },
     slot: route.slots.reduce((best, s) => (s.detour_minutes < best.detour_minutes ? s : best)),
   }));

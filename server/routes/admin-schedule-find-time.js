@@ -449,7 +449,7 @@ router.post('/', async (req, res) => {
       ? await scorePickedHour({
         rawSlots, from: plan.verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
-        withReason: plan.summary, moveAlone,
+        withReason: plan.summary, moveAlone, paidRoads,
       })
       : undefined;
 

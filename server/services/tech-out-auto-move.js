@@ -118,8 +118,10 @@ async function fitsWindow(stop, tech, date, conn = db) {
   if (arrivalWindowRoutingEnabled()) {
     const fit = await checkArrivalPlacement({
       conn,
-      // An automatic move: today's route under way stays unverified.
+      // An automatic move: today's route under way stays unverified, and
+      // it spends none of the pickers' Google allowance.
       fromActiveStop: false,
+      roads: false,
       serviceId: stop.id,
       date,
       technicianId: tech.id,
