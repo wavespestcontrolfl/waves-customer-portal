@@ -8302,6 +8302,26 @@ async function customerNeverAskedForReview(customerId, database = db) {
   }
 }
 
+// The visit a first ask would follow (GATE_REVIEW_FIRST_ASK_LOCK), or null when the lock never
+// applies to it. A re-service keeps today's choice whether it carries is_callback or only the
+// re-service key or name (services/re-service.js isReService; 5 of 49 re-service visits from
+// June to October 2026 had is_callback false). A read failure is null too: today's behavior.
+async function firstAskLockVisit(serviceId, database = db) {
+  if (!serviceId) return null;
+  try {
+    const visit = await database("scheduled_services as s")
+      .leftJoin("services as sv", "s.service_id", "sv.id")
+      .where("s.id", serviceId)
+      .first("s.customer_id", "s.is_callback", "s.service_type", "sv.service_key");
+    if (!visit || visit.is_callback === true) return null;
+    if (require("./re-service").isReService({ serviceKey: visit.service_key, serviceType: visit.service_type })) return null;
+    return visit;
+  } catch (err) {
+    logger.warn(`[review-request] first-ask visit read failed for ${serviceId}: ${err.message}`);
+    return null;
+  }
+}
+
 // GATE_REVIEW_FIRST_ASK_LOCK, the rule for a saved review choice: with the gate on and a
 // never-asked customer, "no ask" is honored ONLY with the "Complaint on site" reason; any other
 // "no ask" stays an ask. Returns null when the lock does not apply (gate off, or the customer
@@ -8345,6 +8365,7 @@ ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES = REVIEW_AFTER_REPORT_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 ReviewService.customerNeverAskedForReview = customerNeverAskedForReview;
+ReviewService.firstAskLockVisit = firstAskLockVisit;
 ReviewService.firstAskLockChoice = firstAskLockChoice;
 ReviewService.FIRST_ASK_OPT_OUT_REASON = FIRST_ASK_OPT_OUT_REASON;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;

@@ -142,9 +142,9 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
     // visit named: the key is absent and the answer is byte for byte as before.
     let firstReviewAsk;
     if (require('../config/feature-gates').reviewFirstAskLockLive() && typeof req.query.serviceId === 'string' && req.query.serviceId) {
-      const visit = await db('scheduled_services').where({ id: req.query.serviceId }).first('customer_id', 'is_callback').catch(() => null);
-      // A re-service (callback) visit stays off, as the completion's own rule does.
-      firstReviewAsk = visit?.is_callback !== true && await ReviewService.customerNeverAskedForReview(visit?.customer_id);
+      // A re-service visit stays off, as the completion's own rule does.
+      const visit = await ReviewService.firstAskLockVisit(req.query.serviceId);
+      firstReviewAsk = Boolean(visit) && await ReviewService.customerNeverAskedForReview(visit.customer_id);
     }
     res.json({
       ...(firstReviewAsk === undefined ? {} : { firstReviewAsk }),

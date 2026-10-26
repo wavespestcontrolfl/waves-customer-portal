@@ -23011,8 +23011,9 @@ router.put('/:id/status', async (req, res, next) => {
       // First review ask (GATE_REVIEW_FIRST_ASK_LOCK): a never-asked customer's "no ask" stays an ask
       // unless the body carries the "Complaint on site" reason (re-services stay off). Gate off: skipped.
       let askForReview = requestReview !== false;
-      if (!askForReview && svc.is_callback !== true) {
-        const firstAsk = await require('../services/review-request').firstAskLockChoice({
+      const reviewRequest = require('../services/review-request');
+      if (!askForReview && require('../config/feature-gates').reviewFirstAskLockLive() && await reviewRequest.firstAskLockVisit(svc.id)) {
+        const firstAsk = await reviewRequest.firstAskLockChoice({
           customerId: svc.customer_id, requestReview, optOutReason: req.body.reviewOptOutReason,
         });
         if (firstAsk) askForReview = firstAsk.requestReview;

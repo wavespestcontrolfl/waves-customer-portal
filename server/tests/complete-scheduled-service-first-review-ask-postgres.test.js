@@ -81,7 +81,7 @@ jest.setTimeout(90000);
 
 const PEST_TYPE = 'General Pest Control';
 
-async function seedVisit({ callback = false, asked = false, reviewed = false } = {}) {
+async function seedVisit({ callback = false, asked = false, reviewed = false, serviceType = PEST_TYPE } = {}) {
   const f = { customerId: randomUUID(), techId: randomUUID(), serviceId: randomUUID(), catalogId: randomUUID(), serviceKey: `fixture_pest_${randomUUID().slice(0, 8)}` };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'FirstAsk', phone: `+1305555${Math.floor(Math.random() * 9000 + 1000)}`,
     email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, has_left_google_review: reviewed });
@@ -89,7 +89,7 @@ async function seedVisit({ callback = false, asked = false, reviewed = false } =
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
   await mockPg('services').insert({ id: f.catalogId, name: `${PEST_TYPE} ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
   await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, property_id: property.id, technician_id: f.techId, service_id: f.catalogId,
-    service_type: PEST_TYPE, scheduled_date: etDateString(new Date()), window_start: '09:00', window_end: '10:00', status: 'confirmed',
+    service_type: serviceType, scheduled_date: etDateString(new Date()), window_start: '09:00', window_end: '10:00', status: 'confirmed',
     is_callback: callback, estimated_duration_minutes: 30 });
   if (asked) {
     const when = new Date(Date.now() - 40 * 86400000);
@@ -206,6 +206,13 @@ postgres('the first review ask lock', () => {
 
   test('gate on, a re-service (callback) visit stays off', async () => {
     const out = await run({ seed: { callback: true }, extra: OFF });
+    expect(out.asks).toBe(0);
+    expect(out.notes.reviewFirstAskLock).toBeUndefined();
+  });
+
+  test('gate on, a re-service without the callback flag stays off too', async () => {
+    // 5 of 49 re-service visits from June to October 2026 carried is_callback false (services/re-service.js isReService).
+    const out = await run({ seed: { serviceType: 'Pest Control Re-Service' }, extra: OFF });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });

@@ -1,15 +1,15 @@
 /**
  * GATE_REVIEW_FIRST_ASK_LOCK (owner 2026-10-26): the completion panel's send-time preview also says whether the
  * visit's customer was never asked for a review (`firstReviewAsk`). Gate off, or no visit named: the key is absent and
- * the answer is as before. A re-service (callback) visit and an unknown visit are never a first ask.
+ * the answer is as before. A re-service and an unknown visit are never a first ask (firstAskLockVisit answers null;
+ * its rule is in review-first-ask-lock.test.js).
  */
-const mockVisit = { current: null };
 jest.mock('../models/db', () => {
-  const db = jest.fn((table) => {
+  const db = jest.fn(() => {
     const q = {
       columnInfo: jest.fn().mockResolvedValue({ report_template_version: {} }),
       where() { return this; },
-      first: () => Promise.resolve(table === 'scheduled_services' ? mockVisit.current : undefined),
+      first: () => Promise.resolve(undefined),
     };
     return q;
   });
@@ -21,6 +21,7 @@ jest.mock('../services/review-request', () => ({
   LEGACY_REVIEW_DELAY_MINUTES: 120,
   REVIEW_AFTER_REPORT_DELAY_MINUTES: 10,
   customerNeverAskedForReview: jest.fn(),
+  firstAskLockVisit: jest.fn(),
   __private: { reviewCadenceTickMinutes: () => [14, 44], LEGACY_REVIEW_TICK_MINUTES: [0, 15, 30, 45], calculateReviewSendPlan: jest.fn() },
 }));
 jest.mock('../services/google-business', () => ({}));
@@ -40,7 +41,7 @@ const gateWas = process.env.GATE_REVIEW_FIRST_ASK_LOCK;
 afterEach(() => { if (gateWas === undefined) delete process.env.GATE_REVIEW_FIRST_ASK_LOCK; else process.env.GATE_REVIEW_FIRST_ASK_LOCK = gateWas; });
 beforeEach(() => {
   ReviewService.customerNeverAskedForReview.mockReset().mockResolvedValue(true);
-  mockVisit.current = { customer_id: 'cust-1', is_callback: false };
+  ReviewService.firstAskLockVisit.mockReset().mockResolvedValue({ customer_id: 'cust-1' });
 });
 
 async function preview(query) {
@@ -58,6 +59,7 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_FIRST_ASK_LOCK',
     delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
     const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
     expect(out).not.toHaveProperty('firstReviewAsk');
+    expect(ReviewService.firstAskLockVisit).not.toHaveBeenCalled();
     expect(ReviewService.customerNeverAskedForReview).not.toHaveBeenCalled();
   });
 
@@ -70,6 +72,7 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_FIRST_ASK_LOCK',
     process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
     const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
     expect(out.firstReviewAsk).toBe(true);
+    expect(ReviewService.firstAskLockVisit).toHaveBeenCalledWith('svc-1');
     expect(ReviewService.customerNeverAskedForReview).toHaveBeenCalledWith('cust-1');
     expect(out.bucket).toBe('legacy:+120m');
   });
@@ -82,10 +85,8 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_FIRST_ASK_LOCK',
 
   test('gate on, a re-service visit or an unknown visit: firstReviewAsk false', async () => {
     process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
-    mockVisit.current = { customer_id: 'cust-1', is_callback: true };
+    ReviewService.firstAskLockVisit.mockResolvedValue(null);
     expect((await preview({ serviceType: 'Pest', serviceId: 'svc-1' })).firstReviewAsk).toBe(false);
-    mockVisit.current = undefined;
-    ReviewService.customerNeverAskedForReview.mockResolvedValue(false);
-    expect((await preview({ serviceType: 'Pest', serviceId: 'svc-1' })).firstReviewAsk).toBe(false);
+    expect(ReviewService.customerNeverAskedForReview).not.toHaveBeenCalled();
   });
 });

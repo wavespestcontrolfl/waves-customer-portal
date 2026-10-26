@@ -3109,8 +3109,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a never-asked customer's ask turned off
     // WITHOUT the "Complaint on site" reason stays on. Only a tech's explicit requestReview:false on a real,
     // completed, loud, non-re-service visit is looked at; system closeouts, backdated, incomplete, concern and
-    // declined visits, the fixed re-service text and callback re-services keep today's behavior. Gate off: no
-    // read at all, requestReview is the posted value.
+    // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior. Gate
+    // off: no read at all, requestReview is the posted value.
     let requestReview = requestReviewPosted;
     let reviewFirstAskLock = null;
     let reviewTimingBody = completionInput.body || {};
@@ -3121,9 +3121,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // A sheet that pins every customer text off (no completion text, no pay link, no ask) means "send nothing".
       && !(sendCompletionSmsRequested === false && includePayLink === false)
       && require('../config/feature-gates').reviewFirstAskLockLive()) {
-      const lockVisit = await db('scheduled_services').where({ id: completionInput.serviceId }).first('customer_id', 'is_callback');
-      if (lockVisit && lockVisit.is_callback !== true) {
-        reviewFirstAskLock = await require('./review-request').firstAskLockChoice({
+      const reviewRequest = require('./review-request');
+      const lockVisit = await reviewRequest.firstAskLockVisit(completionInput.serviceId);
+      if (lockVisit) {
+        reviewFirstAskLock = await reviewRequest.firstAskLockChoice({
           customerId: lockVisit.customer_id, requestReview: requestReviewPosted, optOutReason: reviewOptOutReason,
         });
       }

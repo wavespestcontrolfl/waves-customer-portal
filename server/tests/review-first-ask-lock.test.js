@@ -88,3 +88,35 @@ describe('firstAskLockChoice', () => {
     expect(await choose(asked, false)).toBeNull();
   });
 });
+
+describe('firstAskLockVisit', () => {
+  // scheduled_services joined to services: one row, or a read that throws.
+  function visitDb(row, { fail = false } = {}) {
+    return () => {
+      const q = {};
+      q.leftJoin = () => q;
+      q.where = () => q;
+      q.first = async () => { if (fail) throw new Error('read failed'); return row; };
+      return q;
+    };
+  }
+  const visit = (row, opts) => ReviewService.firstAskLockVisit('svc-1', visitDb(row, opts));
+
+  test('a regular visit is returned with its customer', async () => {
+    expect(await visit({ customer_id: 'cust-1', is_callback: false, service_type: 'Pest Control', service_key: 'pest_quarterly' }))
+      .toMatchObject({ customer_id: 'cust-1' });
+  });
+
+  test('a re-service is never a first ask, with or without the callback flag', async () => {
+    expect(await visit({ customer_id: 'cust-1', is_callback: true, service_type: 'Pest Control', service_key: null })).toBeNull();
+    // 5 of 49 re-service visits from June to October 2026 carried is_callback false.
+    expect(await visit({ customer_id: 'cust-1', is_callback: false, service_type: 'Pest Control', service_key: 'pest_re_service' })).toBeNull();
+    expect(await visit({ customer_id: 'cust-1', is_callback: false, service_type: 'Lawn Care Re-Service', service_key: null })).toBeNull();
+  });
+
+  test('no visit, no id and a read failure are null (today\'s behavior)', async () => {
+    expect(await visit(undefined)).toBeNull();
+    expect(await ReviewService.firstAskLockVisit(null, visitDb({ customer_id: 'cust-1' }))).toBeNull();
+    expect(await visit({ customer_id: 'cust-1' }, { fail: true })).toBeNull();
+  });
+});
