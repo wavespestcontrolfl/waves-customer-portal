@@ -3289,7 +3289,7 @@ export function MobileEstimateRow({
       <Card
         data-estimate-id={estimate.id}
         className={cn(
-          "h-16 px-3 flex items-center gap-1.5",
+          "min-h-16 h-auto px-3 py-3 flex items-center gap-1.5",
           "cursor-default",
           isDraftMuted && "opacity-60",
           highlighted &&

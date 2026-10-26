@@ -92,6 +92,7 @@ function bodyFor(url, method) {
   if (p === "/api/admin/feature-flags") return { flags: {} };
   if (p.endsWith("/unread-count")) return { count: 0, conversations: 0 };
   if (p === "/api/admin/usage/track") return { ok: true };
+  if (p === "/api/admin/consultations/stats") return { booked: 0 };
   if (p === "/api/admin/leads") return { leads: [url.searchParams.get("id") === linkedLead.id ? linkedLead : lead], total: 1 };
   if (p === "/api/admin/leads/sources") return { sources: [source] };
   if (p === "/api/admin/customers") return { customers: [customer], total: 1 };
@@ -517,6 +518,20 @@ async function main() {
         .getByRole("button", { name: "Estimates", exact: true })
         .click();
       await page.getByText("Avery Example", { exact: true }).first().waitFor();
+      if (width < 768) {
+        const row = page.locator('[data-estimate-id="estimate-fixture"]');
+        const clipped = await row.evaluate((node) => {
+          const bounds = node.getBoundingClientRect();
+          return [...node.querySelectorAll('button, span')].filter((child) => {
+            const box = child.getBoundingClientRect();
+            return box.height > 0 && (box.top < bounds.top - 1 || box.bottom > bounds.bottom + 1);
+          }).map((child) => child.textContent.trim());
+        });
+        assert.deepEqual(clipped, [], 'Mobile estimate content stays inside its row');
+        const rowShot = path.join(output, `estimate-row-${width}.png`);
+        await row.screenshot({ path: rowShot });
+        report.screenshots.push(rowShot);
+      }
       const action = page.getByRole("button", {
         name: "Actions for Avery Example",
       });

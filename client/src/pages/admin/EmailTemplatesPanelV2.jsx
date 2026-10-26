@@ -29,6 +29,7 @@ import {
   Select,
   Switch,
   Textarea,
+  Table,
   cn,
 } from "../../components/ui";
 
@@ -293,10 +294,9 @@ function SendHistoryPanel({ messages, loading }) {
         {loading ? (
           <div className="py-10 text-center text-13 text-ink-secondary">Loading send history...</div>
         ) : messages.length ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-13">
+          <Table aria-label="Email send history" className="min-w-[900px] text-left">
               <thead>
-                <tr className="border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary">
+                <tr className="border-b border-zinc-200 text-ui-label text-ink-tertiary">
                   <th className="py-2 pr-4 font-medium">Sent</th>
                   <th className="py-2 pr-4 font-medium">Recipient</th>
                   <th className="py-2 pr-4 font-medium">Template</th>
@@ -329,8 +329,7 @@ function SendHistoryPanel({ messages, loading }) {
                   </tr>
                 ))}
               </tbody>
-            </table>
-          </div>
+            </Table>
         ) : (
           <div className="py-10 text-center text-13 text-ink-secondary">No email sends yet.</div>
         )}
@@ -352,10 +351,9 @@ function TemplateIssuesPanel({ issues, loading, onOpenTemplate }) {
         {loading ? (
           <div className="py-10 text-center text-13 text-ink-secondary">Loading template issues...</div>
         ) : issues.length ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-13">
+          <Table aria-label="Email issues" className="min-w-[900px] text-left">
               <thead>
-                <tr className="border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary">
+                <tr className="border-b border-zinc-200 text-ui-label text-ink-tertiary">
                   <th className="py-2 pr-4 font-medium">When</th>
                   <th className="py-2 pr-4 font-medium">Template</th>
                   <th className="py-2 pr-4 font-medium">Issue</th>
@@ -384,7 +382,7 @@ function TemplateIssuesPanel({ issues, loading, onOpenTemplate }) {
                     <td className="py-3 pr-4 min-w-[220px] text-ink-secondary">
                       <div>{issue.workflow || "-"}</div>
                       {(issue.entity_type || issue.entity_id) && (
-                        <div className="text-11 text-ink-tertiary">
+                        <div className="text-ui-caption text-ink-tertiary">
                           {[issue.entity_type, issue.entity_id].filter(Boolean).join(" ")}
                         </div>
                       )}
@@ -392,7 +390,7 @@ function TemplateIssuesPanel({ issues, loading, onOpenTemplate }) {
                     <td className="py-3 min-w-[260px] text-zinc-900">
                       <div className="line-clamp-2">{issue.reason || "-"}</div>
                       {Array.isArray(issue.unresolved_placeholders) && issue.unresolved_placeholders.length > 0 && (
-                        <div className="mt-1 text-11 text-ink-tertiary">
+                        <div className="mt-1 text-ui-caption text-ink-tertiary">
                           {issue.unresolved_placeholders.join(", ")}
                         </div>
                       )}
@@ -400,8 +398,7 @@ function TemplateIssuesPanel({ issues, loading, onOpenTemplate }) {
                   </tr>
                 ))}
               </tbody>
-            </table>
-          </div>
+            </Table>
         ) : (
           <div className="py-10 text-center text-13 text-ink-secondary">No recent template issues.</div>
         )}
@@ -515,10 +512,9 @@ function SuppressionsPanel({
           {loading ? (
             <div className="py-10 text-center text-13 text-ink-secondary">Loading suppressions...</div>
           ) : suppressions.length ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-13">
+            <Table aria-label="Email suppressions" className="min-w-[1100px] text-left">
                 <thead>
-                  <tr className="border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary">
+                  <tr className="border-b border-zinc-200 text-ui-label text-ink-tertiary">
                     <th className="py-2 pr-4 font-medium">Email</th>
                     <th className="py-2 pr-4 font-medium">Customer</th>
                     <th className="py-2 pr-4 font-medium">Group</th>
@@ -544,7 +540,7 @@ function SuppressionsPanel({
                               {[s.customer.first_name, s.customer.last_name].filter(Boolean).join(" ") || "Unnamed customer"}
                             </a>
                             {s.customer.phone ? (
-                              <div className="text-11 text-ink-tertiary">
+                              <div className="text-ui-caption text-ink-tertiary">
                                 <a href={`tel:${s.customer.phone}`}>{s.customer.phone}</a>
                               </div>
                             ) : null}
@@ -584,8 +580,7 @@ function SuppressionsPanel({
                     </tr>
                   ))}
                 </tbody>
-              </table>
-            </div>
+              </Table>
           ) : (
             <div className="py-10 text-center text-13 text-ink-secondary">No suppressions match the current filters.</div>
           )}
@@ -1038,10 +1033,9 @@ function AutomationRunsPanel({
         {loading ? (
           <div className="py-10 text-center text-13 text-ink-secondary">Loading automation runs...</div>
         ) : runs.length ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-13">
+          <Table aria-label="Email automation runs" className="min-w-[1000px] text-left">
               <thead>
-                <tr className="border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary">
+                <tr className="border-b border-zinc-200 text-ui-label text-ink-tertiary">
                   <th className="py-2 pr-4 font-medium">Created</th>
                   <th className="py-2 pr-4 font-medium">Run after</th>
                   <th className="py-2 pr-4 font-medium">Recipient</th>
@@ -1077,7 +1071,7 @@ function AutomationRunsPanel({
                         {run.last_error || run.exit_reason || run.idempotency_key || "-"}
                       </div>
                       {run.completed_at ? (
-                        <div className="mt-1 text-11 text-ink-tertiary">
+                        <div className="mt-1 text-ui-caption text-ink-tertiary">
                           Completed {formatDateTime(run.completed_at)}
                         </div>
                       ) : null}
@@ -1085,8 +1079,7 @@ function AutomationRunsPanel({
                   </tr>
                 ))}
               </tbody>
-            </table>
-          </div>
+            </Table>
         ) : (
           <div className="py-10 text-center text-13 text-ink-secondary">No runs for this automation yet.</div>
         )}

@@ -29,7 +29,7 @@ function fixtures(url, method) {
   if (method !== "GET") return undefined;
   switch (url.pathname) {
     case "/api/admin/auth/me": return { id: "fixture-admin", role: "admin", name: "Fixture operator" };
-    case "/api/admin/feature-flags": return { flags: {} };
+    case "/api/admin/feature-flags": return { flags: { bid_desk: true } };
     case "/api/admin/notifications/unread-count": return { count: 0 };
     case "/api/admin/communications/unread-count": return { count: 0, conversations: 0 };
     case "/api/admin/banking/balance": return { total_available: 1500, total_pending: 100, total_instant_available: 500, next_payout: { amount: 1234.56, arrival_date: "2026-09-09" } };

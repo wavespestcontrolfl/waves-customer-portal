@@ -154,7 +154,7 @@ function VisitRow({ visit, busy, billing, onBill, onFree, onElsewhere }) {
         </div>
       </TD>
       <TD data-label="Price" nums>{visit.price == null ? "—" : formatMoney(visit.price)}</TD>
-      <TD align="right">
+      <TD data-label="Actions" align="right">
         <div className="ui-record-actions justify-end">
           {statusOnly ? (
             <a
