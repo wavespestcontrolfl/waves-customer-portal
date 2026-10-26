@@ -198,7 +198,7 @@ maybeDescribe('vendor-order-email (live Postgres)', () => {
         to: 'orders@siteone.example', fromEmail: 'contact@wavespestcontrol.com', categories: ['vendor-order'],
         subject: `Pickup order: Waves Pest Control, account 123456, PO WAVES-${request.id.slice(0, 8).toUpperCase()}`,
       });
-      expect(m.sendOne.mock.calls[0][0].cc).toBeUndefined();
+      expect(m.sendOne.mock.calls[0][0].cc).toEqual([]); // no SITEONE_ORDER_CC: sendOne adds no cc for an empty list
       // SendGrid's raw error body can echo an address: the call opts out of sendOne's own error log.
       expect(m.sendOne.mock.calls[0][0].suppressErrorLog).toBe(true);
 
@@ -294,7 +294,7 @@ maybeDescribe('vendor-order-email (live Postgres)', () => {
     test('Send without a preview version is refused', async () => {
       const { request } = await fixture();
       const m = mailer();
-      expect(await reject(sendWith(request.id, m, undefined))).toMatchObject({ statusCode: 409, code: 'preview_required' });
+      expect(await reject(sendWith(request.id, m, undefined))).toMatchObject({ statusCode: 409, code: 'preview_changed' }); // a missing version never matches
       expect(m.sendOne).not.toHaveBeenCalled();
       expect(await emailRow(request.id)).toBeUndefined();
     });
@@ -374,9 +374,22 @@ maybeDescribe('vendor-order-email (live Postgres)', () => {
       expect(Number(out.movement.quantity)).toBe(350);
     });
 
+    test('an UNCONFIRMED send still defaults Receive to what its packages hold: 301 lb asked, 7 x 50 lb, 350 lb received (Codex #6866 r2 P2)', async () => {
+      const { request, product } = await fixture({ request: { requested_quantity: 301 } });
+      const m = mailer(async () => { throw new Error('fetch failed'); }); // SendGrid may have accepted it
+      expect(await reject(send(request.id, m, {}))).toMatchObject({ code: 'send_unconfirmed' });
+      expect(await emailRow(request.id)).toMatchObject({ status: 'sending', packages: 7 });
+      const before = Number((await db('products_catalog').where({ id: product.id }).first('inventory_on_hand')).inventory_on_hand);
+      // the delivery arrives: Receive with no typed quantity records the packages, not the 301 lb asked
+      await require('../services/inventory-operations').updateRestockRequest(request.id, { action: 'receive' }, { actorId: null, source: 'restock_request_receive' });
+      const after = Number((await db('products_catalog').where({ id: product.id }).first('inventory_on_hand')).inventory_on_hand);
+      expect(after - before).toBe(350);
+    });
+
     test('an unsent email never supplies a receive quantity', async () => {
       const { request } = await fixture({ request: { requested_quantity: 301 } });
-      const bad = mailer(async () => { throw Object.assign(new Error('SendGrid 503: x'), { status: 503 }); });
+      // a DEFINITE rejection (4xx): nothing went out (a 503 is unconfirmed, see the test above)
+      const bad = mailer(async () => { throw Object.assign(new Error('SendGrid 400: x'), { status: 400 }); });
       await reject(send(request.id, bad, {}));
       expect(await svc.emailOrderedQuantityFor(db, request.id)).toBeNull();
     });

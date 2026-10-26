@@ -121,6 +121,17 @@ function claimable(row, now = Date.now()) {
 function retryableEmail(row, now = Date.now()) {
   return !!row && row.status === 'sending' && claimable(row, now);
 }
+// The order settings, checked in this order: the first failing rule refuses.
+const SETTING_REFUSALS = [
+  { code: 'no_recipient', message: 'SITEONE_ORDER_EMAIL is not set, so there is nowhere to send the order.', hit: (s) => !s.to },
+  { code: 'recipient_invalid', message: 'SITEONE_ORDER_EMAIL is not a valid email address.', hit: (s) => !EMAIL_RE.test(s.to) },
+  { code: 'cc_invalid', message: 'SITEONE_ORDER_CC is not a valid email address list.', hit: (s) => s.ccList.some((c) => !EMAIL_RE.test(c)) },
+];
+// An earlier email row no claim may take over ('sent', or 'sending' unless stale and never attempted).
+const EARLIER_REFUSALS = {
+  sent: ['email_already_sent', (po) => `SiteOne was already emailed for this request (PO ${po}).`],
+  sending: ['email_sending', (po) => `An email to SiteOne for this request is being sent, or may already have gone out (PO ${po}). Check SendGrid or ask SiteOne before sending again.`],
+};
 const CLAIMABLE_SQL = `(${TABLE}.status IN ('pending', 'failed', 'dismissed') OR (${TABLE}.status = 'sending' AND ${TABLE}.send_attempted_at IS NULL AND ${TABLE}.claimed_at < ?))`;
 
 // The order bot and this email must never both buy a request: the bot claims
@@ -156,7 +167,9 @@ async function assertNoEmailOrderOut(conn, requestId) {
 // Receive default when the admin types no quantity (301 lb asked of a 50 lb
 // pack is 7 packages, and 350 lb is what arrives). null = no sent email.
 async function emailOrderedQuantityFor(conn, requestId) {
-  const row = await conn(TABLE).where({ restock_request_id: requestId, status: 'sent' }).first('ordered_quantity');
+  // An unconfirmed send counts too: a 'sending' row may well have reached SiteOne, and the
+  // delivery holds the packages, not the requested amount (Codex #6866 r2 P2).
+  const row = await conn(TABLE).where({ restock_request_id: requestId }).whereIn('status', ['sent', 'sending']).first('ordered_quantity');
   const quantity = row && row.ordered_quantity != null ? Number(row.ordered_quantity) : null;
   return quantity > 0 ? quantity : null;
 }
@@ -173,20 +186,19 @@ async function findSiteOneVendor(conn) {
  * email. Refuses (409 + code) unless the email can go out. `lock` reads the
  * request row FOR UPDATE (the claim runs it inside its transaction).
  */
-async function loadOrderEmail(conn, requestId, { lock = false, env = process.env, now = Date.now() } = {}) {
+async function loadOrderEmail(conn, requestId, { env, now }) {
   if (!featureGates.siteOneEmailOrderLive()) throw refuse('gate_off', 'Emailing SiteOne an order is not turned on.');
-  if (!UUID_RE.test(String(requestId || ''))) throw orderEmailError(404, 'request_not_found', 'Restock request not found');
-  let query = conn('product_restock_requests').where({ id: requestId });
-  if (lock) query = query.forUpdate();
-  const request = await query.first();
+  if (!UUID_RE.test(String(requestId))) throw orderEmailError(404, 'request_not_found', 'Restock request not found');
+  // FOR UPDATE always: inside the claim's transaction it is the row lock; outside one (the
+  // preview) Postgres holds it for the statement only.
+  const request = await conn('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) throw orderEmailError(404, 'request_not_found', 'Restock request not found');
   if (String(request.status).toLowerCase() !== 'open') throw refuse('request_not_open', `Only an open request can be emailed to SiteOne (this one is ${request.status}).`);
 
-  const to = recipientOf(env);
-  if (!to) throw refuse('no_recipient', 'SITEONE_ORDER_EMAIL is not set, so there is nowhere to send the order.');
-  if (!EMAIL_RE.test(to)) throw refuse('recipient_invalid', 'SITEONE_ORDER_EMAIL is not a valid email address.');
-  const ccList = ccListOf(env);
-  if (ccList.some((c) => !EMAIL_RE.test(c))) throw refuse('cc_invalid', 'SITEONE_ORDER_CC is not a valid email address list.');
+  const settings = { to: recipientOf(env), ccList: ccListOf(env) };
+  const badSetting = SETTING_REFUSALS.find((rule) => rule.hit(settings));
+  if (badSetting) throw refuse(badSetting.code, badSetting.message);
+  const { to, ccList } = settings;
 
   // The same guards the Restock tab's manual actions use: a bot claim being
   // placed right now refuses every action, and an automatic order that is
@@ -209,9 +221,12 @@ async function loadOrderEmail(conn, requestId, { lock = false, env = process.env
   if (order.error) throw refuse(order.error, order.message);
   if (!(order.quantity >= 1)) throw refuse('no_packages', 'The request works out to less than one package.');
 
+  // An earlier email a new claim may not take over (claimable(null) is true) refuses by its status.
   const earlier = await conn(TABLE).where({ restock_request_id: requestId }).first();
-  if (earlier && earlier.status === 'sent') throw refuse('email_already_sent', `SiteOne was already emailed for this request (PO ${earlier.po}).`);
-  if (earlier && !claimable(earlier, now)) throw refuse('email_sending', `An email to SiteOne for this request is being sent, or may already have gone out (PO ${earlier.po}). Check SendGrid or ask SiteOne before sending again.`);
+  if (!claimable(earlier, now)) {
+    const [code, message] = EARLIER_REFUSALS[earlier.status];
+    throw refuse(code, message(earlier.po));
+  }
 
   const built = buildSiteOneOrderEmail({
     requestId, accountNumber: vendor.account_number, packages: order.quantity, itemNumber: pricing.vendor_sku,
@@ -246,7 +261,7 @@ const previewView = (ctx) => ({
 
 /** What would go out, read-only. Refuses with a 409 and a code when it cannot. */
 async function previewOrderEmail(requestId, deps = {}) {
-  const ctx = await loadOrderEmail(deps.db || db, requestId, { env: deps.env || process.env });
+  const ctx = await loadOrderEmail(deps.db || db, requestId, { env: deps.env || process.env, now: Date.now() });
   return previewView(ctx);
 }
 
@@ -268,7 +283,7 @@ const isDefiniteRejection = (err) => {
 async function claimEmail(conn, requestId, token, { env, now, version }) {
   return conn.transaction(async (trx) => {
     await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id');
-    const ctx = await loadOrderEmail(trx, requestId, { lock: true, env, now });
+    const ctx = await loadOrderEmail(trx, requestId, { env, now });
     if (versionOf(ctx) !== version) throw refuse('preview_changed', 'The order changed after you opened the preview. Close this window and open the preview again.');
     const stamp = new Date(now);
     const claim = {
@@ -300,19 +315,18 @@ async function claimEmail(conn, requestId, token, { env, now, version }) {
  * error with statusCode + code on a refusal or a send failure.
  * deps (tests): { db, sendgrid, env, now, token }.
  */
-async function sendOrderEmail(requestId, { actor, actorId, version } = {}, deps = {}) {
+async function sendOrderEmail(requestId, { actor, actorId, version }, deps = {}) {
   const conn = deps.db || db;
   const mailer = deps.sendgrid || sendgrid;
   const env = deps.env || process.env;
   const now = deps.now ?? Date.now();
   // Check the gate, the request and the settings BEFORE claiming anything.
   const current = await loadOrderEmail(conn, requestId, { env, now });
-  // The send is bound to the preview the admin saw (see versionOf).
-  if (!version) throw refuse('preview_required', 'Open the preview first; Send needs the preview it is sending.');
-  if (versionOf(current) !== version) throw refuse('preview_changed', 'The order changed after you opened the preview. Close this window and open the preview again.');
+  // The send is bound to the preview the admin saw (see versionOf); a missing version never matches.
+  if (versionOf(current) !== version) throw refuse('preview_changed', 'Open the preview again: Send sends only the order the preview showed, and this one changed or was never previewed.');
   // sendOne throws before any network call without SENDGRID_API_KEY; claiming
   // first would leave a claim for an email that can never go out.
-  if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
+  if (!mailer.isConfigured()) {
     throw refuse('not_configured', 'Email sending is not configured (SENDGRID_API_KEY missing), so nothing was sent.');
   }
   const token = deps.token || randomUUID();
@@ -331,16 +345,13 @@ async function sendOrderEmail(requestId, { actor, actorId, version } = {}, deps 
   // Still the owner of the claim right before the external send?
   if (!stamped.length) throw refuse('claim_lost', 'This email changed state before it could send. Refresh and check.');
 
-  const fromEmail = env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
-  const fromName = env.SENDGRID_FROM_NAME || WAVES_BRAND_NAME;
-  const cc = splitList(row.cc);
   let res;
   try {
     res = await mailer.sendOne({
       to: row.recipient,
-      ...(cc.length ? { cc } : {}),
-      fromEmail,
-      fromName,
+      cc: splitList(row.cc), // sendOne adds no cc for an empty list
+      fromEmail: env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com',
+      fromName: WAVES_BRAND_NAME,
       subject: row.subject,
       html: row.html,
       text: row.text_body,
@@ -364,16 +375,12 @@ async function sendOrderEmail(requestId, { actor, actorId, version } = {}, deps 
 
   // The email WAS sent. A database problem from here on must never look like
   // a failed send: report the send, leave the row, and let a person reconcile.
-  const messageId = (res && res.messageId) || null;
+  const messageId = res.messageId || null; // sendOne returns { messageId } on every success
   const sentAt = new Date();
-  let finalized = null;
-  try {
-    [finalized] = await conn(TABLE).where(mine).update({
-      status: 'sent', sent_at: sentAt, sent_by: actor || null, provider_message_id: messageId, updated_at: sentAt,
-    }).returning('*');
-  } catch {
-    // finalized stays null; reported just below
-  }
+  // A failed finalize leaves finalized undefined; reported just below, never retried.
+  const [finalized] = await conn(TABLE).where(mine).update({
+    status: 'sent', sent_at: sentAt, sent_by: actor || null, provider_message_id: messageId, updated_at: sentAt,
+  }).returning('*').catch(() => []);
   if (!finalized) logger.error('siteone order email sent but claim not finalized, reconcile', { emailId: row.id, requestId, messageId });
 
   // Mark the request ordered through the Restock tab's own path, so a later
@@ -384,7 +391,7 @@ async function sendOrderEmail(requestId, { actor, actorId, version } = {}, deps 
     await require('../inventory-operations').updateRestockRequest(requestId, {
       action: 'mark_ordered', note: `Emailed SiteOne, PO ${row.po}`,
     }, {
-      actorId: actorId || null,
+      actorId, // updateRestockRequest stores a missing actor as null
       source: 'siteone_email_order',
       metadataPatch: { emailOrder: { emailId: row.id, sentAt: sentAt.toISOString(), po: row.po, packages: row.packages, itemNumber: row.item_number, to: row.recipient } },
     });
@@ -397,7 +404,7 @@ async function sendOrderEmail(requestId, { actor, actorId, version } = {}, deps 
     email: { id: row.id, po: row.po, packages: row.packages, itemNumber: row.item_number, sentAt: sentAt.toISOString(), to: row.recipient },
     messageId,
     requestMarked,
-    ...(finalized ? {} : { reconcile: true }),
+    reconcile: !finalized,
   };
 }
 
