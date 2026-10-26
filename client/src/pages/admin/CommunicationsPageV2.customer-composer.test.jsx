@@ -53,6 +53,57 @@ it("keeps inbox filters and log loading out of the Customer360 composer", () => 
   expect(fetch.mock.calls.some(([url]) => String(url).includes("/admin/communications/log?"))).toBe(false);
 });
 
+it("shows gated customer-history feedback, retries through the existing loader, and preserves the draft", () => {
+  const retryHistory = vi.fn();
+  const view = render(
+    <SmsTab
+      active
+      customer={customer}
+      customerMessages={[]}
+      customerHistoryError="Message history could not be loaded."
+      feedbackEnabled
+      onRetryCustomerHistory={retryHistory}
+    />,
+    { wrapper: MemoryRouter },
+  );
+  const field = screen.getByRole("textbox", { name: "Text message" });
+  fireEvent.change(field, { target: { value: "Keep this draft while retrying" } });
+
+  expect(screen.getByRole("alert")).toHaveTextContent("Message history could not be loaded.");
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(retryHistory).toHaveBeenCalledOnce();
+  expect(field).toHaveValue("Keep this draft while retrying");
+
+  view.rerender(
+    <SmsTab
+      active
+      customer={customer}
+      customerMessages={customerMessages}
+      feedbackEnabled
+      onRetryCustomerHistory={retryHistory}
+    />,
+  );
+  expect(screen.queryByText("Message history could not be loaded.")).not.toBeInTheDocument();
+  expect(field).toHaveValue("Keep this draft while retrying");
+});
+
+it("keeps customer-history feedback hidden when the gate is off", () => {
+  const retryHistory = vi.fn();
+  render(
+    <SmsTab
+      active
+      customer={customer}
+      customerMessages={[]}
+      customerHistoryError="Message history could not be loaded."
+      onRetryCustomerHistory={retryHistory}
+    />,
+    { wrapper: MemoryRouter },
+  );
+
+  expect(screen.queryByText("Message history could not be loaded.")).not.toBeInTheDocument();
+  expect(retryHistory).not.toHaveBeenCalled();
+});
+
 it("keeps the profile recipient and thread line, sends once, and clears only on provider acceptance", async () => {
   window.history.replaceState({}, "", "/?phone=9415550197&draftId=unrelated");
   let accept;

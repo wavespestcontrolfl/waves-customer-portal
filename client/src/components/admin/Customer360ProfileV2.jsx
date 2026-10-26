@@ -9620,10 +9620,23 @@ function CustomerRecipientDetails({
   );
 }
 
+function CustomerConversationLoadError({ error, feedbackEnabled, embedded, commsComposerReady, loading, onRetry }) {
+  // Once the gated embedded composer is mounted, its ActionFeedback owns
+  // history recovery. Initial-load and legacy/overlay paths keep this block.
+  if (!error || (feedbackEnabled && embedded && commsComposerReady)) return null;
+  return (
+    <div className="flex flex-col items-center gap-3 py-5">
+      <p role="alert" className="text-alert-fg text-14">{error}</p>
+      <Button variant="secondary" onClick={onRetry} disabled={loading}>Retry messages</Button>
+    </div>
+  );
+}
+
 function CustomerConversation({
   customerId,
   composerComms,
   composerReadScope,
+  feedbackEnabled,
   commsChannel,
   setCommsChannel,
   commsHasMore,
@@ -9674,12 +9687,14 @@ function CustomerConversation({
             Loading messages…
           </div>
         )}
-        {commsErr && (
-          <div className="flex flex-col items-center gap-3 py-5">
-            <p role="alert" className="text-alert-fg text-14">{commsErr}</p>
-            <Button variant="secondary" onClick={retryComms} disabled={commsLoading}>Retry messages</Button>
-          </div>
-        )}
+        <CustomerConversationLoadError
+          error={commsErr}
+          feedbackEnabled={feedbackEnabled}
+          embedded={embedded}
+          commsComposerReady={commsComposerReady}
+          loading={commsLoading}
+          onRetry={retryComms}
+        />
         {[...comms].reverse().map((message, i) => {
           const Message =
             message.channel === "sms"
@@ -9714,6 +9729,9 @@ function CustomerConversation({
             customer={c}
             customerMessages={composerComms}
             customerReadScope={composerReadScope}
+            customerHistoryError={commsErr}
+            feedbackEnabled={feedbackEnabled}
+            onRetryCustomerHistory={retryComms}
             onSent={async () => {
               setCommsLoaded(false);
               // reloadCustomer refreshes the timeline with the record; a failed
@@ -11096,6 +11114,7 @@ export default function Customer360ProfileV2({
   onClose,
   onCustomerMutation,
   onSelectCustomer,
+  feedbackEnabled = false,
   initialTab = "overview",
   initialScheduledServiceId = null,
   embedded = false,
@@ -11390,6 +11409,7 @@ export default function Customer360ProfileV2({
       customerId={customerId}
       composerComms={composerComms}
       composerReadScope={composerReadScope}
+      feedbackEnabled={feedbackEnabled}
       commsChannel={commsChannel}
       setCommsChannel={setCommsChannel}
       commsHasMore={commsHasMore}

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Input, Select, Button, Field } from "../../components/ui";
+import { Input, Select, Button, Field, ActionFeedback } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
 
 function customerEditValues(c) {
@@ -31,17 +31,20 @@ function customerEditValues(c) {
 
 // The page owns this controller's lifetime; both directory presentations use
 // the same draft, even while the customer workspace temporarily hides the list.
-export default function useCustomerEditor(onSaved, stages) {
+export default function useCustomerEditor(onSaved, stages, feedbackEnabled = false) {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const startEdit = (c) => {
     setEditingId(c.id);
     setEditForm(customerEditValues(c));
+    setSaveError("");
   };
 
   const saveEdit = async () => {
     setSavingEdit(true);
+    setSaveError("");
     try {
       await adminFetch(`/admin/customers/${editingId}`, {
         method: "PUT",
@@ -50,7 +53,9 @@ export default function useCustomerEditor(onSaved, stages) {
       setEditingId(null);
       onSaved();
     } catch (e) {
-      window.alert("Save failed: " + e.message);
+      const message = "Save failed: " + e.message;
+      if (feedbackEnabled) setSaveError(message);
+      else window.alert(message);
     }
     setSavingEdit(false);
   };
@@ -63,15 +68,19 @@ export default function useCustomerEditor(onSaved, stages) {
         editForm={editForm}
         setEditForm={setEditForm}
         savingEdit={savingEdit}
+        saveError={feedbackEnabled ? saveError : ""}
         saveEdit={saveEdit}
         stages={stages}
-        onCancel={() => setEditingId(null)}
+        onCancel={() => {
+          setEditingId(null);
+          setSaveError("");
+        }}
       />
     ),
   };
 }
 
-function CustomerEditor({ editForm, setEditForm, savingEdit, saveEdit, stages, onCancel }) {
+function CustomerEditor({ editForm, setEditForm, savingEdit, saveError, saveEdit, stages, onCancel }) {
   return <section aria-label="Edit customer" className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
     <h2 className="text-16 font-medium text-ink-primary mb-3">Edit customer</h2>
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
@@ -113,6 +122,7 @@ function CustomerEditor({ editForm, setEditForm, savingEdit, saveEdit, stages, o
         })}
       </div>
     </fieldset>)}
+    {saveError && <ActionFeedback error onRetry={savingEdit ? undefined : saveEdit} className="mb-3">{saveError}</ActionFeedback>}
     <div className="ui-record-actions">
       <Button onClick={saveEdit} loading={savingEdit}>{savingEdit ? "Saving…" : "Save"}</Button>
       <Button variant="ghost" onClick={onCancel}>Cancel</Button>
