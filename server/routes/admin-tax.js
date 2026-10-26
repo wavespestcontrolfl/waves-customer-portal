@@ -1563,6 +1563,56 @@ router.get('/export/depreciation', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Time-tracking detail — INFORMATIONAL ONLY, one row per technician-day for
+// laborToCSV: the standalone labor export and the tax package's
+// labor-timetracking-informational.csv. The imputed cost column prices job
+// minutes at the internal job-costing rate; the sole technician is the
+// owner, whose own labor is NOT a deductible expense, so this schedule
+// deliberately does NOT feed pnl.csv (its COGS labor line is real
+// payroll/contract-labor spend only, which flows through expense
+// categories). The summary table stores MINUTES (work_date keyed), not a
+// cost column — the old queries filtered a nonexistent `date` column, so
+// both exports had been empty since the feature shipped.
+async function laborTimeRows(sd, ed, { excludeW2 = false } = {}) {
+  // Effective-dated rates: each day costs at the rate in force that day
+  // (rateAsOf) — same basis as per-visit job costing.
+  const rateRows = await db('company_financials')
+    .where('effective_date', '<=', ed)
+    .orderBy('effective_date', 'asc')
+    .select('effective_date', 'loaded_labor_rate')
+    .catch(() => []);
+  const summaryQuery = db('time_entry_daily_summary as s')
+    .leftJoin('technicians as t', 's.technician_id', 't.id')
+    .whereBetween('s.work_date', [sd, ed])
+    .orderBy('s.work_date', 'desc')
+    .select('s.*', 't.name as technician_name');
+  // excludeW2 (the tax package, under GATE_TAX_PACKAGE_W2_LABOR): a W-2 hire's
+  // time is not the owner's own time, and the hire's pay goes in
+  // w2-payroll.csv instead.
+  if (excludeW2) taxPackageW2.whereNotW2(summaryQuery);
+  const rows = await summaryQuery;
+  return rows.map(r => {
+    // dateCellStr: node-postgres DATE cells are local-midnight Dates —
+    // etDateString(new Date(...)) printed the previous calendar day.
+    const day = dateCellStr(r.work_date);
+    const jobHours = (parseFloat(r.total_job_minutes) || 0) / 60;
+    const dayRate = rateAsOf(rateRows, day);
+    return {
+      date: day,
+      technician_name: r.technician_name || '',
+      // All job hours reported as regular (overtime_hours 0): the summary's
+      // overtime_minutes tracks SHIFT overtime, not job-time OT, and the
+      // owner-operator draws no OT premium — feeding it to laborToCSV would
+      // add a 1.5× pay line on top of hours already counted as regular.
+      total_hours: jobHours.toFixed(2),
+      overtime_hours: 0,
+      jobs: r.job_count || 0,
+      rate: dayRate,
+      total_cost: (jobHours * dayRate).toFixed(2),
+    };
+  });
+}
+
 router.get('/export/labor', async (req, res, next) => {
   try {
     const { start_date, end_date } = req.query;
@@ -1572,10 +1622,8 @@ router.get('/export/labor', async (req, res, next) => {
 
     let summaries = [];
     try {
-      summaries = await db('time_entry_daily_summary')
-        .where('date', '>=', sd).where('date', '<=', ed)
-        .orderBy('date', 'desc');
-    } catch { /* */ }
+      summaries = await laborTimeRows(sd, ed);
+    } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     const csvStr = csv.laborToCSV(summaries);
     res.setHeader('Content-Type', 'text/csv');
@@ -1755,55 +1803,12 @@ router.get('/export/tax-package', async (req, res, next) => {
       }));
     } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
-    // Time-tracking detail — INFORMATIONAL ONLY. The imputed cost column
-    // prices job minutes at the internal job-costing rate; the sole
-    // technician is the owner, whose own labor is NOT a deductible expense,
-    // so this schedule deliberately does NOT feed pnl.csv (its COGS labor
-    // line is real payroll/contract-labor spend only, which flows through
-    // expense categories). The summary table stores MINUTES (work_date
-    // keyed), not a cost column — the old query filtered a nonexistent
-    // `date` column, so this export had been empty since the feature
-    // shipped.
+    // Time-tracking detail (laborTimeRows, above /export/labor).
     // Guarded: a suite that mocks feature-gates without this reader keeps today's package.
     const w2Labor = typeof taxPackageW2LaborLive === 'function' && taxPackageW2LaborLive();
     let laborSummaries = [];
     try {
-      // Effective-dated rates: each day costs at the rate in force that day
-      // (rateAsOf) — same basis as per-visit job costing.
-      const rateRows = await db('company_financials')
-        .where('effective_date', '<=', ed)
-        .orderBy('effective_date', 'asc')
-        .select('effective_date', 'loaded_labor_rate')
-        .catch(() => []);
-      const summaryQuery = db('time_entry_daily_summary as s')
-        .leftJoin('technicians as t', 's.technician_id', 't.id')
-        .whereBetween('s.work_date', [sd, ed])
-        .orderBy('s.work_date', 'desc')
-        .select('s.*', 't.name as technician_name');
-      // GATE_TAX_PACKAGE_W2_LABOR: a W-2 hire's time is not the owner's own time,
-      // and the hire's pay goes in w2-payroll.csv instead.
-      if (w2Labor) taxPackageW2.whereNotW2(summaryQuery);
-      const rows = await summaryQuery;
-      laborSummaries = rows.map(r => {
-        // dateCellStr: node-postgres DATE cells are local-midnight Dates —
-        // etDateString(new Date(...)) printed the previous calendar day.
-        const day = dateCellStr(r.work_date);
-        const jobHours = (parseFloat(r.total_job_minutes) || 0) / 60;
-        const dayRate = rateAsOf(rateRows, day);
-        return {
-          date: day,
-          technician_name: r.technician_name || '',
-          // All job hours reported as regular (overtime_hours 0): the summary's
-          // overtime_minutes tracks SHIFT overtime, not job-time OT, and the
-          // owner-operator draws no OT premium — feeding it to laborToCSV would
-          // add a 1.5× pay line on top of hours already counted as regular.
-          total_hours: jobHours.toFixed(2),
-          overtime_hours: 0,
-          jobs: r.job_count || 0,
-          rate: dayRate,
-          total_cost: (jobHours * dayRate).toFixed(2),
-        };
-      });
+      laborSummaries = await laborTimeRows(sd, ed, { excludeW2: w2Labor });
     } catch (e) { if (e?.code !== '42P01') throw e; /* missing table in dev only */ }
 
     // GATE_TAX_PACKAGE_W2_LABOR: finalized W-2 pay checks paid in the window, read
@@ -1849,7 +1854,10 @@ router.get('/export/tax-package', async (req, res, next) => {
     archive.append(csv.pnlToCSV(pnlData), { name: 'pnl.csv' });
     if (homeOffice) archive.append(csv.homeOfficeToCSV(homeOffice, sharedBills.homeOfficeDeduction(homeOffice)), { name: 'home-office.csv' });
     if (sharedBillRows && sharedBillRows.length) archive.append(csv.sharedBillsToCSV(sharedBillRows), { name: 'shared-bills.csv' });
-    archive.append(csv.generateReadme(year, pnlData, { w2Labor }), { name: 'README.txt' });
+    // GATE_PNL_PAY_RUN_WAGES: the README says the P&L counts the same pay runs. Guarded
+    // so a suite that mocks feature-gates without this reader keeps today's README.
+    const payRunWages = typeof pnlPayRunWagesLive === 'function' && pnlPayRunWagesLive();
+    archive.append(csv.generateReadme(year, pnlData, { w2Labor, payRunWages }), { name: 'README.txt' });
 
     await archive.finalize();
   } catch (err) { next(err); }
@@ -1870,7 +1878,7 @@ const sharedBills = require('../services/tax-shared-bills');
 const taxYears = require('../services/tax-years');
 const returnEngine = require('../services/tax-return-engine');
 const { hasYearConstants, YEARS: TAX_YEAR_CONSTANTS } = require('../services/tax-year-constants');
-const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive, taxPackageW2LaborLive } = require('../config/feature-gates');
+const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive, taxPackageW2LaborLive, pnlPayRunWagesLive } = require('../config/feature-gates');
 const taxPackageW2 = require('../services/tax-package-w2');
 const worksheets = require('../services/tax-worksheets');
 

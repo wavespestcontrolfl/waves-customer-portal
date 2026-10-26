@@ -5,7 +5,7 @@
 // scheduled visit, and the server preview of the "Automatic" review send time.
 import { useEffect, useRef, useState } from 'react';
 import { adoptSeed, reentrySeedsFrom, stepReentry } from '../lib/fast-complete-wrap-up';
-import { reviewPreviewSubmitVerdict, reviewSendPreviewPath } from '../lib/completion-review-timing';
+import { firstReviewAskFrom, reviewPreviewSubmitVerdict, reviewSendPreviewPath } from '../lib/completion-review-timing';
 
 const PREVIEW_POLL_MS = 60 * 1000;
 
@@ -57,19 +57,36 @@ export function useNextVisit({ enabled, customerId, requestRef }) {
 // time of day). Off, it is forgotten: a preview cached from before must not count as known at submit.
 // `recheck(reviewTiming, { reportTextExpected })` is the submit-time read: it applies a fresh answer and returns the verdict
 // (null to go on, else { message }), per the full form's guards (codex #4140 r3, r13, r18).
-export function useReviewPreview({ enabled, willReview, serviceId, serviceType, requestRef }) {
+// `firstAskOpen`: the box is a choice (no suppression), so a first-ask verdict can matter while it is off.
+export function useReviewPreview({ enabled, willReview, firstAskOpen = true, serviceId, serviceType, requestRef }) {
   const [preview, setPreview] = useState(null);
+  // GATE_REVIEW_FIRST_ASK_LOCK: the server's read that this customer was never asked. Kept when the
+  // preview is cleared (box off), since the box still needs its label and its reason then.
+  const [firstAsk, setFirstAsk] = useState(false);
   const previewRef = useRef(null);
   previewRef.current = preview;
   const failureNoticedRef = useRef(false);
-  const fetchPreview = () => requestRef.current(reviewSendPreviewPath(serviceType)).catch(() => null);
+  const fetchPreview = () => requestRef.current(reviewSendPreviewPath(serviceType, serviceId)).catch(() => null);
   useEffect(() => {
     if (!enabled || !willReview) {
       setPreview(null);
-      return undefined;
+      if (!enabled || !firstAskOpen) return undefined;
+      // One read still names the first ask while the box is off (a failed first read, then the box
+      // turned off), so the box knows the server will keep that ask on. No poll; the timing preview
+      // stays unknown. The full form's CompletionPanel does the same.
+      let gone = false;
+      fetchPreview().then((data) => {
+        const verdict = firstReviewAskFrom(data);
+        if (!gone && verdict !== null) setFirstAsk(verdict);
+      });
+      return () => { gone = true; };
     }
     let cancelled = false;
     const load = () => fetchPreview().then((data) => {
+      // The first-ask verdict lands even if the box was just turned off (that stops the poll): the box
+      // then turns itself back on unless the one reason was confirmed.
+      const verdict = firstReviewAskFrom(data);
+      if (verdict !== null) setFirstAsk(verdict);
       if (cancelled) return;
       setPreview(data);
       if (data) failureNoticedRef.current = false;
@@ -77,7 +94,7 @@ export function useReviewPreview({ enabled, willReview, serviceId, serviceType, 
     load();
     const timer = setInterval(load, PREVIEW_POLL_MS);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [enabled, serviceId, serviceType, willReview, requestRef]);
+  }, [enabled, firstAskOpen, serviceId, serviceType, willReview, requestRef]);
 
   const recheck = async (reviewTiming, { reportTextExpected = true } = {}) => {
     const fresh = await fetchPreview();
@@ -88,5 +105,5 @@ export function useReviewPreview({ enabled, willReview, serviceId, serviceType, 
     if (verdict?.dropShown) setPreview(null);
     return verdict;
   };
-  return { preview, previewRef, recheck };
+  return { preview, previewRef, recheck, firstAsk };
 }

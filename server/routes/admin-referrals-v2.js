@@ -7,6 +7,10 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
+const inbound = require('../services/referral-inbound');
+const { referralInboundConfirmLive } = require('../config/feature-gates');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -130,6 +134,56 @@ router.get('/queue', async (req, res, next) => {
     const referrals = await query;
     res.json({ referrals });
   } catch (err) { next(err); }
+});
+
+// =========================================================================
+// Inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM, dark): plan customers who
+// came in through a referral link or named a referrer, waiting for the office
+// to confirm the referrer. services/referral-inbound.js holds the rules.
+// =========================================================================
+router.get('/inbound', async (req, res, next) => {
+  try {
+    if (!referralInboundConfirmLive()) return res.json({ enabled: false, items: [] });
+    const items = await inbound.listInboundReferrals();
+    res.json({ enabled: true, items });
+  } catch (err) { next(err); }
+});
+
+function sendInboundError(res, err, next) {
+  if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code });
+  return next(err);
+}
+
+// POST /inbound/:customerId/confirm — the office names the referrer.
+router.post('/inbound/:customerId/confirm', async (req, res, next) => {
+  try {
+    if (!referralInboundConfirmLive()) return res.status(404).json({ error: 'Not found' });
+    const { customerId } = req.params;
+    const referrerCustomerId = String(req.body?.referrerCustomerId || '');
+    if (!UUID_RE.test(customerId) || !UUID_RE.test(referrerCustomerId)) {
+      return res.status(400).json({ error: 'customerId and referrerCustomerId are required' });
+    }
+    const result = await inbound.confirmInboundReferral({
+      customerId,
+      referrerCustomerId,
+      reviewedBy: UUID_RE.test(String(req.technicianId || '')) ? req.technicianId : null,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) { sendInboundError(res, err, next); }
+});
+
+// POST /inbound/:customerId/dismiss — not a referral; leaves the list for good.
+router.post('/inbound/:customerId/dismiss', async (req, res, next) => {
+  try {
+    if (!referralInboundConfirmLive()) return res.status(404).json({ error: 'Not found' });
+    const { customerId } = req.params;
+    if (!UUID_RE.test(customerId)) return res.status(400).json({ error: 'customerId is required' });
+    const result = await inbound.dismissInboundReferral({
+      customerId,
+      reviewedBy: UUID_RE.test(String(req.technicianId || '')) ? req.technicianId : null,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) { sendInboundError(res, err, next); }
 });
 
 // =========================================================================

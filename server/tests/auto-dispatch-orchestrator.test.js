@@ -1828,13 +1828,16 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
-  test('the same refusal with no proofreader check: no_change, and the apply is handed the start-point lookup', async () => {
+  test('the same refusal with no proofreader check: no_change, and the apply is handed the start-point lookup and the current day\'s technician', async () => {
     await applyMode(async () => {
+      // An unassigned visit's current placement scored on t2's day (candidate-slots.js currentDayTechs).
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: { ...CURRENT, day_technician_id: 't2' }, candidates: [CAND_BIG, CAND_MODERATE] });
       apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('start address changed'), { code: 'START_POINT_CHANGED', statusCode: 409 }));
       const res = await runAutoDispatch({ mode: 'apply' });
       expect(res).toMatchObject({ changed: 0, failed: 0 });
       expect(lastDecision('no_change').reason_code).toBe('START_POINT_CHANGED');
       expect(typeof apply.applyAutoDispatchMove.mock.calls[0][3].startPointFor).toBe('function');
+      expect(apply.applyAutoDispatchMove.mock.calls[0][3].sourceDayTechnicianId).toBe('t2');
     });
   });
 

@@ -4,6 +4,9 @@
 // Manual edits (delete, move, add) are an overlay on the CURRENT line geometry only. Any change to the
 // lines re-runs auto-placement and clears the overlay (applyGeometry), keeping one snapshot so the
 // notice's Undo can put the previous lines and edits back in a single step.
+//
+// Risers, the pump and no-mist zones are not part of the lines. They live in useMistingLayoutExtras, are
+// never cleared by a line change, and are merged into the object this hook returns.
 import { useMemo, useRef, useState } from 'react';
 import { MAP_HEIGHT, MAP_WIDTH } from '../../tech/treatmentZoneSpray';
 import {
@@ -12,6 +15,7 @@ import {
   nearestPointOnLines,
   placeNozzles,
 } from '../../../lib/mistingLayoutGeometry';
+import useMistingLayoutExtras from './useMistingLayoutExtras';
 
 const LINE_HIT_CSS_PX = 12;
 const VERTEX_HIT_CSS_PX = 14;
@@ -64,6 +68,7 @@ export default function useMistingLayoutState(mapState) {
   );
   const nozzles = useMemo(() => (placed ? applyNozzleEdits(placed.nozzles, edits) : []), [placed, edits]);
   const totals = useMemo(() => computeTotals(placed ? placed.lines : [], nozzles), [placed, nozzles]);
+  const extras = useMistingLayoutExtras(mapState, nozzles);
 
   // ── Changes to the lines ───────────────────────────────────────────────────
   // The one door for them. A change that alters the geometry re-places the nozzles, so it clears
@@ -161,6 +166,7 @@ export default function useMistingLayoutState(mapState) {
   };
 
   return {
+    ...extras,
     ready,
     mode,
     chooseMode,

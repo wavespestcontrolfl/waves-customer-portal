@@ -67,6 +67,8 @@ import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/sche
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import {
   MAX_REVIEW_DELAY_MS,
+  COMPLAINT_ON_SITE_REASON,
+  FIRST_ASK_OPT_OUT_PROMPT,
   REVIEW_TIMING_DEFAULT,
   REVIEW_TIMING_OPTIONS,
   completionReportTextExpected,
@@ -75,9 +77,13 @@ import {
   completionTimeOnSiteBody,
   completionWillReview,
   customReviewTimeProblem,
+  firstReviewAskFrom,
   formatReentryStepperMinutes,
+  nextReviewChoice,
   normalizeReviewTiming,
+  reviewBoxLabel,
   reviewDelayMinutesOf,
+  reviewOptOutFields,
   reviewPreviewSubmitVerdict,
   reviewScheduledForOf,
 } from "../../lib/completion-review-timing";
@@ -6811,6 +6817,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
 const JOB_CARD_CHIP = {
   ok: { label: "OK", bg: "#F4F4F5", fg: "#3F3F46" },
+  // GATE_SPRAY_RAIN_RULES: rain likely but the dose stays on the card; neutral, as red is for a hold.
+  caution: { label: "Caution", bg: "#F4F4F5", fg: "#3F3F46" },
   hold: { label: "Hold", bg: "#C8312F", fg: "#FFFFFF" },
   unknown: { label: "Unknown", bg: "#F4F4F5", fg: "#71717A" },
 };
@@ -12367,6 +12375,10 @@ export function CompletionPanel({
   // identically.
   const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
+  // First review ask (GATE_REVIEW_FIRST_ASK_LOCK): the server's read that this visit's customer was
+  // never asked, and the one reason the tech confirmed for turning the box off.
+  const [reviewFirstAsk, setReviewFirstAsk] = useState(false);
+  const [reviewOptOutReason, setReviewOptOutReason] = useState(null);
   const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
   const [reviewCustomAt, setReviewCustomAt] = useState("");
   // Server preview of the "Automatic" send time + whether cadence mode owns
@@ -14172,13 +14184,13 @@ export function CompletionPanel({
   // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
   const previewFailureNoticedRef = useRef(false);
   const fetchReviewSendPreview = useCallback(() => {
-    const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
+    const qs = new URLSearchParams({ serviceType: service?.serviceType || "", ...(service?.id ? { serviceId: String(service.id) } : {}) });
     return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
       headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
     })
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
-  }, [service?.serviceType]);
+  }, [service?.id, service?.serviceType]);
   useEffect(() => {
     if (!willReview || oneTimeRecapOnly) {
       // Polling stops here; a preview cached from before must not survive
@@ -14186,10 +14198,22 @@ export function CompletionPanel({
       // the submit guard would trust it (codex #4140 r24 P1). Unknown reads
       // as fail-closed; re-enabling the controls re-fetches.
       setReviewSendPreview(null);
-      return undefined;
+      if (oneTimeRecapOnly) return undefined;
+      // One read still names the first ask (GATE_REVIEW_FIRST_ASK_LOCK), so a box restored off from a
+      // draft knows the server will keep that ask on. No poll, and the timing preview stays unknown.
+      let gone = false;
+      fetchReviewSendPreview().then((data) => {
+        const firstAsk = firstReviewAskFrom(data);
+        if (!gone && firstAsk !== null) setReviewFirstAsk(firstAsk);
+      });
+      return () => { gone = true; };
     }
     let cancelled = false;
     const load = () => fetchReviewSendPreview().then((data) => {
+      // The first-ask verdict lands even if the box was just turned off (that stops the poll): the box
+      // then turns itself back on unless the one reason was confirmed.
+      const firstAsk = firstReviewAskFrom(data);
+      if (firstAsk !== null) setReviewFirstAsk(firstAsk);
       if (cancelled) return;
       setReviewSendPreview(data);
       if (data) previewFailureNoticedRef.current = false;
@@ -14201,6 +14225,17 @@ export function CompletionPanel({
     const timer = setInterval(load, 60 * 1000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [service?.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly]);
+  // A first ask stays on: a draft restored with the box off, or a verdict that lands late, turns it
+  // back on unless the tech already confirmed the one reason.
+  useEffect(() => {
+    if (reviewFirstAsk && !requestReview && !reviewOptOutReason) setRequestReview(true);
+  }, [reviewFirstAsk, requestReview, reviewOptOutReason]);
+  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk });
+  const handleReviewToggle = (checked) => {
+    const next = nextReviewChoice({ checked, firstAsk: reviewFirstAsk, confirmOptOut: () => window.confirm(FIRST_ASK_OPT_OUT_PROMPT) });
+    setRequestReview(next.requestReview);
+    setReviewOptOutReason(next.reviewOptOutReason);
+  };
   const recapStatusText = recapLoading
     ? "Drafting customer recap..."
     : recapError
@@ -15229,6 +15264,9 @@ export function CompletionPanel({
         sendSms,
         includePayLink,
         requestReview,
+        // The confirmed "Complaint on site" reason (GATE_REVIEW_FIRST_ASK_LOCK): without it a restored
+        // draft's box re-arms on.
+        reviewOptOutReason,
         clientPestRating,
         // Tells restore whether a null rating was a deliberate clear or an
         // untouched picker (pre-2026-09-24 drafts never set it).
@@ -15373,6 +15411,7 @@ export function CompletionPanel({
     sendSms,
     includePayLink,
     requestReview,
+    reviewOptOutReason,
     clientPestRating,
     clientPestRatingDefault,
     reviewTiming,
@@ -15535,6 +15574,7 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
+    setReviewOptOutReason(savedDraft.reviewOptOutReason === COMPLAINT_ON_SITE_REASON ? COMPLAINT_ON_SITE_REASON : null);
     // An untouched picker (legacy drafts stored null for it) keeps whatever
     // is showing now — including the first-visit 5; a tap or a deliberate
     // clear is restored and locks out the late prefill.
@@ -16907,6 +16947,7 @@ export function CompletionPanel({
     if (checked) {
       setSendSms(true);
       setRequestReview(true);
+      setReviewOptOutReason(null);
     }
   }
   function addProduct(product) {
@@ -18413,6 +18454,7 @@ export function CompletionPanel({
           ? undefined
           : (isInspectionVisit ? offerInspectionCredit : true),
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
+        ...reviewOptOutFields({ firstAsk: reviewFirstAsk, willReview, reviewOptOutReason }),
         reviewTiming: oneTimeRecapOnly ? "now" : reviewTiming,
         reviewDelayMinutes: selectedReviewDelayMinutes,
         reviewScheduledFor: oneTimeRecapOnly
@@ -21867,15 +21909,11 @@ export function CompletionPanel({
                   type="checkbox"
                   checked={willReview}
                   disabled={!!reviewSuppressionReason || oneTimeRecapOnly}
-                  onChange={(e) => setRequestReview(e.target.checked)}
+                  onChange={(e) => handleReviewToggle(e.target.checked)}
                   style={{ width: 18, height: 18, accentColor: M.ink }}
                 />{" "}
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
-                  {reviewSuppressionReason
-                    ? "Review request suppressed"
-                    : oneTimeRecapOnly
-                      ? "Review request included"
-                      : "Send review request"}
+                  {reviewBoxText}
                 </span>{" "}
               </label>{" "}
               {willReview && !oneTimeRecapOnly && (
@@ -24152,15 +24190,9 @@ export function CompletionPanel({
               type="checkbox"
               checked={willReview}
               disabled={!!reviewSuppressionReason || oneTimeRecapOnly}
-              onChange={(e) => setRequestReview(e.target.checked)}
+              onChange={(e) => handleReviewToggle(e.target.checked)}
             />{" "}
-            <span>
-              {reviewSuppressionReason
-                ? "Review request suppressed"
-                : oneTimeRecapOnly
-                  ? "Review request included"
-                  : "Send review request"}
-            </span>{" "}
+            <span>{reviewBoxText}</span>{" "}
           </label>
           {willReview && !oneTimeRecapOnly && (
             <div

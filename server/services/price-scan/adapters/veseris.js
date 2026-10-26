@@ -10,6 +10,7 @@
 const { makeAdapter, searchQuery } = require('./base');
 
 const DEFAULT_LOGIN_URL = 'https://veseris.com/default/customer/account/login/';
+const ACCOUNT_URL = 'https://veseris.com/default/customer/account/';
 
 // Magento's wrong-password / locked-account banner on the login page.
 const LOGIN_ERROR_SELECTOR = '.message-error, div.message.error, [data-ui-id$="message-error"]';
@@ -54,9 +55,13 @@ const adapter = makeAdapter({
 
   // Log in to the Magento storefront. The VISIBLE form uses login[username]/login[password]
   // (there's a hidden header mini-login with #customer-email — don't target that). Veseris
-  // resolves login via an OAuth redirect chain (?code=...), which is slow + a bit flaky, so
-  // we wait for the redirect to actually RESOLVE (password field gone AND off the login URL)
-  // rather than a fixed pause, and retry once. Throws on failure so base.js never scrapes an
+  // resolves login via an OAuth redirect (?code=...&userState=AuthenticatedNotRegistered). On
+  // 2026-10-26 that landing URL kept its `?code=` marker for good while the session was fully
+  // signed in and priced (account dashboard loads, search rows show account prices), so the URL
+  // marker is NOT a sign of a half-finished login. We count "password field gone AND off the
+  // login URL" as a candidate success, then CONFIRM it by loading the account page. A session
+  // that is already signed in is redirected away from the login URL; that case is confirmed
+  // the same way, without typing anything. Throws on failure so base.js never scrapes an
   // unauthenticated (list-price / gated) session.
   authenticate: async (page, creds) => {
     const LOGIN_TIMEOUT = 45000;
@@ -65,6 +70,17 @@ const adapter = makeAdapter({
     if (!isTrustedVeserisLoginUrl(loginUrl)) {
       throw new Error('veseris login aborted: login URL is not an https veseris.com host');
     }
+    // A signed-in session shows the account dashboard; a signed-out one is bounced to the
+    // login page (URL or "Customer Login" title). Any failure to load it means not confirmed.
+    const confirmSignedIn = async () => {
+      try {
+        await page.goto(ACCOUNT_URL, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT });
+        if (!isTrustedVeserisLoginUrl(page.url()) || /customer\/account\/login/i.test(page.url())) return false;
+        return !/customer login/i.test(await page.title());
+      } catch {
+        return false;
+      }
+    };
     const attempt = async () => {
       await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT });
       // Re-validate the LANDED host: goto follows redirects, and we type the password into
@@ -73,6 +89,13 @@ const adapter = makeAdapter({
       if (!isTrustedVeserisLoginUrl(page.url())) {
         throw new Error('veseris login aborted: navigation redirected off the trusted host');
       }
+      // Veseris sends an already-signed-in session from the login URL to the account page.
+      // Nothing to type: confirm the session and stop.
+      if (!/customer\/account\/login/i.test(page.url())) return (await confirmSignedIn()) ? 'ok' : 'stalled';
+      // A fresh context shows a cookie-consent modal that can intercept the submit click.
+      // Reject it when present; never fail the login over it.
+      const reject = page.locator('.iubenda-cs-reject-btn:visible').first();
+      if (await reject.count().catch(() => 0)) await reject.click({ timeout: 3000 }).catch(() => {});
       const pass = page.locator('input[name="login[password]"]:visible').first();
       await page.locator('input[name="login[username]"]:visible').first().waitFor({ state: 'visible', timeout: 30000 });
       // Validate the host AND write BOTH credentials in ONE page-context execution — no await
@@ -101,18 +124,14 @@ const adapter = makeAdapter({
         'form:has(input[name="login[password]"]) button[type="submit"]:visible, form:has(input[name="login[password]"]) button:visible',
       ).first();
       await submit.click().catch(() => pass.press('Enter'));
-      // Wait for the OAuth login to FULLY settle into the priced/registered session: password
-      // field gone, off the login page, AND past the transient code-exchange state. Veseris
-      // redirects through `?code=...&userState=AuthenticatedNotRegistered` while it finalizes
-      // the session — and shows $0.00 prices until it does — so proceeding then yields a
-      // gated, unpriced scrape. Wait for that transient marker to clear. ALSO stop early when
-      // Magento answers with its error banner: a rejected sign-in must be reported at once,
-      // not waited out (45 s) and retried — every retry is another failed attempt on a
-      // lockout-protected account.
+      // Wait for the sign-in to leave the login page: password field gone AND off the login URL
+      // (the `?code=` landing counts). ALSO stop early when Magento answers with its error
+      // banner: a rejected sign-in must be reported at once, not waited out (45 s) and retried —
+      // every retry is another failed attempt on a lockout-protected account.
       const settled = await page.waitForFunction((errSel) => {
         const pw = document.querySelector('input[name="login[password]"]');
-        const transient = /[?&]code=|AuthenticatedNotRegistered/i.test(location.href);
-        if ((!pw || !pw.offsetParent) && !/customer\/account\/login/i.test(location.href) && !transient) return 'ok';
+        if ((!pw || !pw.offsetParent) && !/customer\/account\/login/i.test(location.href)
+          && /(^|\.)veseris\.com$/i.test(location.hostname)) return 'ok';
         const err = document.querySelector(errSel);
         if (err && (err.textContent || '').trim()) return 'rejected';
         return false;
@@ -120,14 +139,12 @@ const adapter = makeAdapter({
       if (settled === 'rejected') return 'rejected';
       await page.waitForTimeout(2000);
       const stillPw = await page.locator('input[name="login[password]"]:visible').count();
-      // Success requires the SAME conditions as the wait predicate (its timeout is swallowed,
-      // so re-check here): password form gone, off the login page, AND past the transient
-      // OAuth state (?code= mid-exchange or AuthenticatedNotRegistered). Otherwise a stalled
-      // exchange would be marked logged-in and the first scan would hit the gated/$0 session.
+      // Success needs the same conditions as the wait predicate (its timeout is swallowed, so
+      // re-check here) AND the account page confirming the session, so a stalled exchange is
+      // never marked logged-in and the first scan never hits the gated/$0 session.
       const url = page.url();
-      const transient = /[?&]code=|AuthenticatedNotRegistered/i.test(url);
-      const onLoginPage = /customer\/account\/login/i.test(url);
-      return stillPw === 0 && !transient && !onLoginPage ? 'ok' : 'stalled';
+      const candidate = stillPw === 0 && isTrustedVeserisLoginUrl(url) && !/customer\/account\/login/i.test(url);
+      return candidate && (await confirmSignedIn()) ? 'ok' : 'stalled';
     };
     // Retry only a STALLED login (transient redirect / rate-limit). A REJECTED one (wrong
     // username or password, or a temporarily locked account) is final: retrying cannot fix it

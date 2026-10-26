@@ -267,6 +267,11 @@ describe('Finalized run', () => {
     fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
     const dialog = await screen.findByRole('dialog');
     const stub = await within(dialog).findByLabelText('Pay stub');
+    const fieldDocument = stub.querySelector('.waves-field-document-body');
+    expect(fieldDocument).toHaveClass('field-document-scroll', 'pay-stub');
+    expect(within(fieldDocument).getByRole('heading', { level: 1, name: 'Pay stub' })).toBeInTheDocument();
+    expect(within(fieldDocument).getByText('Controlled staff document')).toBeInTheDocument();
+    expect(fieldDocument.querySelector('img')).toBeNull();
     expect(stub).toHaveTextContent('Waves Pest Control, LLC');
     expect(stub).toHaveTextContent('SSN ending 4321');
     expect(stub).toHaveTextContent('Pay period Oct 12, 2026 to Oct 18, 2026');
@@ -278,7 +283,10 @@ describe('Finalized run', () => {
     expect(within(table).getByText('Net pay').closest('tr')).toHaveTextContent('$812.63$1,625.26');
     expect(stub.textContent).not.toMatch(/employer tax|FUTA|reemployment/i);
     expect(stub).toHaveTextContent('Check number1001');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Print' }));
+    const printButton = within(dialog).getByRole('button', { name: 'Print' });
+    expect(fieldDocument).not.toContainElement(printButton);
+    expect(printButton.closest('.waves-field-no-print')).not.toBeNull();
+    fireEvent.click(printButton);
     expect(print).toHaveBeenCalledTimes(1);
     print.mockRestore();
   });

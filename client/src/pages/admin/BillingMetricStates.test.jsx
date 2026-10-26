@@ -2,6 +2,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import BillingRecoveryPage from "./BillingRecoveryPage";
 import PayerDetailSheet from "./PayerDetailSheet";
@@ -20,7 +21,7 @@ it("keeps pending and failed recovery totals unknown while preserving successful
     return response({ accounts: [], count: 0, atRisk: 0 });
   });
   vi.stubGlobal("fetch", fetch);
-  render(<BillingRecoveryPage />);
+  render(<MemoryRouter initialEntries={["/admin/billing-recovery"]}><BillingRecoveryPage /></MemoryRouter>);
   expect(screen.queryByText("$0.00")).not.toBeInTheDocument();
   await act(async () => release(response({ error: "Recovery unavailable" }, 503)));
   await screen.findByText("Recovery unavailable");

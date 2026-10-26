@@ -7,6 +7,13 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
+import {
+  FieldDocumentBody,
+  FieldFooter,
+  FieldMasthead,
+  FieldTitle,
+} from '../components/FieldDocument';
+import './PriceChangeNoticePage.css';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface } from '../glass/glass-engine';
 import { CUSTOMER_SURFACE } from '../theme-customer';
@@ -19,7 +26,6 @@ import {
   LH,
   SP,
   RADIUS,
-  SHADOW,
 } from '../theme-doc';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -27,7 +33,6 @@ const NAVY = '#04395E';
 
 const SURFACE = {
   page: DOC.page,
-  card: DOC.surface,
   border: DOC.border,
   text: DOC.ink,
   body: DOC.muted,
@@ -37,27 +42,19 @@ const SURFACE = {
   detailBg: '#F9F8F5',
 };
 
-const PRINT_STYLE = `
-@media print {
-  body { background: white !important; }
-  .pcn-no-print, [data-brand-footer] { display: none !important; }
-  .pcn-card { box-shadow: none !important; border: none !important; }
-}
-`;
-
 const H2 = { fontFamily: DOC_FONT_SERIF, fontSize: FS.h3, fontWeight: FW.semibold, color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading };
 const BODY = { fontSize: FS.bodyLg, lineHeight: LH.body, color: SURFACE.body, margin: `0 0 ${SP.lg}px` };
 
 function RateRow({ label, value, sub, big, last }) {
   return (
-    <div style={{
+    <div className="price-change-rate-row" style={{
       display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: SP.md,
       padding: `${SP.xs}px 0`, borderBottom: last ? 'none' : `1px solid ${SURFACE.border}`,
     }}>
-      <span style={{ fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</span>
-      <span style={{ textAlign: 'right', fontSize: big ? FS.h3 : FS.bodyLg, color: SURFACE.text, fontWeight: big ? FW.bold : FW.semibold }}>
+      <span className="price-change-meta" style={{ fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</span>
+      <span className={big ? 'price-change-section-value' : 'price-change-prose'} style={{ textAlign: 'right', fontSize: big ? FS.h3 : FS.bodyLg, color: SURFACE.text, fontWeight: big ? FW.bold : FW.semibold }}>
         {value}
-        {sub && <span style={{ display: 'block', fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.muted }}>{sub}</span>}
+        {sub && <span className="price-change-meta" style={{ display: 'block', fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.muted }}>{sub}</span>}
       </span>
     </div>
   );
@@ -88,16 +85,11 @@ function assuranceFor(lines) {
 function RateReviewNotice({ data }) {
   const { review } = data;
   const lines = review.lines || [];
+  if (!lines.length) return null;
   const first = lines[0] || {};
   const several = lines.length > 1;
   return (
     <>
-      <h1 className="waves-print-h2" style={{
-        fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.bold,
-        color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading,
-      }}>
-        {new Set(lines.map((l) => l.effectiveDate)).size > 1 ? 'Your rates are changing' : `Your rate from ${first.effectiveDate}`}
-      </h1>
       <p style={BODY}>
         Hi {data.firstName}, this is your written notice, at least 30 days ahead, as promised when you signed up.
         {several ? ' Your rates are going up on the dates below.' : ` Your ${(first.service || 'service').toLowerCase()} rate is going up on ${first.effectiveDate}.`}
@@ -105,12 +97,12 @@ function RateReviewNotice({ data }) {
       </p>
 
       {lines.map((line, i) => (
-        <div key={`${line.service}-${i}`} data-glass="soft" style={{
+        <div key={`${line.service}-${i}`} className="doc-keep price-change-rate-card" data-glass="soft" style={{
           background: SURFACE.detailBg, borderRadius: RADIUS.input,
           padding: `${SP.md}px ${SP.lg}px`, margin: `0 0 ${SP.md}px`,
         }}>
           {several && line.service && (
-            <div style={{ fontSize: FS.bodyLg, fontWeight: FW.bold, color: SURFACE.text, marginBottom: SP.xs }}>{line.service}</div>
+            <div className="price-change-prose" style={{ fontSize: FS.bodyLg, fontWeight: FW.bold, color: SURFACE.text, marginBottom: SP.xs }}>{line.service}</div>
           )}
           <RateRow label="Current rate" value={rateLine(line, 'current')} />
           <RateRow label="New rate" value={rateLine(line, 'next')} big />
@@ -125,7 +117,7 @@ function RateReviewNotice({ data }) {
         </div>
       ))}
 
-      <h2 style={{ ...H2, marginTop: SP.lg }}>Why your rate specifically</h2>
+      <h2 className="field-section-heading" style={{ ...H2, marginTop: SP.lg }}>Why your rate specifically</h2>
       {lines.map((line, i) => line.why && (
         <p key={`why-${i}`} style={{ ...BODY, margin: `0 0 ${SP.md}px` }}>
           {several && line.service ? <strong style={{ color: SURFACE.text }}>{line.service}: </strong> : null}
@@ -135,19 +127,19 @@ function RateReviewNotice({ data }) {
 
       {review.costBlock && (
         <>
-          <h2 style={{ ...H2, marginTop: SP.lg }}>What changed this year</h2>
+          <h2 className="field-section-heading" style={{ ...H2, marginTop: SP.lg }}>What changed this year</h2>
           <p style={{ ...BODY, whiteSpace: 'pre-line' }}>{review.costBlock}</p>
         </>
       )}
 
-      <h2 style={H2}>What stays the same</h2>
+      <h2 className="field-section-heading" style={H2}>What stays the same</h2>
       <p style={BODY}>
         Same team, same products, same guarantee: activity between applications means we come back at no charge.
         Your schedule does not change. {assuranceFor(lines)}
         {review.hasPrepay ? ' Your prepaid year stays exactly as it is; the new amount applies only when your plan renews.' : ''}
       </p>
 
-      <div style={{
+      <div className="price-change-prose" style={{
         borderLeft: `4px solid ${SURFACE.calloutBorder}`,
         background: SURFACE.calloutBg,
         borderRadius: `0 ${RADIUS.input}px ${RADIUS.input}px 0`,
@@ -160,19 +152,6 @@ function RateReviewNotice({ data }) {
         after this date, by replying to your email, texting us, or from your portal.
       </div>
 
-      <a
-        href="/"
-        className="pcn-no-print"
-        data-glass-accent=""
-        data-glass-size="primary"
-        style={{
-          display: 'block', textAlign: 'center', textDecoration: 'none',
-          background: '#F0A500', color: NAVY, fontWeight: FW.bold, fontSize: FS.bodyLg,
-          borderRadius: 999, padding: '14px 20px', minHeight: 48, boxSizing: 'border-box',
-        }}
-      >
-        Open my portal
-      </a>
     </>
   );
 }
@@ -236,32 +215,30 @@ export default function PriceChangeNoticePage() {
         </CustomerColumn>
       )
       : (
-        <CustomerColumn style={{ fontFamily: DOC_FONT, color: SURFACE.text }}>
-          <DocumentActionBar shareTitle="Waves service pricing update" />
-          <div
-            className="pcn-card"
-            data-glass="card"
-            style={{
-              background: SURFACE.card, borderRadius: RADIUS.card,
-              border: `1px solid ${SURFACE.border}`,
-              boxShadow: SHADOW.card,
-              padding: '28px 24px 32px',
-            }}
-          >
+        <CustomerColumn className="price-change-page" style={{ fontFamily: DOC_FONT, color: SURFACE.text }}>
+          <div className="waves-field-no-print">
+            <DocumentActionBar shareTitle="Waves service pricing update" />
+          </div>
+          <FieldDocumentBody className="field-document-scroll price-change-document">
+            <FieldMasthead />
+            <FieldTitle
+              eyebrow={data.review ? 'Annual rate review' : 'Price change notice'}
+              title={data.review
+                ? (data.review.lines?.[0]?.effectiveDate
+                  && new Set((data.review.lines || []).map((line) => line.effectiveDate)).size === 1
+                    ? `Your rate from ${data.review.lines[0].effectiveDate}`
+                    : 'Your rates are changing')
+                : 'An update to your recurring service'}
+              reference={data.review ? 'Advance notice' : `Effective ${data.effectiveDate}`}
+            />
             {data.review ? <RateReviewNotice data={data} /> : (
               <>
-            <h1 className="waves-print-h2" style={{
-              fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.bold,
-              color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading,
-            }}>
-              An update to your recurring service
-            </h1>
             <p style={{ fontSize: FS.bodyLg, lineHeight: LH.body, color: SURFACE.body, margin: `0 0 ${SP.lg}px` }}>
               Hi {data.firstName} — thank you for trusting Waves Pest Control to protect your home.
               This is your formal advance notice of an upcoming adjustment to your recurring service price.
             </p>
 
-            <div data-glass="soft" style={{
+            <div className="doc-keep price-change-rate-card" data-glass="soft" style={{
               background: SURFACE.detailBg, borderRadius: RADIUS.input,
               padding: `${SP.md}px ${SP.lg}px`, margin: `0 0 ${SP.lg}px`,
             }}>
@@ -274,17 +251,17 @@ export default function PriceChangeNoticePage() {
                   display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
                   padding: `${SP.xs}px 0`, borderBottom: i < arr.length - 1 ? `1px solid ${SURFACE.border}` : 'none',
                 }}>
-                  <span style={{ fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                  <span className="price-change-meta" style={{ fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                     {label}
                   </span>
-                  <span style={{ fontSize: FS.bodyLg, color: SURFACE.text, fontWeight: FW.semibold }}>
+                  <span className="price-change-prose" style={{ fontSize: FS.bodyLg, color: SURFACE.text, fontWeight: FW.semibold }}>
                     {value}
                   </span>
                 </div>
               ))}
             </div>
 
-            <h2 style={{ fontFamily: DOC_FONT_SERIF, fontSize: FS.h3, fontWeight: FW.semibold, color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading }}>
+            <h2 className="field-section-heading" style={{ fontFamily: DOC_FONT_SERIF, fontSize: FS.h3, fontWeight: FW.semibold, color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading }}>
               What stays the same
             </h2>
             <p style={{ fontSize: FS.bodyLg, lineHeight: LH.body, color: SURFACE.body, margin: `0 0 ${SP.md}px` }}>
@@ -297,7 +274,7 @@ export default function PriceChangeNoticePage() {
               technicians, and the products and equipment required to protect your property effectively.
             </p>
 
-            <div style={{
+            <div className="price-change-prose" style={{
               borderLeft: `4px solid ${SURFACE.calloutBorder}`,
               background: SURFACE.calloutBg,
               borderRadius: `0 ${RADIUS.input}px ${RADIUS.input}px 0`,
@@ -314,7 +291,7 @@ export default function PriceChangeNoticePage() {
             )}
 
             <div style={{ marginTop: SP.lg, paddingTop: SP.lg, borderTop: `1px solid ${SURFACE.border}` }}>
-              <p style={{ fontSize: FS.body, color: SURFACE.muted, lineHeight: LH.body, margin: 0 }}>
+              <p className="price-change-meta" style={{ fontSize: FS.body, color: SURFACE.muted, lineHeight: LH.body, margin: 0 }}>
                 Questions about this change? Call or text us at{' '}
                 <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: SURFACE.text, fontWeight: FW.medium }}>
                   {data.supportPhone || WAVES_SUPPORT_PHONE_DISPLAY}
@@ -322,13 +299,32 @@ export default function PriceChangeNoticePage() {
                 {data.review ? '. Adam reads every reply.' : <>{' '}— we're happy to walk through it.</>}
               </p>
             </div>
-          </div>
+            <FieldFooter
+              label="Price change notice"
+              reference={data.review ? 'Advance notice' : `Effective ${data.effectiveDate}`}
+            />
+          </FieldDocumentBody>
+          {data.review && (
+            <a
+              href="/"
+              className="waves-field-no-print"
+              data-glass-accent=""
+              data-glass-size="primary"
+              style={{
+                display: 'block', textAlign: 'center', textDecoration: 'none',
+                background: '#F0A500', color: NAVY, fontWeight: FW.bold, fontSize: FS.bodyLg,
+                borderRadius: 999, padding: '14px 20px', minHeight: 48, boxSizing: 'border-box',
+                marginTop: SP.lg,
+              }}
+            >
+              Open my portal
+            </a>
+          )}
         </CustomerColumn>
       );
 
   return (
     <>
-      <style>{PRINT_STYLE}</style>
       <meta name="robots" content="noindex, nofollow" />
       <WavesShell variant="customer" topBar="solid">
         <div data-glass-clear="" style={{ flex: 1, background: SURFACE.page }}>
