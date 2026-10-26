@@ -648,6 +648,14 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
       expect(updates).toEqual([expect.objectContaining({ confirmation_sent: true, reminder_24h_sent: true })]);
     });
 
+    test('visit tomorrow but more than 24 hours away: still closed (the day, not the hour count, decides)', async () => {
+      confirmDb();
+      const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+      const tomorrowLate = parseETDateTime(`${etDateString(addETDays(new Date(), 1))}T23:30`);
+      await expect(confirm(tomorrowLate)).resolves.toBe(true);
+      expect(updates).toEqual([expect.objectContaining({ confirmation_sent: true, reminder_24h_sent: true })]);
+    });
+
     test('visit three days out: the 24h reminder stays armed', async () => {
       confirmDb();
       AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValue({ ok: true });
