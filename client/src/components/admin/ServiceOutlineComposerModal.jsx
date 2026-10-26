@@ -31,6 +31,7 @@ const TURF_OPTIONS = [
 const OUTLINE_PROGRAMS = {
   tree_shrub: { heading: "Tree & Shrub service outline", savedKey: "treeShrubServiceOutline" },
   pest_control: { heading: "Pest service outline", savedKey: "pestServiceOutline" },
+  mosquito: { heading: "Mosquito service outline", savedKey: "mosquitoServiceOutline" },
 };
 
 function statusTone(status) {
@@ -107,8 +108,9 @@ function timeAgo(value) {
 }
 
 export default function ServiceOutlineComposerModal({ estimate, adminFetch, onClose }) {
-  // The Estimates list opens a program's outline (Tree & Shrub GATE_TS_OUTLINE, Pest Control GATE_PEST_OUTLINE) with its
-  // outlineServiceLine; a program outline has no grass and no product cards. Every other open is the lawn outline.
+  // The Estimates list opens a program's outline (Tree & Shrub GATE_TS_OUTLINE, Pest Control GATE_PEST_OUTLINE, Mosquito
+  // GATE_MOSQUITO_OUTLINE) with its outlineServiceLine; a program outline has no grass and no product cards. Every other
+  // open is the lawn outline.
   const program = OUTLINE_PROGRAMS[estimate?.outlineServiceLine] || null;
   const savedOutline = program ? estimate?.[program.savedKey] : estimate?.lawnServiceOutline;
   const [turfType, setTurfType] = useState("");

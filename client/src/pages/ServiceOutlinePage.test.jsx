@@ -310,4 +310,35 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(rows.filter((row) => row.open).map((row) => row.querySelector('summary span').textContent)).toEqual(['Fall']);
     expect(screen.getByText('Fall watch-for line.')).toBeInTheDocument();
   });
+
+  // GATE_MOSQUITO_OUTLINE: a Mosquito packet names its program and draws the year as four season rows.
+  it('names the Mosquito program and draws the year as season rows, the build season open', async () => {
+    const seasons = [['Winter', 1], ['Spring', 4], ['Summer', 7], ['Fall', 10]];
+    const content = {
+      ...v13Content(),
+      serviceLine: 'mosquito',
+      title: 'Your Waves Mosquito Program Overview',
+      property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One routine for every yard' },
+      sections: [{
+        key: 'program_year',
+        title: 'Your Year At A Glance',
+        body: 'Every visit follows the same routine, so each season shows what is active.',
+        bullets: seasons.map(([label]) => `${label}: visit. At home: tip.`),
+        visual: {
+          type: 'months',
+          labels: {},
+          limitLabel: null,
+          months: seasons.map(([label, month]) => ({ month, label, name: label, main: [], asNeeded: [], limited: false, visit: `${label} watch-for line.`, atHome: `${label} tip.`, open: label === 'Fall' })),
+        },
+      }],
+    };
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
+    expect(screen.getByText('Mosquito Program')).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe('Your Mosquito Program Overview | Waves'));
+    const rows = [...sectionOf('Your Year At A Glance').querySelectorAll('details')];
+    expect(rows.map((row) => row.querySelector('summary span').textContent)).toEqual(['Winter', 'Spring', 'Summer', 'Fall']);
+    expect(rows.filter((row) => row.open).map((row) => row.querySelector('summary span').textContent)).toEqual(['Fall']);
+    expect(screen.getByText('Fall watch-for line.')).toBeInTheDocument();
+  });
 });

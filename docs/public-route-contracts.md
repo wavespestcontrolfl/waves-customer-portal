@@ -4055,7 +4055,11 @@ A Pest Control packet (`GATE_PEST_OUTLINE`, stamped `pest-v1-copy-1`) carries
 `serviceLine: 'pest_control'` and the same shape; its `program_year` section
 draws `months` with four season rows (`label` a season name such as `Winter`,
 no steps, `labels: {}`, `limitLabel: null`, the build month's season `open`);
-the page's label column grows to fit the word),
+the page's label column grows to fit the word. A Mosquito packet
+(`GATE_MOSQUITO_OUTLINE`, stamped `mosquito-v1-copy-1`) carries
+`serviceLine: 'mosquito'` and the same shape, with the same four season rows
+in its `program_year` section and `property.turfType: null`; a tile's text may
+be a service-report tip's words read by id at build time),
 `/api/public/estimates/:token/deposit-intent` (RETIRED VERDICT STUB —
 owner ruling 2026-08-10: acceptance deposits are permanently
 not-enforced. Token format gate + deposit rate limit, then an

@@ -332,6 +332,7 @@
  *   GATE_TS_WATCH_LIST=true (Tree & Shrub seasonal watch list, owner DRAFT 2026-10-01, tech-facing and storage only: the photo read gains this month's watch list (server/config/tree-shrub-watch-list.js, month in America/New_York) and may name an item as a possible SIGNAL (an optional watch_signals field that never changes a score), GET /:serviceId/tree-shrub/fast-context adds `watchList`, the Fast Complete sheet shows a "This month's watch list" block (Seen / Not seen, Add from watch list, an extent) that never blocks Done, and the technician's choices are FROZEN on the service record (structured_notes.treeShrubWatchItems). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsWatchListLive(). Ships DARK; off = the prompt and every result are byte-identical to before, fast-context has no watchList key and nothing is stored.)
  *   GATE_TS_OUTLINE=true (Tree & Shrub program overview, owner 2026-10-26 "also we need to go through other related outlines, etc and make sure they are more aligned like lawn outline", decision D4-A "do whatever you recommend": staff can build, preview, regenerate and send a Tree & Shrub outline from an estimate with a Tree & Shrub line (server/services/tree-shrub-service-outline.js, routes/admin-service-outlines.js serviceLine 'tree_shrub', the Estimates menu item, the composer), the lawn outline's customer page with the Tree & Shrub month list from the protocol's month cards, its products with the active ingredient and no rate, and its own text and email; packets stored with service_line tree_shrub and stamped content ts-v1-copy-1; ships DARK, read at call time via tsOutlineLive(); off = no Tree & Shrub outline can be built, regenerated or sent, the lawn outline and the Estimates list exactly as before, and a stored Tree & Shrub outline still opens from its link; the outline is sent only when staff press Send)
  *   GATE_PEST_OUTLINE=true (Pest Control program overview, owner 2026-10-26 "also we need to go through other related outlines, etc and make sure they are more aligned like lawn outline", decision D4-A "do whatever you recommend": staff can build, preview, regenerate and send a Pest Control outline from an estimate with a recurring pest line (server/services/pest-service-outline.js, routes/admin-service-outlines.js serviceLine 'pest_control', the Estimates menu item, the composer): the lawn outline's customer page with the year as four seasons, the inside rule of 2026-10-22, the plan's interior-spray and eave-sweep opt-outs, and the products read from the catalog with the active ingredient and no rate; packets stored with service_line pest_control and stamped content pest-v1-copy-1; ships DARK, read at call time via pestOutlineLive(); off = no Pest Control outline can be built, regenerated or sent, the other outlines and the Estimates list exactly as before, and a stored Pest Control outline still opens from its link; the outline is sent only when staff press Send)
+ *   GATE_MOSQUITO_OUTLINE=true (Mosquito program overview, owner 2026-10-26 "also we need to go through other related outlines, etc and make sure they are more aligned like lawn outline", decision D4-A "do whatever you recommend": staff can build, preview, regenerate and send a Mosquito outline from an estimate with a recurring mosquito program row (server/services/mosquito-service-outline.js, routes/admin-service-outlines.js serviceLine 'mosquito', the Estimates menu item, the composer): the lawn outline's customer page with the year as four seasons, the tips read by id from the service-report tip library (a sourced-only tip drops with GATE_TECH_TIP_SOURCES off), Bti dunks and mosquito stations only when the estimate holds them, and the products read from the active catalog rows with the active ingredient and no rate; packets stored with service_line mosquito and stamped content mosquito-v1-copy-1; ships DARK, read at call time via mosquitoOutlineLive(); off = no Mosquito outline can be built, regenerated or sent, the other outlines and the Estimates list exactly as before, and a stored Mosquito outline still opens from its link; the outline is sent only when staff press Send)
  *   GATE_TS_PEST_CHECK=true (Tree & Shrub live-insect check, owner 2026-10-05, tech-facing and storage only: GET /:serviceId/tree-shrub/fast-context adds `pestCheck`, the Fast Complete sheet shows a "Live insects found?" Yes / No block with insect-type chips, blocks Merit when only armored scale is picked, notes a live-finds-only product on a No, and the answers are FROZEN on the service record (structured_notes.treeShrubPestCheck). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsPestCheckLive(). Ships DARK; off = fast-context has no pestCheck key and nothing is stored.)
  *   GATE_ASSESSMENT_FAST_COMPLETE=true (Waves Assessment Fast Complete, owner 2026-10-09: the schedule payload carries `assessmentFastCompleteEnabled` for a visit whose completion profile is the assessment key, and admin Dispatch opens a one-screen sheet (talk note, photos, warm/cold/lost, recommended interests, the inspection credit toggle where the full form shows it) in place of the full form. Complete records the consultation outcome, then posts /complete with texts and the review ask off. Strict opt-in: exactly 'true', read at call time via assessmentFastCompleteLive(). Ships DARK; off = the full form as before.)
  *   GATE_LEAD_SERVICE_DISPLAY=true (Lead service names, owner 2026-10-09: the lead list and lead detail responses carry `service_display`, the lead's service named the way the booking catalog names it, and the Leads screen shows it with the stored text as a tooltip; lead search also matches the shown name. Display only: `leads.service_interest` is never rewritten and nothing is sent to a customer. Strict opt-in: exactly 'true', read at call time via leadServiceDisplayLive(). Ships DARK; off = the screen shows the stored text.)
@@ -4925,6 +4926,9 @@ const gates = {
   // Pest Control program overview (owner 2026-10-26). Boot-log entry only: the outline routes, the composer's
   // Estimates entry and pest-service-outline.js read GATE_PEST_OUTLINE at call time via pestOutlineLive().
   pestOutline: process.env.GATE_PEST_OUTLINE === 'true',
+  // Mosquito program overview (owner 2026-10-26). Boot-log entry only: the outline routes, the composer's
+  // Estimates entry and mosquito-service-outline.js read GATE_MOSQUITO_OUTLINE at call time via mosquitoOutlineLive().
+  mosquitoOutline: process.env.GATE_MOSQUITO_OUTLINE === 'true',
   // Tree & Shrub lighting-aware color (owner 2026-10-23). Boot-log entry only:
   // every caller reads GATE_TS_LIGHTING at call time via tsLightingLive().
   tsLighting: process.env.GATE_TS_LIGHTING === 'true',
@@ -5523,6 +5527,13 @@ function tsOutlineLive() {
 // Control outline can be made or sent.
 function pestOutlineLive() {
   return process.env.GATE_PEST_OUTLINE === 'true';
+}
+
+// GATE_MOSQUITO_OUTLINE read at CALL time — strict `=== 'true'`, so an unset variable is the kill switch. The canonical
+// reader for building, regenerating and sending a Mosquito outline and for its Estimates entry; off = no Mosquito
+// outline can be made or sent.
+function mosquitoOutlineLive() {
+  return process.env.GATE_MOSQUITO_OUTLINE === 'true';
 }
 
 // GATE_TS_LIGHTING read at CALL time — strict `=== 'true'`, dark in every
@@ -8169,6 +8180,8 @@ module.exports.tsPestCheckLive = tsPestCheckLive;
 module.exports.tsOutlineLive = tsOutlineLive;
 // GATE_PEST_OUTLINE reader, on its own line so gate PRs never conflict.
 module.exports.pestOutlineLive = pestOutlineLive;
+// GATE_MOSQUITO_OUTLINE reader, on its own line so gate PRs never conflict.
+module.exports.mosquitoOutlineLive = mosquitoOutlineLive;
 // GATE_TS_NEONIC_CAP reader, on its own line so gate PRs never conflict.
 module.exports.tsNeonicCapLive = tsNeonicCapLive;
 // GATE_TS_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.

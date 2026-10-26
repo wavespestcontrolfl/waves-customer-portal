@@ -3095,6 +3095,19 @@ function EstimatePipelineViewV2({
                                   outlineServiceLine: "pest_control",
                                 }),
                             },
+                            // GATE_MOSQUITO_OUTLINE: the server marks an estimate with a recurring mosquito program row.
+                            e.mosquitoOutlineAvailable && {
+                              key: "mosquito-outline",
+                              label: "Mosquito service outline",
+                              icon: (
+                                <ClipboardList size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                setOutlineTarget({
+                                  ...e,
+                                  outlineServiceLine: "mosquito",
+                                }),
+                            },
                             {
                               key: "proposal",
                               label: "Commercial proposal",
@@ -3889,6 +3902,14 @@ export function MobileEstimateRow({
               icon: <ClipboardList size={16} strokeWidth={1.75} />,
               onClick: () =>
                 onLawnOutline?.({ ...estimate, outlineServiceLine: "pest_control" }),
+            },
+            // GATE_MOSQUITO_OUTLINE: the same composer, opened on the Mosquito outline.
+            estimate.mosquitoOutlineAvailable && {
+              key: "mosquito-outline",
+              label: "Mosquito service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                onLawnOutline?.({ ...estimate, outlineServiceLine: "mosquito" }),
             },
             {
               key: "audit",

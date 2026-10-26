@@ -4,6 +4,7 @@
 // outline. Each entry reads its module at call time, so a test that mocks a module is followed.
 const treeShrub = require('./tree-shrub-service-outline');
 const pest = require('./pest-service-outline');
+const mosquito = require('./mosquito-service-outline');
 
 const OUTLINE_PROGRAMS = Object.freeze({
   tree_shrub: Object.freeze({
@@ -28,6 +29,19 @@ const OUTLINE_PROGRAMS = Object.freeze({
     listKeys: Object.freeze({ available: 'pestOutlineAvailable', outline: 'pestServiceOutline' }),
     offError: 'Pest Control outlines are not turned on.',
     send: Object.freeze({ program: 'pest control', title: 'Your Waves Pest Control Program Overview', messageType: 'pest_service_outline' }),
+  }),
+  mosquito: Object.freeze({
+    build: (args) => mosquito.buildMosquitoOutline(args),
+    live: () => mosquito.mosquitoOutlineLive(),
+    // A recurring mosquito program: the stored estimate holds an exact `mosquito` recurring row (one-time, misting and
+    // commercial mosquito rows are other keys). The estimate's service-line text cannot tell them apart, so the stored
+    // rows decide (mosquito-service-outline.js); the Estimates list passes the estimate's data.
+    offeredOn: (line, { estimateData } = {}) => line.key === 'mosquito' && !!mosquito.mosquitoProgramRow(estimateData),
+    contentLibraryVersion: () => mosquito.MOSQUITO_CONTENT_LIBRARY_VERSION,
+    protocolVersion: () => mosquito.mosquitoProtocolVersion(),
+    listKeys: Object.freeze({ available: 'mosquitoOutlineAvailable', outline: 'mosquitoServiceOutline' }),
+    offError: 'Mosquito outlines are not turned on.',
+    send: Object.freeze({ program: 'mosquito', title: 'Your Waves Mosquito Program Overview', messageType: 'mosquito_service_outline' }),
   }),
 });
 

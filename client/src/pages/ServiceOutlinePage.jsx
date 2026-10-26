@@ -32,12 +32,13 @@ import { etDateString } from "../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
-// The program a packet describes: a Tree & Shrub (GATE_TS_OUTLINE) or Pest Control (GATE_PEST_OUTLINE) packet says so in
-// content.serviceLine; every other packet is a lawn outline.
+// The program a packet describes: a Tree & Shrub (GATE_TS_OUTLINE), Pest Control (GATE_PEST_OUTLINE) or Mosquito
+// (GATE_MOSQUITO_OUTLINE) packet says so in content.serviceLine; every other packet is a lawn outline.
 const PROGRAMS = {
   lawn_care: { badge: "Lawn Care Program", pageTitle: "Your Lawn Care Program Overview | Waves" },
   tree_shrub: { badge: "Tree & Shrub Program", pageTitle: "Your Tree & Shrub Program Overview | Waves" },
   pest_control: { badge: "Pest Control Program", pageTitle: "Your Pest Control Program Overview | Waves" },
+  mosquito: { badge: "Mosquito Program", pageTitle: "Your Mosquito Program Overview | Waves" },
 };
 const programFor = (content) => PROGRAMS[content?.serviceLine] || PROGRAMS.lawn_care;
 
