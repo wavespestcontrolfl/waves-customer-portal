@@ -69,6 +69,7 @@
  *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice write tool, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer on a confirm card (never owner-direct), through the Invoices page's own handler (POST /admin/invoices/:id/send). No invoice creation, amount edit, charge, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer.)
  *   GATE_TRUCK_CLOCK_IN=shadow (owner 2026-10-25, "this works": the rule is that a technician's shift starts by itself from the truck's GPS; THIS RELEASE ONLY RECORDS what that rule would do. The first of two triggers each Eastern work day wins: the truck's first GPS arrival at one of that technician's visits, or the start of the truck's first trip of the day (no earlier trip-start of a different trip for that truck in bouncie_webhook_log that Eastern day) within 200 m of the office. It notes whether the technician has no active shift and has a completed Vehicle Use & Commuting Agreement. Training days stay by hand (a trainee rides in the trainer's truck). Read at call time via truckClockInMode(): exactly 'shadow' (trimmed, any case) = decide and record one truck_clock_in_shadow row a day, never write time_entries; anything else, including 'true', = off, no code path runs. 'true' is not a value yet: live clock-in is a separate later change. Clock-out, the 9 PM reminder and the 11 PM close are unchanged. Sends nothing to a customer or staff member.)
+ *   GATE_SPRAY_RAIN_RULES=shadow|true (owner 2026-10-26, plan page "Visit-Day Rain Rule", D1 = A and D2 = A: the visit-day spray check judges each product's label rain rule (server/config/label-rain-rules.js: "Do not make applications during rain" on the start hour, a label's dry-before-rain advice as a caution only, water-in products not judged) and, for a tank spray whose label has no rain rule, the Waves rule for its service (reschedule-rules.js serviceSensitivity). One odds table for every rain number: caution above reschedule-rules caution_if_rain_prob_above (60%), hold above reschedule_if_rain_prob_above (80%). A caution keeps the dose on the card; only a hold withholds it. Dispatch chips name the source ("Rain hold · label", "Rain caution · Waves rule"). `shadow` = the live check is unchanged and the new verdict of each visit-day readiness / card build is upserted to spray_rain_rule_shadow (peak per visit per day). Off = byte-identical to today. Canonical CALL-TIME reader sprayRainRulesMode(). Kill switch: unset.)
  *   GATE_SATELLITE_PALM_COUNT_TYPED=true (owner 2026-10-24 "ok go", follow-up B to #6562: a never-sent estimate whose Tree & Shrub line priced a palm count read from the satellite image (palmCountFromLookup) is sent only after an admin types the palm count from the aerial photo in Review and send. Acknowledging the AI review is no longer enough; a typed count other than the priced one refuses the send with PALM_COUNT_MISMATCH, so the quote is rebuilt with the real count. Read at call time via satellitePalmCountTypedLive(), strict 'true', dark by default; off = the one-click acknowledgment as before. Never sends, never changes a price.)
  *   GATE_TRUCK_KIT=true (truck check, docs/tool-inventory-tracker-scope.md PR 1: a technician whose truck is an equipment row (category vehicle, assigned to them) gets a Truck check in the field workspace listing every equipment row kept on that truck (assigned_vehicle_id, set on Equipment → Assets) and a Today card once the last check is 7 or more days old; a check writes one equipment_checks row, a missing or damaged item opens a maintenance alert (tool_missing / tool_damaged, resolved on Equipment → Maintenance with Found / Lost or Repaired / Retired) and the check rings one office bell per truck that closes itself when every tool alert on the truck is resolved; with kit keys on rows and checklist items (PR 2) the Schedule readiness strip and the technician's Today page say which required tool a truck lacks. Read at call time via truckKitLive(), strict 'true', dark by default; off = GET and POST /api/tech/truck-check answer 404 { enabled: false }, the readiness poll reads nothing from the kit, nothing renders, nothing is written. Never contacts a customer, never changes an item's status by itself.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
@@ -240,6 +241,7 @@
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
+ *   GATE_REFERRAL_INBOUND_CONFIRM=true (owner 2026-10-26 "YES GO": the Referrals Queue lists plan customers who came in through a referral link (?ref=CODE on their landing page) or named a referrer on their first call, with the likely referrer; the office confirms the referrer or marks "not a referral". Confirm makes the referral row and runs the existing conversion; when a performed recurring visit is on record, both $25 credits post at once with no reward text or email, otherwise at the next performed recurring visit as today. Read at call time via referralInboundConfirmLive(), strict 'true', dark by default; off = the list and both actions are hidden.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
@@ -2805,6 +2807,8 @@ const gates = {
   // unchanged). Once per customer ever, mirroring referral.invite's own
   // idempotency. Unset = referral.invite email returns.
   referralNudgeEnroll: process.env.GATE_REFERRAL_NUDGE_ENROLL === 'true',
+  // GATE_REFERRAL_INBOUND_CONFIRM (Referrals Queue: confirm the referrer of a linked or named inbound plan customer, dark). Boot-log entry only; the call-time reader is referralInboundConfirmLive().
+  referralInboundConfirm: process.env.GATE_REFERRAL_INBOUND_CONFIRM === 'true',
 
   // Autonomous Content Engine — runs the daily content pipeline.
   // Even when this gate is ON, individual action types stay in shadow
@@ -4748,6 +4752,11 @@ const gates = {
   // consumers read serviceLineMapMode() at CALL time. Kill switch: unset.
   serviceLineMapShadow: String(process.env.GATE_SERVICE_LINE_MAP || '').trim().toLowerCase() === 'shadow',
 
+  // Customer-contact admin alerts close themselves once a person answers (owner 2026-10-24,
+  // approved 2026-10-26). Tri-state: 'shadow' records what would close, 'true' closes. Registered
+  // for logGateStatus only; consumers read alertContactCloseMode() at CALL time. Kill switch: unset.
+  alertContactClose: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_CONTACT_CLOSE || '').trim().toLowerCase()),
+
   // Unassigned-visit guard (owner 2026-10-25). Ships DARK: exactly 'true'. Registered for
   // logGateStatus only; consumers read unassignedVisitGuardLive() at CALL time. Kill switch: unset.
   unassignedVisitGuard: process.env.GATE_UNASSIGNED_VISIT_GUARD === 'true',
@@ -6159,6 +6168,12 @@ function photoPrivacyMode() {
 // covered visit's price when a term is created and only logs a visit the
 // check would hold; 'true' also holds it. Any other value is off: nothing is
 // recorded or read. Unset is the kill, no redeploy.
+// GATE_SPRAY_RAIN_RULES read at CALL time: 'shadow' or 'true', anything else is off.
+function sprayRainRulesMode() {
+  const value = String(process.env.GATE_SPRAY_RAIN_RULES || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 function prepayMintPriceHoldMode() {
   const value = String(process.env.GATE_PREPAY_MINT_PRICE_HOLD || '').trim().toLowerCase();
   return value === 'shadow' || value === 'true' ? value : 'off';
@@ -6445,6 +6460,13 @@ function estimateEmailConsultationOfferLive() {
 // reader (server/routes/reservice-public.js GET + POST). Strict 'true'.
 function reserviceDetailsRequiredLive() {
   return process.env.GATE_RESERVICE_DETAILS_REQUIRED === 'true';
+}
+
+// GATE_REFERRAL_INBOUND_CONFIRM read at CALL time, strict `=== 'true'`, dark by default. The one reader for the Referrals Queue's
+// inbound list and its confirm / dismiss actions (routes/admin-referrals-v2.js, services/referral-inbound.js).
+// Off: GET /inbound answers enabled:false with no list, both actions 404, and the page shows no section. Kill: unset.
+function referralInboundConfirmLive() {
+  return process.env.GATE_REFERRAL_INBOUND_CONFIRM === 'true';
 }
 
 // GATE_RESERVICE_PHOTOS read at CALL time — the one canonical reader
@@ -7014,6 +7036,17 @@ function pafTermiteLive() {
 // ringGate seam. Off = byte-identical to before everywhere.
 function adminAlertRelevanceLive() {
   return !['off', 'false', '0'].includes(String(process.env.ADMIN_ALERT_RELEVANCE ?? '').trim().toLowerCase());
+}
+
+// GATE_ALERT_CONTACT_CLOSE read at CALL time: 'shadow', 'true' or 'off'. The
+// customer-contact classes of admin-alert-relevance.js (a text, a voicemail, a
+// missed call or an email from a customer, and a new lead a person reached).
+// 'shadow' judges them and records what would close in audit_log, changing no
+// bell; 'true' closes them like every other class. Any other value, unset
+// included, is off: these classes are not judged at all. Ships dark.
+function alertContactCloseMode() {
+  const value = String(process.env.GATE_ALERT_CONTACT_CLOSE || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
 // ALERT_EPISODES read at CALL time — ships LIVE: on unless set to exactly
@@ -8046,6 +8079,8 @@ module.exports.ibModelFailureNoticeLive = ibModelFailureNoticeLive;
 // GATE_SHORTLINK_LEGACY_EXPIRE reader, on its own line.
 module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
+// GATE_REFERRAL_INBOUND_CONFIRM reader, on its own line so gate PRs never conflict.
+module.exports.referralInboundConfirmLive = referralInboundConfirmLive;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
 // GATE_DUPLICATES_SAME_ADDRESS reader, on its own line.
@@ -8107,6 +8142,9 @@ module.exports.lawnWaterInRainLive = lawnWaterInRainLive;
 module.exports.onSiteCallerDemoteLive = onSiteCallerDemoteLive;
 // GATE_PREPAY_MINT_PRICE_HOLD reader, on its own line so gate PRs never conflict.
 module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
+module.exports.sprayRainRulesMode = sprayRainRulesMode;
+// GATE_ALERT_CONTACT_CLOSE reader, on its own line so gate PRs never conflict.
+module.exports.alertContactCloseMode = alertContactCloseMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.

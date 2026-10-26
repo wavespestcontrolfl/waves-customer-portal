@@ -418,7 +418,11 @@ function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
 
 function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
   if (shouldRing) {
-    const merged = { ...existingMeta, ...metadata, rungAt: new Date().toISOString() };
+    // A ringing refresh clears the done fields (below), so a relevance
+    // retirement stamp on the row is stale: dropped, or the sweep would never
+    // judge this row again (admin-alert-relevance.js candidateQuery).
+    const { retired: _retired, ...standing } = existingMeta;
+    const merged = { ...standing, ...metadata, rungAt: new Date().toISOString() };
     // A DEFINED non-owner audience only — a caller outside ops-digest.js
     // (most refreshOnDedupe dedupe rows) never sets `audience` at all, and
     // that absence must keep today's plain behavior, not read as "not
