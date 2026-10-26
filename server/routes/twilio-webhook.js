@@ -1441,6 +1441,19 @@ router.post('/sms', async (req, res) => {
       }).catch((e) => logger.warn(`[tech-line] text notify failed: ${e.message}`));
     }
 
+    // Visit tech relay (GATE_CUSTOMER_TEXT_TO_VISIT_TECH, census M3): a known
+    // customer's text to an office line during their visit today also reaches
+    // that visit's technician as a tech-home card + push
+    // (services/visit-tech-relay.js). The office bell / owner forward are
+    // unchanged; nothing is sent to the customer.
+    if (numberConfig.type !== 'tech_line' && customer && (Body || inboundMedia.length) && !smsReaction && !courtesyOnly
+      && !staffSender && !detectSmsOptCommand(Body || '').action
+      && require('../config/feature-gates').customerTextToVisitTechLive?.()) {
+      await require('../services/visit-tech-relay').relayCustomerTextToVisitTech({
+        customer, from: From, body: Body, mediaCount: inboundMedia.length,
+      }).catch((e) => logger.warn(`[visit-tech-relay] relay failed: ${e.message}`));
+    }
+
     // Notify Adam of regular inbound SMS. Domain/van tracking leads use the
     // admin notification dispatcher above instead of owner SMS. Skip this
     // legacy owner forward when the sms_reply bell/push above already fired
