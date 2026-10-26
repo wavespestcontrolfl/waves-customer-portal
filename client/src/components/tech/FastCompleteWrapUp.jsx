@@ -19,9 +19,12 @@ import {
   MAX_REVIEW_DELAY_MS,
   completionReportTextExpected,
   completionReviewHint,
+  FIRST_ASK_OPT_OUT_PROMPT,
   completionReviewSuppressionReason,
   completionWillReview,
   formatReentryStepperMinutes,
+  nextReviewChoice,
+  reviewBoxLabel,
 } from '../../lib/completion-review-timing';
 import {
   REENTRY_MAX,
@@ -42,7 +45,7 @@ import '../../styles/tech-workflow.css';
 // The steppers' step, the full form's.
 const REENTRY_STEPS = { exterior: 5, interior: 15 };
 const NEXT_VISIT_DATE = { weekday: 'short', month: 'short', day: 'numeric' };
-const INITIAL_CHOICE = { sendSms: true, includePayLink: true, requestReview: true, reviewTiming: REVIEW_TIMING_DEFAULT, reviewCustomAt: '', adjusted: '', nextVisitNote: '' };
+const INITIAL_CHOICE = { sendSms: true, includePayLink: true, requestReview: true, reviewOptOutReason: null, reviewTiming: REVIEW_TIMING_DEFAULT, reviewCustomAt: '', adjusted: '', nextVisitNote: '' };
 
 // `gate` is the context's `wrapUp` (GATE_FAST_COMPLETE_WRAP_UP). Off, the section is not `enabled`: nothing is
 // read, drawn or sent, and `fields(fallback)` is the fallback the sheet always posted. `applicationsRecorded`: the sheet
@@ -76,10 +79,19 @@ export function useWrapUp({ gate, submission, service, request, base, applicatio
   const willReview = completionWillReview({ requestReview: choice.requestReview, reviewSuppressionReason: suppression });
   const stepper = useReentrySteppers({ enabled, serviceId: service?.id, base, requestRef, applicationsRecorded });
   const nextVisit = useNextVisit({ enabled, customerId: service?.customerId || service?.routedCustomerId, requestRef });
-  const review = useReviewPreview({ enabled, willReview, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
+  const review = useReviewPreview({ enabled, willReview, firstAskOpen: !suppression, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
+  // A first ask stays on: a late verdict turns the box back on unless the one reason was confirmed.
+  const firstAsk = review.firstAsk;
+  useEffect(() => {
+    if (firstAsk && !choice.requestReview && !choice.reviewOptOutReason) setChoice((prev) => ({ ...prev, requestReview: true }));
+  }, [firstAsk, choice.requestReview, choice.reviewOptOutReason]);
+  const setReview = (checked) => {
+    const next = nextReviewChoice({ checked, firstAsk, confirmOptOut: () => window.confirm(FIRST_ASK_OPT_OUT_PROMPT) });
+    setChoice((prev) => ({ ...prev, requestReview: next.requestReview, reviewOptOutReason: next.reviewOptOutReason }));
+  };
   const hint = completionReviewHint({ willReview, effectiveSendSms: choice.sendSms, reviewTiming: choice.reviewTiming, reviewCustomAt: choice.reviewCustomAt, preview: review.preview, reviewAwaitsPayment: billing.reviewAwaitsPayment, customerPhone: service?.customerPhone }).text;
 
-  const state = { ...choice, omitAutoTiming, noPayLink, reviewMarker, adjusted: isAdmin ? choice.adjusted : '', nextVisitNote: choice.nextVisitNote, nextVisit, isAdmin, willReview, willInvoice: billing.willInvoice, ext: stepper.ext, int: stepper.int, seeds: stepper.seeds };
+  const state = { ...choice, firstAsk, omitAutoTiming, noPayLink, reviewMarker, adjusted: isAdmin ? choice.adjusted : '', nextVisitNote: choice.nextVisitNote, nextVisit, isAdmin, willReview, willInvoice: billing.willInvoice, ext: stepper.ext, int: stepper.int, seeds: stepper.seeds };
   const latest = useRef(state);
   latest.current = state;
   useEffect(() => { setNotice(''); }, [choice.reviewTiming, choice.reviewCustomAt, choice.adjusted, choice.requestReview]);
@@ -130,6 +142,8 @@ export function useWrapUp({ gate, submission, service, request, base, applicatio
     view: {
       choice,
       set: (key) => (value) => setChoice((prev) => ({ ...prev, [key]: value })),
+      setReview,
+      reviewLabel: reviewBoxLabel({ reviewSuppressionReason: suppression, firstAsk }),
       stepper,
       nextVisit,
       willReview,
@@ -243,7 +257,7 @@ function NextVisitBlock({ nextVisit, note, onNote }) {
 
 export default function FastCompleteWrapUp({ wrapUp }) {
   if (!wrapUp?.enabled) return null;
-  const { choice, set, stepper, nextVisit, willReview, suppression, hint, notice, willInvoice, payerBanner } = wrapUp.view;
+  const { choice, set, setReview, reviewLabel, stepper, nextVisit, willReview, suppression, hint, notice, willInvoice, payerBanner } = wrapUp.view;
   return (
     <section className="tech-visit-choice-section tech-wrapup" aria-label="Wrap-up">
       <div className="tech-visit-section-head">
@@ -254,8 +268,8 @@ export default function FastCompleteWrapUp({ wrapUp }) {
       <ReentryBlock stepper={stepper} />
       <Toggle checked={choice.sendSms} onChange={set('sendSms')}>Send completion text</Toggle>
       {willInvoice && choice.sendSms && !payerBanner && <PayLinkRow checked={choice.includePayLink} onChange={set('includePayLink')} />}
-      <Toggle checked={willReview} disabled={!!suppression} onChange={set('requestReview')}>
-        {suppression ? 'Review request suppressed' : 'Send review request'}
+      <Toggle checked={willReview} disabled={!!suppression} onChange={setReview}>
+        {reviewLabel}
       </Toggle>
       {willReview && <ReviewTiming choice={choice} set={set} hint={hint} />}
       {nextVisit && <NextVisitBlock nextVisit={nextVisit} note={choice.nextVisitNote} onNote={set('nextVisitNote')} />}

@@ -1684,8 +1684,20 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   if (!packet) return { enrolled: false, reason: 'packet_missing' };
   const payload = packetPayload(packet);
-  const requested = payload.items.every(({ body }) => body.requestReview !== false
-    && (!body.reviewSuppression || body.reviewSuppression === 'invoice_created'));
+  const formAsks = ({ body }) => body.requestReview !== false
+    && (!body.reviewSuppression || body.reviewSuppression === 'invoice_created');
+  let requested = payload.items.every(formAsks);
+  if (!requested && require('../config/feature-gates').reviewFirstAskLockLive()) {
+    // GATE_REVIEW_FIRST_ASK_LOCK: a member whose "no ask" the record kept on (a never-asked customer, no
+    // "Complaint on site" reason) still asks; its record carries requestReview true and the marker.
+    const kept = await database('visit_completion_packet_items as i')
+      .join('service_records as r', 'r.id', 'i.service_record_id')
+      .where('i.packet_id', packet.id).select('i.scheduled_service_id', 'r.structured_notes');
+    const keptIds = new Set(kept.filter((row) => parseJsonObject(row.structured_notes).reviewFirstAskLock?.forcedOn === true)
+      .map((row) => row.scheduled_service_id));
+    requested = keptIds.size > 0 && payload.items.every((item) => formAsks(item) || (keptIds.has(item.serviceId)
+      && (!item.body.reviewSuppression || item.body.reviewSuppression === 'invoice_created')));
+  }
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
   if (!requested || visit.billing_hold) return { enrolled: false, reason: 'visit_review_suppressed' };
   const invoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).first();
