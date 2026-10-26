@@ -34,6 +34,7 @@ const express = require('express');
 const router = require('../routes/admin-payroll');
 const timeOff = require('../services/payroll-time-off');
 const payrollRuns = require('../services/payroll-runs');
+const timeTracking = require('../services/time-tracking');
 const { etDateString } = require('../utils/datetime-et');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 
@@ -424,7 +425,8 @@ postgres('payroll time off', () => {
       expect((await api('PUT', `/time-off/${created.body.entry.id}`, { body: { kind: 'pto', hours: 1 } })).status).toBe(404);
 
       const actions = await auditActions();
-      expect(actions.map((a) => a.action)).toEqual(['payroll.time_off_added', 'payroll.time_off_changed', 'payroll.time_off_removed']);
+      // One transaction, one timestamp: compare as a set, not by order.
+      expect(actions.map((a) => a.action).sort()).toEqual(['payroll.time_off_added', 'payroll.time_off_changed', 'payroll.time_off_removed']);
       expect(actions.every((a) => a.resource_id === created.body.entry.id)).toBe(true);
       const meta = (await trx('audit_log').where({ action: 'payroll.time_off_added' }).first('metadata')).metadata;
       expect(JSON.stringify(meta)).not.toMatch(/Vacation|Sample Alpha/);
@@ -606,6 +608,85 @@ postgres('payroll time off', () => {
       expect((await api('PUT', `/time-off/${entryId}`, { body: { kind: 'holiday', hours: 5 } })).status).toBe(200);
     });
   });
+  describe('a paid week stays closed to time entry changes, even a time-off-only week', () => {
+    const PAID = 'This week is already paid. Void its pay run before changing its entries.';
+    const shift = async (technicianId, day, patch = {}) => {
+      const id = randomUUID();
+      await trx('time_entries').insert({
+        id, technician_id: technicianId, entry_type: 'shift', status: 'completed', approval_status: 'pending',
+        clock_in: `${day}T14:00:00Z`, clock_out: `${day}T22:00:00Z`, duration_minutes: 480, ...patch,
+      });
+      return id;
+    };
+    const timeOffOnlyPaid = async () => {
+      const id = await readyTech('Sample Alpha');
+      await offDay(id, addDays(W1, 1), 'pto', '480.00');
+      const run = await draftAndFinalize(W1);
+      expect(run.checks.map((c) => [c.name, c.regularHours, c.ptoHours])).toEqual([['Sample Alpha', '0.00', '8.00']]);
+      return { id, run };
+    };
+
+    it('refuses to move an unapproved shift into the paid week, and to void one inside it; a void of the pay run frees both', async () => {
+      const { id, run } = await timeOffOnlyPaid();
+      // Next week has an unapproved shift; this week has no approved timesheet at all.
+      const moving = await shift(id, addDays(W1, 8));
+      const move = () => timeTracking.adminEditEntry(moving, {
+        clock_in: `${addDays(W1, 2)}T14:00:00Z`, clock_out: `${addDays(W1, 2)}T22:00:00Z`,
+        edit_reason: 'wrong day', edited_by: ADMIN_ID,
+      });
+      await expect(move()).rejects.toMatchObject({ statusCode: 409, message: PAID });
+      expect(await trx('time_entries').where({ id: moving }).first('clock_in')).toMatchObject({ clock_in: new Date(`${addDays(W1, 8)}T14:00:00Z`) });
+
+      // An entry that already sits in the paid week cannot be voided or edited either.
+      const inside = await shift(id, addDays(W1, 3));
+      await expect(timeTracking.voidEntry(inside, { reason: 'dup', voided_by: ADMIN_ID })).rejects.toMatchObject({ statusCode: 409, message: PAID });
+      await expect(timeTracking.adminEditEntry(inside, { notes: 'x', edit_reason: 'x', edited_by: ADMIN_ID })).rejects.toMatchObject({ statusCode: 409, message: PAID });
+      expect((await trx('time_entries').where({ id: inside }).first('status')).status).toBe('completed');
+
+      // Other technicians and other weeks are not affected.
+      const other = await readyTech('Sample Beta');
+      const free = await shift(other, addDays(W1, 3));
+      await expect(timeTracking.voidEntry(free, { reason: 'dup', voided_by: ADMIN_ID })).resolves.toMatchObject({ status: 'voided' });
+
+      expect((await api('POST', `/runs/${run.id}/void`, { body: { reason: 'Redo' } })).status).toBe(200);
+      await expect(move()).resolves.toMatchObject({ status: 'edited' });
+      await expect(timeTracking.voidEntry(inside, { reason: 'dup', voided_by: ADMIN_ID })).resolves.toMatchObject({ status: 'voided' });
+    });
+
+    it('protects the week with the gate off too, once a time-off-only check exists', async () => {
+      const { id } = await timeOffOnlyPaid();
+      process.env.GATE_PAYROLL_TIME_OFF = 'false';
+      const inside = await shift(id, addDays(W1, 3));
+      await expect(timeTracking.voidEntry(inside, { reason: 'dup', voided_by: ADMIN_ID })).rejects.toMatchObject({ statusCode: 409, message: PAID });
+    });
+
+    it('the shared payroll lock waits for a finalize in progress, and shared holders do not block each other', async () => {
+      const holder = await holderDb.transaction();
+      await holder.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [payrollRuns.PAYROLL_LOCK_NS, payrollRuns.PAYROLL_LOCK_KEY]);
+      try {
+        // The edit runs on its own connection with a lock timeout, so the held lock shows as 55P03.
+        const timedOut = await callerDb.transaction(async (t) => {
+          await t.raw("SET LOCAL lock_timeout = '300ms'");
+          return t.raw('SELECT pg_advisory_xact_lock_shared(hashtext(?), hashtext(?::text))', [payrollRuns.PAYROLL_LOCK_NS, payrollRuns.PAYROLL_LOCK_KEY]);
+        }).catch((err) => err);
+        expect(timedOut.code).toBe('55P03');
+      } finally {
+        await holder.commit();
+      }
+      // Shared holders do not block each other.
+      const a = await callerDb.transaction();
+      const b = await holderDb.transaction();
+      try {
+        await a.raw('SELECT pg_advisory_xact_lock_shared(hashtext(?), hashtext(?::text))', [payrollRuns.PAYROLL_LOCK_NS, payrollRuns.PAYROLL_LOCK_KEY]);
+        await b.raw("SET LOCAL lock_timeout = '300ms'");
+        await b.raw('SELECT pg_advisory_xact_lock_shared(hashtext(?), hashtext(?::text))', [payrollRuns.PAYROLL_LOCK_NS, payrollRuns.PAYROLL_LOCK_KEY]);
+      } finally {
+        await a.commit();
+        await b.commit();
+      }
+    });
+  });
+
   describe('sharing the finalize lock', () => {
     // The service runs on its own connection with a lock timeout, so a held lock shows up as a
     // timeout (55P03) and a free one as the ordinary 404 for an entry that does not exist. Nothing

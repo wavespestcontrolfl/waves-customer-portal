@@ -51,6 +51,7 @@ const {
   staffWeekStartForWorkDate,
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
+const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
 const { shiftCloseReviewLive, payrollTimeOffLive } = require('../config/feature-gates');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -586,12 +587,7 @@ async function recomputeRun(runId, actor, conn = db) {
 // Draft and recompute do not take it: they write draft rows only, never feed
 // another run, and finalize re-evaluates under this lock and compares the
 // review token, so a draft built on stale YTD cannot be finalized.
-const PAYROLL_LOCK_NS = 'payroll.mutation';
-const PAYROLL_LOCK_KEY = 'pay-runs';
-const lockPayrollMutations = (trx) => trx.raw(
-  'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-  [PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY],
-);
+// The lock itself lives in payroll-lock.js (time-tracking.js takes it shared).
 
 // A later finalized check for the same technician and year already counted this
 // one's pay in its year-to-date figures.
