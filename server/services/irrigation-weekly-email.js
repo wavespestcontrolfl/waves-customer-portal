@@ -197,7 +197,7 @@ function joinList(parts) {
  * name what IS on file, then the ONE thing that still blocks the conversion.
  * `derived` is deriveIrrigationInchesPerWeek's result for their prefs.
  */
-function buildScheduleAsk({ derived, inputs, toggleOff = false, explicitInches = null }) {
+function buildScheduleAsk({ derived, inputs, toggleOff = false, explicitInches = null, systemObserved = false }) {
   const have = [];
   if (inputs.wateringDays.length) have.push(`${inputs.wateringDays.length} watering ${inputs.wateringDays.length === 1 ? 'day' : 'days'}`);
   if (inputs.runMinutes != null) have.push(`${inputs.runMinutes} minutes per zone`);
@@ -262,7 +262,15 @@ function buildScheduleAsk({ derived, inputs, toggleOff = false, explicitInches =
   if (missing.length > 1 && have.length) {
     return `We have your sprinkler system on file${haveClause}but not ${joinList(missing)}. Add ${joinList(missingActions)} ${PORTAL_IRRIGATION_ASK} (or your weekly inches, if you know them) ${SETUP_CLOSER}`;
   }
-  return `We have a sprinkler system on file for you, but not how long or how often it runs. Add your watering days, minutes per zone and head type (or your weekly inches, if you know them) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
+  // Nothing on file. The irrigation_system flag defaults ON for every new
+  // property (20260828000002), so on its own it proves nothing: only a
+  // technician's recorded in-ground/mixed type says a system exists. Without
+  // one, the ask never claims a system the customer never told us about
+  // (owner 2026-10-26: new clients read "We have a sprinkler system on file").
+  if (systemObserved) {
+    return `We have a sprinkler system on file for you, but not how long or how often it runs. Add your watering days, minutes per zone and head type (or your weekly inches, if you know them) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
+  }
+  return `We don't have a sprinkler schedule for your home yet. If you water with a sprinkler system, add your watering days, minutes per zone and head type (or your weekly inches, if you know them) ${PORTAL_IRRIGATION_ASK} ${SETUP_CLOSER}`;
 }
 
 // Seeded confirm_schedule callout — still exactly right for a technician-
@@ -597,7 +605,12 @@ function decideWeeklyEmail({
       ? (turfType === 'in_ground' || turfType === 'mixed')
       : irrigationSystem === true;
     const grassLabelSetup = customerGrassLabel(grassType);
-    const setupWaterSaved = hasSystem ? waterSavedSetupSentence(askWaterSaved()) : null;
+    // The ask names the customer's own entries when any are on file (and not
+    // for a system marked off, whose ask routes them to reply to us), so the
+    // gallons closer must not then say their schedule is missing.
+    const askNamesEntries = irrigationSystem !== false
+      && (askInputs.wateringDays.length > 0 || askInputs.runMinutes != null || askInputs.headTypes.length > 0);
+    const setupWaterSaved = hasSystem ? waterSavedSetupSentence(askWaterSaved(), { scheduleDetailsOnFile: askNamesEntries }) : null;
     const rainSetup = formatInches(rainfallInches7d);
     const targetSetup = formatInches(advice.recommendedInchesPerWeek);
     const quiet = setupAskQuiet === true;
@@ -615,7 +628,7 @@ function decideWeeklyEmail({
         // setup_schedule's callout ({{schedule_ask}}): what is on file and
         // the one input still missing. setup_system has no such block, and
         // an empty optional variable renders nothing.
-        schedule_ask: hasSystem && !quiet ? [movedPreface + buildScheduleAsk({ derived: askDerived, inputs: askInputs, toggleOff: irrigationSystem === false, explicitInches: askExplicit }), setupWaterSaved].filter(Boolean).join(' ') : '',
+        schedule_ask: hasSystem && !quiet ? [movedPreface + buildScheduleAsk({ derived: askDerived, inputs: askInputs, toggleOff: irrigationSystem === false, explicitInches: askExplicit, systemObserved: turfType === 'in_ground' || turfType === 'mixed' }), setupWaterSaved].filter(Boolean).join(' ') : '',
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,
@@ -823,6 +836,8 @@ function decideWeeklyEmail({
       rateTable: table,
       // The gallons sentence reads the block this decision froze (or the replayed snapshot's), never the live gate.
       waterSaved: decisionInputs.waterSaved || null,
+      // Why a run plan has no minutes is read from the frozen head types, never today's prefs.
+      headTypes: decisionInputs.headTypes || null,
     });
     // No plan to render (no policy in force) for an unconfirmed schedule:
     // never fall through with the former home's payload — re-enter the
