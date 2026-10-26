@@ -4045,7 +4045,12 @@ and `categories` sections whose keys are `problems`, `products`,
 `common_questions`. A `tiles` item may carry `until` (`YYYY-MM-DD`): the page
 hides that tile after that ET day (the watering-order tile, which a stored
 packet keeps after the order ends). Product names in `products` are public
-label names with an active ingredient; no rate, price or PII),
+label names with an active ingredient; no rate, price or PII. A Tree & Shrub
+packet (`GATE_TS_OUTLINE`, stamped `ts-v1-copy-1`) has the same shape: its
+`content` adds `serviceLine: 'tree_shrub'`, which the page reads for its program
+badge and tab title (absent = lawn), `property` carries `programLabel` and
+`turfType: null`, and its sections use the same visual types; a `categories`
+item's `key` is its icon and may repeat, so the page keys a card by its label),
 `/api/public/estimates/:token/deposit-intent` (RETIRED VERDICT STUB —
 owner ruling 2026-08-10: acceptance deposits are permanently
 not-enforced. Token format gate + deposit rate limit, then an
@@ -5695,22 +5700,34 @@ to this estimate, already chosen and trimmed to one printed page by
 Fixed owner copy, no prices, no customer data. The key is ABSENT on an accepted,
 declined or expired estimate. Only the browser-rendered estimate PDF (`EstimateProposalDocument`)
 prints it, on its own last page; the interactive estimate page ignores it.
-`/data?mode=pdf` (the document render pass only; never a normal page load) may carry an
-optional top-level `mistingLayout` block (GATE_MISTING_LAYOUT_DESIGNER, dark): `{ imageUrl,
-revision, address|null, counts: { nozzles, eave, fence, risers, linearFt, zones, pump } }`, the
+`/data` (the normal page load and the `?mode=pdf` document render pass alike) may carry an
+optional top-level `mistingLayout` block (GATE_MISTING_LAYOUT_DESIGNER): `{ imageUrl,
+revision, address|null, counts: { nozzles, eave, fence, risers, linearFt, zones, pump }, geometry }`, the
 staff-drawn concept sketch saved for this estimate (`services/misting-layouts.js`).
 `imageUrl` is a signed S3 link that lasts 20 minutes (the render pin lasts 15); `revision` is a
 16-hex-character tag that changes on every save (a hash of the picture key, never the key), which the
 emailed-PDF fingerprint reads in place of the expiring link; counts are
-numbers and `pump` is a boolean. No prices and no customer data beyond the property
+numbers and `pump` is a boolean. `geometry` is what the estimate page animates the spray from, projected
+field by field from the saved layout in the 1280 by 960 map space: `{ center: { lat, lng }, zoom, mapWidth,
+mapHeight, lines: [{ kind: eave|fence|bed, points: [{ x, y }] }], nozzles: [{ x, y, kind: eave|fence,
+lineIndex|null, aim? }], risers: [{ x, y, source?: bed|manual, lineIndex? }], pump: { x, y }|null,
+zones: [{ kind, x, y, radiusFt }] }`. `aim` is a manual compass heading in degrees and is present only for
+a manually aimed nozzle; every other aim is derived on the client. The block holds no S3 key, no staff
+id, no line id and no price. The emailed-PDF fingerprint leaves `geometry` out: every save changes
+`revision`, so the revision already covers it. No prices and no customer data beyond the property
 address the document already prints. The key is ABSENT unless BOTH `GATE_MOSQUITO_MISTING`
 and `GATE_MISTING_LAYOUT_DESIGNER` are on, a layout is saved for the estimate, and the
 estimate carries the misting system by the same reader the accept guards use
 (`estimateDataCarriesMosquitoMisting`, which honors an authored proposal and ignores stale
 engine rows) and the layout was drawn for the estimate's current address (case, spacing and punctuation blind; a trailing ZIP or state is ignored; a changed house number or street omits it), so every other response stays byte-identical. A storage failure omits the key,
 never the response. `EstimateProposalDocument` prints it as a "Proposed misting layout"
-section and counts a sketch that fails to load as a failed image; the interactive estimate
-page ignores it.
+card (in the estimate card, with the counts, a pump notice when nozzles plus risers pass 60 (a Zone Kit)
+or 120 (a second system), a legend and the concept note) in the place of the
+satellite photo, which is then not shown, and counts a sketch that fails to load as a failed image
+(the satellite photo is not counted when a layout is present); it ignores `geometry`. The interactive estimate
+page (`EstimateViewPage`, Waves AI card) shows the same card in the place of the satellite photo, with an
+animated blue mist canvas over the picture drawn from `geometry` (paused offscreen and while the tab is hidden, still
+with `prefers-reduced-motion`), and puts the satellite photo back when the picture fails to load.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that

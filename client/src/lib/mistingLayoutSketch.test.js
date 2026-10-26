@@ -2,14 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { MAP_HEIGHT, MAP_WIDTH, pxToFeet } from '../components/tech/treatmentZoneSpray';
 import { applyNozzleEdits, placeNozzles } from './mistingLayoutGeometry';
 import {
-  SKETCH_CONCEPT,
-  SKETCH_FOOTER_H,
-  SKETCH_HEADER_H,
+  SKETCH_ATTRIBUTION_H,
   SKETCH_HEIGHT,
+  SKETCH_WIDTH,
   buildSketchModel,
   numberNozzles,
   scaleBar,
-  sketchDateLabel,
   zoneLabel,
 } from './mistingLayoutSketch';
 import { legendRows, mistingLayoutCountsLine } from './mistingLayoutCounts';
@@ -119,38 +117,26 @@ describe('text', () => {
     expect(line.split(' · ')).toHaveLength(5);
   });
 
-  it('dates the sketch in Eastern time', () => {
-    // 03:30 UTC on Oct 27 is still Oct 26 in Eastern time.
-    expect(sketchDateLabel(new Date('2026-10-27T03:30:00Z'))).toBe('October 26, 2026');
-  });
-
   it('labels a zone by its kind', () => {
     expect(zoneLabel({ kind: 'ac' })).toBe('No mist: AC intake');
   });
 });
 
 describe('buildSketchModel', () => {
-  it('carries the concept note, numbered nozzles, scale and legend', () => {
+  it('carries the numbered nozzles, scale and drawing parts, and none of the words the estimate card now owns', () => {
     const lines = [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 100 }, { x: 400, y: 100 }] }];
     const model = buildSketchModel({
       lat: LAT,
       zoom: ZOOM,
-      address: '500 Example Court',
-      date: new Date('2026-10-26T15:00:00Z'),
       lines,
       nozzles: [{ x: 400, y: 100, kind: 'eave', lineIndex: 0 }, { x: 100, y: 100, kind: 'eave', lineIndex: 0 }],
       risers: [{ x: 10, y: 10 }],
       pump: { x: 20, y: 20 },
       zones: [{ kind: 'pool', x: 50, y: 50, radiusFt: 15, radiusPx: 60 }],
-      totals: { eaveCount: 2, fenceCount: 0, linearFt: 55 },
     });
-    expect(model.concept).toBe(SKETCH_CONCEPT);
-    expect(model.concept).toBe('Concept layout — final placement at the design visit and install.');
     expect(model.nozzles.map((n) => [n.number, n.x])).toEqual([[1, 100], [2, 400]]);
-    expect(model.dateLabel).toBe('October 26, 2026');
-    expect(model.legend[0]).toBe('Nozzles: 2 (eave 2, fence 0)');
-    expect(model.legend).toContain('Pump: placed');
     expect(model.scale.feet).toBeGreaterThan(0);
+    expect(Object.keys(model).sort()).toEqual(['lines', 'nozzles', 'pump', 'risers', 'scale', 'zones']);
   });
 
   describe('nozzles inside a no-mist zone', () => {
@@ -166,7 +152,6 @@ describe('buildSketchModel', () => {
       risers: [],
       pump: null,
       zones,
-      totals: { eaveCount: nozzles.length, fenceCount: 0, linearFt: 100 },
     });
     const n = (key, x) => ({ key, x, y: 500, kind: 'eave', lineIndex: 0 });
 
@@ -179,22 +164,48 @@ describe('buildSketchModel', () => {
       expect([...flagInZones(nozzles, [withPx], LAT, ZOOM)].sort()).toEqual([...flaggedKeys].sort());
       expect(model.nozzles.every((m) => typeof m.flagged === 'boolean')).toBe(true);
     });
+  });
 
-    it('adds the legend row with the count when some are flagged, and none when all are clear', () => {
-      const some = build([n('a', 100), n('b', 500), n('c', 510)]);
-      expect(some.legend).toContain('In a no-mist zone: 2 (aim away or move)');
-      expect(some.legend[0]).toBe('Nozzles: 3 (eave 3, fence 0)');
-      const none = build([n('a', 100), n('b', 900)]);
-      expect(none.legend.some((row) => row.startsWith('In a no-mist zone'))).toBe(false);
-      expect(none.legend).toHaveLength(5);
-      const noZones = build([n('a', 500)], []);
-      expect(noZones.nozzles[0].flagged).toBe(false);
-      expect(noZones.legend).toHaveLength(5);
+  describe('spray aim', () => {
+    const lines = [{ id: 'L1', kind: 'eave', points: [{ x: 100, y: 500 }, { x: 900, y: 500 }] }];
+    const build = (nozzles, zones = []) => buildSketchModel({
+      lat: LAT, zoom: ZOOM, lines, nozzles, risers: [], pump: null, zones,
+    });
+    const n = (x, extra = {}) => ({ x, y: 500, kind: 'eave', lineIndex: 0, ...extra });
+
+    it('carries each nozzle\'s heading, near-water mark and throw in sketch pixels (10 ft, 5 ft near water)', () => {
+      const pool = { kind: 'pool', x: 150, y: 400, radiusFt: 15, radiusPx: feetToPx(15, LAT, ZOOM) };
+      const model = build([n(150), n(850)], [pool]);
+      const [near, far] = model.nozzles;
+      expect(near.nearWater).toBe(true);
+      expect(far.nearWater).toBe(false);
+      expect(pxToFeet(near.reachPx, LAT, ZOOM)).toBeCloseTo(5, 5);
+      expect(pxToFeet(far.reachPx, LAT, ZOOM)).toBeCloseTo(10, 5);
+      // The nozzles stand on one wall, so the far one aims down the photo; the near one runs along the wall.
+      expect(far.aimHeading).toBeCloseTo(180, 5);
+      expect([90, 270]).toContain(Math.round(near.aimHeading));
+    });
+
+    it('shortens the arrow of a nozzle pointing at the next one, to half the way but no less than the minimum', () => {
+      const pool = { kind: 'pool', x: 600, y: 400, radiusFt: 15, radiusPx: feetToPx(15, LAT, ZOOM) };
+      // Three nozzles 44 px apart along the wall, right of the pool's center: all near water, aimed along the wall to the right.
+      const model = build([n(600), n(644), n(688)], [pool]);
+      expect(model.nozzles.map((m) => Math.round(m.aimHeading))).toEqual([90, 90, 90]);
+      expect(model.nozzles.map((m) => m.arrowPx)).toEqual([26, 26, 40]);
+    });
+
+    it('prefers a manual aim, and keeps the near-water mark with the position', () => {
+      const pool = { kind: 'water', x: 150, y: 400, radiusFt: 15, radiusPx: feetToPx(15, LAT, ZOOM) };
+      const model = build([n(150, { aim: 45 }), n(850, { aim: 0 })], [pool]);
+      expect(model.nozzles.map((m) => m.aimHeading)).toEqual([45, 0]);
+      expect(model.nozzles[0].nearWater).toBe(true); // the position decides this, not the aim
     });
   });
 
-  it('keeps the photo at its native size between the header and the footer', () => {
-    expect(SKETCH_HEIGHT).toBe(SKETCH_HEADER_H + MAP_HEIGHT + SKETCH_FOOTER_H);
+  it('is the photo at its native size, filling the frame, with the attribution strip left clear', () => {
+    expect(SKETCH_WIDTH).toBe(MAP_WIDTH);
+    expect(SKETCH_HEIGHT).toBe(MAP_HEIGHT);
     expect(MAP_WIDTH).toBe(1280);
+    expect(SKETCH_ATTRIBUTION_H).toBeGreaterThanOrEqual(44);
   });
 });

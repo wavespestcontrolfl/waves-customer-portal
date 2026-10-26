@@ -242,4 +242,40 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(screen.getByText('St. Augustine')).toBeInTheDocument();
     expect(screen.queryByText('Program')).not.toBeInTheDocument();
   });
+
+  // GATE_TS_OUTLINE: a Tree & Shrub packet names its program; two treatment cards share the fertilizer icon.
+  it('names the Tree & Shrub program in the badge and the tab title, and draws cards that share an icon', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const content = {
+      ...v13Content(),
+      serviceLine: 'tree_shrub',
+      title: 'Your Waves Tree & Shrub Program Overview',
+      property: { addressSummary: '100 Test Way, Sarasota', turfType: null, programLabel: 'One program for every landscape' },
+      sections: [{
+        key: 'treatment_categories',
+        title: 'Treatments That May Be Used',
+        body: 'Which ones a visit uses depends on what the plants show.',
+        bullets: ['Palm fertilizer: Slow-release.', 'Shrub fertilizer: Slow-release, twice a year.'],
+        visual: { type: 'categories', items: [
+          { key: 'feeding', label: 'Palm fertilizer', text: 'Slow-release.' },
+          { key: 'feeding', label: 'Shrub fertilizer', text: 'Slow-release, twice a year.' },
+        ] },
+      }],
+    };
+    renderWith(content);
+    await screen.findByRole('heading', { level: 2, name: 'Treatments That May Be Used' });
+    expect(screen.getByText('Tree & Shrub Program')).toBeInTheDocument();
+    expect(screen.queryByText('Lawn Care Program')).not.toBeInTheDocument();
+    expect(document.title).toBe('Your Tree & Shrub Program Overview | Waves');
+    const cards = within(sectionOf('Treatments That May Be Used')).getAllByRole('listitem');
+    expect(cards.map((card) => card.querySelector('span span').textContent)).toEqual(['Palm fertilizer', 'Shrub fertilizer']);
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/);
+  });
+
+  it('a packet with no service line stays the lawn program', async () => {
+    renderWith(v13Content());
+    await screen.findByRole('heading', { level: 2, name: 'Your Year At A Glance' });
+    expect(screen.getByText('Lawn Care Program')).toBeInTheDocument();
+    expect(document.title).toBe('Your Lawn Care Program Overview | Waves');
+  });
 });
