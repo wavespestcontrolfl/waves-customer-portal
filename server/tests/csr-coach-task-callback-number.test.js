@@ -83,22 +83,97 @@ describe('replaceOwnedNumbers — callback guard', () => {
 describe('buildCsrScoringText — caller\'s number in the prompt', () => {
   const base = { callDirection: 'inbound', csrName: 'Test CSR', callSource: 'main', metadata: {}, transcript: 'hello' };
 
-  test('carries the caller line and the callback rule when contactPhone is given', () => {
+  test('carries the caller ID line and the callback rule when contactPhone is given', () => {
     const text = buildCsrScoringText({ ...base, contactPhone: CALLER });
-    expect(text).toContain("Caller's number: 941-555-0142");
-    expect(text).toContain("must use the caller's number above, never a Waves number");
+    expect(text).toContain('Caller ID: 941-555-0142');
+    expect(text).toContain('number the caller gave in the call if it differs from the caller ID');
+    expect(text).toContain('Never use a Waves number');
   });
 
   test('omits the caller line when contactPhone is unknown or one of our lines', () => {
     for (const contactPhone of [null, undefined, '', '+19413187612']) {
       const text = buildCsrScoringText({ ...base, contactPhone });
-      expect(text).not.toContain("Caller's number:");
+      expect(text).not.toContain('Caller ID:');
       expect(text).toContain('Never put a Waves phone number in the follow-up task');
     }
   });
 });
 
-describe('scoreCall — end to end', () => {
+// A caller can disclaim the ANI ("that's the office line / not my number") or
+// give a different callback number. Pre-push review P1: the ANI must not be
+// forced on the model or inserted by the guard in those cases.
+const ALT = '+19415550988';
+const disclaimedNoNumber = { caller: { caller_id_disclaimed: true, phone_source: 'unknown', phone_e164: null } };
+const disclaimedWithAlt = { caller: { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: ALT } };
+const disclaimedAltEqualsAni = { caller: { caller_id_disclaimed: true, phone_source: 'both', phone_e164: CALLER } };
+const spokenAltNotDisclaimed = { caller: { caller_id_disclaimed: false, phone_source: 'spoken', phone_e164: ALT } };
+const ownedAsCallback = { caller: { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+19413187612' } };
+
+describe('disclaimed ANI and alternate confirmed callback number', () => {
+  test('disclaimed ANI: the guard does not insert the ANI, it uses the words', () => {
+    expect(replaceOwnedNumbers('Call Pat at 941-318-7612.', CALLER, disclaimedNoNumber))
+      .toBe("Call Pat at the caller's number.");
+    // The disclaimed number repeated back as the "callback" is still the ANI.
+    expect(replaceOwnedNumbers('Call Pat at 941-318-7612.', CALLER, disclaimedAltEqualsAni))
+      .toBe("Call Pat at the caller's number.");
+  });
+
+  test('disclaimed ANI with a confirmed alternate: the alternate is inserted', () => {
+    expect(replaceOwnedNumbers('Call Pat at (941) 318-7612.', CALLER, disclaimedWithAlt))
+      .toBe('Call Pat at 941-555-0988.');
+  });
+
+  test('a confirmed alternate wins over the ANI when the ANI was not disclaimed', () => {
+    expect(replaceOwnedNumbers('Call Pat at 941-318-7612.', CALLER, spokenAltNotDisclaimed))
+      .toBe('Call Pat at 941-555-0988.');
+  });
+
+  test('an owned number given as the "callback" is never used', () => {
+    expect(replaceOwnedNumbers('Call Pat at 941-318-7612.', CALLER, ownedAsCallback))
+      .toBe("Call Pat at the caller's number.");
+  });
+
+  test('a caller-ID-only extraction (not disclaimed) still falls back to the ANI', () => {
+    const ext = { caller: { caller_id_disclaimed: false, phone_source: 'caller_id', phone_e164: CALLER } };
+    expect(replaceOwnedNumbers('Call Pat at 941-318-7612.', CALLER, ext)).toBe('Call Pat at 941-555-0142.');
+  });
+
+  test('prompt omits the caller ID line when the ANI is disclaimed', () => {
+    const text = buildCsrScoringText({ callDirection: 'inbound', csrName: 'Test CSR', transcript: 'hi', contactPhone: CALLER, v2Extraction: disclaimedNoNumber });
+    expect(text).not.toContain('Caller ID:');
+    expect(text).not.toContain('941-555-0142');
+    expect(text).toContain('not theirs');
+    expect(text).toContain("the caller's number");
+  });
+
+  test('prompt gives the confirmed number, not the disclaimed ANI', () => {
+    const text = buildCsrScoringText({ callDirection: 'inbound', csrName: 'Test CSR', transcript: 'hi', contactPhone: CALLER, v2Extraction: disclaimedWithAlt });
+    expect(text).not.toContain('Caller ID:');
+    expect(text).not.toContain('941-555-0142');
+    expect(text).toContain('Confirmed callback number: 941-555-0988');
+  });
+
+  test('prompt lists both the caller ID and a different spoken number when not disclaimed', () => {
+    const text = buildCsrScoringText({ callDirection: 'inbound', csrName: 'Test CSR', transcript: 'hi', contactPhone: CALLER, v2Extraction: spokenAltNotDisclaimed });
+    expect(text).toContain('Caller ID: 941-555-0142');
+    expect(text).toContain('Confirmed callback number: 941-555-0988');
+  });
+
+  test('scoreCall end to end: disclaimed ANI never reaches the prompt or the stored task', async () => {
+    for (const k of Object.keys(mockInserts)) delete mockInserts[k];
+    dispatchWithFallback.mockReset();
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: scoreAnswer('Call Pat at 941-318-7612 today.') });
+    await CSRCoach.scoreCall({
+      csrName: 'Test CSR', customerId: null, callDirection: 'inbound', callSource: 'main',
+      transcript: 'that is the office line', metadata: {}, contactPhone: CALLER, v2Extraction: disclaimedNoNumber,
+    });
+    const [, request] = dispatchWithFallback.mock.calls[0];
+    expect(request.text).not.toContain('941-555-0142');
+    expect(mockInserts.ai_follow_up_tasks.recommended_action).toBe("Call Pat at the caller's number today.");
+  });
+});
+
+describe('scoreCall — end to end' , () => {
   beforeEach(() => {
     for (const k of Object.keys(mockInserts)) delete mockInserts[k];
     dispatchWithFallback.mockReset();
@@ -114,7 +189,7 @@ describe('scoreCall — end to end', () => {
       transcript: 'caller asks about ants', metadata: {}, contactPhone: CALLER,
     });
     const [, request] = dispatchWithFallback.mock.calls[0];
-    expect(request.text).toContain("Caller's number: 941-555-0142");
+    expect(request.text).toContain('Caller ID: 941-555-0142');
     expect(mockInserts.ai_follow_up_tasks.recommended_action)
       .toBe('Call Pat at 941-555-0142 immediately, before she books another company.');
   });

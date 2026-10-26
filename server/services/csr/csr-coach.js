@@ -103,41 +103,81 @@ const CALLER_NUMBER_FALLBACK_WORDS = "the caller's number";
 // +1 941 318 7612. The digit lookarounds keep it off longer digit runs.
 const PHONE_IN_TEXT_RE = /(?<!\d)(?:\+?1[\s.-]?)?(?:\((\d{3})\)|(\d{3}))[\s.-]?(\d{3})[\s.-]?(\d{4})(?!\d)/g;
 
-// The caller's number as it should read in task text (941-807-6741), or null
-// when it is unknown, malformed, or itself one of our lines (a forwarding
-// artifact — never a number a customer can be called back on).
-function callerNumberForTask(contactPhone) {
-  const digits = String(contactPhone == null ? '' : contactPhone).replace(/\D/g, '');
-  const last10 = digits.slice(-10);
+function formatTaskNumber(value) {
+  const last10 = String(value == null ? '' : value).replace(/\D/g, '').slice(-10);
   if (last10.length !== 10) return null;
   if (TWILIO_NUMBERS.isOwnedNumber(last10)) return null;
   return `${last10.slice(0, 3)}-${last10.slice(3, 6)}-${last10.slice(6)}`;
 }
 
-function replaceOwnedNumbers(text, contactPhone) {
+// Which number a callback may use (pre-push review P1: contactPhone is only
+// the call's ANI, and a caller can disclaim it or give a different number).
+//   callerId — the ANI as 941-xxx-xxxx, or null when unknown, one of our own
+//     lines, or disclaimed by the caller (caller_id_disclaimed). Shown to the
+//     model as "Caller ID"; never used when disclaimed.
+//   confirmed — a callback number the caller gave in the call (the v2
+//     extraction's caller.phone_e164), or null. Trusted only when it is a
+//     dialable, non-Waves number AND call-triage-flags agrees it is a real
+//     replacement: a disclaimed ANI whose disclaimer is no longer unresolved
+//     (callerIdDisclaimedNeedsCallback false — the same check behind
+//     callbackNumberCoachingNote), or a spoken number on a call that was not
+//     disclaimed.
+// Pure/testable.
+function resolveCallbackNumbers(v2Extraction, contactPhone) {
+  const caller = v2Extraction?.caller || null;
+  const { callerIdDisclaimedNeedsCallback, isDialablePhone } = require('../call-triage-flags');
+  const disclaimed = caller?.caller_id_disclaimed === true;
+  let confirmed = null;
+  if (caller && isDialablePhone(caller.phone_e164)) {
+    const trusted = disclaimed
+      ? !callerIdDisclaimedNeedsCallback(caller, { ani: contactPhone })
+      : caller.phone_source === 'spoken';
+    if (trusted) confirmed = formatTaskNumber(caller.phone_e164);
+  }
+  return { callerId: disclaimed ? null : formatTaskNumber(contactPhone), confirmed };
+}
+
+// The number an owned line in task text is rewritten to: the confirmed
+// callback, else the undisclaimed caller ID, else words.
+function callbackReplacement(v2Extraction, contactPhone) {
+  const { callerId, confirmed } = resolveCallbackNumbers(v2Extraction, contactPhone);
+  return confirmed || callerId || CALLER_NUMBER_FALLBACK_WORDS;
+}
+
+function replaceOwnedNumbers(text, contactPhone, v2Extraction = null) {
   if (typeof text !== 'string' || !text) return text;
-  const replacement = callerNumberForTask(contactPhone) || CALLER_NUMBER_FALLBACK_WORDS;
+  const replacement = callbackReplacement(v2Extraction, contactPhone);
   return text.replace(PHONE_IN_TEXT_RE, (match, paren, bare, b, c) => (
     TWILIO_NUMBERS.isOwnedNumber(`${paren || bare}${b}${c}`) ? replacement : match
   ));
 }
 
-// The scoring request's user text. When the caller's number is known it is
-// stated outright, with one instruction that a callback uses it — the model
-// otherwise picks up the Waves line the caller dialed (see the guard above).
-// Pure/testable.
-function buildCsrScoringText({ callDirection, csrName, callSource, metadata, transcript, contactPhone } = {}) {
-  const callerNumber = callerNumberForTask(contactPhone);
-  const numberRule = callerNumber
-    ? "A callback in the follow-up task must use the caller's number above, never a Waves number."
-    : "Never put a Waves phone number in the follow-up task; if you need a callback number, write \"the caller's number\".";
+// The scoring request's user text. The ANI is presented as caller ID, not as
+// the callback number: the model is told to prefer a different number the
+// caller gave, and when the caller disclaimed the ANI the line is left out.
+// Without any of this the model picks up the Waves line the caller dialed
+// (see the guard above). Pure/testable.
+function buildCsrScoringText({ callDirection, csrName, callSource, metadata, transcript, contactPhone, v2Extraction = null } = {}) {
+  const { callerId, confirmed } = resolveCallbackNumbers(v2Extraction, contactPhone);
+  const disclaimed = v2Extraction?.caller?.caller_id_disclaimed === true;
+  let numberRule;
+  if (disclaimed) {
+    numberRule = confirmed
+      ? "The caller said the number they called from is not theirs. Any callback in the follow-up task must use the confirmed callback number above, never a Waves number."
+      : "The caller said the number they called from is not theirs. Any callback in the follow-up task must use the number the caller gave in the call, or the words \"the caller's number\" if none was given. Never use a Waves number.";
+  } else if (callerId || confirmed) {
+    numberRule = "Any callback in the follow-up task must use the number the caller gave in the call if it differs from the caller ID, otherwise the caller ID. Never use a Waves number.";
+  } else {
+    numberRule = "Never put a Waves phone number in the follow-up task; if you need a callback number, use the number the caller gave in the call, or the words \"the caller's number\".";
+  }
   return `Score this ${callDirection} call:
 
 CSR: ${csrName}
 Source: ${callSource || 'unknown'}
 ${metadata?.customerName ? `Customer: ${metadata.customerName}` : ''}
 ${metadata?.serviceInterest ? `Service interest: ${metadata.serviceInterest}` : ''}
-${callerNumber ? `Caller's number: ${callerNumber}` : ''}
+${callerId ? `Caller ID: ${callerId}` : ''}
+${confirmed ? `Confirmed callback number: ${confirmed}` : ''}
 
 TRANSCRIPT/NOTES:
 ${transcript || 'No transcript available — score based on available metadata only.'}
@@ -498,7 +538,7 @@ Return JSON:
   "estimated_job_value": null or number,
   "follow_up_task": null or { "type": "call_back/send_sms/send_estimate", "recommended_action": "specific script", "deadline_hours": 4/24/48, "priority": "high/medium/low" }
 }`,
-      text: buildCsrScoringText({ callDirection, csrName, callSource, metadata, transcript, contactPhone }),
+      text: buildCsrScoringText({ callDirection, csrName, callSource, metadata, transcript, contactPhone, v2Extraction }),
     // BOUNDED. The call-recording pass AWAITS this while holding its
     // processing claim, and its heartbeat runs on a timer — so on the SDK's
     // defaults a hang here kept the claim alive and unreclaimable by both the
@@ -585,7 +625,7 @@ Return JSON:
         assigned_to: csrName || 'Adam',
         task_type: score.follow_up_task.type,
         // Never leave one of our own lines as the callback number.
-        recommended_action: replaceOwnedNumbers(score.follow_up_task.recommended_action, contactPhone),
+        recommended_action: replaceOwnedNumbers(score.follow_up_task.recommended_action, contactPhone, v2Extraction),
         context_summary: score.call_summary,
         deadline: new Date(Date.now() + score.follow_up_task.deadline_hours * 3600000),
         status: 'pending',
@@ -852,6 +892,7 @@ module.exports = new CSRCoach();
 module.exports.csrScoringApplies = csrScoringApplies;
 module.exports.SALES_RUBRIC_CALL_NATURE = SALES_RUBRIC_CALL_NATURE;
 module.exports.callbackNumberCoachingNote = callbackNumberCoachingNote;
+module.exports.resolveCallbackNumbers = resolveCallbackNumbers;
 module.exports.replaceOwnedNumbers = replaceOwnedNumbers;
 module.exports.buildCsrScoringText = buildCsrScoringText;
 module.exports.CALLBACK_NUMBER_COACHING_NOTE = CALLBACK_NUMBER_COACHING_NOTE;
