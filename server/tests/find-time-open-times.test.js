@@ -12,6 +12,8 @@
  *     with no forecast they carry none.
  *  4. GET /ui says openTimes only when both GATE_OPEN_TIMES_BOX and
  *     GATE_BEST_TIME_HINTS are on.
+ *  5. Across every route, a technician who cannot perform one of the
+ *     booking's services is never listed (a row books its technician).
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -53,6 +55,7 @@ jest.mock('../services/rain-out', () => ({
   loadOccupancy: jest.fn(),
 }));
 jest.mock('../services/scheduling/hint-road-times', () => ({ priceChipsOnRoads: jest.fn(async (chips) => chips) }));
+jest.mock('../services/technician-capabilities', () => ({ inactiveCapabilitiesForServices: jest.fn(async () => []) }));
 
 const express = require('express');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -60,6 +63,7 @@ const { loadOccupancy } = require('../services/rain-out');
 const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
 const { getHourlyRainOutlook } = require('../services/weather-forecast');
 const { priceChipsOnRoads } = require('../services/scheduling/hint-road-times');
+const { inactiveCapabilitiesForServices } = require('../services/technician-capabilities');
 const { buildOpenTimes, OPEN_TIMES_MAX_DAYS } = require('../services/scheduling/find-time-hints');
 const findTimeRouter = require('../routes/admin-schedule-find-time');
 
@@ -202,4 +206,19 @@ test('GET /ui answers openTimes only with both gates on', async () => {
   expect(await ui()).toEqual({ ok: true, openTimes: true });
   delete process.env.GATE_BEST_TIME_HINTS;
   expect(await ui()).toEqual({ ok: true, openTimes: false });
+});
+
+test('across every route, a technician who cannot do one of the services is left out', async () => {
+  process.env.GATE_OPEN_TIMES_BOX = 'true';
+  inactiveCapabilitiesForServices.mockResolvedValue([{ technician_id: 't2', service_type: 'Lawn Fertilization' }]);
+  const body = await (await post({ ...LIST, serviceType: 'Pest Control', serviceTypes: ['Pest Control', 'Lawn Fertilization'] })).json();
+  const sep1 = body.summary.days.find((day) => day.date === '2026-09-01');
+  expect(sep1.hours.map((hour) => hour.technician.id)).toEqual(['t1']);
+  expect(inactiveCapabilitiesForServices).toHaveBeenCalledWith(
+    expect.anything(), ['t1', 't2'], [{ service_type: 'Pest Control' }, { service_type: 'Lawn Fertilization' }],
+  );
+  // One technician's own route: nothing to check.
+  inactiveCapabilitiesForServices.mockClear();
+  await post({ ...LIST, technicianId: 't1', serviceTypes: ['Lawn Fertilization'] });
+  expect(inactiveCapabilitiesForServices).not.toHaveBeenCalled();
 });

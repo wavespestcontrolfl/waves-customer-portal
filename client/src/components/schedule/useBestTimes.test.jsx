@@ -412,3 +412,18 @@ it('an answer without the list (the box was turned off since) draws the strip', 
   expect(sent[sent.length - 1]).toMatchObject({ pickedStart: '14:00', dateFrom: '2034-12-30' });
   expect(result.current.availability.openTimes).toBeUndefined();
 });
+
+it('open times: a closed picker forgets its list, so reopening searches the schedule again', async () => {
+  const today = etDateString();
+  const fetch = routedFetch({ ui: true, answer: listOf });
+  vi.stubGlobal('fetch', fetch);
+  const { result, rerender } = renderHook((props) => useBestTimes({
+    date: addDays(today, 3), serviceId: 'fixture', technicianId: 'tech', openTimes: true, ...props,
+  }), { initialProps: { enabled: true } });
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBeTruthy());
+  rerender({ enabled: false });
+  expect(result.current.availability).toBeNull();
+  rerender({ enabled: true });
+  await waitFor(() => expect(searches(fetch)).toHaveLength(2));
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBeTruthy());
+});

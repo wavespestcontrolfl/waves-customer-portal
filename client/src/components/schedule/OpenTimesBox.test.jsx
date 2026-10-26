@@ -145,6 +145,15 @@ describe('the box', () => {
     fireEvent.click(screen.getAllByTestId('open-time-row')[1]);
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-01', start: '09:00', technicianId: 't2', pickTech: true }));
   });
+  it('an unassigned visit: the row at the form\'s own hour stays tappable and books its technician', () => {
+    const onPick = vi.fn();
+    render(<OpenTimesBox availability={answer()} currentDate="2035-01-02" currentStart="08:00" currentTechnicianId={null} onPick={onPick} techPick />);
+    const row = screen.getAllByTestId('open-time-row').find((r) => r.textContent.startsWith('Tue Jan 2'));
+    expect(row.disabled).toBe(false);
+    expect(row.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(row);
+    expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-02', start: '08:00', technicianId: 't1', pickTech: true }));
+  });
   it('while the first search runs it says so; the strip hands over to the box', () => {
     render(<AvailabilityStrip availability={{ openTimes: { pending: true }, days: [], best: null, picked: null }} currentDate="2035-01-04" currentStart="09:00" />);
     expect(screen.getByRole('status').textContent).toBe('Finding open times…');

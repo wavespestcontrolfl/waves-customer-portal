@@ -129,8 +129,11 @@ export default function OpenTimesBox({
   const { rows, empty } = openTimesRows(days, { mode, band, techId: showTech ? techId : '', focusDate });
   // Mid re-check the rows were found for the previous inputs: show them, take none.
   const pick = availability.stale ? undefined : onPick;
+  // A row is "current" only when taking it would change nothing: an hour on
+  // another technician's route (or any route, for an unassigned visit) stays
+  // tappable, as the strip's chips do.
   const isCurrent = (hour) => hour.date === currentDate && sameStart(hour.start, currentStart)
-    && (!hour.technicianId || !currentTechnicianId || String(hour.technicianId) === String(currentTechnicianId));
+    && (!hour.technicianId || String(hour.technicianId) === String(currentTechnicianId ?? ''));
   const take = (hour) => {
     if (!pick) return;
     setFocusDate(hour.date);

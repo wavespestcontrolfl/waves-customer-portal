@@ -214,6 +214,20 @@ async function resolveFindTimeTarget({ serviceId, propertyId, customerId, addres
   };
 }
 
+// The technicians among `techIds` who cannot perform one of the booking's
+// services. A list row books its technician explicitly, past the auto
+// matcher's capability check, so such a technician is never listed.
+async function techsLackingServices(techIds, { serviceType, serviceTypes }) {
+  const wanted = [...new Set([serviceType, ...(Array.isArray(serviceTypes) ? serviceTypes : [])]
+    .filter((t) => typeof t === 'string' && t.trim()))];
+  const ids = [...new Set(techIds.filter(Boolean).map(String))];
+  if (!wanted.length || !ids.length) return new Set();
+  const inactive = await require('../services/technician-capabilities').inactiveCapabilitiesForServices(
+    db, ids, wanted.map((service_type) => ({ service_type })),
+  );
+  return new Set(inactive.map((row) => String(row.technician_id)));
+}
+
 // The pickers ask once which box to draw, so a search is shaped for it from
 // the start. Read at call time: a flip needs no redeploy.
 router.get('/ui', (req, res) => {
@@ -399,7 +413,7 @@ router.post('/', async (req, res) => {
     const rawSlots = markUnknownDetours(Array.isArray(result?.slots) ? result.slots : []);
     // One guard pass answers both lists: `ranked` is the plain hint's top-N
     // (one start per gap); `every` is each start that fits, for the summary.
-    const { ranked: slots, every } = hint
+    const { ranked: slots, every: everyStart } = hint
       ? await guardHintStarts(rawSlots, {
         today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN, every: plan.summary, perTech: plan.openTimes === true,
       })
@@ -426,16 +440,15 @@ router.post('/', async (req, res) => {
       })
       : undefined;
     if (pickedByTech?.length) {
-      const wanted = [...new Set([serviceType, ...(Array.isArray(serviceTypes) ? serviceTypes : [])]
-        .filter((t) => typeof t === 'string' && t.trim()))];
-      if (wanted.length) {
-        const inactive = await require('../services/technician-capabilities').inactiveCapabilitiesForServices(
-          db, pickedByTech.map((v) => v.technician.id), wanted.map((service_type) => ({ service_type })),
-        );
-        const unqualified = new Set(inactive.map((row) => String(row.technician_id)));
-        pickedByTech = pickedByTech.filter((v) => !unqualified.has(String(v.technician.id)));
-      }
+      const unqualified = await techsLackingServices(pickedByTech.map((v) => v.technician.id), { serviceType, serviceTypes });
+      pickedByTech = pickedByTech.filter((v) => !unqualified.has(String(v.technician.id)));
     }
+    // The open-times list across every route: its rows book their technician
+    // the same way (tech pick), so the same check applies to each hour.
+    const lacking = plan.openTimes && !technicianId && everyStart?.length
+      ? await techsLackingServices(everyStart.map((s) => s.technician?.id), { serviceType, serviceTypes })
+      : new Set();
+    const every = lacking.size ? everyStart.filter((s) => !lacking.has(String(s.technician?.id))) : everyStart;
 
     // The engine's per-date refusal counts feed the summary's day status
     // only; they are not part of any response contract.

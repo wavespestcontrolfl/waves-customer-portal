@@ -356,6 +356,9 @@ export function useBestTimes({
     // A summary starts today at the earliest (the engine never searches
     // before today), so a past date has no days around it to offer. The
     // open-times list always starts today, whatever date is picked.
+    // A closed picker forgets its list: reopened (the drag-and-drop confirm
+    // stays mounted between drags), it searches the schedule as it is now.
+    if (!enabled) heldList.current = null;
     if (!enabled || !hasSubject || (!listMode && (!YMD.test(String(date || '')) || date < etDateString())) || hintsGated()) {
       setAvailability(null);
       setChecking(false);
