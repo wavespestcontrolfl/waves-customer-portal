@@ -142,6 +142,21 @@ postgres('payroll tax form figures', () => {
     expect(q4.w2).toHaveLength(2);
   });
 
+  it('employee counts follow the pay period: a week holding March 12 paid in April counts for Q1, its wages for Q2 (Codex #6770 r2)', async () => {
+    // A voided check of the same week (another technician) never counts.
+    await addCheck('2026-03-09', '2026-03-20', {}, 'voided', otherTechId);
+    await addCheck('2026-03-09', '2026-04-03');
+    // A week that ends before March 12 does not count.
+    await addCheck('2026-03-02', '2026-03-13', {}, 'finalized', otherTechId);
+    const q1 = await readFormFigures({ year: 2026, quarter: 1, conn: trx });
+    expect(line(q1.f941, '1').value).toBe(1);
+    expect(line(q1.rt6, '1 month 3').value).toBe(1);
+    expect(line(q1.f941, '2').value).toBe(100000); // only the March 13 pay date
+    const q2 = await readFormFigures({ year: 2026, quarter: 2, conn: trx });
+    expect(line(q2.f941, '2').value).toBe(100000);
+    expect(line(q2.f941, '1').value).toBe(0);
+  });
+
   it('a quarter with no checks reads zeros', async () => {
     const out = await readFormFigures({ year: 2026, quarter: 2, conn: trx });
     expect(line(out.f941, '2').value).toBe(0);

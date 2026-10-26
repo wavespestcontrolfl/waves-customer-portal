@@ -24,7 +24,8 @@
  *   not paid cuts the FUTA credit (IRS line 10 worksheet), and the portal does
  *   not work that worksheet.
  * - The 12th rule: a check counts for a month's 12th when week_start <= the
- *   12th <= week_start + 6. Only checks paid in the quarter are counted.
+ *   12th <= week_start + 6, whenever it was paid (a March 9 week paid in April
+ *   still counts for March 12). Wages and taxes follow the pay date.
  * - No full SSN, EIN, bank or routing number is held or shown. Every form field
  *   that needs one reads "Enter from your records".
  * - A year or quarter with no checks returns zeros, not an error.
@@ -207,14 +208,14 @@ function depositSchedule({ year, quarter, line12, priorQuarterLine12, lookbackCe
   return { kind: 'monthly', reason: `The lookback period holds ${centsText(lookbackCents)} of tax, $50,000 or less, and no month reached $100,000.` };
 }
 
-function form941(year, quarter, quarterChecks, depositsCents, history) {
+function form941(year, quarter, quarterChecks, depositsCents, history, periodChecks) {
   const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
   const { wages, fit, ssWages, addlWages, ssTax, medicareTax, addlTax, line5e, line6, line7, line10, line12 } = quarterTaxes(quarterChecks);
   const line14 = max0(line12 - depositsCents);
   const line15 = max0(depositsCents - line12);
 
   const rows = [
-    count('1', 'Number of employees who received wages, tips, or other compensation for the pay period including March 12, June 12, September 12, or December 12', employeesOnTwelfth(quarterChecks, year, months[2])),
+    count('1', 'Number of employees who received wages, tips, or other compensation for the pay period including March 12, June 12, September 12, or December 12', employeesOnTwelfth(periodChecks, year, months[2])),
     cents('2', 'Wages, tips, and other compensation', wages),
     cents('3', 'Federal income tax withheld from wages, tips, and other compensation', fit),
     cents('5a', 'Taxable social security wages (column 1) and tax (column 2)', ssWages, { rate: pctText(2 * RATES.socialSecurityBp), value2: ssTax }),
@@ -295,10 +296,10 @@ function rt6Tax(quarterChecks) {
   return { gross, excess, checkTax, rateBp: bp, distinct, tax };
 }
 
-function formRt6(year, quarter, quarterChecks) {
+function formRt6(year, quarter, quarterChecks, periodChecks) {
   const months = [1, 2, 3].map((n) => (quarter - 1) * 3 + n);
   const { gross, excess, checkTax, rateBp, distinct, tax } = rt6Tax(quarterChecks);
-  const rows = months.map((month, index) => count(`1 month ${index + 1}`, `Covered employees, ${MONTH_NAMES[month - 1]}`, employeesOnTwelfth(quarterChecks, year, month)));
+  const rows = months.map((month, index) => count(`1 month ${index + 1}`, `Covered employees, ${MONTH_NAMES[month - 1]}`, employeesOnTwelfth(periodChecks, year, month)));
   rows.push(
     cents('2', 'Gross wages', gross),
     cents('3', 'Excess wages over the $7,000 wage base', excess),
@@ -473,7 +474,7 @@ function w3Totals(forms) {
  * `year`, dates as YYYY-MM-DD text); deposits are paid calendar rows as
  * { source_key, amount_paid, amount_due }.
  */
-function buildFormFigures({ year, quarter, rows = [], priorRows = [], deposits941 = [], deposits940 = [], rt6Paid = [], addresses = new Map() }) {
+function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows = null, deposits941 = [], deposits940 = [], rt6Paid = [], addresses = new Map() }) {
   // Each check takes its own pay year's Social Security wage base.
   const normalizeYear = (list, y) => {
     const wageBase = list.length ? socialSecurityWageBaseCents(y) : 0;
@@ -483,6 +484,11 @@ function buildFormFigures({ year, quarter, rows = [], priorRows = [], deposits94
   const priorChecks = [year - 2, year - 1].flatMap((y) => normalizeYear(priorRows.filter((r) => String(r.pay_date).startsWith(`${y}-`)), y));
   const quarterChecks = yearChecks.filter((c) => quarterOfMonth(monthOf(c)) === quarter);
   const allChecks = [...priorChecks, ...yearChecks];
+  // Employee counts (941 line 1, RT-6 months) follow the PAY PERIOD that holds
+  // the 12th, whenever it was paid (Codex #6770 r2: a March 9 week paid in
+  // April still counts for March 12). periodRows: the finalized checks whose
+  // week can hold a 12th of the quarter; without them, every check given.
+  const periodChecks = (periodRows || [...priorRows, ...rows]).map((r) => ({ technicianId: r.technician_id, weekStart: r.week_start }));
   const line12Of = (y, q) => quarterTaxes(allChecks.filter((c) => c.payDate.startsWith(`${y}-`) && quarterOfMonth(monthOf(c)) === q)).line12;
   const quarterEnd = `${year}-${pad(quarter * 3)}`;
   const monthCents = new Map();
@@ -502,8 +508,8 @@ function buildFormFigures({ year, quarter, rows = [], priorRows = [], deposits94
     year,
     quarter,
     employer: { name: WAVES_BUSINESS_NAME, address: WAVES_ADDRESS_LINE, ein: FROM_RECORDS },
-    f941: form941(year, quarter, quarterChecks, depositTotal(deposits941), history),
-    rt6: formRt6(year, quarter, quarterChecks),
+    f941: form941(year, quarter, quarterChecks, depositTotal(deposits941), history, periodChecks),
+    rt6: formRt6(year, quarter, quarterChecks, periodChecks),
     f940: form940(year, yearChecks, depositTotal(deposits940), rt6Paid),
     w2,
     w3: w3Totals(w2),
@@ -557,6 +563,15 @@ async function readFormFigures({ year, quarter, conn = db }) {
       conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"),
     );
+  // The pay periods that can hold a 12th of the quarter, whenever they were
+  // paid: weeks starting from six days before the first month's 12th through
+  // the third month's 12th.
+  const firstMonth = (quarter - 1) * 3 + 1;
+  const periodRows = await conn('payroll_checks')
+    .where({ status: 'finalized' })
+    .where('week_start', '>=', addStaffWorkDays(`${year}-${pad(firstMonth)}-12`, -6))
+    .where('week_start', '<=', `${year}-${pad(firstMonth + 2)}-12`)
+    .select('technician_id', conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"));
   const quarterMonths = [1, 2, 3].map((n) => `${year}-${pad((quarter - 1) * 3 + n)}`);
   const deposits941 = await paidDeposits(conn, '941_deposit', quarterMonths);
   const deposits940 = await paidDeposits(conn, '940_deposit', [String(year)]);
@@ -570,7 +585,7 @@ async function readFormFigures({ year, quarter, conn = db }) {
       if (address) addresses.set(t.id, address);
     }
   }
-  return buildFormFigures({ year, quarter, rows, priorRows, deposits941, deposits940, rt6Paid, addresses });
+  return buildFormFigures({ year, quarter, rows, priorRows, periodRows, deposits941, deposits940, rt6Paid, addresses });
 }
 
 /** Query-string check: a 4-digit year from 2020 on and a quarter 1 to 4. */

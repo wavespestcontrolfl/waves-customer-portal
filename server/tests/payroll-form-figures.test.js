@@ -144,6 +144,22 @@ describe('Form 941', () => {
     expect(line(q1([check('2026-01-12', '2026-01-23', { tech: 5 })]).f941, '1').value).toBe(0);
   });
 
+  test('the 12th rule follows the pay period, not the pay date (Codex #6770 r2): a March 9 week paid in April counts for March 12', () => {
+    const late = check('2026-03-09', '2026-04-03', { tech: 7 });
+    const q1 = buildFormFigures({ year: 2026, quarter: 1, rows: [late] });
+    expect(line(q1.f941, '1').value).toBe(1);
+    expect(line(q1.rt6, '1 month 3').value).toBe(1);
+    // Its wages stay in the quarter it was paid.
+    expect(line(q1.f941, '2').value).toBe(0);
+    const q2 = buildFormFigures({ year: 2026, quarter: 2, rows: [late] });
+    expect(line(q2.f941, '2').value).toBe(100000);
+    expect(line(q2.f941, '1').value).toBe(0);
+    // The read passes the pay-period checks on their own (periodRows); they count even when no wages are in the quarter.
+    const period = buildFormFigures({ year: 2026, quarter: 1, rows: [], periodRows: [{ technician_id: 'tech-8', week_start: '2026-03-09' }] });
+    expect(line(period.f941, '1').value).toBe(1);
+    expect(line(period.f941, '2').value).toBe(0);
+  });
+
   test('line 16 under $2,500 needs no schedule', () => {
     const out = build([check('2026-10-05', '2026-10-16', taxed({ tech: 1, federal_income_tax_cents: 10000 }))]);
     expect(line(out.f941, '12').value).toBe(25300);
