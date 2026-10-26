@@ -16,10 +16,10 @@
 import React, { useState } from 'react';
 import { useDispatchAlerts } from '../../hooks/useDispatchAlerts';
 import AlertCard from './AlertCard';
-import { Button } from '../ui';
+import { ActionFeedback, Button } from '../ui';
 
-export default function ActionQueuePane({ onOpenJob }) {
-  const { alerts, loading, error, resolveAlert, clearAlerts, decideNotClosedOut } = useDispatchAlerts();
+export default function ActionQueuePane({ onOpenJob, feedbackRetryEnabled = false }) {
+  const { alerts, loading, error, retryAlerts, resolveAlert, clearAlerts, decideNotClosedOut } = useDispatchAlerts();
   const [clearing, setClearing] = useState(false);
   const [clearError, setClearError] = useState(null);
 
@@ -65,9 +65,15 @@ export default function ActionQueuePane({ onOpenJob }) {
             Loading alerts…
           </div>
         ) : error ? (
-          <div className="text-12 text-alert-fg px-1 py-2">
-            Failed to load alerts: {error}
-          </div>
+          feedbackRetryEnabled ? (
+            <ActionFeedback error onRetry={retryAlerts} className="px-1 py-2">
+              Failed to load alerts: {error}
+            </ActionFeedback>
+          ) : (
+            <div className="text-12 text-alert-fg px-1 py-2">
+              Failed to load alerts: {error}
+            </div>
+          )
         ) : alerts.length === 0 ? (
           <div className="text-12 text-ink-tertiary px-1 py-2">
             No active alerts.
