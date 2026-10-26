@@ -8243,6 +8243,16 @@ function alertRingOnceLive() {
 // GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
 module.exports.alertRingOnceLive = alertRingOnceLive;
 
+// GATE_ALERT_CLAUDE_QUEUE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-26, "ok go").
+// On, an admin row that is a reminder from a Claude job on the owner's Mac (metadata.opsJob, unless metadata.opsWho is
+// 'person') or one of our own engineering faults (the classes in services/admin-alert-routing.js) is written Activity-only
+// and stamped who 'claude': it leaves the owner's bell and `needs-me --who claude` lists it. Off = every row lands as before.
+function alertClaudeQueueLive() {
+  return process.env.GATE_ALERT_CLAUDE_QUEUE === 'true';
+}
+// GATE_ALERT_CLAUDE_QUEUE reader, on its own line so gate PRs never conflict.
+module.exports.alertClaudeQueueLive = alertClaudeQueueLive;
+
 // GATE_NEW_CLIENT_CONFIRM_EMAIL read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader for
 // the new-client confirmation promotion: services/appointment-reminders.js resolveConfirmationChannel. Off: a booking confirmation
 // keeps today's channel (text first, email only when the text fails). On: a confirmation that would go by text alone goes by text

@@ -12,6 +12,7 @@ function safeErrorSummary(err) {
 }
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const { stampClaudeQueue } = require('./admin-alert-routing');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
   'appointment_confirmation',
@@ -393,6 +394,16 @@ async function resolveRingOnRefresh(ringOnRefresh, existing, existingMeta) {
 //     is left exactly as this emission composed it ('activity', its own
 //     value) — never forced.
 function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
+  const merged = mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing);
+  if (!metadata.claudeQueue) return merged;
+  // A row routed to Claude's queue (admin-alert-routing.js) is Activity-only whether or not this refresh
+  // rings: never let a stale quiet flag or the owner-bell correction above put it back in the bell, and
+  // move a row first written into the bell off it. Moving off the bell is not a ring.
+  const { quiet: _routedQuiet, ...rest } = merged;
+  return { ...rest, feed: 'activity' };
+}
+
+function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
   if (shouldRing) {
     const merged = { ...existingMeta, ...metadata, rungAt: new Date().toISOString() };
     // A DEFINED non-owner audience only — a caller outside ops-digest.js
@@ -484,7 +495,12 @@ const NotificationService = {
       // converted ex-raw-insert sites. Same truthy sentinel as the internal
       // test-customer gate above: intentional suppression must read as
       // success-without-a-row, never as an insert failure.
-      if (recipientType === 'admin') {
+      // Claude's queue (GATE_ALERT_CLAUDE_QUEUE, services/admin-alert-routing.js): a Mac reminder job's row or one of
+      // our own engineering faults is written Activity-only and stamped who 'claude'. It is no longer a ring, so the
+      // bell policy below (which decides whether to ring) must not silence it: the row still has to be written.
+      const rowMetadata = recipientType === 'admin' ? stampClaudeQueue({ category, metadata }) : metadata;
+      const routedToClaude = rowMetadata !== metadata || Boolean(rowMetadata?.claudeQueue);
+      if (recipientType === 'admin' && !routedToClaude) {
         try {
           const bellPolicy = require('./notification-bell-policy');
           if (bellPolicy.isBellPolicyEnabled()) {
@@ -541,7 +557,7 @@ const NotificationService = {
         ...(normalized.detail ? { detail: normalized.detail } : {}),
         icon: icon || getCategoryIcon(category),
         link: link || null,
-        metadata: metadata ? JSON.stringify(metadata) : null,
+        metadata: rowMetadata ? JSON.stringify(rowMetadata) : null,
       }).returning('*');
       return notif;
     } catch (err) {
@@ -607,7 +623,9 @@ const NotificationService = {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
     const windowMs = Number(dedupeWindowMs);
-    const metadata = { ...createOpts.metadata, dedupeKey, ...(dedupeVersion === undefined ? {} : { dedupeVersion }) };
+    // Stamped here too (create() would stamp a fresh insert anyway): a refresh of a standing row never reaches
+    // create(), and it must carry the Claude-queue fields (see mergeRefreshMetadata).
+    const metadata = stampClaudeQueue({ category, metadata: { ...createOpts.metadata, dedupeKey, ...(dedupeVersion === undefined ? {} : { dedupeVersion }) } });
     const dedupeAndInsert = async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
         let existingQuery = trx('notifications')
@@ -1174,6 +1192,7 @@ module.exports = NotificationService;
 module.exports.safeErrorSummary = safeErrorSummary;
 module.exports._private = {
   resolveRingOnRefresh,
+  mergeRefreshMetadata,
   safeErrorSummary,
   CUSTOMER_PREFERENCE_KEYS,
   customerPreferenceEnabled,

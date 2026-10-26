@@ -123,6 +123,28 @@ customer's message by this rule.
 A Claude session that resolves a row says what fixed it (the PR or the change). It never
 resolves a `person` row.
 
+**Claude's own queue** (owner 2026-10-26, `GATE_ALERT_CLAUDE_QUEUE`). Two kinds of row never
+belong in the owner's bell, because the owner would only relay them to Claude:
+- a reminder from a Claude job on the owner's Mac (`metadata.opsJob`, stamped by
+  `~/ops-oneshots/lib/bell.js`). A job marks an ask that is the owner's (a gate flip for the
+  owner's gates, a money ask) with `metadata.opsWho = 'person'`; that row stays in the bell.
+  Every other job row is Claude's. An `ask` job row is `needs-you`, an `fyi` one is `fyi`.
+- one of our own engineering faults, from the named table in
+  `server/services/admin-alert-routing.js` (`CLAUDE_QUEUE_CLASSES`): the SMS draft canary
+  (`sms-draft-canary:`), a Mac reminder job that failed (`ops-reminder-broken:`), a Google
+  review sync that is degraded or cannot store rows (`metadata.reason` `gbp_sync_degraded`), and
+  the review sync health escalation marker (`metadata.opsKey` `gbp-sync-health`). These are
+  `broken`. Add a class there when a new engineering fault would otherwise ring the owner.
+The routing is server-side, in `NotificationService.create` and `notifyAdmin`: no emitter and no
+Mac code decides it. A routed row is written Activity-only (`metadata.feed = 'activity'`) and
+stamped `who = 'claude'`, so `needs-me --who claude` lists it. It is written even when the
+bell policy would silence a ring, because it is no longer a ring, and a refresh never puts it
+back in the bell. Never routed: a customer-contact category (`inbound_sms`, `inbound_email`,
+`missed_call`, `voicemail_callback`, `new_lead`), a trigger-registry row, a row tied to a
+customer, and an `ops_digest` row (owner 2026-09-11: ACT / FIX exceptions from the Mac ops
+checks stay in the bell). Rows already open in the bell move once with
+`server/scripts/reroute-claude-queue-rows.js` (dry run by default).
+
 ## 6. What is enforced today
 
 | Rule | Where | State |
@@ -132,6 +154,7 @@ resolves a `person` row.
 | New code must use the helper | `server/tests/admin-alert-raw-callsite-ratchet.test.js` counts raw `notifyAdmin(` call sites per file against a checked-in ceiling; a file may not gain one | ratchet |
 | No emoji in admin text | `notification-service.js` | enforced, all categories |
 | Done state: a done row is hidden from the bell list, its unread count and mark-all-read (the Activity feed keeps it, marked Done). Every id-addressed done write is `NotificationService.markAdminDone`; emitters that close inside their own fenced update spread `doneColumns` into it. Auto-done sources: episode closes (`closeAdminAlertKeys`, `done_by` `episodes`), the relevance sweep (`relevance`), an ops-digest fall-off resolve, a superseded missed-call bell (a voicemail on the same call, or the caller got through on a later call within 7 days: `retireCalledBackMissedCalls`, 2-minute call-alert cron), a retired missing-deduction bell, a superseded promise-chaser bell, a resolved no-show dispatch tracking bell, a booking-miss bell once its visit is booked, done on another day, or 14 days after its agreed day (`call-booking-miss-watchdog.js`; a visit booked on another day turns the bell into a date check), a logged-delivery bell once no live restock request may cover it (`purchase-receipts/sweep.js`; a delivery with no such request writes none), and every other system retire (a newer bell replaced it, a batch absorbed it, the work was done: the call-commitments watchdog, the follow-up pager, procurement, collections cards, the setup-fee and first-application alerts, the cancellation review bell). A system writer never retires an alert with `read_at` alone; `server/tests/notification-system-retire-closes-done-contract.test.js` fails any non-null `read_at` write that does not also close done, unless it is a named person's read or another table. Not done: any mark-read by a person (a thread open, mark-all-read, a dashboard dismiss). | `PUT /api/admin/notifications/:id/done` (same role scope as mark-read) and `/:id/reopen` (admin only; body `{ doneAt }` is the `done_at_token` the Recently-done list served, a row done again since answers 409 `changed`, and only a row a person closed (`done_by` a technician id or `claude`) can be reopened, a system close answers 409 `not_reopenable`); the bell's Done control | enforced |
+| Claude's own reminders and our engineering faults leave the bell: an admin row with `metadata.opsJob` (unless `opsWho` is `person`) or in a named fault class is written Activity-only and stamped `who = claude`, `severity` `broken` for a fault; customer-contact categories, registry events, customer-tied rows and `ops_digest` rows are never routed | `server/services/admin-alert-routing.js`, applied in `NotificationService.create` and `notifyAdmin`; `server/scripts/reroute-claude-queue-rows.js` moves rows already open | enforced while `GATE_ALERT_CLAUDE_QUEUE` is on (dark by default) |
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
