@@ -3,6 +3,12 @@ const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+const featureGates = require('../config/feature-gates');
+
+// Looked up on the module at call time: tests load this file under partial
+// feature-gates mocks, and a missing reader must read as "gate off".
+const reviewBonusAskFirstLive = () => typeof featureGates.reviewBonusAskFirstLive === 'function'
+  && featureGates.reviewBonusAskFirstLive();
 
 const POLICY_KEY = 'review_incentives.policy';
 const DEFAULT_POLICY = {
@@ -224,11 +230,50 @@ async function resolveTechnicianForReviewRequest(request, conn = db) {
   return null;
 }
 
+// GATE_REVIEW_BONUS_ASK_FIRST (census M8, second technician): the latest visit
+// before a review is not always the visit that earned it. A pest + lawn
+// customer can see both technicians in one week, and two visits on one date tie.
+// The review ask the customer acted on names the visit: the latest ask clicked
+// through to Google before the review (redirected_at, the immutable first-click
+// claim), else the latest ask sent before it. Same 45 days as the rest of the
+// resolver. Nothing found: the caller falls through to today's order.
+async function reviewAskTechnician(review, conn, reviewDate) {
+  const reviewAt = asDate(reviewDate);
+  const since = new Date(reviewAt.getTime() - 45 * DAY_MS);
+  const asks = () => conn('review_requests')
+    .where({ customer_id: review.customer_id })
+    .whereNotNull('technician_id');
+  const clicked = await asks()
+    .whereNotNull('redirected_at')
+    .where('redirected_at', '<=', reviewAt)
+    .where('redirected_at', '>=', since)
+    .orderBy('redirected_at', 'desc')
+    .first();
+  const request = clicked || await asks()
+    .whereNotNull('sent_at')
+    .where('sent_at', '<=', reviewAt)
+    .where('sent_at', '>=', since)
+    .orderBy('sent_at', 'desc')
+    .first();
+  if (!request?.technician_id) return null;
+  return {
+    technicianId: request.technician_id,
+    serviceRecordId: request.service_record_id || null,
+    reviewRequestId: request.id,
+    method: clicked ? 'clicked_review_request' : 'sent_review_request',
+  };
+}
+
 async function resolveTechnicianForGoogleReview(review, conn = db) {
   if (!review?.customer_id) return null;
   const reviewDate = review.review_created_at || review.created_at || new Date();
   const reviewDateOnly = etBusinessDate(reviewDate);
   const cutoff = etBusinessDateOffset(reviewDate, -45);
+
+  if (reviewBonusAskFirstLive()) {
+    const fromAsk = await reviewAskTechnician(review, conn, reviewDate);
+    if (fromAsk) return fromAsk;
+  }
 
   const serviceRecord = await conn('service_records')
     .where({ customer_id: review.customer_id })

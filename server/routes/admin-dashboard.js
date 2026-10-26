@@ -22,6 +22,13 @@ const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { resolveAttributionFreshStart, applyAttributionFreshStart } = require('../utils/attribution-fresh-start');
 const rateLimit = require('express-rate-limit');
 
+// GATE_CALLBACK_SOURCE_TECH reader, looked up at call time: tests load this
+// route under partial feature-gates mocks, and a missing reader reads as off.
+const callbackSourceTechLive = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.callbackSourceTechLive === 'function' && gates.callbackSourceTechLive();
+};
+
 // Server-side gate for the AI chart builder. The client hides the panel behind
 // the same flag, but the endpoints must enforce it too — otherwise any admin who
 // knows the route could reach the LLM + SQL sandbox while it's dark-launched.
@@ -892,6 +899,37 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         callbacks: parseInt(r.callbacks || 0),
         callbackRate: r.jobs > 0 ? Math.round((parseInt(r.callbacks || 0) / parseInt(r.jobs)) * 1000) / 10 : 0,
       }));
+      // GATE_CALLBACK_SOURCE_TECH (census M9): a callback counts against the
+      // technician whose visit it corrects (services/callback-credit.js), not
+      // the one who did it. Jobs, revenue and margins stay where they are. A
+      // technician credited with a callback but no job in the window gets a
+      // row; a credited id with no technicians row joins "Unassigned", as its
+      // jobs do above.
+      if (callbackSourceTechLive()) {
+        const { callbackCreditByTechnician } = require('../services/callback-credit');
+        const credit = await callbackCreditByTechnician(db, { start, endDate });
+        const ids = [...credit.keys()].filter((id) => id != null);
+        const names = new Map((ids.length ? await db('technicians').whereIn('id', ids).select('id', 'name') : [])
+          .map((t) => [String(t.id), t.name]));
+        const byRow = new Map();
+        for (const [id, count] of credit) {
+          const rowKey = id != null && names.has(id) ? id : null;
+          byRow.set(rowKey, (byRow.get(rowKey) || 0) + count);
+        }
+        const rowKeyOf = (r) => (r.techId == null ? null : String(r.techId));
+        for (const rowKey of byRow.keys()) {
+          if (leaderboard.some((r) => rowKeyOf(r) === rowKey)) continue;
+          const name = rowKey == null ? null : names.get(rowKey);
+          leaderboard.push({
+            techId: rowKey, name: name || 'Unassigned', unassigned: !name,
+            jobs: 0, revenue: 0, rpmh: 0, margin: 0, callbacks: 0, callbackRate: 0,
+          });
+        }
+        leaderboard = leaderboard.map((r) => {
+          const callbacks = byRow.get(rowKeyOf(r)) || 0;
+          return { ...r, callbacks, callbackRate: r.jobs > 0 ? Math.round((callbacks / r.jobs) * 1000) / 10 : 0 };
+        });
+      }
     } catch (err) {
       logger.error(`[admin-dashboard] leaderboard failed: ${err.message}`);
     }
