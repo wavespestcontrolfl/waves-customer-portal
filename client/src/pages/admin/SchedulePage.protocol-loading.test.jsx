@@ -323,6 +323,16 @@ describe("Job card chemical area add-on", () => {
     expect(screen.getByText(/^Limit:/)).toBeVisible();
   });
 
+  // GATE_SPRAY_RAIN_RULES: a rain caution keeps the dose; the chip says Caution, never Unknown.
+  it("names a rain caution and shows its reason", async () => {
+    const body = card();
+    body.products = [{ ...body.products[0], verdict: "caution", verdictReason: "rain 65% at 2 pm — label: no spraying during rain" }];
+    await show(body);
+    expect((await screen.findAllByText("rain 65% at 2 pm — label: no spraying during rain"))[0]).toBeVisible();
+    expect(screen.getAllByText("Caution").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
+  });
+
   it("shows the hold reason in place of a withheld rate, and no Safety line when none is stated", async () => {
     await show(card({ rate: null, rateNote: "Spray check: wind over 10 mph — rate withheld", safety: null }));
     expect(await screen.findByText("Spray check: wind over 10 mph — rate withheld")).toBeVisible();

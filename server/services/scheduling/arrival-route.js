@@ -823,16 +823,17 @@ async function persistArrivalOrder(conn, fit, targetId) {
 }
 
 /** GATE_STAFF_ROUTE_INSERTION, capacity mode off: after a staff save moved a
- *  visit (another day, technician or start), number its technician's day in
- *  the order the staff check certified. Until then a moved visit has no
- *  number, and the board, the tech app and the tracking page list it after
- *  every numbered stop. Runs on the caller's save transaction under a
- *  savepoint: any failure keeps the save and leaves the numbers as they
- *  were. A day the check cannot certify (a save past its warning, a stop
+ *  visit (another day, technician or start), or New Appointment booked one
+ *  (GATE_NEW_APPT_STOP_ORDER; `source: 'new_appointment'` goes on the audit
+ *  row), number its technician's day in the order the staff check
+ *  certified. Until then such a visit has no number, and the board, the tech
+ *  app and the tracking page list it after every numbered stop. Runs on the
+ *  caller's save transaction under a savepoint: any failure keeps the save
+ *  and leaves the numbers as they were. A day the check cannot certify (a save past its warning, a stop
  *  under way, a missing location, a shared stop) also stays as it was.
  *  Callers hold the tech-day fence; a busy one leaves the numbers to the
  *  writer holding it. Returns the order written, or null. */
-async function placeMovedVisit(conn, { serviceId } = {}) {
+async function placeMovedVisit(conn, { serviceId, source } = {}) {
   if (capacityEnabled() || !staffRouteInsertionLive() || !arrivalWindowRoutingEnabled()) return null;
   if (!conn?.isTransaction || !serviceId) return null;
   try {
@@ -852,7 +853,7 @@ async function placeMovedVisit(conn, { serviceId } = {}) {
       const order = await writeRouteOrder(sp, fit, serviceId);
       await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
         resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,
-        metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: order } });
+        metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: order, ...(source ? { source } : {}) } });
       return order;
     });
   } catch (error) {

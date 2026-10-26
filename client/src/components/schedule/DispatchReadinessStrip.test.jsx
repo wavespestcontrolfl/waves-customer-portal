@@ -42,6 +42,14 @@ describe('dispatch readiness', () => {
     expect(screen.getByRole('button').textContent).toBe('View Job Card');
   });
 
+  // GATE_SPRAY_RAIN_RULES: a rain caution keeps the dose, so it is not a hold: neutral, with a rain icon.
+  it('renders a rain caution neutral, with a rain icon', () => {
+    render(<DispatchReadinessStrip readiness={{ issues: [{ kind: 'weather', status: 'caution', label: 'Rain likely 2 pm · label: no spraying in rain' }] }} onOpen={() => {}} />);
+    const button = screen.getByRole('button', { name: 'Rain likely 2 pm · label: no spraying in rain. Open Job Card' });
+    expect(button.className).not.toContain('text-alert-fg');
+    expect(button.querySelector('svg').getAttribute('class')).toContain('cloud-rain');
+  });
+
   it('renders missing evidence as a neutral unknown', () => {
     render(<DispatchReadinessStrip readiness={{ issues: [{ status: 'unknown', label: 'Weather unknown' }] }} onOpen={() => {}} />);
     const button = screen.getByRole('button', { name: 'Weather unknown. Open Job Card' });
