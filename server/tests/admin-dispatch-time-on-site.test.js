@@ -1096,7 +1096,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(laneAt).toBeGreaterThan(tierAt);
   });
 
-  test('the closeout stamps lawn_protocol_* assignment fields only when the plan attributes a program — a legacy tier on an explicit per_visit / one_time lane cannot mint an assignment (codex #4365 r2 P2)', () => {
+  test('the closeout stamps lawn_protocol_* assignment fields only when the plan attributes a program — a legacy tier on an explicit one_time lane cannot mint an assignment (codex #4365 r2 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(source).toMatch(/require\('\.\.\/services\/lawn-completion-defaults'\)/);
     expect(source).toMatch(/const \{ [^}]*lawnPlanProgramApplies[^}]* \} = require\('\.\.\/services\/lawn-completion-defaults'\);/);
