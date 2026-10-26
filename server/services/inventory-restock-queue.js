@@ -22,6 +22,9 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
     // vendor_orders (PR 2 ledger) is one row per request at most; absent
     // table (older schema) → no order columns.
     const hasOrders = await db.schema.hasTable('vendor_orders');
+    // The order email to SiteOne (GATE_SITEONE_EMAIL_ORDER): its ledger row,
+    // when there is one, shows on the request so a sent email is never hidden.
+    const hasEmails = officeDetail && await db.schema.hasTable('vendor_order_emails');
     let query = db('product_restock_requests as prr')
       .leftJoin('products_catalog as pc', 'prr.product_id', 'pc.id')
       .leftJoin('scheduled_services as ss', 'prr.scheduled_service_id', 'ss.id')
@@ -39,9 +42,11 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         'c.last_name',
         'c.address_line1',
         'c.city',
+        ...(hasEmails ? ['voe.status as email_status', 'voe.po as email_po', 'voe.sent_at as email_sent_at', 'voe.packages as email_packages', 'voe.item_number as email_item_number'] : []),
         ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
       )
       .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
+      .modify((q) => { if (hasEmails) q.leftJoin('vendor_order_emails as voe', 'voe.restock_request_id', 'prr.id'); })
       .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
       .orderByRaw('prr.needed_by asc nulls last')
       .orderBy('prr.created_at', 'desc')
@@ -58,6 +63,8 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
     // spend: a single-product order total IS the unit cost — owner-only,
     // like every other cost field on this router (Codex r1 P2).
     return {
+      // Owner only: whether the Restock tab offers "Email order to SiteOne".
+      ...(showSpend ? { siteOneEmailOrder: require('../config/feature-gates').siteOneEmailOrderLive() } : {}),
       requests: rows.map((row) => ({
         id: row.id,
         productId: row.product_id,
@@ -80,6 +87,12 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         // | failed | needs_review, with the vendor number, total and the
         // parked reason so the tab explains why a request still needs a hand.
         order: hasOrders ? restockOrderView(row, showSpend, officeDetail) : null,
+        // The email to SiteOne for this request (sent, or sent-or-in-flight
+        // and awaiting a person's check); null = none.
+        emailOrder: officeDetail && ['sent', 'sending'].includes(row.email_status) ? {
+          status: row.email_status, po: row.email_po, sentAt: row.email_sent_at || null,
+          packages: row.email_packages != null ? Number(row.email_packages) : null, itemNumber: row.email_item_number || null,
+        } : null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,

@@ -38,6 +38,30 @@ describe('restock list office detail', () => {
     expect(requests[0].order).toMatchObject({ status: 'placed', adapter: null, externalOrderNumber: null, amountCents: null });
   });
 
+  // GATE_SITEONE_EMAIL_ORDER: the owner's list says whether the tab offers the
+  // button and carries a sent (or unconfirmed) email; a technician's list has neither.
+  test('the owner list carries the email-order flag and the email; a technician list carries neither', async () => {
+    global.__restockRow = { ...ROW, email_status: 'sent', email_po: 'WAVES-R1', email_sent_at: '2026-10-27T15:00:00Z', email_packages: 6, email_item_number: '098604' };
+    delete process.env.GATE_SITEONE_EMAIL_ORDER;
+    const off = await listRestockRequests({ status: 'open', showSpend: true });
+    expect(off.siteOneEmailOrder).toBe(false);
+    process.env.GATE_SITEONE_EMAIL_ORDER = 'true';
+    try {
+      const owner = await listRestockRequests({ status: 'open', showSpend: true });
+      expect(owner.siteOneEmailOrder).toBe(true);
+      expect(owner.requests[0].emailOrder).toEqual({ status: 'sent', po: 'WAVES-R1', sentAt: '2026-10-27T15:00:00Z', packages: 6, itemNumber: '098604' });
+      const tech = await listRestockRequests({ status: 'open', officeDetail: false });
+      expect(tech).not.toHaveProperty('siteOneEmailOrder');
+      expect(tech.requests[0].emailOrder).toBeNull();
+    } finally { delete process.env.GATE_SITEONE_EMAIL_ORDER; }
+  });
+
+  test('a failed or pending email row is not shown', async () => {
+    global.__restockRow = { ...ROW, email_status: 'failed', email_po: 'WAVES-R1' };
+    const { requests } = await listRestockRequests({ status: 'open', showSpend: true });
+    expect(requests[0].emailOrder).toBeNull();
+  });
+
   test('the office list keeps them (default)', async () => {
     const { requests } = await listRestockRequests({ status: 'open' });
     expect(requests[0]).toMatchObject({

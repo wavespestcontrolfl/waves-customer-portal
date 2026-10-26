@@ -244,7 +244,7 @@ async function applyAnnualOfferGuard({ html, text, estimateIds, templateKey, wit
  * (plus withheldLinksRewritten: [ids] when the rewrite policy above fired).
  */
 async function sendOne({
-  to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments,
+  to, cc, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments,
   customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy,
   database, providerBoundaryCheck = async () => ({ ok: true }),
   // Per-request bound override for callers that hold a connection/lock across
@@ -265,6 +265,7 @@ async function sendOne({
   const payload = {
     personalizations: [{
       to: (Array.isArray(to) ? to : [to]).map((email) => ({ email })),
+      ...(Array.isArray(cc) && cc.length ? { cc: cc.map((email) => ({ email })) } : {}),
       headers: headers || undefined,
       // Echoed back on every webhook event for this send — lets the event
       // handler resolve the row by a stable id even before provider_message_id

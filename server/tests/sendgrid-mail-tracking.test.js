@@ -36,6 +36,18 @@ describe('SendGrid security-email tracking controls', () => {
     });
   });
 
+  test('cc is added to the personalization only when given', async () => {
+    const sendgrid = require('../services/sendgrid-mail');
+    const base = { to: 'vendor@example.test', fromEmail: 'contact@example.test', subject: 'Order', text: 'Hi', suppressErrorLog: true };
+    await sendgrid.sendOne({ ...base, cc: ['copy@example.test'] });
+    await sendgrid.sendOne(base);
+    const withCc = JSON.parse(global.fetch.mock.calls[0][1].body).personalizations[0];
+    const without = JSON.parse(global.fetch.mock.calls[1][1].body).personalizations[0];
+    expect(withCc.cc).toEqual([{ email: 'copy@example.test' }]);
+    expect(withCc.to).toEqual([{ email: 'vendor@example.test' }]);
+    expect(without).not.toHaveProperty('cc');
+  });
+
   test('clearBlockedAddress deletes only the encoded SendGrid block entry', async () => {
     const sendgrid = require('../services/sendgrid-mail');
     await sendgrid.clearBlockedAddress('customer+tag@example.com');

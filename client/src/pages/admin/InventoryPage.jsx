@@ -23,6 +23,8 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProductLabelReview from "../../components/admin/ProductLabelReview";
+import SiteOneEmailOrderDialog from "../../components/admin/SiteOneEmailOrderDialog";
+import { etDateString } from "../../lib/timezone";
 import {
   ActionFeedback,
   Badge,
@@ -2972,6 +2974,11 @@ function RestockRequestsTab({
   const loadSequence = useRef(0);
   const [receivingId, setReceivingId] = useState("");
   const [receiveDrafts, setReceiveDrafts] = useState({});
+  // GATE_SITEONE_EMAIL_ORDER: the server tells an admin whether the tab
+  // offers "Email order to SiteOne"; emailOrderFor is the request whose
+  // preview dialog is open.
+  const [emailOrderEnabled, setEmailOrderEnabled] = useState(false);
+  const [emailOrderFor, setEmailOrderFor] = useState(null);
   // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
   // server presigns for 1 h; the cell drops the links a little before that
   // and offers Refresh, so a tab left open can always re-request fresh URLs.
@@ -3020,7 +3027,10 @@ function RestockRequestsTab({
     setLoading(true);
     try {
       const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(queueStatus)}${requestId ? `&requestId=${encodeURIComponent(requestId)}` : ""}`);
-      if (sequence === loadSequence.current) setRequests(data.requests || []);
+      if (sequence === loadSequence.current) {
+        setRequests(data.requests || []);
+        setEmailOrderEnabled(!!data.siteOneEmailOrder);
+      }
     } catch (err) {
       if (sequence === loadSequence.current)
         showToast(`Failed to load restock requests: ${err.message}`);
@@ -3185,6 +3195,7 @@ function RestockRequestsTab({
                       canAuthor={canAuthor}
                       evidence={evidence[request.id]}
                       loadEvidence={loadEvidence}
+                      onEmailOrder={emailOrderEnabled ? setEmailOrderFor : null}
                     />
                     <RestockActionCell
                       request={request}
@@ -3200,6 +3211,22 @@ function RestockRequestsTab({
             </TBody>
           </Table>
         </div>
+      )}
+      {emailOrderFor && (
+        <SiteOneEmailOrderDialog
+          request={emailOrderFor}
+          onClose={() => setEmailOrderFor(null)}
+          onSent={async (result) => {
+            setEmailOrderFor(null);
+            showToast(
+              result.requestMarked === false
+                ? "Email sent to SiteOne, but the request was not marked ordered. Use Mark Ordered."
+                : "Order emailed to SiteOne",
+            );
+            await load();
+            onUpdate && onUpdate();
+          }}
+        />
       )}
     </Card>
   );
@@ -3249,8 +3276,10 @@ function RestockStatusCell({
   canAuthor = false,
   evidence = null,
   loadEvidence = null,
+  onEmailOrder = null,
 }) {
   const order = request.order;
+  const emailOrder = request.emailOrder;
   const summary = order ? autoOrderSummary(order) : null;
   // Links show only while their presigned URLs are live; an expired or empty
   // fetch falls back to the button, and live links keep a Refresh beside them.
@@ -3307,6 +3336,19 @@ function RestockStatusCell({
           )}
         </div>
       )}
+      {emailOrder?.status === "sent" && (
+        <div className="mt-[6px] text-ui-body u-nums">
+          Emailed to SiteOne{" "}
+          {emailOrder.sentAt ? etDateString(new Date(emailOrder.sentAt)) : ""} · PO{" "}
+          {emailOrder.po}
+        </div>
+      )}
+      {emailOrder?.status === "sending" && (
+        <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
+          Email to SiteOne may have gone out · PO {emailOrder.po}. Check SendGrid
+          or SiteOne before sending again.
+        </div>
+      )}
       {canAuthor && request.status === "open" && order?.status !== "placing" && (
         <Button
           onClick={() => runAction(request, "mark_ordered")}
@@ -3317,6 +3359,20 @@ function RestockStatusCell({
           Mark Ordered
         </Button>
       )}
+      {canAuthor &&
+        onEmailOrder &&
+        request.status === "open" &&
+        !emailOrder &&
+        order?.status !== "placing" && (
+          <Button
+            onClick={() => onEmailOrder(request)}
+            disabled={receivingId === request.id}
+            variant="secondary"
+            className="mt-[8px] block"
+          >
+            Email order to SiteOne
+          </Button>
+        )}
     </TD>
   );
 }

@@ -3181,6 +3181,34 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
   }
 });
 
+// GET/POST /restock-requests/:id/siteone-email — preview and send the pickup
+// order email to SiteOne for an open request (owner 2026-10-26, dark behind
+// GATE_SITEONE_EMAIL_ORDER). Owner-only: it emails a vendor and orders stock.
+// A refusal answers 409 + a machine `code`; a gate that is off answers 404.
+const siteOneEmailOrder = () => require('../services/procurement/vendor-order-email');
+const siteOneEmailError = (err, res, next) => {
+  if (err && err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
+  return next(err);
+};
+router.get('/restock-requests/:id/siteone-email', requireAdmin, async (req, res, next) => {
+  try {
+    if (!featureGates.siteOneEmailOrderLive()) return res.status(404).json({ error: 'Not found' });
+    res.json({ preview: await siteOneEmailOrder().previewOrderEmail(req.params.id) });
+  } catch (err) { siteOneEmailError(err, res, next); }
+});
+router.post('/restock-requests/:id/siteone-email', requireAdmin, async (req, res, next) => {
+  try {
+    if (!featureGates.siteOneEmailOrderLive()) return res.status(404).json({ error: 'Not found' });
+    const actor = (req.technician && (req.technician.name || req.technician.email)) || null;
+    const result = await siteOneEmailOrder().sendOrderEmail(req.params.id, { actor, actorId: req.technicianId });
+    // IDs only, no addresses (PII).
+    const fields = { requestId: req.params.id, technicianId: req.technicianId, emailId: result.email.id, messageId: result.messageId };
+    if (result.reconcile || !result.requestMarked) logger.error('siteone order email sent but not fully recorded, reconcile', { ...fields, requestMarked: result.requestMarked });
+    else logger.info('siteone order email sent', fields);
+    res.json(result);
+  } catch (err) { siteOneEmailError(err, res, next); }
+});
+
 // ── Helper: per-oz price of a vendor_pricing row (null when size unknown) ──
 // Rederives from the CURRENT price + quantity first: legacy approval paths
 // update price/quantity without refreshing normalized_unit_price/price_per_oz,
