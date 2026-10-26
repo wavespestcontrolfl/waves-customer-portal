@@ -14,10 +14,14 @@
  * Data sources:
  *   revenue       — see deriveRevenue(): mirrors the completion handler's
  *                   invoiceAmount (estimated_price → monthly_rate, callbacks $0)
- *   labor_cost    — time_entries.duration_minutes (else actual_start/end span)
+ *   labor_cost    — time_entries.duration_minutes (else actual_start/end span,
+ *                   else, for a completed visit nothing measured, its scheduled
+ *                   estimated_duration_minutes)
  *                   × company_financials.loaded_labor_rate
  *   material_cost — product_inventory_movements.cost_used, plus
- *                   property_application_history fallback costs
+ *                   property_application_history fallback costs priced by the
+ *                   same per-unit rule as the inventory deduction
+ *                   (inventory-cost.js)
  *   drive_cost    — company_financials.drive_cost_per_stop (once per physical
  *                   stop when a combined-closeout allocation marker is present)
  *   expenses      — expenses WHERE scheduled_service_id=?
@@ -33,6 +37,8 @@
 const logger = require('./logger');
 const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cost-visit-types');
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+const { baseQuantityUnit, convertInventoryQuantity } = require('./inventory-units');
+const { calculateInventoryCost } = require('./inventory-cost');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
@@ -100,7 +106,16 @@ async function getFinancials(db) {
  * backfill must re-derive from the scheduled-service/customer truth rather than
  * compute cost/margin around a fake number. Pure (no I/O), unit-testable.
  */
-function deriveRevenue({ serviceRecord, scheduledService, customer, ignoreExistingRevenue = false } = {}) {
+function deriveRevenue({
+  serviceRecord, scheduledService, customer, ignoreExistingRevenue = false, keepRecordedRevenue = false,
+} = {}) {
+  // A cost-only re-run (keepRecordedRevenue) keeps whatever revenue is already
+  // written, $0 included: the positive-only short-circuit below would re-derive
+  // a recorded $0 from today's price or plan and rewrite historical revenue.
+  if (keepRecordedRevenue && serviceRecord?.revenue != null) {
+    const recorded = Number(serviceRecord.revenue);
+    if (Number.isFinite(recorded) && recorded >= 0) return round2(recorded);
+  }
   if (!ignoreExistingRevenue) {
     const recordRevenue = Number(serviceRecord?.revenue);
     if (Number.isFinite(recordRevenue) && recordRevenue > 0) return round2(recordRevenue);
@@ -188,6 +203,7 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   explicitLaborMinutes = null,
   overrideLaborMinutes = null,
   allocatedLaborMinutes,
+  estimatedLaborMinutes = null,
 } = {}) {
   let minutes = 0;
   const hasAllocatedLabor = allocatedLaborMinutes !== undefined;
@@ -245,19 +261,33 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   // days/weeks ago, end = today's office checkout): both the clock-in-window
   // query above and the span math below would fabricate that whole gap as
   // labor, so only the caller's explicit operator-entered minutes count.
-  // Absent them, labor stays 0 — the same "no data" posture a visit with no
-  // recorded bounds gets.
+  // Absent them, only the scheduled estimate below can apply — never the span.
   if (!minutes && !hasAllocatedLabor && untrustedLifecycleSpan) {
     const explicit = Number(explicitLaborMinutes);
     if (Number.isFinite(explicit) && explicit > 0) minutes = Math.round(explicit);
   }
-  // Final fallback: the actual_start/end span on the scheduled_service.
+  // Measured fallback: the actual_start/end span on the scheduled_service.
   if (!minutes && !hasAllocatedLabor && !untrustedLifecycleSpan && startTime && endTime) {
     minutes = Math.max(0, Math.round((new Date(endTime) - new Date(startTime)) / 60000));
   }
+  // Last resort, passed only for a COMPLETED visit: its scheduled duration
+  // (estimated_duration_minutes) when no source above measured any time — a
+  // backdated closeout with no typed time on site, or a close with no start
+  // stamp. Booking 0 h there read real visits as free labor and idle time:
+  // from late September most closes went that way, so Gross Margin and Tech
+  // Utilization drifted far from the truth. A grouped allocation keeps its own
+  // answer (its null means "no trustworthy start" for the whole packet).
+  let laborEstimated = false;
+  if (!minutes && !hasAllocatedLabor) {
+    const estimated = Number(estimatedLaborMinutes);
+    if (Number.isFinite(estimated) && estimated > 0) {
+      minutes = Math.round(estimated);
+      laborEstimated = true;
+    }
+  }
 
   const hours = minutes / 60;
-  return { laborMinutes: minutes, laborHours: hours, laborCost: round2(hours * rate) };
+  return { laborMinutes: minutes, laborHours: hours, laborCost: round2(hours * rate), laborEstimated };
 }
 
 async function calcProductsCost(db, serviceRecordId) {
@@ -309,20 +339,29 @@ async function calcProductsCost(db, serviceRecordId) {
       if (!qty || !r.product_id) continue;
       if (costedInventoryProductIds.has(r.product_id)) continue;
 
-      let unitCost = null;
+      // Price the amount the way the completion deduction prices an inventory
+      // movement (inventory-cost.js): cost_per_unit in its own unit, else the
+      // amount's share of one best_price package of unit_size_oz. This loop
+      // used to multiply the amount straight by cost_per_unit or by the
+      // cheapest vendor_pricing.price — a PACKAGE price — so 31.5 fl oz from a
+      // $38.05 2.5-gal jug booked $1,198.57 instead of about $3.83.
+      const amountUnit = baseQuantityUnit(r.quantity_unit);
       const prod = await db('products_catalog').where({ id: r.product_id }).first();
-      if (prod?.cost_per_unit) unitCost = Number(prod.cost_per_unit);
-
-      if (unitCost == null) {
-        const best = await db('vendor_pricing')
-          .where({ product_id: r.product_id })
-          .orderBy('price', 'asc')
-          .first();
-        if (best?.price) unitCost = Number(best.price);
-      }
-
-      if (unitCost != null) {
-        const line = round2(qty * unitCost);
+      const inventoryUnit = prod?.inventory_unit || amountUnit;
+      // best_price is the catalog's per-package winner across vendor rows
+      // (recalcBestPrice in admin-inventory.js, lowest $/oz per the owner's
+      // 2026-09-30 ruling), so vendor_pricing is not read again here. A product
+      // with no catalog price, or an amount no rule can convert, stays uncosted
+      // rather than fabricated.
+      const { unitCost, costUsed } = calculateInventoryCost({
+        product: prod,
+        deductedAmount: convertInventoryQuantity(qty, amountUnit, inventoryUnit),
+        inventoryUnit,
+        amount: qty,
+        amountUnit,
+      });
+      if (costUsed != null) {
+        const line = round2(costUsed);
         total += line;
         breakdown.push({ product_id: r.product_id, qty, unit: r.quantity_unit, unit_cost: unitCost, line });
       }
@@ -405,7 +444,9 @@ function serviceRecordDriveAllocationStamp({ record, ambiguous }) {
  * Returns the computed cost object. Pass `db` to run on a specific knex handle
  * (e.g. a migration's); omit it to use the app db singleton. opts.recomputeRevenue
  * (backfill-only) re-derives revenue from source instead of preserving any
- * existing — possibly stale-seeded — service_records.revenue.
+ * existing — possibly stale-seeded — service_records.revenue;
+ * opts.keepRecordedRevenue (a cost-only re-run) keeps any written revenue,
+ * $0 included.
  * opts.untrustedLifecycleSpan (backdated quiet closeouts) blocks the labor
  * fallbacks that derive from the row's actual_start/actual_end bounds — see
  * calcLaborCost; opts.explicitLaborMinutes supplies the operator-entered
@@ -419,6 +460,7 @@ function serviceRecordDriveAllocationStamp({ record, ambiguous }) {
  */
 async function calculateJobCost(scheduledServiceId, db, {
   recomputeRevenue = false,
+  keepRecordedRevenue = false,
   untrustedLifecycleSpan = false,
   explicitLaborMinutes = null,
   overrideLaborMinutes = null,
@@ -462,7 +504,8 @@ async function calculateJobCost(scheduledServiceId, db, {
   // through. Labor then comes only from direct job time entries, else the
   // persisted operator-entered duration (scheduled_services.service_time_minutes,
   // which applyBackfillDurationPolicy writes from the explicit timeOnSite or
-  // not at all under backfill), else 0. The caller option remains honored for
+  // not at all under backfill), else the completed visit's scheduled estimate
+  // (estimated_duration_minutes), else 0. The caller option remains honored for
   // any calc made before the completion's record row is committed/visible
   // (belt and braces); caller-supplied explicit minutes win over the column.
   const recordNotes = parseJsonObject(record?.structured_notes);
@@ -526,11 +569,17 @@ async function calculateJobCost(scheduledServiceId, db, {
 
   const { laborRate, driveCostPerStop } = await getFinancials(db);
   const revenue = intentionallyFree ? 0 : deriveRevenue({
-    serviceRecord: record, scheduledService: svc, customer, ignoreExistingRevenue: recomputeRevenue,
+    serviceRecord: record, scheduledService: svc, customer, ignoreExistingRevenue: recomputeRevenue, keepRecordedRevenue,
   });
-  const { laborCost, laborHours } = await calcLaborCost(
+  // The scheduled estimate is a last resort for COMPLETED visits only: a
+  // pending or future visit costed on an expense entry or a manual recalc has
+  // done no work yet and books no labor.
+  const estimatedLaborMinutes = svc.status === 'completed'
+    ? Number(svc.estimated_duration_minutes) || null
+    : null;
+  const { laborCost, laborHours, laborEstimated } = await calcLaborCost(
     db, scheduledServiceId, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
-    { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes },
+    { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes, estimatedLaborMinutes },
   );
   const { productsCost, breakdown } = record?.id
     ? await calcProductsCost(db, record.id)
@@ -664,7 +713,8 @@ async function calculateJobCost(scheduledServiceId, db, {
 
   logger.info(
     `[job-costing] ${scheduledServiceId} — revenue $${fin.revenue} cost $${fin.total_job_cost} `
-    + `profit $${fin.gross_profit} (${fin.gross_margin_pct ?? '—'}%)`,
+    + `profit $${fin.gross_profit} (${fin.gross_margin_pct ?? '—'}%)`
+    + `${laborEstimated ? ' — labor from the scheduled estimate' : ''}`,
   );
 
   // Bridge the customer's realized revenue/profit/LTV onto their ad-attribution
@@ -687,12 +737,17 @@ async function calculateJobCost(scheduledServiceId, db, {
 }
 
 /**
- * backfillServiceRecordFinancials(db?)
+ * backfillServiceRecordFinancials(db?, { onError, since, keepRecordedRevenue })
  * Recompute costs for every completed scheduled_service that has a
  * service_record and write the financials through. Idempotent. Used by the
  * one-time backfill migration (which passes its own knex) and runnable ad hoc.
+ * `since` (YYYY-MM-DD) limits the run to visits on or after that date;
+ * keepRecordedRevenue keeps each record's written revenue, $0 included (a
+ * re-cost after a costing fix must not re-derive revenue that completion,
+ * billing recovery or a refund adjustment already set); without it the run
+ * re-derives revenue as the original backfill did.
  */
-async function backfillServiceRecordFinancials(db, { onError } = {}) {
+async function backfillServiceRecordFinancials(db, { onError, since = null, keepRecordedRevenue = false } = {}) {
   db = resolveDb(db);
   const srCols = await db('service_records').columnInfo().catch(() => ({}));
   // Nothing to populate if the financial columns were never added.
@@ -706,15 +761,18 @@ async function backfillServiceRecordFinancials(db, { onError } = {}) {
   // older rows NULL — leaving their dashboard/revenue financials blank. We also
   // union in the FK referenced by any completed service_record, so a completed
   // record whose scheduled_service carries a non-completed status is still caught.
-  const fromServices = await db('scheduled_services')
-    .where('status', 'completed')
+  let servicesQuery = db('scheduled_services').where('status', 'completed');
+  if (since) servicesQuery = servicesQuery.where('scheduled_date', '>=', since);
+  const fromServices = await servicesQuery
     .pluck('id')
     .catch(() => []);
   let fromRecords = [];
   if (srCols.scheduled_service_id) {
-    fromRecords = await db('service_records')
+    let recordsQuery = db('service_records')
       .whereNotNull('scheduled_service_id')
-      .where('status', 'completed')
+      .where('status', 'completed');
+    if (since) recordsQuery = recordsQuery.where('service_date', '>=', since);
+    fromRecords = await recordsQuery
       .distinct('scheduled_service_id')
       .pluck('scheduled_service_id')
       .catch(() => []);
@@ -726,9 +784,12 @@ async function backfillServiceRecordFinancials(db, { onError } = {}) {
   let skipped = 0;
   for (const id of ids) {
     try {
-      // recomputeRevenue: re-derive instead of trusting any existing (possibly
-      // synthetic-seeded) service_records.revenue — see deriveRevenue.
-      const res = await calculateJobCost(id, db, { recomputeRevenue: true });
+      // Default: re-derive instead of trusting any existing (possibly
+      // synthetic-seeded) service_records.revenue — see deriveRevenue. A
+      // costing-fix re-run keeps the written revenue instead.
+      const res = await calculateJobCost(
+        id, db, keepRecordedRevenue ? { keepRecordedRevenue: true } : { recomputeRevenue: true },
+      );
       processed += 1;
       if (res.serviceRecordId) updated += 1;
     } catch (err) {
@@ -744,6 +805,7 @@ async function backfillServiceRecordFinancials(db, { onError } = {}) {
 module.exports = {
   calculateJobCost,
   calcLaborCost,
+  calcProductsCost,
   resolveServiceRecord,
   parseJsonObject,
   backfillServiceRecordFinancials,

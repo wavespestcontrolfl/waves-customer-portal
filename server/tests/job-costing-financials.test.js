@@ -9,9 +9,35 @@ const {
   deriveRevenue,
   computeServiceRecordFinancials,
   calculateJobCost,
+  calcProductsCost,
+  backfillServiceRecordFinancials,
 } = require('../services/job-costing');
 
 describe('deriveRevenue — mirrors the completion handler invoiceAmount', () => {
+  test('keepRecordedRevenue keeps a written $0 even when the visit now carries a price', () => {
+    expect(deriveRevenue({
+      serviceRecord: { revenue: 0 },
+      scheduledService: { estimated_price: 149, is_callback: false },
+      customer: { monthly_rate: 99 },
+      keepRecordedRevenue: true,
+    })).toBe(0);
+    // Without the mode, the positive-only short-circuit re-derives the $0.
+    expect(deriveRevenue({
+      serviceRecord: { revenue: 0 },
+      scheduledService: { estimated_price: 149, is_callback: false },
+      customer: { monthly_rate: 99 },
+    })).toBe(149);
+  });
+
+  test('keepRecordedRevenue still derives when nothing was ever written', () => {
+    expect(deriveRevenue({
+      serviceRecord: { revenue: null },
+      scheduledService: { estimated_price: 149, is_callback: false },
+      customer: { monthly_rate: 99 },
+      keepRecordedRevenue: true,
+    })).toBe(149);
+  });
+
   test('an explicit visit price (estimated_price) wins over monthly_rate', () => {
     const rev = deriveRevenue({
       serviceRecord: { revenue: null },
@@ -325,14 +351,23 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
       jobCosts: [],
       jobCostUpdates: [],
       serviceRecordUpdates: [],
+      plucks: [],
       windowQueried: false,
       get currentJobCost() { return currentJobCost; },
     };
     const db = (table) => {
       const wheres = [];
+      const whereArgs = [];
       const chain = {
-        where: (...args) => { wheres.push(args[0]); return chain; },
+        where: (...args) => { wheres.push(args[0]); whereArgs.push(args); return chain; },
         whereNot: () => chain,
+        whereNotNull: () => chain,
+        distinct: () => chain,
+        // The backfill's id lists: this visit, from either source.
+        pluck: () => {
+          writes.plucks.push({ table, wheres: whereArgs });
+          return Promise.resolve([svc.id]);
+        },
         whereBetween: () => chain,
         leftJoin: () => chain,
         orderBy: () => chain,
@@ -622,5 +657,171 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     const db = fakeCostingDb({ svc: NORMAL_SVC, record });
     const res = await calculateJobCost('svc-1', db);
     expect(res.labor_cost).toBe(52.5);
+  });
+
+  describe('scheduled estimate — a completed visit nothing measured', () => {
+    test('a backfilled close with no typed time books its scheduled estimate, never the stale span', async () => {
+      const db = fakeCostingDb({ svc: { ...STALE_SVC, estimated_duration_minutes: 45 }, record: BACKFILLED_RECORD });
+      const res = await calculateJobCost('svc-1', db);
+      expect(res.laborHours).toBe(0.75);
+      expect(res.labor_cost).toBe(26.25); // 45 min at $35/hr — not 0, not 698 h
+      expect(db.writes.windowQueried).toBe(false);
+      expect(db.writes.serviceRecordUpdates[0].labor_hours).toBe(0.75);
+    });
+
+    test('typed time on site and job time entries both outrank the estimate', async () => {
+      const typed = fakeCostingDb({
+        svc: { ...STALE_SVC, service_time_minutes: 30, estimated_duration_minutes: 45 },
+        record: BACKFILLED_RECORD,
+      });
+      expect((await calculateJobCost('svc-1', typed)).laborHours).toBe(0.5);
+      const clocked = fakeCostingDb({
+        svc: { ...STALE_SVC, estimated_duration_minutes: 45 },
+        record: BACKFILLED_RECORD,
+        jobEntries: [{ duration_minutes: 50 }],
+      });
+      expect((await calculateJobCost('svc-1', clocked)).labor_cost).toBe(29.17);
+    });
+
+    test('a measured same-day span outranks the estimate (live behavior unchanged)', async () => {
+      const db = fakeCostingDb({ svc: { ...NORMAL_SVC, estimated_duration_minutes: 45 }, record: NORMAL_RECORD });
+      expect((await calculateJobCost('svc-1', db)).laborHours).toBe(1.5);
+    });
+
+    test('a completed close with no start stamp books the estimate', async () => {
+      const db = fakeCostingDb({
+        svc: { ...NORMAL_SVC, actual_start_time: null, estimated_duration_minutes: 60 },
+        record: NORMAL_RECORD,
+      });
+      const res = await calculateJobCost('svc-1', db);
+      expect(res.laborHours).toBe(1);
+      expect(res.labor_cost).toBe(35);
+    });
+
+    test('a visit that is not completed never books an estimate', async () => {
+      const db = fakeCostingDb({
+        svc: {
+          ...NORMAL_SVC, status: 'confirmed', actual_start_time: null, actual_end_time: null, estimated_duration_minutes: 60,
+        },
+        record: NORMAL_RECORD,
+      });
+      const res = await calculateJobCost('svc-1', db);
+      expect(res.laborHours).toBe(0);
+      expect(res.labor_cost).toBe(0);
+    });
+
+    test.each([
+      ['zero', 0],
+      ['unknown', null],
+    ])('a grouped %s allocation is never replaced by the estimate', async (_label, allocatedMinutes) => {
+      const record = {
+        ...NORMAL_RECORD,
+        structured_notes: { visitDurationAllocation: { version: 1, allocatedMinutes } },
+      };
+      const db = fakeCostingDb({ svc: { ...NORMAL_SVC, estimated_duration_minutes: 60 }, record });
+      expect((await calculateJobCost('svc-1', db)).laborHours).toBe(0);
+    });
+  });
+
+  test.each([
+    ['a positive', 120],
+    ['a $0', 0],
+  ])('a dated costing re-run keeps %s written revenue and asks only for visits since the date', async (_label, written) => {
+    const db = fakeCostingDb({ svc: NORMAL_SVC, record: { ...NORMAL_RECORD, revenue: written } });
+    const res = await backfillServiceRecordFinancials(db, { since: '2026-04-01', keepRecordedRevenue: true });
+    expect(res).toEqual({ processed: 1, updated: 1, skipped: 0 });
+    expect(db.writes.serviceRecordUpdates[0].revenue).toBe(written); // never re-derived to the $129 visit price
+    expect(db.writes.plucks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'scheduled_services',
+        wheres: expect.arrayContaining([['scheduled_date', '>=', '2026-04-01']]),
+      }),
+      expect.objectContaining({
+        table: 'service_records',
+        wheres: expect.arrayContaining([['service_date', '>=', '2026-04-01']]),
+      }),
+    ]));
+  });
+});
+
+describe('calcProductsCost — an application amount is priced per unit, never per package', () => {
+  // Chainable fake for exactly calcProductsCost's queries: the usage movements,
+  // the application rows, and the catalog row. vendor_pricing must never be
+  // read (the catalog's best_price already ranks the vendor rows).
+  function fakeProductsDb({ movements = [], applications = [], products = {} } = {}) {
+    return (table) => {
+      let productId = null;
+      const chain = {
+        leftJoin: () => chain,
+        where: (arg) => {
+          if (arg && typeof arg === 'object') productId = arg.id || arg.product_id || productId;
+          return chain;
+        },
+        whereNull: () => chain,
+        orderBy: () => chain,
+        select: () => Promise.resolve(table.startsWith('product_inventory_movements') ? movements : applications),
+        first: () => {
+          if (table === 'vendor_pricing') throw new Error('vendor_pricing read');
+          if (table === 'products_catalog') return Promise.resolve(products[productId] || null);
+          return Promise.resolve(null);
+        },
+      };
+      return chain;
+    };
+  }
+  // A 2.5-gal (320 fl oz) jug at $38.95.
+  const JUG = { inventory_unit: 'fl_oz', unit_size_oz: 320, best_price: 38.95, cost_per_unit: null };
+
+  test('a liquid amount costs its share of one best_price package', async () => {
+    const db = fakeProductsDb({
+      applications: [{ product_id: 'p-jug', quantity_applied: 31.5, quantity_unit: 'fl_oz' }],
+      products: { 'p-jug': JUG },
+    });
+    const { productsCost, breakdown } = await calcProductsCost(db, 'rec-1');
+    expect(productsCost).toBe(3.83); // the old fallback booked 31.5 × the jug price
+    expect(breakdown).toEqual([
+      expect.objectContaining({ product_id: 'p-jug', qty: 31.5, unit: 'fl_oz', line: 3.83 }),
+    ]);
+  });
+
+  test('a granular amount in lb is converted to ounces of the bag', async () => {
+    const db = fakeProductsDb({
+      applications: [{ product_id: 'p-bag', quantity_applied: 16.968, quantity_unit: 'lb' }],
+      products: { 'p-bag': { inventory_unit: 'lb', unit_size_oz: 800, best_price: 44.23, cost_per_unit: null } },
+    });
+    expect((await calcProductsCost(db, 'rec-1')).productsCost).toBe(15.01); // 50-lb bag at $44.23
+  });
+
+  test('cost_per_unit is applied in its own unit', async () => {
+    const db = fakeProductsDb({
+      applications: [{ product_id: 'p-unit', quantity_applied: 9.25, quantity_unit: 'fl_oz' }],
+      products: { 'p-unit': { inventory_unit: 'fl_oz', cost_per_unit: 0.2835, cost_unit: 'fl_oz', unit_size_oz: 320, best_price: 89.31 } },
+    });
+    expect((await calcProductsCost(db, 'rec-1')).productsCost).toBe(2.62);
+  });
+
+  test.each([
+    ['a product with no catalog price', { quantity_applied: 6, quantity_unit: 'fl_oz' }, { inventory_unit: 'fl_oz', unit_size_oz: null, best_price: null, cost_per_unit: null }],
+    ['an amount with no unit', { quantity_applied: 6, quantity_unit: null }, JUG],
+    ['a count amount on a measured product', { quantity_applied: 2, quantity_unit: 'each' }, JUG],
+  ])('%s stays uncosted instead of fabricated', async (_label, application, product) => {
+    const db = fakeProductsDb({
+      applications: [{ product_id: 'p-1', ...application }],
+      products: { 'p-1': product },
+    });
+    const { productsCost, breakdown } = await calcProductsCost(db, 'rec-1');
+    expect(productsCost).toBe(0);
+    expect(breakdown).toEqual([]);
+  });
+
+  test('a product an inventory movement already costed is not costed again', async () => {
+    const db = fakeProductsDb({
+      movements: [{ product_id: 'p-jug', quantity: 31.5, unit: 'fl_oz', unit_cost: 0.1217, cost_used: 3.83 }],
+      applications: [{ product_id: 'p-jug', quantity_applied: 31.5, quantity_unit: 'fl_oz' }],
+      products: { 'p-jug': JUG },
+    });
+    const { productsCost, breakdown } = await calcProductsCost(db, 'rec-1');
+    expect(productsCost).toBe(3.83);
+    expect(breakdown).toHaveLength(1);
   });
 });
