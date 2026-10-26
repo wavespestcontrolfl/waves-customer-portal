@@ -234,10 +234,11 @@
       "required": [
         "edit_reason"
       ],
-      "reviewed": "Handler and timeTracking.adminEditEntry read end to end, with assertEntryMutable, the week locks, resolveDisputedDailyStatuses and recomputeEntryMutationSummaries: refuses an active, voided or APPROVED entry, a day or week already approved; keeps the originals on the first edit; recomputes the day and week summaries (time_entries, time_entry_daily_summary, time_weekly_summary). The summary recompute clears the technician's weekly sign-off column so the week needs re-signing; no signature value is read or returned. No pay rate, pay run, message or outside call is in the chain. Re-read 2026-10-25 (#6705): payrollUnits and PAYROLL_SCALE moved unchanged from time-tracking.js to utils/payroll-units.js; writes, signals and unresolved callees are the same. Re-read 2026-10-25 (GATE_AUTO_LUNCH): the day recompute also stores unpaid_meal_minutes (reads the day's no_lunch) and, with the gate on, the week splits regular and overtime on paid minutes; same three tables, no new call or message. The week recompute first refreshes unpaid_meal_minutes on its non-approved days under the week lock (refreshDailyUnpaidMeals); approved days keep their snapshot. The entry-edit sign-off reset is now the shared resetWeekSignOff helper (same tech_signed_at/tech_signature clear the waiver covers). Re-read 2026-10-25 (GATE_SHIFT_CLOSE_REVIEW, #6726): adminEditEntry now calls autoCloseReviewedBy (same file). When the edit CHANGES the clock-out of a shift the system closed automatically and no one has reviewed yet, it also sets auto_close_reviewed_at and auto_close_reviewed_by on that same time_entries row, which releases that shift's pay-run hold; an unchanged clock-out (the editor resends it on every save) changes nothing. Same three tables, same signals and unresolved callees; no message, no pay run.",
+      "reviewed": "Handler and timeTracking.adminEditEntry read end to end, with assertEntryMutable, the week locks, resolveDisputedDailyStatuses and recomputeEntryMutationSummaries: refuses an active, voided or APPROVED entry, a day or week already approved; keeps the originals on the first edit; recomputes the day and week summaries (time_entries, time_entry_daily_summary, time_weekly_summary). The summary recompute clears the technician's weekly sign-off column so the week needs re-signing; no signature value is read or returned. No pay rate, pay run, message or outside call is in the chain. Re-read 2026-10-25 (#6705): payrollUnits and PAYROLL_SCALE moved unchanged from time-tracking.js to utils/payroll-units.js; writes, signals and unresolved callees are the same. Re-read 2026-10-25 (GATE_AUTO_LUNCH): the day recompute also stores unpaid_meal_minutes (reads the day's no_lunch) and, with the gate on, the week splits regular and overtime on paid minutes; same three tables, no new call or message. The week recompute first refreshes unpaid_meal_minutes on its non-approved days under the week lock (refreshDailyUnpaidMeals); approved days keep their snapshot. The entry-edit sign-off reset is now the shared resetWeekSignOff helper (same tech_signed_at/tech_signature clear the waiver covers). Re-read 2026-10-25 (GATE_SHIFT_CLOSE_REVIEW, #6726): adminEditEntry now calls autoCloseReviewedBy (same file). When the edit CHANGES the clock-out of a shift the system closed automatically and no one has reviewed yet, it also sets auto_close_reviewed_at and auto_close_reviewed_by on that same time_entries row, which releases that shift's pay-run hold; an unchanged clock-out (the editor resends it on every save) changes nothing. Same three tables, same signals and unresolved callees; no message, no pay run. Re-read 2026-10-26 (GATE_PAYROLL_TIME_OFF, #6865): assertEntryMutable now takes the payroll lock in SHARED mode (payroll-lock.js, pg_advisory_xact_lock_shared; edits do not block each other, a finalize of a pay run waits for them) and refuses with 409 when a finalized payroll_checks row exists for the technician and an affected week (a read of payroll_checks, no write); same three tables written, no message, no pay run, no money.",
       "reason": "Corrects one technician timesheet entry the way the Time Tracking screen does, with a required reason. An approved entry, day or week is refused by the handler. Only time_entries and the day and week summaries are written.",
       "noSend": "Changes one time entry and recomputes its day and week totals. Any edit, a notes-only one too, resets the entry to pending approval and clears the technician's signature on the week, so they must sign again (the card says whether the week is signed). No message is sent. An approved day or week is refused. It does not change a pay rate or run payroll. Changing the clock-out of a shift the system closed automatically also marks that shift reviewed, so its pay run line is no longer held.",
       "waive": {
+        "effect_call:lockPayrollMutationsShared": "Takes a shared Postgres advisory lock for the length of the transaction so a pay run finalize and an entry edit wait for each other; it changes no row, sends nothing and moves no money.",
         "credential_field:tech_signature": "The summary recompute sets the weekly tech_signature column to null so the week needs a new sign-off; the chain reads no signature value and the bar never returns the response body."
       },
       "writes": [
@@ -247,6 +248,7 @@
       ],
       "signals": [
         "credential_field:tech_signature",
+        "effect_call:lockPayrollMutationsShared",
         "write:insert",
         "write:onConflict",
         "write:transaction",
@@ -261,7 +263,7 @@
         "services/time-tracking.js#trx.returning",
         "services/time-tracking.js#trx.update"
       ],
-      "hash": "1af6cdbbe9c24b0b83abb587ae147e05"
+      "hash": "f10622f9750f6c8d9cc014cb5c1390cc"
     },
     {
       "method": "PUT",

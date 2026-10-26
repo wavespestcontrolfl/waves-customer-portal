@@ -3371,6 +3371,10 @@ Owner, after #6837 fixed the estimate page: "so the glass UI, should have stayed
 
 Owner: "the what happens next should be below the proposal". **Decision.** On an authored commercial proposal page the order is hero → proposal card → What happens next → Accept & sign → Ask Waves. It replaces the 2026-08-08 slot directly under the hero; the card keeps its "What happens next" title, and its wording ("tap Accept & sign agreement below") still points down to the sign card.
 
+## 2026-10-26 — Commercial proposals show business-fit reviews
+
+Owner "OK GO" on choice 2A (decision page 8zoPRWmm). **Decision.** An authored commercial proposal shows the Google reviews section again, under "What our customers say". It reads 40 reviews from the shared pool and keeps the first 8 with no home, family, pets or yard words (128 of the 181 reviews qualify; none of the 181 comes from a commercial customer). The reviews stay word for word. The app pitch stays hidden.
+
 ## 2026-10-26 — Commercial proposals: the customer picks the first visit after signing
 
 Owner "OK GO" on choice 1B (decision page 8zoPRWmm): "The customer picks the first visit from open slots, the same way residential customers do. It books by itself, sized to the real visit length." **Decision.** Behind `GATE_COMMERCIAL_FIRST_VISIT` (dark; the owner flips it), the signed-agreement card on an eligible commercial proposal becomes **Pick your first visit**, using the shared `SchedulePicker` every booking surface uses, inside a glass card with a real `h2` and the gold accent on **Book this time**. Booking marks the proposal won, so the page then shows the accepted card with the visit date. Before signing, the agreement card says the customer picks the visit next. The signing page offers "Back to your estimate". The proposal builder gains a per-program **Visit length** (minutes) input that sizes the visit. Proposals outside the v1 scope (anything but single-cadence pest programs) keep "Our team will follow up to schedule your first visit." This supersedes, for this one case, the 2026-09-24 rule that commercial work is never self-booked: the price now sits in a signed agreement.

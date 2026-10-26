@@ -25,6 +25,14 @@
  * finalized or voided while a later finalized check exists for the same
  * technician and year: void the later run first.
  *
+ * GATE_PAYROLL_TIME_OFF (owner 2026-10-26): a draft also pays the paid time off
+ * and holiday days recorded in payroll_time_off (services/payroll-time-off.js)
+ * for the week. They are hours not worked: paid at the straight rate on the same
+ * check, never counted toward overtime. A W-2 technician with time off and no
+ * worked time that week gets a check for the time off alone. Time off never
+ * bypasses the timesheet: a technician whose worked time is not approved stays
+ * waiting. Gate off, every function here reads and returns what it did before.
+ *
  * Every write runs in one transaction with row locks. Audit events are
  * critical and carry ids only.
  */
@@ -43,7 +51,8 @@ const {
   staffWeekStartForWorkDate,
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
-const { shiftCloseReviewLive } = require('../config/feature-gates');
+const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
+const { shiftCloseReviewLive, payrollTimeOffLive } = require('../config/feature-gates');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_REASON = 500;
@@ -69,6 +78,15 @@ const MONEY_COLUMNS = {
 const MONEY_KEYS = Object.keys(MONEY_COLUMNS);
 const EMPLOYEE_TAX_KEYS = ['federal_income_tax_cents', 'social_security_cents', 'medicare_cents', 'additional_medicare_cents'];
 const EMPLOYER_TAX_KEYS = ['employer_social_security_cents', 'employer_medicare_cents', 'futa_cents', 'fl_reemployment_cents'];
+
+// GATE_PAYROLL_TIME_OFF, read at call time. The typeof guard keeps a test mock of
+// feature-gates that lacks the reader working (off).
+const timeOffOn = () => typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
+
+// payroll_checks time-off columns, read and written only with the gate on.
+const TIME_OFF_MINUTE_COLUMNS = ['pto_minutes', 'holiday_minutes'];
+const TIME_OFF_PAY_COLUMNS = ['pto_pay_cents', 'holiday_pay_cents'];
+const TIME_OFF_COLUMNS = [...TIME_OFF_MINUTE_COLUMNS, ...TIME_OFF_PAY_COLUMNS];
 
 const requireUuid = (id, what) => {
   if (!UUID_RE.test(String(id || ''))) throw new PayrollError(404, `${what} not found.`);
@@ -151,6 +169,7 @@ const hoursText = (minutes) => (Math.round((Number(minutes) || 0) / 60 * 100) / 
  * problem: the message of computePaycheck becomes the reason.
  */
 function buildCheck({ tech, payDate, weekStart, w4, ytdGrossCents }) {
+  const withTimeOff = timeOffOn();
   let pay;
   try {
     pay = computePaycheck({
@@ -159,6 +178,7 @@ function buildCheck({ tech, payDate, weekStart, w4, ytdGrossCents }) {
       hourlyRate: tech.pay_rate,
       regularMinutes: tech.regular_minutes,
       overtimeMinutes: tech.overtime_minutes,
+      ...(withTimeOff ? { ptoMinutes: tech.pto_minutes || 0, holidayMinutes: tech.holiday_minutes || 0 } : {}),
       ytdGrossWages: centsText(ytdGrossCents),
       w4,
     });
@@ -180,6 +200,12 @@ function buildCheck({ tech, payDate, weekStart, w4, ytdGrossCents }) {
     status: 'draft',
   };
   for (const [column, key] of Object.entries(MONEY_COLUMNS)) check[column] = pay[key];
+  if (withTimeOff) {
+    check.pto_minutes = tech.pto_minutes || 0;
+    check.holiday_minutes = tech.holiday_minutes || 0;
+    check.pto_pay_cents = pay.ptoPayCents;
+    check.holiday_pay_cents = pay.holidayPayCents;
+  }
   return { check };
 }
 
@@ -187,6 +213,7 @@ function buildCheck({ tech, payDate, weekStart, w4, ytdGrossCents }) {
 // rows as stored (strings from Postgres) and from rows about to be stored
 // (numbers), so every value is normalized first.
 function tokenOf(run, rows) {
+  const withTimeOff = timeOffOn();
   const parts = rows.map((row) => [
     row.technician_id,
     Number(row.hourly_rate).toFixed(2),
@@ -196,6 +223,11 @@ function tokenOf(run, rows) {
     row.w4_election_id,
     Number(row.ytd_gross_before_cents),
     ...MONEY_KEYS.map((key) => Number(row[key])),
+    // A time-off change after drafting changes the token, so finalize asks for a reload.
+    ...(withTimeOff ? [
+      ...TIME_OFF_MINUTE_COLUMNS.map((key) => Number(row[key] || 0).toFixed(2)),
+      ...TIME_OFF_PAY_COLUMNS.map((key) => Number(row[key] || 0)),
+    ] : []),
   ]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return crypto.createHash('sha256').update(JSON.stringify([run.week_start, run.pay_date, parts])).digest('hex').slice(0, 32);
 }
@@ -208,6 +240,7 @@ function sumRows(rows) {
     employeeTaxesCents: total(EMPLOYEE_TAX_KEYS),
     netCents: total(['net_cents']),
     employerTaxesCents: total(EMPLOYER_TAX_KEYS),
+    ...(timeOffOn() ? { ptoPayCents: total(['pto_pay_cents']), holidayPayCents: total(['holiday_pay_cents']) } : {}),
   };
 }
 
@@ -222,7 +255,8 @@ const runColumns = (conn) => [
 
 const checkColumns = (conn) => [
   'id', 'run_id', 'technician_id', 'employee_name', 'hourly_rate', 'regular_minutes', 'overtime_minutes',
-  ...MONEY_KEYS, 'ytd_gross_before_cents', 'w4_election_id', 'pay_method', 'check_number', 'status',
+  ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_COLUMNS : []),
+  'ytd_gross_before_cents', 'w4_election_id', 'pay_method', 'check_number', 'status',
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
   conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"),
 ];
@@ -255,6 +289,14 @@ function serializeCheck(row) {
     futaCents: Number(row.futa_cents),
     flReemploymentCents: Number(row.fl_reemployment_cents),
     ytdGrossBeforeCents: Number(row.ytd_gross_before_cents),
+    ...(timeOffOn() ? {
+      ptoMinutes: Number(row.pto_minutes || 0),
+      holidayMinutes: Number(row.holiday_minutes || 0),
+      ptoHours: hoursText(row.pto_minutes),
+      holidayHours: hoursText(row.holiday_minutes),
+      ptoPayCents: Number(row.pto_pay_cents || 0),
+      holidayPayCents: Number(row.holiday_pay_cents || 0),
+    } : {}),
   };
 }
 
@@ -292,6 +334,25 @@ async function workedTechnicianIds(conn, start, end) {
     .where('status', '!=', 'voided')
     .select('technician_id');
   return [...new Set([...daily, ...entries].map((row) => row.technician_id))];
+}
+
+// GATE_PAYROLL_TIME_OFF: paid time off and holiday minutes of W-2 technicians
+// dated inside the week, summed per technician. Map of id -> { pto, holiday }.
+async function timeOffByTechnician(conn, start, end) {
+  const rows = await conn('payroll_time_off as o')
+    .join('technicians as t', 't.id', 'o.technician_id')
+    .where('o.work_date', '>=', start)
+    .where('o.work_date', '<=', end)
+    .where('t.employment_type', 'w2')
+    .groupBy('o.technician_id', 'o.kind')
+    .select('o.technician_id', 'o.kind', conn.raw('SUM(o.minutes) AS minutes'));
+  const byTech = new Map();
+  for (const row of rows) {
+    const entry = byTech.get(row.technician_id) || { pto: 0, holiday: 0 };
+    entry[row.kind === 'holiday' ? 'holiday' : 'pto'] = Number(row.minutes);
+    byTech.set(row.technician_id, entry);
+  }
+  return byTech;
 }
 
 // Year-to-date gross before a pay date, in cents: finalized, non-voided checks
@@ -341,8 +402,32 @@ async function evaluate(conn, run, { lock = false } = {}) {
     technicianId: row.id, name: row.name, reason: 'Timesheet for this week is not approved yet',
   }));
 
-  const withHours = approved.filter((row) => Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0) > 0);
-  const ytd = await ytdBefore(conn, withHours.map((row) => row.technician_id), run.pay_date, start);
+  const workedRows = approved.filter((row) => Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0) > 0);
+  let withHours = workedRows;
+  // Time off rides on the worked check, or makes a check of its own when nothing
+  // was worked. A technician whose worked time waits for approval stays waiting.
+  let timeOffOnlyRows = [];
+  if (timeOffOn()) {
+    const timeOff = await timeOffByTechnician(conn, start, end);
+    const waitingIds = new Set(worked);
+    withHours = workedRows.map((row) => {
+      const off = timeOff.get(row.technician_id);
+      return { ...row, pto_minutes: off ? off.pto : 0, holiday_minutes: off ? off.holiday : 0 };
+    });
+    const workedIds = new Set(workedRows.map((row) => row.technician_id));
+    const offOnlyIds = [...timeOff.keys()].filter((id) => !workedIds.has(id) && !waitingIds.has(id));
+    if (offOnlyIds.length) {
+      const techs = await conn('technicians').whereIn('id', offOnlyIds).where({ employment_type: 'w2' })
+        .orderBy([{ column: 'name' }, { column: 'id' }])
+        .select('id', 'name', 'pay_rate', 'pay_method');
+      timeOffOnlyRows = techs.map((row) => ({
+        technician_id: row.id, name: row.name, pay_rate: row.pay_rate, pay_method: row.pay_method,
+        regular_minutes: 0, overtime_minutes: 0,
+        pto_minutes: timeOff.get(row.id).pto, holiday_minutes: timeOff.get(row.id).holiday,
+      }));
+    }
+  }
+  const ytd = await ytdBefore(conn, [...withHours, ...timeOffOnlyRows].map((row) => row.technician_id), run.pay_date, start);
   // GATE_SHIFT_CLOSE_REVIEW: a week holding a shift the system closed (the
   // 11 PM job or the 14-hour check) that no admin has edited or confirmed
   // cannot be paid yet. Minutes are not changed; the line is only held.
@@ -358,7 +443,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
     : new Set();
   const checks = [];
   const blocked = [];
-  for (const tech of withHours) {
+  for (const tech of [...withHours, ...timeOffOnlyRows]) {
     if (unreviewed.has(tech.technician_id)) {
       blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: AUTO_CLOSE_BLOCK_REASON });
       continue;
@@ -408,7 +493,8 @@ async function listRuns(conn = db) {
     .limit(MAX_RUNS)
     .select(runColumns(conn));
   if (!runs.length) return [];
-  const rows = await conn('payroll_checks').whereIn('run_id', runs.map((run) => run.id)).select(['run_id', ...MONEY_KEYS]);
+  const rows = await conn('payroll_checks').whereIn('run_id', runs.map((run) => run.id))
+    .select(['run_id', ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_PAY_COLUMNS : [])]);
   const byRun = new Map();
   for (const row of rows) {
     if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);
@@ -501,12 +587,7 @@ async function recomputeRun(runId, actor, conn = db) {
 // Draft and recompute do not take it: they write draft rows only, never feed
 // another run, and finalize re-evaluates under this lock and compares the
 // review token, so a draft built on stale YTD cannot be finalized.
-const PAYROLL_LOCK_NS = 'payroll.mutation';
-const PAYROLL_LOCK_KEY = 'pay-runs';
-const lockPayrollMutations = (trx) => trx.raw(
-  'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-  [PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY],
-);
+// The lock itself lives in payroll-lock.js (time-tracking.js takes it shared).
 
 // A later finalized check for the same technician and year already counted this
 // one's pay in its year-to-date figures.
@@ -637,9 +718,18 @@ async function getStub(checkId, conn = db) {
     employee: { name: c.name, ssnLast4 },
     payPeriod: { start: check.week_start, end: addStaffWorkDays(check.week_start, 6) },
     payDate: check.pay_date,
-    hours: { regular: c.regularHours, overtime: c.overtimeHours },
+    hours: {
+      regular: c.regularHours,
+      overtime: c.overtimeHours,
+      ...(timeOffOn() ? { pto: c.ptoHours, holiday: c.holidayHours } : {}),
+    },
     hourlyRate: c.hourlyRate,
-    earnings: { regularPayCents: c.regularPayCents, overtimePayCents: c.overtimePayCents, grossCents: c.grossCents },
+    earnings: {
+      regularPayCents: c.regularPayCents,
+      overtimePayCents: c.overtimePayCents,
+      ...(timeOffOn() ? { ptoPayCents: c.ptoPayCents, holidayPayCents: c.holidayPayCents } : {}),
+      grossCents: c.grossCents,
+    },
     taxes: {
       federalIncomeTaxCents: c.federalIncomeTaxCents,
       socialSecurityCents: c.socialSecurityCents,
@@ -669,8 +759,12 @@ const CSV_HEADERS = [
   'Employer Medicare', 'FUTA', 'FL Reemployment Tax', 'Pay Method', 'Check Number',
 ];
 
+// Appended at the END, gate on only, so a reader of the old columns keeps working.
+const CSV_TIME_OFF_HEADERS = ['PTO Hours', 'PTO Pay', 'Holiday Hours', 'Holiday Pay'];
+
 function checksToCsv(rows) {
-  const lines = [csvRow(CSV_HEADERS)];
+  const withTimeOff = timeOffOn();
+  const lines = [csvRow(withTimeOff ? [...CSV_HEADERS, ...CSV_TIME_OFF_HEADERS] : CSV_HEADERS)];
   for (const row of rows) {
     const c = serializeCheck(row);
     lines.push(csvRow([
@@ -679,6 +773,7 @@ function checksToCsv(rows) {
       centsText(c.additionalMedicareCents), centsText(c.netCents), centsText(c.employerSocialSecurityCents),
       centsText(c.employerMedicareCents), centsText(c.futaCents), centsText(c.flReemploymentCents),
       c.payMethod === 'bank_transfer' ? 'Bank transfer' : 'Paper check', c.checkNumber || '',
+      ...(withTimeOff ? [c.ptoHours, centsText(c.ptoPayCents), c.holidayHours, centsText(c.holidayPayCents)] : []),
     ]));
   }
   return lines.join('\n');
