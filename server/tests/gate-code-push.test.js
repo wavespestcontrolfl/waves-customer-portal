@@ -44,12 +44,12 @@ let auditRows;
 function chain(table) {
   const c = {};
   c.where = () => c;
+  c.whereIn = (_column, actions) => { c.actions = actions; return c; };
   c.whereRaw = (_sql, [key]) => { c.key = key; return c; };
-  c.first = async () => {
-    if (table === 'property_preferences') return prefsRow;
-    if (table === 'audit_log') return auditRows.find((row) => row.metadata.key === c.key);
-    return undefined;
-  };
+  c.first = async () => (table === 'property_preferences' ? prefsRow : undefined);
+  c.select = async () => (table === 'audit_log'
+    ? auditRows.filter((row) => row.metadata.key === c.key && c.actions.includes(row.action)).map((row) => ({ action: row.action }))
+    : []);
   c.insert = (row) => ({ returning: async () => { auditRows.push(row); return [{ id: auditRows.length }]; } });
   return c;
 }
@@ -62,10 +62,28 @@ function sample(where, { minutesAgo = 0 } = {}) {
   };
 }
 
+// The push service as it behaves (push-notifications.js sendToAdminUsers):
+// look up the tech's devices, ask beforeDispatch, hand off, summarize.
+let devices;
+let deliveredOk;
+let dispatched;
+function fakePushService() {
+  PushService.sendToAdminUser.mockImplementation(async (_technicianId, _notification, { beforeDispatch } = {}) => {
+    if (!devices) return { subscriptions: 0, sent: 0 };
+    if (beforeDispatch && (await beforeDispatch()) === false) return { subscriptions: devices, sent: 0, superseded: true };
+    dispatched += 1;
+    return { subscriptions: devices, sent: deliveredOk ? devices : 0, failed: deliveredOk ? 0 : devices };
+  });
+}
+
 let service;
 beforeEach(() => {
   jest.clearAllMocks();
   sentKeys.clear();
+  devices = 1;
+  deliveredOk = true;
+  dispatched = 0;
+  fakePushService();
   process.env.GATE_GATE_CODE_PUSH = 'true';
   process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
   prefsRow = null;
@@ -101,7 +119,7 @@ test('pinned gate: nothing farther than 300 m; one push within it, carrying the 
   await expect(maybePushGateCode(sample(at(0.0009)))).resolves.toEqual({ sent: true, trigger: 'gate_pin' });
   expect(PushService.sendToAdminUser).toHaveBeenCalledWith(TECH_ID, {
     title: 'Gate: 4242 (neighborhood)', body: '', url: '/admin/today', tag: 'gate-code-svc-1', priority: 'high',
-  });
+  }, { beforeDispatch: expect.any(Function) });
   expect(auditRows).toHaveLength(1);
   expect(auditRows[0]).toMatchObject({ action: 'gate_code_push.sent', resource_type: 'scheduled_service', resource_id: 'svc-1' });
   expect(JSON.stringify(auditRows[0])).not.toContain('4242');
@@ -112,17 +130,48 @@ test('once per stop and trip: a later sample, or another process, sends nothing;
   await expect(maybePushGateCode(sample(at(0.0005)))).resolves.toEqual({ sent: false, reason: 'already_sent' });
   sentKeys.clear(); // a restart or a second instance: the audit row decides
   await expect(maybePushGateCode(sample(at(0.0005)))).resolves.toEqual({ sent: false, reason: 'already_sent' });
-  expect(PushService.sendToAdminUser).toHaveBeenCalledTimes(1);
+  expect(dispatched).toBe(1);
 
   service = { ...service, en_route_at: new Date(Date.now() - 2 * 60000).toISOString() };
   await expect(maybePushGateCode(sample(at(0.0005)))).resolves.toEqual({ sent: true, trigger: 'gate_pin' });
-  expect(PushService.sendToAdminUser).toHaveBeenCalledTimes(2);
+  expect(dispatched).toBe(2);
+});
+
+// Codex pre-push P1: the trip is claimed only once a device is about to get
+// the push, and a delivery no device accepted is not the end of it.
+test('no device: nothing is claimed, and a later sample can still send', async () => {
+  devices = 0;
+  await expect(maybePushGateCode(sample(at(0.0009)))).resolves.toEqual({ sent: false, reason: 'no_device' });
+  expect(auditRows).toEqual([]);
+  devices = 1;
+  await expect(maybePushGateCode(sample(at(0.0005)))).resolves.toEqual({ sent: true, trigger: 'gate_pin' });
+});
+
+test('a delivery no device accepted frees the trip for another try; after three failures it stops', async () => {
+  deliveredOk = false;
+  for (let i = 0; i < 3; i += 1) {
+    await expect(maybePushGateCode(sample(at(0.0009)))).resolves.toEqual({ sent: false, reason: 'delivery_failed' });
+  }
+  expect(auditRows.map((row) => row.action)).toEqual([
+    'gate_code_push.sent', 'gate_code_push.failed', 'gate_code_push.sent', 'gate_code_push.failed', 'gate_code_push.sent', 'gate_code_push.failed',
+  ]);
+  deliveredOk = true;
+  await expect(maybePushGateCode(sample(at(0.0009)))).resolves.toEqual({ sent: false, reason: 'already_sent' });
+  expect(dispatched).toBe(3);
+});
+
+test('a failed delivery, then a good one: the code arrives on the next sample', async () => {
+  deliveredOk = false;
+  await maybePushGateCode(sample(at(0.0009)));
+  deliveredOk = true;
+  await expect(maybePushGateCode(sample(at(0.0005)))).resolves.toEqual({ sent: true, trigger: 'gate_pin' });
+  expect(dispatched).toBe(2);
 });
 
 test('a code but no pin: the push goes on the first en-route sample', async () => {
   neighborhoodAccess.neighborhoodGateWaypointsForVisits.mockImplementation(async () => new Map());
   await expect(maybePushGateCode(sample(at(0.05)))).resolves.toEqual({ sent: true, trigger: 'en_route' });
-  expect(PushService.sendToAdminUser).toHaveBeenCalledWith(TECH_ID, expect.objectContaining({ title: 'Gate: 4242 (neighborhood)' }));
+  expect(PushService.sendToAdminUser).toHaveBeenCalledWith(TECH_ID, expect.objectContaining({ title: 'Gate: 4242 (neighborhood)' }), expect.anything());
 });
 
 test.each([
@@ -132,7 +181,7 @@ test.each([
   prefsRow = prefs;
   neighborhoodAccess.neighborhoodGateEntriesForVisits.mockImplementation(async () => new Map([['svc-1', [entry]]]));
   await maybePushGateCode(sample(at(0.0009)));
-  expect(PushService.sendToAdminUser).toHaveBeenCalledWith(TECH_ID, expect.objectContaining({ title }));
+  expect(PushService.sendToAdminUser).toHaveBeenCalledWith(TECH_ID, expect.objectContaining({ title }), expect.anything());
 });
 
 test('no community gate code anywhere: nothing is sent', async () => {
@@ -147,7 +196,7 @@ test("directory gate off: the neighborhood is never read, and the customer's own
   await expect(maybePushGateCode(sample(at(0.05)))).resolves.toEqual({ sent: true, trigger: 'en_route' });
   expect(neighborhoodAccess.neighborhoodGateEntriesForVisits).not.toHaveBeenCalled();
   expect(neighborhoodAccess.neighborhoodGateWaypointsForVisits).not.toHaveBeenCalled();
-  expect(PushService.sendToAdminUser).toHaveBeenCalledWith(TECH_ID, expect.objectContaining({ title: 'Gate: 1111' }));
+  expect(PushService.sendToAdminUser).toHaveBeenCalledWith(TECH_ID, expect.objectContaining({ title: 'Gate: 1111' }), expect.anything());
 });
 
 test.each([
@@ -164,5 +213,5 @@ test.each([
 test('a failed claim sends nothing and never throws', async () => {
   db.transaction.mockImplementation(async () => { throw new Error('db down'); });
   await expect(maybePushGateCode(sample(at(0.0009)))).resolves.toEqual({ sent: false, reason: 'error' });
-  expect(PushService.sendToAdminUser).not.toHaveBeenCalled();
+  expect(dispatched).toBe(0);
 });

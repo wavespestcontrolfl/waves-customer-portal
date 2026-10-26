@@ -205,6 +205,16 @@ async function processTrackingEvent({ logId, eventType, payload }) {
         logger.error(`[webhooks-bouncie] pingTechLocation failed: ${err.message}`);
       }
 
+      // Gate code on the way in (GATE_GATE_CODE_PUSH; off = returns at once).
+      // BEFORE the detector: a point that also marks the arrival (a house
+      // near the gate) must still find the visit en route. Own try/catch: a
+      // failure here never changes the work below or the 200.
+      try {
+        await gateCodePush.maybePushGateCode({ techStatus, point });
+      } catch (err) {
+        logger.error(`[webhooks-bouncie] gate code push failed: ${err.message}`);
+      }
+
       let arrival = null;
       try {
         arrival = await gpsArrivalDetector.maybeMarkArrivedFromGps({
@@ -229,14 +239,6 @@ async function processTrackingEvent({ logId, eventType, payload }) {
         });
       } catch (err) {
         logger.error(`[webhooks-bouncie] truck clock-in failed: ${err.message}`);
-      }
-
-      // Gate code on the way in (GATE_GATE_CODE_PUSH; off = returns at once).
-      // Own try/catch: a failure here never changes the work above or the 200.
-      try {
-        await gateCodePush.maybePushGateCode({ techStatus, point });
-      } catch (err) {
-        logger.error(`[webhooks-bouncie] gate code push failed: ${err.message}`);
       }
     }
 

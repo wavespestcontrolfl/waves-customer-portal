@@ -10,8 +10,8 @@
  *     GATE_PUSH_RADIUS_METERS of the pin;
  *   - a code but no pin: on the first truck sample after the visit goes en
  *     route.
- * It rides the Bouncie webhook beside the GPS arrival detector and takes a
- * sample by that detector's own rules (gps-arrival-detector.js: the tech's
+ * It rides the Bouncie webhook just before the GPS arrival detector and takes
+ * a sample by that detector's own rules (gps-arrival-detector.js: the tech's
  * current position, the visit's assigned tech, the visit en route, a fresh
  * sample taken after the en-route tap).
  *
@@ -19,9 +19,11 @@
  * 2026-10-26). That is the one exception to the single-line staff push
  * (2026-09-05): a push that only says a code exists saves nothing at the
  * gate. Once per stop and en-route trip (the detector's own stop and attempt
- * keys), claimed under an advisory lock with an audit row so a restart or a
- * second instance never sends it again. The code is never written to the
- * audit row or a log. Staff phone only; nothing is sent to a customer.
+ * keys): claimed right before the first device hand-off, under an advisory
+ * lock with an audit row, so a restart or a second instance never sends it
+ * again; a delivery no device accepted frees the trip for another try. The
+ * code is never written to the audit rows or a log. Staff phone only;
+ * nothing is sent to a customer.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -33,6 +35,9 @@ const { recordAuditEvent } = require('./audit-log');
 
 const GATE_PUSH_RADIUS_METERS = 300;
 const SENT_ACTION = 'gate_code_push.sent';
+const FAILED_ACTION = 'gate_code_push.failed';
+// A delivery no device accepted frees the trip for another try, this many times.
+const MAX_FAILED_ATTEMPTS = 3;
 const SENT_MEMO_MAX = 2000;
 // stop|attempt keys this process already sent (or found sent), so a truck
 // that keeps pinging near the gate costs no query per sample.
@@ -68,16 +73,22 @@ async function gateFor(service) {
   return { lines, pin };
 }
 
-// Claims the push for this stop and trip: true when this call recorded it.
+// Claims the push for this stop and trip, right before the first device
+// hand-off (PushService beforeDispatch, after its device lookup): true when
+// this call recorded it. A trip is taken while it has a sent row that no
+// failed row answers, and for good once it has failed MAX_FAILED_ATTEMPTS
+// times.
 async function claimOnce(service, key, { trigger, distance }) {
   let claimed = false;
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['gate_code_push', key]);
-    const existing = await trx('audit_log')
-      .where({ resource_type: 'scheduled_service', action: SENT_ACTION })
+    const rows = await trx('audit_log')
+      .where({ resource_type: 'scheduled_service' })
+      .whereIn('action', [SENT_ACTION, FAILED_ACTION])
       .whereRaw("metadata->>'key' = ?", [key])
-      .first('id');
-    if (existing) return;
+      .select('action');
+    const failed = rows.filter((row) => row.action === FAILED_ACTION).length;
+    if (rows.length - failed > failed || failed >= MAX_FAILED_ATTEMPTS) return;
     await recordAuditEvent({
       actor_type: 'system:gate-code-push',
       action: SENT_ACTION,
@@ -90,6 +101,18 @@ async function claimOnce(service, key, { trigger, distance }) {
     claimed = true;
   });
   return claimed;
+}
+
+// A delivery no device accepted: answers the claim so a later sample tries again.
+async function releaseClaim(service, key) {
+  await recordAuditEvent({
+    actor_type: 'system:gate-code-push',
+    action: FAILED_ACTION,
+    resource_type: 'scheduled_service',
+    resource_id: service.id,
+    metadata: { key },
+    critical: true,
+  });
 }
 
 function remember(key) {
@@ -113,8 +136,10 @@ async function enRouteVisitFor({ techStatus, point }) {
 }
 
 /**
- * Called by the Bouncie webhook for every truck position, after the arrival
- * detector. Never throws; the reason says why nothing was sent.
+ * Called by the Bouncie webhook for every truck position, BEFORE the arrival
+ * detector: a sample that also marks the arrival (a house near the gate)
+ * must still find the visit en route. Never throws; the reason says why
+ * nothing was sent.
  */
 async function maybePushGateCode({ techStatus, point } = {}) {
   if (!featureGates.gateCodePushLive()) return { sent: false, reason: 'gate_off' };
@@ -140,17 +165,31 @@ async function maybePushGateCode({ techStatus, point } = {}) {
       trigger = 'gate_pin';
     }
 
-    const claimed = await claimOnce(service, key, { trigger, distance });
-    remember(key);
-    if (!claimed) return { sent: false, reason: 'already_sent' };
-
-    await require('./push-notifications').sendToAdminUser(service.technician_id || techStatus.tech_id, {
+    // Claimed only once a device is about to receive it, so a failed device
+    // lookup or a tech with no device never burns the trip.
+    let claimed = false;
+    const result = await require('./push-notifications').sendToAdminUser(service.technician_id || techStatus.tech_id, {
       title: lines[0],
       body: lines.slice(1).join(' · '),
       url: '/admin/today',
       tag: `gate-code-${service.id}`,
       priority: 'high',
+    }, {
+      beforeDispatch: async () => {
+        claimed = await claimOnce(service, key, { trigger, distance });
+        return claimed;
+      },
     });
+    if (!(Number(result?.subscriptions) > 0)) return { sent: false, reason: 'no_device' };
+    if (!claimed) {
+      remember(key);
+      return { sent: false, reason: 'already_sent' };
+    }
+    if (!(Number(result.sent) > 0)) {
+      await releaseClaim(service, key);
+      return { sent: false, reason: 'delivery_failed' };
+    }
+    remember(key);
     return { sent: true, trigger };
   } catch (err) {
     logger.warn(`[gate-code-push] failed (${err.code || err.name || 'error'})`);

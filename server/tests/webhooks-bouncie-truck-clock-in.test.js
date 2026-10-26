@@ -141,8 +141,10 @@ describe('Bouncie tracking webhook, truck clock-in hook', () => {
   });
 
   // GATE_GATE_CODE_PUSH (services/gate-code-push.js): the gate line on the way
-  // in rides the same truck position, after the detector and the clock-in.
-  test('the gate code push runs last, with the tech status and the point; its failure is logged and changes nothing else', async () => {
+  // in rides the same truck position, BEFORE the detector (Codex pre-push P1):
+  // a point that also marks the arrival, a house near the gate, must still
+  // find the visit en route.
+  test('the gate code push runs first, with the tech status and the point; its failure is logged and changes nothing else', async () => {
     const order = [];
     gpsArrivalDetector.maybeMarkArrivedFromGps.mockImplementation(async () => { order.push('detector'); return null; });
     truckClockIn.maybeClockInFromTruck.mockImplementation(async () => { order.push('truck'); });
@@ -150,7 +152,9 @@ describe('Bouncie tracking webhook, truck clock-in hook', () => {
 
     await expect(router._test.processTrackingEvent({ logId: 12, eventType: 'tripData', payload: PAYLOAD })).resolves.toBeUndefined();
 
-    expect(order).toEqual(['detector', 'truck', 'gate']);
+    expect(order).toEqual(['gate', 'detector', 'truck']);
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledTimes(1);
+    expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledTimes(1);
     expect(gateCodePush.maybePushGateCode).toHaveBeenCalledWith({
       techStatus: TECH_STATUS,
       point: expect.objectContaining({ lat: 27.3, lng: -82.5 }),
