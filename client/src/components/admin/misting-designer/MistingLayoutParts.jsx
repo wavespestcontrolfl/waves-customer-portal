@@ -124,7 +124,7 @@ export function limitNote(count, limits) {
   const max = Number(limits?.maxNozzles);
   const min = Number(limits?.minNozzles);
   if (Number.isFinite(max) && count > max) return `The estimator accepts up to ${max} nozzles. Remove some before using this count.`;
-  if (Number.isFinite(min) && count > 0 && count < min) return `The system includes at least ${min} nozzles. A lower count is billed at the included count.`;
+  if (Number.isFinite(min) && count > 0 && count < min) return `The estimator accepts at least ${min} nozzles. A lower count makes the estimate invalid and sends it to manual review, so add nozzles before using this count.`;
   return null;
 }
 
