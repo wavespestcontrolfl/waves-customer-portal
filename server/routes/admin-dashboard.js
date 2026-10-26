@@ -576,14 +576,18 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     const daysInPeriod = Math.max(1, Math.ceil((now - new Date(start)) / 86400000) + 1);
     let availableHours = numTechs ? numTechs * 8 * daysInPeriod : 0;
     if (secondTechLows && numTechs) {
-      // Same window as daysInPeriod (daysInPeriod calendar dates ending today).
-      // A technician with no work-days list keeps every day.
-      const todayMs = Date.parse(`${todayStr}T00:00:00Z`);
+      // The labor-hours window exactly: start through endDate (a caller may
+      // end it before today), each date once. Weekdays as
+      // technician-eligibility.js reads work_days (getUTCDay of the date, 0 =
+      // Sunday). A technician with no work-days list keeps every day.
       const windowDows = [];
-      for (let i = 0; i < daysInPeriod; i++) windowDows.push(new Date(todayMs - i * 86400000).getUTCDay());
+      const lastMs = Date.parse(`${endDate}T00:00:00Z`);
+      for (let ms = Date.parse(`${String(start).slice(0, 10)}T00:00:00Z`); ms <= lastMs; ms += 86400000) {
+        windowDows.push(new Date(ms).getUTCDay());
+      }
       let techDays = 0;
       for (const days of techWorkDays) {
-        techDays += days ? windowDows.filter((dow) => days.includes(dow)).length : daysInPeriod;
+        techDays += days ? windowDows.filter((dow) => days.includes(dow)).length : windowDows.length;
       }
       availableHours = techDays * 8;
     }

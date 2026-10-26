@@ -3,9 +3,10 @@
  *
  * Off: available hours = active technicians rows x 8 x every day (today's
  * number). On: only assignable field staff (active and field-dispatchable)
- * count, and each counts only the days in the window that are in their
- * work_days (null = every day), at 8 hours a work day. A failed read keeps
- * the fail-loud behavior (null utilization, logged).
+ * count, and each counts only the days of the labor-hours window (start
+ * through the end date, each date once) that are in their work_days (null =
+ * every day), at 8 hours a work day. A failed read keeps the fail-loud
+ * behavior (null utilization, logged).
  */
 jest.mock('../models/db', () => {
   const mockState = { technicians: [], failTechnicians: false };
@@ -62,8 +63,9 @@ const { computeCoreKpis } = require('../routes/admin-dashboard');
 const fakeDb = require('../models/db');
 const logger = require('../services/logger');
 
-// Wed 2026-10-28 12:00 ET. With range.from Thu 2026-10-22 the period is 8
-// dates (Wed Oct 21 .. Wed Oct 28): Wed x2, Thu, Fri, Sat, Sun, Mon, Tue.
+// Wed 2026-10-28 12:00 ET. With range.from Thu 2026-10-22 the old count
+// rounds the period to 8 days; the labor-hours window is 7 dates (Thu Oct 22
+// .. Wed Oct 28): Thu, Fri, Sat, Sun, Mon, Tue, Wed.
 const NOW = new Date('2026-10-28T16:00:00Z');
 const RANGE = { from: '2026-10-22' };
 const PEOPLE = [
@@ -94,19 +96,29 @@ describe('computeCoreKpis tech utilization', () => {
 
   it('gate on: assignable staff only, on their work days only', async () => {
     process.env.GATE_SECOND_TECH_LOWS = 'true';
-    // Tech One Mon-Thu: Wed Oct 21, Thu Oct 22, Mon Oct 26, Tue Oct 27, Wed Oct 28 = 5 days.
-    // Tech Two every day = 8. Tech Three Sat/Sun = 2. Office and inactive rows = 0.
-    // 15 work days x 8 hours = 120; 20 / 120 = 17%.
+    // Tech One Mon-Thu: Thu Oct 22, Mon Oct 26, Tue Oct 27, Wed Oct 28 = 4 days.
+    // Tech Two every day = 7. Tech Three Sat/Sun = 2. Office and inactive rows = 0.
+    // 13 work days x 8 hours = 104; 20 / 104 = 19%.
     const kpis = await computeCoreKpis('last_7', RANGE);
-    expect(kpis.financial.utilization).toBe(17);
+    expect(kpis.financial.utilization).toBe(19);
   });
 
   it('gate on, no work_days list anywhere: only the office and inactive rows drop out', async () => {
     process.env.GATE_SECOND_TECH_LOWS = 'true';
     fakeDb.__mockState.technicians = PEOPLE.map((p) => ({ ...p, work_days: null }));
-    // 3 assignable x 8 days x 8 hours = 192; 20 / 192 = 10%.
+    // 3 assignable x 7 days x 8 hours = 168; 20 / 168 = 12%.
     const kpis = await computeCoreKpis('last_7', RANGE);
-    expect(kpis.financial.utilization).toBe(10);
+    expect(kpis.financial.utilization).toBe(12);
+  });
+
+  it('gate on, a window that ends before today (range.to): only its own dates count', async () => {
+    // Mon Oct 19 .. Sun Oct 25, the window the labor hours use. Tech One Mon-Thu = 4,
+    // Tech Two = 7, Tech Three Sat/Sun = 2: 13 x 8 = 104; 20 / 104 = 19%. Off, the old
+    // count runs to today: 4 rows x 8 hours x 11 days = 352; 20 / 352 = 6%.
+    const window = { from: '2026-10-19', to: '2026-10-25' };
+    expect((await computeCoreKpis('last_7', window)).financial.utilization).toBe(6);
+    process.env.GATE_SECOND_TECH_LOWS = 'true';
+    expect((await computeCoreKpis('last_7', window)).financial.utilization).toBe(19);
   });
 
   it('gate on, no assignable technician: utilization is null, not a divide by zero', async () => {
