@@ -508,6 +508,8 @@ app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 // Residential service agreement (GATE_ESTIMATE_SERVICE_AGREEMENT): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.serviceAgreementPreGuard);
+// Commercial first visit picker (GATE_COMMERCIAL_FIRST_VISIT): same reason, same shape.
+app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
 
 app.use('/api/', limiter);
 

@@ -536,24 +536,34 @@ async function handleAgreementSigned({ contractId, database = db }) {
       ? new Date(contract.signed_at).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' })
       : '';
     const payment = await paymentSentence(est, contract.customer_id, database);
+    // GATE_COMMERCIAL_FIRST_VISIT: when the signer can book the first visit online, the office waits for that booking
+    // (its own alert) instead of booking by phone beside it.
+    const bookOnline = await require('./commercial-first-visit').firstVisitOnlineFor(est.id, database);
 
     await raiseAdminAlert('customer', {
       area: 'Estimates',
-      action: fitAction('Estimates', name, [
+      action: fitAction('Estimates', name, bookOnline ? [
+        (who) => `watch for ${who}'s first visit booking`,
+        (who) => `watch for ${who}'s booking`,
+      ] : [
         (who) => `mark ${who} won and book the first visit`,
         (who) => `mark ${who} won`,
       ]),
-      why: `Signed the commercial agreement for ${number}; the estimate is still open and nothing is booked.`,
+      why: bookOnline
+        ? `Signed the commercial agreement for ${number}; they can book the first visit online now.`
+        : `Signed the commercial agreement for ${number}; the estimate is still open and nothing is booked.`,
       severity: 'needs-you',
       link: `/admin/estimates/${est.id}/proposal`,
       subject: { type: 'estimate', id: String(est.id) },
-      doneWhen: 'estimate_marked_won',
+      doneWhen: bookOnline ? 'visit_booked' : 'estimate_marked_won',
       who: 'person',
     }, {
       // A customer signing is a customer acting: the bell policy never silences it.
       bell: true,
       dedupeKey: `commercial-agreement-signed:${contract.id}`,
-      detail: `${name} signed the Commercial Pest Service Agreement for ${number}${signedOn ? ` on ${signedOn}` : ''}. The estimate was not accepted, and no visit, invoice or charge was created. ${payment}Mark the estimate won, then schedule the first visit. The signed copy goes to the customer by email.`,
+      detail: `${name} signed the Commercial Pest Service Agreement for ${number}${signedOn ? ` on ${signedOn}` : ''}. The estimate was not accepted, and no visit, invoice or charge was created. ${payment}${bookOnline
+        ? 'They can now pick their first visit online, and you get a second alert when they book. If they do not book, mark the estimate won, then schedule the first visit.'
+        : 'Mark the estimate won, then schedule the first visit.'} The signed copy goes to the customer by email.`,
       metadata: { estimateId: est.id, customerId: contract.customer_id, contractId: contract.id },
     });
 

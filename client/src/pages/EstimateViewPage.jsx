@@ -79,6 +79,7 @@ import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyle
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
+import { firstVisitLabel } from '../components/estimate/CommercialFirstVisitPicker';
 import ConsumerNoticeSign, { ConsumerNoticeHint, CONSUMER_NOTICE_HINT } from '../components/estimate/ConsumerNoticeSign';
 import ServiceAgreementSign from '../components/estimate/ServiceAgreementSign';
 import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
@@ -9816,8 +9817,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             state="accepted"
             customerFirstName={estimate.customerFirstName}
             address={estimate.address}
-            // Booked + upcoming visit → show the date, not "we'll follow up".
-            appointmentLabel={existingAppointment ? formatAppointmentLabel(existingAppointment) : null}
+            // Booked + upcoming visit → show the date, not "we'll follow up". A commercial proposal's
+            // self-booked first visit (GATE_COMMERCIAL_FIRST_VISIT) rides cta.commercialFirstVisit.
+            appointmentLabel={existingAppointment
+              ? formatAppointmentLabel(existingAppointment)
+              : (cta?.commercialFirstVisit?.state === 'booked' ? firstVisitLabel(cta.commercialFirstVisit.visit) : null)}
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
@@ -9885,7 +9889,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ) : null}
         {/* "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): only when /data carries
             cta.commercialAgreement — absent with the gate off, so the page is unchanged. */}
-        <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} />
+        <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} firstVisit={cta?.commercialFirstVisit} />
         {/* Residential Waves AI property card (HOME sq ft / POOL-LANAI / COMPLEXITY):
             not for an authored commercial proposal — the PDF document drops
             `intelligence` for it the same way. */}

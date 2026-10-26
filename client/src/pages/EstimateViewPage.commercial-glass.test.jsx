@@ -150,6 +150,35 @@ describe('authored commercial proposal page', () => {
   });
 });
 
+// GATE_COMMERCIAL_FIRST_VISIT: /data's cta.commercialFirstVisit. Signed, the agreement card becomes the first-visit
+// picker and What happens next points at it; once booked (the proposal is then accepted), the accepted card shows the
+// visit date.
+describe('commercial first visit on the proposal page', () => {
+  it('signed + pick: the picker replaces the signed card and What happens next points below', async () => {
+    const payload = proposalPayload({ canSign: false, state: 'signed' });
+    payload.cta.commercialFirstVisit = { state: 'pick', durationMinutes: 30 };
+    vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/first-visit/availability')
+      ? json({ ok: true, days: [], slots: [] })
+      : json(payload))));
+    render(<EstimateViewPage />);
+    await screen.findByText('Commercial Service Proposal');
+    const picker = await screen.findByTestId('commercial-first-visit-picker');
+    expect(picker).toHaveAttribute('data-glass', 'card');
+    expect(within(picker).getByRole('heading', { level: 2, name: 'Pick your first visit' })).toBeInTheDocument();
+    expect(screen.queryByTestId('commercial-agreement-signed')).not.toBeInTheDocument();
+    expect(screen.getByTestId('proposal-next-steps')).toHaveTextContent('Pick the day and time of your first visit below');
+  });
+
+  it('accepted with a booked first visit: the accepted card shows the visit date', async () => {
+    const payload = proposalPayload();
+    payload.cta = { ...payload.cta, terminalState: 'accepted', commercialFirstVisit: { state: 'booked', visit: { date: '2026-11-03', windowStart: '09:00', windowEnd: '10:00' } } };
+    vi.stubGlobal('fetch', vi.fn(async () => json(payload)));
+    render(<EstimateViewPage />);
+    expect(await screen.findByText('Tuesday, November 3 at 9 AM')).toBeInTheDocument();
+    expect(screen.getByText('Your visit')).toBeInTheDocument();
+  });
+});
+
 describe('residential estimate page is unchanged', () => {
   it('still renders the Waves AI card, the app pitch, the reviews and the old next-steps card', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(residentialQuotePayload())));

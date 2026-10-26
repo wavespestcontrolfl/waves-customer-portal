@@ -13,6 +13,7 @@ jest.mock('../config/feature-gates', () => ({
   payAfterFirstVisitLive: () => false,
   pafSetupFeeLive: () => false,
   commercialProposalSignLive: () => false,
+  commercialFirstVisitLive: () => false,
   estimateConsumerNoticeLive: () => false,
   estimateServiceAgreementLive: () => false,
 }));

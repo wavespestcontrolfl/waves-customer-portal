@@ -416,3 +416,23 @@ it('shows no Bid tools switch and no bid sections when the gate is off', async (
   expect(screen.queryByText(BID_FORM_TITLE)).toBeNull();
   expect(screen.queryByText(COST_SHEET_TITLE)).toBeNull();
 });
+
+// GATE_COMMERCIAL_FIRST_VISIT: a program's visit length sizes the first visit the customer books online. It saves as a
+// number when typed and stays off the payload when blank, so the server keeps no key for it.
+it('saves a program visit length when typed and leaves it off when blank', async () => {
+  saved.proposal = {
+    enabled: true, title: 'Synthetic proposal', buildings: [],
+    programs: [{ id: 'program-1', service: 'pest', label: 'Interior Pest Control', frequencyPerYear: 12, pricePerApplication: 81.67, taxable: true }],
+  };
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  const minutes = screen.getByLabelText('Visit length in minutes');
+  expect(minutes).toHaveValue(null);
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await screen.findByRole('button', { name: 'Saved' });
+  expect(JSON.parse(calls.find((call) => call.method === 'PUT').body).proposal.programs[0]).not.toHaveProperty('visitMinutes');
+  calls.length = 0;
+  fireEvent.change(minutes, { target: { value: '30' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await waitFor(() => expect(calls.some((call) => call.method === 'PUT')).toBe(true));
+  expect(JSON.parse(calls.find((call) => call.method === 'PUT').body).proposal.programs[0]).toMatchObject({ visitMinutes: 30 });
+});

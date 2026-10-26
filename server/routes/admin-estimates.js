@@ -4616,6 +4616,12 @@ router.put('/:id/proposal', async (req, res, next) => {
         // r8 on #4270).
         const programIssue = programRevenueIssue(program);
         if (programIssue) return res.status(400).json({ error: programIssue });
+        // Visit length: blank, or whole minutes from 5 to 480 (the normalizer drops anything else, so say so here).
+        const visitMinutes = program?.visitMinutes;
+        if (visitMinutes != null && String(visitMinutes).trim() !== ''
+          && !(Number.isInteger(Number(visitMinutes)) && Number(visitMinutes) >= 5 && Number(visitMinutes) <= 480)) {
+          return res.status(400).json({ error: 'Visit length must be a whole number of minutes from 5 to 480.' });
+        }
         if (String(program?.label ?? program?.name ?? '').length > 120) {
           return res.status(400).json({ error: 'Program names are limited to 120 characters.' });
         }

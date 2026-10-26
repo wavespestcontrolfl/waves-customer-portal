@@ -543,6 +543,41 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY) or Net 30', () =
     });
   });
 
+  // GATE_COMMERCIAL_FIRST_VISIT: when the signer can book the first visit online, the office watches for that booking
+  // (its own alert) instead of booking by phone beside it.
+  describe('the office alert when the customer books the first visit online', () => {
+    afterEach(() => jest.restoreAllMocks());
+    async function signedNet30() {
+      const made = makeDb();
+      await ensureAgreement({ estimate: estimateRow(), req, database: made.database });
+      Object.assign(made.state.contracts[0], { status: 'signed', signed_at: new Date() });
+      return made;
+    }
+
+    test('online booking open: watch for the booking, done when a visit is booked', async () => {
+      const online = jest.spyOn(require('../services/commercial-first-visit'), 'firstVisitOnlineFor').mockResolvedValue(true);
+      const { database } = await signedNet30();
+      await handleAgreementSigned({ contractId: 'contract-1', database });
+      expect(online).toHaveBeenCalledWith(expect.any(String), database);
+      const [, headline, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+      expect(headline).toMatch(/^Estimates — watch for .+ (first visit )?booking$/);
+      expect(why).toMatch(/; they can book the first visit online now\.$/);
+      expect(opts.detail).toContain('They can now pick their first visit online, and you get a second alert when they book.');
+      expect(opts.detail).not.toContain('Mark the estimate won, then schedule the first visit.');
+      expect(opts.metadata).toMatchObject({ doneWhen: 'visit_booked' });
+    });
+
+    test('online booking not open: the office marks it won and books, as before', async () => {
+      jest.spyOn(require('../services/commercial-first-visit'), 'firstVisitOnlineFor').mockResolvedValue(false);
+      const { database } = await signedNet30();
+      await handleAgreementSigned({ contractId: 'contract-1', database });
+      const [, headline, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+      expect(headline).toMatch(/^Estimates — mark .+ won/);
+      expect(opts.detail).toContain('Mark the estimate won, then schedule the first visit.');
+      expect(opts.metadata).toMatchObject({ doneWhen: 'estimate_marked_won' });
+    });
+  });
+
   describe('autopayNextStep: the signing page\'s next step after an Auto Pay agreement is signed', () => {
     async function signed(estimate = autopay()) {
       const made = slotDb(estimate);
