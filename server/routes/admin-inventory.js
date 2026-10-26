@@ -3183,20 +3183,21 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
 
 // GET/POST /restock-requests/:id/siteone-email — preview and send the pickup
 // order email to SiteOne for an open request (owner 2026-10-26, dark behind
-// GATE_SITEONE_EMAIL_ORDER). Owner-only: it emails a vendor and orders stock.
+// GATE_SITEONE_EMAIL_ORDER). Owner-only: it emails a vendor and orders stock, and
+// STAFF_INVENTORY_REQUEST above lists neither path, so the router's requireAdmin covers both.
 // A refusal answers 409 + a machine `code`; a gate that is off answers 404.
 const siteOneEmailOrder = () => require('../services/procurement/vendor-order-email');
 const siteOneEmailError = (err, res, next) => {
   if (err && err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
   return next(err);
 };
-router.get('/restock-requests/:id/siteone-email', requireAdmin, async (req, res, next) => {
+router.get('/restock-requests/:id/siteone-email', async (req, res, next) => {
   try {
     if (!featureGates.siteOneEmailOrderLive()) return res.status(404).json({ error: 'Not found' });
     res.json({ preview: await siteOneEmailOrder().previewOrderEmail(req.params.id) });
   } catch (err) { siteOneEmailError(err, res, next); }
 });
-router.post('/restock-requests/:id/siteone-email', requireAdmin, async (req, res, next) => {
+router.post('/restock-requests/:id/siteone-email', async (req, res, next) => {
   try {
     if (!featureGates.siteOneEmailOrderLive()) return res.status(404).json({ error: 'Not found' });
     const actor = (req.technician && (req.technician.name || req.technician.email)) || null;
