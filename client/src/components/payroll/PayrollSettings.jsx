@@ -14,6 +14,7 @@ import { adminFetch } from '../../lib/adminFetch';
 import { etDateString } from '../../lib/timezone';
 import { dayLabel, dollars } from './payrollFormat';
 import PayRuns from './PayRuns';
+import PayrollForms from './PayrollForms';
 
 // Staff page, Payroll tab (owner 2026-10-25, basic payroll layer 1b-2a). An admin
 // types the W-4 elections from the signed PAPER form and records how each W-2
@@ -37,7 +38,7 @@ async function call(path, { raw = false, ...options } = {}) {
   const response = await adminFetch(`/admin/payroll${path}`, options);
   if (raw && response.ok) return response;
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Payroll request failed (${response.status}).`);
+  if (!response.ok) throw Object.assign(new Error(data.error || `Payroll request failed (${response.status}).`), { status: response.status });
   return data;
 }
 
@@ -230,6 +231,8 @@ export default function PayrollSettings() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [dialog, setDialog] = useState(null);
+  // Bumped when a pay run is finalized or voided, so the tax form figures refetch.
+  const [formsVersion, setFormsVersion] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -273,7 +276,8 @@ export default function PayrollSettings() {
         </TBody>
       </Table>
     </Card>}
-    <PayRuns call={call} />
+    <PayRuns call={call} onRunsChanged={() => setFormsVersion(v => v + 1)} />
+    <PayrollForms call={call} refreshKey={formsVersion} />
     {dialog?.kind === 'w4' && <W4Dialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'pay' && <PayMethodDialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'history' && <W4HistoryDialog technician={dialog.tech} onClose={close} />}
