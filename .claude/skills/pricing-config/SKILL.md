@@ -58,9 +58,15 @@ environment that carries the row (prod does), **editing
 
 ## Standing owner rulings (dated — don't relitigate)
 
-- **No pricing floors** (2026-07-17): all floors are DISARMED; margins are
-  report-only. Never re-add a floor or flag "below floor". This covers the
-  margin/program floors only. The owner-set one-time list minimums stay
+- **Pricing floors** (2026-07-17 disarmed every margin/program floor; owner
+  2026-10-09 re-armed one, for lawn): a residential recurring lawn plan
+  lists at cost / 0.55 with a $55-a-visit minimum, and WaveGuard tier and
+  manual discounts on the lawn line stop at a 35% collected margin
+  (`GATE_LAWN_COST_PLUS_LIST`, ON in production since 2026-10-26). The
+  owner ruled the same 35% floor for T&S; it is not built (it waits on the
+  T&S protocol). Every other margin/program floor stays disarmed and
+  report-only: do not flag "below floor" outside lawn, and do not add a
+  floor without an owner ruling. The owner-set one-time list minimums stay
   live and re-apply after the 15% recurring-customer perk: one-time pest
   $199 (`ONE_TIME.pest.floor`) and one-time mosquito $199
   (`ONE_TIME.mosquito.floor`, owner 2026-10-25).

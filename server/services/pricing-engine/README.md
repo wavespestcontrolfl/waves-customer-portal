@@ -17,7 +17,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | `LABOR_RATE` | $35.00/hr | Loaded wages + benefits + WC + vehicle + insurance |
 | `DRIVE_TIME` | 20 min | Per-visit drive allowance baked into labor cost |
 | `ADMIN_ANNUAL` | $51 | Per-service/yr admin overhead (billing, scheduling, CRM) |
-| `MARGIN_FLOOR` | 35% | Margin REPORTING threshold for recurring lines (enforcement removed 2026-07-17 — owner ruling "forget all floors") |
+| `MARGIN_FLOOR` | 35% | Margin REPORTING threshold for recurring lines (enforcement removed 2026-07-17 — owner ruling "forget all floors"; lawn enforces it again under `GATE_LAWN_COST_PLUS_LIST`, ON since 2026-10-26) |
 | `MARGIN_TARGET_TS` | 40% | Tree & Shrub admin-inclusive margin target (45% until the 2026-10-21 owner audit; DB-authoritative via `global_margin_target_ts`); `(annualDirectCost + ADMIN_ANNUAL) / (1 − target)` |
 | `CONDITIONAL_CEILING` | $60 | Max conditional material/yr before reprice |
 | `PROCESSING_ADJUSTMENT` | 1.00 | Retained no-op wrapper; checkout uses `computeChargeAmount` to add 2.90% only for confirmed credit funding |
@@ -106,7 +106,7 @@ into `priceLawnCare`.
 - MODERATE_SHADE: 0.625 lb N, 2 N-apps, Pillar
 - HEAVY_SHADE: 0.50 lb N, 2 N-apps, Pillar
 
-**Cost-plus list price (`GATE_LAWN_COST_PLUS_LIST`, ships OFF; owner 2026-10-09):**
+**Cost-plus list price (`GATE_LAWN_COST_PLUS_LIST`, ships OFF, ON in production since 2026-10-26; owner 2026-10-09):**
 residential recurring lawn care only. Off, everything above is unchanged. On:
 
 - `annualCost` = v13 whole-lawn product (`LAWN_PRICING_V2.costPlusList.materialPer1000SqftPerYear`
