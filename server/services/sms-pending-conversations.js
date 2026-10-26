@@ -37,14 +37,29 @@ const REPLY_LOOKBACK = "INTERVAL '24 hours'";
 // as a binding. Shared with the customer-contact alert witnesses
 // (admin-alert-contact-witnesses.js).
 function callEndedAtSql(alias = 'spoken') {
-  const postCallRow = `(${alias}.metadata->>'source' IN (${[...POST_CALL_ROW_SOURCES].map((source) => `'${source}'`).join(', ')})
-    AND NOT (${alias}.metadata->>'source' = 'status_callback'
-      AND COALESCE(${alias}.metadata->>'inserted_on_status', '') NOT IN ('', ${[...TERMINAL_CALL_STATUSES].map((status) => `'${status}'`).join(', ')})))`;
   return `COALESCE(
     CASE WHEN ${alias}.metadata->>'ended_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
       THEN CAST(${alias}.metadata->>'ended_at' AS timestamptz) END,
-    CASE WHEN ${postCallRow} IS NOT TRUE
+    CASE WHEN ${postCallRowSql(alias)} IS NOT TRUE
       THEN ${alias}.created_at + make_interval(secs => COALESCE(${alias}.duration_seconds, 0)) END)`;
+}
+
+// A row inserted after the call was over (call-timeline.js createdAfterTheCall).
+function postCallRowSql(alias) {
+  return `(${alias}.metadata->>'source' IN (${[...POST_CALL_ROW_SOURCES].map((source) => `'${source}'`).join(', ')})
+    AND NOT (${alias}.metadata->>'source' = 'status_callback'
+      AND COALESCE(${alias}.metadata->>'inserted_on_status', '') NOT IN ('', ${[...TERMINAL_CALL_STATUSES].map((status) => `'${status}'`).join(', ')})))`;
+}
+
+// When the customer placed the call, as SQL over a call_log alias: the SQL form
+// of call-timeline.js callStartedAt. created_at is the start unless the row was
+// inserted after the call (a status callback on a terminal event, a recording
+// recovery), when the call's own length (the largest positive of
+// duration_seconds and recording_duration_seconds) is backed out of it.
+function callStartedAtSql(alias = 'call_log') {
+  return `(CASE WHEN ${postCallRowSql(alias)} IS TRUE
+    THEN ${alias}.created_at - make_interval(secs => GREATEST(0, COALESCE(${alias}.duration_seconds, 0), COALESCE(${alias}.recording_duration_seconds, 0)))
+    ELSE ${alias}.created_at END)`;
 }
 
 // Shared source for the Messages needs-response badge, filtered inbox, and
@@ -375,4 +390,4 @@ async function countPendingSmsConversations({
   return result;
 }
 
-module.exports = { loadPendingSmsConversations, countPendingSmsConversations, callEndedAtSql, NEEDS_REPLY_SINCE };
+module.exports = { loadPendingSmsConversations, countPendingSmsConversations, callEndedAtSql, callStartedAtSql, NEEDS_REPLY_SINCE };

@@ -61,7 +61,7 @@
  * confirms resolved, appt booked, rescheduled"; this replaces the earlier
  * line that kept them out of the sweep). A text (inbound_sms) closes when the
  * Messages "needs a reply" reader no longer counts its conversation; a voicemail
- * callback request, a missed call, an email and a new lead close when a person
+ * callback request, an email and a new lead close when a person
  * called back and spoke, a person's text reached the customer, a visit was
  * booked or a quote was handed off, each judged only by what came AFTER the
  * event the bell is about. Every such fact is a shared witness read in
@@ -71,8 +71,10 @@
  * no bell changed; `true` = closed like any other class. Review bells and
  * money-owed/failed/refund alerts are still never in the table: a class is
  * only in it if its category (plus dedupeKey prefix or trigger) is listed
- * below. A new text from a known sender rewrites the sender's one thread bell
- * and rings it again (the refresh clears done and the retired stamp); an
+ * below. A missed call (customer_missed_call) is NOT in the table: its one owner
+ * is missed-call-bell.js (retireCalledBackMissedCalls, every 2 minutes), which
+ * judges the same contact facts behind the same gate. A new text from a known
+ * sender rewrites the sender's one thread bell and rings it again (the refresh clears done and the retired stamp); an
  * unknown sender's bell is put back by the re-arm pass when the number has an
  * unanswered text again. Two other customer-contact bells are in it by owner
  * ruling (2026-10-03), each closed only by the record that answers it: the
@@ -214,11 +216,16 @@ function repeatFormCustomerId(meta) {
 // follow-ups — those land on an existing customer's plan whether or not anyone
 // worked the lead), and never one that did not run (cancelled, no-show,
 // skipped). The newest such booking's creation time per customer.
+// The live-booking predicate: not one that did not run, and never a child the
+// system generated on its own. Exported for missed-call-bell.js's SQL form.
+function whereLiveBooking(q) {
+  return q.where((w) => w.whereNull('status').orWhereNotIn('status', VISIT_NEVER_RAN_STATUSES))
+    .whereNull('recurring_parent_id').whereNull('parent_service_id');
+}
+
 async function bookedVisitsByCustomer(conn, customerIds) {
   if (!customerIds.length) return new Map();
-  const booked = await conn('scheduled_services').whereIn('customer_id', customerIds)
-    .where((q) => q.whereNull('status').orWhereNotIn('status', VISIT_NEVER_RAN_STATUSES))
-    .whereNull('recurring_parent_id').whereNull('parent_service_id')
+  const booked = await whereLiveBooking(conn('scheduled_services').whereIn('customer_id', customerIds))
     .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
   return new Map(booked.map((r) => [String(r.customer_id), r.latest_created_at]));
 }
@@ -610,7 +617,7 @@ function textAnswered(s) {
   return 'Answered, or no reply needed';
 }
 
-// A voicemail callback request or a missed call: a person called back and
+// A voicemail callback request: a person called back and
 // spoke with them, the customer called in and a person answered, a person's
 // text reached them, a visit was booked, or a quote was handed off.
 function callerReached(s) {
@@ -699,10 +706,10 @@ const CLASSES = [
   { // call-recording-processor.js — one bell per voicemail, no dedupe key
     key: 'voicemail_callback', categories: ['voicemail_callback'], triggerKey: 'customer_voicemail_callback', contactOnly: true, contact: 'voice', contactRule: callerReached,
   },
-  { // missed-call-bell.js — one bell per call. The promise chaser, repeat caller and
-    // Sandy hand-off bells share the category and keep their own classes / owners.
-    key: 'missed_call', categories: ['missed_call'], triggerKey: 'customer_missed_call', contactOnly: true, contact: 'voice', contactRule: callerReached,
-  },
+  // Missed calls (customer_missed_call) are NOT here: missed-call-bell.js owns them
+  // (retireCalledBackMissedCalls, every 2 minutes, one owner), and it judges the
+  // contact clauses below behind the same gate. The promise chaser, repeat caller
+  // and Sandy hand-off bells share the category and keep their own owners.
   { // email-sync.js ringCustomerEmailBell — one bell per email
     key: 'inbound_email', categories: ['inbound_email'], triggerKey: 'customer_email_received', contactOnly: true, contact: 'email', contactRule: emailAnswered,
   },
@@ -1023,5 +1030,6 @@ module.exports = {
   subjectFor,
   refsFromRow,
   judge,
+  whereLiveBooking,
   CLASSES,
 };

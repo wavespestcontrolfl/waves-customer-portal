@@ -367,12 +367,12 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect((await get(unknown.row.id)).done_at).toBeNull();
     });
 
-    test('a missed call or voicemail callback request: a person\'s call back, a person-answered call in, a person\'s text, a booked visit or a handed-off quote after the call closes it; earlier contact, an unanswered callback and an automated bell do not', async () => {
+    test('a voicemail callback request (a missed call is missed-call-bell.js\'s, not the sweep\'s): a person\'s call back, a person-answered call in, a person\'s text, a booked visit or a handed-off quote after the call closes it; earlier contact, an unanswered callback and an automated bell do not', async () => {
       gate('true');
       const t0 = mins(new Date(), -300);
       const callRow = (phone, customer, over = {}) => insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer?.id || null,
         status: 'no-answer', twilio_call_sid: sid('CAI'), created_at: t0, ...over });
-      const missed = async (phone, customer, { category = 'missed_call', triggerKey = 'customer_missed_call' } = {}) => {
+      const missed = async (phone, customer, { category = 'voicemail_callback', triggerKey = 'customer_voicemail_callback' } = {}) => {
         const call = await callRow(phone, customer);
         const row = await bell({ category, created_at: mins(t0, 3),
           metadata: { triggerKey, payload: { callLogId: call.id, customerId: customer?.id || null, phone, name: 'Caller' } } });
@@ -437,8 +437,8 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       const missed = async (phone) => {
         const customer = await customerWith(phone);
         const call = await insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer.id, status: 'no-answer', twilio_call_sid: sid('CAI'), created_at: t0 });
-        const row = await bell({ category: 'missed_call', created_at: mins(t0, 3),
-          metadata: { triggerKey: 'customer_missed_call', payload: { callLogId: call.id, customerId: customer.id, phone, name: 'Caller' } } });
+        const row = await bell({ category: 'voicemail_callback', created_at: mins(t0, 3),
+          metadata: { triggerKey: 'customer_voicemail_callback', payload: { callLogId: call.id, customerId: customer.id, phone, name: 'Caller' } } });
         return { customer, phone, row };
       };
       const noEnd = await missed('+15555558061');
@@ -482,6 +482,33 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect(await state(ringing.row.id)).toEqual(['relevance', 'A person called back']);
       expect(await state(mailRow.id)).toEqual(['relevance', 'A person called back']);
       expect(await state(beforeRow.id)).toBeNull();
+    });
+
+    test('a voicemail bell for a call row inserted after the call was over is anchored on the call\'s real start (callStartedAt); a text before the call still does not count; a missed-call bell is not the sweep\'s', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -300);
+      const delayed = async (phone) => {
+        const customer = await customerWith(phone);
+        // The status callback inserted this row 10 minutes after the call began; the call lasted 10 minutes.
+        const call = await insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer.id, status: 'completed',
+          twilio_call_sid: sid('CAI'), created_at: mins(t0, 10), duration_seconds: 600, metadata: JSON.stringify({ source: 'status_callback', inserted_on_status: 'completed' }) });
+        const row = await bell({ category: 'voicemail_callback', created_at: mins(t0, 12),
+          metadata: { triggerKey: 'customer_voicemail_callback', payload: { callLogId: call.id, customerId: customer.id, phone } } });
+        return { customer, phone, row };
+      };
+      const between = await delayed('+15555558071');
+      const early = await delayed('+15555558072');
+      await staffText(between.customer, between.phone, mins(t0, 5));
+      await staffText(early.customer, early.phone, mins(t0, -3));
+      // A missed-call bell with a person's text after it: missed-call-bell.js owns it, the sweep leaves it.
+      const missedCustomer = await customerWith('+15555558073');
+      const missedBell = await bell({ category: 'missed_call', created_at: mins(t0, 3),
+        metadata: { triggerKey: 'customer_missed_call', payload: { customerId: missedCustomer.id, phone: missedCustomer.phone } } });
+      await staffText(missedCustomer, missedCustomer.phone, mins(t0, 20));
+      await sweep();
+      expect(await get(between.row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
+      expect((await get(early.row.id)).done_at).toBeNull();
+      expect((await get(missedBell.id)).done_at).toBeNull();
     });
 
     test('an email from a customer: a person\'s reply in its thread closes it; a forward to someone else, a reply on another thread and an earlier reply do not', async () => {

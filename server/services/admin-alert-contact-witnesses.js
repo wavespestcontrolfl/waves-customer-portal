@@ -32,6 +32,7 @@
  */
 
 const { phoneIdentityKey } = require('../utils/phone');
+const { callStartedAt } = require('../utils/call-timeline');
 const { phoneIdentitySql } = require('./sms-response-policy');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -103,7 +104,9 @@ const SUBJECT_OF = {
   voice: ({ refs }, { calls }) => {
     const call = refs.callLogId ? calls.get(String(refs.callLogId)) : null;
     return {
-      anchor: call ? asDate(call.created_at) : null,
+      // When the customer placed the call (call-timeline.js callStartedAt): a row
+      // inserted after the call was over carries a post-call created_at.
+      anchor: call ? callStartedAt(call) : null,
       customerId: call?.customer_id ? String(call.customer_id) : null,
       phones: [call?.direction === 'inbound' ? call.from_phone : null, refs.phone],
     };
@@ -207,7 +210,7 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
   const byIds = async (table, ids, columns) => new Map((ids.length ? await conn(table).whereIn('id', ids).select(...columns) : []).map((r) => [String(r.id), r]));
   const lookups = {
     texts: await resolveTexts(conn, unique(items.filter((i) => i.kind === 'sms').map((i) => i.refs.sid))),
-    calls: await byIds('call_log', unique(items.filter((i) => i.kind === 'voice').map((i) => i.refs.callLogId)), ['id', 'created_at', 'customer_id', 'from_phone', 'direction']),
+    calls: await byIds('call_log', unique(items.filter((i) => i.kind === 'voice').map((i) => i.refs.callLogId)), ['id', 'created_at', 'customer_id', 'from_phone', 'direction', 'metadata', 'duration_seconds', 'recording_duration_seconds']),
     emails: await byIds('emails', unique(items.filter((i) => i.kind === 'email').map((i) => i.refs.emailId)), ['id', 'gmail_thread_id', 'received_at', 'customer_id']),
   };
   const idents = items.map((item) => identify(item, lookups)).filter(Boolean);

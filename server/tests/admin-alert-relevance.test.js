@@ -1114,16 +1114,17 @@ describe('customer-contact classes', () => {
     expect(alertContactCloseMode()).toBe(mode);
   });
 
-  test('the classes exist only while the gate is shadow or true, and match by the emitter\'s trigger (the promise chaser, repeat caller and other missed-call bells are not theirs)', () => {
-    const rows = { sms: smsThread(), voicemail: voicemail(), missed: missed(), email: email() };
+  test('the classes exist only while the gate is shadow or true, and match by the emitter\'s trigger (a missed-call bell has no class here: missed-call-bell.js owns it; the promise chaser keeps its own)', () => {
+    const rows = { sms: smsThread(), voicemail: voicemail(), email: email() };
     for (const row of Object.values(rows)) expect(classify(row)).toBeNull();
     for (const mode of ['shadow', 'true']) {
       gate(mode);
       expect(Object.fromEntries(Object.entries(rows).map(([k, row]) => [k, classify(row)?.key])))
-        .toEqual({ sms: 'inbound_sms', voicemail: 'voicemail_callback', missed: 'missed_call', email: 'inbound_email' });
+        .toEqual({ sms: 'inbound_sms', voicemail: 'voicemail_callback', email: 'inbound_email' });
     }
     gate('true');
     for (const other of [
+      missed(),
       note({ category: 'missed_call', metadata: { triggerKey: 'repeat_caller', payload: { callLogId: CALL } } }),
       note({ category: 'missed_call', metadata: { triggerKey: 'relay_unbooked_call', payload: { callLogId: CALL } } }),
       note({ category: 'inbound_sms', metadata: { payload: { twilioSid: SID } } }),
@@ -1160,7 +1161,7 @@ describe('customer-contact classes', () => {
     ]);
     // A bad id parses to null, never throws.
     mockLoadContactBundles.mockClear();
-    await loadSubjects([note({ category: 'missed_call', metadata: { triggerKey: 'customer_missed_call', payload: { callLogId: 'nope', customerId: 'nope' } } })]);
+    await loadSubjects([note({ category: 'voicemail_callback', metadata: { triggerKey: 'customer_voicemail_callback', payload: { callLogId: 'nope', customerId: 'nope' } } })]);
     expect(mockLoadContactBundles.mock.calls[0][0][0].refs).toMatchObject({ callLogId: null, customerId: null });
   });
 
@@ -1183,7 +1184,7 @@ describe('customer-contact classes', () => {
       expect((await verdictFor(smsUnknown(), { pending: true })).reason).toBeNull();
     });
 
-    test.each([['voicemail', voicemail], ['missed call', missed]])('a %s: a person\'s call back, a call in a person answered, a person\'s text, a booked visit or a quote after the call closes it; nothing, or only earlier contact, keeps it', async (_name, make) => {
+    test.each([['voicemail', voicemail]])('a %s: a person\'s call back, a call in a person answered, a person\'s text, a booked visit or a quote after the call closes it; nothing, or only earlier contact, keeps it', async (_name, make) => {
       expect((await verdictFor(make(), {})).reason).toBeNull();
       expect((await verdictFor(make())).reason).toBeNull();
       expect((await verdictFor(make(), { backAt: at(20) })).reason).toBe('A person called back');
@@ -1249,7 +1250,7 @@ describe('customer-contact classes', () => {
       gate('shadow');
       const open = smsThread();
       const mail = email();
-      const waiting = missed();
+      const waiting = voicemail();
       const personDone = { ...voicemail(), done_at: new Date('2026-09-27T14:00:00Z'), done_by: '7', read_at: new Date('2026-09-27T14:00:00Z') };
       mockTables.notifications = [open, mail, waiting, personDone];
       answered(open);
@@ -1378,7 +1379,7 @@ describe('customer-contact classes', () => {
 
     test('a call bell whose visit was cancelled again is put back; a failed witness load leaves every closed row as it is', async () => {
       gate('true');
-      const row = closed(missed(), 'A visit was booked');
+      const row = closed(voicemail(), 'A visit was booked');
       mockTables.notifications = [row];
       mockBundles = new Map([[String(row.id), bundle({ visitAt: at(20) })]]);
       expect((await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).rearmed).toBe(0);
