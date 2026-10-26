@@ -13,6 +13,9 @@
  *     (staff-contact.js), minus a proactive draft (call-commitments.js
  *     withoutProactiveDraft), the call-contact check's own text witness;
  *   - a call a person placed and spoke on: personCallBackSql (staff-contact.js);
+ *     every call is judged by when it ENDED (callEndedAtSql, the Messages
+ *     reader's definition): a row inserted after the call was over and carrying
+ *     no end stamp from Twilio has no trustworthy end and counts for nothing;
  *     an inbound call a human answered: answered_by = 'human', as the Messages
  *     reader reads it. Never a bare call_log row, bridged_at or a duration;
  *   - a quote that reached the customer: handedOffWithin +
@@ -35,6 +38,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
 
+const DAY_MS = 24 * 60 * 60 * 1000;
 const asDate = (v) => {
   const d = v ? new Date(v) : null;
   return d && !Number.isNaN(d.getTime()) ? d : null;
@@ -132,13 +136,22 @@ async function personWitnesses(conn, { customerIds, peers, since }) {
       .modify(withoutProactiveDraft).where('os.created_at', '>', since),
     'os.customer_id', textPeer, customerIds, peers,
   ).select('os.customer_id', conn.raw(`${textPeer} as peer`)).max('os.created_at as at').groupByRaw('1, 2');
+  // A call is judged by when it ENDED (the Messages reader's definition,
+  // callEndedAtSql): a row inserted after the call was over (recovered or
+  // status-callback rows) says nothing about when it happened, so without
+  // Twilio's own end stamp it has no end and counts for nothing. The created_at
+  // bound is only a prefilter for the index (no call runs a day).
+  const { callEndedAtSql } = require('./sms-pending-conversations');
+  const endedAt = callEndedAtSql('cl');
   const callQuery = (direction, peerColumn) => {
     const peerSql = phoneIdentitySql(peerColumn);
     return whereIdentity(
       conn('call_log as cl').where('cl.direction', direction).where('cl.status', 'completed')
-        .modify((q) => whereNotSandboxCall(q, 'cl.source')).where('cl.created_at', '>', since),
+        .modify((q) => whereNotSandboxCall(q, 'cl.source'))
+        .where('cl.created_at', '>', new Date(since.getTime() - DAY_MS))
+        .whereRaw(`${endedAt} > ?`, [since]),
       'cl.customer_id', peerSql, customerIds, peers,
-    ).select('cl.customer_id', conn.raw(`${peerSql} as peer`)).max('cl.created_at as at').groupByRaw('1, 2');
+    ).select('cl.customer_id', conn.raw(`${peerSql} as peer`), conn.raw(`MAX(${endedAt}) as at`)).groupByRaw('1, 2');
   };
   const backRows = await callQuery('outbound', 'cl.to_phone').whereRaw(personCallBackSql('cl'));
   const inRows = await callQuery('inbound', 'cl.from_phone').where('cl.answered_by', 'human');

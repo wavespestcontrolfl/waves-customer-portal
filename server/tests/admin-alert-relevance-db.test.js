@@ -430,6 +430,60 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect((await get(chaser.id)).done_at).toBeNull();
     });
 
+    test('a call witness counts by when the call ENDED: a delayed insert of an earlier call, or a post-call row with no end stamp, never closes; a call that began before the event and ended after it does', async () => {
+      gate('true');
+      const t0 = mins(new Date(), -300);
+      const stamp = (extra) => JSON.stringify(extra);
+      const missed = async (phone) => {
+        const customer = await customerWith(phone);
+        const call = await insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer.id, status: 'no-answer', twilio_call_sid: sid('CAI'), created_at: t0 });
+        const row = await bell({ category: 'missed_call', created_at: mins(t0, 3),
+          metadata: { triggerKey: 'customer_missed_call', payload: { callLogId: call.id, customerId: customer.id, phone, name: 'Caller' } } });
+        return { customer, phone, row };
+      };
+      const noEnd = await missed('+15555558061');
+      const endedEarlier = await missed('+15555558062');
+      const endedLater = await missed('+15555558063');
+      const ringing = await missed('+15555558064');
+      const inboundDelayed = await missed('+15555558065');
+      // Inserted by the status callback AFTER the call was over (created_at is a post-call time), no end stamp: no trustworthy end.
+      await staffCall(noEnd.customer, noEnd.phone, mins(t0, 30), { metadata: stamp({ source: 'status_callback', inserted_on_status: 'completed' }) });
+      // The same delayed insert of a call that really ended BEFORE the event.
+      await staffCall(endedEarlier.customer, endedEarlier.phone, mins(t0, 30), { metadata: stamp({ source: 'status_callback', ended_at: mins(t0, -10).toISOString() }) });
+      // A delayed insert whose own end stamp (Twilio's event time) is after the event: it counts.
+      await staffCall(endedLater.customer, endedLater.phone, mins(t0, 30), { metadata: stamp({ source: 'status_callback', ended_at: mins(t0, 12).toISOString() }) });
+      // A status-callback row inserted on a non-terminal status was created near the call's start: insert time plus duration.
+      await staffCall(ringing.customer, ringing.phone, mins(t0, 20), { metadata: stamp({ source: 'status_callback', inserted_on_status: 'ringing' }) });
+      // A recovered row for an inbound call a human answered, no end stamp.
+      await insert('call_log', { direction: 'inbound', from_phone: inboundDelayed.phone, to_phone: BIZ, customer_id: inboundDelayed.customer.id, status: 'completed',
+        answered_by: 'human', twilio_call_sid: sid('CAI'), created_at: mins(t0, 30), duration_seconds: 60, metadata: stamp({ source: 'twilio_recording_status_recovered' }) });
+
+      // An email received at t0 and a staff call that began 5 minutes before it and ended 10 minutes after.
+      const mailer = await customerWith('+15555558066', { email: `overlap-${Date.now()}@example.invalid` });
+      const inbound = await insert('emails', { gmail_id: sid('GM'), gmail_thread_id: sid('TH'), from_address: mailer.email, to_address: 'office@waves.example.invalid',
+        cc_address: '', bcc_address: '', label_ids: JSON.stringify(['INBOX']), received_at: t0, customer_id: mailer.id });
+      const mailRow = await bell({ category: 'inbound_email', created_at: mins(t0, 2), link: `/admin/email?id=${inbound.id}`,
+        metadata: { triggerKey: 'customer_email_received', payload: { emailId: inbound.id, customerId: mailer.id } } });
+      await staffCall(mailer, mailer.phone, mins(t0, -5), { duration_seconds: 900 });
+      // And one that ended just before the email: not after it.
+      const before = await customerWith('+15555558067', { email: `before-${Date.now()}@example.invalid` });
+      const beforeMail = await insert('emails', { gmail_id: sid('GM'), gmail_thread_id: sid('TH'), from_address: before.email, to_address: 'office@waves.example.invalid',
+        cc_address: '', bcc_address: '', label_ids: JSON.stringify(['INBOX']), received_at: t0, customer_id: before.id });
+      const beforeRow = await bell({ category: 'inbound_email', created_at: mins(t0, 2), link: `/admin/email?id=${beforeMail.id}`,
+        metadata: { triggerKey: 'customer_email_received', payload: { emailId: beforeMail.id, customerId: before.id } } });
+      await staffCall(before, before.phone, mins(t0, -30), { duration_seconds: 600 });
+
+      await sweep();
+      const state = async (id) => { const r = await get(id); return r.done_at ? [r.done_by, r.resolution] : null; };
+      expect(await state(noEnd.row.id)).toBeNull();
+      expect(await state(endedEarlier.row.id)).toBeNull();
+      expect(await state(inboundDelayed.row.id)).toBeNull();
+      expect(await state(endedLater.row.id)).toEqual(['relevance', 'A person called back']);
+      expect(await state(ringing.row.id)).toEqual(['relevance', 'A person called back']);
+      expect(await state(mailRow.id)).toEqual(['relevance', 'A person called back']);
+      expect(await state(beforeRow.id)).toBeNull();
+    });
+
     test('an email from a customer: a person\'s reply in its thread closes it; a forward to someone else, a reply on another thread and an earlier reply do not', async () => {
       gate('true');
       const t0 = mins(new Date(), -300);
