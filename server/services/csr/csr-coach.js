@@ -90,15 +90,16 @@ function callbackNumberCoachingNote(v2Extraction, contactPhone) {
   return CALLBACK_NUMBER_COACHING_NOTE;
 }
 
-// Callback-number guard (live miss, 2026-10-26: 81 tasks since April told staff
-// to "Call <name> at 941-318-7612", which is OUR Bradenton office line — the
-// number the caller dialed, not the number to call back). The scoring prompt
-// never carried the caller's number, so the model copied the only number in
-// reach. Two layers: scoreCall's prompt now states the caller's number, and
-// this deterministic guard rewrites any Waves-owned number left in the task
-// text. Ownership comes from config/twilio-numbers.js isOwnedNumber (location,
-// tracking, GBP, paid, van, toll-free, main and alert lines) — no second list.
-const CALLER_NUMBER_FALLBACK_WORDS = "the caller's number";
+// Callback number in the scoring prompt (live miss, 2026-10-26: 81 tasks since
+// April told staff to "Call <name> at 941-318-7612", which is OUR Bradenton
+// office line: the number the caller dialed, not the number to call back). The
+// prompt never carried the caller's number, so the model copied the only number
+// in reach. The prompt now states it (see buildCsrScoringText). The task text is
+// stored exactly as the model wrote it: a rewrite cannot tell "call 941-318-7612"
+// from "do not call 941-318-7612" or a voicemail script, so scoreCall only
+// WARNS (warnIfCallbackNamesOwnedNumber) when a call_back task still names one
+// of our lines. Ownership comes from config/twilio-numbers.js isOwnedNumber
+// (location, tracking, GBP, paid, van, toll-free, main and alert lines).
 // 10 digits with optional +1 / 1 prefix, optional parens, and space, dot or
 // dash separators: 941-318-7612, (941) 318-7612, 941.318.7612, 9413187612,
 // +1 941 318 7612. The digit lookarounds keep it off longer digit runs.
@@ -152,49 +153,22 @@ function resolveCallbackNumbers(v2Extraction, contactPhone) {
   return { callerId: disclaimed ? null : formatTaskNumber(contactPhone), confirmed };
 }
 
-// The number an owned line in task text is rewritten to: the confirmed
-// callback, else the undisclaimed caller ID, else words.
-function callbackReplacement(v2Extraction, contactPhone) {
-  const { callerId, confirmed } = resolveCallbackNumbers(v2Extraction, contactPhone);
-  return confirmed || callerId || CALLER_NUMBER_FALLBACK_WORDS;
-}
-
-// Text a writer set off in quotes: "...", curly double quotes, '...' and curly
-// single quotes. A single quote only opens after a non-word character and only
-// closes before one, so apostrophes (Shyla's, don't) do not start a quote.
-const QUOTED_TEXT_RE = new RegExp([
-  '"[^"]*"',
-  '\u201C[^\u201D]*\u201D',
-  "(?<![A-Za-z0-9])'(?:[^']|'(?=[A-Za-z]))*'(?![A-Za-z0-9])",
-  '(?<![A-Za-z0-9])\u2018(?:[^\u2018\u2019]|\u2019(?=[A-Za-z]))*\u2019(?![A-Za-z0-9])',
-].join('|'), 'g');
-
-// Rewrites an owned number that a call_back task names as the number to call.
-// Only that: a send_sms / send_estimate script, and any quoted line inside a
-// call_back task, is customer-facing text ("Please call us at 941-318-7612")
-// where our number is correct and stays.
-function replaceOwnedNumbers(text, contactPhone, v2Extraction = null, taskType = 'call_back') {
-  if (typeof text !== 'string' || !text) return text;
-  if (taskType !== 'call_back') return text;
-  const replacement = callbackReplacement(v2Extraction, contactPhone);
-  const rewrite = (part) => part.replace(PHONE_IN_TEXT_RE, (match, paren, bare, b, c) => (
-    TWILIO_NUMBERS.isOwnedNumber(`${paren || bare}${b}${c}`) ? replacement : match
-  ));
-  let out = '';
-  let last = 0;
-  QUOTED_TEXT_RE.lastIndex = 0;
-  for (let m = QUOTED_TEXT_RE.exec(text); m; m = QUOTED_TEXT_RE.exec(text)) {
-    out += rewrite(text.slice(last, m.index)) + m[0];
-    last = m.index + m[0].length;
+// True when a call_back task's text still contains one of our own numbers.
+// Observability only: the text is never changed and nothing throws. The log line
+// carries the task id and no digits (no PII).
+function callbackNamesOwnedNumber(taskType, text) {
+  if (taskType !== 'call_back' || typeof text !== 'string' || !text) return false;
+  for (const m of text.matchAll(PHONE_IN_TEXT_RE)) {
+    if (TWILIO_NUMBERS.isOwnedNumber(`${m[1] || m[2]}${m[3]}${m[4]}`)) return true;
   }
-  return out + rewrite(text.slice(last));
+  return false;
 }
 
 // The scoring request's user text. The ANI is presented as caller ID, not as
 // the callback number: the model is told to prefer a different number the
 // caller gave, and when the caller disclaimed the ANI the line is left out.
 // Without any of this the model picks up the Waves line the caller dialed
-// (see the guard above). Pure/testable.
+// (see the header comment above). Pure/testable.
 function buildCsrScoringText({ callDirection, csrName, callSource, metadata, transcript, contactPhone, v2Extraction = null } = {}) {
   const { callerId, confirmed } = resolveCallbackNumbers(v2Extraction, contactPhone);
   const disclaimed = v2Extraction?.caller?.caller_id_disclaimed === true;
@@ -662,8 +636,7 @@ Return JSON:
         customer_id: customerId || null,
         assigned_to: csrName || 'Adam',
         task_type: score.follow_up_task.type,
-        // Never leave one of our own lines as the callback number.
-        recommended_action: replaceOwnedNumbers(score.follow_up_task.recommended_action, contactPhone, v2Extraction, score.follow_up_task.type),
+        recommended_action: score.follow_up_task.recommended_action,
         context_summary: score.call_summary,
         deadline: new Date(Date.now() + score.follow_up_task.deadline_hours * 3600000),
         status: 'pending',
@@ -672,6 +645,12 @@ Return JSON:
       await db('csr_call_scores').where('id', callScore.id).update({
         follow_up_task_created: true,
       });
+
+      if (callbackNamesOwnedNumber(task.task_type || score.follow_up_task.type, score.follow_up_task.recommended_action)) {
+        try {
+          logger.warn(`[csr-coach] call_back task ${task.id} still names a Waves-owned number as written by the model (text left unchanged)`);
+        } catch { /* observability only */ }
+      }
 
       score._followUpTaskId = task.id;
     }
@@ -931,7 +910,7 @@ module.exports.csrScoringApplies = csrScoringApplies;
 module.exports.SALES_RUBRIC_CALL_NATURE = SALES_RUBRIC_CALL_NATURE;
 module.exports.callbackNumberCoachingNote = callbackNumberCoachingNote;
 module.exports.resolveCallbackNumbers = resolveCallbackNumbers;
-module.exports.replaceOwnedNumbers = replaceOwnedNumbers;
+module.exports.callbackNamesOwnedNumber = callbackNamesOwnedNumber;
 module.exports.buildCsrScoringText = buildCsrScoringText;
 module.exports.CALLBACK_NUMBER_COACHING_NOTE = CALLBACK_NUMBER_COACHING_NOTE;
 module.exports.isUsableCsrScore = isUsableCsrScore;
