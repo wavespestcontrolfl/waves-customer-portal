@@ -21,7 +21,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
 const notifications = require('../services/notification-service');
-const { alertUndeliveredShipments } = require('../services/purchase-receipts/undelivered-shipments');
+const { alertUndeliveredShipments, closeDeliveredUndeliveredBells } = require('../services/purchase-receipts/undelivered-shipments');
 const { runPurchaseReceiptRestockSweep, processReceiptEmail } = require('../services/purchase-receipts/sweep');
 
 const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments'];
@@ -269,6 +269,77 @@ jest.setTimeout(30000);
       await shipped('ship-1');
       expect((await run()).undelivered).toEqual([]);
       expect(await alertBells('ship-1')).toHaveLength(0);
+    });
+
+    // Amazon's Shipped and Delivered emails for one package can carry
+    // different shipment ids (Gentrol, October 2026): the Delivered email's
+    // lines settle the shipped items by order number and item.
+    describe('a Delivered email under another shipment id', () => {
+      const ORDER = '900-1000001-1000001';
+      const delivered = (quantity, overrides = {}) => processReceiptLine(line({
+        orderNumber: ORDER, shipmentKey: 'delivered-key', item: { title: TITLE, quantity }, ...overrides,
+      }));
+      const shippedItems = (shipmentId, quantity, overrides = {}) => shipped(shipmentId, {
+        body_text: `Order #\n${ORDER}\nTrack package: https://www.amazon.com/x?shipmentId=${shipmentId}\n\n* ${TITLE}\n  Quantity: ${quantity}\n\n* Lenovo Chromebook\n  Quantity: 1\n`,
+        ...overrides,
+      });
+
+      test('the same order and item, delivered and logged: no bell and no held line', async () => {
+        await delivered(2);
+        await shippedItems('shipped-key', 2);
+        expect((await run()).undelivered).toEqual([]);
+        expect(await alertBells('shipped-key')).toHaveLength(0);
+        expect(await mockConn('purchase_receipt_lines').where({ shipment_key: 'shipped-key' })).toEqual([]);
+      });
+
+      test('an item the Delivered email ruled equipment or held counts as handled', async () => {
+        await delivered(2, { forcedStatus: 'agent_equipment' });
+        await shippedItems('shipped-key', 2);
+        expect((await run()).undelivered).toEqual([]);
+      });
+
+      test('a genuinely undelivered shipment still rings, even with a Delivered line for another order or item', async () => {
+        await delivered(2, { orderNumber: '900-2000002-2000002' });
+        await delivered(1, { lineNo: 2, item: { title: 'Zoecon Gentrol IGR', quantity: 1 } });
+        await shippedItems('shipped-key', 2);
+        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['shipped-key']);
+        expect(await alertBells('shipped-key')).toHaveLength(1);
+      });
+
+      test('a partial delivery (2 shipped, 1 delivered) still rings for the rest', async () => {
+        await delivered(1);
+        await shippedItems('shipped-key', 2);
+        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['shipped-key']);
+        const [bell] = await alertBells('shipped-key');
+        expect(bell.detail || bell.body).toContain('Taurus SC ×1 on');
+      });
+
+      test('a split order: the other package\'s Delivered line is not proof for this one', async () => {
+        await delivered(2); // package A, delivered under delivered-key
+        await shippedItems('shipped-a', 2, { received_at: new Date(NOW - 6 * DAY) }); // its own Shipped email, a different id
+        await shippedItems('delivered-key', 2, { received_at: new Date(NOW - 6 * DAY) });
+        // delivered-key IS a sibling's id, so it cannot cover shipped-a.
+        expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(['shipped-a']);
+      });
+
+      test('a bell already rung closes once the shipment proves delivered, and one with items still missing stays', async () => {
+        await shippedItems('shipped-key', 2);
+        await run();
+        const [bell] = await alertBells('shipped-key');
+        expect(bell.done_at).toBeNull();
+        await closeDeliveredUndeliveredBells();
+        expect((await alertBells('shipped-key'))[0].done_at).toBeNull(); // nothing delivered yet
+
+        await delivered(1);
+        await closeDeliveredUndeliveredBells();
+        expect((await alertBells('shipped-key'))[0].done_at).toBeNull(); // 1 of 2
+
+        await delivered(1, { lineNo: 3 });
+        expect(await closeDeliveredUndeliveredBells()).toBe(1);
+        expect((await alertBells('shipped-key'))[0]).toMatchObject({
+          done_by: 'purchase-receipts', resolution: 'The delivery email arrived under another shipment id; the items are accounted for',
+        });
+      });
     });
 
     test('a promised arrival day is waited out, plus the day after: "Arriving Wednesday" from Sun Sep 13 rings Fri Sep 18', async () => {
