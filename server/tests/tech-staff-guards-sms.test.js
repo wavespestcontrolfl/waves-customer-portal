@@ -1,6 +1,7 @@
 // GATE_TECH_STAFF_GUARDS, M12 (census 2026-10-25): an inbound text from an active technician's own cell
-// to an office line is a staff sender: no inbox thread, no lead intake, no estimator draft, no owner
-// forward, no write. Same harness as twilio-webhook-solicitation.test.js (real webhook, mocked
+// to an office line is a staff sender. The office still sees it (inbox row, legacy log row, activity row,
+// the owner's unknown-sender text forward, unread); only the customer and lead side is skipped (spam
+// screen, estimator draft and agent, AI auto-reply and drafts, new-prospect bells). Same harness as twilio-webhook-solicitation.test.js (real webhook, mocked
 // persistence and providers; nothing is sent). The phone set itself is tested against Postgres in
 // staff-sender-phones-postgres.test.js, so it is stubbed here.
 const mockWrites = [];
@@ -120,6 +121,9 @@ jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: jest
 jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEnabled: () => true, startSmsThreadDraft: jest.fn(async () => ({})) }));
 jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: jest.fn(async () => ({})) }));
 jest.mock('../services/tech-line', () => ({ notifyTechLineText: jest.fn(async () => ({})) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({})), __private: { redactSensitiveText: (t) => t } }));
+jest.mock('../services/ai-assistant/assistant', () => ({ processMessage: jest.fn(async () => ({ reply: 'Hi there', escalated: false, conversationId: 'c1' })) }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/staff-sender-phones', () => ({ isStaffTechSender: jest.fn(async () => false) }));
 
 const { EventEmitter } = require('node:events');
@@ -170,37 +174,102 @@ afterAll(() => {
 });
 
 describe('an inbound text from an active technician\'s phone', () => {
-  test('is a staff sender: acknowledged, and nothing is persisted, drafted, forwarded or sent', async () => {
-    isStaffTechSender.mockImplementation(async (phone) => phone === TECH_CELL);
-    const res = await receive('Running ten minutes late, can the office call the next stop?');
+  const asStaff = () => isStaffTechSender.mockImplementation(async (phone) => phone === TECH_CELL);
+  const writesTo = (table) => mockWrites.filter((w) => w.table === table);
+  const TEXT = 'Gate is locked at the next stop, can the office call the owner?';
+
+  test('stays in the office inbox as an unread unknown-sender thread, exactly as today', async () => {
+    asStaff();
+    const res = await receive(TEXT);
     expect(res.statusCode).toBe(200);
     expect(res.body).toBe('<Response></Response>');
-    expect(recordTouchpoint).not.toHaveBeenCalled();
+    expect(recordTouchpoint).toHaveBeenCalledTimes(1);
+    const touch = recordTouchpoint.mock.calls[0][0];
+    expect(touch).toMatchObject({ channel: 'sms', contactPhone: TECH_CELL, direction: 'inbound', body: TEXT, ourEndpointId: OFFICE_LINE });
+    expect(touch.customerId).toBeUndefined();     // the unknown-sender thread, no customer
+    expect(touch.isRead).toBe(false);             // unread, so the inbox dot and count show it
+    const log = writesTo('sms_log');
+    expect(log).toHaveLength(1);
+    expect(log[0].row).toMatchObject({ customer_id: null, direction: 'inbound', from_phone: TECH_CELL, message_body: TEXT, message_type: 'inbound' });
+    expect(log[0].row.is_read).toBeUndefined();
+    expect(writesTo('activity_log')).toHaveLength(1);
+  });
+
+  test('raises the normal unknown-sender alert: one owner text forward', async () => {
+    asStaff();
+    await receive(TEXT);
+    expect(sendSMS).toHaveBeenCalledTimes(1);
+    expect(sendSMS.mock.calls[0][0]).toBe('+12025550199');
+    expect(sendSMS.mock.calls[0][2]).toEqual({ messageType: 'internal_alert' });
+  });
+
+  test('skips the customer and lead side: no screen, estimator draft, agent, auto-reply or new-prospect bell', async () => {
+    asStaff();
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    const res = await receive('We have exclusive pest leads for you.');
+    expect(res.statusCode).toBe(200);
+    delete process.env.GATE_SMS_SPAM_CLASSIFIER;
+    // Not screened as a solicitation: no verdict stored, never silenced.
+    expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
+    expect(JSON.parse(writesTo('sms_log')[0].row.metadata).spam_verdict).toBeUndefined();
     expect(updateByTwilioSid).not.toHaveBeenCalled();
-    expect(mockWrites).toEqual([]);
     expect(handleClarifyReply).not.toHaveBeenCalled();
     expect(startSmsThreadDraft).not.toHaveBeenCalled();
     expect(processInboundSms).not.toHaveBeenCalled();
-    expect(sendSMS).not.toHaveBeenCalled();
-    expect(uploadTwilioMedia).not.toHaveBeenCalled();
+    expect(writesTo('customers')).toEqual([]);
+    expect(writesTo('leads')).toEqual([]);
+    expect(writesTo('message_drafts')).toEqual([]);
+    expect(require('../services/notification-triggers').triggerNotification).not.toHaveBeenCalled();
+    expect(require('../services/ai-assistant/assistant').processMessage).not.toHaveBeenCalled();
+    expect(require('../services/messaging/send-customer-message').sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('any other sender (or the gate off) keeps today\'s path: an inbox thread, the owner forward', async () => {
-    const res = await receive('Running ten minutes late, can the office call the next stop?');
+  test('control: the same pitch from a stranger IS screened, so the staff skip above is real', async () => {
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    await receive('We have exclusive pest leads for you.');
+    delete process.env.GATE_SMS_SPAM_CLASSIFIER;
+    expect(JSON.parse(writesTo('sms_log')[0].row.metadata).spam_verdict).toBeDefined();
+  });
+
+  test('on the AI line it is not auto-replied to (a customer there is)', async () => {
+    const gates = require('../config/feature-gates');
+    gates.isEnabled.mockImplementation((gate) => gate === 'webhooks' || gate === 'aiAssistantAutoReply');
+    const { processMessage } = require('../services/ai-assistant/assistant');
+    try {
+      await receive(TEXT, { to: numbers.tollFree.number });
+      expect(processMessage).toHaveBeenCalledTimes(1);   // control: an ordinary sender is answered
+      processMessage.mockClear();
+      asStaff();
+      await receive(TEXT, { to: numbers.tollFree.number, sid: 'SM-synthetic-staff-guard-2' });
+      expect(processMessage).not.toHaveBeenCalled();
+      expect(require('../services/messaging/send-customer-message').sendCustomerMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      gates.isEnabled.mockImplementation((gate) => gate === 'webhooks');
+    }
+  });
+
+  test('any other sender (or the gate off) is handled as today: the same inbox row, plus the estimator draft', async () => {
+    const res = await receive(TEXT);
     expect(res.statusCode).toBe(200);
     expect(recordTouchpoint).toHaveBeenCalledTimes(1);
+    expect(handleClarifyReply).toHaveBeenCalledTimes(1);
+    expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+    expect(processInboundSms).toHaveBeenCalledTimes(1);
     expect(sendSMS).toHaveBeenCalledTimes(1);
   });
 
   test('a STOP keyword keeps its normal consent handling', async () => {
-    isStaffTechSender.mockImplementation(async (phone) => phone === TECH_CELL);
+    asStaff();
     await receive('STOP');
     expect(recordTouchpoint).toHaveBeenCalledTimes(1);
+    // Not treated as staff: the ordinary customer/lead side still sees it, as today.
+    expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
   });
 
   (TECH_LINE ? test : test.skip)('a text to a technician line keeps its own conversation', async () => {
-    isStaffTechSender.mockImplementation(async (phone) => phone === TECH_CELL);
+    asStaff();
     await receive('On my way', { to: TECH_LINE });
     expect(recordTouchpoint).toHaveBeenCalledTimes(1);
+    expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
   });
 });

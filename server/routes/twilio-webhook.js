@@ -313,15 +313,15 @@ router.post('/sms', async (req, res) => {
     }
 
     // GATE_TECH_STAFF_GUARDS (census M12): a text from an ACTIVE technician's own cell to an office
-    // line is staff, not an "Unknown" customer thread: no inbox thread, no lead intake, no AI reply,
-    // no new-prospect bell. A number that is also on a customer record never gets here (the set
-    // leaves it out), a compliance keyword (STOP/START/HELP) keeps its normal handling, and a
-    // technician line keeps its own conversation. The SID claim above already dedupes redelivery.
-    if (await require('../services/staff-sender-phones').isStaffTechSender(From)
-      && !TWILIO_NUMBERS.isTechLine(To) && !detectSmsOptCommand(Body || '').action) {
-      logger.info(`[sms] inbound from an active technician's phone ${maskPhone(From)} — staff sender, no customer thread`);
-      return res.type('text/xml').send('<Response></Response>');
-    }
+    // line is a STAFF SENDER. The office still sees it: the inbox row, the legacy log row, the activity
+    // row and the owner's unknown-sender text forward all run as today. Only the customer and lead side
+    // is skipped (`staffSender` below): the spam screen, the estimator draft and shadow agent, the AI
+    // auto-reply and drafts, the tracking-line new-lead bell. A number that is also on a customer record
+    // is not in the set, a compliance keyword (STOP/START/HELP) keeps its normal handling, and a
+    // technician line keeps its own conversation.
+    const staffSender = await require('../services/staff-sender-phones').isStaffTechSender(From)
+      && !TWILIO_NUMBERS.isTechLine(To) && !detectSmsOptCommand(Body || '').action;
+    if (staffSender) logger.info(`[sms] inbound from an active technician's phone ${maskPhone(From)} — staff sender, kept in the inbox, no customer or lead handling`);
 
     // Eligibility gates passed — attach the body to the entry reservation
     // (codex #3413 r27/r29). A DURABLE row (round-17): a crash from here
@@ -546,7 +546,7 @@ router.post('/sms', async (req, res) => {
     // default.
     let outboundHistoryMatch = false;
     let outboundHistoryLookupFailed = false;
-    if (!isAiNumber && !knownCallerLookupFailed && !knownCallerRecord) {
+    if (!isAiNumber && !staffSender && !knownCallerLookupFailed && !knownCallerRecord) {
       try {
         outboundHistoryMatch = await queryOutboundHistory(From);
       } catch (err) {
@@ -571,6 +571,7 @@ router.post('/sms', async (req, res) => {
       recruitingLedgerLookupFailed = true;
     }
     const complianceEligible = isAiNumber
+      || staffSender
       || Boolean(knownCallerLookupFailed || knownCallerRecord)
       || outboundHistoryMatch
       || outboundHistoryLookupFailed
@@ -1234,7 +1235,7 @@ router.post('/sms', async (req, res) => {
     // admin bell still fires — it replaces the owner SMS forward for
     // tracking lines (isTrackingLeadInbound below) — and links to the inbox
     // instead of a lead record.
-    if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer && !smsReaction && !courtesyOnly && (Body || inboundMedia.length)) {
+    if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer && !staffSender && !smsReaction && !courtesyOnly && (Body || inboundMedia.length)) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         const source = numberConfig.domain || 'van wrap';
@@ -1277,11 +1278,11 @@ router.post('/sms', async (req, res) => {
       // message continues into normal inbox handling either way.
       const { handleClarifyReply } = require('../services/estimate-clarify-asks');
       // A callback-time answer ("2" = 2 PM) is never quote data: no clarify, no draft.
-      const clarifyReply = (!intakeScopeVetoed && !pendingTimeAnswer && Body && String(Body).trim())
+      const clarifyReply = (!staffSender && !intakeScopeVetoed && !pendingTimeAnswer && Body && String(Body).trim())
         ? await handleClarifyReply({ phone: From, body: Body, triggerSmsLogId: smsLogEntry.id })
         : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
-      if (!intakeScopeVetoed && !pendingTimeAnswer && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
+      if (!staffSender && !intakeScopeVetoed && !pendingTimeAnswer && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
         await startSmsThreadDraft({ phone: From, triggerBody: Body, triggerSmsLogId: smsLogEntry.id });
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
@@ -1368,7 +1369,7 @@ router.post('/sms', async (req, res) => {
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
-    if (Body && !smsReaction) {
+    if (Body && !smsReaction && !staffSender) {
       void require('../services/estimate-conversion-agent').processInboundSms({
         customer,
         from: From,
@@ -1494,7 +1495,7 @@ router.post('/sms', async (req, res) => {
     }
 
     // Van wrap tracking — new lead flow
-    if (numberConfig.type === 'tracking') {
+    if (numberConfig.type === 'tracking' && !staffSender) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         await triggerNotification('new_lead', {
@@ -1542,7 +1543,7 @@ router.post('/sms', async (req, res) => {
     });
     const legacyAiDraftsEnabled = require('../services/photo-text-triage').legacyAiDraftsAllowed(photoTriage);
 
-    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
+    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !staffSender && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
       try {
         const WavesAssistant = require('../services/ai-assistant/assistant');
         const aiResult = await WavesAssistant.processMessage({
@@ -1646,7 +1647,7 @@ router.post('/sms', async (req, res) => {
     const legacyDraftContext = {
       customer, numberConfig, Body, From, smsLogEntry, schedulingIntent, rescheduleAsk, smsReaction, courtesyOnly,
     };
-    await runLegacyAiDraft({ ...legacyDraftContext, enabled: legacyAiDraftsEnabled });
+    await runLegacyAiDraft({ ...legacyDraftContext, enabled: legacyAiDraftsEnabled && !staffSender });
 
     // PHOTO-TEXT AUTO-TRIAGE, step 2: a candidate (step 1 above) runs the
     // admin photo assessment and parks ONE pending draft reply for owner
@@ -1654,7 +1655,7 @@ router.post('/sms', async (req, res) => {
     // vision call never holds this block.
     // A triage that fails terminally parks the legacy draft it displaced.
     void require('../services/photo-text-triage').runPhotoTriage(photoTriage, {
-      legacyFallback: ({ park }) => runLegacyAiDraft({ ...legacyDraftContext, enabled: isEnabled('legacyAiDrafts'), park }),
+      legacyFallback: ({ park }) => runLegacyAiDraft({ ...legacyDraftContext, enabled: isEnabled('legacyAiDrafts') && !staffSender, park }),
     }).catch((err) => logger.error(`[photo-triage] inbound triage failed: ${err.message}`));
 
     // SMS SHADOW DRAFTER (brand-voice loop, Phase B) — silently record what
@@ -1699,7 +1700,7 @@ router.post('/sms', async (req, res) => {
     // file resolves through the offer's own customer, then the on-file check.
     // Any customer-facing Waves line (an offer can go out from the main line
     // or a tracking line too; a text with no open offer on its line is a no-op).
-    if (Body && !smsReaction && !isAiNumber
+    if (Body && !smsReaction && !isAiNumber && !staffSender
       && require('../config/feature-gates').gateEnvValue('GATE_SMS_SCHEDULING_DECIDE')) {
       void require('../services/sms-scheduling-decide').runShadowDecision({
         customer: customer || null,
