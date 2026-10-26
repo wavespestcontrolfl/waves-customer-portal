@@ -428,6 +428,38 @@ describe("useAdminTableViews", () => {
     expect(view.result.current.views.map(({ name }) => name)).toEqual(["Primary", "Newer peer view"]);
   });
 
+  it("makes pending apply and mutation work inert after unmount", async () => {
+    const applying = mountHook();
+    expect(await mutate(() => applying.result.current.saveView("Apply before leaving"))).toBe(true);
+    const id = applying.result.current.views[0].id;
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    setItem.mockClear();
+    catalogReads.hold = true;
+    let applyPromise;
+    act(() => { applyPromise = applying.result.current.applyView(id); });
+    await waitFor(() => expect(catalogReads.pending).toHaveLength(1));
+
+    applying.unmount();
+    let applied;
+    catalogReads.hold = false;
+    await act(async () => {
+      catalogReads.pending.shift()();
+      applied = await applyPromise;
+    });
+    expect(applied).toBeNull();
+    expect(setItem).not.toHaveBeenCalled();
+
+    const mutating = mountHook(hookOptions({ tableId: "unmounted-mutation" }));
+    await hydrate(mutating);
+    const storageKey = mutating.result.current.storageKey;
+    let savePromise;
+    act(() => { savePromise = mutating.result.current.saveView("Do not commit"); });
+    mutating.unmount();
+    expect(await mutate(() => savePromise)).toBe(false);
+    expect((await readSavedViewCatalog({ storageKey, storage: localStorage, defaults: DEFAULTS, normalize })).views)
+      .toEqual([]);
+  });
+
   it("serializes overlapping stale saves and preserves each queued snapshot", async () => {
     const first = mountHook();
     const second = mountHook();
