@@ -6523,6 +6523,9 @@ router.get('/', async (req, res, next) => {
     // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
     let gateActionVisits = new Set();
     const neighborhoodTechActions = require('../config/feature-gates').neighborhoodTechActionsLive();
+    // GATE_SCHEDULE_ACCESS_CODES: the office schedule draws each row's gate
+    // lines (propertyAlerts) only while this is on; read once per request.
+    const scheduleAccessCodes = require('../config/feature-gates').scheduleAccessCodesLive();
     try {
       if (require('../config/feature-gates').neighborhoodAccessLive()) {
         const neighborhoodAccess = require('../services/neighborhood-access');
@@ -7003,6 +7006,7 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        ...(scheduleAccessCodes ? { scheduleAccessEnabled: true } : {}),
         ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date

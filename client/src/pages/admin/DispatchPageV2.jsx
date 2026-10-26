@@ -2627,6 +2627,15 @@ export default function DispatchPageV2({
           }}
           // GATE_NEW_CALLER_BOOKING: Link customer on a visit booked by address.
           newCallerBooking={safeData.newCallerBooking === true}
+          // GATE_SCHEDULE_ACCESS_CODES: a gate code was reported or added from
+          // Details. Refetch the day (the list row shows it too) and hand the
+          // sheet's Access section this visit's fresh row; the sheet keeps its
+          // own snapshot. A visit the refetch misses (moved, week row) = null.
+          onAccessChanged={async () => {
+            const visitId = detailService?.id;
+            const fresh = await fetchSchedule(date, { silent: true });
+            return (fresh?.services || []).find((r) => String(r.id) === String(visitId)) || null;
+          }}
           onCustomerLinked={() => {
             closeFastSheetsBehindDetails();
             // The visit now has a customer, a property and armed reminders:
