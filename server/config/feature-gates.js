@@ -3926,6 +3926,20 @@ const gates = {
   // time. Kill switch: unset — chips show the model's numbers.
   bestTimesRoadTimes: gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES'),
 
+  // Open-times box (owner 2026-10-25, layout A, "all staff" + "start"): the
+  // staff time picker on New Appointment, Edit appointment, Reschedule, the
+  // drag-and-drop confirm and Quick Move lists only open times: 15 dates of
+  // the next four weeks with "adds N min" and the technician, Best / Soonest,
+  // Morning / Afternoon / Evening, a date's own open times when the Date field
+  // changes, and a technician filter where the screen can change the
+  // technician. No "doesn't fit" verdict, and Save never says "anyway". The
+  // find-time route reads it through gateEnvValue() at call time (GET
+  // /find-time/ui tells the pickers; a summary search with openTimes answers
+  // summary.open_times). Needs GATE_BEST_TIME_HINTS. Dark in every
+  // environment. Kill switch: unset, and the pickers show the availability
+  // strip as before. This entry is for logGateStatus only.
+  openTimesBox: gateEnvValue('GATE_OPEN_TIMES_BOX'),
+
   // New Appointment address-first best times (owner 2026-10-24, replacing the
   // 2026-10-21 Dispatch "Find a time" drawer): office staff on a call with a
   // NEW caller open New Appointment, pick the address in its New customer

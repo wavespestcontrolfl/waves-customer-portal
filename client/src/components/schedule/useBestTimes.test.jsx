@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
-import { useBestTimes, resetHintsGated } from './useBestTimes';
+import { useBestTimes, resetHintsGated, resetOpenTimesUi } from './useBestTimes';
+import { etDateString } from '../../lib/timezone';
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -316,4 +317,98 @@ it('never compares routes once one technician is chosen', async () => {
   const body = JSON.parse(fetch.mock.calls[0][1].body);
   expect(body.compareTechs).toBeUndefined();
   expect(body.pickedStart).toBeUndefined();
+});
+
+// ---- the open-times box's list (GATE_OPEN_TIMES_BOX, owner 2026-10-25) ----
+
+const addDays = (ymd, n) => { const d = new Date(`${ymd}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const listHour = { start_time: '10:00', end_time: '11:00', detour_minutes: 6, technician: { id: 'tech', name: 'Fixture Tech' }, rain_tier: 2 };
+// Routes the box question (GET /find-time/ui) and the searches.
+function routedFetch({ ui, answer }) {
+  return vi.fn(async (url, init) => {
+    if (String(url).endsWith('/find-time/ui')) return { ok: true, json: async () => ({ ok: true, openTimes: ui }) };
+    const body = JSON.parse(init.body);
+    return { ok: true, json: async () => answer(body) };
+  });
+}
+const listOf = (body) => ({
+  slots: [],
+  summary: {
+    days: [{ date: body.dateFrom, status: 'open', hours: [listHour] }],
+    open_times: { from: body.dateFrom, to: body.dateTo },
+  },
+});
+const searches = (fetch) => fetch.mock.calls.filter(([url]) => !String(url).endsWith('/ui')).map(([, init]) => JSON.parse(init.body));
+
+beforeEach(() => { resetOpenTimesUi(); });
+
+it('open times: one search from today for four weeks on every route; a new hour or date inside them searches nothing', async () => {
+  const today = etDateString();
+  const fetch = routedFetch({ ui: true, answer: listOf });
+  vi.stubGlobal('fetch', fetch);
+  const { result, rerender } = renderHook((props) => useBestTimes({
+    serviceId: 'fixture', technicianId: 'tech', arrivalWindows: true, bestRows: true, openTimes: true, techPick: true, ...props,
+  }), { initialProps: { date: addDays(today, 3), pickedStart: '09:00' } });
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBe(today));
+  const [body] = searches(fetch);
+  expect(body).toMatchObject({ summary: true, openTimes: true, dateFrom: today, dateTo: addDays(today, 27), serviceId: 'fixture', hint: true });
+  expect(body).not.toHaveProperty('pickedStart');
+  expect(body).not.toHaveProperty('bestRows');
+  // Tech pick: the list covers every technician's route.
+  expect(body).not.toHaveProperty('technicianId');
+  expect(result.current.availability.days[0].hours[0]).toMatchObject({ start: '10:00', technicianName: 'Fixture Tech', rainTier: 2, detourMinutes: 6 });
+  rerender({ date: addDays(today, 9), pickedStart: '13:00' });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(searches(fetch)).toHaveLength(1);
+  expect(result.current.availability.stale).toBeUndefined();
+});
+
+it('open times: a screen that cannot change the technician lists that route only', async () => {
+  const today = etDateString();
+  const fetch = routedFetch({ ui: true, answer: listOf });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({ date: addDays(today, 3), serviceId: 'fixture', technicianId: 'tech', openTimes: true }));
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBeTruthy());
+  expect(searches(fetch)[0]).toMatchObject({ technicianId: 'tech', openTimes: true });
+});
+
+it('open times: a date past the four weeks asks for that one day, keeping the list', async () => {
+  const today = etDateString();
+  const far = addDays(today, 40);
+  const fetch = routedFetch({ ui: true, answer: listOf });
+  vi.stubGlobal('fetch', fetch);
+  const { result, rerender } = renderHook((props) => useBestTimes({ serviceId: 'fixture', technicianId: 'tech', openTimes: true, ...props }), {
+    initialProps: { date: addDays(today, 3) },
+  });
+  await waitFor(() => expect(result.current.availability?.openTimes?.from).toBeTruthy());
+  rerender({ date: far });
+  await waitFor(() => expect(result.current.availability?.days.map((day) => day.date)).toEqual([today, far]));
+  const sent = searches(fetch);
+  expect(sent).toHaveLength(2);
+  expect(sent[1]).toMatchObject({ dateFrom: far, dateTo: far, openTimes: true });
+});
+
+it('box off: the strip search as before, picked hour and best-times rows included', async () => {
+  const fetch = routedFetch({ ui: false, answer: () => summaryAnswer });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00', bestRows: true, openTimes: true, techPick: true,
+  }));
+  await waitFor(() => expect(result.current.availability?.days).toHaveLength(2));
+  const [body] = searches(fetch);
+  expect(body).toMatchObject({ summary: true, bestRows: true, pickedStart: '14:00', technicianId: 'tech', dateFrom: '2034-12-30', dateTo: '2035-01-09' });
+  expect(body).not.toHaveProperty('openTimes');
+  expect(result.current.availability.openTimes).toBeUndefined();
+});
+
+it('an answer without the list (the box was turned off since) draws the strip', async () => {
+  const today = etDateString();
+  const fetch = routedFetch({ ui: true, answer: (body) => (body.openTimes ? { slots: [], summary: { days: [] } } : summaryAnswer) });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({ date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00', openTimes: true }));
+  await waitFor(() => expect(result.current.availability?.days).toHaveLength(2));
+  const sent = searches(fetch);
+  expect(sent[0]).toMatchObject({ openTimes: true, dateFrom: today });
+  expect(sent[sent.length - 1]).toMatchObject({ pickedStart: '14:00', dateFrom: '2034-12-30' });
+  expect(result.current.availability.openTimes).toBeUndefined();
 });

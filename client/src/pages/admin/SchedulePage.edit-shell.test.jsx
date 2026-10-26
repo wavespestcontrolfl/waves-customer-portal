@@ -503,3 +503,39 @@ it('a cleared auto-dispatch box rides the save with the value the form opened wi
   await waitFor(() => expect(onSaved2).toHaveBeenCalledOnce());
   expect(savedBody()).toMatchObject({ autoDispatchLocked: true, autoDispatchLockedWas: true });
 });
+
+// ---- the open-times box (GATE_OPEN_TIMES_BOX, owner 2026-10-25) ----
+
+const openTimesRow = (date, start, detourMinutes, technicianId, technicianName) => ({
+  date, start, end: `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}:00`, detourMinutes,
+  technicianId, technicianName, driveSource: null, rainTier: null,
+});
+const openTimesAnswer = (hours) => ({
+  pickedDate: '2035-01-02', openTimes: { from: '2035-01-02', to: '2035-01-29' }, best: null, picked: null,
+  days: [{ date: '2035-01-03', status: 'open', hours }],
+});
+
+it('open times: the form asks for the box on every route, and a move keeps the plain Save', () => {
+  bestTimesState.availability = openTimesAnswer([openTimesRow('2035-01-03', '10:00', 3, 't1', 'Fixture Tech')]);
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  expect(bestTimesState.args).toMatchObject({ openTimes: true, techPick: true });
+  expect(screen.getByTestId('open-times-box')).toBeInTheDocument();
+  fireEvent.change(screen.getByRole('dialog', { name: 'Edit appointment' }).querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /anyway/ })).not.toBeInTheDocument();
+});
+
+it('open times: a row on another technician\'s route books that technician (tech pick)', () => {
+  bestTimesState.availability = openTimesAnswer([
+    openTimesRow('2035-01-03', '10:00', 3, 't2', 'Second Fixture'),
+    openTimesRow('2035-01-03', '11:00', 9, 't1', 'Fixture Tech'),
+  ]);
+  const assigned = { ...service, technicianId: 't1' };
+  render(<EditServiceModal service={assigned} technicians={[{ id: 't1', name: 'Fixture Tech' }, { id: 't2', name: 'Second Fixture' }]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.getByDisplayValue('Fixture Tech')).toBeInTheDocument();
+  fireEvent.click(screen.getAllByTestId('open-time-row').find((row) => row.textContent.includes('Second Fixture')));
+  expect(screen.getByDisplayValue('Second Fixture')).toBeInTheDocument();
+  expect(screen.getByRole('dialog', { name: 'Edit appointment' }).querySelector('input[type="date"]')).toHaveValue('2035-01-03');
+  expect(writes()).toHaveLength(0);
+});

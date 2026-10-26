@@ -131,6 +131,8 @@ export default function RescheduleConfirmModal({
     // The same two best-times rows as New Appointment (owner 2026-10-08).
     // The server reads what the visit books from its own rows (serviceId).
     bestRows: true,
+    // The open-times box (GATE_OPEN_TIMES_BOX), on the landing route.
+    openTimes: true,
   });
 
   // The modal stays mounted between drags (open just flips), so a previous
