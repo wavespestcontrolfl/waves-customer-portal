@@ -447,7 +447,7 @@ function messagesFromPlan({ plan, converts }) {
   if (noticeSends) {
     messages.push({
       kind: 'consumer_notice', will_send: true, template: 'consumer_notice.fdacs_13692',
-      text: `${noticeChannels.join(' and ').replace(/^./, (c) => c.toUpperCase())}: the Florida consumer notice (FDACS-13692) to sign, right after Confirm. Not sent if it is signed first or the address changes; a text after 8 PM waits until 8 AM`,
+      text: `${noticeChannels.join(' and ').replace(/^./, (c) => c.toUpperCase())}: the Florida consumer notice (FDACS-13692) to sign, right after Confirm. Not sent if it is signed first or the address changes before it goes out; a text after 8 PM waits until 8 AM and then goes to the phone on file`,
     });
   } else if (notice) {
     messages.push({ kind: 'none', will_send: false, text: 'No Florida consumer notice: no email or phone it can go to. The office is notified to send it by hand' });

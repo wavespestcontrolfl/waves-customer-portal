@@ -327,7 +327,7 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     const lines = labels(card(preview));
     expect(lines).toEqual(expect.arrayContaining([
       'Message: No membership email: a one-time estimate only changes status here',
-      'Message: Email l***@example.com and text ***00: the Florida consumer notice (FDACS-13692) to sign, right after Confirm. Not sent if it is signed first or the address changes; a text after 8 PM waits until 8 AM',
+      'Message: Email l***@example.com and text ***00: the Florida consumer notice (FDACS-13692) to sign, right after Confirm. Not sent if it is signed first or the address changes before it goes out; a text after 8 PM waits until 8 AM and then goes to the phone on file',
     ]));
     expect(card(preview).notifies_customer).toBe(true);
     // The membership email decision stays its own: the notice never turns it on.
