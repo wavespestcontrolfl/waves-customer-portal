@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
+import { IDBFactory } from 'fake-indexeddb';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter, MemoryRouter, Outlet, Route, Routes, useNavigate, useLocation } from 'react-router-dom';
@@ -544,7 +545,7 @@ describe('CustomersPageV2 workflow state', () => {
     await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
     expect(Object.fromEntries(requests[0])).toMatchObject({ healthRisk: 'at_risk', page: '1', limit: '25' });
     fireEvent.click(screen.getByRole('button', { name: 'Customers saved views' }));
-    fireEvent.change(screen.getByRole('combobox', { name: 'Customers saved view' }), {
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Customers saved view' }), {
       target: { value: 'all-healthy' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Use view' }));
@@ -557,7 +558,7 @@ describe('CustomersPageV2 workflow state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
     await waitFor(() => expect(requests.at(-1).get('page')).toBe('2'));
     fireEvent.click(screen.getByRole('button', { name: 'Customers saved views' }));
-    fireEvent.change(screen.getByRole('combobox', { name: 'Customers saved view' }), {
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Customers saved view' }), {
       target: { value: 'all-healthy' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Use view' }));
@@ -637,12 +638,19 @@ describe('CustomersPageV2 workflow state', () => {
     expect(await screen.findByRole('searchbox', { name: 'Customers search' })).toBeInTheDocument();
   });
 
-  it('keeps saved Directory settings across Map while Map remains a 500-row view', async () => {
+  it('keeps saved Directory settings across a failed and retried 500-row Map view', async () => {
     storeCustomerViews({ page: 2, pageSize: 25, search: 'Map-safe' });
     const requests = [];
+    let mapReads = 0;
     vi.stubGlobal('fetch', vi.fn((url) => {
       const parsed = new URL(String(url), 'http://fixture.invalid');
-      if (parsed.pathname === '/api/admin/customers') requests.push(parsed.searchParams);
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      requests.push(parsed.searchParams);
+      if (parsed.searchParams.get('limit') === '500') {
+        mapReads += 1;
+        if (mapReads === 1) return response({ error: 'Map customers unavailable' }, 503);
+        return response({ ...list, total: 50, totalPages: 1 });
+      }
       return response({ ...list, total: 50, totalPages: 2 });
     }));
 
@@ -650,15 +658,23 @@ describe('CustomersPageV2 workflow state', () => {
       <VerifiedDirectory />
     </MemoryRouter>);
     await screen.findByRole('button', { name: 'Customers saved views' });
-    const latestDirectoryRequest = () => requests.filter((params) => params.get('suggest') === '1').at(-1);
-    expect(Object.fromEntries(latestDirectoryRequest())).toMatchObject({ page: '2', search: 'Map-safe', limit: '25' });
+    expect(Object.fromEntries(requests.at(-1))).toMatchObject({ page: '2', search: 'Map-safe', limit: '25' });
 
     fireEvent.click(screen.getByRole('button', { name: 'Map', exact: true }));
-    await waitFor(() => expect(Object.fromEntries(latestDirectoryRequest())).toMatchObject({ page: '1', limit: '500' }));
+    expect(await screen.findByText('Map customers unavailable')).toBeInTheDocument();
+    expect(requests.filter((params) => params.get('limit') === '500').map(Object.fromEntries)).toEqual([
+      expect.objectContaining({ page: '1', search: 'Map-safe', limit: '500' }),
+    ]);
     expect(screen.queryByRole('button', { name: 'Customers saved views' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(mapReads).toBe(2));
+    expect(requests.filter((params) => params.get('limit') === '500').map(Object.fromEntries)).toEqual([
+      expect.objectContaining({ page: '1', search: 'Map-safe', limit: '500' }),
+      expect.objectContaining({ page: '1', search: 'Map-safe', limit: '500' }),
+    ]);
 
     fireEvent.click(screen.getByRole('button', { name: 'Directory', exact: true }));
-    await waitFor(() => expect(Object.fromEntries(latestDirectoryRequest())).toMatchObject({
+    await waitFor(() => expect(Object.fromEntries(requests.at(-1))).toMatchObject({
       page: '2', search: 'Map-safe', limit: '25',
     }));
     expect(await screen.findByRole('button', { name: 'Customers saved views' })).toBeInTheDocument();
@@ -918,6 +934,7 @@ describe('CustomersPageV2 workflow state', () => {
   });
 
   beforeEach(() => {
+    globalThis.indexedDB = new IDBFactory();
     localStorage.clear();
     localStorage.setItem('waves_admin_token', 'test-token');
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));

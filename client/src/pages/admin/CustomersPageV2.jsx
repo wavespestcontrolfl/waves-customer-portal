@@ -2316,8 +2316,8 @@ export default function CustomersPageV2() {
     };
   }, [isAdmin]);
 
-  function loadCustomers(p) {
-    const pg = p || page;
+  function loadCustomers(requestedPage) {
+    const pg = view === "directory" ? (requestedPage ?? page) : 1;
     const seq = loadSeqRef.current + 1;
     loadSeqRef.current = seq;
     if (loadAbortRef.current) loadAbortRef.current.abort();
@@ -2601,8 +2601,8 @@ export default function CustomersPageV2() {
     );
   };
 
-  const applySavedView = (id) => {
-    const applied = savedViewController.applyView(id);
+  const applySavedView = async (id) => {
+    const applied = await savedViewController.applyView(id);
     if (!applied) return null;
     setSavedViewApplication((current) => current + 1);
     const nextRisk = applied.healthFilters.healthRisk || null;
