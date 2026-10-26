@@ -1369,6 +1369,9 @@ async function applyPlannedMove(pm, run, attempt) {
     // The start points this move (and any SLOT_TAKEN fallback) was scored from:
     // the run's cache. The move guard refuses when a Team-tab edit changed one.
     startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(pm.ctx, technicianId),
+    // An unassigned visit's current day was scored on this technician's route
+    // (candidate-slots.js currentDayTechs), so their start point is fenced too.
+    sourceDayTechnicianId: (fresh.current && fresh.current.day_technician_id) || null,
     ...moveCheck.writeOptions(checked, {
       alternateCandidates: run.sundays.fallbacks(pm.service, fresh.rankedCandidates),
       rescore: async () => {
