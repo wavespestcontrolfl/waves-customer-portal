@@ -10,6 +10,8 @@ import {
   Field,
   Input,
   Select,
+  TablePagination,
+  TableToolbar,
   Textarea,
   UiSurface,
   buttonStyles,
@@ -104,11 +106,19 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 import { getAdminUser } from "../../lib/adminAuth";
-import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
-import { stackDocumentDiscounts, stackablePresets } from "../../lib/discountStack";
+import {
+  useDiscountStackingState,
+  ensureStackingFresh,
+} from "../../hooks/useDiscountStacking";
+import {
+  stackDocumentDiscounts,
+  stackablePresets,
+} from "../../lib/discountStack";
 import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
 import useDictationPending from "../../hooks/dictationPending";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+const DEFAULT_INVOICE_PAGE_SIZE = 100;
+const INVOICE_PAGE_SIZE_OPTIONS = [25, 50, 100];
 const INVOICE_STATUS_FILTERS = [
   { key: "all", label: "All" },
   { key: "overdue", label: "Overdue" },
@@ -1581,6 +1591,25 @@ function InvoiceFilter({ label, value, options, onChange, disabled }) {
   );
 }
 
+function SelectSendableButton({ count, receiptMode, max, disabled, onClick }) {
+  if (count === 0) return null;
+  return (
+    <Button
+      onClick={onClick}
+      disabled={disabled}
+      variant="secondary"
+      onClickCapture={(event) =>
+        event.currentTarget.focus({ preventScroll: true })
+      }
+      className="min-w-11"
+    >
+      {receiptMode
+        ? `Select ${Math.min(count, max)} to receipt`
+        : `Select sendable (${count})`}
+    </Button>
+  );
+}
+
 // ── Invoice List (mirrors attached UI) ──
 function InvoiceSummaryStats({ stats, isMobile }) {
   if (!stats || isMobile) return null;
@@ -1617,15 +1646,16 @@ function InvoiceList({
   const [searchParams, setSearchParams] = useSearchParams();
   const customerFilterId =
     searchParams.get("customer") || searchParams.get("customerId") || "";
+  const tableControlsEnabled = searchParams.get("tableControls") === "1";
   // POST /admin/invoices/:id/charge-card is requireAdmin on the server
   // (off-session saved-card charges are admin-only); the charge action only
   // renders for admin-role users, failing closed on missing/unknown role.
   // The "card on file" info badge stays visible to all staff.
   const isAdminUser = getAdminUser()?.role === "admin";
-  const PAGE_SIZE = 100;
   const [invoices, setInvoices] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_INVOICE_PAGE_SIZE);
   const [loadingMore, setLoadingMore] = useState(false);
   const [filter, setFilter] = useState("all");
   const [datePeriod, setDatePeriod] = useState("all");
@@ -1639,13 +1669,11 @@ function InvoiceList({
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState(false);
   const [moreError, setMoreError] = useState(false);
+  const [listReloadKey, setListReloadKey] = useState(0);
   const [deepLinkError, setDeepLinkError] = useState("");
   const [deepLinkAttempt, setDeepLinkAttempt] = useState(0);
   const listReqIdRef = useRef(0);
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedQuery(query), 300);
-    return () => clearTimeout(t);
-  }, [query]);
+  const replacementLoadingRef = useRef(false);
   const [expanded, setExpanded] = useState(null);
   // A deep-linked invoice fetched ahead of its page lives OUTSIDE the
   // paginated collection (Codex PR r9 P2): merging it into `invoices`
@@ -1653,6 +1681,18 @@ function InvoiceList({
   // exhausted. Rendered rows merge it; pagination math never sees it.
   const [deepLinkedInvoice, setDeepLinkedInvoice] = useState(null);
   const [selected, setSelected] = useState(new Set());
+  useEffect(() => {
+    if (query === debouncedQuery) return undefined;
+    const t = setTimeout(() => {
+      listReqIdRef.current += 1;
+      replacementLoadingRef.current = true;
+      setListLoading(true);
+      setPage(1);
+      setSelected(new Set());
+      setDebouncedQuery(query);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [debouncedQuery, query]);
   const [batchSending, setBatchSending] = useState(false);
   const [sendModalInvoice, setSendModalInvoice] = useState(null);
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
@@ -1669,10 +1709,23 @@ function InvoiceList({
   const [applyCreditInvoice, setApplyCreditInvoice] = useState(null);
   const [cardOnFileInvoice, setCardOnFileInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag("ff_invoice_send_receipt", true);
+  const requestPageSize = tableControlsEnabled
+    ? pageSize
+    : DEFAULT_INVOICE_PAGE_SIZE;
+  const listControlsDisabled = batchSending || listLoading;
+  const resetListPage = () => {
+    listReqIdRef.current += 1;
+    setPage(1);
+    setSelected(new Set());
+  };
+  const handleQueryChange = (value) => {
+    setQuery(value);
+    setSelected(new Set());
+  };
   const load = useCallback(
     async ({ append = false, pageNo = 1 } = {}) => {
       const params = buildInvoiceListParams({
-        limit: PAGE_SIZE,
+        limit: requestPageSize,
         pageNo,
         sort,
         filter,
@@ -1687,15 +1740,36 @@ function InvoiceList({
       const reqId = append ? listReqIdRef.current : ++listReqIdRef.current;
       setMoreError(false);
       if (!append) {
+        replacementLoadingRef.current = true;
         setListLoading(true);
         setListError(false);
+        // Replacement rows cannot retain a now-hidden selection.
+        setSelected(new Set());
       }
-      const data = await adminFetch(`/admin/invoices?${params}`).catch(
+      let data = await adminFetch(`/admin/invoices?${params}`).catch(
         () => null,
       );
       // A newer request has been issued since — let it paint instead.
       if (reqId !== listReqIdRef.current) return;
-      if (!append) setListLoading(false);
+      if (data && tableControlsEnabled) {
+        const responseTotal = Number(data.total);
+        const lastPage = Math.max(
+          1,
+          Math.ceil(responseTotal / requestPageSize),
+        );
+        if (pageNo > lastPage) {
+          params.set("page", String(lastPage));
+          data = await adminFetch(`/admin/invoices?${params}`).catch(
+            () => null,
+          );
+          if (reqId !== listReqIdRef.current) return;
+          pageNo = lastPage;
+        }
+      }
+      if (!append) {
+        replacementLoadingRef.current = false;
+        setListLoading(false);
+      }
       if (!data) {
         if (!append) {
           setListError(true);
@@ -1723,15 +1797,21 @@ function InvoiceList({
       );
       setTotal(Number(data.total ?? rows.length) || 0);
       setPage(Number(data.page || pageNo));
-      if (!append) {
-        setSelected(new Set());
-      }
+      if (!append) setSelected(new Set());
     },
-    [PAGE_SIZE, customerFilterId, datePeriod, debouncedQuery, filter, sort],
+    [
+      customerFilterId,
+      datePeriod,
+      debouncedQuery,
+      filter,
+      requestPageSize,
+      sort,
+      tableControlsEnabled,
+    ],
   );
   useEffect(() => {
     load();
-  }, [load, refreshKey]);
+  }, [load, refreshKey, listReloadKey]);
 
   // Keep expanded invoice detail in the URL so notification links, mobile
   // back navigation, and refresh all restore the same row. A deep-linked
@@ -1798,6 +1878,7 @@ function InvoiceList({
     // The URL effect owns expansion, including deferred route updates and Back.
   };
   const clearCustomerFilter = () => {
+    resetListPage();
     const next = new URLSearchParams(searchParams);
     next.delete("customer");
     next.delete("customerId");
@@ -2002,6 +2083,7 @@ function InvoiceList({
     }
   };
   const toggleSelect = (id) => {
+    if (replacementLoadingRef.current) return;
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
     else next.add(id);
@@ -2030,7 +2112,8 @@ function InvoiceList({
   const sendableInvoices = receiptMode
     ? invoices.filter((i) => i.status === "paid" && !i.receipt_sent_at)
     : invoices.filter((i) => invoiceSendableStatuses.has(i.status));
-  const selectAllSendable = () =>
+  const selectAllSendable = () => {
+    if (replacementLoadingRef.current) return;
     setSelected(
       new Set(
         sendableInvoices
@@ -2038,9 +2121,10 @@ function InvoiceList({
           .map((i) => i.id),
       ),
     );
+  };
   const clearSelection = () => setSelected(new Set());
   const handleBatchSend = async () => {
-    if (batchSendingRef.current) return;
+    if (batchSendingRef.current || replacementLoadingRef.current) return;
     const ids = Array.from(selected);
     if (ids.length === 0) return;
     if (receiptMode) {
@@ -2219,10 +2303,81 @@ function InvoiceList({
     }
     groupMap.get(key).items.push(inv);
   }
+  const canResetTableControls = [
+    Boolean(query),
+    filter !== "all",
+    datePeriod !== "all",
+    sort !== "newest",
+    Boolean(customerFilterId),
+  ].includes(true);
   return (
     <div>
+      <div hidden={!tableControlsEnabled}>
+        <fieldset
+          disabled={batchSending}
+          className="m-0 min-w-0 border-0 p-0 pb-4"
+        >
+          <TableToolbar
+            label="Invoices"
+            search={query}
+            onSearchChange={handleQueryChange}
+            searchPlaceholder="Search invoices"
+            onReset={() => {
+              setQuery("");
+              // Clear committed search immediately, not after its debounce.
+              setDebouncedQuery("");
+              setFilter("all");
+              setDatePeriod("all");
+              setSort("newest");
+              resetListPage();
+              setListReloadKey((key) => key + 1);
+              if (customerFilterId) clearCustomerFilter();
+            }}
+            canReset={canResetTableControls}
+          >
+            <InvoiceFilter
+              label="Status"
+              value={filter}
+              onChange={(value) => {
+                setFilter(value);
+                resetListPage();
+              }}
+              options={INVOICE_STATUS_FILTERS}
+            />
+            <InvoiceFilter
+              label="Date"
+              value={datePeriod}
+              onChange={(value) => {
+                setDatePeriod(value);
+                resetListPage();
+              }}
+              options={INVOICE_DATE_FILTERS}
+            />
+            <InvoiceFilter
+              label="Sort"
+              value={sort}
+              onChange={(value) => {
+                setSort(value);
+                resetListPage();
+              }}
+              options={INVOICE_SORT_OPTIONS}
+            />
+            <SelectSendableButton
+              count={sendableInvoices.length}
+              receiptMode={receiptMode}
+              max={BATCH_RECEIPT_MAX}
+              disabled={listControlsDisabled}
+              onClick={selectAllSendable}
+            />
+          </TableToolbar>
+        </fieldset>
+        <div className="mt-3 flex">
+          <InvoiceSummaryStats stats={stats} isMobile={isMobile} />
+        </div>
+      </div>
       {/* Search */}
       <div
+        hidden={tableControlsEnabled}
         style={{
           padding: "4px 0 12px",
         }}
@@ -2240,7 +2395,7 @@ function InvoiceList({
               name="admin_invoice_search"
               value={query}
               disabled={batchSending}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(event) => handleQueryChange(event.target.value)}
               placeholder="Search"
               style={{
                 width: "100%",
@@ -2267,6 +2422,7 @@ function InvoiceList({
           <Button
             type="button"
             onClick={clearCustomerFilter}
+            disabled={batchSending}
             aria-label="Clear customer invoice filter"
             variant={"secondary"}
             onClickCapture={(event) =>
@@ -2280,7 +2436,8 @@ function InvoiceList({
           </Button>
         </div>
       )}
-      {/* Filter pills */}
+      {/* The visibility wrapper must not carry display:flex, which overrides hidden. */}
+      <div hidden={tableControlsEnabled}>
       <div
         style={{
           display: "flex",
@@ -2295,41 +2452,41 @@ function InvoiceList({
           label="Filter"
           disabled={batchSending}
           value={filter}
-          onChange={setFilter}
+          onChange={(value) => {
+            setFilter(value);
+            resetListPage();
+          }}
           options={INVOICE_STATUS_FILTERS}
         />{" "}
         <InvoiceFilter
           label="Date"
           disabled={batchSending}
           value={datePeriod}
-          onChange={setDatePeriod}
+          onChange={(value) => {
+            setDatePeriod(value);
+            resetListPage();
+          }}
           options={INVOICE_DATE_FILTERS}
         />{" "}
         <InvoiceFilter
           label="Sort"
           disabled={batchSending}
           value={sort}
-          onChange={setSort}
+          onChange={(value) => {
+            setSort(value);
+            resetListPage();
+          }}
           options={INVOICE_SORT_OPTIONS}
         />
-        {sendableInvoices.length > 0 && (
-          <Button
-            onClick={selectAllSendable}
-            disabled={batchSending}
-            variant={"secondary"}
-            onClickCapture={(event) =>
-              event.currentTarget.focus({
-                preventScroll: true,
-              })
-            }
-            className="min-w-11"
-          >
-            {receiptMode
-              ? `Select ${Math.min(sendableInvoices.length, BATCH_RECEIPT_MAX)} to receipt`
-              : `Select sendable (${sendableInvoices.length})`}
-          </Button>
-        )}
+        <SelectSendableButton
+          count={sendableInvoices.length}
+          receiptMode={receiptMode}
+          max={BATCH_RECEIPT_MAX}
+          disabled={batchSending}
+          onClick={selectAllSendable}
+        />
         <InvoiceSummaryStats stats={stats} isMobile={isMobile} />
+      </div>
       </div>
       {/* List */}
       {deepLinkError && (
@@ -2463,7 +2620,7 @@ function InvoiceList({
                       {canSelect ? (
                         <Checkbox
                           id={`invoice-row-select-${inv.id}`}
-                          disabled={batchSending}
+                          disabled={listControlsDisabled}
                           name="invoice_row_select"
                           checked={isSelected}
                           onChange={() => toggleSelect(inv.id)}
@@ -3000,13 +3157,39 @@ function InvoiceList({
         </div>
       )}
 
+      <div hidden={!tableControlsEnabled}>
+        <TablePagination
+          label="Invoices"
+          page={page}
+          totalPages={Math.ceil(total / pageSize)}
+          total={total}
+          pageSize={pageSize}
+          pageSizeOptions={INVOICE_PAGE_SIZE_OPTIONS}
+          disabled={listControlsDisabled}
+          itemLabel="invoices"
+          onPageChange={(nextPage) => {
+            setSelected(new Set());
+            setPage(nextPage);
+            load({ pageNo: nextPage });
+          }}
+          onPageSizeChange={(nextPageSize) => {
+            setPageSize(nextPageSize);
+            resetListPage();
+          }}
+        />
+      </div>
       {moreError && (
-        <ActionFeedback error className="mt-4">
+        <ActionFeedback
+          error
+          className="mt-4"
+          hidden={tableControlsEnabled}
+        >
           Could not load more invoices. Use Load more to retry.
         </ActionFeedback>
       )}
       {invoices.length < total && (
         <div
+          hidden={tableControlsEnabled}
           style={{
             padding: isMobile ? "18px 16px" : "18px 0",
             textAlign: "center",
@@ -3025,7 +3208,7 @@ function InvoiceList({
                 setLoadingMore(false);
               }
             }}
-            disabled={loadingMore || listLoading}
+            disabled={loadingMore || listLoading || batchSending}
             variant={"secondary"}
             onClickCapture={(event) =>
               event.currentTarget.focus({
@@ -3064,7 +3247,7 @@ function InvoiceList({
           </span>{" "}
           <Button
             onClick={handleBatchSend}
-            disabled={batchSending}
+            disabled={listControlsDisabled}
             variant={"secondary"}
             onClickCapture={(event) =>
               event.currentTarget.focus({
