@@ -401,7 +401,7 @@ function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
     // ask, or GATE_ALERT_CLAUDE_QUEUE turned off): drop the fields routing set, so the row returns to the bell.
     // Whatever this emission itself carries stands (its own feed / who / severity); a feed the emitter wrote
     // itself on a row that was never routed is not touched, because this branch needs claudeQueue.
-    const { claudeQueue: _gone, who, severity, feed, ...rest } = merged;
+    const { claudeQueue: _gone, who, severity, feed: _routedFeed, ...rest } = merged;
     return {
       ...rest,
       ...('who' in metadata ? { who } : {}),
