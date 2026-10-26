@@ -640,7 +640,6 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     config,
     today: new Date(),
     excludeServiceIds: [svc.id],
-    excludeSelfBookingId: svc.self_booking_id || null,
     serviceKey,
     serviceIdentity,
     // Self-serve surface — a new target starting within the notice window
@@ -1014,7 +1013,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
     // Anti-forgery: the customer can only commit a slot the availability
     // engine still offers for that day (route feasibility, lunch reserve,
-    // self-book day caps, whole-hour grid). The rebooker's transactional
+    // whole-hour grid). The rebooker's transactional
     // conflict check below still owns the race.
     const dayAvailability = await buildAvailabilityForService(svc, {
       rangeFrom: date,
@@ -1194,11 +1193,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       ? result.rescheduledOccurrences
       : null;
 
-    // Self-booked visits carry a linked self_booked_appointments row that the
-    // public availability builder counts for max_self_books_per_day
-    // (booking.js fullDays) — move it with the visit or the old day stays
-    // artificially full while the new day goes uncounted. Best-effort right
-    // after the rebooker commit; a failure only skews the day-cap counting.
+    // Self-booked visits carry a linked self_booked_appointments row (the
+    // booking's slot copy) — move it with the visit so the copy keeps the
+    // visit's date and window. Best-effort right after the rebooker commit.
     if (svc.self_booking_id) {
       try {
         await db('self_booked_appointments')

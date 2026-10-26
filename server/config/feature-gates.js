@@ -73,6 +73,7 @@
  *   GATE_PAYROLL=true (basic payroll for Waves' own W-2 technicians, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Layer 1b-2a: an admin types the elections from a signed paper Form W-4 into the Staff page Payroll tab (filing status, Step 2 box, Step 3 credits, Step 4 amounts, exempt, date signed, first pay date it applies to); each entry is a new row and old rows are never edited. The admin also records how each technician is paid: paper check, or bank transfer with the date of the employee's written OK (Florida law). Stores no SSN and no bank account number; the paper W-4 keeps both. Read at call time via payrollLive(), strict 'true', dark by default; off = every /api/admin/payroll route answers 404 before any query and the Payroll tab is hidden; rollback = unset. Sends nothing to a customer or staff member.)
  *   GATE_PAYROLL_TAX_CALENDAR=true (basic payroll layer 2, owner 2026-10-25, "can we start building basic now, and add layers to it at later stages?". Needs GATE_PAYROLL for the finalized pay runs it reads. Puts the amount and due date of each payroll tax deposit and filing on the existing Tax page filing calendar: the monthly federal deposit, Form 941, Florida RT-6, a FUTA over $500 alert (FUTA deposits are out of scope), Form 940, W-2 and W-3, and the Florida new hire report. Due dates move past weekends and legal holidays by the IRS and Florida rules. The 14-day reminder text to the owner is the existing tax deadline alert. A row the owner marks filed or paid is never changed; if a pay run later raises an amount above what the marked rows cover, a new balance row holds the difference, and if the pay checks behind a marked return change, a review row asks the owner to check the figures. Read at call time via payrollTaxCalendarLive(), strict 'true', dark by default; off = the sync returns before any query. The owner makes every deposit and filing himself; sends nothing to a customer or staff member. Rollback = unset.)
  *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
+ *   GATE_TECH_STAFF_GUARDS=true (census M12 + M6, owner 2026-10-25: (M12) an inbound text or call FROM the phone of an ACTIVE technician (technicians.employment_status 'active') is staff, like the env staff phones: a text to an office line stays in the office inbox (unread, with the owner's usual unknown-sender text forward) but gets no spam screen, estimator draft or new-prospect bell; a call keys no customer or lead and gets no missed-call text-back; a number that is also on a customer record stays a customer. Outbound sends and the owner phone set are unchanged. (M6) a technician's En Route or On Site tap on a booking the office has not reviewed no longer approves it: the tap answers 409 and ONE office notification per visit rings (Schedule, needs-you); an admin login still auto-confirms. Read at call time via techStaffGuardsLive(), strict 'true', dark by default; off = today's behavior byte for byte; rollback = unset. Sends nothing to a customer.)
  *   GATE_CONTACT_LOGIN=true (an on-location contact signs into the customer app with their OWN phone number through the same SMS code login, landing on the account they are a contact for as a CONTACT session: view-only schedule, visit history, technician tracking, service-report documents (never for a contact the report rule withholds from) and their own notification choices (GET/PUT /api/notifications/contact-preferences); every other portal route answers 403 ACCOUNT_HOLDER_ONLY — billing, payments, cards, referrals, credits, requests, chat, property, account deletion, the holder's preferences, push subscriptions. The account holder's own number always wins; a contact number is tried only when no holder row matches, and the contact's session dies at its next refresh once the holder removes them. Per-contact notification choices (service_contact_notification_prefs) only NARROW what the account sends: a purpose the holder turned off stays off. Owner rulings 2026-10-20: view only, no confirm or reschedule; the contact's in-app text-consent checkbox counts as the YES for a pending opt-in ask only, never over a STOP. Read at call time via contactLoginLive(), strict 'true', dark by default; off = a contact number never logs in, an existing contact token is refused (401) and the senders ignore the per-contact table, byte-identical to before. Sends nothing to a customer.)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
@@ -124,10 +125,6 @@
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
  *   GATE_SIGNUP_SINGLE_EMAIL=true (ONE email at recurring signup: the accepted-onboarding email also carries the property and the plan (no payment section: the "Auto Pay is set up" email stays its own email, owner 2026-09-30), and the separate membership.started / welcome emails are skipped ONLY when that combined email was accepted for sending — each still sends if it was not; same-day later acceptances get a short per-property email; the welcome TEXT is unchanged; strict === 'true', read at call time; dark in dev AND prod)
- *   GATE_ONE_TIME_WELCOME_EMAIL=true (welcome email for eligible first one-time bookings; enqueue + delivery opt-in, SMS unchanged)
- *     RETIRED BY OWNER DECISION 2026-09-09: one-time customers do not get a welcome email — the booking confirmation
- *     plus the en-route app-intro email (GATE_APP_INTRO_EMAIL) is the whole one-time onboarding. Unset in prod the
- *     same day, before any send. Leave dark; do not re-enable without a new owner ruling.
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=shadow (runs created + finalized as would_send, nothing dispatched) | true (live sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
@@ -153,7 +150,6 @@
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
- *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
  *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
  *   GATE_AGENT_RUNS=true      (agent run ledger WRITES — services/agent-control/runs.js records work_items / agent_runs / steps / events for lanes that call it; off = every handle is inert; the /control/runs reads stay on GATE_AGENT_CONTROL_READ; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
@@ -318,7 +314,6 @@
  *   GATE_NOTE_BOX_PHOTOS=true (Photos in the notes box, owner "ok go" 2026-10-02 on the Fast Complete mockup v8: the office Complete Service form puts the visit's photos inside the notes box, each with a short description typed or dictated that rides as the photo's caption to the report writer and the customer's report, and the separate photo section goes away. The schedule payload carries `noteBoxPhotosEnabled` per service, never for lawn or tree, shrub & palm. Strict opt-in: exactly 'true', read at call time via noteBoxPhotosLive(). Ships DARK; off = the form's photo section exactly as before.)
  *   GATE_LANE_VOICE_FILL=true (Fast Complete step 2, owner "ok go" 2026-10-02 on the mockup v8: POST /admin/dispatch/:id/lane-facts reads a specialty visit's own record (bed bug, fire ant, tick, bee & wasp, mud dauber, mosquito) from the technician's note: the places from the lane's own list and at most one value per finding group, each with the note's own words, kept only when the lane's closeout offers it and the note holds the words, never a pair the completion refuses (services/visit-lane-facts.js, TEXT_POLICIES.fastStructured, lane visit_lane_facts). Writes nothing: the office form and the tech's sheet show each field with its words for a person to confirm. With GATE_FAST_COMPLETE_REPORT also on, the tech portal opens such a visit (one that completes without a project) in the Fast Complete sheet's report flow instead of the project editor: the sheet's record card fills from the note, and the report and the /complete body (areasServiced, structuredObservations) are written from it; the pest-recap context answers the visit's `lane`. Strict opt-in: exactly 'true', read at call time via laneVoiceFillLive(). Ships DARK; off = 404 { enabled: false }, and the tech portal routes lane visits to the project editor as before.)
  *   GATE_TYPED_VOICE_FILL=true (Fast Complete steps 3 to 5, owner "ok go" 2026-10-02 on the mockup v8: POST /admin/dispatch/:id/typed-facts reads a typed visit's own findings (cockroach, the German and palmetto knockdowns, flea, pest inspection, mosquito event, wildlife trapping, rodent exclusion, sanitation and inspection; step 4: rodent trap checks, rodent and termite bait stations; step 5: termite liquid, trenching, rodding, spot and foam treatments and termite inspections, never new-construction pre-treat) from the technician's note: each pick field's values from the typed form's own options (the form as served for the visit's service key), each count and the technician's own 0-5 rating where they set the score only when the quote states the number (digits or words), a termite treatment's solution strength only as the percent its quote states, each with the note's own words, kept only when the note holds the words and never a combination the completion's own validator (validateTypedFindings, requirements off) refuses, every side of a clash left for a person (services/visit-typed-facts.js, TEXT_POLICIES.fastStructured, lane visit_typed_facts). Free-text and product-filled (autoFilled) fields are never read, nor the state's notice questions (treatment notice posted, inspection notice affixed: always a tap); a rating already set (scoreSet) is never read over. The termite forms are read on the office form only: their visits keep the typed form on the tech portal (typedReportFlowEnabled stays off for them). Writes nothing: a person confirms every field. On, the schedule payload carries `typedVoiceFillEnabled` and Generate AI report on the office Complete Service form first posts the notes with the form's present values (judged only, never stored) and fills only the fields still empty, each shown with the words it came from; a field set is never filled over and a fill that clashes with one is left for a person. With GATE_FAST_COMPLETE_REPORT also on, the schedule payload carries `typedReportFlowEnabled` (never a combined visit) and the tech portal opens such a visit in the Fast Complete sheet's report flow in place of the typed form: Generate reads the record from the note the same way, its card shows each field with the words it came from (a Change for each pick, a box for a count or free text, the 0-5 score where the tech sets it), and the report and completion are written from the record (structuredFindings, the form's own treated areas, activityScore); a nothing-found record, a saved trace the report would show, or a product whose place only the full form records goes to the Full form. A typed inspection shows the office form's inspection-credit toggle (on unless the tech turns it off; sent as offerInspectionCredit), and, after sending, the sheet offers a one-tap "Book the follow-up" on the day a completion suggests (bed bug, flea, cockroach and the knockdowns; POST /admin/dispatch/:id/schedule-followup, a pending visit, as the office's Schedule follow-up books it; the sheet context's `followupBooking`). Strict opt-in: exactly 'true', read at call time via typedVoiceFillLive(). Ships DARK; off = 404 { enabled: false }, Generate is unchanged and typed visits open the typed form as before.)
- *   GATE_COMBO_FAST_COMPLETE=true (owner 2026-10-09, PR 1 of 2, no screen yet: lets the pest and lawn Fast Complete sheets be PARTS of one grouped stop. The schedule payload carries `comboFastCompleteEnabled` for a row that is a member of a grouped stop; the lawn context, treatment guide and trouble-area clear answer for a grouped lawn member when the request says it is part of a combined stop (header X-Combo-Stop: 1) AND the server confirms the stop is open with exactly two open members; the lawn Fast Complete preflight accepts a grouped member only inside its own visit-closeout packet. Customer-silent. Strict opt-in: exactly 'true', read at call time via comboFastCompleteLive(). Ships DARK; off = the flag is false and every route refuses a grouped lawn member exactly as before.)
  *   GATE_FAST_COMPLETE_WRAP_UP=true (owner 2026-10-10: the lawn visit and Tree & Shrub Fast Complete sheets show a "Wrap-up" section, the bottom of the full Complete Service form: adjust time on site (admin), re-entry countdown, completion text, payment link, review request and timing, next scheduled visit note. Their /lawn-fast/context and /tree-shrub/fast-context answers carry `wrapUp: true`; the sheets post the section's choices on /complete, which already takes every one. Untouched, the section posts the four customer-text flags the sheets already posted. Off = no key, and both sheets render and post exactly what they did. Strict opt-in: exactly 'true', read at call time via fastCompleteWrapUpLive(). Ships DARK.)
  *   GATE_STATION_FAST_COMPLETE=true (owner 2026-10-08: a termite or rodent bait station visit opens the one-screen Fast Complete sheet in admin Dispatch even while the station map (station-map-v1) is on. The sheet loads the property's station registry and shows "N stations, all OK"; the technician's note names exceptions by station number ("station 4 had activity, I replaced the bait in 7"), read by POST /admin/dispatch/:id/typed-facts when the request carries the sheet's stations (services/visit-station-facts.js: the number must be an active station of the visit's program, the status one of activity / serviced / no access, and the quoted words in the note, else dropped), each shown as a chip the technician taps to correct. The completion posts termiteStations exactly as the full form does (an entry per station, touched on exceptions) and the typed station counts from the shared rule (client/src/lib/station-checks.js). Adding, moving or retiring a station, a rodent trap check, a combined visit, an inspection-only outcome, a station with no pin and a registry that failed to load all stay on the full form. Needs GATE_FAST_COMPLETE_REPORT and GATE_TYPED_VOICE_FILL. The schedule payload carries `stationFastCompleteEnabled`. Strict opt-in: exactly 'true' in every environment, read at call time via stationFastCompleteLive(). Ships DARK; off = the flag is false, the typed-facts route reads no stations and station visits route exactly as before.)
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve BOOK notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking of a slot starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule's DESTINATION slot, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
@@ -326,7 +321,6 @@
  *   SELF_SERVE_ARRIVAL_GRACE_MINUTES=0 (not a gate — the self-serve arrival grace, server/services/scheduling/policy.js#selfServeArrivalGraceMinutes, owner ruling 2026-09-28 "I'd rather be more lenient than strict": a self-serve (customer-picked) time is an ARRIVAL window, kept when the technician can arrive within this many minutes of the window's start. CAPACITY MODE ONLY (GATE_SCHEDULING_CAPACITY) — reads 0 with it off — and never for a same-day pick (today's route is already live). Unset/blank/garbage/negative all read as 0 (today's byte-identical strict behavior); clamped to 120, the existing arrival-promise ceiling (ARRIVAL_WINDOW_MINUTES, utils/sms-time-format.js) — grace can only narrow that promise, never widen it. **ESTIMATE PICKER ONLY** (Codex r1 P1, #5314 — until GATE_BOOK_ARRIVAL_GRACE, the next line, gave /book its own opt-in): /book and public reschedule both run a STRICT pre-verify travel probe ahead of their capacity commit, so a grace-kept slot there would 409 SLOT_TAKEN before ever reaching the capacity check — `estimate-slot-availability.js` is the ONLY caller that opts find-time.js's `packCapacityEnds` into grace (`arrivalGrace: true`, checked in ADDITION to the env value — the flag is the real gate; the env alone changes nothing for /book, voice, re-service, inspection, or any reschedule surface, even though several of them share the SAME `packEnds:true` admission). Offer side also checks EVERY live hold on the tech/date (Codex r2 P1), not just the single nearest anchor `capacityGapNeighbours` picks per side — a hold's window is a promise, not a fixed slot, so an earlier-starting hold can still end later than a later-starting committed stop chosen instead, and grace must never overlook it. **A hold is certified ONCE, at reserve** (Codex r2 P0): `slot-reservation.js`'s `reserveSlot` is the ONLY `verifyArrivalCapacity` caller that passes `arrivalGraceMinutes` (its own commit path has no pre-verify probe under capacity), and it reads the EXACT grace that justified the offer — carried as its own HMAC-bound + cleartext field on the signed estimate slot offer (`utils/slot-offer-token.js`) — never a fresh live env read. **The wire format is opt-in PER OFFER, not a blanket bump** (Codex round 3: the first cut bumped the canonical string/slotId shape for every offer unconditionally, breaking every in-flight estimate offer at deploy even with grace dark — "default 0 = byte-identical" has to cover the wire format too): an ungraced offer (grace 0 or omitted — every `/book` offer, every estimate offer with capacity/grace off or the date excluded) signs/appends the EXACT `<base>.<exp>.<sig>` shape origin/main always produced, verifying under both old and new code across a deploy; only a genuinely graced offer takes the new `<base>.<exp>.<arrivalGrace>.<sig>` shape (and only such an offer in flight at the exact deploy instant fails once, same accepted trade as the file's original v1→v2 bump). `signCustomerFacingSlots` signs a non-zero grace only for a slot marked `routeMode: 'arrival_windows'` (find-time's own stamp, proof it passed the grace-aware filter at all — anything else signs 0, so a future non-route-mode generator's slot can never inherit an unchecked leniency). `commitReservation` NEVER applies a grace bound at all (keeps only the pre-existing 120-minute promise, byte-identical to before this lane): a hold reserved at grace 90 with an 80-minute delay is accepted regardless of what this env reads by accept time, and a grace change between offer and reserve is likewise inert for that one signed offer (fixed at mint time; only a fresh availability fetch picks up a changed value). `extendReservation` never re-verifies capacity fitness at all under capacity mode (a pre-existing, unrelated gap — a live hold's certified route order is trusted as-is; re-running the whole-route simulation on every extend was judged not cheap enough to add here), so a hold's grace certification is fixed at reserve time and is not re-checked if grace or the route changes before an extend.)
  *   GATE_BOOK_ARRIVAL_GRACE=true (owner-approved 2026-09-29: the SAME self-serve arrival grace the estimate picker already uses (SELF_SERVE_ARRIVAL_GRACE_MINUTES, above) now also applies to ONLINE BOOKING — /book offers (/api/booking/availability, /find-slots, the /capture-intent revalidation, public re-service, inspection booking) and their commit, createSelfBooking. **Ships DARK: off unless `true`/`1`/`on`**; needs GATE_BOOK_CAPACITY_COMMIT + GATE_SCHEDULING_CAPACITY live too (bookInsertionOffersLive()) and a grace value above 0 to change anything; read at call time via bookArrivalGraceLive() (config/feature-gates.js). Off = today's strict drive+15-minute travel-gap offer/commit, byte for byte. On: (1) the offer keeps a slot the strict gap would drop when the day's whole-route arrival simulation certifies the technician arrives within grace of the slot's start — waived ONLY against the PREVIOUS assigned committed stop (never a real window overlap, never a live hold, never the NEXT stop's side, never an unassigned/other-technician stop) and only when every other neighbour clears the strict gap; (2) find-time.js's packCapacityEnds now checks BOTH route neighbours of a candidate under that same rule (it used to test the previous-side pick against the previous stop only and the next-side pick against the next stop only, so picks that crowded the OTHER neighbour survived find-time and were dropped by /book's own mirror, emptying whole days); (3) the commit's strict pre-verify travel probe accepts exactly those waived previous-side clashes and verifyArrivalCapacity enforces the same grace bound, so offer and commit agree in both directions; (4) the offer's signed slot_sig carries a distinct policy tag (BOOK_ARRIVAL_GRACE_OFFER_POLICY, utils/slot-offer-token.js) and the EXACT grace that justified it (v3 field shape `<exp>.<grace>.<sig>`, only when grace > 0), so a flip between mint and confirm — either direction — fails the signature into the standard pick-your-time-again 409. The phone agent, public reschedule (its rebooker commit still runs the strict probe), office Find-a-Time, Intelligence Bar and auto-dispatch never opt in and are unaffected. Kill switch: unset it.)
  *   GATE_BOOK_PREFERRED_TIME=true (/book "Can't find a time?" block under the time picker: text-our-team link plus a preferred day/time request form -> POST /api/booking/preferred-time, which files an internal lead + one admin bell, and the lead closes itself as 'handled' (neither won nor lost, one admin FYI) when the customer later books online. Sends NOTHING to the customer (no SMS, no email, no confirmation text) and retires any open abandoned-booking intent for the same phone/session so the recovery worker cannot text them either. Strict opt-in in EVERY environment, read at call time via bookPreferredTimeLive(); the client learns it from GET /api/booking/config `preferred_time`. Off = the generic 404 on the POST and no block on the page.)
- *   GATE_SELF_BOOK_DAY_CAP=true (owner ruling 2026-09-23: the old "max 3 self-bookings per calendar day" cap — retired in favor of the self-serve notice window, server/services/scheduling/self-serve-notice.js. Unset (default) = no per-day cap anywhere: the offer-time date filtering in routes/booking.js buildBookingAvailability, the commit-time re-checks in routes/booking.js createSelfBooking and services/availability.js confirmBooking, and the offer-time day-loop skip in services/availability.js getAvailableSlots all skip their countActiveSelfBookingsForDay / acquireSelfBookingDayCapLock calls. 'true' = today's cap behavior byte-for-byte. Read at call time via selfBookDayCapEnabled() below — a flip needs no redeploy. The lock/count primitives themselves are unaffected and stay available to every self-booking writer.)
  *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
  *   GATE_VISIT_PREP_PHOTOS=true (server-only dark foundation: customer attaches photos + a short note to a specific upcoming visit from the public /appointment/:token page — POST /api/public/appointment/:token/photos, plus an additive prepPhotos summary on the existing GET. Strict opt-in, read at call time via visitPrepPhotosLive(). The appointment-page entry ALSO needs GATE_APPOINTMENT_PAGE (it rides that router). The Waves app entry — POST /api/schedule/:id/prep-photos and the prepPhotos field on GET /api/schedule/next — needs only this gate; flipping it opens both entry points. Off = the generic 404 on both POST routes: the anonymous appointment-page route answers it before any body parse (visitPrepPreParserGuard, mounted ahead of the shared parsers in index.js); the authenticated app route answers it after the schedule router's normal authentication and shared parsers (a logged-in route exposes nothing to an anonymous probe), before its own limiter and multipart parse. Neither GET payload carries a prepPhotos key. Surfaces when on: the appointment-page box, the app's Send photos button, the tech Visit Brief's Customer flagged block, the stop chip, and the office feed item. Sends nothing to a customer.)
  *   GATE_VISIT_PREP_TECH_ALERTS=true (PR 6, customer-visit-photos scope doc §5.4 item 4: the assigned field technician gets a tech-home card plus a one-line push — "A customer sent photos for a visit on your route" — when a customer submits visit prep photos. Strict opt-in, read at call time via visitPrepTechAlertsLive() in server/services/visit-prep-tech-alert.js. ALSO requires GATE_VISIT_PREP_PHOTOS live (nothing to alert about otherwise). Deliberately its OWN gate rather than GATE_TECH_VISIT_NOTIFICATIONS — that gate is off in production, and this can be the first tech visit card to go live; it reuses that mechanism's card/push plumbing (tech_notifications + PushService.sendToAdminUser) without depending on its gate. Recipient = the visit's CURRENT assigned technician, re-read fresh at send time — never the pre-lock row. No technician, or a non-assignable one → no card. Never fired for a duplicate-only resubmit. Sends nothing to a customer.)
@@ -365,9 +359,7 @@ const isProd = process.env.NODE_ENV === 'production';
 const gates = {
   // GATE_BID_KIT (Bid kit, admin only, dark). Boot-log entry only; the call-time reader is bidKitLive().
   bidKit: process.env.GATE_BID_KIT === 'true',
-  // Admin-only fixed test pair for one explicitly configured customer; opt-in everywhere.
   editorialEvidence: gateEnvValue('GATE_EDITORIAL_EVIDENCE'),
-  customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
   // Customer iOS icon count; opt-in everywhere, with request-time route checks.
   customerNativeBadges: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES'),
   // Billing Email/Text/App preference API; opt-in everywhere and read at request time by the route.
@@ -2794,16 +2786,6 @@ const gates = {
   // idempotency. Unset = referral.invite email returns.
   referralNudgeEnroll: process.env.GATE_REFERRAL_NUDGE_ENROLL === 'true',
 
-  // Field Content Module — master gate for the tech capture → review →
-  // publish pipeline (content_prompts, dispatches, media_uploads,
-  // content_queue). Off means no routes, no cron, no UI. Sub-flags for
-  // phased rollout live in the DB-backed feature_flags table:
-  //   field_content.sms_prompts     (phase 3)
-  //   field_content.auto_assemble   (phase 4)
-  //   field_content.publish_fanout  (phase 5)
-  // All three cascade-require this master gate.
-  fieldContentModule: isProd ? process.env.GATE_FIELD_CONTENT === 'true' : true,
-
   // Autonomous Content Engine — runs the daily content pipeline.
   // Even when this gate is ON, individual action types stay in shadow
   // mode until SHADOW_MODE_<ACTION_TYPE>=false is set (per v3.1 plan
@@ -3424,12 +3406,6 @@ const gates = {
   // every consumer reads gateEnvValue at CALL time through the single
   // lunchBlockEnabled() helper in services/scheduling/customer-windows.js.
   bookingLunchBlock: gateEnvValue('GATE_BOOKING_LUNCH_BLOCK'),
-
-  // Self-booking day cap (owner ruling 2026-09-23) — retired in favor of the
-  // self-serve notice window; see selfBookDayCapEnabled() below, the one
-  // canonical reader every day-cap call site uses. Registered here for
-  // logGateStatus only.
-  selfBookDayCap: gateEnvValue('GATE_SELF_BOOK_DAY_CAP'),
 
   // JOB CARD tab in the Service Protocol drawer (Tech Resource Drawer PR 2):
   // one GET assembles the customer strip, a 1–3 sentence paragraph written
@@ -4264,15 +4240,6 @@ const gates = {
   // logGateStatus; the recorder reads gateEnvValue at CALL time.
   llmCallLedger: gateEnvValue('GATE_LLM_CALL_LEDGER'),
 
-  // LLM call traces — services/llm-dispatch-metrics.js recordTrace. ON: for
-  // lanes whose agent-control runtime policy sets trace: true, the REDACTED
-  // system / prompt / response bodies (pii-redactor, 8 KB cap each) are kept
-  // in llm_call_traces for 7 days, keyed to the call row — so it needs the
-  // ledger gate too. Inbound lanes skip low-confidence redactions. OFF
-  // (default, dev AND prod): nothing is written. Kill switch: unset. Read at
-  // CALL time via gateEnvValue.
-  llmCallTraces: gateEnvValue('GATE_LLM_CALL_TRACES'),
-
   // Agent-control hub read — routes/admin-agents.js /control/areas +
   // /control/lanes via services/agent-control/hub-read.js. ON: the Control
   // center reads per-lane calls, ok / fallback rates, latency, tokens and
@@ -4409,6 +4376,10 @@ const gates = {
   // nudge routing. This entry is for logGateStatus; the services read shiftCloseReviewLive()
   // at CALL time. Ships DARK: exactly 'true' only. Texts only the owner's own phone.
   shiftCloseReview: process.env.GATE_SHIFT_CLOSE_REVIEW === 'true',
+  // Staff guards (census M12 + M6, owner 2026-10-25): an active technician's own phone is a staff
+  // sender, and a technician's field tap no longer approves an unreviewed booking. This entry is for
+  // logGateStatus; the services read techStaffGuardsLive() at CALL time. Ships DARK: exactly 'true' only.
+  techStaffGuards: process.env.GATE_TECH_STAFF_GUARDS === 'true',
   // Consultation-link lane ("Book with Adam", scope doc
   // lead-inspection-link-scope.md): the /inspection/:token public page, the
   // buildLeadConsultationLink composer/admin builder, and the recurring-lead
@@ -5872,6 +5843,13 @@ function bidKitLive() {
   return process.env.GATE_BID_KIT === 'true';
 }
 
+// GATE_ANNUAL_PLAN_DOCUMENTS: owner-only informational annual-plan PDFs in
+// Documents. Read at request time; off skips the extra list query and returns
+// 404 for downloads. Existing My Plan/signed-agreement reads stay independent.
+function annualPlanDocumentsLive() {
+  return process.env.GATE_ANNUAL_PLAN_DOCUMENTS === 'true';
+}
+
 // GATE_COMMERCIAL_PROPOSAL_SIGN read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader
 // for "Accept & sign agreement" on an authored commercial proposal: POST /api/estimates/:token/commercial-agreement
 // (services/commercial-proposal-agreement.js), the `cta.commercialAgreement` block on GET /:token/data, the sign hook in
@@ -6309,18 +6287,6 @@ function estimateConsultationOfferLive() {
 // here).
 function estimateEmailConsultationOfferLive() {
   return process.env.GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER === 'true';
-}
-
-// Self-booking day cap (owner ruling 2026-09-23) — the canonical reader
-// every day-cap call site uses (routes/booking.js buildBookingAvailability
-// + createSelfBooking, services/availability.js getAvailableSlots +
-// confirmBooking). Read at CALL time via gateEnvValue so a flip needs no
-// redeploy. Unset (default) = no per-day cap anywhere; 'true'/'1'/'on' =
-// today's behavior byte-for-byte. The lock/count primitives
-// (acquireSelfBookingDayCapLock / countActiveSelfBookingsForDay) stay in
-// place either way — call sites just skip invoking them while this is off.
-function selfBookDayCapEnabled() {
-  return gateEnvValue('GATE_SELF_BOOK_DAY_CAP');
 }
 
 // GATE_RESERVICE_DETAILS_REQUIRED read at CALL time — the one canonical
@@ -7056,6 +7022,12 @@ function shiftCloseReviewLive() {
   return process.env.GATE_SHIFT_CLOSE_REVIEW === 'true';
 }
 
+// Staff guards (services/staff-sender-phones.js, routes/tech-track.js), read at CALL time. Strict
+// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
+function techStaffGuardsLive() {
+  return process.env.GATE_TECH_STAFF_GUARDS === 'true';
+}
+
 // GATE_TRUCK_KIT read at CALL time — strict `=== 'true'`, dark by default
 // (docs/tool-inventory-tracker-scope.md PR 1). The canonical reader for
 // services/truck-kit.js and routes/tech-truck-check.js. Off: both tech routes
@@ -7123,11 +7095,8 @@ function logGateStatus() {
 // / 'on', any case), 'strict' (exactly 'true'; also assumed for a gate known
 // only from the header), or 'mixed' (read both ways in this file).
 // RETIRED names stay out entirely: they must not be re-enabled from the bar
-// (welcome email: owner ruling; self-book day cap: retired 2026-09-23 in
-// favor of the self-serve notice window; glass: the theme gates were removed).
+// (glass: the theme gates were removed).
 const RETIRED = new Set([
-  'GATE_ONE_TIME_WELCOME_EMAIL',
-  'GATE_SELF_BOOK_DAY_CAP',
   'GATE_ESTIMATE_GLASS',
   'GATE_EMAIL_GLASS',
   'GATE_REPORT_GLASS',
@@ -7648,7 +7617,7 @@ function smsCourtesyAfterTemplateLive() {
   return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
@@ -8020,13 +7989,6 @@ function assessmentFastCompleteLive() {
 // GATE_ASSESSMENT_FAST_COMPLETE reader, on its own line so gate PRs never conflict.
 module.exports.assessmentFastCompleteLive = assessmentFastCompleteLive;
 
-// GATE_COMBO_FAST_COMPLETE read at CALL time, strict `=== 'true'`, dark in every environment.
-function comboFastCompleteLive() {
-  return process.env.GATE_COMBO_FAST_COMPLETE === 'true';
-}
-// GATE_COMBO_FAST_COMPLETE reader, on its own line so gate PRs never conflict.
-module.exports.comboFastCompleteLive = comboFastCompleteLive;
-
 // GATE_FAST_COMPLETE_WRAP_UP read at CALL time, strict `=== 'true'`, dark in every environment.
 function fastCompleteWrapUpLive() {
   return process.env.GATE_FAST_COMPLETE_WRAP_UP === 'true';
@@ -8269,6 +8231,7 @@ module.exports.lawnReclaimedHalfNLive = lawnReclaimedHalfNLive;
 module.exports.mosquitoMistingLive = mosquitoMistingLive;
 // GATE_BID_KIT reader, on its own line so gate PRs never conflict.
 module.exports.bidKitLive = bidKitLive;
+module.exports.annualPlanDocumentsLive = annualPlanDocumentsLive;
 // GATE_COMMERCIAL_PROPOSAL_SIGN reader, on its own line so gate PRs never conflict.
 module.exports.commercialProposalSignLive = commercialProposalSignLive;
 module.exports.commercialAutopayLive = commercialAutopayLive;
@@ -8308,6 +8271,8 @@ module.exports.estimateConsumerNoticeLive = estimateConsumerNoticeLive;
 module.exports.shiftCloseReviewLive = shiftCloseReviewLive;
 // GATE_TECH_LOGIN_PRIVACY reader, on its own line so gate PRs never conflict.
 module.exports.techLoginPrivacyLive = techLoginPrivacyLive;
+// GATE_TECH_STAFF_GUARDS reader, on its own line so gate PRs never conflict.
+module.exports.techStaffGuardsLive = techStaffGuardsLive;
 // GATE_REVIEW_BONUS_ASK_FIRST reader, on its own line so gate PRs never conflict.
 module.exports.reviewBonusAskFirstLive = reviewBonusAskFirstLive;
 // GATE_CALLBACK_SOURCE_TECH reader, on its own line so gate PRs never conflict.

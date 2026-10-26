@@ -22,9 +22,10 @@
 .c360-additional-contacts a { color: #52525b; }
 .c360-embedded .c360-alerts { padding: 16px 28px; }
 .c360-embedded .c360-alerts > div { height: auto; min-height: 36px; padding: 6px 10px; font-size: 14px; white-space: normal; }
-/* Already inset by the admin shell; the sticky strip also carries safe-area
-   padding so it remains clear in Safari's expanded/standalone viewport. */
-.c360-section-navigation { position: sticky; top: 0; z-index: 20; display: flex; flex-shrink: 0; min-width: 0; padding-top: env(safe-area-inset-top, 0px); border-bottom: 1px solid #e4e4e7; background: #fff; }
+.c360-section-navigation { display: flex; flex-shrink: 0; min-width: 0; border-bottom: 1px solid #e4e4e7; background: #fff; }
+/* Embedded workspaces own the sticky strip. Overlay tabs stay in normal flow
+   beneath their separate persistent header and mobile action bar. */
+.c360-embedded .c360-section-navigation { position: sticky; top: 0; z-index: 20; padding-top: env(safe-area-inset-top, 0px); }
 .c360-embedded .c360-tab-content { padding: 26px 28px; flex: 1 0 auto; }
 .c360-embedded .c360-overview-content { display: flex; flex-direction: column; }
 .c360-embedded .c360-overview-billing { padding: 20px; border: 1px solid #e4e4e7; border-radius: 6px; }

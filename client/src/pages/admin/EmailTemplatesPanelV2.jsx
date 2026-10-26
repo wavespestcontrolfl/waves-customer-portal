@@ -34,7 +34,7 @@ import {
 } from "../../components/ui";
 
 // Templates whose preview reports first-visit audience eligibility for an appointment.
-const AUDIENCE_PREVIEW_TEMPLATE_KEYS = ["app_intro", "welcome.new_recurring"];
+const AUDIENCE_PREVIEW_TEMPLATE_KEYS = ["app_intro"];
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 

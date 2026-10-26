@@ -262,8 +262,8 @@ describe('tableOnlyLines', () => {
 // Codex round 6: explicit 'false' — dotenv (loaded as server modules are
 // required) only fills in variables that are absent.
 test('the telemetry gates stay set to false once the server modules have loaded', () => {
-  expect([process.env.GATE_LLM_CALL_LEDGER, process.env.GATE_LLM_CALL_TRACES, process.env.GATE_LLM_DISPATCH_METRICS])
-    .toEqual(['false', 'false', 'false']);
+  expect([process.env.GATE_LLM_CALL_LEDGER, process.env.GATE_LLM_DISPATCH_METRICS])
+    .toEqual(['false', 'false']);
 });
 
 // Codex round 10: an earlier proposal reaches a later line not only when

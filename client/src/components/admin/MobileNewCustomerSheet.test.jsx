@@ -6,9 +6,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import MobileNewCustomerSheet from './MobileNewCustomerSheet';
 
 vi.mock('../AddressAutocomplete', () => ({
-  default: ({ value, onChange, onSelect, placeholder }) => (
+  default: ({ id, value, onChange, onSelect, placeholder }) => (
     <>
-      <input placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
+      <input id={id} placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
       <button type="button" onClick={() => onSelect({ line1: '10 Palm Ave', line2: 'Unit 8', city: 'Naples', state: 'FL', zip: '34102' })}>
         Select unit address
       </button>
@@ -39,10 +39,10 @@ describe('MobileNewCustomerSheet', () => {
       <MobileNewCustomerSheet open onClose={vi.fn()} onCreated={vi.fn()} />,
     );
 
-    fireEvent.change(screen.getByPlaceholderText('First name'), { target: { value: 'Avery' } });
-    fireEvent.change(screen.getByPlaceholderText('Phone number'), { target: { value: '9415550100' } });
-    fireEvent.change(screen.getByPlaceholderText('Address line 1'), { target: { value: '10 Palm Ave' } });
-    fireEvent.change(screen.getByPlaceholderText('Address line 2'), { target: { value: 'Unit 4' } });
+    fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Avery' } });
+    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '9415550100' } });
+    fireEvent.change(screen.getByLabelText('Address line 1'), { target: { value: '10 Palm Ave' } });
+    fireEvent.change(screen.getByLabelText('Address line 2'), { target: { value: 'Unit 4' } });
     fireEvent.click(screen.getAllByRole('button', { name: 'Save' })[0]);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
@@ -62,8 +62,8 @@ describe('MobileNewCustomerSheet', () => {
     }))));
 
     render(<MobileNewCustomerSheet open onClose={vi.fn()} onCreated={vi.fn()} />);
-    fireEvent.change(screen.getByPlaceholderText('First name'), { target: { value: 'Avery' } });
-    fireEvent.change(screen.getByPlaceholderText('Phone number'), { target: { value: '9415550100' } });
+    fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Avery' } });
+    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '9415550100' } });
     fireEvent.click(screen.getAllByRole('button', { name: 'Save' })[0]);
 
     expect(await screen.findByText('That phone number already belongs to another account')).toBeInTheDocument();
@@ -72,10 +72,42 @@ describe('MobileNewCustomerSheet', () => {
   it('replaces and clears address line 2 from autocomplete selections', () => {
     render(<MobileNewCustomerSheet open onClose={vi.fn()} onCreated={vi.fn()} />);
 
-    const line2 = screen.getByPlaceholderText('Address line 2');
+    const line2 = screen.getByLabelText('Address line 2');
     fireEvent.click(screen.getByRole('button', { name: 'Select unit address' }));
     expect(line2).toHaveValue('Unit 8');
     fireEvent.click(screen.getByRole('button', { name: 'Select street address' }));
     expect(line2).toHaveValue('');
+  });
+
+  it('keeps every form label visible and associated after values are entered', () => {
+    render(<MobileNewCustomerSheet open onClose={vi.fn()} onCreated={vi.fn()} />);
+
+    const labeledValues = [
+      ['First name', 'Avery'],
+      ['Last name', 'Morgan'],
+      ['Phone number', '9415550100'],
+      ['Email address', 'avery@example.com'],
+      ['Address line 1', '10 Palm Ave'],
+      ['Address line 2', 'Unit 4'],
+      ['City', 'Naples'],
+      ['State', 'FL'],
+      ['ZIP', '34102'],
+    ];
+
+    labeledValues.forEach(([label, value]) => {
+      const field = screen.getByLabelText(label);
+      fireEvent.change(field, { target: { value } });
+      expect(field).toHaveAccessibleName(label);
+      expect(screen.getByText(label, { selector: 'label' })).toBeVisible();
+    });
+
+    const propertyLabel = screen.getByLabelText('Property label');
+    fireEvent.change(propertyLabel, { target: { value: '__custom__' } });
+    expect(propertyLabel).toHaveAccessibleName('Property label');
+
+    const customLabel = screen.getByLabelText('Custom property label');
+    fireEvent.change(customLabel, { target: { value: 'Rental - Cape Coral' } });
+    expect(customLabel).toHaveAccessibleName('Custom property label');
+    expect(screen.getByText('Custom property label', { selector: 'label' })).toBeVisible();
   });
 });

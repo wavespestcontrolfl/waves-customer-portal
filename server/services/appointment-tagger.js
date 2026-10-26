@@ -4,7 +4,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
-const { sendNewRecurringWelcome, isNewRecurringSignupCandidate, queueOneTimeWelcomeEmail } = require('./new-recurring-welcome-sms');
+const { sendNewRecurringWelcome, isNewRecurringSignupCandidate } = require('./new-recurring-welcome-sms');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
@@ -161,9 +161,6 @@ class AppointmentTagger {
       if (isNewSignup) {
         await this.triggerWelcomeSequence(service);
       }
-    }
-    if (service.is_recurring === false) {
-      await queueOneTimeWelcomeEmail(service);
     }
   }
 

@@ -197,9 +197,9 @@ async function exportFixture(args) {
 // verified again once every module the replay uses is loaded (Codex #4153
 // r11). A promise that can be broken by moving a line is not a promise
 // (compliance-gate-eval.js precedent).
-const LEDGER_GATES = ['GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_CALL_TRACES'];
+const LEDGER_GATES = ['GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_CALL_LEDGER'];
 function assertNoLedgerWrites(gates, when) {
-  if (gates.isEnabled('llmDispatchMetrics') || gates.gateEnvValue('GATE_LLM_CALL_LEDGER') || gates.gateEnvValue('GATE_LLM_CALL_TRACES')) {
+  if (gates.isEnabled('llmDispatchMetrics') || gates.gateEnvValue('GATE_LLM_CALL_LEDGER')) {
     console.error(`ABORT (${when}): an LLM ledger gate resolved ENABLED — this run would write llm_dispatch_log rows. Unset ${LEDGER_GATES.join(' / ')} and re-run.`);
     process.exit(2);
   }

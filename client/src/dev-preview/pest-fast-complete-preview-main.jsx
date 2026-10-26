@@ -1,6 +1,6 @@
 /**
- * DEV HARNESS — the pest-only Complete service sheet: the REAL FastCompleteSheet over synthetic data and the same fake
- * `request` as the combo harness (no network, no API, no database). Served by `npx vite` at
+ * DEV HARNESS — the pest-only Complete service sheet: the REAL FastCompleteSheet over synthetic data and a fake
+ * `request` (no network, no API, no database). Served by `npx vite` at
  * /preview-pest-fast-complete.html. Open it at phone width (390px) to match the tech's screen.
  * NOT part of the app build (no rollup input) — never a public route. Nothing is saved: the packet POST answers a
  * canned "done".

@@ -28,7 +28,7 @@ describe('knownGateCatalog', () => {
 
   test('does not know made-up names, and keeps a retired gate out', () => {
     expect(catalog.has('GATE_NOT_A_REAL_GATE_ZZZ')).toBe(false);
-    expect(catalog.has('GATE_ONE_TIME_WELCOME_EMAIL')).toBe(false);
+    expect(catalog.has('GATE_ESTIMATE_GLASS')).toBe(false);
   });
 
   test('gates that take a timestamp or mode are never classified as on/off', () => {

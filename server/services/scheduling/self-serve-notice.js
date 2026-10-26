@@ -2,9 +2,8 @@
  * Self-serve notice window (owner ruling 2026-09-23; split into separate
  * book/move windows 2026-09-28).
  *
- * Replaces the old "max 3 self-bookings per calendar day" cap
- * (GATE_SELF_BOOK_DAY_CAP, server/config/feature-gates.js) with a simpler
- * rule: through any SELF-SERVE customer surface, a customer cannot BOOK a
+ * Replaced the old "max 3 self-bookings per calendar day" cap (removed)
+ * with a simpler rule: through any SELF-SERVE customer surface, a customer cannot BOOK a
  * visit that starts within the next SELF_SERVE_NOTICE_HOURS hours (default
  * 24), and cannot MOVE (reschedule) a visit that currently starts within
  * the next SELF_SERVE_MOVE_NOTICE_HOURS hours (default 24, independent of
