@@ -804,7 +804,7 @@ async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
       limit,
     });
   }
-  return retired + await closeContactedMissedCalls({ limit });
+  return retired + await closeContactedMissedCalls();
 }
 
 // Open customer_missed_call bells, joined to their call (bell age inside the
@@ -887,8 +887,8 @@ const CONTACT_CLAUSES = [
   },
   {
     resolution: 'An estimate was sent after the call',
-    // handedOffWithin takes a boundary value, not a column: candidates are read
-    // with the call's start, then each is asked the promise lane's own question.
+    // handedOffWithin takes a boundary value, not a column: candidates are paged
+    // with the call's start, then each page is asked the promise lane's own question.
     clause: (q) => q.whereRaw('call_log.customer_id IS NOT NULL'),
     narrow: async (rows) => {
       const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
@@ -902,31 +902,39 @@ const CONTACT_CLAUSES = [
     },
   },
 ];
-// Quote candidates are filtered in JS, so they are read wider than a retire page.
-const QUOTE_CANDIDATE_LIMIT = 500;
+// The candidate set is bounded by RETIRE_WINDOW_MS (7 days of open bells), so each
+// run walks ALL of it, clause by clause, in keyset pages ordered by bell id: a page
+// of rows that match nothing (a quote candidate with no hand-off, a shadow row
+// already audited) can never hide the rows after it. The ceiling is only a safety
+// valve against a runaway table; hitting it is logged.
+const CONTACT_PAGE_SIZE = 200;
+const CONTACT_RUN_CEILING = 5000;
 
-async function closeContactedMissedCalls({ limit = 100 } = {}) {
+async function closeContactedMissedCalls() {
   const mode = require('../config/feature-gates').alertContactCloseMode();
   if (mode === 'off') return 0;
   const { callStartedAtSql } = require('./sms-pending-conversations');
   let closed = 0;
   for (const { clause, resolution, narrow } of CONTACT_CLAUSES) {
     try {
-      let rows = await openMissedCallBells().modify(clause)
-        .select('notifications.id as notification_id', 'call_log.id as call_id', 'call_log.customer_id', db.raw(`${callStartedAtSql('call_log')} as started_at`))
-        .limit(narrow ? QUOTE_CANDIDATE_LIMIT : limit);
-      if (narrow) rows = (await narrow(rows)).slice(0, limit);
-      if (!rows.length) continue;
-      if (mode === 'true') {
-        closed += await supersedeCalls(rows.map((r) => r.call_id), resolution);
-      } else {
-        const { etDateString } = require('../utils/datetime-et');
-        const { auditAlertWouldClose } = require('./audit-log');
-        const judgedAt = new Date().toISOString();
-        await auditAlertWouldClose({
-          et_day: etDateString(),
-          items: rows.map((r) => ({ notification_id: r.notification_id, alert_class: 'missed_call', reason: resolution, judged_at: judgedAt })),
-        });
+      let cursor = null;
+      let seen = 0;
+      for (;;) {
+        const page = await openMissedCallBells().modify(clause)
+          .modify((q) => { if (cursor) q.where('notifications.id', '>', cursor); })
+          .select('notifications.id as notification_id', 'call_log.id as call_id', 'call_log.customer_id', db.raw(`${callStartedAtSql('call_log')} as started_at`))
+          .orderBy('notifications.id', 'asc')
+          .limit(CONTACT_PAGE_SIZE);
+        if (!page.length) break;
+        cursor = page[page.length - 1].notification_id;
+        seen += page.length;
+        const matched = narrow ? await narrow(page) : page;
+        if (matched.length) closed += await closeContactPage(mode, matched, resolution);
+        if (page.length < CONTACT_PAGE_SIZE) break;
+        if (seen >= CONTACT_RUN_CEILING) {
+          logger.warn(`[missed-call-bell] contact close stopped at ${seen} candidates (${resolution}); the rest wait for the next run`);
+          break;
+        }
       }
     } catch (err) {
       logger.warn(`[missed-call-bell] contact close skipped (${resolution}): ${require('./notification-service').safeErrorSummary(err)}`);
@@ -935,8 +943,22 @@ async function closeContactedMissedCalls({ limit = 100 } = {}) {
   return closed;
 }
 
+// `true` retires the matched bells; `shadow` only records them (audit_log).
+async function closeContactPage(mode, rows, resolution) {
+  if (mode === 'true') return supersedeCalls(rows.map((r) => r.call_id), resolution);
+  const { etDateString } = require('../utils/datetime-et');
+  const { auditAlertWouldClose } = require('./audit-log');
+  const judgedAt = new Date().toISOString();
+  await auditAlertWouldClose({
+    et_day: etDateString(),
+    items: rows.map((r) => ({ notification_id: r.notification_id, alert_class: 'missed_call', reason: resolution, judged_at: judgedAt })),
+  });
+  return 0;
+}
+
 module.exports = {
   retireCalledBackMissedCalls,
+  closeContactedMissedCalls,
   missedCallEligible,
   missedCallShapeEligible,
   isEmptyVoicemailRecording,

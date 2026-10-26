@@ -19,7 +19,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const missedCallBell = require('../services/missed-call-bell');
 
-jest.setTimeout(30000);
+jest.setTimeout(60000);
 (SKIP ? describe.skip : describe)('missed-call bell, contact close, on PostgreSQL', () => {
   let database;
   const schema = `call_contact_${randomUUID().replaceAll('-', '')}`;
@@ -159,6 +159,66 @@ jest.setTimeout(30000);
     await database('estimates').insert({ id: randomUUID(), customer_id: customerId, status: 'sent', sent_at: mins(40), estimate_data: delivered(mins(40)) });
     expect(await run()).toBe(1);
     expect(await state(row)).toEqual(['supersede', 'An estimate was sent after the call']);
+  });
+
+  // n open bells (each with its own call) for one customer, ids ascending from `from` so the order is known.
+  async function manyBells(n, { customer = customerId, from = 0 } = {}) {
+    const calls = [];
+    const bells = [];
+    for (let i = from; i < from + n; i += 1) {
+      const id = randomUUID();
+      calls.push({ id, twilio_call_sid: sid('CA'), direction: 'inbound', from_phone: CALLER, to_phone: BIZ, customer_id: customer, status: 'no-answer',
+        answered_by: 'missed', duration_seconds: 0, metadata: JSON.stringify({}), created_at: CALL_AT, updated_at: CALL_AT });
+      bells.push({ id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, recipient_type: 'admin', category: 'missed_call', title: 'Missed call', body: 'Called.',
+        link: `/admin/communications#tab=calls&call=${id}`, created_at: new Date(),
+        metadata: JSON.stringify({ triggerKey: 'customer_missed_call', payload: { callLogId: id, phone: CALLER } }) });
+    }
+    for (let i = 0; i < n; i += 100) {
+      await database('call_log').insert(calls.slice(i, i + 100));
+      await database('notifications').insert(bells.slice(i, i + 100));
+    }
+    return bells;
+  }
+
+  // The closer on its own: the called-back proof in front of it scans every open bell's calls
+  // (no indexes in this fixture schema), which is not what these tests are about.
+  const closeOnly = () => missedCallBell.closeContactedMissedCalls();
+
+  test('the whole candidate set is walked every run: an eligible quote bell after many non-matching candidates closes in one run', async () => {
+    gate('true');
+    // 520 open bells for a customer with no quote (past the old 500-row candidate cap, over two pages), then ONE for a customer whose quote was handed off after the call.
+    const fillers = await manyBells(520);
+    const quoted = randomUUID();
+    await database('customers').insert({ id: quoted, first_name: 'Quoted', last_name: 'Synthetic', phone: '+19415550177' });
+    const call = await missedCall({ customer_id: quoted, from_phone: '+19415550177' });
+    const late = { id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', recipient_type: 'admin', category: 'missed_call', title: 'Missed call', body: 'Called.',
+      link: `/admin/communications#tab=calls&call=${call.id}`, created_at: new Date(),
+      metadata: JSON.stringify({ triggerKey: 'customer_missed_call', payload: { callLogId: call.id, phone: '+19415550177' } }) };
+    await database('notifications').insert(late);
+    const at = mins(40);
+    await database('estimates').insert({ id: randomUUID(), customer_id: quoted, status: 'sent', sent_at: at,
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } }) });
+    expect(await closeOnly()).toBe(1);
+    expect(await state(late)).toEqual(['supersede', 'An estimate was sent after the call']);
+    expect(await state(fillers[0])).toBeNull();
+    // Run again: nothing left to close, nothing starves, nothing throws.
+    expect(await closeOnly()).toBe(0);
+  });
+
+  test('shadow audits every matching bell across pages, and true then closes all of them in one run (no fixed cap)', async () => {
+    await staffText(mins(10));
+    const bells = await manyBells(450);
+    gate('shadow');
+    expect(await closeOnly()).toBe(0);
+    const logged = await database('audit_log').where({ action: 'notification.alert_relevance.would_close' });
+    expect(logged).toHaveLength(450);
+    expect(new Set(logged.map((r) => r.resource_id))).toEqual(new Set(bells.map((b) => b.id)));
+    // A second shadow run the same day adds nothing.
+    await closeOnly();
+    expect(await database('audit_log').where({ action: 'notification.alert_relevance.would_close' })).toHaveLength(450);
+    gate('true');
+    expect(await closeOnly()).toBe(450);
+    expect(await database('notifications').whereNull('done_at')).toHaveLength(0);
   });
 
   test('the promise chaser and other missed-call-category bells are never touched', async () => {
