@@ -176,8 +176,12 @@ function buildingBlock(ctx, building, y, taxRate) {
     const qtyH = doc.heightOfString(formatQuantity(item), { width: COL_W.qty });
     const rateH = doc.heightOfString(formatUnitPrice(item.unitPrice), { width: COL_W.rate });
     const rowH = Math.max(descH + 6, qtyH + 6, rateH + 6, 18);
+    const pageBefore = doc.page;
     y = ensureSpace(ctx, y, rowH + 4);
-    if (y === 56) y = tableHeader(doc, y);  // re-print header after a page break
+    // The continuation masthead returns a measured body y, which grows when
+    // a long proposal title wraps. Detect the actual page transition instead
+    // of treating one historical y coordinate as a page-break sentinel.
+    if (doc.page !== pageBefore) y = tableHeader(doc, y);
 
     doc.font('Helvetica').fillColor(INK).text(item.description || '—', COL.desc, y, { width: COL_W.desc });
     doc.fillColor(BODY).fontSize(9).text(item.frequencyLabel, COL.freq, y + 1, { width: COL_W.freq });

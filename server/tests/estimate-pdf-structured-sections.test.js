@@ -503,7 +503,7 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
   });
 });
 
-describe('pdfkit fallback — recorded acceptance block', () => {
+describe('pdfkit fallback — page-boundary contracts', () => {
   const ACCEPTANCE = {
     recordId: 'ACC-ABCD1234',
     termsVersion: 'v2026-09',
@@ -543,6 +543,36 @@ describe('pdfkit fallback — recorded acceptance block', () => {
     }
     return pages;
   }
+
+  test('a long-title continuation repeats the line-item table header after its measured masthead', async () => {
+    const title = 'Comprehensive Multi-Property Pest Management and Exterior Rodent Monitoring Service Proposal for 2026';
+    const estimate = {
+      ...STRUCTURED_ESTIMATE,
+      estimate_data: {
+        proposal: {
+          ...STRUCTURED_ESTIMATE.estimate_data.proposal,
+          title,
+          buildings: [{
+            name: 'Service location',
+            lineItems: Array.from({ length: 36 }, (_, index) => ({
+              description: `Recurring pest service area ${index + 1}`,
+              unitPrice: 120,
+              frequency: 'monthly',
+              taxable: false,
+            })),
+          }],
+        },
+      },
+    };
+
+    const pages = extractPdfPages(await buildEstimateProposalPDFBuffer(estimate, { billsPerApplication: false }));
+    const tablePages = pages.filter((page) => page.includes('DESCRIPTION'));
+    expect(tablePages).toHaveLength(2);
+    expect(tablePages[1]).toContain('Comprehensive Multi-Property Pest Management');
+    expect(tablePages[1]).toContain('Service Proposal for 2026');
+    expect(tablePages[1]).toContain('continued');
+    expect(tablePages[1]).toContain('Recurring pest service area');
+  });
 
   test('the block is never split across a page boundary, whatever precedes it', async () => {
     for (const pad of [0, 300, 600, 900, 1200, 1500, 1800]) {
