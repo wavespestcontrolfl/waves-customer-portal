@@ -26,6 +26,7 @@ const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const gpsArrivalDetector = require('../services/gps-arrival-detector');
 const truckClockIn = require('../services/truck-clock-in');
+const gateCodePush = require('../services/gate-code-push');
 const { pingTechLocation } = require('../services/tech-status');
 const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('../services/customer-tracking-eta');
 const {
@@ -228,6 +229,14 @@ async function processTrackingEvent({ logId, eventType, payload }) {
         });
       } catch (err) {
         logger.error(`[webhooks-bouncie] truck clock-in failed: ${err.message}`);
+      }
+
+      // Gate code on the way in (GATE_GATE_CODE_PUSH; off = returns at once).
+      // Own try/catch: a failure here never changes the work above or the 200.
+      try {
+        await gateCodePush.maybePushGateCode({ techStatus, point });
+      } catch (err) {
+        logger.error(`[webhooks-bouncie] gate code push failed: ${err.message}`);
       }
     }
 

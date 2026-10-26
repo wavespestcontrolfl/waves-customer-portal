@@ -14,6 +14,9 @@ jest.mock('../services/gps-arrival-detector', () => ({
 jest.mock('../services/truck-clock-in', () => ({
   maybeClockInFromTruck: jest.fn(),
 }));
+jest.mock('../services/gate-code-push', () => ({
+  maybePushGateCode: jest.fn(),
+}));
 jest.mock('../services/bouncie-webhook-security', () => ({
   inspectBouncieWebhook: jest.fn(),
   stringifyBounciePayload: jest.fn((payload) => JSON.stringify(payload)),
@@ -24,6 +27,7 @@ const logger = require('../services/logger');
 const { pingTechLocation } = require('../services/tech-status');
 const gpsArrivalDetector = require('../services/gps-arrival-detector');
 const truckClockIn = require('../services/truck-clock-in');
+const gateCodePush = require('../services/gate-code-push');
 const { inspectBouncieWebhook } = require('../services/bouncie-webhook-security');
 const router = require('../routes/webhooks-bouncie');
 
@@ -134,5 +138,24 @@ describe('Bouncie tracking webhook, truck clock-in hook', () => {
     expect(res.status).not.toHaveBeenCalledWith(500);
     expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledTimes(1);
     expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledTimes(1);
+  });
+
+  // GATE_GATE_CODE_PUSH (services/gate-code-push.js): the gate line on the way
+  // in rides the same truck position, after the detector and the clock-in.
+  test('the gate code push runs last, with the tech status and the point; its failure is logged and changes nothing else', async () => {
+    const order = [];
+    gpsArrivalDetector.maybeMarkArrivedFromGps.mockImplementation(async () => { order.push('detector'); return null; });
+    truckClockIn.maybeClockInFromTruck.mockImplementation(async () => { order.push('truck'); });
+    gateCodePush.maybePushGateCode.mockImplementation(async () => { order.push('gate'); throw new Error('push down'); });
+
+    await expect(router._test.processTrackingEvent({ logId: 12, eventType: 'tripData', payload: PAYLOAD })).resolves.toBeUndefined();
+
+    expect(order).toEqual(['detector', 'truck', 'gate']);
+    expect(gateCodePush.maybePushGateCode).toHaveBeenCalledWith({
+      techStatus: TECH_STATUS,
+      point: expect.objectContaining({ lat: 27.3, lng: -82.5 }),
+    });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('gate code push failed: push down'));
+    expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
   });
 });

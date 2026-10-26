@@ -282,6 +282,9 @@ async function loadCurrentService(currentJobId) {
       's.en_route_at',
       's.scheduled_date',
       's.visit_id',
+      // The visit's premise, for the gate-code push's neighborhood lookup
+      // (gate-code-push.js); the arrival decision never reads it.
+      's.property_id',
       'sv.en_route_at as visit_en_route_at',
       // The earliest en-route time among the stop's current members.
       db.raw('(select min(m.en_route_at) from scheduled_services m where m.visit_id = s.visit_id) as group_en_route_at'),
@@ -681,6 +684,14 @@ module.exports = {
   validLatitude,
   validLongitude,
   loadArrivalConfig: loadConfig,
+  // Shared with the gate-code push (gate-code-push.js), which rides the same
+  // truck samples: the same current-sample, current-visit and en-route checks,
+  // and the same stop and attempt keys, never a copy.
+  isAcceptedCurrentSample,
+  loadCurrentService,
+  serviceRejection,
+  stopKey,
+  attemptKey,
   _test: {
     DEFAULT_CONFIG,
     buildArrivalDecision,
