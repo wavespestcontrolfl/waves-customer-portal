@@ -6101,6 +6101,17 @@ function commercialFirstVisitLive() {
   return process.env.GATE_COMMERCIAL_FIRST_VISIT === 'true';
 }
 
+// GATE_ESTIMATE_ASSESSMENT_FIRST read at CALL time, strict `=== 'true'`, dark by default in every environment (owner
+// 2026-10-26, "OK GO" on decision page choice 3A). The one reader for "Book a free Waves Assessment first" on an open
+// estimate: `assessmentFirst` on GET /api/estimates/:token/data and the estimate-token booking page's API
+// (routes/estimate-assessment-public.js, mounted with its pre-guard on /api/public/estimate-assessment). Off: the API
+// answers the generic 404, /data carries nothing new and the lead-only consultation offer is as before. On, a customer
+// viewing an eligible open estimate can book a free Waves Assessment from it; the booking texts its confirmation.
+// Kill: unset.
+function estimateAssessmentFirstLive() {
+  return process.env.GATE_ESTIMATE_ASSESSMENT_FIRST === 'true';
+}
+
 // GATE_TAX_SHARED_BILLS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
 function taxSharedBillsLive() {
   return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_SHARED_BILLS');
@@ -8649,6 +8660,8 @@ module.exports.commercialProposalSignLive = commercialProposalSignLive;
 module.exports.commercialAutopayLive = commercialAutopayLive;
 // GATE_COMMERCIAL_FIRST_VISIT reader, on its own line so gate PRs never conflict.
 module.exports.commercialFirstVisitLive = commercialFirstVisitLive;
+// GATE_ESTIMATE_ASSESSMENT_FIRST reader, on its own line so gate PRs never conflict.
+module.exports.estimateAssessmentFirstLive = estimateAssessmentFirstLive;
 // GATE_TAX_SHARED_BILLS reader, on its own line so gate PRs never conflict.
 module.exports.taxSharedBillsLive = taxSharedBillsLive;
 // GATE_TAX_RETURN_ENGINE reader, on its own line so gate PRs never conflict.

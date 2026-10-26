@@ -4821,8 +4821,10 @@ export function carryRefreshProjections(prev, body, isRefresh) {
   const carried = {};
   if (prev?.returnVisit && !body.returnVisit) carried.returnVisit = prev.returnVisit;
   // The offer is bound to the property it was matched against (GH codex
-  // #4853 r3 P0): a staff revision to another address drops it.
-  if (prev?.consultationOffer && !body.consultationOffer
+  // #4853 r3 P0): a staff revision to another address drops it. A refresh
+  // that now offers the free Waves Assessment (GATE_ESTIMATE_ASSESSMENT_FIRST,
+  // composed on every load) drops it too: the page carries one offer, never two.
+  if (prev?.consultationOffer && !body.consultationOffer && !body.assessmentFirst
     && prev?.estimate?.address === body?.estimate?.address) carried.consultationOffer = prev.consultationOffer;
   return Object.keys(carried).length ? { ...body, ...carried } : body;
 }
@@ -4848,6 +4850,36 @@ export function ConsultationOfferSection({ consultationOffer }) {
         target="_blank"
         rel="noopener noreferrer"
         style={estimateCallCtaStyle}
+      >
+        Pick a time
+      </a>
+    </section>
+  );
+}
+
+// "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST, owner 2026-10-26 decision page choice 3A):
+// renders ONLY from /data's `assessmentFirst` ({ url }); the server decides eligibility (an open estimate the customer
+// is viewing, a customer account at the estimate's property, no open assessment). It links to the estimate-token
+// booking page (/estimate/:token/assessment) in a new tab, so a customer mid-configuration keeps their choices. It
+// replaces the lead-only consultation offer and never disables or replaces the estimate's own accept CTA. Glass card
+// (owner 2026-10-26: web pages keep the glass UI).
+export function AssessmentFirstSection({ assessmentFirst }) {
+  if (!assessmentFirst?.url) return null;
+  return (
+    <section data-glass="card" data-testid="assessment-first" aria-labelledby="assessment-first-title" style={estimateCard()}>
+      <h2 id="assessment-first-title" style={{ fontSize: 26, lineHeight: 1.25, fontWeight: 600, color: W.navy, margin: '0 0 8px' }}>
+        Book a free Waves Assessment first
+      </h2>
+      <p style={{ fontSize: 16, color: W.textBody, lineHeight: 1.5, margin: 0 }}>
+        Want us to look before you decide? A Waves technician can visit, walk the property with you and answer your
+        questions. It&rsquo;s free, and there&rsquo;s no commitment.
+      </p>
+      <a
+        href={assessmentFirst.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        data-glass-accent=""
+        style={{ ...estimateCallCtaStyle, display: 'block', width: 'fit-content', marginLeft: 'auto', marginRight: 'auto' }}
       >
         Pick a time
       </a>
@@ -9859,6 +9891,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={showAskBar && !isRegulatedCertificateSurface} />
           : null}
         {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
+        {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
         {/* Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS
             → /data ships `proposal`): the line items + totals + included-service
             terms the customer used to get only inside the emailed PDF. Rendered
@@ -10033,6 +10066,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             certificate surfaces excepted), so the action follows that. */}
         {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
         {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
+        {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -10644,6 +10678,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {glassContent ? null : aiPanelBlock}
 
           {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
+          {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
 
           {bookingContent}
 

@@ -2126,7 +2126,12 @@ function parseCommitBody(body) {
 
 // Phase 2 — createSelfBooking with the assessment's internal callbackVisit
 // (see the handler's phase-2 note for the lane-dedupe contract).
-async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe }) {
+// `source` and `alertLabel` default to this page's; the estimate-token page (estimate-assessment-public.js) passes its
+// own and no leadDedupe (its dedupe is the per-customer assessment lane below).
+async function bookAssessmentVisit({
+  booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe,
+  source = 'inspection_link', alertLabel = '🔁 Free consultation self-booked:', estimateGuard = null,
+}) {
   const { createSelfBooking } = booking._internals;
   return createSelfBooking({
     slot_date: date,
@@ -2136,7 +2141,7 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
     // The customer-VISIBLE `notes` column stays generic — the free-text
     // note rides internal_notes below (never customer/tech visible notes).
     customer_notes: null,
-    source: 'inspection_link',
+    source,
     // Server-resolved trust context — the token proved the lead's identity.
     authedCustomer: custRow,
     payAtVisit: false,
@@ -2157,8 +2162,10 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
       // refuses (409) under its customer fence if the customer's stored pin
       // has moved since (Codex #4737 r5 P1).
       expectedLocation: bookingLocation,
-      alertLabel: '🔁 Free consultation self-booked:',
+      alertLabel,
       leadDedupe,
+      // The estimate-token page's in-transaction re-check (estimate-assessment-public.js); absent for a lead link.
+      ...(estimateGuard ? { estimateGuard } : {}),
     },
   });
 }
@@ -2651,6 +2658,24 @@ router._internals = {
   computeConsultationSlotsForLead,
   currentBookingState,
   bookingAddressInputs,
+  // The estimate-token booking page (estimate-assessment-public.js) books the same Waves Assessment with this page's
+  // own catalog, window, availability, slot match, commit and success shape.
+  ASSESSMENT_EXPECTED_IDENTITY,
+  addressDisplay,
+  maskPhone,
+  bookingRange,
+  searchParseOpts,
+  loadAssessmentCatalog,
+  buildAvailabilityForLead,
+  shapeAvailability,
+  findSlotIn,
+  commitWindowFailure,
+  parseCommitBody,
+  findOpenVisit,
+  visitShape,
+  rescheduleUrlFor,
+  bookAssessmentVisit,
+  finishCommittedBooking,
 };
 
 router._test = {

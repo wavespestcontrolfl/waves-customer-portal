@@ -278,7 +278,8 @@ module.exports = {
   // The one rule for "the lead this estimate belongs to" (also read by the
   // email division's payload builders).
   linkedLeadIdFor,
-  // The one "same property" rule (also the commercial first visit's signed-premises check, commercial-first-visit.js).
+  // The one "same property" rule (also the commercial first visit's signed-premises check, commercial-first-visit.js,
+  // and the estimate-token assessment page's, estimate-assessment-public.js).
   sameProperty,
   PROBE_BUDGET_MS,
   FINAL_CHECK_SNAPSHOT,

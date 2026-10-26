@@ -2510,8 +2510,8 @@ async function createSelfBooking(payload = {}) {
     // callback — the visit carries the server-resolved per-visit price and
     // invoices on completion. callbackVisit.estimateGuard ({ estimateId,
     // revalidate(trx) }): a booking made from an estimate's page
-    // (commercial-first-visit.js) re-checks that estimate inside the booking
-    // transaction (see the lock below).
+    // (commercial-first-visit.js, estimate-assessment-public.js) re-checks
+    // that estimate inside the booking transaction (see the lock below).
     const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
       && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
       ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
@@ -4036,8 +4036,8 @@ async function createSelfBooking(payload = {}) {
           });
         }
       }
-      // callbackVisit.estimateGuard (a booking from an estimate's page,
-      // commercial-first-visit.js): a per-estimate
+      // callbackVisit.estimateGuard (a booking from an estimate's page:
+      // commercial-first-visit.js, estimate-assessment-public.js): a per-estimate
       // lock taken after every shared rung and the lane/lead locks (only these
       // callers take the namespace, and it is the terminal lock, so no cycle),
       // then the caller's re-check on THIS transaction: 'booked' when the one
