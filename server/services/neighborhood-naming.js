@@ -122,13 +122,18 @@ async function countyPass({ lookup, platLookup, addressLookup, nowIso }) {
     }
     failuresInARow = 0;
     const recheck = Boolean(home.neighborhood_checked_at);
-    const { status } = await db.transaction((trx) => resolvePropertyNeighborhood(home, {
+    const { status, zipOnly } = await db.transaction((trx) => resolvePropertyNeighborhood(home, {
       conn: trx, lookup: async () => parcel, onlyUnchecked: !recheck, recheck,
     }));
     tally[status] = (tally[status] || 0) + 1;
     // The county answered without a home to link: it waits a day. A claim lost
     // to a concurrent writer (already_checked, stale_lookup) is simply seen again.
-    if (['no_name', 'no_parcel', 'situs_mismatch'].includes(status)) await stampNaming(home, { county_at: nowIso, county_answered: true });
+    // A lot that differs only by ZIP is kept on the row for the office's list
+    // (unplacedHomes); any other answer clears it.
+    if (['no_name', 'no_parcel', 'situs_mismatch'].includes(status)) {
+      const zipMismatch = zipOnly ? { situs_zip: zipOnly.situsZip, county: zipOnly.county, subdivision: zipOnly.subdivision } : null;
+      await stampNaming(home, { county_at: nowIso, county_answered: true, zip_mismatch: zipMismatch });
+    }
   }
   return tally;
 }
@@ -257,4 +262,44 @@ async function runNamingPass({
   return { county, caller };
 }
 
-module.exports = { runNamingPass, callerCommunityName, linkFromCaller };
+// ---- homes not placed (GATE_NEIGHBORHOOD_UNPLACED, owner ruling 2026-10-26) ----
+// For the office's list on the Gate codes page: live homes with no
+// neighborhood where the county's lot at the pin carries the home's number and
+// street under another ZIP (stamped by the county pass, for the current
+// address only), and live homes with no neighborhood whose customer saved a
+// gate code (it reaches only that customer's stops until the home is placed).
+// An office decision (neighborhood_source 'office', linked or cleared) is out:
+// liveHomes leaves it out. Nothing is linked here.
+const UNPLACED_LIMIT = 300;
+const ZIP_MISMATCH_SQL = `CASE WHEN ${FRESH_SQL} AND jsonb_typeof(p.neighborhood_naming->'zip_mismatch') = 'object'
+  THEN p.neighborhood_naming->'zip_mismatch' END`;
+const SAVED_CODE_SQL = `EXISTS (SELECT 1 FROM property_preferences pp
+  WHERE pp.customer_id = p.customer_id AND btrim(coalesce(pp.neighborhood_gate_code, '')) <> '')`;
+
+async function unplacedHomes() {
+  const rows = await liveHomes()
+    .whereNull('p.neighborhood_id')
+    .where((w) => w.whereRaw(`(${ZIP_MISMATCH_SQL}) IS NOT NULL`).orWhereRaw(SAVED_CODE_SQL))
+    .select('p.id', 'p.customer_id', 'p.address_line1', 'p.city', 'p.zip', 'c.first_name', 'c.last_name',
+      db.raw(`${ZIP_MISMATCH_SQL} AS zip_mismatch`), db.raw(`${SAVED_CODE_SQL} AS saved_code`))
+    .orderByRaw(`${SAVED_CODE_SQL} DESC, p.address_line1, p.id`)
+    .limit(UNPLACED_LIMIT);
+  return rows.map((r) => {
+    const zm = r.zip_mismatch;
+    return {
+      propertyId: r.id,
+      customerId: r.customer_id,
+      customerName: [r.first_name, r.last_name].filter(Boolean).join(' ') || null,
+      address: [r.address_line1, r.city].filter(Boolean).join(', ') || null,
+      zip: r.zip || null,
+      savedCode: r.saved_code === true,
+      countyLot: zm ? {
+        zip: zm.situs_zip || null,
+        county: zm.county || null,
+        community: neighborhoodNameFromSubdivision(zm.subdivision),
+      } : null,
+    };
+  });
+}
+
+module.exports = { runNamingPass, callerCommunityName, linkFromCaller, unplacedHomes };
