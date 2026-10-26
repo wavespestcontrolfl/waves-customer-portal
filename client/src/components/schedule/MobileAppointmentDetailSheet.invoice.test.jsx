@@ -5,6 +5,8 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import MobileAppointmentDetailSheet from './MobileAppointmentDetailSheet';
 
+window.scrollTo = vi.fn();
+
 vi.mock('./MobileCustomerDetailSheet', () => ({ default: () => null }));
 vi.mock('./RainOutSheet', () => ({ default: () => null }));
 vi.mock('./EstimateProvenanceCard', () => ({ default: () => null }));

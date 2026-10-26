@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -45,6 +46,46 @@ function Harness() {
   );
 }
 
+function LegacyPortaledDialog({ onClose }) {
+  return createPortal(
+    <div role="dialog" aria-label="Legacy portaled dialog">
+      <button>Legacy first</button>
+      <button onClick={onClose}>Close legacy</button>
+    </div>,
+    document.body,
+  );
+}
+
+function SuspendedOuterDialog({ onClose }) {
+  const [nested, setNested] = useState(false);
+  const ref = useModalFocus(true, null, !nested);
+  return (
+    <div ref={ref} role="dialog" aria-label="Suspended outer dialog">
+      <button>Outer first</button>
+      <button
+        onClick={(event) => {
+          event.currentTarget.focus({ preventScroll: true });
+          setNested(true);
+        }}
+      >
+        Open legacy
+      </button>
+      <button onClick={onClose}>Close suspended outer</button>
+      {nested && <LegacyPortaledDialog onClose={() => setNested(false)} />}
+    </div>
+  );
+}
+
+function SuspendedHarness() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)}>Open suspended outer</button>
+      {open && <SuspendedOuterDialog onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
 describe('useModalFocus', () => {
   it('keeps every Tab step in the top modal and skips unavailable controls', async () => {
     render(<Harness />);
@@ -82,6 +123,31 @@ describe('useModalFocus', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close nested' }));
     await waitFor(() => expect(nestedOpener).toHaveFocus());
     fireEvent.click(screen.getByRole('button', { name: 'Close outer' }));
+    await waitFor(() => expect(originalOpener).toHaveFocus());
+  });
+
+  it('suspends containment for a legacy portaled child, then resumes it without losing the original opener', async () => {
+    render(<SuspendedHarness />);
+    const originalOpener = screen.getByRole('button', { name: 'Open suspended outer' });
+    originalOpener.focus();
+    fireEvent.click(originalOpener);
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Suspended outer dialog' })).toHaveFocus());
+
+    const nestedOpener = screen.getByRole('button', { name: 'Open legacy' });
+    fireEvent.click(nestedOpener);
+    const legacyFirst = screen.getByRole('button', { name: 'Legacy first' });
+    legacyFirst.focus();
+    const childTab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    document.dispatchEvent(childTab);
+    expect(childTab.defaultPrevented).toBe(false);
+    expect(legacyFirst).toHaveFocus();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close legacy' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Legacy portaled dialog' })).not.toBeInTheDocument());
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(screen.getByRole('button', { name: 'Outer first' })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close suspended outer' }));
     await waitFor(() => expect(originalOpener).toHaveFocus());
   });
 

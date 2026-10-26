@@ -174,7 +174,7 @@ function DriveLine({ service, statusById }) {
   return (
     <div
       className={'flex items-center u-nums font-bold border-b border-hairline ' + 'border-zinc-200 ' + (late ? 'bg-alert-bg text-alert-fg' : 'bg-zinc-50 text-ink-tertiary')}
-      style={{ fontSize: 13, padding: '5px 14px 5px 22px', gap: 8 }}
+      style={{ fontSize: 14, padding: '5px 14px 5px 22px', gap: 8 }}
     >
       <span aria-hidden style={{ width: 2, height: 14, borderRadius: 1, background: 'currentColor', opacity: late ? 1 : 0.4, flexShrink: 0 }} />
       <span className="min-w-0">
@@ -219,7 +219,7 @@ function dayDriveLabel(services) {
 
 // The word under a card button's icon.
 function ButtonLabel({ children }) {
-  return <span className="block max-w-full truncate leading-tight" style={{ fontSize: 14 }}>{children}</span>;
+  return <span className="block max-w-full text-center leading-tight" style={{ fontSize: 14 }}>{children}</span>;
 }
 
 function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
@@ -279,10 +279,10 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   // Icon over a one-word label (owner 2026-10-05), so a new tech can tell
   // the buttons apart.
   const actionBtnClass =
-    'inline-flex flex-col items-center justify-center flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
+    'inline-flex flex-col items-center justify-center border-hairline border-solid border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
   const primaryBtnClass =
-    'inline-flex flex-col items-center justify-center flex-1 min-w-0 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
-  const btnStyle = { height: 56, gap: 2 };
+    'inline-flex flex-col items-center justify-center border-hairline border-solid border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
+  const btnStyle = { height: 56, gap: 2, flex: '1 1 72px', minWidth: 72 };
 
   return (
     <div
@@ -295,12 +295,16 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
       <div className="flex-1 min-w-0" style={{ padding: '12px 14px' }}>
         <button
           type="button"
-          onClick={() => { if (!longPressTriggered.current) onEdit?.(service); }}
+          onClick={(event) => {
+            if (longPressTriggered.current) return;
+            event.currentTarget.focus({ preventScroll: true });
+            onEdit?.(service);
+          }}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerCancel}
           onContextMenu={(e) => e.preventDefault()}
-          className="block w-full text-left bg-white active:bg-zinc-50 u-focus-ring"
+          className="block w-full border-0 text-left bg-white active:bg-zinc-50 u-focus-ring"
         >
           <span className="flex items-baseline gap-2 flex-wrap">
             <span className={'font-medium ' + (done ? 'text-ink-tertiary' : 'text-zinc-900')} style={{ fontSize: 15 }}>
@@ -317,11 +321,11 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
               <span
                 className="inline-flex items-center rounded-full uppercase tracking-label font-medium"
                 style={{
-                  height: 18,
-                  padding: '0 8px',
+                  minHeight: 24,
+                  padding: '2px 8px',
                   background: '#DCFCE7',
                   color: '#166534',
-                  fontSize: 10,
+                  fontSize: 14,
                 }}
                 title={service.prepaidSeriesContext?.totalCoveredVisits > 1
                   ? `Visit ${service.prepaidSeriesContext.visitNumber || '?'} of ${service.prepaidSeriesContext.totalVisitsInSeries} on a prepaid plan`
@@ -334,7 +338,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
           {service.address && (
             <span
               className="block text-ink-secondary"
-              style={{ fontSize: 13, marginTop: 2, wordBreak: 'break-word' }}
+              style={{ fontSize: 14, marginTop: 2, wordBreak: 'break-word' }}
             >
               {service.address}
             </span>
@@ -342,14 +346,14 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
           {serviceDisplayName(service) && (
             <span
               className="block text-ink-secondary"
-              style={{ fontSize: 13, marginTop: 1 }}
+              style={{ fontSize: 14, marginTop: 1 }}
             >
               {serviceDisplayName(service)}
             </span>
           )}
           <span
             className="block u-nums text-ink-tertiary"
-            style={{ fontSize: 12, marginTop: 3 }}
+            style={{ fontSize: 14, marginTop: 3 }}
           >
             {formatWindow(service)}
             {/* Rain at this stop: its zone's hourly chance at the window-start
@@ -369,7 +373,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
         {hasActions && (
           <div className="flex items-stretch gap-2 flex-wrap" style={{ marginTop: 10 }}>
             {canAssignTechnician && (
-              <div className="relative flex flex-1 min-w-0" ref={techBtnRef}>
+              <div className="relative flex" style={{ flex: '1 1 72px', minWidth: 72 }} ref={techBtnRef}>
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); setShowTechPicker(!showTechPicker); }}
@@ -592,8 +596,8 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
   return (
     <section>
       <header
-        className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 flex items-center justify-between u-nums font-bold text-zinc-900"
-        style={{ padding: '8px 14px', height: 36, fontSize: 13, gap: 8 }}
+        className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 flex flex-wrap items-center justify-between u-nums font-medium text-zinc-900"
+        style={{ padding: '8px 14px', minHeight: 44, fontSize: 14, gap: 8 }}
       >
         {/* A week section names its day and carries that day's rain chance
             (the week feed stamps no per-stop figure); the day list's date
@@ -607,7 +611,7 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
             </span>
           )}
         </span>
-        <span className="whitespace-nowrap">
+        <span className="ml-auto text-right">
           {doneCount} done · {leftCount} left
           {openHours.length > 0 && ` · ${openHours.length} open ${openHours.length === 1 ? 'hr' : 'hrs'}`}
           {driveLabel && ` · ${driveLabel} driving`}
@@ -616,7 +620,7 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
       {rows.length === 0 ? (
         <div
           className="text-ink-tertiary italic"
-          style={{ padding: '14px', fontSize: 13 }}
+          style={{ padding: '14px', fontSize: 14 }}
         >
           No appointments
         </div>
@@ -707,7 +711,7 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
 
   if (mode === 'day') {
     return (
-      <div className="bg-white">
+      <div className="bg-white [&_button]:appearance-none">
         <DaySegment
           dateStr={date}
           services={services || []}
@@ -729,20 +733,20 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
 
   if (loading && !weekData) {
     return (
-      <div className="py-10 text-center text-13 text-ink-secondary">
+      <div className="py-10 text-center text-14 text-ink-secondary">
         Loading week…
       </div>
     );
   }
   if (error) {
     return (
-      <div className="py-10 text-center text-13 text-alert-fg">{error}</div>
+      <div className="py-10 text-center text-14 text-alert-fg">{error}</div>
     );
   }
 
   const days = weekData?.days || [];
   return (
-    <div className="bg-white">
+    <div className="bg-white [&_button]:appearance-none">
       {days.map((d) => (
         <DaySegment
           key={d.date}

@@ -3,7 +3,9 @@ import { useEffect, useRef } from 'react';
 // Shared focus management for the hand-rolled modals. On open: remembers the
 // trigger, moves focus into the dialog, and keeps Tab / Shift+Tab cycling
 // inside it. On close/unmount: restores focus to the remembered trigger.
-// Pass an onEscape callback to add the standard keyboard-close behavior.
+// Pass an onEscape callback to add the standard keyboard-close behavior. A
+// parent can pass containFocus=false while a legacy portaled child is open;
+// it stays registered for opener restoration without intercepting the child.
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -35,11 +37,13 @@ function isAvailable(element) {
 // dialogs are stacked (for example, an error alert over a form).
 const modalStack = [];
 
-export default function useModalFocus(active = true, onEscape = null) {
+export default function useModalFocus(active = true, onEscape = null, containFocus = true) {
   const dialogRef = useRef(null);
   const modalEntryRef = useRef({});
   const onEscapeRef = useRef(onEscape);
   onEscapeRef.current = onEscape;
+  const containFocusRef = useRef(containFocus);
+  containFocusRef.current = containFocus;
 
   // Capture the opener during render because an autoFocus child can move
   // focus before the passive effect runs.
@@ -90,6 +94,10 @@ export default function useModalFocus(active = true, onEscape = null) {
         return;
       }
       if (event.key !== 'Tab') return;
+      // A parent dialog can stay registered while a legacy portaled child is
+      // open. Suspending only containment preserves the parent's original
+      // opener for final close without pulling Tab behind the child overlay.
+      if (!containFocusRef.current) return;
 
       const focusable = getFocusable();
       if (focusable.length === 0) {
