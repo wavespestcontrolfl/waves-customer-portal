@@ -4529,6 +4529,18 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN (offset 8) — GATE_TECH_STAFF_GUARDS: close the "review this booking" notices whose
+  // visit no longer waits for office review (confirmed, cancelled, skipped, completed or gone), by
+  // whatever path. The emitter's own retire; gate off = no query. runExclusive: one sweep at a time.
+  cron.schedule('8,18,28,38,48,58 * * * *', async () => {
+    if (!require('../config/feature-gates').techStaffGuardsLive()) return;
+    try {
+      await runExclusive('tech-unreviewed-booking-close', () => require('./tech-unreviewed-booking-alert').closeResolved());
+    } catch (err) {
+      logger.error(`[tech-unreviewed-booking] close tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips

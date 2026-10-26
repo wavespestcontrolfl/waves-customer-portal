@@ -25,7 +25,12 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 const mockRaise = jest.fn(async () => ({ id: 1 }));
-jest.mock('../services/tech-unreviewed-booking-alert', () => ({ raiseForVisit: (...a) => mockRaise(...a), closeForVisit: jest.fn() }));
+jest.mock('../services/tech-unreviewed-booking-alert', () => ({
+  raiseForVisit: (...a) => mockRaise(...a),
+  closeForVisit: jest.fn(),
+  // The real rule: which bookings still wait for office review.
+  awaitingOfficeReview: jest.requireActual('../services/tech-unreviewed-booking-alert').awaitingOfficeReview,
+}));
 const mockTransition = jest.fn(async () => ({}));
 jest.mock('../services/job-status', () => ({ transitionJobStatus: (...a) => mockTransition(...a) }));
 const mockMarkEnRoute = jest.fn(async () => ({ ok: true, state: 'en_route', enRouteAt: 'now', smsSent: false }));
@@ -139,6 +144,16 @@ describe.each([['en-route', 'En Route'], ['on-site', 'On Site']])('%s tap on an 
     expect(mockActivate).toHaveBeenCalledTimes(1);
     expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ fromStatus: 'pending', toStatus: 'confirmed' }));
     expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('gate on, technician, a moved booking the office never reviewed (confirmed, not customer-confirmed): refused, one notice', async () => {
+    db.__state.visit = { ...pendingVoiceBooking('tech-2'), status: 'confirmed', customer_confirmed: false };
+    const res = await tap(leg);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('outbound_review_unconfirmed');
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(db.__state.updates).toEqual([]);
+    expect(mockRaise).toHaveBeenCalledTimes(1);
   });
 
   test('gate on, technician, booking already reviewed: the tap advances as usual, no notice', async () => {

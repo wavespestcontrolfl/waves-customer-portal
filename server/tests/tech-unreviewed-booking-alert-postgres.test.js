@@ -76,6 +76,28 @@ maybeDescribe('tech-unreviewed-booking-alert (live Postgres)', () => {
     expect(await rows(visit.id)).toHaveLength(0);
   });
 
+  test('a moved booking the office never reviewed (confirmed, not customer-confirmed) still raises its notice', async () => {
+    const visit = await newVisit();
+    await db('scheduled_services').where({ id: visit.id }).update({ status: 'confirmed', customer_confirmed: false });
+    await alert.raiseForVisit(visit, 'En Route');
+    expect(await rows(visit.id)).toHaveLength(1);
+  });
+
+  test('the close sweep closes a cancelled visit\'s notice done and leaves a still-pending one open', async () => {
+    const cancelled = await newVisit();
+    const pending = await newVisit(['Bo', 'Ray']);
+    await alert.raiseForVisit(cancelled, 'En Route');
+    await alert.raiseForVisit(pending, 'En Route');
+    await db('scheduled_services').where({ id: cancelled.id }).update({ status: 'cancelled' });
+    expect(await alert.closeResolved()).toBe(1);
+    const [closedRow] = await rows(cancelled.id);
+    expect(closedRow.done_at).not.toBeNull();
+    expect(closedRow.resolution).toBe('The visit was cancelled.');
+    const [openRow] = await rows(pending.id);
+    expect(openRow.done_at).toBeNull();
+    expect(await alert.closeResolved()).toBe(0);
+  });
+
   test('a second tap (either leg) rings nothing new', async () => {
     const visit = await newVisit();
     await alert.raiseForVisit(visit, 'En Route');
