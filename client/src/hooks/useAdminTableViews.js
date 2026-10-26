@@ -295,6 +295,9 @@ export function useAdminTableViews({ tableId, enabled, defaults, normalize, init
     window.addEventListener("focus", requestRefresh);
     requestRefresh();
     return () => {
+      catalogRequestRef.current += 1;
+      applyRequestRef.current += 1;
+      scopeGenerationRef.current += 1;
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("focus", requestRefresh);
       if (channelRef.current === channel) channelRef.current = null;
