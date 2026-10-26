@@ -3,7 +3,7 @@ import { Gavel } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
-  ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Table, TBody, TD, TH, THead, Textarea, TR, UiSurface,
+  ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Table, TableColumnPicker, TablePagination, TableToolbar, TBody, TD, TH, THead, Textarea, TR, UiSurface,
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
@@ -46,6 +46,23 @@ const FILTERS = [
   { key: "decided", label: "Decided" },
   { key: "all", label: "All" },
 ];
+const BID_COLUMNS = [
+  { id: "project", label: "Project / action", required: true },
+  { id: "buyer", label: "Buyer" },
+  { id: "source", label: "Source" },
+  { id: "due", label: "Due" },
+  { id: "deadline", label: "Deadline" },
+  { id: "status", label: "Status" },
+];
+const ALL_BID_COLUMNS = BID_COLUMNS.map((column) => column.id);
+const BID_COLUMN_WIDTHS = { project: 280, buyer: 180, source: 160, due: 240, deadline: 120, status: 120 };
+const SORTS = [
+  { value: "workflow", label: "Default order" },
+  { value: "due", label: "Due soonest" },
+  { value: "project", label: "Project A–Z" },
+  { value: "buyer", label: "Buyer A–Z" },
+];
+const DEFAULT_PAGE_SIZE = 100;
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -82,6 +99,39 @@ const titleOf = (bid) => (bid.project_title
   : bid.first_subject || "(no subject)");
 const buyerOf = (bid) => bid.gc_or_agency || bid.buyer_name || bid.first_from_name || bid.first_from_address || "";
 const emailHref = (emailId) => `/admin/communications?id=${encodeURIComponent(emailId)}#tab=email`;
+const searchTextOf = (bid) => [
+  bid.project_title,
+  bid.package_name,
+  bid.first_subject,
+  bid.gc_or_agency,
+  bid.buyer_name,
+  bid.buyer_email,
+  bid.first_from_name,
+  bid.first_from_address,
+  SOURCE_LABEL[bid.source],
+  bid.source,
+  bid.solicitation_number,
+  bid.location,
+].filter(Boolean).join(" ").toLocaleLowerCase();
+
+function sortBids(rows, sort) {
+  if (sort === "workflow") return rows;
+  return rows.map((bid, index) => ({ bid, index })).sort((left, right) => {
+    if (sort === "due") {
+      const leftDue = left.bid.due_at ? Date.parse(left.bid.due_at) : Number.POSITIVE_INFINITY;
+      const rightDue = right.bid.due_at ? Date.parse(right.bid.due_at) : Number.POSITIVE_INFINITY;
+      const safeLeftDue = Number.isFinite(leftDue) ? leftDue : Number.POSITIVE_INFINITY;
+      const safeRightDue = Number.isFinite(rightDue) ? rightDue : Number.POSITIVE_INFINITY;
+      if (safeLeftDue !== safeRightDue) return safeLeftDue - safeRightDue;
+    } else {
+      const leftText = sort === "project" ? titleOf(left.bid) : buyerOf(left.bid);
+      const rightText = sort === "project" ? titleOf(right.bid) : buyerOf(right.bid);
+      const compared = leftText.localeCompare(rightText, undefined, { numeric: true, sensitivity: "base" });
+      if (compared) return compared;
+    }
+    return left.index - right.index;
+  }).map(({ bid }) => bid);
+}
 
 function DueCell({ bid }) {
   if (!bid.due_at) return <span className="text-ink-secondary" title="No due date was read from the email">Not read</span>;
@@ -96,17 +146,25 @@ function DueCell({ bid }) {
   );
 }
 
-function BidTable({ bids, selectedId, onSelect, checklistLive }) {
+function BidTable({ bids, selectedId, onSelect, checklistLive, visibleColumns = ALL_BID_COLUMNS, adaptiveColumns = false }) {
+  const visible = new Set(visibleColumns);
+  const adaptiveMinWidth = visibleColumns.reduce((total, id) => total + (BID_COLUMN_WIDTHS[id] || 0), 0);
   return (
-    <Table layout="records" containerClassName="bid-desk-table" className="table-fixed min-[1101px]:min-w-[1100px]" aria-label="Bid desk projects">
+    <Table
+      layout="records"
+      containerClassName="bid-desk-table"
+      className={`table-fixed ${adaptiveColumns ? "min-[1101px]:min-w-[var(--bid-desk-table-min-width)]" : "min-[1101px]:min-w-[1100px]"}`}
+      style={adaptiveColumns ? { "--bid-desk-table-min-width": `${adaptiveMinWidth}px` } : undefined}
+      aria-label="Bid desk projects"
+    >
       <THead>
         <TR>
           <TH scope="col">Project</TH>
-          <TH scope="col" className="w-[180px]">Buyer</TH>
-          <TH scope="col" className="w-[160px]">Source</TH>
-          <TH scope="col" className="w-[240px]">Due</TH>
-          <TH scope="col" className="w-[120px]">Deadline</TH>
-          <TH scope="col" className="w-[120px]">Status</TH>
+          {visible.has("buyer") && <TH scope="col" className="w-[180px]">Buyer</TH>}
+          {visible.has("source") && <TH scope="col" className="w-[160px]">Source</TH>}
+          {visible.has("due") && <TH scope="col" className="w-[240px]">Due</TH>}
+          {visible.has("deadline") && <TH scope="col" className="w-[120px]">Deadline</TH>}
+          {visible.has("status") && <TH scope="col" className="w-[120px]">Status</TH>}
         </TR>
       </THead>
       <TBody>
@@ -134,11 +192,11 @@ function BidTable({ bids, selectedId, onSelect, checklistLive }) {
                 )}
               </div>
             </TD>
-            <TD data-label="Buyer">{buyerOf(bid)}</TD>
-            <TD data-label="Source">{SOURCE_LABEL[bid.source] || bid.source}</TD>
-            <TD data-label="Due" className="bid-desk-due-cell"><DueCell bid={bid} /></TD>
-            <TD data-label="Deadline" nums className="whitespace-nowrap">{OPEN.includes(bid.status) ? daysText(bid.days_left) : ""}</TD>
-            <TD data-label="Status" className="whitespace-nowrap">{STATUS_LABEL[bid.status] || bid.status}</TD>
+            {visible.has("buyer") && <TD data-label="Buyer">{buyerOf(bid)}</TD>}
+            {visible.has("source") && <TD data-label="Source">{SOURCE_LABEL[bid.source] || bid.source}</TD>}
+            {visible.has("due") && <TD data-label="Due" className="bid-desk-due-cell"><DueCell bid={bid} /></TD>}
+            {visible.has("deadline") && <TD data-label="Deadline" nums className="whitespace-nowrap">{OPEN.includes(bid.status) ? daysText(bid.days_left) : ""}</TD>}
+            {visible.has("status") && <TD data-label="Status" className="whitespace-nowrap">{STATUS_LABEL[bid.status] || bid.status}</TD>}
           </TR>
         ))}
       </TBody>
@@ -314,6 +372,98 @@ function MarkEmail({ onMarked }) {
   );
 }
 
+function BidDeskControls({
+  enhanced, search, onSearchChange, filter, onFilterChange, showEarlier, onEarlierChange,
+  sort, onSortChange, visibleColumns, onColumnsChange, onReset, canReset, loadedCount,
+}) {
+  if (!enhanced) {
+    return (
+      <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Filter">
+        {FILTERS.map(({ key, label }) => (
+          <Button key={key} size="sm" variant={filter === key ? "primary" : "secondary"} aria-pressed={filter === key} onClick={() => onFilterChange(key)}>
+            {label}
+          </Button>
+        ))}
+        <Button size="sm" variant="ghost" aria-pressed={showEarlier} onClick={() => onEarlierChange(!showEarlier)}>
+          {showEarlier ? "Hide earlier mail" : "Show earlier mail"}
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-3 grid gap-2">
+      <TableToolbar
+        label="Bid Desk"
+        search={search}
+        onSearchChange={onSearchChange}
+        searchPlaceholder="Search loaded bids"
+        onReset={onReset}
+        canReset={canReset}
+      >
+        <Field id="bid-table-status" label="Status" className="w-36">
+          <Select value={filter} onChange={(event) => onFilterChange(event.target.value)}>
+            {FILTERS.map(({ key, label }) => <option key={key} value={key}>{label}</option>)}
+          </Select>
+        </Field>
+        <Field id="bid-table-earlier" label="Earlier mail" className="w-44">
+          <Select value={showEarlier ? "show" : "hide"} onChange={(event) => onEarlierChange(event.target.value === "show")}>
+            <option value="show">Show earlier mail</option>
+            <option value="hide">Hide earlier mail</option>
+          </Select>
+        </Field>
+        <Field id="bid-table-sort" label="Sort" className="w-48">
+          <Select value={sort} onChange={(event) => onSortChange(event.target.value)}>
+            {SORTS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+          </Select>
+        </Field>
+        <TableColumnPicker label="Bid Desk" columns={BID_COLUMNS} visibleColumns={visibleColumns} onChange={onColumnsChange} />
+      </TableToolbar>
+      <p className="text-ui-caption text-ink-secondary">Search, filters, sorting, and page counts apply to the loaded bids.</p>
+      {loadedCount >= 500 && (
+        <p className="text-ui-body text-ink-secondary">Only the first 500 bids are loaded. Search and filters apply to this set.</p>
+      )}
+    </div>
+  );
+}
+
+function BidDeskResults({
+  error, loading, loadedCount, shown, displayed, selectedId, onSelect, checklistLive, enhanced,
+  visibleColumns, page, totalPages, pageSize, onPageChange, onPageSizeChange,
+}) {
+  return (
+    <>
+      {error.text && <ActionFeedback error onRetry={error.onRetry} className="mb-3">{error.text}</ActionFeedback>}
+      {loading && !loadedCount && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading bids…</div>}
+      {!loading && !error.text && shown.length === 0 && (
+        <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">No bids here.</div>
+      )}
+      {displayed.length > 0 && (
+        <BidTable
+          bids={displayed}
+          selectedId={selectedId}
+          onSelect={onSelect}
+          checklistLive={checklistLive}
+          visibleColumns={enhanced ? visibleColumns : ALL_BID_COLUMNS}
+          adaptiveColumns={enhanced}
+        />
+      )}
+      {enhanced && !loading && !error.text && (
+        <TablePagination
+          label="Bid Desk"
+          page={page}
+          totalPages={totalPages}
+          total={shown.length}
+          pageSize={pageSize}
+          onPageChange={onPageChange}
+          onPageSizeChange={onPageSizeChange}
+          itemLabel="loaded bids"
+          pageSizeOptions={[25, 50, 100, 500]}
+        />
+      )}
+    </>
+  );
+}
+
 export default function BidDeskPage({ embedded = false }) {
   const [params, setParams] = useSearchParams();
   const [bids, setBids] = useState([]);
@@ -322,6 +472,12 @@ export default function BidDeskPage({ embedded = false }) {
   const [error, setError] = useState({ text: "", off: false });
   const [filter, setFilter] = useState("open");
   const [showEarlier, setShowEarlier] = useState(true);
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState("workflow");
+  const [visibleColumns, setVisibleColumns] = useState(ALL_BID_COLUMNS);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const enhancedControls = params.get("tableControls") === "1";
   const selectedId = params.get("bid") || "";
 
   const load = useCallback(async () => {
@@ -347,12 +503,31 @@ export default function BidDeskPage({ embedded = false }) {
 
   const select = (id) => setParams((prev) => { const next = new URLSearchParams(prev); if (id) next.set("bid", id); else next.delete("bid"); return next; });
 
-  const shown = useMemo(() => bids.filter((bid) => {
-    if (!showEarlier && bid.historical) return false;
-    if (filter === "open") return OPEN.includes(bid.status);
-    if (filter === "decided") return !OPEN.includes(bid.status);
-    return true;
-  }), [bids, filter, showEarlier]);
+  const shown = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    const filtered = bids.filter((bid) => {
+      if (!showEarlier && bid.historical) return false;
+      if (filter === "open" && !OPEN.includes(bid.status)) return false;
+      if (filter === "decided" && OPEN.includes(bid.status)) return false;
+      return !enhancedControls || !query || searchTextOf(bid).includes(query);
+    });
+    return enhancedControls ? sortBids(filtered, sort) : filtered;
+  }, [bids, enhancedControls, filter, search, showEarlier, sort]);
+  const totalPages = Math.max(1, Math.ceil(shown.length / pageSize));
+  useEffect(() => {
+    if (!enhancedControls) return;
+    setPage((current) => Math.min(Math.max(1, current), totalPages));
+  }, [enhancedControls, totalPages]);
+  const displayed = enhancedControls
+    ? shown.slice((page - 1) * pageSize, page * pageSize)
+    : shown;
+  const resetEnhancedControls = () => {
+    setSearch("");
+    setFilter("open");
+    setShowEarlier(true);
+    setPage(1);
+  };
+  const enhancedControlsChanged = Boolean(search) || filter !== "open" || !showEarlier;
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
@@ -372,23 +547,40 @@ export default function BidDeskPage({ embedded = false }) {
         <>
           <MarkEmail onMarked={(id) => { load(); if (id) select(id); }} />
 
-          <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Filter">
-            {FILTERS.map(({ key, label }) => (
-              <Button key={key} size="sm" variant={filter === key ? "primary" : "secondary"} aria-pressed={filter === key} onClick={() => setFilter(key)}>
-                {label}
-              </Button>
-            ))}
-            <Button size="sm" variant="ghost" aria-pressed={showEarlier} onClick={() => setShowEarlier((v) => !v)}>
-              {showEarlier ? "Hide earlier mail" : "Show earlier mail"}
-            </Button>
-          </div>
+          <BidDeskControls
+            enhanced={enhancedControls}
+            search={search}
+            onSearchChange={(value) => { setSearch(value); setPage(1); }}
+            filter={filter}
+            onFilterChange={(value) => { setFilter(value); setPage(1); }}
+            showEarlier={showEarlier}
+            onEarlierChange={(value) => { setShowEarlier(value); setPage(1); }}
+            sort={sort}
+            onSortChange={(value) => { setSort(value); setPage(1); }}
+            visibleColumns={visibleColumns}
+            onColumnsChange={setVisibleColumns}
+            onReset={resetEnhancedControls}
+            canReset={enhancedControlsChanged}
+            loadedCount={bids.length}
+          />
 
-          {error.text && <ActionFeedback error onRetry={load} className="mb-3">{error.text}</ActionFeedback>}
-          {loading && !bids.length && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading bids…</div>}
-          {!loading && !error.text && shown.length === 0 && (
-            <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">No bids here.</div>
-          )}
-          {shown.length > 0 && <BidTable bids={shown} selectedId={selectedId} onSelect={select} checklistLive={checklistLive} />}
+          <BidDeskResults
+            error={{ ...error, onRetry: load }}
+            loading={loading}
+            loadedCount={bids.length}
+            shown={shown}
+            displayed={displayed}
+            selectedId={selectedId}
+            onSelect={select}
+            checklistLive={checklistLive}
+            enhanced={enhancedControls}
+            visibleColumns={visibleColumns}
+            page={page}
+            totalPages={totalPages}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={(size) => { setPageSize(size); setPage(1); }}
+          />
 
           {selectedId && (
             <div className="mt-4">
