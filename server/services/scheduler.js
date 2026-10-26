@@ -6948,8 +6948,8 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('45 5 * * *', async () => {
     try {
-      const { runWaveGuardInventoryForecastCheck } = require('./waveguard-inventory-forecast');
-      const result = await runWaveGuardInventoryForecastCheck({ days: 14, limit: 150, source: 'scheduled_daily' });
+      const { runWaveGuardInventoryForecastCheck, DEFAULT_FORECAST_DAYS } = require('./waveguard-inventory-forecast');
+      const result = await runWaveGuardInventoryForecastCheck({ days: DEFAULT_FORECAST_DAYS, limit: 150, source: 'scheduled_daily' });
       if (!result.skipped) {
         logger.info(`[waveguard-inventory-forecast] ok=${result.ok || 0} warning=${result.warning || 0} short=${result.short || 0} unit_mismatch=${result.unit_mismatch || 0} not_tracked=${result.not_tracked || 0} products=${result.productCount || 0}`);
       }
