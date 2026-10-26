@@ -3082,6 +3082,19 @@ function EstimatePipelineViewV2({
                                   outlineServiceLine: "tree_shrub",
                                 }),
                             },
+                            // GATE_PEST_OUTLINE: the server marks an estimate with a recurring pest line.
+                            e.pestOutlineAvailable && {
+                              key: "pest-outline",
+                              label: "Pest service outline",
+                              icon: (
+                                <ClipboardList size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                setOutlineTarget({
+                                  ...e,
+                                  outlineServiceLine: "pest_control",
+                                }),
+                            },
                             {
                               key: "proposal",
                               label: "Commercial proposal",
@@ -3868,6 +3881,14 @@ export function MobileEstimateRow({
               icon: <ClipboardList size={16} strokeWidth={1.75} />,
               onClick: () =>
                 onLawnOutline?.({ ...estimate, outlineServiceLine: "tree_shrub" }),
+            },
+            // GATE_PEST_OUTLINE: the same composer, opened on the Pest Control outline.
+            estimate.pestOutlineAvailable && {
+              key: "pest-outline",
+              label: "Pest service outline",
+              icon: <ClipboardList size={16} strokeWidth={1.75} />,
+              onClick: () =>
+                onLawnOutline?.({ ...estimate, outlineServiceLine: "pest_control" }),
             },
             {
               key: "audit",

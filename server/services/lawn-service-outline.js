@@ -1332,9 +1332,10 @@ module.exports = {
   resolveJurisdictionId,
   resolveSeasonBand,
   validateContent,
-  // Shared with the Tree & Shrub outline (tree-shrub-service-outline.js, GATE_TS_OUTLINE).
+  // Shared with the Tree & Shrub and Pest Control outlines (tree-shrub-service-outline.js, pest-service-outline.js).
   V13_COPY,
   WATERING_ORDER,
+  activeIngredientText,
   addressSummary,
   estimateSnapshot,
   estimateViewPath,

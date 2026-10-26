@@ -22,6 +22,7 @@ const ESTIMATE = {
   address: '100 Test Way, Sarasota',
   lawnServiceOutline: { id: 'lawn-packet' },
   treeShrubServiceOutline: { id: 'ts-packet' },
+  pestServiceOutline: { id: 'pest-packet' },
 };
 
 const previewBody = (adminFetch) => JSON.parse(adminFetch.mock.calls.find(([path]) => path === '/admin/service-outlines/preview')[1].body);
@@ -43,6 +44,16 @@ describe('ServiceOutlineComposerModal', () => {
     expect(body).not.toHaveProperty('turfType');
     expect(screen.queryByText('Turf type')).not.toBeInTheDocument();
     expect(screen.queryByText('Include approved product cards')).not.toBeInTheDocument();
+  });
+
+  it('a Pest Control open asks for the Pest Control outline and reads its own saved packet', async () => {
+    const adminFetch = fakeAdminFetch();
+    render(<ServiceOutlineComposerModal estimate={{ ...ESTIMATE, outlineServiceLine: 'pest_control' }} adminFetch={adminFetch} onClose={() => {}} />);
+    expect(screen.getByRole('heading', { name: 'Pest service outline' })).toBeInTheDocument();
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/service-outlines/pest-packet'));
+    expect(adminFetch).not.toHaveBeenCalledWith('/admin/service-outlines/ts-packet');
+    expect(previewBody(adminFetch)).toEqual(expect.objectContaining({ serviceLine: 'pest_control', includeProductCards: false }));
+    expect(screen.queryByText('Turf type')).not.toBeInTheDocument();
   });
 
   it('a lawn open is the lawn composer as before', async () => {

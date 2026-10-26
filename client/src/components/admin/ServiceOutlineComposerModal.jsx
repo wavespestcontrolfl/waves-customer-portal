@@ -26,6 +26,13 @@ const TURF_OPTIONS = [
   { value: "unknown", label: "Unknown" },
 ];
 
+// The outline programs beside the lawn outline (server/services/service-outline-programs.js): the composer's heading and
+// the Estimates row key that holds the program's newest outline.
+const OUTLINE_PROGRAMS = {
+  tree_shrub: { heading: "Tree & Shrub service outline", savedKey: "treeShrubServiceOutline" },
+  pest_control: { heading: "Pest service outline", savedKey: "pestServiceOutline" },
+};
+
 function statusTone(status) {
   if (status === "blocked") return "alert";
   return status === "passed" ? "strong" : "neutral";
@@ -100,10 +107,10 @@ function timeAgo(value) {
 }
 
 export default function ServiceOutlineComposerModal({ estimate, adminFetch, onClose }) {
-  // The Estimates list opens a Tree & Shrub outline (GATE_TS_OUTLINE) with outlineServiceLine "tree_shrub"; it has no
-  // grass and no product cards. Every other open is the lawn outline.
-  const treeShrub = estimate?.outlineServiceLine === "tree_shrub";
-  const savedOutline = treeShrub ? estimate?.treeShrubServiceOutline : estimate?.lawnServiceOutline;
+  // The Estimates list opens a program's outline (Tree & Shrub GATE_TS_OUTLINE, Pest Control GATE_PEST_OUTLINE) with its
+  // outlineServiceLine; a program outline has no grass and no product cards. Every other open is the lawn outline.
+  const program = OUTLINE_PROGRAMS[estimate?.outlineServiceLine] || null;
+  const savedOutline = program ? estimate?.[program.savedKey] : estimate?.lawnServiceOutline;
   const [turfType, setTurfType] = useState("");
   const [detailLevel, setDetailLevel] = useState("standard");
   const [includeProductCards, setIncludeProductCards] = useState(false);
@@ -121,15 +128,15 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
 
   const requestBody = useMemo(() => ({
     estimateId: estimate?.id,
-    ...(treeShrub ? { serviceLine: "tree_shrub" } : { turfType: turfType || undefined }),
+    ...(program ? { serviceLine: estimate.outlineServiceLine } : { turfType: turfType || undefined }),
     detailLevel,
-    includeProductCards: treeShrub ? false : includeProductCards,
+    includeProductCards: program ? false : includeProductCards,
     includeProductCategories: true,
     includePortalReporting: true,
     includeGpsReminders: true,
     includePublicGuideLink: true,
     includeExclusions: true,
-  }), [detailLevel, estimate?.id, includeProductCards, treeShrub, turfType]);
+  }), [detailLevel, estimate?.id, estimate?.outlineServiceLine, includeProductCards, program, turfType]);
 
   const loadPreview = useCallback(async () => {
     if (!estimate?.id) return;
@@ -317,7 +324,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
           <div>
             <div className="flex items-center gap-2">
               <Sprout size={18} strokeWidth={1.75} className="text-emerald-700" />
-              <h2 className="text-base font-medium text-zinc-950">{treeShrub ? "Tree & Shrub service outline" : "Lawn service outline"}</h2>
+              <h2 className="text-base font-medium text-zinc-950">{program ? program.heading : "Lawn service outline"}</h2>
               {validation.status && (
                 <Badge tone={statusTone(validation.status)} className="inline-flex items-center gap-1">
                   {validationIcon(validation.status)}
@@ -354,7 +361,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
         <div className="min-h-0 flex-1 overflow-y-auto lg:grid lg:overflow-hidden lg:grid-cols-[280px_minmax(0,1fr)_300px]">
           <aside className="border-b border-zinc-200 bg-zinc-50 p-4 lg:border-b-0 lg:border-r">
             <div className="space-y-4">
-              {!treeShrub && (
+              {!program && (
                 <label className="block">
                   <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Turf type</span>
                   <select value={turfType} onChange={(event) => setTurfType(event.target.value)} className="mt-1 h-10 w-full rounded-xs border border-zinc-300 bg-white px-3 text-sm text-zinc-900">
@@ -374,7 +381,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
                 </select>
               </label>
 
-              {!treeShrub && (
+              {!program && (
                 <label className="flex items-start gap-2 rounded-xs border border-zinc-200 bg-white p-3 text-sm text-zinc-700">
                   <input type="checkbox" checked={includeProductCards} onChange={(event) => setIncludeProductCards(event.target.checked)} className="mt-1" />
                   <span>
@@ -443,7 +450,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
                 Fact and Safety Status
               </div>
               <dl className="mt-3 space-y-2 text-sm">
-                {!treeShrub && <div className="flex justify-between gap-2"><dt className="text-zinc-500">Turf</dt><dd className="font-medium text-zinc-900">{preview?.summary?.turfLabel || "Pending"}</dd></div>}
+                {!program && <div className="flex justify-between gap-2"><dt className="text-zinc-500">Turf</dt><dd className="font-medium text-zinc-900">{preview?.summary?.turfLabel || "Pending"}</dd></div>}
                 <div className="flex justify-between gap-2"><dt className="text-zinc-500">Season</dt><dd className="font-medium text-zinc-900">{preview?.summary?.seasonBand || "Pending"}</dd></div>
                 <div className="flex justify-between gap-2"><dt className="text-zinc-500">Products</dt><dd className="font-medium text-zinc-900">{preview?.summary?.productCardCount || 0}</dd></div>
                 <div className="flex justify-between gap-2"><dt className="text-zinc-500">Local rule</dt><dd className="font-medium text-zinc-900">{preview?.summary?.jurisdictionId || "Pending"}</dd></div>
