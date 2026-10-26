@@ -4719,6 +4719,13 @@ function initScheduledJobs() {
     try {
       await runExclusive('invoice-followups', async () => {
         const InvoiceFollowUps = require('./invoice-followups');
+        // GATE_AUTOPAY_HOLD_TIMEOUT: release Auto Pay holds that Auto Pay never acted on, before due
+        // touches are read. A sweep failure is logged and never stops the touch run.
+        try {
+          await InvoiceFollowUps.releaseStaleAutopayHolds();
+        } catch (sweepErr) {
+          logger.error(`Invoice follow-ups: autopay hold timeout sweep failed: ${sweepErr.message}`);
+        }
         const result = await InvoiceFollowUps.runPending();
         logger.info(`Invoice follow-ups done: ${result.sent} sent, ${result.skipped} skipped`);
       });

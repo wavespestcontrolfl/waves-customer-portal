@@ -124,11 +124,21 @@ describe('authored commercial proposal page', () => {
     expect(screen.getByTestId('proposal-detail-card')).toHaveAttribute('data-glass', 'card');
   });
 
+  it('puts What happens next below the proposal and above the Accept & sign card (owner 2026-10-26)', async () => {
+    await renderProposal({ canSign: true, state: 'none' });
+    const follows = (a, b) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const detail = screen.getByTestId('proposal-detail-card');
+    const nextSteps = screen.getByTestId('proposal-next-steps');
+    expect(follows(detail, nextSteps)).toBe(true);
+    expect(follows(nextSteps, screen.getByTestId('commercial-agreement-sign'))).toBe(true);
+  });
+
   it('the What happens next card is glass UI: a real heading and the gold call button', async () => {
     await renderProposal({ canSign: true, state: 'none' });
     const nextSteps = screen.getByTestId('proposal-next-steps');
     expect(within(nextSteps).getByRole('heading', { level: 2, name: 'What happens next' })).toBeInTheDocument();
     expect(within(nextSteps).getByRole('link', { name: 'Call (941) 297-5749' })).toHaveAttribute('data-glass-accent');
+    expect(within(nextSteps).getByRole('link', { name: 'Call (941) 297-5749' })).toHaveStyle({ marginLeft: 'auto', marginRight: 'auto' });
   });
 
   it('the signed and call-us agreement cards are glass too', async () => {

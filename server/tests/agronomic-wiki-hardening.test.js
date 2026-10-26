@@ -34,7 +34,8 @@ jest.mock('../services/lawn-grass-context', () => ({
 }));
 jest.mock('@anthropic-ai/sdk', () => {
   return class MockAnthropic {
-    constructor() {
+    constructor(opts) {
+      global.__anthropicOpts = opts;
       this.messages = {
         create: (...args) => global.__anthropicCreate(...args),
       };
@@ -220,13 +221,41 @@ describe('generatePage', () => {
       'Product: Talstar P'
     );
 
-    expect(global.__anthropicCreate.mock.calls[0][0].max_tokens).toBe(16000);
+    // 32000 (2026-10-26): a 56-record track page hit 16000 on every retry.
+    expect(global.__anthropicCreate.mock.calls[0][0].max_tokens).toBe(32000);
+    // Above ~21K max_tokens the SDK refuses a non-streaming call unless the
+    // client carries an explicit timeout.
+    expect(global.__anthropicOpts).toEqual({ timeout: 10 * 60 * 1000 });
     // High and medium effort both ran pages into the cap at 16000 (2026-09-28).
     expect(global.__anthropicCreate.mock.calls[0][0].output_config).toEqual({ effort: 'low' });
     expect(result.writeState).toBe('failed');
     expect(result.entry.content).toBe(existing.content);
     const contentPatch = (state.updates.knowledge_entries || []).find((u) => 'content' in u);
     expect(contentPatch).toBeUndefined();
+  });
+
+  test('an update asks for a bounded page that replaces earlier revision notes', async () => {
+    const existing = {
+      id: 'ke-2',
+      slug: 'track/sample-track',
+      content: '# Sample Track\n\n> Data reconciliation note (this revision): count rose by one.',
+      data_point_count: 2,
+      source_treatment_ids: ['o1', 'o2'],
+      stale_flag: false,
+    };
+    useDb({ knowledge_entries: [existing] });
+
+    await wiki.generatePage(
+      'track/sample-track', 'track',
+      { outcomes: [{ id: 'o1' }, { id: 'o2' }, { id: 'o3' }] },
+      'Track sample Performance'
+    );
+
+    const prompt = global.__anthropicCreate.mock.calls[0][0].messages[0].content;
+    expect(prompt).toMatch(/keep the whole page under 2000 words/);
+    expect(prompt).toMatch(/replacing any earlier revision, reconciliation or change notes/);
+    expect(prompt).toMatch(/Never drop a contradiction flag or an open review item/);
+    expect(prompt).not.toMatch(/Preserve existing content that is still supported/);
   });
 
   test('still creates a placeholder stub for a brand-new page when the AI call fails', async () => {
