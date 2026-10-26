@@ -3,6 +3,12 @@ const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+const featureGates = require('../config/feature-gates');
+
+// Looked up on the module at call time: tests load this file under partial
+// feature-gates mocks, and a missing reader must read as "gate off".
+const reviewBonusAskFirstLive = () => typeof featureGates.reviewBonusAskFirstLive === 'function'
+  && featureGates.reviewBonusAskFirstLive();
 
 const POLICY_KEY = 'review_incentives.policy';
 const DEFAULT_POLICY = {
@@ -224,11 +230,51 @@ async function resolveTechnicianForReviewRequest(request, conn = db) {
   return null;
 }
 
+// GATE_REVIEW_BONUS_ASK_FIRST (census M8, second technician): the latest visit
+// before a review is not always the visit that earned it. A pest + lawn
+// customer can see both technicians in one week, and two visits on one date tie.
+// The review ask that reached the customer names the visit: the latest ask
+// DELIVERED in the 45 days before the review, by email (sent_at) or by text
+// (sms_sent_at; the completion-SMS and composer asks stamp only that one).
+// A click on the ask link (redirected_at) is not used: nothing proves the
+// customer made it, and an undelivered ask's link can be opened by anyone who
+// holds it (Codex #6755 security review). Nothing found: the caller falls
+// through to today's order.
+async function reviewAskTechnician(review, conn, reviewDate) {
+  const reviewAt = asDate(reviewDate);
+  const since = new Date(reviewAt.getTime() - 45 * DAY_MS);
+  const inSpan = (value) => {
+    const at = validDate(value);
+    return at && at <= reviewAt && at >= since ? at : null;
+  };
+  const asks = await conn('review_requests')
+    .where({ customer_id: review.customer_id })
+    .whereNotNull('technician_id')
+    .where('created_at', '<=', reviewAt);
+  let best = null;
+  for (const ask of asks) {
+    const at = [inSpan(ask.sent_at), inSpan(ask.sms_sent_at)].filter(Boolean).sort((a, b) => b - a)[0];
+    if (at && (!best || at > best.at)) best = { ask, at };
+  }
+  if (!best) return null;
+  return {
+    technicianId: best.ask.technician_id,
+    serviceRecordId: best.ask.service_record_id || null,
+    reviewRequestId: best.ask.id,
+    method: 'delivered_review_request',
+  };
+}
+
 async function resolveTechnicianForGoogleReview(review, conn = db) {
   if (!review?.customer_id) return null;
   const reviewDate = review.review_created_at || review.created_at || new Date();
   const reviewDateOnly = etBusinessDate(reviewDate);
   const cutoff = etBusinessDateOffset(reviewDate, -45);
+
+  if (reviewBonusAskFirstLive()) {
+    const fromAsk = await reviewAskTechnician(review, conn, reviewDate);
+    if (fromAsk) return fromAsk;
+  }
 
   const serviceRecord = await conn('service_records')
     .where({ customer_id: review.customer_id })
