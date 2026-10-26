@@ -928,6 +928,7 @@ app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/twili
 app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/collections-voice-webhook'));
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
+app.use('/api/admin/cost-cards', require('./routes/admin-cost-cards'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));
 app.use('/api/admin/schedule/new-caller', require('./routes/admin-schedule-new-caller'));
 app.use('/api/admin/schedule', require('./routes/admin-schedule'));
