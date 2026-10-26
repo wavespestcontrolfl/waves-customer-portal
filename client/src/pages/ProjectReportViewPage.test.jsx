@@ -102,6 +102,10 @@ describe('ProjectReportViewPage theme gate', () => {
     expect(header).toHaveTextContent('test@example.com');
     expect(header).toHaveTextContent('(941) 555-1212');
     expect(header).toHaveTextContent('123 Test St, Testville, FL 34000');
+    const body = container.querySelector('.waves-field-document-body.project-report-document-body');
+    expect(body).not.toBeNull();
+    expect(body.querySelector('.field-document-masthead img')).toHaveAttribute('src', '/waves-logo.png');
+    expect(body.contains(container.querySelector('.doc-action-bar'))).toBe(false);
   });
 });
 

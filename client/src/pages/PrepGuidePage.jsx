@@ -2,18 +2,17 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
+import { FieldDocumentBody, FieldMasthead, FieldTitle, FieldFooter } from '../components/FieldDocument';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
   DOC,
   DOC_FONT,
-  DOC_FONT_SERIF,
   FS,
   FW,
   LH,
   SP,
   RADIUS,
-  SHADOW,
 } from '../theme-doc';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -36,7 +35,7 @@ const PRINT_STYLE = `
 @media print {
   body { background: white !important; }
   .prep-no-print, [data-brand-footer] { display: none !important; }
-  .prep-card { box-shadow: none !important; border: none !important; }
+  .prep-card { box-shadow: none !important; }
 }
 `;
 
@@ -132,8 +131,8 @@ function BlockRenderer({ blocks }) {
         );
       case 'heading':
         return (
-          <h2 key={i} className="waves-print-h2" style={{
-            fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.semibold,
+          <h2 key={i} className="field-section-heading" style={{
+            fontFamily: DOC_FONT, fontSize: FS.h2, fontWeight: FW.semibold,
             color: SURFACE.text, margin: `28px 0 ${SP.md}px`, lineHeight: LH.heading,
           }}>
             {block.content}
@@ -326,25 +325,12 @@ export default function PrepGuidePage() {
             pdfUrl={`${API_BASE}/public/prep/${token}/pdf`}
             pdfFileName={`Waves_${String(data.projectTypeLabel || 'Prep_Guide').replace(/[^A-Za-z0-9]+/g, '_')}_Prep_Guide.pdf`}
           />
-          <div
-            className="prep-card"
-            data-glass="card"
-            style={{
-              background: SURFACE.card, borderRadius: RADIUS.card,
-              border: `1px solid ${SURFACE.border}`,
-              boxShadow: SHADOW.card,
-              padding: '28px 24px 32px',
-            }}
-          >
-            <div data-gt="eyebrow" style={{ fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: SURFACE.muted, marginBottom: SP.xs }}>
-              Prep guide{data.projectTypeLabel ? ` · ${data.projectTypeLabel}` : ''}
-            </div>
-            <h1 className="waves-print-h2" style={{
-              fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.bold,
-              color: SURFACE.text, margin: `0 0 ${SP.xxs}px`, lineHeight: LH.heading,
-            }}>
-              {data.projectTypeLabel} Prep Guide
-            </h1>
+          <FieldDocumentBody className="prep-card">
+            <FieldMasthead />
+            <FieldTitle
+              eyebrow={`Prep guide${data.projectTypeLabel ? ` · ${data.projectTypeLabel}` : ''}`}
+              title={`${data.projectTypeLabel} Prep Guide`}
+            />
             {(() => {
               // Contact block (owner 2026-07-13): names and address only,
               // one line each, empties dropped — account holder's name,
@@ -381,7 +367,8 @@ export default function PrepGuidePage() {
                 </a>
               </p>
             </div>
-          </div>
+            <FieldFooter label="Service preparation" reference={data.projectTypeLabel} />
+          </FieldDocumentBody>
 
           {/* Bottom "Print this page" button superseded by the
               DocumentActionBar above (owner 2026-07-09). */}

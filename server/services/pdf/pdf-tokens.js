@@ -49,4 +49,8 @@ const PDF_TYPE = {
   display: 26,
 };
 
-module.exports = { PDF_COLORS, PDF_SPACE, PDF_TYPE };
+function fieldBrowserFooterTemplate(label = 'Waves Pest Control') {
+  return `<div style="box-sizing:border-box;width:100%;margin:0 0.5in;padding:7px 0 0;border-top:1px solid ${PDF_COLORS.rule};font:500 8px/1.2 Arial,sans-serif;color:${PDF_COLORS.muted};display:flex;justify-content:space-between;"><span style="color:${PDF_COLORS.navy};">${label}</span><span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span></div>`;
+}
+
+module.exports = { PDF_COLORS, PDF_SPACE, PDF_TYPE, fieldBrowserFooterTemplate };

@@ -10,6 +10,7 @@ import {
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 import { isTroubleSpotPhoto, rateWithBasis, sameSentence, techTextBeyondSummary } from './serviceReportCleanup';
+import { FieldDocument, FieldMasthead, FieldTitle } from '../components/FieldDocument';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -63,8 +64,6 @@ function portalBase(publicOrigin) {
   if (typeof window !== 'undefined' && window.location?.origin) return window.location.origin;
   return PORTAL_FALLBACK;
 }
-
-const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-serif";
 
 // Mirrors STATION_CARD_PROGRAM_META in StationMapCard: "activity" means bait
 // consumption on a bait program and a recorded capture on a trapping program —
@@ -323,7 +322,7 @@ function zoneNames(app, zones, serviceLine = 'pest') {
 
 function Label({ children }) {
   return (
-    <span style={{
+    <span className="field-info-label" style={{
       display: 'inline-block', minWidth: 86, color: MUTED, fontSize: 9.5,
       fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
     }}>{children}</span>
@@ -333,9 +332,9 @@ function Label({ children }) {
 function InfoRow({ label, children }) {
   if (children == null || children === '') return null;
   return (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '1.5px 0', minWidth: 0 }}>
+    <div className="field-info-row" style={{ display: 'flex', gap: 8, minWidth: 0 }}>
       <Label>{label}</Label>
-      <span style={{ color: INK, fontSize: 11.5, lineHeight: 1.35, minWidth: 0, overflowWrap: 'anywhere' }}>{children}</span>
+      <span className="field-info-value" style={{ color: INK, fontSize: 11.5 }}>{children}</span>
     </div>
   );
 }
@@ -360,7 +359,7 @@ function DocPoisonControl({ data, listsProducts = false, titled = false, showApp
 // the PDF). The look is unchanged.
 function SectionHeader({ children }) {
   return (
-    <div role="heading" aria-level={2} className="doc-keep-with-next" style={{
+    <div role="heading" aria-level={2} className="doc-keep-with-next field-section-heading" style={{
       borderBottom: `1.5px solid ${NAVY}`, margin: '14px 0 6px', paddingBottom: 3,
       color: NAVY, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{children}</div>
@@ -369,7 +368,7 @@ function SectionHeader({ children }) {
 
 function Bullet({ children }) {
   return (
-    <div style={{ display: 'flex', gap: 7, padding: '1.5px 0', fontSize: 11.5, lineHeight: 1.45, color: INK }}>
+    <div className="field-document-bullet" style={{ display: 'flex', gap: 7, padding: '1.5px 0', color: INK }}>
       <span aria-hidden="true" style={{ color: MUTED }}>•</span>
       <span>{children}</span>
     </div>
@@ -1028,13 +1027,8 @@ export default function ServiceReportDocument({ data, token }) {
   const interaction = interactionLabel(data.customerInteraction);
 
   return (
-    <div
-      className="service-report-v1 service-report-document"
-      style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}
-    >
+    <FieldDocument className="service-report-v1 service-report-document" sheetClassName="doc-page">
       <style>{`
-        .service-report-document { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-        .service-report-document .doc-page { max-width: 760px; margin: 0 auto; padding: 20px 16px 28px; }
         .service-report-document table { border-collapse: collapse; width: 100%; }
         @media print {
           /* The document IS the artifact — no shell chrome, no glass. */
@@ -1043,7 +1037,6 @@ export default function ServiceReportDocument({ data, token }) {
           .waves-skip-link { display: none !important; }
           html[data-glass-theme] .glass-scene-orbs,
           html[data-glass-theme] .glass-scene-grain { display: none !important; }
-          .service-report-document .doc-page { padding: 0; max-width: none; }
           .service-report-document .doc-keep,
           .service-report-document .doc-product-row { break-inside: avoid; page-break-inside: avoid; }
           .service-report-document .doc-keep-with-next { break-after: avoid-page; page-break-after: avoid; }
@@ -1061,32 +1054,21 @@ export default function ServiceReportDocument({ data, token }) {
         .service-report-document .doc-station-pin.is-serviced { background: #B7791F; }
         .service-report-document .doc-station-pin.is-inaccessible { background: ${MUTED}; }
       `}</style>
-      <div className="doc-page">
-
-        {/* Letterhead */}
-        <div className="doc-keep doc-letterhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
-          <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
-          <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
-            <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
-            <div>{WAVES_SUPPORT_PHONE_DISPLAY} · wavespestcontrol.com</div>
-            <div>contact@wavespestcontrol.com</div>
-            <div>Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}</div>
-          </div>
-        </div>
-
-        {/* Title row */}
-        <div className="doc-keep doc-title-row" style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-          borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8,
-        }}>
-          <div role="heading" aria-level={1} style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em' }}>SERVICE REPORT</div>
-          <div style={{ fontSize: 11, color: MUTED }}>
-            Report #{reportNumber} · {fmtServiceDate(data.serviceDate)}
-          </div>
-        </div>
+      <div className="doc-keep doc-letterhead" data-testid="doc-letterhead"><FieldMasthead /></div>
+      <FieldTitle
+        eyebrow="Visit documentation"
+        title="SERVICE REPORT"
+        subtitle={data.serviceDisplayName || data.serviceType || null}
+        reference={(
+          <>
+            <div>Report #{reportNumber}</div>
+            <strong>{fmtServiceDate(data.serviceDate)}</strong>
+          </>
+        )}
+      />
 
         {/* Info grid */}
-        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
+        <div className="doc-keep doc-info-grid field-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr' }}>
           {/* minWidth:0 on each column: grid otherwise honours a long unbroken
               email's min-content width and squeezes the other two columns. */}
           <div style={{ minWidth: 0 }}>
@@ -1954,7 +1936,6 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         </div>
 
-      </div>
-    </div>
+    </FieldDocument>
   );
 }
