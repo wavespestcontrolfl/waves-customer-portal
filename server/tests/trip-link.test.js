@@ -282,10 +282,10 @@ describe('the trips read agrees with the stops read', () => {
     expect(late.trips.map((t) => t.tripId)).toEqual(['t2']);
     // The stop at the end of t2 starts at minute 55 and ends when t3 starts at minute 80, after the window closes.
     expect(late.stops.map((s) => s.startMs)).toEqual([min(55)]);
-    // t2 began before this window (minute 40) and ended inside it (minute 55): carried in, never one of its trips.
+    // A trip belongs to the window it ENDS in: t2 (minute 40 to 55) is one of [45, 90)'s trips, read whole from minute
+    // 40; t3 (minute 80 to 95) ends after it and is not.
     const after = await truckStops.loadTruckDay(fakeConn(rows), 'imei-1', { fromMs: min(45), toMs: min(90), maxGapMeters: GAP, now: NOW });
-    expect(after.carriedIn.map((t) => t.tripId)).toEqual(['t2']);
-    expect(after.trips.map((t) => t.tripId)).toEqual(['t3']);
+    expect(after.trips.map((t) => [t.tripId, t.startMs, t.endMs])).toEqual([['t2', min(40), min(55)]]);
   });
 
   test('both reads use the same bounded query as the stops read, and no vehicle reads nothing', async () => {
@@ -304,8 +304,25 @@ describe('the trips read agrees with the stops read', () => {
     expect(stopsConn.calls[0].wheres.find((w) => w[0] === 'received_at' && w[1] === '>=')[2].getTime()).toBe(FROM);
     const none = fakeConn(rows);
     expect(await truckStops.loadTruckTrips(none, '', { fromMs: FROM, toMs: TO })).toEqual([]);
-    expect(await truckStops.loadTruckDay(none, '', { fromMs: FROM, toMs: TO, maxGapMeters: GAP })).toEqual({ trips: [], stops: [], carriedIn: [] });
+    expect(await truckStops.loadTruckDay(none, '', { fromMs: FROM, toMs: TO, maxGapMeters: GAP })).toEqual({ trips: [], stops: [] });
     expect(none.calls).toHaveLength(0);
+  });
+});
+
+describe('what a point is', () => {
+  const FENCE = { lat: 27.4, lng: -82.5 };
+  const east = (metres) => ({ lat: FENCE.lat, lng: FENCE.lng + metres / (111195 * Math.cos((FENCE.lat * Math.PI) / 180)) });
+
+  test('a fence counts inside its own radius, not the wider arrival radius', () => {
+    const fences = [{ ...FENCE, radius: 50, type: 'personal' }];
+    expect(tripLink.kindOfPoint(east(40), { radius: 175, fences, home: null })).toBe('personal');
+    expect(tripLink.kindOfPoint(east(150), { radius: 175, fences, home: null })).toBe('other');
+  });
+
+  test('a fence with no radius uses the arrival radius; the nearest fence wins', () => {
+    expect(tripLink.kindOfPoint(east(150), { radius: 175, fences: [{ ...FENCE, radius: 0, type: 'supplier' }], home: null })).toBe('supplier');
+    const fences = [{ ...FENCE, radius: 300, type: 'business' }, { ...east(120), radius: 300, type: 'supplier' }];
+    expect(tripLink.kindOfPoint(east(100), { radius: 175, fences, home: null })).toBe('supplier');
   });
 });
 

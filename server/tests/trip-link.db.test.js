@@ -365,29 +365,28 @@ describeDb('trip link (PostgreSQL)', () => {
     expect(Number((await mockPg('trip_links').where({ technician_id: f.tech }).count({ n: '*' }).first()).n)).toBe(0);
   });
 
-  test('a trip across midnight belongs to the day it began, read whole, and never to both days', async () => {
+  test('a trip across midnight belongs to the day it ended, read whole, and never to both days', async () => {
     await technician();
-    // 23:55 ET on Oct 7 (03:55Z) to 00:05 ET on Oct 8 (04:05Z); its two batches were received either side of midnight.
+    // 23:55 ET on Oct 7 (03:55Z) to 00:05 ET on Oct 8; its two batches were received either side of midnight.
     await tripData('trip-x', [['03:55', HOME]], IMEI, new Date(iso('03:56')));
     await tripData('trip-x', [['04:05', north(-5500)]], IMEI, new Date(iso('04:06')));
     await mileage('trip-x', 1.5, { date: '2026-10-07' });
     const now = new Date('2026-10-10T00:00:00Z');
     const window = (day) => ({ fromMs: Date.parse(`${day}T04:00:00Z`), toMs: Date.parse(`${day}T04:00:00Z`) + 86400000 });
-    const oct8 = await truckStops.loadTruckDay(mockPg, IMEI, { ...window('2026-10-08'), maxGapMeters: 175, now: now.getTime() });
-    expect(oct8.trips.map((t) => t.tripId)).not.toContain('trip-x');
-    const oct7 = await truckStops.loadTruckTrips(mockPg, IMEI, { ...window('2026-10-07'), now: now.getTime() });
-    expect(oct7.map((t) => [t.tripId, t.startMs, t.endMs])).toEqual([['trip-x', Date.parse(iso('03:55')), Date.parse(iso('04:05'))]]);
-    await tripLink.linkDay(mockPg, DAY, { now });
-    expect(await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first()).toBeUndefined();
+    const oct7 = await truckStops.loadTruckDay(mockPg, IMEI, { ...window('2026-10-07'), maxGapMeters: 175, now: now.getTime() });
+    expect(oct7.trips.map((t) => t.tripId)).not.toContain('trip-x');
+    const oct8 = await truckStops.loadTruckTrips(mockPg, IMEI, { ...window('2026-10-08'), now: now.getTime() });
+    expect(oct8.map((t) => [t.tripId, t.startMs, t.endMs])).toEqual([['trip-x', Date.parse(iso('03:55')), Date.parse(iso('04:05'))]]);
     await tripLink.linkDay(mockPg, '2026-10-07', { now });
+    expect(await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first()).toBeUndefined();
+    await tripLink.linkDay(mockPg, DAY, { now });
     const linked = await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first();
     expect(new Date(linked.trip_start).toISOString()).toBe(new Date(iso('03:55')).toISOString());
-    await tripLink.linkDay(mockPg, DAY, { now }); // the next day's re-run leaves it alone
-    expect(new Date((await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first()).trip_start).toISOString())
-      .toBe(new Date(iso('03:55')).toISOString());
+    await tripLink.linkDay(mockPg, '2026-10-07', { now }); // the other day's re-run leaves it alone
+    expect(await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first()).toMatchObject({ bouncie_trip_id: 'trip-x' });
   });
 
-  test('a visit just after midnight: the drive that began before midnight starts its leg, and that trip stays on its own day', async () => {
+  test('a visit just after midnight: the drive that began before midnight is its leg, and that trip links to it', async () => {
     const tech = await technician();
     await homeHistory();
     // Home at 23:55 ET on Oct 7 (03:55Z) to the customer at 00:05 ET on Oct 8; on site until 00:35; then home.
@@ -403,7 +402,11 @@ describeDb('trip link (PostgreSQL)', () => {
     expect(leg).toMatchObject({ status: 'matched', drive_from_kind: 'home', drive_trip_ids: ['trip-x'] });
     expect(Number(leg.drive_minutes)).toBe(10);
     expect(Number(leg.drive_miles)).toBe(4.4);
-    expect((await links()).map((r) => r.bouncie_trip_id)).toEqual(['trip-y']);
+    expect((await links()).map((r) => [r.bouncie_trip_id, r.ends_at_kind, r.ends_at_scheduled_service_id, r.suggested_purpose]))
+      .toEqual([['trip-x', 'visit', id, 'business'], ['trip-y', 'home', null, 'unclassified']]);
+    // The day the drive began does not take it back.
+    await tripLink.linkDay(mockPg, '2026-10-07', { now: new Date('2026-10-09T06:00:00Z') });
+    expect(await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first()).toMatchObject({ ends_at_kind: 'visit' });
   });
 
   test('it never writes mileage_log, scheduled_services, pins or alerts', async () => {

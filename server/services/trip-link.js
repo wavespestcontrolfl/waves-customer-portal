@@ -13,7 +13,9 @@
  * nothing and writes nothing (runTripLinkNightly). linkDay itself is gate-agnostic so the backfill script can call it.
  *
  * One ET day, one technician at a time:
- *   1. The vehicle's trips of the day, and its stops (a gap of 5+ minutes between two trips, bouncie-truck-stops.js).
+ *   1. The vehicle's stops that start that day (a gap of 5+ minutes between two trips, bouncie-truck-stops.js) and
+ *      its trips that end that day: a trip belongs to the day of the stop it ends at, so a drive across midnight and
+ *      the stop it reaches stay on one day.
  *   2. The technician's COMPLETED visits WORKED that day (arrival stamp, else completion stamp: a visit closed out on
  *      a later day belongs to the day the truck was there), one physical visit per visit_id group; destination as the
  *      pin check resolves it (visit-gps-context.js).
@@ -55,12 +57,15 @@ const ms = (value) => (value ? new Date(value).getTime() : NaN);
 
 // ---------- pure rules ----------
 
-/** What a point is: the nearest active fence it stands in (its type), else the home base, else 'other'. */
+/**
+ * What a point is: the nearest active fence it stands in (its type; inside the fence's own radius, else the arrival
+ * radius when the fence has none), else the home base, else 'other'.
+ */
 function kindOfPoint(point, { radius, fences, home }) {
   let best = null;
   for (const fence of fences) {
     const d = distanceMeters(fence.lat, fence.lng, point.lat, point.lng);
-    if (!ctx.isWithin(d, Math.max(radius, fence.radius))) continue;
+    if (!ctx.isWithin(d, fence.radius > 0 ? fence.radius : radius)) continue;
     if (!best || d < best.d) best = { d, type: fence.type };
   }
   if (best) return best.type;
@@ -141,12 +146,11 @@ const purposeFor = (kind) => {
 
 /**
  * One technician-day, pure. `groups` are the physical visits ({ key, members, destination }); `trips` the day's
- * trips in time order; `stops` the day's stops in time order; `carriedIn` trips that began the day before and ended
- * this day (a drive across midnight: it can start the day's first drive leg, but its link belongs to the day it
- * began); `mileageByTrip` a Map tripId -> { id, miles }.
- * @returns {{legs:object[], links:object[]}} legs: one per member service; links: one per trip of the day
+ * trips (those that END that day) in time order; `stops` the day's stops (those that START that day) in time order;
+ * `mileageByTrip` a Map tripId -> { id, miles }.
+ * @returns {{legs:object[], links:object[]}} legs: one per member service; links: one per trip
  */
-function computeDay({ groups, trips, stops, carriedIn = [], mileageByTrip = new Map(), radius, fences = [], home = null }) {
+function computeDay({ groups, trips, stops, mileageByTrip = new Map(), radius, fences = [], home = null }) {
   const matches = groups.map((group) => ({
     group,
     ...matchVisit({ destination: group.destination, window: visitWindow(group.members), stops, radius }),
@@ -166,7 +170,7 @@ function computeDay({ groups, trips, stops, carriedIn = [], mileageByTrip = new 
     }
     const stop = stops[m.index];
     const sharers = usersOfStop.get(m.index).length;
-    const leg = driveLeg({ index: m.index, stops, trips: [...carriedIn, ...trips], kinds, mileageByTrip, radius, home });
+    const leg = driveLeg({ index: m.index, stops, trips, kinds, mileageByTrip, radius, home });
     for (const member of m.group.members) {
       legs.push({
         scheduled_service_id: member.id,
@@ -247,7 +251,7 @@ async function writeTechnicianDay(conn, { day, bounds, technicianId, imei, legRo
     await trx('visit_gps_legs').where({ technician_id: technicianId, service_date: day })
       .whereNotIn('scheduled_service_id', legRows.map((row) => row.scheduled_service_id)).del();
     await trx('trip_links')
-      .where('trip_start', '>=', new Date(bounds.startMs)).where('trip_start', '<', new Date(bounds.endMs))
+      .where('trip_end', '>=', new Date(bounds.startMs)).where('trip_end', '<', new Date(bounds.endMs))
       .where(function ofThisDay() {
         this.where({ technician_id: technicianId });
         if (imei) this.orWhere({ vehicle_imei: imei });
@@ -258,12 +262,12 @@ async function writeTechnicianDay(conn, { day, bounds, technicianId, imei, legRo
 
 /** One vehicle's day: its trips, stops, the mileage rows of those trips and its home base. */
 async function readVehicleDay(conn, technician, bounds, etDay, radius, now) {
-  const { trips, stops, carriedIn } = await truckStops.loadTruckDay(conn, technician.imei, {
+  const { trips, stops } = await truckStops.loadTruckDay(conn, technician.imei, {
     fromMs: bounds.startMs, toMs: bounds.endMs, maxGapMeters: radius, now: now.getTime(),
   });
-  const mileageByTrip = await loadMileage(conn, [...carriedIn, ...trips].map((trip) => trip.tripId));
+  const mileageByTrip = await loadMileage(conn, trips.map((trip) => trip.tripId));
   const home = await ctx.loadHomeBase(conn, technician.imei, new Date(bounds.endMs - 1), technician.changedAt, etDay);
-  return { trips, stops, carriedIn, mileageByTrip, home };
+  return { trips, stops, mileageByTrip, home };
 }
 
 const emptyTally = () => ({ matched: 0, no_vehicle: 0, no_destination: 0, no_stop: 0, ambiguous: 0 });
@@ -290,7 +294,7 @@ async function loadDayInputs(conn, etDay, bounds, only) {
   }
   // Technicians that hold rows for the day (legs or links) are re-run too, so rows they no longer earn go.
   let staleLegs = conn('visit_gps_legs').where({ service_date: etDay }).distinct('technician_id');
-  let staleLinks = conn('trip_links').where('trip_start', '>=', start).where('trip_start', '<', end).distinct('technician_id');
+  let staleLinks = conn('trip_links').where('trip_end', '>=', start).where('trip_end', '<', end).distinct('technician_id');
   if (only) {
     staleLegs = staleLegs.whereIn('technician_id', only);
     staleLinks = staleLinks.whereIn('technician_id', only);

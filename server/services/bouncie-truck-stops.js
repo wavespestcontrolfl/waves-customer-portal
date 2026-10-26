@@ -24,8 +24,8 @@ const PAGE_SIZE = 500;
 // A trip-data event can reach us hours late; events are read up to this long after the window closes.
 const LATE_ARRIVAL_MS = 12 * 60 * 60 * 1000;
 // A trip that began before a window opened has batches received before it. The trips reads (trip link) start this
-// long earlier so a trip's first point is its true start: a trip across midnight belongs to the day it began, never to
-// both. loadTruckStops keeps its own read (the pin check is unchanged); its stops inside the window are the same.
+// long earlier so a trip is read whole: its first point is its true start. loadTruckStops keeps its own read (the pin
+// check is unchanged); its stops inside the window are the same.
 const EARLY_READ_MS = 12 * 60 * 60 * 1000;
 
 function parsePayload(payload) {
@@ -132,31 +132,29 @@ async function loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters, now = Da
 }
 
 /**
- * The trips of one vehicle that START inside [fromMs, toMs), in time order. The read starts EARLY_READ_MS before the
- * window, so a trip that began before it is read whole and left out, never cut to a late start.
+ * The trips of one vehicle that END inside [fromMs, toMs), in time order. A trip belongs to the day it ends: the day of
+ * the stop it ends at (a stop belongs to the day it starts, and it starts where a trip ends), so a drive across
+ * midnight and the stop it reaches are on one day. The read starts EARLY_READ_MS before the window, so such a trip is
+ * read whole, never cut to a late start.
  */
 async function loadTruckTrips(conn, imei, { fromMs, toMs, now = Date.now() }) {
   if (!imei) return [];
   return tripList(await readTripMap(conn, imei, { fromMs, toMs, now, readFromMs: fromMs - EARLY_READ_MS }))
-    .filter((trip) => trip.startMs >= fromMs && trip.startMs < toMs);
+    .filter((trip) => trip.endMs >= fromMs && trip.endMs < toMs);
 }
 
 /**
- * A vehicle's trips AND stops that start inside [fromMs, toMs), from ONE read (starting EARLY_READ_MS before the
- * window, as loadTruckTrips). The stops are derived over every trip the read saw, as loadTruckStops does, so a stop at
- * the end of the window's last trip (its next trip begins after toMs) is kept. `carriedIn`: trips that began before the
- * window and ended inside it (a drive across midnight); they belong to the day they began, but the window's first
- * drive leg can start with one.
+ * A vehicle's trips that END inside [fromMs, toMs) and its stops that START inside it (see loadTruckTrips), from ONE
+ * read. The stops are derived over every trip the read saw, as loadTruckStops does, so a stop at the end of the
+ * window's last trip (its next trip begins after toMs) is kept.
  */
 async function loadTruckDay(conn, imei, { fromMs, toMs, maxGapMeters, now = Date.now() }) {
-  if (!imei) return { trips: [], stops: [], carriedIn: [] };
+  if (!imei) return { trips: [], stops: [] };
   const trips = await readTripMap(conn, imei, { fromMs, toMs, now, readFromMs: fromMs - EARLY_READ_MS });
-  const inWindow = (startMs) => startMs >= fromMs && startMs < toMs;
-  const list = tripList(trips);
+  const inWindow = (ms) => ms >= fromMs && ms < toMs;
   return {
-    trips: list.filter((trip) => inWindow(trip.startMs)),
+    trips: tripList(trips).filter((trip) => inWindow(trip.endMs)),
     stops: stopsFromTrips(trips, { maxGapMeters }).filter((stop) => inWindow(stop.startMs)),
-    carriedIn: list.filter((trip) => trip.startMs < fromMs && trip.endMs > fromMs),
   };
 }
 

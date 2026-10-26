@@ -37,7 +37,7 @@ router.get('/summary', async (req, res) => {
   try {
     const startAt = new Date(etDayBounds(from).startMs);
     const endAt = new Date(etDayBounds(to).endMs);
-    const tripsBy = (column) => db('trip_links').where('trip_start', '>=', startAt).where('trip_start', '<', endAt)
+    const tripsBy = (column) => db('trip_links').where('trip_end', '>=', startAt).where('trip_end', '<', endAt)
       .groupBy(column).select(`${column} as key`).count({ trips: '*' }).sum({ miles: 'distance_miles' });
     const visits = await db.raw(`WITH v AS (${VISITS_SQL})
       SELECT status, count(*)::int AS visits,
