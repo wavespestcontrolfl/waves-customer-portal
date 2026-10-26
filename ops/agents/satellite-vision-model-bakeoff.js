@@ -57,7 +57,7 @@ const FIELD_FROM_ANALYSIS = {
   palms: 'estimatedPalmCount',
 };
 const ZOOMS = [['micro', 22], ['ultra', 21], ['super', 20], ['close', 19], ['wide', 18]];
-const LEDGER_GATES = ['GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_CALL_TRACES'];
+const LEDGER_GATES = ['GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_CALL_LEDGER'];
 
 const positiveInt = (flag) => (raw) => {
   const n = Number(raw);
@@ -100,7 +100,7 @@ function parseArgs(argv) {
 }
 
 function assertNoLedgerWrites(gates, when) {
-  if (gates.isEnabled('llmDispatchMetrics') || gates.gateEnvValue('GATE_LLM_CALL_LEDGER') || gates.gateEnvValue('GATE_LLM_CALL_TRACES')) {
+  if (gates.isEnabled('llmDispatchMetrics') || gates.gateEnvValue('GATE_LLM_CALL_LEDGER')) {
     console.error(`ABORT (${when}): an LLM ledger gate resolved ENABLED — this run would write llm_dispatch_log rows. Unset ${LEDGER_GATES.join(' / ')} and re-run.`);
     process.exit(2);
   }

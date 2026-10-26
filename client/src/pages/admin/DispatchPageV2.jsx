@@ -94,10 +94,6 @@ import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import { reportFlowFields, stationMapKnownOff, stationMapKnownOn } from "../../lib/pest-fast-complete";
 import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
-import FastCompleteComboSheet from '../../components/tech/FastCompleteComboSheet';
-import { comboMembersFor } from '../../lib/combo-fast-complete';
-import { comboDraftId, operatorScope } from '../../lib/visit-closeout-packet';
-import { deleteVisitCompletionDraft } from '../../lib/completion-resume-store';
 import {
   mergePostPaymentService,
   fastCompleteSheetFor,
@@ -529,8 +525,6 @@ export default function DispatchPageV2({
   // cache write can leave it missing or stale), as fastCompleteOperatorOf reads.
   const verifiedRole = (outlet?.user?.id ? outlet.user : getAdminUser())?.role || null;
   const [closingVisitId, setClosingVisitId] = useState(null);
-  // A stop of one regular pest visit and one lawn visit, on the one-screen container (GATE_COMBO_FAST_COMPLETE).
-  const [comboStop, setComboStop] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
   // report opens right here in the schedule — the same interaction as the
@@ -995,12 +989,8 @@ export default function DispatchPageV2({
   // visit or leaves for another screen (move, cancel, billing, edit, checkout,
   // treatment plan, book next) closes it too, so it never completes a stale row.
   const fastSheetBehindDetails = !!(detailService && (pestFastService || treeShrubFastService
-    || lawnReserviceFastService || lawnFastService || assessmentFastService || comboStop));
+    || lawnReserviceFastService || lawnFastService || assessmentFastService));
   const closeFastSheetsBehindDetails = () => {
-    // The combo container keeps its parts' forms on the device for a reload; the visit changed, so those forms must not
-    // come back as ready when the stop is reopened.
-    if (comboStop) void deleteVisitCompletionDraft(comboDraftId(comboStop.visitId), operatorScope(fastCompleteOperatorId));
-    setComboStop(null);
     setPestFastService(null);
     setTreeShrubFastService(null);
     setLawnReserviceFastService(null);
@@ -1014,8 +1004,7 @@ export default function DispatchPageV2({
       void fetchSchedule(date, { silent: true });
     }
   };
-  // The props a Fast Complete sheet is opened with, for a schedule row: one builder per sheet, shared by the sheet opened
-  // on its own and by the same sheet as a part of a pest + lawn stop (FastCompleteComboSheet).
+  // The props a Fast Complete sheet is opened with, for a schedule row: one builder per sheet.
   // `a || b` over a row's snake_case and camelCase spellings, as the sheets were always given them.
   const pickOf = (row, ...keys) => keys.reduce((found, key) => found || row[key], undefined);
   const lawnSheetService = (row) => ({
@@ -1092,13 +1081,6 @@ export default function DispatchPageV2({
       setCompletingService(service);
       return;
     }
-    // A grouped stop that is exactly one regular pest visit and one lawn visit (the gate rides the row): the short screen,
-    // before the long visit closeout below. Anything else, or the sheet's own "Full form", falls through unchanged.
-    const comboPair = comboMembersFor(service, fullForm ? null : data?.services);
-    if (comboPair) {
-      setComboStop({ visitId: service.visitId, row: service, ...comboPair });
-      return;
-    }
     if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutEnabled === true || service.visitCloseoutPacket)) {
       setClosingVisitId(service.visitId);
       return;
@@ -1130,7 +1112,7 @@ export default function DispatchPageV2({
       return;
     }
     setCompletingService(service);
-  }, [data?.visitCloseout, data?.services, stationMapOff, stationSheetOn]);
+  }, [data?.visitCloseout, stationMapOff, stationSheetOn]);
 
   // Second half of the ?completeService deep-link: once the day's schedule
   // is loaded, open the completion for the pending id through
@@ -2090,28 +2072,6 @@ export default function DispatchPageV2({
           setScheduleRefreshKey((value) => value + 1);
           void fetchSchedule(date, { silent: true });
         }}
-      />}
-      {comboStop && <FastCompleteComboSheet
-        key={comboStop.visitId}
-        visitId={comboStop.visitId}
-        pest={{ service: pestSheetService(comboStop.pest), voiceFillEnabled: comboStop.pest.fastCompleteVoiceFillEnabled === true }}
-        lawn={{ service: lawnSheetService(comboStop.lawn) }}
-        request={adminFetch}
-        operatorId={fastCompleteOperatorId}
-        catalog={products}
-        onClose={() => setComboStop(null)}
-        onSaved={() => {
-          setScheduleRefreshKey((value) => value + 1);
-          void fetchSchedule(date, { silent: true });
-        }}
-        onFullForm={() => {
-          const visitId = comboStop.visitId;
-          setComboStop(null);
-          setClosingVisitId(visitId);
-        }}
-        // The live row for the member the tech opened, from the stop's own load.
-        onViewDetails={(rows) => setDetailService(rows.find((row) => row.id === comboStop.row.id))}
-        suspended={!!detailService}
       />}
       {completingService && (
         <CompletionPanel

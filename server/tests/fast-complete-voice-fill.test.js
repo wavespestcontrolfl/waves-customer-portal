@@ -360,7 +360,6 @@ describe('call ledger lane', () => {
     expect(LANES.some((lane) => lane.id === VoiceFill.LANE_ID)).toBe(true);
     const policy = policyFor(VoiceFill.LANE_ID);
     expect(policy.ledger).toBe('call');
-    expect(policy.trace).toBe(false);
     // the call site labels the ledger row with this lane
     expect(fs.readFileSync(path.join(__dirname, '../services/fast-complete-voice-fill.js'), 'utf8')).toContain(`laneId: '${VoiceFill.LANE_ID}'`);
   });

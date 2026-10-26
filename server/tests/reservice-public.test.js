@@ -372,7 +372,7 @@ describe('lane dedupe atomicity (source guards, codex P1 #3194)', () => {
     // The dedupe answers with its own code so the route can distinguish it
     // from a slot race.
     expect(bookingSrc).toMatch(/code: 'ALREADY_BOOKED',/);
-    expect(bookingSrc).toMatch(/txErr\.code === 'SLOT_TAKEN' \|\| txErr\.code === 'DAY_FULL' \|\| txErr\.code === 'ALREADY_BOOKED'/);
+    expect(bookingSrc).toMatch(/txErr\.code === 'SLOT_TAKEN' \|\| txErr\.code === 'ALREADY_BOOKED'/);
   });
 
   test('a callback commit only replays ITS OWN service — a parallel other-lane or paid booking at the same start falls through to the real checks (codex r3 P2)', () => {

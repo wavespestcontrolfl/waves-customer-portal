@@ -438,7 +438,7 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     expect(run.indexOf("require(path.join(REPO, 'server/config'))")).toBeLessThan(run.indexOf('for (const gate of LEDGER_GATES) delete process.env[gate];'));
     expect(run.indexOf("assertNoLedgerWrites(gates, 'before imports')")).toBeLessThan(run.indexOf("require(path.join(REPO, 'server/config/models'))"));
     expect(run.indexOf("assertNoLedgerWrites(gates, 'after imports')")).toBeGreaterThan(run.indexOf("require(path.join(REPO, 'server/services/eval/lawn-visit-assessment-eval'))"));
-    expect(src).toMatch(/const LEDGER_GATES = \['GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_CALL_TRACES'\];/);
+    expect(src).toMatch(/const LEDGER_GATES = \['GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_CALL_LEDGER'\];/);
     // The script is a module for tests and a program for operators.
     expect(src).toMatch(/if \(require\.main === module\) \{/);
   });

@@ -98,7 +98,7 @@ beforeEach(() => {
 });
 
 async function openPropertyTab() {
-  fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+  fireEvent.click(await screen.findByRole('tab', { name: 'Property' }));
 }
 
 describe('Customer 360 → Property → Access & Preferences', () => {

@@ -93,7 +93,7 @@ describe('listGates', () => {
 
   test('call-time-only gates are listed; retired gates and non-GATE variables are not', () => {
     expect(row('GATE_ADMIN_MFA')).toBeDefined();
-    expect(row('GATE_SELF_BOOK_DAY_CAP')).toBeUndefined();
+    expect(row('GATE_PORTAL_GLASS')).toBeUndefined();
     expect(listGates().every((g) => /^GATE_/.test(g.name))).toBe(true);
   });
 

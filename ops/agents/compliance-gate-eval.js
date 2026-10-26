@@ -392,10 +392,9 @@ async function main() {
   // time (feature-gates.js:47) — setting it afterwards would do nothing.
   delete process.env.GATE_LLM_DISPATCH_METRICS;
   // The per-call ledger (agent-control S2a) writes a row from EVERY adapter
-  // leg, chain or not, and the trace gate keeps request bodies on top —
-  // both read at call time, so unset = off for this process (Codex r14).
+  // leg, chain or not — read at call time, so unset = off for this
+  // process (Codex r14).
   delete process.env.GATE_LLM_CALL_LEDGER;
-  delete process.env.GATE_LLM_CALL_TRACES;
 
   const complianceGate = require(path.join(REPO, 'server/services/content/compliance-gate'));
   const guardrails = require(path.join(REPO, 'server/services/content/content-guardrails'));
@@ -406,10 +405,10 @@ async function main() {
   // broken by moving a line is not a promise — so check the resolved gate and
   // refuse to run rather than discover it in the table afterwards.
   const gates = require(path.join(REPO, 'server/config/feature-gates'));
-  if (gates.isEnabled('llmDispatchMetrics') || gates.gateEnvValue('GATE_LLM_CALL_LEDGER') || gates.gateEnvValue('GATE_LLM_CALL_TRACES')) {
+  if (gates.isEnabled('llmDispatchMetrics') || gates.gateEnvValue('GATE_LLM_CALL_LEDGER')) {
     console.error('ABORT: an LLM ledger gate resolved ENABLED — this run would write llm_dispatch_log rows.');
     console.error('       This harness is READ-ONLY and must not touch the database.');
-    console.error('       Unset GATE_LLM_DISPATCH_METRICS / GATE_LLM_CALL_LEDGER / GATE_LLM_CALL_TRACES in the calling environment and re-run.');
+    console.error('       Unset GATE_LLM_DISPATCH_METRICS / GATE_LLM_CALL_LEDGER in the calling environment and re-run.');
     process.exit(1);
   }
 

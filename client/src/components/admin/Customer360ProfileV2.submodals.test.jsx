@@ -120,8 +120,7 @@ describe('Customer360ProfileV2 sub-modals', () => {
 
   it('renders a DATE column on the calendar day the server stored, not a day early', async () => {
     await openProfile();
-    // The tab strip comes first in the DOM; a timeline filter chip shares the name.
-    fireEvent.click(screen.getAllByRole('button', { name: 'Services' })[0]);
+    fireEvent.click(screen.getByRole('tab', { name: 'Services' }));
     expect(await screen.findByText(/Sep 7, 2026/)).toBeInTheDocument();
     expect(screen.queryByText(/Sep 6, 2026/)).not.toBeInTheDocument();
   });

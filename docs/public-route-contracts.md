@@ -1331,8 +1331,8 @@ reserve/commit/extend gates, `/api/booking/availability`, `/find-slots`,
 re-service, and the assistant's availability engine — neither offers nor
 accepts a start within that window of now (the estimate picker's minimum lead
 IS this window, replacing the flat 120-minute same-day lead). The old
-`max_self_books_per_day` cap is retired: its offer-time day filtering and
-commit-time re-checks run only while `GATE_SELF_BOOK_DAY_CAP` is set. Staff,
+`max_self_books_per_day` cap is retired and removed: there is no offer-time day
+filtering or commit-time day re-check. Staff,
 admin and the voice agent's booking tools are unaffected.
 Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
 lenient than strict" — the Parrish live miss: a Tuesday 11:00 candidate hid
@@ -3725,6 +3725,8 @@ Lead CALL / TEXT preference (owner 2026-10-14; always on): on `POST /api/webhook
 
 `GATE_LEAD_CALL_TEXT_FOLLOWUP` (dark; owner 2026-10-24): on `POST /api/webhooks/twilio/sms`, after the TwiML ack, the same unconsumed text goes to `handleLeadReply` (`server/services/lead-call-text-followup.js`). For a `+1` lead sender who got our "Reply CALL" text in 7 days (not `active_customer` / `won` / `at_risk`), it can send ONE text per event through `sendCustomerMessage` (audience `lead`, entry point `lead_call_text_followup`, a customer action in the send window): the service question for a bare TEXT, the time question for a bare CALL from 8 PM to 8 AM ET, and the booked-time confirmation for a clear time answer to that question. It writes `lead_callback_requests` (one open row per phone, one `scheduled` row per 15-minute slot) and may set a NULL or `awaiting_address` `lead_intake_status` to `awaiting_service`; otherwise it raises one `lead` needs-you bell and sends nothing. The inbound text still takes its ordinary path and bell. Gate off = no text, no row, no bell, and every response byte-identical.
 
+`GATE_TECH_STAFF_GUARDS` (dark; census M12, owner 2026-10-25): on `POST /api/webhooks/twilio/sms`, a sender whose number (last 10 digits) is the phone of an ACTIVE technician (`server/services/staff-sender-phones.js`, cached 60 s) is a staff sender. A number that is also on a live customer record (primary, secondary or service-contact slot) is NOT a staff sender (the customer wins), and neither is a Waves-owned line. A staff text keeps the ordinary inbox path byte-for-byte: the unified inbox row (unread), the `sms_log` row, the activity row and the owner's unknown-sender text forward (for a domain or van-wrap tracking number too, with the repeat-sender limit). It skips only the customer and lead side: the solicitation screen (a staff text is never silenced as spam), the outbound-history read, the estimator clarify / draft, the estimate-conversion agent, the scheduling shadow, and the tracking-line new-lead / van "Unknown prospect" bells. Unchanged for a staff sender: STOP / START / HELP and natural-language opt-outs, a text to a technician line, and the TwiML response. The post-call pipeline treats the same phones like env staff phones (no customer or lead keyed on them) and the missed-call text-back skips them (`skipped:internal_number`); the live voice webhook is unchanged. Gate off = no staff lookup at all and every response and side effect byte-identical.
+
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared
@@ -5057,6 +5059,12 @@ price list in ~/mosquito-misting-scope-20260924.md §4.3 (dealer cost
 unknown); the gate stays off until the owner launches the service, so the
 public payload is byte-identical today. The gate also feeds the payload's
 cache signature and the blog price-card exclusion like the other gated rows.
+German roach initial row retired (2026-10-25, owner "retire"): the payload no
+longer carries `german_roach_initial` (the legacy $100 "German Roach Initial
+Service (3-Visit)"). German roach work publishes only as
+`german_roach_cleanout`; the engine still prices the legacy series so stored
+estimates replay as sent. The Astro JSON-LD offer map and its fallback
+snapshot drop the key in the paired astro PR.
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public
@@ -6065,9 +6073,7 @@ route-fit, not the day's). Day lists contain the packed feasible starts (owner r
 on a day with a committed stop, each route gap offers only the hour packed
 against its neighbouring stop(s) — the latest start before the next stop and/or
 the earliest after the previous one — never a mid-gap hour; an empty day still
-lists every grid hour); only the separate recommendations are curated. Moving an existing self-booked visit
-excludes that booking from its own day-cap count (the per-day cap runs only
-while `GATE_SELF_BOOK_DAY_CAP` is set — retired 2026-09-23). Self-serve notice
+lists every grid hour); only the separate recommendations are curated. Self-serve notice
 windows (owner ruling 2026-09-23, `scheduling/self-serve-notice.js`; split
 into a book window and a move window 2026-09-28, `SELF_SERVE_MOVE_NOTICE_HOURS`,
 default 24, independent of `SELF_SERVE_NOTICE_HOURS` — no fallback to it):
@@ -6084,8 +6090,7 @@ scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
 (route feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK`
-is set, the self-serve notice window, and — only while `GATE_SELF_BOOK_DAY_CAP`
-is set — self-book day caps re-checked server-side):
+is set, and the self-serve notice window):
   - default: moves the single visit via `SmartRebooker.reschedule`
     (advisory lock + tech-route overlap conflict check + `reschedule_log`
     audit as `customer_self_serve` + escalation flagging);
@@ -6177,8 +6182,7 @@ allowing the page to select the remaining lane; malformed lanes still return 400
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
 feasibility, the lunch reserve only while `GATE_BOOKING_LUNCH_BLOCK` is set,
-the self-serve notice window, day caps only while `GATE_SELF_BOOK_DAY_CAP`
-is set — the anti-forgery model
+and the self-serve notice window — the anti-forgery model
 reschedule-public uses in place of the funnel's signed-offer HMAC), then
 committed through `createSelfBooking`'s transaction with the
 internal-only `callbackVisit` option (is_callback=true — completion

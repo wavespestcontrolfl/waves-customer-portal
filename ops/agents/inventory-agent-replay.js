@@ -18,7 +18,7 @@
 // Postgres itself. That alone isn't the whole process, though:
 // dispatchWithFallback's real LLM calls (the whole point of this script) go
 // through server/services/llm-dispatch-metrics.js when GATE_LLM_CALL_LEDGER /
-// GATE_LLM_CALL_TRACES / GATE_LLM_DISPATCH_METRICS are on, which writes
+// GATE_LLM_DISPATCH_METRICS are on, which writes
 // through the SHARED server/models/db pool — a completely different
 // connection this script's own pool has no say over (2026-09-27 pre-push
 // review P1). Two independent layers close that gap, both set before this
@@ -30,7 +30,7 @@
 //      like libpq) sends it as the startup `options` parameter on EVERY
 //      connection this process opens, this script's own pool included, so
 //      the shared db module's pool is read-only too, however it's used.
-//   2. The three telemetry gates are forced off for this process, so the
+//   2. The telemetry gates are forced off for this process, so the
 //      writing code paths themselves are never even reached — belt and
 //      suspenders in case PGOPTIONS were ever not honored (a future pg
 //      version, some other connection config overriding `options`, …).
@@ -54,7 +54,6 @@ if (process.env.DATABASE_PUBLIC_URL) {
 // .env (dotenv) as they are required, and dotenv fills in an ABSENT
 // variable but never replaces one already set.
 process.env.GATE_LLM_CALL_LEDGER = 'false';
-process.env.GATE_LLM_CALL_TRACES = 'false';
 process.env.GATE_LLM_DISPATCH_METRICS = 'false';
 //
 // The LLM leg costs real money/time per unresolved title, so --limit caps

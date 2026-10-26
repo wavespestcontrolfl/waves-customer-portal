@@ -105,7 +105,7 @@ const putCalls = (fetchMock) => fetchMock.mock.calls
 async function openEditor() {
   render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
   await screen.findAllByText('Avery Customer');
-  fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+  fireEvent.click(await screen.findByRole('tab', { name: 'Property' }));
   await screen.findByText('Access & Preferences');
   fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
   await screen.findByText('New sod');
@@ -441,7 +441,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
       stubFetch({ prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole' }, newSod: { holdLines: [], lastPreEmergent: [{ line: LINE, warning: WARNING }] }, onPut: () => response({}) });
       render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
       await screen.findAllByText('Avery Customer');
-      fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+      fireEvent.click(await screen.findByRole('tab', { name: 'Property' }));
       expect(await screen.findByText(LINE)).toBeInTheDocument();
       expect(screen.getByTestId('sod-pre-emergent-warning')).toBeInTheDocument();
     });
@@ -455,7 +455,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     });
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findAllByText('Avery Customer');
-    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Property' }));
     expect(await screen.findByText('New sod')).toBeInTheDocument();
     expect(screen.getByText('Part of lawn: back lawn')).toBeInTheDocument();
     expect(await screen.findByText('Pre-emergent is held until Oct 1, 2027.')).toBeInTheDocument();
@@ -471,7 +471,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     });
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findAllByText('Avery Customer');
-    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Property' }));
     expect(await screen.findByTestId('sod-loading')).toBeInTheDocument();
     expect(screen.queryByTestId('sod-hold-lines')).not.toBeInTheDocument();
     release();
@@ -487,7 +487,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     });
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findAllByText('Avery Customer');
-    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Property' }));
     expect(await screen.findByText('Hold dates could not be read.')).toBeInTheDocument();
     expect(screen.queryByTestId('sod-hold-lines')).not.toBeInTheDocument();
   });
@@ -498,7 +498,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     const fetchMock = stubFetch({ prefs: { sod_laid_on: '2026-10-01', sod_covers: 'part', sod_area: 'Back yard strip' }, onPut: () => response({}) });
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findAllByText('Avery Customer');
-    fireEvent.click(await screen.findByRole('button', { name: 'Property' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Property' }));
     await screen.findByText('Access & Preferences');
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/new-sod'))).toBe(false);
     expect(screen.queryByText('New sod')).not.toBeInTheDocument();

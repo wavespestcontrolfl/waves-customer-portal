@@ -15,6 +15,7 @@ jest.mock('../services/inspection-credit', () => ({
   redeemInspectionCreditForBooking: jest.fn(async () => ({})),
 }));
 jest.mock('../services/appointment-card-request', () => ({ requestCardForAppointment: jest.fn(async () => ({ requested: false })) }));
+jest.mock('../services/tech-unreviewed-booking-alert', () => ({ closeForVisit: jest.fn(async () => 0) }));
 
 const { buildTriageItem } = require('../services/call-routing-gates');
 const {
@@ -685,6 +686,31 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
       'svc1', 'cust1', '2026-07-14T09:00', 'pest_control', 'admin_manual', { sendConfirmation: false, closeReminderWindows: false },
     );
     expect(db._state.triageResolved).toBe(true);
+  });
+
+  // GATE_TECH_STAFF_GUARDS (census M6): confirming the booking closes the office notice a technician's
+  // refused tap raised. Gate off = the hook does not touch it.
+  describe('the unreviewed-booking notice (GATE_TECH_STAFF_GUARDS)', () => {
+    const { closeForVisit } = require('../services/tech-unreviewed-booking-alert');
+    const prev = process.env.GATE_TECH_STAFF_GUARDS;
+    afterEach(() => {
+      if (prev === undefined) delete process.env.GATE_TECH_STAFF_GUARDS;
+      else process.env.GATE_TECH_STAFF_GUARDS = prev;
+    });
+
+    test('gate on: a confirmed booking closes its notice', async () => {
+      process.env.GATE_TECH_STAFF_GUARDS = 'true';
+      const db = confirmHookDb({});
+      expect(await runOutboundReviewConfirmHook(db, svc, 'test')).toBe(true);
+      expect(closeForVisit).toHaveBeenCalledWith('svc1', db);
+    });
+
+    test('gate off: the notice is not touched', async () => {
+      delete process.env.GATE_TECH_STAFF_GUARDS;
+      const db = confirmHookDb({});
+      await runOutboundReviewConfirmHook(db, svc, 'test');
+      expect(closeForVisit).not.toHaveBeenCalled();
+    });
   });
 
   test('a carried lead that moved mid-estimate stays OPEN even without the booking-time flag', async () => {

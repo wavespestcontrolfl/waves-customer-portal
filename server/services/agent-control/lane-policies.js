@@ -46,7 +46,6 @@ const DEFAULT_RUNTIME = Object.freeze({
   eval_family: null,
   maturity: null,
   workflow_id: null,
-  trace: false,
   // null = no cap yet (cost arrives in a later PR)
   budget: Object.freeze({ max_steps: 50, max_tool_calls: 100, max_retries: 2, max_cost_usd: null }),
 });
@@ -162,7 +161,7 @@ const LANE_RUNTIME = {
   // is the other relay implementation the comment above already covers.
   voice_relay_collections: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
   // Optional manual replay judge: no business writes; ordinary call ledger
-  // and traces remain available. Event cadence avoids expected silence alarms.
+  // remains available. Event cadence avoids expected silence alarms.
   voice_relay_judge: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
 
   // ── Photos & property ──

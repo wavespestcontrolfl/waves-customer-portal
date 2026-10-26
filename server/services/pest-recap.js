@@ -367,7 +367,7 @@ async function sheetRecordFor(profile, svc, knex) {
 
 // Is a project linked to this visit, directly (projects.scheduled_service_id) or only through its service record
 // (the legacy link)? The admin-projects create guard's own lookup. A read that fails counts as linked (fail closed).
-// Used by the sheet record above and by the combo stop check (combo-fast-complete.js), on the caller's connection.
+// Used by the sheet record above, on the caller's connection.
 async function serviceHasLinkedProject(serviceId, knex = db) {
   const linked = await knex('projects')
     .leftJoin('service_records', 'projects.service_record_id', 'service_records.id')

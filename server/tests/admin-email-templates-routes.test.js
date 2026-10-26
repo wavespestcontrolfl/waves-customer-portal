@@ -1086,7 +1086,6 @@ describe('onboarding audience checks in the existing admin preview', () => {
   const appointmentId = '00000000-0000-4000-8000-000000000101';
   const EmailTemplates = require('../services/email-template-library');
   const intro = require('../services/recurring-app-intro-email');
-  const welcome = require('../services/new-recurring-welcome-sms');
   let templateKey;
 
   beforeEach(() => {
@@ -1097,9 +1096,6 @@ describe('onboarding audience checks in the existing admin preview', () => {
     jest.spyOn(EmailTemplates, 'sendTemplate').mockResolvedValue({ sent: false });
     jest.spyOn(intro, 'appIntroEligibility').mockResolvedValue({ eligible: true, reason: 'first_visit' });
     jest.spyOn(intro, 'isEnabled').mockReturnValue(true);
-    jest.spyOn(welcome, 'oneTimeWelcomeEligibility').mockResolvedValue({ eligible: true, reason: 'first_one_time_booking' });
-    jest.spyOn(welcome, 'oneTimeWelcomeEmailEnabled').mockReturnValue(false);
-    jest.spyOn(welcome, 'queueOneTimeWelcomeEmail').mockResolvedValue({ queued: false });
     db.raw = jest.fn(sql => sql);
   });
   afterEach(() => jest.restoreAllMocks());
@@ -1117,25 +1113,6 @@ describe('onboarding audience checks in the existing admin preview', () => {
     });
     expect(intro.appIntroEligibility).toHaveBeenCalledWith(service);
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-    expect(welcome.queueOneTimeWelcomeEmail).not.toHaveBeenCalled();
-  });
-
-  test('one-time welcome preview shows eligibility while the new email gate is off', async () => {
-    templateKey = 'welcome.new_recurring';
-    const service = { id: appointmentId, customer_id: 'customer-1', is_recurring: false };
-    const customer = { id: 'customer-1', email: 'fixture@example.invalid' };
-    setDbQueues({ scheduled_services: [chain({ first: service })], customers: [chain({ first: customer })] });
-    await withServer(async baseUrl => {
-      const res = await fetch(`${baseUrl}/admin/email-templates/versions/version-1/preview`, {
-        method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ payload: {}, scheduledServiceId: appointmentId }),
-      });
-      expect(res.status).toBe(200);
-      expect((await res.json()).audiencePreview).toMatchObject({ before: false, after: true, gateEnabled: false, applies: true });
-    });
-    expect(welcome.oneTimeWelcomeEligibility).toHaveBeenCalledWith(service, customer);
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-    expect(welcome.queueOneTimeWelcomeEmail).not.toHaveBeenCalled();
   });
 
   test('rejects a malformed appointment before reading or rendering', async () => {

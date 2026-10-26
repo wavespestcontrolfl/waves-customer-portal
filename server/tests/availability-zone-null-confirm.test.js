@@ -99,16 +99,14 @@ function wireConfirm({ zones = [], replacedRow = undefined } = {}) {
     throw new Error(`Unexpected db table ${table}`);
   });
 
-  const dayCapCount = chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
   const selfBookInsert = chain({
     returning: jest.fn().mockResolvedValue([{ id: 'booking-1' }]),
   });
   const scheduledQueries = [];
   const trx = jest.fn((table) => {
     if (table === 'self_booked_appointments') {
-      // First call = day-cap count, later call = insert. Both chains
-      // support either usage; return count first.
-      return trx.selfBookCalls++ === 0 ? dayCapCount : selfBookInsert;
+      trx.selfBookCalls++;
+      return selfBookInsert;
     }
     if (table === 'scheduled_services') {
       const q = chain({
@@ -346,35 +344,25 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
 
   // ---- ORDERING CONTRACT (services/scheduling/occupancy.js) ---------------
   // Global order: date-occupancy -> self-booking-confirm -> tech -> zone ->
-  // day-cap. confirmBooking uses rungs 1, 4 and 5. A writer that took them in
-  // any other order could deadlock against createSelfBooking, which shares
-  // all three.
+  // day lock. confirmBooking uses rungs 1 and 4 only: the per-day count cap
+  // (and with it the day lock this writer once took as rung 5) was retired
+  // for the self-serve notice window.
   describe('lock ordering', () => {
-    // The day-cap rung only exists while GATE_SELF_BOOK_DAY_CAP is set
-    // (owner ruling 2026-09-23 retired the cap for the notice window).
-    let prevCap;
-    beforeEach(() => { prevCap = process.env.GATE_SELF_BOOK_DAY_CAP; process.env.GATE_SELF_BOOK_DAY_CAP = 'true'; });
-    afterEach(() => {
-      if (prevCap === undefined) delete process.env.GATE_SELF_BOOK_DAY_CAP;
-      else process.env.GATE_SELF_BOOK_DAY_CAP = prevCap;
-    });
-
-    test('GATE_SELF_BOOK_DAY_CAP unset (default): no day-cap lock and no day count — the commit mirrors the offer side', async () => {
-      delete process.env.GATE_SELF_BOOK_DAY_CAP;
+    test('no day lock and no day count — the commit mirrors the offer side', async () => {
       const { trx } = wireConfirm({ zones: [] });
       const result = await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
       expect(result.confirmationCode).toBeTruthy();
       expect(lockKeys(trx)).not.toContain(DATE);
       expect(advisoryLocks(trx).some(([ns]) => ns === 'self-booking-day-cap')).toBe(false);
-      // The self_booked_appointments table was only touched for the INSERT
-      // (call #1), never for a day count.
+      // The self_booked_appointments table was only touched for the INSERT,
+      // never for a day count.
       expect(trx.selfBookCalls).toBe(1);
     });
 
     test.each([
       ['zone-null', []],
       ['zone-resolved', [{ id: 'zone-1', zone_name: 'Sarasota / South', cities: ['Offgridville'] }]],
-    ])('%s confirm takes date-occupancy -> zone -> day-cap', async (_label, zones) => {
+    ])('%s confirm takes date-occupancy -> zone', async (_label, zones) => {
       const { trx } = wireConfirm({ zones });
 
       await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
@@ -382,25 +370,22 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
       const keys = lockKeys(trx);
       const occupancyIdx = keys.indexOf(`occupancy:${DATE}`);
       const zoneIdx = keys.indexOf(`zone:${zones[0]?.id || 'unknown'}:${DATE}`);
-      const dayCapIdx = keys.indexOf(DATE);
       expect(occupancyIdx).toBeGreaterThanOrEqual(0);
       expect(zoneIdx).toBeGreaterThanOrEqual(0);
-      expect(dayCapIdx).toBeGreaterThanOrEqual(0);
       // Rung 1 is FIRST — of every advisory lock this transaction takes, not
       // merely before the zone one.
       expect(occupancyIdx).toBe(0);
       expect(occupancyIdx).toBeLessThan(zoneIdx);
-      expect(zoneIdx).toBeLessThan(dayCapIdx);
     });
 
-    test('the day-cap lock rides the self-booking-day-cap namespace, the other two ride slot-reserve', async () => {
+    test('date-occupancy and zone ride the slot-reserve namespace', async () => {
       const { trx } = wireConfirm({ zones: [] });
       await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
 
       const locks = advisoryLocks(trx);
       expect(locks[0]).toEqual(['slot-reserve', `occupancy:${DATE}`]);
       expect(locks[1]).toEqual(['slot-reserve', `zone:unknown:${DATE}`]);
-      expect(locks[2]).toEqual(['self-booking-day-cap', DATE]);
+      expect(locks.some(([ns]) => ns === 'self-booking-day-cap')).toBe(false);
     });
   });
 });
