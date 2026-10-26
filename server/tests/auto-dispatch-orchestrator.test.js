@@ -2101,3 +2101,17 @@ describe('day rules (GATE_AUTO_DISPATCH_DAY_RULES, owner 2026-10-24)', () => {
     });
   });
 });
+
+describe('run log line words the day-move rule for the guard mode in force', () => {
+  const { describeGuardRule } = _internals;
+  test('legacy keeps the flat lock boundary', () => {
+    expect(describeGuardRule('legacy', '2026-11-09', '2026-10-26')).toBe('lock>2026-11-09');
+    expect(describeGuardRule(undefined, '2026-11-09', '2026-10-26')).toBe('lock>2026-11-09');
+  });
+  test('tiers says day moves start 7 days out', () => {
+    expect(describeGuardRule('tiers', '2026-11-09', '2026-10-26')).toBe('tiers: day moves from 7 days out');
+  });
+  test('flex says frozen under 73h and day moves land on or after today + 5', () => {
+    expect(describeGuardRule('flex', '2026-11-09', '2026-10-26')).toBe('flex: frozen under 73h, day moves on or after 2026-10-31');
+  });
+});
