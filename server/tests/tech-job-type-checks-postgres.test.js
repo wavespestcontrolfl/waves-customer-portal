@@ -180,13 +180,16 @@ postgres('technician job type from the catalog (real Postgres)', () => {
         made.visitIds.push(first.visit.id);
         const out = await assignDispatchJob({ jobId: first.visit.id, technicianId: hire.id, actorId: null, emit: false });
         expect(out).toMatchObject({ changed: true, warnings: [`${hire.name} is set to Off for Lawn, tree & shrub work.`] });
+        // The job-type lines alone, for the edit save's series siblings (Codex #6740 r2).
+        expect(out.capabilityWarnings).toEqual([`${hire.name} is set to Off for Lawn, tree & shrub work.`]);
         expect((await db('scheduled_services').where({ id: first.visit.id }).first('technician_id')).technician_id).toBe(hire.id);
 
         delete process.env.GATE_TECH_JOB_TYPE_CHECKS;
         const second = await book(palm, null);
         made.visitIds.push(second.visit.id);
-        expect(await assignDispatchJob({ jobId: second.visit.id, technicianId: hire.id, actorId: null, emit: false }))
-          .not.toHaveProperty('warnings');
+        const offOut = await assignDispatchJob({ jobId: second.visit.id, technicianId: hire.id, actorId: null, emit: false });
+        expect(offOut).not.toHaveProperty('warnings');
+        expect(offOut).not.toHaveProperty('capabilityWarnings');
       });
     });
   });

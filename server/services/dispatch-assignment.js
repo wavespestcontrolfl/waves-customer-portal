@@ -381,6 +381,9 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     technicianName: tech?.name || null,
     changed: true,
     ...(assignWarnings.length ? { warnings: assignWarnings } : {}),
+    // The job-type lines alone, for a caller that warns for some visits itself
+    // (assignScheduleJobs' series siblings). Gate off: [] and no key.
+    ...(capabilityLines.length ? { capabilityWarnings: capabilityLines } : {}),
   };
 }
 
