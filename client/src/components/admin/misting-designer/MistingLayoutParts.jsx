@@ -76,7 +76,21 @@ function AimStatus({ layout }) {
   );
 }
 
-export function Toolbar({ layout, editsPresent }) {
+// − and + step the photo's zoom, like the Treatment Zone Mapper's: out as far as MIN_TRACE_ZOOM, in as far as the
+// closest photo there is. + is off, with its reason beside it, when a point would leave the photo.
+function ZoomControl({ zoom }) {
+  const { level, canOut, canIn, busy, reason, onStep } = zoom;
+  return (
+    <div role="group" aria-label="Map zoom" className="flex flex-wrap items-center gap-2 mb-3">
+      <Button variant="secondary" aria-label="Zoom out" disabled={!canOut || busy} onClick={() => onStep(-1)}>−</Button>
+      <span data-testid="layout-zoom" className="text-14 text-zinc-900">Zoom {level}</span>
+      <Button variant="secondary" aria-label="Zoom in" disabled={!canIn || busy} onClick={() => onStep(1)}>+</Button>
+      {reason ? <span data-testid="layout-zoom-note" className="text-14 text-zinc-600">{reason}</span> : null}
+    </div>
+  );
+}
+
+export function Toolbar({ layout, editsPresent, zoom }) {
   const { mode, chooseMode, canFinish, finishDraft, undo, clearAll, hasContent, directions, spray, reducedMotion } = layout;
   return (
     <>
@@ -109,6 +123,7 @@ export function Toolbar({ layout, editsPresent }) {
         </Button>
         <span className="text-14 text-zinc-600">Undo and Clear change the lines only.</span>
       </div>
+      {zoom && <ZoomControl zoom={zoom} />}
       <div role="group" aria-label="Preview controls" className="flex flex-wrap items-center gap-2 mb-3">
         <Button
           variant={spray && !reducedMotion ? 'primary' : 'secondary'}

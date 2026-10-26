@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest';
-import { fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import EstimateProposalDocument from './EstimateProposalDocument';
 import { GLASS_COPY } from '../lib/estimate-glass-copy';
 import { RATE_REVIEW_TERMS_LINE } from '@estimate-copy-claims';
@@ -1164,6 +1164,58 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
       expect([...legend.querySelectorAll('li')].map((li) => li.textContent)).toEqual(MISTING_LEGEND_KEYS.map((k) => k.label));
       expect(legend.textContent).toContain('Near water or in a no-mist zone');
       expect(legend.textContent).toContain('Arrow = spray direction');
+    });
+
+    describe('in the satellite photo\'s place', () => {
+      // A residential estimate (not an authored commercial proposal), which is what carries the "How your price was built" block.
+      const residential = docData(single);
+      const withSatellite = { ...residential, estimate: { ...residential.estimate, satelliteUrl: 'https://files.example/sat.png' } };
+      const satImg = (container) => container.querySelector('img[alt^="Satellite view"]');
+
+      it('without a layout the satellite photo prints as always, and a failed one counts', () => {
+        const { container } = render(<EstimateProposalDocument data={withSatellite} token="tok-123" />);
+        expect(satImg(container)).toBeTruthy();
+        expect(container.querySelector('[data-testid="doc-misting-layout"]')).toBeNull();
+        fireEvent.error(satImg(container));
+        expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(1);
+      });
+
+      it('with a layout the card takes the photo\'s position and the satellite photo is not shown', () => {
+        const without = render(<EstimateProposalDocument data={withSatellite} token="tok-123" />).container;
+        const photo = satImg(without);
+        const slot = photo.parentElement; // the "How your price was built" block holds the photo
+        const textBefore = [...slot.children].map((el) => el.tagName);
+        cleanup();
+
+        const { container } = render(<EstimateProposalDocument data={{ ...withSatellite, mistingLayout: layout }} token="tok-123" />);
+        expect(satImg(container)).toBeNull();
+        expect(container.innerHTML).not.toContain('files.example/sat.png');
+        const card = container.querySelector('[data-testid="doc-misting-layout"]');
+        expect(card).toBeTruthy();
+        // Same place: the last thing in the same block, after its heading, body and metrics.
+        expect(card.parentElement.textContent).toContain('How your price was built');
+        expect(card.parentElement.lastElementChild).toBe(card);
+        expect([...card.parentElement.children].slice(0, -1).map((el) => el.tagName)).toEqual(textBefore.slice(0, -1));
+        // It is printed once.
+        expect(container.querySelectorAll('[data-testid="doc-misting-layout"]')).toHaveLength(1);
+      });
+
+      it('counts only the layout image: a failed layout counts one, a satellite photo that was never shown counts none', () => {
+        const { container } = render(<EstimateProposalDocument data={{ ...withSatellite, mistingLayout: layout }} token="tok-123" />);
+        expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(0);
+        fireEvent.error(container.querySelector('[data-testid="doc-misting-layout"] img'));
+        expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(1);
+        expect(container.querySelector('[data-testid="doc-misting-layout"]')).toBeNull();
+        expect(satImg(container)).toBeNull(); // a dropped layout does not bring the photo back
+      });
+
+      it('still prints the layout, once, when there is no price block to hold it', () => {
+        const noBlock = { ...withSatellite, estimate: { ...withSatellite.estimate, intelligence: null }, mistingLayout: layout };
+        const { container } = render(<EstimateProposalDocument data={noBlock} token="tok-123" />);
+        expect(container.querySelectorAll('[data-testid="doc-misting-layout"]')).toHaveLength(1);
+        expect(satImg(container)).toBeNull();
+        expect(container.textContent).not.toContain('How your price was built');
+      });
     });
 
     it('adds no section and no text when the key is absent, so the document is unchanged', () => {

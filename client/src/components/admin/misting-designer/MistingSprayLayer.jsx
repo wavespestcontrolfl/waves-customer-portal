@@ -6,7 +6,7 @@
 import { useEffect, useRef } from 'react';
 import { MAP_HEIGHT, MAP_WIDTH } from '../../tech/treatmentZoneSpray';
 import { aimReachPx, aimVector } from '../../../lib/mistingLayoutAim';
-import { drawMistWedge } from '../../../lib/mistingLayoutMistDraw';
+import { drawMistPuff, drawMistWedge } from '../../../lib/mistingLayoutMistDraw';
 
 const FRAME_MS = 1000 / 60;
 const SPAWN_EVERY_MS = 100; // one puff per nozzle
@@ -34,7 +34,7 @@ function spawn(parts, nozzles, aims, lat, zoom) {
       vy: (v.x * s + v.y * c) * speed,
       life: 0,
       max: 60 + Math.random() * 30,
-      r: 5 + Math.random() * 6,
+      r: 7 + Math.random() * 7,
     });
   });
 }
@@ -75,15 +75,8 @@ export default function MistingSprayLayer({ nozzles, aims, lat, zoom, animate, w
         p.vx *= drag;
         p.vy *= drag;
         p.r += 0.12 * k;
-        // White mist with a faint blue edge, so it reads on bright lawn and pale roofs as well as on shade.
-        const a = Math.sin((Math.PI * p.life) / p.max);
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(236, 248, 255, ${a * 0.55})`;
-        ctx.fill();
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = `rgba(0, 120, 190, ${a * 0.35})`;
-        ctx.stroke();
+        // The Treatment Zone Mapper's blue puff: a white-mixed core fading to clear, so it reads on lawn and roof alike.
+        drawMistPuff(ctx, p.x, p.y, p.r, Math.sin((Math.PI * p.life) / p.max) * 0.6);
       }
     };
     const start = () => {

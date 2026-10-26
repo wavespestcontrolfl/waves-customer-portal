@@ -21,6 +21,7 @@ import {
   moveRiser,
   setPump,
 } from '../../../lib/mistingLayoutExtras';
+import { scaleExtras } from '../../../lib/mistingLayoutZoom';
 
 const NO_FLAGS = Object.freeze({ nozzleKeys: new Set(), riserKeys: new Set() });
 const point = (p) => ({ x: p.x, y: p.y });
@@ -76,6 +77,12 @@ export default function useMistingLayoutExtras(mapState, nozzles, initial = null
     }
   };
 
+  // The photo's zoom changed by `delta`: everything stays on the same ground. Their restore point is at the old scale, so it goes.
+  const rescaleExtras = (delta) => {
+    setClearedExtras(null);
+    setExtras((prev) => scaleExtras(prev, delta));
+  };
+
   const clearExtras = () => {
     const count = extrasCount(extras);
     if (count === 0) return;
@@ -106,5 +113,6 @@ export default function useMistingLayoutExtras(mapState, nozzles, initial = null
     tapZone,
     clearExtras,
     restoreExtras,
+    rescaleExtras,
   };
 }

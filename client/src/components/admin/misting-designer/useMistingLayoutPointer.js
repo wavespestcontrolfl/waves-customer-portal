@@ -88,7 +88,7 @@ export default function useMistingLayoutPointer(layout, mapState) {
   };
 
   const onPointerDown = (e) => {
-    if (!layout.ready || (e.button !== undefined && e.button > 0)) return;
+    if (!layout.ready || layout.zoomBusy || (e.button !== undefined && e.button > 0)) return;
     const p = toMap(e);
     if (!insideMap(p)) return;
     const tool = TOOLS[layout.mode];

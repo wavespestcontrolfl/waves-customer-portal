@@ -20,6 +20,7 @@ import {
   nearestPointOnLines,
   placeNozzles,
 } from '../../../lib/mistingLayoutGeometry';
+import { fitsAfterZoom, scaleDraft, scaleEdits, scaleLines } from '../../../lib/mistingLayoutZoom';
 import useMistingLayoutExtras from './useMistingLayoutExtras';
 
 const LINE_HIT_CSS_PX = 12;
@@ -86,6 +87,7 @@ export default function useMistingLayoutState(mapState, initial = null) {
   const [directions, setDirections] = useState(true); // aim arrows on the map
   const [reducedMotion] = useState(prefersReducedMotion);
   const [spray, setSpray] = useState(() => !prefersReducedMotion()); // animated mist; off for reduced motion
+  const [zoomBusy, setZoomBusy] = useState(false); // a photo at another zoom is loading: taps wait for it
   const [aimKey, setAimKey] = useState(null); // the nozzle whose aim was last touched (Reset aim acts on it)
   const idRef = useRef(initial ? initial.idCounter : 0);
   const nextId = (prefix) => {
@@ -119,6 +121,23 @@ export default function useMistingLayoutState(mapState, initial = null) {
   }, [ready, mapState, nozzles, allLines, extras.zones]);
   const nearWaterCount = useMemo(() => [...aims.values()].filter((a) => a.nearWater).length, [aims]);
   const aimedNozzle = aimKey ? nozzles.find((n) => n.key === aimKey) || null : null;
+
+  // ── Zoom ───────────────────────────────────────────────────────────────────
+  // A zoom in is refused while any point would leave the frame; `zoomInFits` says whether it would.
+  const zoomInFits = useMemo(
+    () => fitsAfterZoom({ lines, draft, edits, extras: { risers: extras.risers, pump: extras.pump, zones: extras.zones } }, 1),
+    [lines, draft, edits, extras.risers, extras.pump, extras.zones],
+  );
+
+  // The photo changed zoom by `delta`: scale everything staff placed so it stays on the same ground (lib/mistingLayoutZoom).
+  // The notice's restore point is at the old scale, so it goes.
+  const rescale = (delta) => {
+    setLines((prev) => scaleLines(prev, delta));
+    setDraft((prev) => scaleDraft(prev, delta));
+    setEdits((prev) => scaleEdits(prev, delta));
+    setNotice(null);
+    extras.rescaleExtras(delta);
+  };
 
   // ── Changes to the lines ───────────────────────────────────────────────────
   // The one door for them. A change that alters the geometry re-places the nozzles, so it clears
@@ -261,5 +280,9 @@ export default function useMistingLayoutState(mapState, initial = null) {
     selectAim: (n) => setAimKey(n.key),
     aimNozzleToward,
     resetAim,
+    zoomBusy,
+    setZoomBusy,
+    zoomInFits,
+    rescale,
   };
 }

@@ -3,7 +3,7 @@
 // "!" mark, so the warning does not rely on color alone. A numbered nozzle is blue; it turns amber when
 // it is flagged or stands near water, and its arrow turns amber with it.
 import { aimVector } from '../../../lib/mistingLayoutAim';
-import { MIST_ARROW, MIST_ARROW_NEAR_WATER, aimTip } from '../../../lib/mistingLayoutMistDraw';
+import { MIST_ARROW, MIST_ARROW_NEAR_WATER, MIST_TRACE_STROKES, aimTip } from '../../../lib/mistingLayoutMistDraw';
 
 export const COPPER = '#b87333';
 const WARN = '#dc2626';
@@ -16,11 +16,23 @@ const ARROW_FROM = NOZZLE_R + 3; // an arrow starts just outside its dot, so it 
 
 const pointList = (points) => points.map((p) => `${p.x},${p.y}`).join(' ');
 
+// A traced line is the Treatment Zone Mapper's layered blue glow (wide soft blue, white core, strong blue on top);
+// a fence is dashed on the top stroke only, so the glow stays whole.
 export function LineGraphic({ line }) {
   return (
     <g data-testid={`layout-line-${line.kind}`}>
-      <polyline points={pointList(line.points)} fill="none" stroke="#000" strokeOpacity="0.7" strokeWidth="11" strokeLinejoin="round" strokeLinecap="round" />
-      <polyline points={pointList(line.points)} fill="none" stroke="#fff" strokeWidth="5" strokeDasharray={line.kind === 'fence' ? '18 12' : undefined} strokeLinejoin="round" />
+      {MIST_TRACE_STROKES.map((stroke, i) => (
+        <polyline
+          key={stroke.width}
+          points={pointList(line.points)}
+          fill="none"
+          stroke={stroke.color}
+          strokeWidth={stroke.width}
+          strokeDasharray={line.kind === 'fence' && i === MIST_TRACE_STROKES.length - 1 ? '18 12' : undefined}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      ))}
     </g>
   );
 }

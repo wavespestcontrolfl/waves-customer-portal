@@ -113,6 +113,33 @@ describe('drawSketch', () => {
     expect(names.lastIndexOf('restore')).toBeGreaterThan(clips[1]);
   });
 
+  it('traces an eave as the pest report\'s blue glow, and a fence the same with a dashed top stroke', () => {
+    const lineStrokes = (kind) => {
+      const styles = [];
+      const ctx = new Proxy({ measureText: (t) => ({ width: String(t).length * 14 }) }, {
+        get(target, prop) {
+          if (prop in target) return target[prop];
+          if (prop === 'stroke') return () => { styles.push([target.lineWidth, target.strokeStyle, target.dash]); };
+          if (prop === 'setLineDash') return (d) => { target.dash = d; };
+          return () => {};
+        },
+        set(target, prop, value) { target[prop] = value; return true; },
+      });
+      const m = buildSketchModel({
+        lat: 26.95, zoom: 20, lines: [{ id: 'L1', kind, points: [{ x: 100, y: 100 }, { x: 400, y: 100 }] }],
+        nozzles: [], risers: [], pump: null, zones: [],
+      });
+      drawSketch(ctx, m, { map: {} });
+      return styles.slice(0, 3);
+    };
+    expect(lineStrokes('eave')).toEqual([
+      [16, 'rgba(10,126,194,0.28)', []],
+      [9, 'rgba(255,255,255,0.6)', []],
+      [4.5, 'rgba(10,126,194,0.92)', []],
+    ]);
+    expect(lineStrokes('fence').map((s) => s[2])).toEqual([[], [], [18, 12]]);
+  });
+
   it('draws the pump as one square', () => {
     const { ctx, calls } = recordingContext();
     drawSketch(ctx, model(), { map: {} });
@@ -236,7 +263,8 @@ describe('drawSketch', () => {
       return { ctx, calls };
     }
     const WEDGE = MIST_WEDGE_FILL;
-    const wedgeRadii = (calls) => calls.flatMap((c, i) => (c[0] === 'arc' && calls[i + 2] && calls[i + 2][0] === 'fill' && calls[i + 2][1] === WEDGE ? [c[3]] : []));
+    // A wedge is an arc, its closing, a gradient (none in this recording context: flat fill) and the fill.
+    const wedgeRadii = (calls) => calls.flatMap((c, i) => (c[0] === 'arc' && calls.slice(i + 1, i + 4).some((f) => f[0] === 'fill' && f[1] === WEDGE) ? [c[3]] : []));
 
     it('gives every nozzle an arrow and a mist wedge, as long as its throw', () => {
       const { ctx, calls } = styleContext();

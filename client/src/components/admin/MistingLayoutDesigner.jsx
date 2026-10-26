@@ -28,6 +28,7 @@ import useMistingLayoutSave from './misting-designer/useMistingLayoutSave';
 import MistingLayoutSaveBar from './misting-designer/MistingLayoutSaveBar';
 import useMistingLayoutState, { editCount } from './misting-designer/useMistingLayoutState';
 import useMistingLayoutPointer from './misting-designer/useMistingLayoutPointer';
+import useMistingZoom from './misting-designer/useMistingZoom';
 import {
   CONCEPT_LABEL,
   CountsPanel,
@@ -67,6 +68,8 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
   const { ready, mode, totals, notice } = layout;
   const save = useMistingLayoutSave({ estimateId, mapState, address: address || (saved && saved.address) || null, layout, saved });
 
+  const zoom = useMistingZoom(mapState, layout);
+
   const useCounts = () => {
     if (totals.count <= 0) return;
     // Second argument: the riser count, which the estimator writes only when it is above zero.
@@ -85,7 +88,11 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
                 A layout saved for a different address is not shown. Saving this one replaces it.
               </p>
             )}
-            <Toolbar layout={layout} editsPresent={editCount(layout.edits) > 0} />
+            <Toolbar
+              layout={layout}
+              editsPresent={editCount(layout.edits) > 0}
+              zoom={zoom}
+            />
             <p className="text-14 text-zinc-600 mb-3">{toolHint(mode)}</p>
             {mode === 'add' && layout.addMiss && (
               <p role="status" className="text-14 text-amber-800 mb-3">Tap on a drawn line to add a nozzle</p>

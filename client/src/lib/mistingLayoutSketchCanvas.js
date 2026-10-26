@@ -7,7 +7,7 @@
 // on the photo's bottom strip, where Google's own attribution sits.
 import { MAP_HEIGHT, MAP_WIDTH } from '../components/tech/treatmentZoneSpray';
 import { SKETCH_ATTRIBUTION_H, SKETCH_HEIGHT, SKETCH_WIDTH, zoneLabel } from './mistingLayoutSketch';
-import { drawAimArrow, drawMistWedge } from './mistingLayoutMistDraw';
+import { MIST_TRACE_STROKES, drawAimArrow, drawMistWedge } from './mistingLayoutMistDraw';
 
 const COPPER = '#b87333';
 const WARN = '#dc2626';
@@ -102,20 +102,19 @@ function drawLabels(ctx, model, obstacles) {
   if (model.pump) drawLabelNear(ctx, 'Pump', { x: model.pump.x, y: model.pump.y, gap: 22 }, model.nozzles, placed);
 }
 
+// The Treatment Zone Mapper's layered blue glow; a fence is dashed on the top stroke only.
 function drawLine(ctx, line) {
   if (line.points.length < 2) return;
   ctx.save();
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  polyline(ctx, line.points);
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
-  ctx.lineWidth = 11;
-  ctx.stroke();
-  polyline(ctx, line.points);
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 5;
-  ctx.setLineDash(line.kind === 'fence' ? [18, 12] : []);
-  ctx.stroke();
+  MIST_TRACE_STROKES.forEach((stroke, i) => {
+    polyline(ctx, line.points);
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth = stroke.width;
+    ctx.setLineDash(line.kind === 'fence' && i === MIST_TRACE_STROKES.length - 1 ? [18, 12] : []);
+    ctx.stroke();
+  });
   ctx.restore();
 }
 

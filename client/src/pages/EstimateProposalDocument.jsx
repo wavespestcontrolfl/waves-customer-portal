@@ -249,12 +249,13 @@ export default function EstimateProposalDocument({ data, token }) {
   // if it fails it drops itself and reports through the counter the
   // renderer reads.
   const [satelliteFailed, setSatelliteFailed] = useState(false);
-  // Saved misting layout sketch (GATE_MISTING_LAYOUT_DESIGNER, /data `mistingLayout`): a second remote image,
-  // counted the same way. Absent key = no section and the count stays exactly the satellite's.
+  // Saved misting layout sketch (GATE_MISTING_LAYOUT_DESIGNER, /data `mistingLayout`): a remote image counted the
+  // same way, in the satellite photo's place. Absent key = the satellite photo and its count, exactly as before.
   const [mistingFailed, setMistingFailed] = useState(false);
   const mistingLayout = data?.mistingLayout?.imageUrl ? data.mistingLayout : null;
   if (typeof window !== 'undefined') {
-    window.__WAVES_PDF_IMAGE_FAILURES = (satelliteFailed ? 1 : 0) + (mistingLayout && mistingFailed ? 1 : 0);
+    // A saved misting layout takes the satellite photo's place, so the photo is neither shown nor counted then.
+    window.__WAVES_PDF_IMAGE_FAILURES = mistingLayout ? (mistingFailed ? 1 : 0) : (satelliteFailed ? 1 : 0);
   }
 
   // Distinct service stacks across the proposal lines. Commercial estimates
@@ -441,6 +442,35 @@ export default function EstimateProposalDocument({ data, token }) {
   const estimateNumber = estimate.slug
     || String(estimate.id || '').split('-')[0].toUpperCase()
     || '';
+
+  // GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn misting layout (server /data `mistingLayout`, document render only;
+  // absent with the gate off, no saved layout, no misting system, or a layout drawn for another address). The drawing is
+  // plain; its title, counts, legend and concept note sit in the estimate card around it (the estimate template's card
+  // and inner box). It takes the satellite photo's place in the document, same position, and the separate satellite photo
+  // is not shown then. A layout image that fails to load drops the whole card and counts as a failed image.
+  const misting = mistingLayout && !mistingFailed ? (
+    <div className="doc-keep" data-testid="doc-misting-layout" style={estimateCard({ padding: 16, marginBottom: 0, marginTop: 14 })}>
+      <SectionHeader>Proposed misting layout</SectionHeader>
+      <div style={estimateInnerBox({ marginTop: 8, padding: 6 })}>
+        <img
+          src={mistingLayout.imageUrl}
+          alt={`Proposed misting layout for ${mistingLayout.address || estimate.address || 'the property'}`}
+          style={{ display: 'block', width: '100%', maxHeight: 640, objectFit: 'contain', borderRadius: 8 }}
+          onError={() => setMistingFailed(true)}
+        />
+      </div>
+      <p style={{ margin: '8px 0 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{mistingLayoutCountsLine(mistingLayout.counts)}</p>
+      <ul data-testid="doc-misting-legend" aria-label="Legend" style={{ listStyle: 'none', margin: '6px 0 0', padding: 0, display: 'flex', flexWrap: 'wrap', gap: '3px 16px' }}>
+        {MISTING_LEGEND_KEYS.map((k) => (
+          <li key={k.key} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, lineHeight: 1.4, color: MUTED }}>
+            <i aria-hidden="true" style={{ display: 'inline-block', flexShrink: 0, boxSizing: 'content-box', width: 8, height: 8, ...MISTING_SWATCH[k.key] }} />
+            {k.label}
+          </li>
+        ))}
+      </ul>
+      <p style={{ margin: '6px 0 0', fontSize: 11, lineHeight: 1.5, color: MUTED }}>Concept layout — final placement at the design visit and install.</p>
+    </div>
+  ) : null;
 
   return (
     <FieldDocument className="estimate-document-v1" sheetClassName="doc-page">
@@ -767,7 +797,7 @@ export default function EstimateProposalDocument({ data, token }) {
                 ))}
               </div>
             ) : null}
-            {estimate.satelliteUrl && !satelliteFailed ? (
+            {mistingLayout ? misting : estimate.satelliteUrl && !satelliteFailed ? (
               <img
                 src={resolveApiAssetUrl(estimate.satelliteUrl)}
                 alt={`Satellite view of ${estimate.address || 'the property'}`}
@@ -778,33 +808,8 @@ export default function EstimateProposalDocument({ data, token }) {
           </div>
         ) : null}
 
-        {/* GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn concept sketch of the misting system (server /data `mistingLayout`,
-            document render only; absent with the gate off or no saved layout). The drawing is plain; its title, counts, legend and concept note
-            sit in the estimate card around it (the estimate template's card and inner box). A sketch that fails to load drops the whole
-            section and counts as a failed image. */}
-        {mistingLayout && !mistingFailed ? (
-          <div className="doc-keep" data-testid="doc-misting-layout" style={estimateCard({ padding: 16, marginBottom: 0, marginTop: 14 })}>
-            <SectionHeader>Proposed misting layout</SectionHeader>
-            <div style={estimateInnerBox({ marginTop: 8, padding: 6 })}>
-              <img
-                src={mistingLayout.imageUrl}
-                alt={`Proposed misting layout for ${mistingLayout.address || estimate.address || 'the property'}`}
-                style={{ display: 'block', width: '100%', maxHeight: 640, objectFit: 'contain', borderRadius: 8 }}
-                onError={() => setMistingFailed(true)}
-              />
-            </div>
-            <p style={{ margin: '8px 0 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{mistingLayoutCountsLine(mistingLayout.counts)}</p>
-            <ul data-testid="doc-misting-legend" aria-label="Legend" style={{ listStyle: 'none', margin: '6px 0 0', padding: 0, display: 'flex', flexWrap: 'wrap', gap: '3px 16px' }}>
-              {MISTING_LEGEND_KEYS.map((k) => (
-                <li key={k.key} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, lineHeight: 1.4, color: MUTED }}>
-                  <i aria-hidden="true" style={{ display: 'inline-block', flexShrink: 0, boxSizing: 'content-box', width: 8, height: 8, ...MISTING_SWATCH[k.key] }} />
-                  {k.label}
-                </li>
-              ))}
-            </ul>
-            <p style={{ margin: '6px 0 0', fontSize: 11, lineHeight: 1.5, color: MUTED }}>Concept layout — final placement at the design visit and install.</p>
-          </div>
-        ) : null}
+        {/* No "How your price was built" block to hold it: the layout still prints, here. */}
+        {!intelligence ? misting : null}
 
         {/* GATE_ESTIMATE_LAWN_LIMITS: what the lawn program can and can't fix (server copy, /data `lawnLimits`; absent unless a recurring lawn estimate). */}
         {data?.lawnLimits?.heading && Array.isArray(data.lawnLimits.paragraphs) && data.lawnLimits.paragraphs.length > 0 ? (

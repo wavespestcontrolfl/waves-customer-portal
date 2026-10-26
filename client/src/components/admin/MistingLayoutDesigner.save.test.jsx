@@ -162,7 +162,7 @@ describe('reopening a saved layout', () => {
     expect(screen.getByTestId('layout-other-address')).toHaveTextContent(/different address/);
     expect(nozzleCount()).toBe(0);
     // The photo is the new address's, not the saved layout's.
-    expect(loadBestMapImage).toHaveBeenCalledWith(LAT, LNG, 'test-key', [20, 19]);
+    expect(loadBestMapImage).toHaveBeenCalledWith(LAT, LNG, 'test-key', [21, 20, 19]); // the Treatment Zone Mapper's order: as close as the imagery goes
     tap(frame, 100, 100);
     tap(frame, 300, 100);
     adminFetch.mockResolvedValueOnce({ layout: { savedAt: '2026-10-26T16:00:00Z' } });
@@ -193,6 +193,6 @@ describe('reopening a saved layout', () => {
     render(<MistingLayoutDesigner {...props({ estimateId: 'est-1' })} />);
     await screen.findByTestId('layout-map');
     expect(nozzleCount()).toBe(0);
-    expect(loadBestMapImage).toHaveBeenCalledWith(LAT, LNG, 'test-key', [20, 19]);
+    expect(loadBestMapImage).toHaveBeenCalledWith(LAT, LNG, 'test-key', [21, 20, 19]); // the Treatment Zone Mapper's order: as close as the imagery goes
   });
 });
