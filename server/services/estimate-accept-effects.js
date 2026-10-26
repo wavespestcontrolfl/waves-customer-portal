@@ -971,6 +971,14 @@ const sameTarget = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(can
 // address on file changed after the card): the receipt says it was
 // suppressed, never "complete it by hand" (codex #6113 r28).
 function skippedStepWarning(ctx, step) {
+  // A skipped consumer notice is a legal step left undone: the office bell says so (the response warning alone is
+  // gone once the card closes). Detached, like the send itself.
+  if (step.step === 'consumer_notice') {
+    const { alertManualAcceptConsumerNoticeSkipped } = require('./estimate-consumer-notice');
+    void alertManualAcceptConsumerNoticeSkipped({
+      estimateId: ctx.acceptedEstimate.id, customerId: customerIdOf(ctx), ...(ctx.database ? { conn: ctx.database } : {}),
+    });
+  }
   if (!Array.isArray(ctx.warnings)) return;
   if (step.step === 'membership_email') {
     ctx.warnings.push(membershipEmailWarning(null, 'recipient_changed'));

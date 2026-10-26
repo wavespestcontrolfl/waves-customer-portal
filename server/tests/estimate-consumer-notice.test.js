@@ -28,7 +28,7 @@ const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { TEMPLATE: SEED } = require('../models/migrations/20261024140000_seed_fdacs_13692_consumer_notice');
 const {
   SNAPSHOT_SOURCE, MANUAL_ACCEPT_SOURCE, estimateNeedsConsumerNotice, consumerNoticeState, consumerNoticeCtaFor, consumerNoticeBlocksAccept,
-  ensureEstimateConsumerNotice, sendManualAcceptConsumerNotice, consumerNoticeRecipients, consumerNoticeTarget,
+  ensureEstimateConsumerNotice, sendManualAcceptConsumerNotice, consumerNoticeRecipients, consumerNoticeTarget, alertManualAcceptConsumerNoticeSkipped,
 } = require('../services/estimate-consumer-notice');
 
 const req = { ip: '203.0.113.9', get: () => 'jest-agent' };
@@ -525,6 +525,15 @@ describe('sendManualAcceptConsumerNotice', () => {
     const expected = { ...(await consumerNoticeTarget(database, 'est-1', 'cust-1')), email_key: null, phone_key: null };
     expect(await sendManualAcceptConsumerNotice({ estimateId: 'est-1', customerId: 'cust-1', expected, conn: database })).toMatchObject({ sent: false, reason: 'not_delivered' });
     expect(deliverDocumentRequestChannels).not.toHaveBeenCalled();
+  });
+
+  test('a skipped carded send rings the bell naming the customer, and never throws', async () => {
+    const { database } = makeDb({});
+    await alertManualAcceptConsumerNoticeSkipped({ estimateId: 'est-1', customerId: 'cust-1', conn: database });
+    expect(raiseAdminAlert.mock.calls[0][1]).toMatchObject({ subject: { type: 'estimate', id: 'est-1' } });
+    expect(raiseAdminAlert.mock.calls[0][1].action).toContain('Pat Owner');
+    raiseAdminAlert.mockRejectedValueOnce(new Error('bell down'));
+    await expect(alertManualAcceptConsumerNoticeSkipped({ estimateId: 'est-1', customerId: 'cust-1', conn: database })).resolves.toBeUndefined();
   });
 
   test('the first read failing still rings the bell for the accepted estimate', async () => {

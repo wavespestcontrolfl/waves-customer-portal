@@ -356,6 +356,16 @@ async function sendManualAcceptConsumerNotice({ estimateId, customerId = null, e
   }
 }
 
+// The Intelligence Bar accept skipped the send because its pinned target changed after the commit (runPostCommit):
+// nothing goes out, and the office is told to finish it. Never throws.
+async function alertManualAcceptConsumerNoticeSkipped({ estimateId, customerId, conn = db }) {
+  try {
+    await alertNoticeNotSent({ id: estimateId, customer_id: customerId }, 'recipient_changed', conn);
+  } catch (err) {
+    logger.warn(`[estimate-consumer-notice] skip alert failed for estimate ${estimateId}: ${err.code || err.message}`);
+  }
+}
+
 module.exports = {
   SNAPSHOT_SOURCE,
   MANUAL_ACCEPT_SOURCE,
@@ -368,4 +378,5 @@ module.exports = {
   consumerNoticeRecipients,
   consumerNoticeTarget,
   sendManualAcceptConsumerNotice,
+  alertManualAcceptConsumerNoticeSkipped,
 };

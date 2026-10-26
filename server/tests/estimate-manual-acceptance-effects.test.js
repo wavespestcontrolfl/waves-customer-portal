@@ -1592,6 +1592,24 @@ describe('the post-commit plan (pure)', () => {
     }
   });
 
+  test('a consumer notice step whose pinned target changed is skipped, and the office bell is raised instead', async () => {
+    const notice = require('../services/estimate-consumer-notice');
+    const send = jest.spyOn(notice, 'sendManualAcceptConsumerNotice').mockResolvedValue({ sent: true });
+    const skipped = jest.spyOn(notice, 'alertManualAcceptConsumerNoticeSkipped').mockResolvedValue();
+    const resolve = jest.spyOn(Effects.POST_COMMIT_STEPS.consumer_notice, 'resolveTarget').mockResolvedValue({ email_key: 'new' });
+    try {
+      const warnings = [];
+      await Effects.runPostCommit([{ step: 'consumer_notice', sends: true, target: { email_key: 'old' } }], {
+        acceptedEstimate: { id: 'est-9', customer_id: 'cust-1' }, warnings,
+      });
+      expect(send).not.toHaveBeenCalled();
+      expect(skipped).toHaveBeenCalledWith({ estimateId: 'est-9', customerId: 'cust-1' });
+      expect(warnings).toEqual([`${Effects.STEP_LABELS.consumer_notice}: what it acts on changed after the accept. Complete it by hand.`]);
+    } finally {
+      send.mockRestore(); skipped.mockRestore(); resolve.mockRestore();
+    }
+  });
+
   test('an annual prepay accept never plans the membership email', () => {
     const plan = Effects.planPostCommit({ billingTerm: 'prepay_annual', acceptedEstimate: accepted, conversion });
     expect(plan.some((s) => s.step === 'membership_email')).toBe(false);
