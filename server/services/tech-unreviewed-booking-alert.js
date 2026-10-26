@@ -9,11 +9,16 @@
  *
  * Both functions are best effort: they log and resolve, never reject, so the refusal the technician
  * sees and the confirm hook never depend on the bell.
+ *
+ * The raise runs in one transaction that locks the visit row and reads it again: a confirm that
+ * committed first is seen there, so no notice is raised for a booking that is already confirmed; a
+ * confirm that comes after waits for this commit, and its hook then closes the notice.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const { raiseAdminAlert } = require('./admin-alert-compose');
 const { lookupCustomerName, fitAction } = require('./admin-alert-names');
+const { isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
 
 const KEY_PREFIX = 'tech-unreviewed-booking:';
 const keyFor = (visitId) => `${KEY_PREFIX}${visitId}`;
@@ -25,32 +30,39 @@ function dateOnly(value) {
 }
 
 /**
- * @param {object} svc  scheduled_services row (id, customer_id, scheduled_date)
+ * @param {object} svc  scheduled_services row (id; the row is read again under a lock)
  * @param {string} tap  'En Route' or 'On Site'
  */
 async function raiseForVisit(svc, tap) {
   try {
-    const name = await lookupCustomerName(db, svc.customer_id);
-    const day = dateOnly(svc.scheduled_date);
-    const link = `/admin/dispatch?tab=schedule${day ? `&date=${day}` : ''}&appointment=${encodeURIComponent(svc.id)}`;
-    return await raiseAdminAlert('schedule', {
-      area: 'Schedule',
-      action: name
-        ? fitAction('Schedule', name, [(who) => `review ${who}'s booking before the visit`, (who) => `review ${who}'s booking`])
-        : 'review a booking before the visit',
-      why: `The technician tapped ${tap}, but the office has not reviewed this booking.`,
-      severity: 'needs-you',
-      link,
-      subject: { type: 'visit', id: String(svc.id) },
-      doneWhen: 'visit_confirmed',
-      who: 'person',
-    }, {
-      // One notice per visit, however many times the technician taps.
-      dedupeKey: keyFor(svc.id),
-      detail: `${name || 'A customer'}'s booking came from a phone call and is still waiting for office review. `
-        + `The technician tapped ${tap}; the tap was refused and nothing was confirmed. `
-        + 'Confirm the booking (or cancel the visit) before the technician starts it. The customer was not contacted.',
-      metadata: { scheduledServiceId: String(svc.id) },
+    return await db.transaction(async (trx) => {
+      const fresh = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
+        .first('id', 'customer_id', 'scheduled_date', 'status', 'customer_confirmed', 'source_action');
+      // Confirmed (or gone) since the technician's read: nothing for the office to review.
+      if (!isPendingOutboundReviewBooking(fresh)) return null;
+      const name = await lookupCustomerName(trx, fresh.customer_id);
+      const day = dateOnly(fresh.scheduled_date);
+      const link = `/admin/dispatch?tab=schedule${day ? `&date=${day}` : ''}&appointment=${encodeURIComponent(fresh.id)}`;
+      return raiseAdminAlert('schedule', {
+        area: 'Schedule',
+        action: name
+          ? fitAction('Schedule', name, [(who) => `review ${who}'s booking before the visit`, (who) => `review ${who}'s booking`])
+          : 'review a booking before the visit',
+        why: `The technician tapped ${tap}, but the office has not reviewed this booking.`,
+        severity: 'needs-you',
+        link,
+        subject: { type: 'visit', id: String(fresh.id) },
+        doneWhen: 'visit_confirmed',
+        who: 'person',
+      }, {
+        // One notice per visit, however many times the technician taps.
+        dedupeKey: keyFor(fresh.id),
+        detail: `${name || 'A customer'}'s booking came from a phone call and is still waiting for office review. `
+          + `The technician tapped ${tap}; the tap was refused and nothing was confirmed. `
+          + 'Confirm the booking (or cancel the visit) before the technician starts it. The customer was not contacted.',
+        metadata: { scheduledServiceId: String(fresh.id) },
+        trx,
+      });
     });
   } catch (err) {
     logger.warn(`[tech-unreviewed-booking] alert failed for ${svc.id}: ${err.message}`);

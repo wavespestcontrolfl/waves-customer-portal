@@ -25,19 +25,25 @@ maybeDescribe('tech-unreviewed-booking-alert (live Postgres)', () => {
     alert = require('../services/tech-unreviewed-booking-alert');
   });
   afterEach(async () => {
-    for (const id of visits.splice(0)) await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [alert.keyFor(id)]).del();
+    for (const id of visits.splice(0)) {
+      await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [alert.keyFor(id)]).del();
+      await db('scheduled_services').where({ id }).del();
+    }
     for (const id of customers.splice(0)) await db('customers').where({ id }).del();
   });
 
+  // A real visit row: the raise locks and re-reads it. Pending, from a phone booking, not confirmed.
   const newVisit = async (name = ['Ana', 'Lee']) => {
     const id = randomUUID();
     const customerId = randomUUID();
     visits.push(id);
-    if (name) {
-      customers.push(customerId);
-      await db('customers').insert({ id: customerId, first_name: name[0], last_name: name[1], phone: '+19415550188' });
-    }
-    return { id, customer_id: name ? customerId : null, scheduled_date: '2026-10-26' };
+    customers.push(customerId);
+    await db('customers').insert({ id: customerId, first_name: name ? name[0] : '', last_name: name ? name[1] : '', phone: '+19415550188' });
+    await db('scheduled_services').insert({
+      id, customer_id: customerId, scheduled_date: '2026-10-26', service_type: 'General Pest Control',
+      status: 'pending', customer_confirmed: false, source_action: 'voice_agent',
+    });
+    return { id, customer_id: customerId, scheduled_date: '2026-10-26' };
   };
   const rows = (id) => db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [alert.keyFor(id)]).select('*');
 
@@ -60,6 +66,14 @@ maybeDescribe('tech-unreviewed-booking-alert (live Postgres)', () => {
     });
     expect(row.done_at).toBeNull();
     expect(row.read_at).toBeNull();
+  });
+
+  test('a booking the office confirmed after the technician read it raises no notice', async () => {
+    const visit = await newVisit();
+    // The technician's request read the pending row; the office confirmed before the raise.
+    await db('scheduled_services').where({ id: visit.id }).update({ status: 'confirmed', customer_confirmed: true });
+    expect(await alert.raiseForVisit(visit, 'En Route')).toBeNull();
+    expect(await rows(visit.id)).toHaveLength(0);
   });
 
   test('a second tap (either leg) rings nothing new', async () => {
