@@ -88,12 +88,7 @@ const {
   protocolVersion,
   TEMPLATE_VERSION,
 } = require('../services/lawn-service-outline');
-const {
-  SERVICE_LINE: TREE_SHRUB_LINE,
-  TS_CONTENT_LIBRARY_VERSION,
-  treeShrubOutlineLive,
-  treeShrubProtocolVersion,
-} = require('../services/tree-shrub-service-outline');
+const { OUTLINE_PROGRAMS, outlineProgram } = require('../services/service-outline-programs');
 
 // Hard ceiling for limit=all list fetches. The estimates pipeline computes
 // all-time KPIs client-side from this list; if the table ever outgrows this
@@ -4106,10 +4101,11 @@ router.get('/', async (req, res, next) => {
       clickStats = new Map(rows.map((r) => [r.entity_id, r]));
     }
 
-    // The newest outline per estimate and program: Tree & Shrub packets (GATE_TS_OUTLINE) apart; every other packet is lawn.
+    // The newest outline per estimate and program: each program's packets (service-outline-programs.js: Tree & Shrub,
+    // Pest Control) apart; every other packet is lawn.
     let outlineByEstimateId = new Map();
-    const treeShrubOutlineByEstimateId = new Map();
-    const treeShrubOutlinesLive = treeShrubOutlineLive();
+    const programOutlines = new Map(Object.keys(OUTLINE_PROGRAMS).map((line) => [line, new Map()]));
+    const livePrograms = Object.entries(OUTLINE_PROGRAMS).filter(([, program]) => program.live());
     if (ids.length) {
       try {
         const outlineRows = await db('service_outline_packets')
@@ -4149,12 +4145,12 @@ router.get('/', async (req, res, next) => {
           outlineEventStats = new Map(eventRows.map((row) => [row.packet_id, row]));
         }
         for (const row of outlineRows) {
-          const treeShrub = row.service_line === TREE_SHRUB_LINE;
-          const byEstimate = treeShrub ? treeShrubOutlineByEstimateId : outlineByEstimateId;
+          const program = outlineProgram(row.service_line);
+          const byEstimate = program ? programOutlines.get(row.service_line) : outlineByEstimateId;
           if (!row.estimate_id || byEstimate.has(row.estimate_id)) continue;
           const stats = outlineEventStats.get(row.id) || {};
-          const currentContentLibraryVersion = treeShrub ? TS_CONTENT_LIBRARY_VERSION : contentLibraryVersion();
-          const currentProtocolVersion = treeShrub ? treeShrubProtocolVersion() : protocolVersion();
+          const currentContentLibraryVersion = program ? program.contentLibraryVersion() : contentLibraryVersion();
+          const currentProtocolVersion = program ? program.protocolVersion() : protocolVersion();
           const staleReasons = [
             row.content_library_version !== currentContentLibraryVersion ? 'content library updated' : null,
             row.protocol_version !== currentProtocolVersion ? 'protocol updated' : null,
@@ -4407,11 +4403,11 @@ router.get('/', async (req, res, next) => {
           pricingRisk: pricingRiskById.get(e.id) || null,
           riskTypeNeedsReview: commercialRiskTypeReviewNeeded(estData),
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
-          // GATE_TS_OUTLINE: an estimate with a Tree & Shrub line offers its outline; off = neither key.
-          ...(treeShrubOutlinesLive ? {
-            treeShrubOutlineAvailable: serviceLines.some((line) => line.key === TREE_SHRUB_LINE),
-            treeShrubServiceOutline: treeShrubOutlineByEstimateId.get(e.id) || null,
-          } : {}),
+          // Each program whose gate is on: whether the estimate offers its outline, and its newest outline; off = neither key.
+          ...Object.fromEntries(livePrograms.flatMap(([line, program]) => [
+            [program.listKeys.available, serviceLines.some((line) => program.offeredOn(line, { monthlyTotal }))],
+            [program.listKeys.outline, programOutlines.get(line).get(e.id) || null],
+          ])),
         };
       }),
       // Signals the ESTIMATE_LIST_LIMIT cap was hit, so the client can warn that

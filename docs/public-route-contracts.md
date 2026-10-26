@@ -4050,7 +4050,12 @@ packet (`GATE_TS_OUTLINE`, stamped `ts-v1-copy-1`) has the same shape: its
 `content` adds `serviceLine: 'tree_shrub'`, which the page reads for its program
 badge and tab title (absent = lawn), `property` carries `programLabel` and
 `turfType: null`, and its sections use the same visual types; a `categories`
-item's `key` is its icon and may repeat, so the page keys a card by its label),
+item's `key` is its icon and may repeat, so the page keys a card by its label.
+A Pest Control packet (`GATE_PEST_OUTLINE`, stamped `pest-v1-copy-1`) carries
+`serviceLine: 'pest_control'` and the same shape; its `program_year` section
+draws `months` with four season rows (`label` a season name such as `Winter`,
+no steps, `labels: {}`, `limitLabel: null`, the build month's season `open`);
+the page's label column grows to fit the word),
 `/api/public/estimates/:token/deposit-intent` (RETIRED VERDICT STUB —
 owner ruling 2026-08-10: acceptance deposits are permanently
 not-enforced. Token format gate + deposit rate limit, then an

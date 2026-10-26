@@ -6,8 +6,8 @@
  *    `staffPreviewable` (whether the staff preview renders the row).
  *  - GET /admin/estimates/:id/acceptance serves the recorded acceptance to the
  *    owner only, 404 when there is none, 500 when the read fails.
- *  - The rows' outline summaries keep lawn and Tree & Shrub packets apart
- *    (GATE_TS_OUTLINE, owner 2026-10-26).
+ *  - The rows' outline summaries keep lawn, Tree & Shrub and Pest Control
+ *    packets apart (GATE_TS_OUTLINE, GATE_PEST_OUTLINE, owner 2026-10-26).
  * Synthetic data only.
  */
 jest.mock('../models/db', () => {
@@ -436,6 +436,45 @@ describe('GET /admin/estimates outline summaries', () => {
       }));
       expect(byId['e-pest'].treeShrubOutlineAvailable).toBe(false);
       expect(byId['e-pest'].treeShrubServiceOutline).toBeNull();
+    });
+  });
+});
+
+describe('GET /admin/estimates Pest Control outline (GATE_PEST_OUTLINE)', () => {
+  const saved = process.env.GATE_PEST_OUTLINE;
+  beforeEach(() => { jest.clearAllMocks(); mockAuth.role = 'admin'; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_PEST_OUTLINE; else process.env.GATE_PEST_OUTLINE = saved;
+  });
+
+  test('on: a recurring pest plan offers the outline and keeps its packet apart; a one-time pest job is not offered', async () => {
+    process.env.GATE_PEST_OUTLINE = 'true';
+    tableDb({
+      estimates: [
+        base('e-recurring', { service_interest: 'Pest Control', monthly_total: '45.00' }),
+        base('e-one-time', { service_interest: 'Pest Control', monthly_total: '0', onetime_total: '189.00' }),
+      ],
+      outlines: [
+        { id: 'pest-packet', estimate_id: 'e-recurring', service_line: 'pest_control', status: 'sent', validation_status: 'passed', created_at: '2026-10-26T12:00:00Z', summary_json: {}, content_json: {}, content_library_version: 'pest-v1-copy-1', template_version: 'mvp-1', product_registry_version: 'public-facts-v1', protocol_version: null },
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
+      expect(byId['e-recurring'].pestOutlineAvailable).toBe(true);
+      expect(byId['e-recurring'].pestServiceOutline).toEqual(expect.objectContaining({ id: 'pest-packet', stale: false, staleReasons: [] }));
+      expect(byId['e-recurring'].lawnServiceOutline).toBeNull();
+      expect(byId['e-one-time'].pestOutlineAvailable).toBe(false);
+    });
+  });
+
+  test('off: no Pest Control key is sent', async () => {
+    delete process.env.GATE_PEST_OUTLINE;
+    tableDb({ estimates: [base('e-recurring', { service_interest: 'Pest Control', monthly_total: '45.00' })] });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      expect(estimates[0]).not.toHaveProperty('pestOutlineAvailable');
+      expect(estimates[0]).not.toHaveProperty('pestServiceOutline');
     });
   });
 });
