@@ -136,7 +136,7 @@ describe('reopening a saved layout', () => {
     const moved = screen.getAllByTestId('layout-nozzle').find((el) => Number(el.getAttribute('cx')) === 260);
     expect(moved).toBeTruthy();
     // Nothing has changed since the save.
-    expect(screen.getByTestId('layout-save-status').textContent).toMatch(/^Saved /);
+    await waitFor(() => expect(screen.getByTestId('layout-save-status').textContent).toMatch(/^Saved /));
   });
 
   it('changing the lines after the reopen re-places the nozzles and clears the saved edits with the usual notice and undo', async () => {
