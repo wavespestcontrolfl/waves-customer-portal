@@ -433,12 +433,13 @@ async function alertOffice({ estimate, customer, visit, plan, accepted, series }
     const name = tidyName(customer.company_name || [customer.first_name, customer.last_name].filter(Boolean).join(' ') || 'Customer');
     const when = visitDayLabel(visit.date, visit.windowStart);
     let why;
-    if (!accepted) why = `Booked online for ${when}; mark the estimate won by hand.`;
+    if (!accepted) why = `Booked online for ${when}; mark the estimate won and set the repeat visits.`;
     else if (series?.seeded > 0) why = `Booked online for ${when}; the estimate is won and the series is set.`;
     else if (series?.kept) why = `Booked online for ${when}; they already have a pest series, so check it.`;
     else why = `Booked online for ${when}; set the repeat visits from it.`;
     let seriesDetail;
-    if (series?.seeded > 0) seriesDetail = `${series.seeded} more ${CADENCE_WORD[plan.visitsPerYear]} visits were added after it.`;
+    if (!accepted) seriesDetail = 'No repeat visits were added: set them from the proposal once it is won.';
+    else if (series?.seeded > 0) seriesDetail = `${series.seeded} more ${CADENCE_WORD[plan.visitsPerYear]} visits were added after it.`;
     else if (series?.kept) seriesDetail = 'The customer already has a pest series, so this visit stays a one-off.';
     else seriesDetail = 'The repeat visits were not added: set the series from this visit.';
     await raiseAdminAlert('customer', {
@@ -542,7 +543,9 @@ async function bookFirstVisit(estimate, { date, time, openFor }) {
   } catch (err) {
     logger.error(`[commercial-first-visit] FIX: visit ${visit.id} booked but estimate ${estimate.id} was not marked won: ${errorLine(err)}`);
   }
-  const series = await seedSeries({ visit, customerId: customer.id, plan, estimateId: estimate.id });
+  // A refused accept (an edit since the booking, among others) seeds nothing: a year of visits at terms the accept
+  // could not confirm stays out, and the office sets the series from the proposal once it is won.
+  const series = accepted ? await seedSeries({ visit, customerId: customer.id, plan, estimateId: estimate.id }) : null;
   await alertOffice({ estimate, customer, visit, plan, accepted, series });
   return { ok: true, visit: { date: visit.date, windowStart: visit.windowStart, windowEnd: visit.windowEnd } };
 }
