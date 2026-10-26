@@ -138,6 +138,7 @@ describe('authored commercial proposal page', () => {
     const nextSteps = screen.getByTestId('proposal-next-steps');
     expect(within(nextSteps).getByRole('heading', { level: 2, name: 'What happens next' })).toBeInTheDocument();
     expect(within(nextSteps).getByRole('link', { name: 'Call (941) 297-5749' })).toHaveAttribute('data-glass-accent');
+    expect(within(nextSteps).getByRole('link', { name: 'Call (941) 297-5749' })).toHaveStyle({ marginLeft: 'auto', marginRight: 'auto' });
   });
 
   it('the signed and call-us agreement cards are glass too', async () => {

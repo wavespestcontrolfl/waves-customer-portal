@@ -91,10 +91,15 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
 
   if (state === 'quote_required') {
     // A proposal's card is glass UI (owner 2026-10-26): the glass card, a real heading on the glass
-    // heading scale, and the gold call button. Every other quote card keeps its layout.
-    const { cardProps, Heading, callProps } = isProposal
-      ? { cardProps: { 'data-glass': 'card', 'data-testid': 'proposal-next-steps' }, Heading: 'h2', callProps: { 'data-glass-accent': '' } }
-      : { cardProps: {}, Heading: 'div', callProps: {} };
+    // heading scale, and the gold call button, centered. Every other quote card keeps its layout.
+    const { cardProps, Heading, callProps, callStyle } = isProposal
+      ? {
+        cardProps: { 'data-glass': 'card', 'data-testid': 'proposal-next-steps' },
+        Heading: 'h2',
+        callProps: { 'data-glass-accent': '' },
+        callStyle: { display: 'block', width: 'fit-content', marginLeft: 'auto', marginRight: 'auto' },
+      }
+      : { cardProps: {}, Heading: 'div', callProps: {}, callStyle: null };
     return (
       <div {...cardProps} style={{ ...estimateCard(), borderTop: '4px solid #F97316' }}>
         <Heading style={{ fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: W.navy, margin: '0 0 8px' }}>
@@ -147,7 +152,7 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
             {quoteReasonText}
           </div>
         ) : null}
-        <a href={`tel:${WAVES_TEL}`} {...callProps} style={callCtaStyle}>Call {WAVES_PHONE}</a>
+        <a href={`tel:${WAVES_TEL}`} {...callProps} style={{ ...callCtaStyle, ...callStyle }}>Call {WAVES_PHONE}</a>
       </div>
     );
   }
