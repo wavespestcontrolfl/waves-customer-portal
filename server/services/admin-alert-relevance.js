@@ -128,6 +128,9 @@ const STALE_IN_PROGRESS_STATUSES = new Set(['on_site', 'en_route']);
 
 // notification-service's done helpers, read lazily like candidateQuery's.
 const doneState = () => require('./notification-service')._private;
+// A log line never carries err.message: knex puts the SQL and its bindings there, and the witness
+// queries bind customer phone numbers and email addresses (AGENTS.md: no PII in logs).
+const errSummary = (err) => require('./notification-service').safeErrorSummary(err);
 
 const uuidOrNull = (v) => (typeof v === 'string' && UUID_RE.test(v.trim()) ? v.trim().toLowerCase() : null);
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -258,7 +261,7 @@ async function loadContact(rows, data, conn) {
     data.contact = await loadContactBundles(items, { conn, bookedVisits: (ids) => bookedVisitsByCustomer(conn, ids) });
   } catch (err) {
     data.contactFailed = true;
-    logger.warn(`[alert-relevance] customer-contact witnesses failed to load: ${err.message}`);
+    logger.warn(`[alert-relevance] customer-contact witnesses failed to load: ${errSummary(err)}`);
   }
 }
 
@@ -824,7 +827,7 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
     const judged = { ...latest, metadata: unretired(latest.metadata) };
     if (judge(cls, subjectFor(judged, await loadSubjects([judged]), todayET)).reason) return reason;
   } catch (err) {
-    logger.warn(`[alert-relevance] notification ${row.id}: the check after retiring failed, putting it back: ${err.message}`);
+    logger.warn(`[alert-relevance] notification ${row.id}: the check after retiring failed, putting it back: ${errSummary(err)}`);
   }
   await stillOurs(db('notifications')).update(undone(doneAt));
   return null;
@@ -866,7 +869,7 @@ async function takeOverPersonDone(row, cls, todayET) {
   try {
     stillMovedOn = !!judge(cls, subjectFor(current, await loadSubjects([current]), todayET)).reason;
   } catch (err) {
-    logger.warn(`[alert-relevance] notification ${row.id}: the check after a takeover failed, handing it back: ${err.message}`);
+    logger.warn(`[alert-relevance] notification ${row.id}: the check after a takeover failed, handing it back: ${errSummary(err)}`);
   }
   if (!stillMovedOn) {
     await exact(db('notifications'), 'relevance').update({ done_by: row.done_by });
@@ -931,7 +934,7 @@ async function rearmRelevantAgain(now, todayET) {
         if (judge(cls, subject).reason) continue;
         rearmed += await putBack(row);
       } catch (err) {
-        logger.warn(`[alert-relevance] notification ${row.id} not re-armed: ${err.message}`);
+        logger.warn(`[alert-relevance] notification ${row.id} not re-armed: ${errSummary(err)}`);
       }
     }
     if (rows.length < PAGE_SIZE) break;
@@ -959,7 +962,7 @@ async function recordWouldClose(items, now, todayET) {
       items: items.map(({ row, cls, reason }) => ({ notification_id: row.id, alert_class: cls.key, reason, judged_at: now.toISOString() })),
     });
   } catch (err) {
-    logger.warn(`[alert-relevance] could not record ${items.length} would-close verdict(s): ${err.message}`);
+    logger.warn(`[alert-relevance] could not record ${items.length} would-close verdict(s): ${errSummary(err)}`);
     return 0;
   }
 }
@@ -1000,7 +1003,7 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
         const cls = classify(row);
         if (cls) await sweepRow(row, cls, subjectFor(row, data, todayET), { now, todayET, byClass, shadowed });
       } catch (err) {
-        logger.warn(`[alert-relevance] notification ${row.id} skipped: ${err.message}`);
+        logger.warn(`[alert-relevance] notification ${row.id} skipped: ${errSummary(err)}`);
       }
     }
     wouldClose += await recordWouldClose(shadowed, now, todayET);
