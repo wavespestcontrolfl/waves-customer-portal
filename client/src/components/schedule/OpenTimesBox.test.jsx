@@ -65,9 +65,14 @@ describe('openTimesRows', () => {
     expect(openTimesRows(DAYS, { mode: 'soonest', band: 'any', techId: '', focusDate: '2035-01-01' }).rows.map((h) => h.start)).toEqual(['09:00', '14:00']);
     expect(openTimesRows(DAYS, { mode: 'best', band: 'any', techId: '', focusDate: '2035-01-07' })).toEqual({ rows: [], empty: 'No open times this day' });
   });
-  it('a far day whose lookup failed says so, not that it has no open times', () => {
-    const unchecked = [...DAYS, { date: '2035-02-20', status: 'unchecked', hours: [] }];
-    expect(openTimesRows(unchecked, { mode: 'best', band: 'any', techId: '', focusDate: '2035-02-20' })).toEqual({ rows: [], empty: 'Could not check this day' });
+  it('a day nobody could check says so, not that it has no open times', () => {
+    // A far day whose lookup failed, and a route the engine could not verify (under way, a stop with no location).
+    const days = [...DAYS, { date: '2035-02-20', status: 'unchecked', hours: [] }, { date: '2035-01-06', status: 'unverified', hours: [] }];
+    for (const focusDate of ['2035-02-20', '2035-01-06']) {
+      expect(openTimesRows(days, { mode: 'best', band: 'any', techId: '', focusDate })).toEqual({ rows: [], empty: 'Could not check this day' });
+    }
+    // A full day stays a day with no open times.
+    expect(openTimesRows(days, { mode: 'best', band: 'any', techId: '', focusDate: '2035-01-03' }).empty).toBe('No open times this day');
   });
   it('the number: "~" for the model, none for a road time, and no number for an unpriced route', () => {
     expect(addsPhrase(hour('2035-01-01', '09:00', 7.4))).toBe('adds ~7 min');
