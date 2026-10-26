@@ -34,12 +34,13 @@ function etDayBounds(day) {
 
 /**
  * Completed visits with their customer, technician and primary property. `requireVehicle` (the default) keeps only
- * technicians that have a Bouncie vehicle; trip-link passes false so a visit without one is still recorded.
+ * technicians that have a Bouncie vehicle; trip-link passes false so a visit without one, or without a technician at
+ * all (left join), is still recorded.
  */
 function completedVisitQuery(conn, { requireVehicle = true } = {}) {
   const query = conn('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
-    .join('technicians as t', 't.id', 's.technician_id')
+    [requireVehicle ? 'join' : 'leftJoin']('technicians as t', 't.id', 's.technician_id')
     .leftJoin('customer_properties as p', function joinPrimary() {
       this.on('p.customer_id', '=', 'c.id').andOnVal('p.active', '=', true).andOnVal('p.is_primary', '=', true);
     })

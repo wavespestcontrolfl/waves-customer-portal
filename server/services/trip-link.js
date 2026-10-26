@@ -48,6 +48,9 @@ const MS_PER_MIN = 60000;
 const INSERT_CHUNK = 200;
 
 const tripLinkLive = () => typeof gates.tripLinkLive === 'function' && gates.tripLinkLive();
+// The key of the completed visits that have no technician: they are recorded as 'no_vehicle' rows with no technician.
+const UNASSIGNED = 'unassigned';
+const NO_TECHNICIAN = { id: null, imei: '', changedAt: null };
 
 const round = (value, places) => {
   const factor = 10 ** places;
@@ -289,7 +292,7 @@ async function loadDayInputs(conn, etDay, bounds, only) {
   if (only) visitQuery = visitQuery.whereIn('s.technician_id', only);
   const groupsByTech = new Map();
   for (const group of groupVisits(ctx.shapeVisits(await visitQuery))) {
-    const id = String(group.technicianId);
+    const id = group.technicianId == null ? UNASSIGNED : String(group.technicianId);
     groupsByTech.set(id, [...(groupsByTech.get(id) || []), group]);
   }
   // Technicians that hold rows for the day (legs or links) are re-run too, so rows they no longer earn go.
@@ -299,7 +302,10 @@ async function loadDayInputs(conn, etDay, bounds, only) {
     staleLegs = staleLegs.whereIn('technician_id', only);
     staleLinks = staleLinks.whereIn('technician_id', only);
   }
-  const staleIds = [...await staleLegs, ...await staleLinks].map((row) => row.technician_id).filter(Boolean).map(String);
+  const stale = [...await staleLegs, ...await staleLinks].map((row) => row.technician_id);
+  const staleIds = stale.filter(Boolean).map(String);
+  // Unassigned rows of the day are re-run too (a whole-day run only: a technician filter never covers them).
+  if (!only && stale.some((id) => id == null)) staleIds.push(UNASSIGNED);
   const withVehicle = [...technicians.values()].filter((t) => t.imei).map((t) => t.id);
   return { technicians, groupsByTech, ids: new Set([...withVehicle, ...groupsByTech.keys(), ...staleIds]) };
 }
@@ -356,7 +362,7 @@ async function linkDay(conn, etDay, { technicianIds = null, dryRun = false, now 
   if (dryRun) summary.rows = { legs: [], links: [] };
 
   for (const technicianId of ids) {
-    const technician = technicians.get(technicianId);
+    const technician = technicianId === UNASSIGNED ? NO_TECHNICIAN : technicians.get(technicianId);
     if (!technician) continue; // no technician row: nothing to judge
     try {
       const vehicle = technician.imei && !ctx.dayBeforeMapping(etDay, technician.changedAt);
@@ -367,7 +373,7 @@ async function linkDay(conn, etDay, { technicianIds = null, dryRun = false, now 
       if (dryRun) {
         summary.rows.legs.push(...legRows); summary.rows.links.push(...linkRows);
       } else {
-        await writeTechnicianDay(conn, { day: etDay, bounds, technicianId, imei: vehicle ? technician.imei : null, legRows, linkRows });
+        await writeTechnicianDay(conn, { day: etDay, bounds, technicianId: technician.id, imei: vehicle ? technician.imei : null, legRows, linkRows });
       }
       summary.technicians += 1;
       summary.trips += linkRows.length;

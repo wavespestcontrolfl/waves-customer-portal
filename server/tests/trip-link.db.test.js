@@ -409,6 +409,22 @@ describeDb('trip link (PostgreSQL)', () => {
     expect(await mockPg('trip_links').where({ bouncie_trip_id: 'trip-x' }).first()).toMatchObject({ ends_at_kind: 'visit' });
   });
 
+  test('a completed visit with no technician is recorded as no_vehicle with no technician, and a re-run replaces it', async () => {
+    const f = await fixture();
+    const c = await customer(PIN);
+    const loose = await visit(c, null, '14:40', '14:21');
+    await link();
+    expect(await legOf(loose)).toMatchObject({ status: 'no_vehicle', technician_id: null, vehicle_imei: null });
+    expect(await counts()).toEqual({ legs: 4, links: 4 });
+    // Assigned later: the re-run moves it to the technician and the unassigned row is not left behind.
+    await mockPg('scheduled_services').where({ id: loose }).update({ technician_id: f.tech });
+    await link();
+    expect(await legOf(loose)).toMatchObject({ technician_id: f.tech });
+    expect(Number((await mockPg('visit_gps_legs').whereNull('technician_id').count({ n: '*' }).first()).n)).toBe(0);
+    const { body } = await (async () => { process.env.GATE_TRIP_LINK = 'true'; return summary(); })();
+    expect(body.services).toBe(4);
+  });
+
   test('it never writes mileage_log, scheduled_services, pins or alerts', async () => {
     await fixture();
     const snapshot = async () => ({
