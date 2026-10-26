@@ -239,16 +239,14 @@ async function loadMileage(conn, tripIds) {
 
 // ---------- the write: one transaction per technician-day ----------
 
-async function insertChunks(trx, table, key, rows) {
-  for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
-    await trx(table).insert(rows.slice(i, i + INSERT_CHUNK)).onConflict(key).merge();
-  }
-}
-
 async function writeTechnicianDay(conn, { day, bounds, technicianId, imei, legRows, linkRows }) {
   await conn.transaction(async (trx) => {
-    await insertChunks(trx, 'visit_gps_legs', 'scheduled_service_id', legRows);
-    await insertChunks(trx, 'trip_links', 'bouncie_trip_id', linkRows);
+    for (let i = 0; i < legRows.length; i += INSERT_CHUNK) {
+      await trx('visit_gps_legs').insert(legRows.slice(i, i + INSERT_CHUNK)).onConflict('scheduled_service_id').merge();
+    }
+    for (let i = 0; i < linkRows.length; i += INSERT_CHUNK) {
+      await trx('trip_links').insert(linkRows.slice(i, i + INSERT_CHUNK)).onConflict('bouncie_trip_id').merge();
+    }
     // A re-run replaces the day: rows for visits no longer worked here, or trips no longer read, go. The day's links
     // of this technician go too when the technician has no usable tracker any more (imei null: every one of them).
     await trx('visit_gps_legs').where({ technician_id: technicianId, service_date: day })
@@ -352,7 +350,7 @@ function buildRows({ etDay, technician, groups, read, radius, fences, now }) {
  * @param {{technicianIds?:string[], dryRun?:boolean, now?:Date, radius?:number}} opts dryRun computes and writes nothing
  * @returns {Promise<{day:string, technicians:number, legs:object, trips:number, errors:number, rows?:object}>}
  */
-async function linkDay(conn, etDay, { technicianIds = null, dryRun = false, now = new Date(), radius = null } = {}) {
+async function linkDay(conn, etDay, { technicianIds, dryRun, now = new Date(), radius } = {}) {
   const bounds = ctx.etDayBounds(etDay);
   const arrivalRadius = radius || (await loadArrivalConfig()).radiusMeters;
   const fences = await ctx.loadFences(conn);
@@ -365,15 +363,16 @@ async function linkDay(conn, etDay, { technicianIds = null, dryRun = false, now 
     const technician = technicianId === UNASSIGNED ? NO_TECHNICIAN : technicians.get(technicianId);
     if (!technician) continue; // no technician row: nothing to judge
     try {
-      const vehicle = technician.imei && !ctx.dayBeforeMapping(etDay, technician.changedAt);
-      const read = vehicle ? await readVehicleDay(conn, technician, bounds, etDay, arrivalRadius, now) : null;
+      // The tracker that counts for this day: none when there is none or it was remapped that day or later.
+      const imei = technician.imei && !ctx.dayBeforeMapping(etDay, technician.changedAt) ? technician.imei : null;
+      const read = imei ? await readVehicleDay(conn, technician, bounds, etDay, arrivalRadius, now) : null;
       const { legRows, linkRows } = buildRows({
         etDay, technician, groups: groupsByTech.get(technicianId) || [], read, radius: arrivalRadius, fences, now,
       });
       if (dryRun) {
         summary.rows.legs.push(...legRows); summary.rows.links.push(...linkRows);
       } else {
-        await writeTechnicianDay(conn, { day: etDay, bounds, technicianId: technician.id, imei: vehicle ? technician.imei : null, legRows, linkRows });
+        await writeTechnicianDay(conn, { day: etDay, bounds, technicianId: technician.id, imei, legRows, linkRows });
       }
       summary.technicians += 1;
       summary.trips += linkRows.length;
