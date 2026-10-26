@@ -163,6 +163,40 @@ export const DOC = {
   navyLiteral: B.glassNavy, // #04395E — chrome pinned across themes (glass navy, owner 2026-07-12)
 };
 
+// ---------- Field authored-document presentation ----------
+
+// Additive, deliberately literal tokens for the owner-approved Field
+// document family. These do not replace DOC roles: payment, contract and
+// other glass surfaces continue to resolve through their existing variables.
+// The companion FieldDocument wrapper exposes these as scoped CSS variables
+// only inside an authored document body. Print sizes are separate from the
+// customer-screen floor so browser PDFs keep a useful paper density.
+export const FIELD_DOCUMENT = {
+  navy: '#04395E',
+  blue: '#009CDE',
+  gold: '#F0A500',
+  ink: '#3F4A65',
+  muted: '#475569',
+  rule: '#D5DEE5',
+  soft: '#F1F7FA',
+  warm: '#FAF8F3',
+  paper: '#FFFFFF',
+  canvas: '#E5EAF0',
+  screen: {
+    prose: 16,
+    meta: 14,
+    section: 18,
+    title: 29,
+  },
+  print: {
+    prose: '10pt',
+    meta: '9pt',
+    fine: '8pt',
+    section: '11pt',
+    title: '22pt',
+  },
+};
+
 // ---------- radii / elevation / motion ----------
 
 export const RADIUS = {
