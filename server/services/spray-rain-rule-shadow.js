@@ -3,8 +3,8 @@
 // GATE_SPRAY_RAIN_RULES=shadow (owner 2026-10-26, plan page "Visit-Day Rain Rule"): records, per visit and
 // visit day, the WORST verdict the rain rules would have shown (spray_rain_rule_shadow), next to the chip
 // the board shows today. Written from a visit-day job card or readiness build (job-card.js); nothing reads
-// it to decide anything. A row is refreshed at most every 10 minutes unless the verdict got worse, so the
-// board's 60-second readiness poll does not write every minute.
+// it to decide anything. A row is refreshed at most every 10 minutes unless the verdict got worse or a live
+// hold appeared, so the board's 60-second readiness poll does not write every minute.
 const db = require('../models/db');
 
 const RANK_SQL = (table) => `CASE ${table}.shadow_status WHEN 'hold' THEN 3 WHEN 'caution' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END`;
@@ -62,7 +62,9 @@ async function recordSprayRainShadow({ dbh = db, ...input }) {
       service_type = EXCLUDED.service_type,
       reads = spray_rain_rule_shadow.reads + 1,
       last_seen_at = now()
-    WHERE ${worse} OR spray_rain_rule_shadow.last_seen_at < now() - interval '10 minutes'`, [
+    WHERE ${worse}
+      OR (EXCLUDED.live_hold AND NOT spray_rain_rule_shadow.live_hold)
+      OR spray_rain_rule_shadow.last_seen_at < now() - interval '10 minutes'`, [
     row.scheduled_service_id, row.visit_date, row.start_at, row.service_type, row.live_label, row.live_hold,
     row.shadow_status, row.shadow_label, row.start_pop, row.max_pop_4h, row.dose_hidden, row.products,
   ]);

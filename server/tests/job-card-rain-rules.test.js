@@ -112,6 +112,21 @@ describe('buildSprayCheck with rain rules', () => {
     expect(out).toMatchObject({ verdict: 'hold', kind: 'wind', source: 'product limit', reason: 'wind over 10 mph' });
   });
 
+  test('a reviewed label with only conditional restrictions stays unknown when nothing else applies', () => {
+    // An approved review (GATE_LABEL_PIPELINE) whose four facts are conditional: no numeric limit, unresolved.
+    const conditional = { status: 'conditional', value: null, quote: 'Do not apply if rain is expected (sites vary).', page: 3, note: 'Site-specific.' };
+    const snapshotOf = (p) => Object.fromEntries(['name', 'epa_reg_number', 'formulation', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rainfast_minutes', 'rain_free_hours']
+      .map((k) => [k, p[k] == null ? null : String(p[k])]));
+    const granule = { id: 'r', name: 'Reviewed Granule G', epa_reg_number: '999-1', application_method: 'granular' };
+    const reviewed = { ...granule, label_weather_review: { active: { status: 'approved', productSnapshot: snapshotOf(granule),
+      facts: { minTempF: conditional, maxTempF: conditional, maxWindMph: conditional, rainFreeHours: conditional } } } };
+    process.env.GATE_LABEL_PIPELINE = 'true';
+    try {
+      const out = buildSprayCheck({ products: [reviewed], hourly: hours([0, 0, 0, 0]), now: NOW, rainRules: pest, labelSources: { r: 'current' } }).verdicts[0];
+      expect(out).toEqual({ productId: 'r', verdict: 'unknown', reason: 'Conditional label restrictions need review' });
+    } finally { delete process.env.GATE_LABEL_PIPELINE; }
+  });
+
   test('no forecast at all is unknown for a product with a rule, and nothing to judge stays ok', () => {
     expect(buildSprayCheck({ products: [talak, heritage], hourly: null, now: NOW, rainRules: pest }).verdicts)
       .toEqual([{ productId: 't', verdict: 'unknown', reason: 'No forecast' }, { productId: 'h', verdict: 'ok', reason: null }]);
@@ -215,7 +230,8 @@ describe('the shadow record (GATE_SPRAY_RAIN_RULES=shadow)', () => {
     const [sql, bindings] = raw.mock.calls[0];
     expect(sql).toMatch(/ON CONFLICT \(scheduled_service_id, visit_date\) DO UPDATE SET/);
     expect(sql).toMatch(/shadow_status = CASE WHEN .* THEN EXCLUDED\.shadow_status ELSE spray_rain_rule_shadow\.shadow_status END/);
-    expect(sql).toMatch(/WHERE .* OR spray_rain_rule_shadow\.last_seen_at < now\(\) - interval '10 minutes'/);
+    expect(sql).toMatch(/OR \(EXCLUDED\.live_hold AND NOT spray_rain_rule_shadow\.live_hold\)/);
+    expect(sql).toMatch(/OR spray_rain_rule_shadow\.last_seen_at < now\(\) - interval '10 minutes'/);
     expect(bindings).toEqual(['svc1', '2026-09-04', NOW.toISOString(), 'Quarterly Pest Control', 'Weather unknown', false, 'ok', null, 70, 85, false,
       JSON.stringify([{ name: 'Atticus Talak 7.9 F', verdict: 'ok', reason: null, source: null }])]);
   });

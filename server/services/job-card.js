@@ -830,8 +830,13 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     const waves = !rule && limits.rainFreeHours == null && rainRules.waves && isTankMixable(product) ? rainRules.waves : null;
     const applies = limits.minTempF != null || limits.maxTempF != null || limits.maxWindMph != null
       || limits.rainFreeHours != null || Boolean(rule?.duringRain || rule?.dryBeforeRain) || Boolean(waves);
-    // Nothing to judge: a water-in product, a non-spray, a service with no rain rule.
-    if (!applies) return { productId: product.id, verdict: 'ok', reason: null };
+    // Nothing to judge: a water-in product, a non-spray, a service with no rain rule. A reviewed label
+    // whose restrictions are conditional still reads unknown, as on today's path.
+    if (!applies) {
+      return review?.unresolved
+        ? { productId: product.id, verdict: 'unknown', reason: 'Conditional label restrictions need review' }
+        : { productId: product.id, verdict: 'ok', reason: null };
+    }
     if (!window.length) return { productId: product.id, verdict: 'unknown', reason: 'No forecast' };
     const holds = [];
     const cautions = [];
