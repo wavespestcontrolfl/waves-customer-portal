@@ -198,8 +198,14 @@ describe('the auto sign-off decision table', () => {
   test('an incomplete list asks even when every change is a SiteOne purchase', () => {
     expect(run({ complete: false, after: [...base(2), lib.snapshotOf(product(3))], bought: [ID(3)] })).toMatchObject({ auto: false, reasons: ['incomplete'] });
   });
-  test('a removed-only change signs off', () => {
-    expect(run({ after: base(1) })).toMatchObject({ auto: true, reasons: [] });
+  test('a removed product always asks, whatever else changed, and is named', () => {
+    const d = run({ after: base(1) });
+    expect(d).toMatchObject({ auto: false, reasons: ['removed'] });
+    const mixed = run({ after: [base(2)[0], lib.snapshotOf(product(3))], bought: [ID(3)] }); // one removed, one SiteOne add
+    expect(mixed).toMatchObject({ auto: false, reasons: ['removed'] });
+  });
+  test('a first run asks for its own reason only (there is no earlier list to remove from)', () => {
+    expect(run({ previous: 'first_run', after: base(1) }).reasons).toEqual(['first_run']);
   });
   test('a new unmatched visit line asks even when everything else is a SiteOne purchase; none new does not', () => {
     const after = [...base(2), lib.snapshotOf(product(3))];
@@ -439,9 +445,18 @@ describe('runBidKitProductListSync', () => {
     expect(result).toMatchObject({ signedOff: false, reasons: ['incomplete'] });
     expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toMatch(/missing its EPA number, label or SDS/);
   });
-  test('a removed-only change signs off', async () => {
+  test('a removed product (a technician took it off a recent visit, or it aged out) is never signed off: unsigned, one bell naming it', async () => {
     setList([rowsBefore[0]]);
-    expect(await run()).toMatchObject({ changed: true, signedOff: true });
+    expect(await run()).toMatchObject({ changed: true, signedOff: false, rang: true, reasons: ['removed'] });
+    expect(store.replaceFile.mock.calls[0][3].attestBySystem).toBe(false);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toBe('Removed Synthetic Product 2; check and sign off.');
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][3].detail).toMatch(/Removed \(no longer on a visit in the last 12 months, or taken off a visit record\): Synthetic Product 2\./);
+    expect(store.logActivity.mock.calls.some((c) => c[1] === 'bid_kit_attested')).toBe(false);
+  });
+  test('a SiteOne addition together with a removal still asks, and names the removal', async () => {
+    setList([rowsBefore[0], product(3)], [3]);
+    expect(await run()).toMatchObject({ signedOff: false, reasons: ['removed'] });
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][2]).toBe('Removed Synthetic Product 2; 1 other change; check and sign off.');
   });
   test('a version nobody signed off stays unsigned, and its bell is rewritten rather than stacked', async () => {
     store.listItems.mockResolvedValue([itemRow({ attested_at: null })]);

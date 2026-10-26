@@ -10,8 +10,11 @@
 //   - this job built the file it is replacing (a stored snapshot whose file is still the one on the row),
 //   - that file was signed off (a version nobody vouched for is never vouched for by a later SiteOne-only change),
 //   - the list is complete (every registered pesticide has its label and SDS, every pesticide category row has an EPA number),
-//   - every product that was ADDED or CHANGED has a logged SiteOne purchase line. A removed product (not used in 12 months)
-//     is SiteOne-safe.
+//   - every product that was ADDED or CHANGED has a logged SiteOne purchase line (the owner's rule is about purchases),
+//   - no product was REMOVED. A product leaves the list when it is not used in 12 months, but also when a technician takes it off
+//     a recent visit record; a removal says nothing about purchases and can hide a product from a bid document, so it is always
+//     reviewed by the owner,
+//   - no NEW free-text visit line (no catalog product) appeared: nothing prints for it, so it is never signed off unseen.
 // Anything else replaces the file, leaves it NOT signed off and raises ONE admin bell (one open episode per item; a later run
 // rewrites it). Nothing is sent to a customer, an agency or anyone else; the outputs are the kit row, its private file, activity
 // rows and the admin bell. Gate off = the job returns before any query.
@@ -203,7 +206,8 @@ function listIsComplete(rows) {
 // changed products with no SiteOne purchase.
 // `newUnmatched`: the free-text visit lines with no catalog product whose name was not already in the previous (signed) snapshot.
 // A pesticide typed as free text produces no row in the PDF, so it must never be signed off unseen: it asks. Names the previous
-// snapshot already had, and names that dropped out, do not block.
+// snapshot already had, and names that dropped out, do not block. Any REMOVED product asks too (reason 'removed'): the SiteOne
+// rule is about purchases and covers added and changed rows only.
 function decideSignOff({ previous, wasSignedOff, complete, diff, bought, newUnmatched = [] }) {
   const reasons = [];
   let outside = [];
@@ -212,6 +216,7 @@ function decideSignOff({ previous, wasSignedOff, complete, diff, bought, newUnma
   if (previous === 'ok') {
     outside = [...diff.added, ...diff.changed].filter((product) => !bought.has(product.id));
     if (outside.length) reasons.push('not_siteone');
+    if (diff.removed.length) reasons.push('removed');
     if (newUnmatched.length) reasons.push('unmatched_new');
     if (!wasSignedOff) reasons.push('unsigned_before');
   }
@@ -249,9 +254,10 @@ function segmentsFor({ diff, decision }) {
   const segments = [];
   if (addedOut.length) segments.push(`Added ${joinNames(addedOut)} (not a SiteOne purchase)`);
   if (changedOut.length) segments.push(`${joinNames(changedOut)} changed (not a SiteOne purchase)`);
+  if (diff.removed.length && decision.reasons.includes('removed')) segments.push(`Removed ${joinNames(diff.removed)}`);
   if (decision.reasons.includes('incomplete')) segments.push('a pesticide is missing its EPA number, label or SDS');
   if (fresh.length) segments.push(`New visit lines recorded without a catalog product: ${joinNames(fresh)}`);
-  const quiet = diff.added.length - addedOut.length + diff.changed.length - changedOut.length + diff.removed.length;
+  const quiet = diff.added.length - addedOut.length + diff.changed.length - changedOut.length + (decision.reasons.includes('removed') ? 0 : diff.removed.length);
   if (quiet && segments.length) segments.push(`${quiet} other ${quiet === 1 ? 'change' : 'changes'}`);
   if (!segments.length) {
     const n = diff.added.length + diff.changed.length + diff.removed.length;
@@ -285,7 +291,7 @@ function detailFor({ diff, decision, previous, unmatched = [] }) {
   const lines = [
     productLine('Added', mark(diff.added)),
     productLine('Changed', mark(changedWords)),
-    productLine('Removed', diff.removed),
+    decision.reasons.includes('removed') && diff.removed.length ? `Removed (no longer on a visit in the last 12 months, or taken off a visit record): ${diff.removed.map((p) => tidy(p.name)).join(', ')}.` : productLine('Removed', diff.removed),
     decision.reasons.includes('incomplete') ? 'The list is incomplete: a pesticide is missing its EPA number, label or SDS.' : '',
     (decision.newUnmatched || []).length ? `New visit lines recorded without a catalog product (they cannot be printed or checked): ${decision.newUnmatched.map((line) => tidy(line.name)).join(', ')}.` : '',
     decision.reasons.includes('unsigned_before') ? 'The earlier version is still not signed off.' : '',

@@ -297,6 +297,21 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
     expect(row.details.product_list_sync.unmatched).toEqual([`novel pesticide ${tag}`]);
   });
 
+  test('a product taken off a recent visit record (its last use) is never signed off by the system: unsigned, one bell names it', async () => {
+    const item = await kitItem();
+    const keep = await catalogRow('Keep'); const drop = await catalogRow('Drop');
+    await apply(keep); await apply(drop);
+    await lib.runBidKitProductListSync();
+    await signOff(item.id);
+    // A recap edit deletes the line: the product has no use left in the window.
+    await mockPg('service_products').where({ product_id: drop.id }).del();
+    expect(await lib.runBidKitProductListSync()).toMatchObject({ changed: true, signedOff: false, reasons: ['removed'] });
+    const row = await rowOf(item.id);
+    expect(row.attested_at).toBeNull();
+    expect(row.details.product_list_sync.rows.map((r) => r.name)).toEqual([`Keep ${tag}`]);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls.at(-1)[2]).toBe(`Removed Drop ${tag}; check and sign off.`);
+  });
+
   test('a kit with no product list item is left alone', async () => {
     expect(await lib.runBidKitProductListSync()).toEqual({ skipped: 'no_item' });
     expect(puts()).toHaveLength(0);
