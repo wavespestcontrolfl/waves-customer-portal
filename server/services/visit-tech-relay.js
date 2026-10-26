@@ -19,6 +19,12 @@
  * (stops-ahead.js: COALESCE(route_order, 999), COALESCE(window_start,
  * '23:59'), created_at, id). One card per technician per text.
  *
+ * A visit counts only while it is a live stop, by the same predicates
+ * stops-ahead.js uses: no terminal or rescheduled status, no tracker-terminal
+ * track_state ('complete' / 'cancelled'; NULL-safe), and no expired
+ * estimate-slot hold. En route or on site reads from the status OR the
+ * tracker (track_state 'en_route' / 'on_property'), since either can lead.
+ *
  * An admin technician (the owner) already gets the office bell for the same
  * text, so an admin gets no copy. The office inbox, bell and owner forward are
  * unchanged. Sends nothing to a customer. Fails soft: an error is logged and
@@ -27,14 +33,31 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
-const { TERMINAL_STATUSES, NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
+const { NOT_A_STOP_STATUSES } = require('./stops-ahead');
 
 const ACTIVE_STATUSES = ['en_route', 'on_site'];
+const ACTIVE_TRACK_STATES = ['en_route', 'on_property'];
+const TRACKER_DONE_STATES = ['complete', 'cancelled'];
 const PUSH_SNIPPET_CHARS = 80;
 const CARD_BODY_CHARS = 500;
-const CLOSED_STATUSES = [...new Set([...TERMINAL_STATUSES, ...NOT_A_ROUTE_STOP_STATUSES])];
 
 const DAY_PLAN_ORDER = "COALESCE(route_order, 999), COALESCE(window_start, '23:59'), created_at, id";
+
+// A logged Knex error message can carry its bindings (the sender's phone, the
+// customer's name, the text): log the code or name only, as tech-line.js does.
+function errorTag(err) {
+  return String((err && (err.code || err.name)) || 'error');
+}
+
+// The stops-ahead.js live-stop predicates (see the header).
+function liveStops(query, conn) {
+  return query
+    .whereNotIn('status', NOT_A_STOP_STATUSES)
+    .where((q) => q.whereNull('track_state').orWhereNotIn('track_state', TRACKER_DONE_STATES))
+    .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', conn.fn.now()));
+}
+
+const isUnderway = (visit) => ACTIVE_STATUSES.includes(visit.status) || ACTIVE_TRACK_STATES.includes(visit.track_state);
 
 /**
  * Technicians (non-admin, active) whose visit today with this customer is en
@@ -42,11 +65,10 @@ const DAY_PLAN_ORDER = "COALESCE(route_order, 999), COALESCE(window_start, '23:5
  * technician.
  */
 async function visitTechniciansFor(customerId, { conn = db, today = etDateString() } = {}) {
-  const visits = await conn('scheduled_services')
+  const visits = await liveStops(conn('scheduled_services'), conn)
     .where({ customer_id: customerId, scheduled_date: today })
     .whereNotNull('technician_id')
-    .whereNotIn('status', CLOSED_STATUSES)
-    .select('id', 'technician_id', 'status');
+    .select('id', 'technician_id', 'status', 'track_state');
   if (!visits.length) return [];
 
   const techIds = [...new Set(visits.map((v) => String(v.technician_id)))];
@@ -58,11 +80,12 @@ async function visitTechniciansFor(customerId, { conn = db, today = etDateString
   const out = [];
   for (const tech of techs) {
     const own = visits.filter((v) => String(v.technician_id) === String(tech.id));
-    let relay = own.some((v) => ACTIVE_STATUSES.includes(v.status));
+    let relay = own.some(isUnderway);
     if (!relay) {
-      const next = await conn('scheduled_services')
+      const next = await liveStops(conn('scheduled_services'), conn)
         .where({ technician_id: tech.id, scheduled_date: today })
-        .whereNotIn('status', [...CLOSED_STATUSES, ...ACTIVE_STATUSES])
+        .whereNotIn('status', ACTIVE_STATUSES)
+        .where((q) => q.whereNull('track_state').orWhereNotIn('track_state', ACTIVE_TRACK_STATES))
         .orderByRaw(DAY_PLAN_ORDER)
         .first('id');
       relay = !!next && own.some((v) => String(v.id) === String(next.id));
@@ -98,7 +121,7 @@ async function relayCustomerTextToVisitTech({ customer, from, body, mediaCount =
         }),
       });
     } catch (err) {
-      logger.error(`[visit-tech-relay] text card failed for technician ${tech.id}: ${err.message}`);
+      logger.error(`[visit-tech-relay] text card failed for technician ${tech.id} (${errorTag(err)})`);
       continue;
     }
     sent += 1;
@@ -111,10 +134,10 @@ async function relayCustomerTextToVisitTech({ customer, from, body, mediaCount =
         priority: 'high',
       });
     } catch (pushErr) {
-      logger.warn(`[visit-tech-relay] push failed for technician ${tech.id} (card already written): ${pushErr.message}`);
+      logger.warn(`[visit-tech-relay] push failed for technician ${tech.id} (card already written, ${errorTag(pushErr)})`);
     }
   }
   return sent;
 }
 
-module.exports = { relayCustomerTextToVisitTech, visitTechniciansFor };
+module.exports = { relayCustomerTextToVisitTech, visitTechniciansFor, errorTag };

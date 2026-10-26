@@ -1451,7 +1451,7 @@ router.post('/sms', async (req, res) => {
       && require('../config/feature-gates').customerTextToVisitTechLive?.()) {
       await require('../services/visit-tech-relay').relayCustomerTextToVisitTech({
         customer, from: From, body: Body, mediaCount: inboundMedia.length,
-      }).catch((e) => logger.warn(`[visit-tech-relay] relay failed: ${e.message}`));
+      }).catch((e) => logger.warn(`[visit-tech-relay] relay failed (${require('../services/visit-tech-relay').errorTag(e)})`));
     }
 
     // Notify Adam of regular inbound SMS. Domain/van tracking leads use the

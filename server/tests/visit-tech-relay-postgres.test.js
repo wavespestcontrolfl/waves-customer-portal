@@ -98,6 +98,30 @@ postgres('visit tech relay (real Postgres)', () => {
     expect(await relay.visitTechniciansFor(earlyWindow.id)).toEqual([]);
   });
 
+  test('live stops only (pre-push audit P1): an expired hold or a tracker-complete row never blocks the real next stop; a tracker-active row counts as underway', async () => {
+    const hire = await makeTech('Synthetic Hire');
+    const deadHold = await makeCustomer('Deadhold');
+    const trackerDone = await makeCustomer('Trackerdone');
+    const realNext = await makeCustomer('Realnext');
+    const trackerActive = await makeCustomer('Trackeractive');
+    const holdId = await visit(deadHold, hire, 'confirmed', '07:00');
+    await db('scheduled_services').where({ id: holdId }).update({ reservation_expires_at: new Date(Date.now() - 60 * 60 * 1000) });
+    const doneId = await visit(trackerDone, hire, 'confirmed', '08:00');
+    await db('scheduled_services').where({ id: doneId }).update({ track_state: 'complete' });
+    await visit(realNext, hire, 'confirmed', '10:00');
+
+    expect(await relay.visitTechniciansFor(deadHold.id)).toEqual([]);
+    expect(await relay.visitTechniciansFor(trackerDone.id)).toEqual([]);
+    expect(idsOf(await relay.visitTechniciansFor(realNext.id))).toEqual([String(hire.id)]);
+
+    // status can trail the tracker: 'confirmed' + track_state 'en_route' is underway.
+    const other = await makeTech('Synthetic Other');
+    const activeId = await visit(trackerActive, other, 'confirmed', '15:00');
+    await db('scheduled_services').where({ id: activeId }).update({ track_state: 'en_route' });
+    await visit(await makeCustomer('Earlier'), other, 'confirmed', '09:00');
+    expect(idsOf(await relay.visitTechniciansFor(trackerActive.id))).toEqual([String(other.id)]);
+  });
+
   test('an admin technician (the owner) and an inactive technician get no copy', async () => {
     const owner = await makeTech('Synthetic Owner', { role: 'admin' });
     const former = await makeTech('Synthetic Former', { status: 'inactive' });
