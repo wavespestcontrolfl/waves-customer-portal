@@ -14,6 +14,8 @@
  *     GATE_BEST_TIME_HINTS are on.
  *  5. Across every route, a technician who cannot perform one of the
  *     booking's services is never listed (a row books its technician).
+ *  6. The Dispatch grid's lit hours (GATE_BOARD_OPEN_TIMES) get the same
+ *     search with the box's gate off, and the day view carries the flag.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -80,7 +82,7 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
-const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX', 'GATE_BOOKING_RAIN_RANK', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX', 'GATE_BOARD_OPEN_TIMES', 'GATE_BOOKING_RAIN_RANK', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
 const ORIGINAL = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 afterAll(() => {
   for (const name of GATES) {
@@ -114,6 +116,8 @@ beforeEach(() => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   findAvailableSlots.mockResolvedValue(ENGINE());
   loadOccupancy.mockResolvedValue(emptyOccupancy());
+  // clearAllMocks keeps implementations: every test starts with every technician qualified.
+  inactiveCapabilitiesForServices.mockResolvedValue([]);
 });
 
 function post(body) {
@@ -221,4 +225,32 @@ test('across every route, a technician who cannot do one of the services is left
   inactiveCapabilitiesForServices.mockClear();
   await post({ ...LIST, technicianId: 't1', serviceTypes: ['Lawn Fertilization'] });
   expect(inactiveCapabilitiesForServices).not.toHaveBeenCalled();
+});
+
+test('the Dispatch grid\'s lit hours: the board gate alone allows the open-times search for the board\'s days', async () => {
+  process.env.GATE_BOARD_OPEN_TIMES = 'true';
+  const body = await (await post({ ...LIST, dateFrom: '2026-09-01', dateTo: '2026-09-01', serviceType: 'Pest Control' })).json();
+  expect(body.summary.open_times).toEqual({ from: '2026-09-01', to: '2026-09-01' });
+  expect(body.summary.days.map((day) => day.date)).toEqual(['2026-09-01']);
+  expect(body.summary.days[0].hours.map((hour) => hour.technician.id)).toEqual(['t1', 't2']);
+  // The pickers still ask for the box by its own gate.
+  expect(await (await fetch(`${baseUrl}/admin/schedule/find-time/ui`)).json()).toEqual({ ok: true, openTimes: false });
+});
+
+test('GATE_BOARD_OPEN_TIMES is off unless set and rides the admin schedule day view to Dispatch', () => {
+  const read = (value) => {
+    const saved = process.env.GATE_BOARD_OPEN_TIMES;
+    if (value === undefined) delete process.env.GATE_BOARD_OPEN_TIMES; else process.env.GATE_BOARD_OPEN_TIMES = value;
+    try {
+      let on;
+      jest.isolateModules(() => { on = jest.requireActual('../config/feature-gates').isEnabled('boardOpenTimes'); });
+      return on;
+    } finally {
+      if (saved === undefined) delete process.env.GATE_BOARD_OPEN_TIMES; else process.env.GATE_BOARD_OPEN_TIMES = saved;
+    }
+  };
+  expect(read(undefined)).toBe(false);
+  expect(read('true')).toBe(true);
+  const day = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  expect(day).toContain("boardOpenTimes: isEnabled('boardOpenTimes')");
 });

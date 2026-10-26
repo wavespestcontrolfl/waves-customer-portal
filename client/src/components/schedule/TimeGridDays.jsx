@@ -22,6 +22,7 @@ import { cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 import { SERIES_ACK_REQUIRED, apiErrorMessage, parseSeriesAckError } from './seriesMove';
 import { etStartOfWeek } from '../../lib/timezone';
+import { useBoardOpenTimes, LitHours } from './BoardOpenTimes';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -381,7 +382,7 @@ function AnytimeStrip({ services, dayLabel, scheduledDate, onEdit, onTreatmentPl
   );
 }
 
-function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, owesCompletion, onCreateSlot }) {
+function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, owesCompletion, onCreateSlot, fits = null, best = null }) {
   // Unassigned services render in the UnassignedRail; assigned flexible
   // services render above the timed grid so they are still visible.
   const assignedServices = (day.services || []).filter((s) => s.technicianId);
@@ -469,6 +470,8 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, owesCompletio
             onCreateStart={onCreateSlot ? handleCreateStart : undefined}
           />
         ))}
+        {/* GATE_BOARD_OPEN_TIMES: while a visit is dragged, the hours that fit it on its own route this day. */}
+        {fits && <LitHours fits={fits} best={best} minutesToTopPx={minutesToTopPx} hourHeight={(60 / SLOT_MIN) * SLOT_HEIGHT} />}
         {sel && (
           <div
             className="absolute left-0 right-0 pointer-events-none"
@@ -717,6 +720,9 @@ export default function TimeGridDays({
   onStatsChange,  // receives aggregated stats (totalCount, completedCount, …) for the visible range
   refreshKey = 0, // bump to force a week-fetch refresh from the parent
   hideUnassignedRail = false,
+  // GATE_BOARD_OPEN_TIMES (day feed `boardOpenTimes`): a drag lights the
+  // hours that fit the visit on its own route, day by day.
+  openTimesOnDrag,
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -766,6 +772,17 @@ export default function TimeGridDays({
     if (dayCount === 5) return all.slice(0, 5);
     return all;
   }, [data, optimistic, dayCount, date]);
+
+  // The visit in flight, and the hours that fit it on its own route across
+  // the shown days (a week drop keeps the technician).
+  const [dragging, setDragging] = useState(null);
+  const { fits: dragFits, best: bestFit } = useBoardOpenTimes({
+    enabled: openTimesOnDrag,
+    service: dragging,
+    durationOf: effectiveDuration,
+    dates: days.map((day) => day.date),
+    ownRoute: true,
+  });
 
   // Emit aggregated stats for the visible range whenever the data shifts.
   // DispatchPageV2 uses this to render the centered stats row (services /
@@ -843,6 +860,7 @@ export default function TimeGridDays({
   }, [days]);
 
   const onDragEnd = useCallback((event) => {
+    setDragging(null);
     const { active, over } = event;
     if (!over) return;
     const svc = active.data.current?.service;
@@ -1010,7 +1028,13 @@ export default function TimeGridDays({
       className="bg-white rounded-md overflow-hidden"
       style={{ border: '1px solid #E4E4E7' }}
     >
-      <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={pointerWithin}
+        onDragStart={(event) => setDragging(event.active?.data?.current?.service || null)}
+        onDragCancel={() => setDragging(null)}
+        onDragEnd={onDragEnd}
+      >
         <div className="flex" style={{ maxHeight: '70vh' }}>
           {!hideUnassignedRail && (
             <UnassignedRail
@@ -1038,6 +1062,8 @@ export default function TimeGridDays({
                   onTreatmentPlan={onTreatmentPlan}
                   onViewCustomer={onViewCustomer} owesCompletion={owesCompletion}
                   onCreateSlot={onCreateSlot}
+                  fits={dragFits && dragFits.filter((fit) => fit.date === day.date)}
+                  best={bestFit}
                 />
               ))}
             </div>

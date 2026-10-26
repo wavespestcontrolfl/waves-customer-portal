@@ -1688,6 +1688,7 @@ export default function DispatchPageV2({
           date={date}
           dayCount={7}
           selectedDate={date}
+          openTimesOnDrag={safeData.boardOpenTimes === true}
           hideUnassignedRail={false}
           refreshKey={scheduleRefreshKey}
           owesCompletion={completionResumeMarked}
@@ -1719,6 +1720,7 @@ export default function DispatchPageV2({
           date={date}
           dayCount={5}
           selectedDate={date}
+          openTimesOnDrag={safeData.boardOpenTimes === true}
           hideUnassignedRail={isMobile}
           refreshKey={scheduleRefreshKey}
           owesCompletion={completionResumeMarked}
@@ -2021,6 +2023,8 @@ export default function DispatchPageV2({
               onDateChange={setDate}
               showOpenHours={getAdminUser()?.role === "admin"}
               bookingHours={safeData.bookingHours || null}
+              // GATE_BOARD_OPEN_TIMES: a drag lights the hours that fit the visit.
+              openTimesOnDrag={safeData.boardOpenTimes === true}
               onCreateSlot={({ date: slotDate, windowStart, techId }) => {
                 setNewApptDefaults({ date: slotDate, windowStart, techId });
                 setShowNewAppt(true);
