@@ -32,7 +32,8 @@ const body = { fontSize: 16, lineHeight: 1.5, color: W.textBody, margin: 0 };
  * with POST /estimates/:token/first-visit. The server books the visit,
  * marks the proposal won and texts the booking confirmation.
  */
-export default function CommercialFirstVisitPicker({ token, durationMinutes = null }) {
+// `onBooked(visit)` runs once the visit is booked (the page reloads its data: the proposal is now accepted).
+export default function CommercialFirstVisitPicker({ token, durationMinutes = null, onBooked = null }) {
   const [availability, setAvailability] = useState(null);
   const [loadState, setLoadState] = useState('loading'); // loading | ready | error
   const [callUs, setCallUs] = useState('');
@@ -86,6 +87,7 @@ export default function CommercialFirstVisitPicker({ token, durationMinutes = nu
       const data = await res.json().catch(() => ({}));
       if ((res.ok && data.booked) || (res.status === 409 && data.code === 'already_booked')) {
         setBooked(data.visit || {});
+        if (onBooked) onBooked(data.visit || null);
         return;
       }
       if (res.status === 409 && data.code === 'slot_taken') {

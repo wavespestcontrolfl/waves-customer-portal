@@ -33,10 +33,12 @@ describe('CommercialFirstVisitPicker', () => {
       ? json(200, { ok: true, days: [DAY], slots: [] })
       : json(200, { booked: true, visit: { date: '2026-11-03', windowStart: '09:00', windowEnd: '10:00' } })));
     vi.stubGlobal('fetch', fetchMock);
-    render(<CommercialFirstVisitPicker token="tok-1" durationMinutes={30} />);
+    const onBooked = vi.fn();
+    render(<CommercialFirstVisitPicker token="tok-1" durationMinutes={30} onBooked={onBooked} />);
     expect(screen.getByRole('heading', { level: 2, name: 'Pick your first visit' })).toBeInTheDocument();
     fireEvent.click(await pickNineAm());
     expect(await screen.findByTestId('commercial-first-visit-booked')).toHaveTextContent('Tuesday, November 3 at 9 AM.');
+    expect(onBooked).toHaveBeenCalledWith({ date: '2026-11-03', windowStart: '09:00', windowEnd: '10:00' });
     const [url, init] = fetchMock.mock.calls[1];
     expect(url).toBe('/api/estimates/tok-1/first-visit');
     expect(JSON.parse(init.body)).toEqual({ date: '2026-11-03', time: '09:00' });

@@ -9889,7 +9889,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ) : null}
         {/* "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): only when /data carries
             cta.commercialAgreement — absent with the gate off, so the page is unchanged. */}
-        <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} firstVisit={cta?.commercialFirstVisit} />
+        <CommercialAgreementSign
+          token={token}
+          commercialAgreement={cta?.commercialAgreement}
+          firstVisit={cta?.commercialFirstVisit}
+          // Booking the first visit accepts the proposal: reload, so the page shows the accepted card with the visit.
+          onFirstVisitBooked={() => { loadEstimate({ preserveSelection: true }).catch(() => {}); }}
+        />
         {/* Residential Waves AI property card (HOME sq ft / POOL-LANAI / COMPLEXITY):
             not for an authored commercial proposal — the PDF document drops
             `intelligence` for it the same way. */}

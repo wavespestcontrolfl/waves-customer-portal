@@ -26,7 +26,7 @@ export const SIGN_BUTTON_LABEL = 'Accept & sign agreement';
 // `firstVisit` is /data's cta.commercialFirstVisit (GATE_COMMERCIAL_FIRST_VISIT), absent with the gate off: 'pick' turns
 // the signed state into the first-visit picker, 'booked' shows the booked visit, and 'after_signing' tells an unsigned
 // customer they pick the visit next.
-export default function CommercialAgreementSign({ token, commercialAgreement, firstVisit = null }) {
+export default function CommercialAgreementSign({ token, commercialAgreement, firstVisit = null, onFirstVisitBooked = null }) {
   const inFlight = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -62,7 +62,9 @@ export default function CommercialAgreementSign({ token, commercialAgreement, fi
   );
 
   if (state === 'signed') {
-    if (firstVisit?.state === 'pick') return <CommercialFirstVisitPicker token={token} durationMinutes={firstVisit.durationMinutes} />;
+    if (firstVisit?.state === 'pick') {
+      return <CommercialFirstVisitPicker token={token} durationMinutes={firstVisit.durationMinutes} onBooked={onFirstVisitBooked} />;
+    }
     const bookedLabel = firstVisit?.state === 'booked' ? firstVisitLabel(firstVisit.visit) : null;
     return (
       <div data-glass="card" data-testid="commercial-agreement-signed" style={estimateCard()}>
