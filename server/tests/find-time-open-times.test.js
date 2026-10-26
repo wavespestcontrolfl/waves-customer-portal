@@ -128,7 +128,7 @@ const LIST = {
 
 test('gate off: an openTimes request answers the strip summary, as without it', async () => {
   const asked = await (await post({ ...LIST, pickedDate: '2026-09-01', pickedStart: '09:00', bestRows: true })).json();
-  const { openTimes, ...without } = LIST;
+  const { openTimes: _asked, ...without } = LIST;
   const plain = await (await post({ ...without, pickedDate: '2026-09-01', pickedStart: '09:00', bestRows: true })).json();
   delete asked.summary.elapsed_ms;
   delete plain.summary.elapsed_ms;
@@ -164,7 +164,7 @@ test('gate on: four weeks, every technician, no picked verdict, no best-times ro
 
 test('gate on: openTimes without summary mode is an ordinary hint', async () => {
   process.env.GATE_OPEN_TIMES_BOX = 'true';
-  const { summary, ...hintOnly } = LIST;
+  const { summary: _summary, ...hintOnly } = LIST;
   const body = await (await post({ ...hintOnly, topN: 2 })).json();
   expect(body.summary).toBeUndefined();
   expect(body.slots).toHaveLength(2);
