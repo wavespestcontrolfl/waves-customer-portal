@@ -253,6 +253,9 @@ const PRODUCT_EXPECTATION_CLASS = new Map([
   // it gets no line, the same fail-closed posture as an unmapped product.
   ['advion wdg granular', null],
   ['gentrol igr', 'igr'],
+  // The catalog row is Gentrol Complete EC3 since 2026-10-25 (owner); visit
+  // lines recorded before keep the name 'Gentrol IGR', so both stay mapped.
+  ['gentrol complete ec3', 'igr'],
   ['tekko pro igr', 'igr'],
   // Surfactant/adjuvant — deliberately maps to no class (documented here so
   // it reads as a decision, not an omission).
@@ -282,13 +285,17 @@ const PRODUCT_ACTIVE_INGREDIENT = new Map([
   ['advion cockroach gel bait', 'indoxacarb'],
   ['advion ant bait gel', 'indoxacarb'],
   ['gentrol igr', '(S)-hydroprene'],
+  // The line reads "an insect growth regulator (IGR) with ...", so it names the
+  // growth regulator half of Gentrol Complete EC3 (the other half is lambda-cyhalothrin).
+  ['gentrol complete ec3', '(S)-hydroprene'],
   ['tekko pro igr', 'pyriproxyfen and novaluron'],
 ].map(([name, ai]) => [normalizeProductName(name), ai]));
 
 // Label durations, by product. Tekko Pro's is for cockroach nymphs (up to 6
 // months), so it needs a roach-tagged application. Gentrol IGR's label
 // (EPA 2724-351) states "CONTINUOUS PROTECTION FOR 4 MONTHS" for every pest
-// it lists (owner 2026-10-05: say it on the report).
+// it lists (owner 2026-10-05: say it on the report). Gentrol Complete EC3 has
+// no entry: its label's duration wording is a different claim, never reviewed.
 const IGR_LABEL_DURATION = new Map([
   ['tekko pro igr', { needsRoachTarget: true, sentence: 'It is labeled for up to 6 months of activity on cockroach nymphs.' }],
   ['gentrol igr', { needsRoachTarget: false, sentence: 'Its label gives up to 4 months of continuous protection.' }],
