@@ -438,6 +438,42 @@ describe('syncPermits', () => {
   });
 });
 
+describe('reportSyncedSince (deploy-kill retry: skip a report step already done)', () => {
+  const { reportSyncedSince } = require('../services/property-lookup/manatee-permit-sync');
+  const since = new Date('2026-10-26T06:00:00Z');
+
+  function stubTables(rowsByTable) {
+    const built = {};
+    db.mockImplementation((table) => {
+      built[table] = builder(rowsByTable[table]);
+      return built[table];
+    });
+    return built;
+  }
+
+  test('true only when BOTH sections have a row seen since the cutoff', async () => {
+    const built = stubTables({
+      pool_permit_records: { last_seen_at: new Date('2026-10-26T11:42:11Z') },
+      construction_permit_records: { last_seen_at: new Date('2026-10-26T11:44:19Z') },
+    });
+    expect(await reportSyncedSince(since)).toBe(true);
+    for (const table of ['pool_permit_records', 'construction_permit_records']) {
+      expect(built[table].where).toHaveBeenCalledWith('last_seen_at', '>=', since);
+      expect(built[table].first).toHaveBeenCalledWith('last_seen_at');
+    }
+  });
+
+  test('one stale section → false (the retry re-runs the report step)', async () => {
+    stubTables({
+      pool_permit_records: { last_seen_at: new Date('2026-10-26T11:42:11Z') },
+      construction_permit_records: undefined,
+    });
+    expect(await reportSyncedSince(since)).toBe(false);
+    stubTables({ pool_permit_records: undefined, construction_permit_records: { last_seen_at: new Date() } });
+    expect(await reportSyncedSince(since)).toBe(false);
+  });
+});
+
 describe('county-permits merge', () => {
   test('synced closed permit surfaces when the open-permits GIS layer is empty', async () => {
     jest.resetModules();
