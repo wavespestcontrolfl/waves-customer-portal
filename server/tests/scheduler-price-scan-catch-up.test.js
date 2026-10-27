@@ -10,8 +10,9 @@ jest.mock('../utils/scheduled-cron', () => ({
   schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn(),
 }));
 let mockHealthRow = null;
+let mockHealthRowQueue = []; // consumed first, one per read, before mockHealthRow
 jest.mock('../models/db', () => {
-  const db = jest.fn(() => ({ where() { return this; }, first: jest.fn(async () => mockHealthRow), del: jest.fn().mockResolvedValue(0) }));
+  const db = jest.fn(() => ({ where() { return this; }, first: jest.fn(async () => (mockHealthRowQueue.length ? mockHealthRowQueue.shift() : mockHealthRow)), del: jest.fn().mockResolvedValue(0) }));
   db.raw = jest.fn().mockResolvedValue({ rows: [] });
   db.fn = { now: jest.fn() };
   return db;
@@ -64,6 +65,7 @@ const HOUR = 60 * 60 * 1000;
 beforeEach(() => {
   jest.clearAllMocks();
   mockHealthRow = null;
+  mockHealthRowQueue = [];
   runExclusive.mockImplementation(async (_key, task) => task());
 });
 
@@ -121,8 +123,20 @@ describe('the hourly catch-up tick', () => {
     runWeeklyScan.mockResolvedValue({ ok: true, evaluated: 25, scanned: 25 });
     const { catchUp } = registerCrons();
     await catchUp();
+    expect(runExclusive).toHaveBeenCalledWith('price-scan-weekly-catch-up', expect.any(Function), { recordHealth: false });
     expect(runExclusive).toHaveBeenCalledWith('price-scan-weekly', expect.any(Function));
     expect(runWeeklyScan).toHaveBeenCalledTimes(1);
+  });
+
+  test('another instance finished the rerun while this tick waited for the lock: no second scan', async () => {
+    const failed = { last_status: 'failed', last_started_at: ago(2 * HOUR), last_finished_at: ago(HOUR), consecutive_failures: 1 };
+    const fixed = { last_status: 'success', last_started_at: ago(5 * 60 * 1000), last_finished_at: ago(60 * 1000), consecutive_failures: 0 };
+    mockHealthRowQueue = [failed, fixed]; // cheap pre-check sees the failure; the read under the lock sees the fix
+    const { catchUp } = registerCrons();
+    await catchUp();
+    expect(runExclusive).toHaveBeenCalledTimes(1);
+    expect(runExclusive).toHaveBeenCalledWith('price-scan-weekly-catch-up', expect.any(Function), { recordHealth: false });
+    expect(runWeeklyScan).not.toHaveBeenCalled();
   });
 
   test('a rerun that fails again throws inside the lock (the failure count climbs)', async () => {

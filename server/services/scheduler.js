@@ -1891,15 +1891,23 @@ function initScheduledJobs() {
   // job_health row shows a failed run in the last 24 h, or a run that started 3+ h ago
   // and never finished — at most three failed attempts in a row. The per-match draft
   // dedup keeps a rerun from re-staging an ask already sitting in the queue.
+  // The first read is a cheap filter. The decision is made AGAIN under a separate
+  // retry lock (the deploy-kill-retry pattern): the scan lock only stops overlap, so a
+  // tick that waited for a slot while another instance finished the rerun would
+  // otherwise start a second scan from a stale row.
   cron.schedule('20 * * * *', async () => {
     if (!isEnabled('priceScanWeekly')) return;
     try {
       const { decidePriceScanCatchUp, JOB_NAME } = require('./price-scan/catch-up');
-      const row = await db('job_health').where({ job_name: JOB_NAME }).first();
-      const decision = decidePriceScanCatchUp(row);
-      if (!decision.run) return;
-      logger.warn(`[price-scan] catch-up rerun (${decision.reason}; last status ${row.last_status}, ${row.consecutive_failures} failures in a row)`);
-      await runExclusive(JOB_NAME, runPriceScanBody);
+      const readRow = () => db('job_health').where({ job_name: JOB_NAME }).first();
+      if (!decidePriceScanCatchUp(await readRow()).run) return;
+      await runExclusive(`${JOB_NAME}-catch-up`, async () => {
+        const row = await readRow();
+        const decision = decidePriceScanCatchUp(row);
+        if (!decision.run) return;
+        logger.warn(`[price-scan] catch-up rerun (${decision.reason}; last status ${row.last_status}, ${row.consecutive_failures} failures in a row)`);
+        await runExclusive(JOB_NAME, runPriceScanBody);
+      }, { recordHealth: false });
     } catch (err) {
       logger.error(`Price scan catch-up failed: ${err.message}`);
     }
