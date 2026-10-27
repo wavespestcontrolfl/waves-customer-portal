@@ -24,6 +24,7 @@ jest.mock('../services/booking/new-caller-visit', () => {
 });
 
 const fs = require('fs');
+const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const newCallerVisit = require('../services/booking/new-caller-visit');
 const { linkOfficeVisitFromCall, _private } = require('../services/booking/new-caller-link-from-call');
@@ -44,7 +45,8 @@ const PAT = { phone: '+15555550142', first_name: 'Pat', last_name: 'Example', ad
 const WAITING = { customer_id: null, status: 'pending' };
 
 // Answers each read by table: rows.visit (the office-visit lookup), rows.call (the claimed call row),
-// rows.customer (every customers read), rows.recheck (the visit re-read, locked, before a bell).
+// rows.customer (every customers read), rows.recheck (the visit re-read, locked, before a bell),
+// rows.services (the plan check's catalog list).
 // A transaction runs on the same fake, so a bell written on it carries `trx: conn`.
 function fakeConn(rows, { throwOn = null } = {}) {
   const reads = [];
@@ -64,6 +66,12 @@ function fakeConn(rows, { throwOn = null } = {}) {
         if (table === 'call_log') return rows.call;
         if (table === 'customers') return rows.customer;
         throw new Error(`unexpected read of ${table}`);
+      },
+      select: async (...columns) => {
+        reads.push({ table, wheres, columns, locked });
+        if (table === throwOn) throw new Error('synthetic read failure with select * from services');
+        if (table === 'services') return rows.services || [];
+        throw new Error(`unexpected list of ${table}`);
       },
     };
     return chain;
@@ -200,6 +208,54 @@ describe('the agent links the office visit after the call checkpoint', () => {
       }));
   });
 
+  // D8 bell first (new-caller-plan-check.js): the plan the call agreed joins the check bell.
+  const QUARTERLY = { id: 'svc-q', service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service', short_name: null, billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4 };
+  const PLAN_CALL = {
+    ...TEXT_OK.extraction,
+    service_request: {
+      specific_service_name: 'Quarterly Pest Control Service', price_offered_by_staff: true, price_accepted_by_caller: true, price_is_final: true, quote_promised: false,
+      prices: [{ amount_usd: 107, amount_max_usd: null, unit: 'per_application', accepted: true, caller_response: 'accepted', prepay_term: null, evidence_quote: 'it is 107 every three months' }],
+    },
+  };
+  const planVisit = () => officeVisit({ customer_id: CUSTOMER_ID, service_id: 'svc-q', service_type: 'Quarterly Pest Control Service' });
+
+  test('a call that agreed a plan price puts the plan in the check bell, with the record the two-month count reads', async () => {
+    const conn = fakeConn({ visit: officeVisit(), call: { customer_id: CUSTOMER_ID }, customer: { ...PAT, address_line1: '102 Example St' }, services: [QUARTERLY] });
+    newCallerVisit.linkNewCallerVisit.mockResolvedValueOnce({ visit: planVisit(), addedProperty: true });
+    newCallerVisit.armLinkedVisitComms.mockResolvedValueOnce({ remindersArmed: true, confirmationSent: false });
+
+    const out = await linkOfficeVisitFromCall({
+      call: CALL, procToken: 'tok-1', conn, createdCustomerId: CUSTOMER_ID,
+      text: { ...TEXT_OK, passBlocked: true, extraction: PLAN_CALL },
+      extracted: { appointment_confirmed: true, preferred_date_time: '2031-03-07T14:00' },
+    });
+
+    expect(out.checks).toEqual(['address', 'time', 'text_consent', 'plan']);
+    // The longest list of things to check still fits one why.
+    expect(notify).toHaveBeenCalledWith('schedule', "Schedule — check Pat Example's visit on Fri Mar 7",
+      'Check 4 things on this visit: a different address, a different time, no confirmation text and the plan price.', expect.objectContaining({
+        detail: expect.stringContaining('\n- Plan from the call: Quarterly Pest Control Service, $107.00 a visit, $428.00 a year. Prepay: not said. $99 setup fee: not said.'
+          + '\n  Said on the call: "it is 107 every three months"\n  Checks: all six pass.\n  The plan is not set up. Set it up by hand, as today.'),
+        metadata: expect.objectContaining({
+          checks: ['address', 'time', 'text_consent', 'plan'],
+          plan_check: { all_pass: true, failed: [], per_visit: 107, yearly: 428, prepay: null, setup_fee_said: 'not_said' },
+        }),
+      }));
+  });
+
+  test('a failed catalog read costs the bell its plan lines only', async () => {
+    const conn = fakeConn({ visit: officeVisit(), call: { customer_id: CUSTOMER_ID }, customer: PAT }, { throwOn: 'services' });
+    newCallerVisit.linkNewCallerVisit.mockResolvedValueOnce({ visit: planVisit(), addedProperty: true });
+    newCallerVisit.armLinkedVisitComms.mockResolvedValueOnce({ remindersArmed: false, confirmationSent: false });
+
+    const out = await linkOfficeVisitFromCall({ call: CALL, procToken: 'tok-1', conn, text: { ...TEXT_OK, extraction: PLAN_CALL } });
+
+    expect(out).toMatchObject({ outcome: 'linked', checks: ['reminders'] });
+    expect(logger.warn).toHaveBeenCalledWith(`[new-caller] plan check for visit ${VISIT_ID} failed: Error`);
+    expect(notify).toHaveBeenCalledWith('schedule', expect.any(String), _private.CHECKS.reminders.why,
+      expect.objectContaining({ metadata: expect.not.objectContaining({ plan_check: expect.anything() }) }));
+  });
+
   test('failed reminders are the one check; an older customer\'s own home is never a different address (D6)', async () => {
     const conn = fakeConn({ visit: officeVisit(), call: { customer_id: CUSTOMER_ID }, customer: { ...PAT, address_line1: '9 Other Rd' } });
     newCallerVisit.linkNewCallerVisit.mockResolvedValueOnce({ visit: linkedVisit(), addedProperty: true });
@@ -316,7 +372,7 @@ maybeDescribe('the agent link on Postgres', () => {
   }
 
   // An answered inbound call, a visit the office booked for it, then the pass's checkpoint state.
-  async function bookedCall({ scheduledDate, customerId, token }) {
+  async function bookedCall({ scheduledDate, customerId, token, serviceKey = null }) {
     const [call] = await db('call_log').insert({
       direction: 'inbound', from_phone: '+15555550100', to_phone: '+15555550999', status: 'in-progress',
       twilio_call_sid: `CA${require('crypto').randomBytes(16).toString('hex')}`, duration_seconds: 0,
@@ -324,7 +380,9 @@ maybeDescribe('the agent link on Postgres', () => {
       metadata: JSON.stringify({ forward_acceptance: { accepted: true, csr_name: 'Office', answered_by_number: '+15555550123', accepted_at: minutesAgo(5).toISOString() } }),
     }).returning(['id']);
     made.callIds.push(call.id);
-    const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
+    const svc = serviceKey
+      ? await db('services').where({ service_key: serviceKey }).first('id')
+      : await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
     const booked = await newCallerVisit.bookNewCallerVisit({
       input: { scheduledDate, windowStart: '13:00', serviceId: svc.id, address: ADDRESS, callLogId: call.id },
     });
@@ -367,6 +425,31 @@ maybeDescribe('the agent link on Postgres', () => {
     // D2: the customer this call created gave another address on the call; the visit keeps the booked one.
     expect(out.checks).toEqual(['address']);
     expect(notify).toHaveBeenCalledWith('schedule', expect.any(String), _private.CHECKS.address.why, expect.objectContaining({ dedupeKey: `new-caller-visit-check:${visitId}` }));
+  });
+
+  test('a call that agreed a plan price gets its plan check from the live catalog (D8 bell first)', async () => {
+    const customerId = await insertCustomer('Planned', '+15555550148');
+    const { callId, visitId } = await bookedCall({ scheduledDate: '2031-04-09', customerId, token: 'tok-pass-3', serviceKey: 'pest_general_quarterly' });
+    const service = await db('services').where({ service_key: 'pest_general_quarterly' }).first('name', 'visits_per_year');
+    const extraction = {
+      ...TEXT_OK.extraction,
+      service_request: {
+        specific_service_name: service.name, price_offered_by_staff: true, price_accepted_by_caller: true, price_is_final: true, quote_promised: false,
+        prices: [{ amount_usd: 100, amount_max_usd: null, unit: 'per_application', accepted: true, caller_response: 'accepted', prepay_term: null, evidence_quote: null }],
+      },
+    };
+
+    const out = await linkOfficeVisitFromCall({
+      call: { id: callId }, procToken: 'tok-pass-3', text: { ...TEXT_OK, callerPhone: '+15555550148', extraction }, createdCustomerId: customerId,
+    });
+
+    expect(out).toMatchObject({ outcome: 'linked', visitId, checks: ['address', 'plan'] });
+    expect(notify).toHaveBeenCalledWith('schedule', expect.any(String), expect.any(String), expect.objectContaining({
+      dedupeKey: `new-caller-visit-check:${visitId}`,
+      metadata: expect.objectContaining({
+        plan_check: expect.objectContaining({ all_pass: true, per_visit: 100, yearly: 100 * Number(service.visits_per_year) }),
+      }),
+    }));
   });
 
   test('a pass whose claim moved links nothing: a rotated token, or a call relinked to another customer inside the link', async () => {
