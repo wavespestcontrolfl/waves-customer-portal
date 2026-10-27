@@ -440,6 +440,18 @@ describe('helpers', () => {
     expect(target.planLinks).toBe(false);
   });
 
+  test('targetForRun: a template canonical ({{siteUrl}}/…) is not a URL in any lane', () => {
+    const refresh = poller._internals.targetForRun(makeRun({
+      action_type: 'refresh_existing_page',
+      draft_payload: { type: 'draft', frontmatter: { title: 'Refresh', canonical: '{{siteUrl}}/termite-control-venice-fl/' } },
+    }));
+    expect(refresh.url).toBeNull();
+    const blog = poller._internals.targetForRun(makeRun({
+      draft_payload: { type: 'draft', frontmatter: { title: 'Post', canonical: '{{siteUrl}}/pest-control/test-post/' } },
+    }));
+    expect(blog.url).toBeNull();
+  });
+
   test('auto-merge defaults on only for supporting blogs and honors explicit configuration', () => {
     expect(poller._internals.autoMergeEnabled('new_supporting_blog')).toBe(true);
     expect(poller._internals.autoMergeEnabled('refresh_existing_page')).toBe(false);
@@ -689,6 +701,27 @@ describe('merged-by-human reconciliation', () => {
       // no safe slug -> null, never a guess
       expect(poller._internals.deriveBlogRouteUrl(makeRun({ draft_payload: JSON.stringify({ frontmatter: {} }) }))).toBeNull();
     });
+  });
+
+  test('a merged refresh whose draft carries only the template canonical is live-checked at the brief target_url and completes', async () => {
+    const briefUrl = 'https://www.wavespestcontrol.com/termite-control-venice-fl/';
+    const updates = setupDb({
+      pending: [makeRun({
+        action_type: 'refresh_existing_page',
+        brief_id: 'brief-r',
+        draft_payload: JSON.stringify({ type: 'draft', frontmatter: { title: 'Termite Control in Venice, FL', canonical: '{{siteUrl}}/termite-control-venice-fl/' }, body: 'x' }),
+      })],
+      briefs: [{ id: 'brief-r', target_url: briefUrl, target_keyword: 'termite control venice', city: 'Venice' }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-10-27T22:03:05Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].merged).toBe(true);
+    expect(pagesPoll.liveUrlResponds).toHaveBeenCalledWith(briefUrl);
+    expect(pagesPoll.liveUrlResponds).not.toHaveBeenCalledWith(expect.stringContaining('{{'));
+    expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published', published_url: briefUrl });
   });
 
   test('merged with NO resolvable target URL (draft + brief blank): fails closed, never completed_published with null URL', async () => {
