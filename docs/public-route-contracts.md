@@ -2700,7 +2700,17 @@ count.") whatever the window's length. (4) A bait hold marked
 `yields_to_label_water_in` gives way to a water-in the label directs: the
 banner is that water-in with no hold line. (5) Beside any hold, a water-in with
 `beside_hold_by_hours` (a humectant's one-day root-zone step) takes that window
-instead of its own one- or two-hour one. No new key, state or route; the
+instead of its own one- or two-hour one. (6) Late close (owner 2026-10-27,
+`lawn-watering-late-close.js`): a lawn visit closed on a later ET day than it
+was worked (the first arrival stamp the report's staleness rule keeps, else the
+scheduled day, else the first raw arrival stamp, is on an earlier ET day than
+the completion, and an arrival is 12 or more hours before it) is no claim: the
+unfrozen build carries no watering instruction, so no `reportV2.banner`
+watering lines, no `product_instruction` aftercare and no mow line, exactly as
+any other no-claim visit; the completion freezes nothing for it and sends no
+watering text. A frozen visit still replays what it froze. `LAWN_RENDER_STRATEGY`
+is `p12-lawn-late-close-20261027` so cached lawn PDFs and renders re-key once.
+No new key, state or route; the
 no-claim reason the office alert uses, and the frozen instruction's `yielded`
 (for the staff note), never enter the payload. The unfrozen PDF
 cache key adds the gate state and the logged targets (`:wr=1e:`); off, it is the
