@@ -36,16 +36,18 @@
  *                              service before the provider call). A link-only
  *                              Auto Pay link stays on the Customers page.
  *
- *   search_quick_links       — read only: the composer's Quick Links library
- *                              (link-library.js listLinks: the per-office
- *                              Google review links, the hand-managed rows
- *                              (app stores, socials, Yelp/Facebook reviews)
- *                              and every wavespestcontrol.com page from the
- *                              sitemap), searched the way the sheet searches
- *                              it, with the ready "{clause}: {url}" line. No
- *                              customer data; nothing is built or sent. These
- *                              are public links, so send_sms / draft_sms may
- *                              carry them to any customer.
+ *   search_quick_links       — read only: the Quick Links the text and email
+ *                              composers insert (the portal login and cancel
+ *                              plan links, then link-library.js listLinks:
+ *                              the per-office Google review links, the
+ *                              hand-managed rows (app stores, socials,
+ *                              Yelp/Facebook reviews) and every
+ *                              wavespestcontrol.com page from the sitemap),
+ *                              searched the way the sheet searches, with the
+ *                              ready "{clause}: {url}" line, for a text, an
+ *                              email, a blog post or a note. No customer
+ *                              data; nothing is built or sent. The How-to
+ *                              guides stay in the sheet (client data).
  *
  * The two writes follow the write-gates.js two-step: unconfirmed → a PREVIEW (reads
  * only); the route fingerprints it and the operator approves on the card;
@@ -98,22 +100,29 @@ const KIND_NAMES = Object.keys(KINDS);
 // Fields the composer handlers return beside url/line that the operator can use.
 const LINK_FACT_FIELDS = ['balance', 'estimate', 'appointment', 'prep', 'report', 'receipt', 'projectReport', 'expiresAt', 'lanes', 'immediateOnly', 'standalone'];
 
-// The library categories (link-library.js CATEGORIES).
-const LIBRARY_CATEGORIES = ['reviews', 'booking', 'app', 'website', 'social'];
-const LIBRARY_CATEGORY_LABELS = { reviews: 'Reviews', booking: 'Booking & quotes', app: 'Waves app', website: 'Website', social: 'Social' };
+// The sheet's static account links (client/src/lib/composerLinks.js
+// STATIC_COMPOSER_LINKS; the tool test pins the two copies together): no
+// token, so any customer may get them, by text or email.
+const PORTAL_LINKS = [
+  { name: 'Portal login', url: 'https://portal.wavespestcontrol.com/login', clause: 'Manage your account and appointments here', keywords: 'portal login account app sign in manage' },
+  { name: 'Cancel plan link', url: 'https://portal.wavespestcontrol.com/login?next=%2F%3Ftab%3Dplan', clause: 'You can review or cancel your plan from your account here', keywords: 'cancel cancellation stop plan end service quit' },
+].map((link) => ({ ...link, category: 'customer' }));
+// The sheet's groups (InsertLinkSheet LINK_GROUP_ORDER) this tool searches.
+const LIBRARY_CATEGORIES = ['customer', 'reviews', 'booking', 'app', 'website', 'social'];
+const LIBRARY_CATEGORY_LABELS = { customer: 'For this customer', reviews: 'Reviews', booking: 'Booking & quotes', app: 'Waves app', website: 'Website', social: 'Social' };
 const QUICK_LINK_LIMIT = 15;
 
 const CUSTOMER_LINK_TOOLS = [
   {
     name: 'search_quick_links',
-    description: `Search the Quick Links library — the same links the Communications composer's Quick Links sheet offers for any customer: the Google review link for each office, the Yelp and Facebook review pages, the App Store and Google Play links, the social profiles, the booking pages (quote, book, pricing calculator) and every page of wavespestcontrol.com (service, city, pest and blog pages). Every word of query must match the link's name, address, keywords or group, like the sheet's search; no query lists the group (or everything) up to the limit. Returns name, url, category and line (the ready SMS sentence "{clause}: {url}"). Read only: builds nothing, sends nothing, no customer data.
-To text one to a customer, put its line in send_sms (operator confirms on the card) or draft_sms. These are public links: any customer may get them. Per-customer links (pay balance, estimate, reschedule, appointment, report, receipt, referral, prep guide) are create_customer_link, not this; a review REQUEST (tracked, with follow-ups) is trigger_review_request.
-Use for: "what's our termite control link", "pull the Google review link for Parrish", "get me the app store links", "text Smith our mosquito service link", "list our social links"`,
+    description: `Pull Waves Quick Links — the same links the text and email composers' Quick Links sheet inserts: the portal login and cancel plan links (customer), the Google review link for each office plus the Yelp and Facebook review pages (reviews), the App Store and Google Play links for the Waves app (app), the social profiles (social), the quote, book and pricing calculator pages (booking) and every page of wavespestcontrol.com: service, city, pest and blog pages (website). Every word of query must match the link's name, address, keywords or group, like the sheet's search; no query lists the group (or everything) up to the limit. Returns name, url, category and line (the ready sentence "{clause}: {url}"). Read only: builds nothing, sends nothing, no customer data.
+Use the url or line anywhere a link is wanted: a text (send_sms, operator confirms on the card, or draft_sms), an email reply or draft, a blog post or page draft, a visit or schedule note. These links carry no customer token: any customer may get them. Per-customer links (pay balance, estimate, reschedule, appointment, report, receipt, referral, prep guide) are create_customer_link, not this; a review REQUEST (tracked, with follow-ups) is trigger_review_request. The How-to guides (step-by-step app instructions) are only in the composers' Quick Links sheet.
+Use for: "what's our termite control link", "pull the Google review link for Parrish", "get me the app store links", "text Smith the app download links", "link our mosquito page in this blog post", "list our social links"`,
     input_schema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Words to match (e.g. "termite sarasota", "google review parrish", "app"). Omit to list a whole category.' },
-        category: { type: 'string', enum: LIBRARY_CATEGORIES, description: 'Only this group: reviews, booking, app, website, social' },
+        category: { type: 'string', enum: LIBRARY_CATEGORIES, description: 'Only this group: customer (portal login, cancel plan), reviews, booking, app, website, social' },
         limit: { type: 'integer', minimum: 1, maximum: 50, description: `Max links returned (default ${QUICK_LINK_LIMIT})` },
       },
     },
@@ -271,7 +280,7 @@ async function searchQuickLinks(input) {
   if (category && !LIBRARY_CATEGORIES.includes(category)) return { error: `category must be one of ${LIBRARY_CATEGORIES.join(', ')}`, code: 'invalid_target' };
   const limit = Math.min(Math.max(parseInt(input.limit, 10) || QUICK_LINK_LIMIT, 1), 50);
   const terms = String(input.query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
-  const all = await require('../link-library').listLinks();
+  const all = [...PORTAL_LINKS, ...(await require('../link-library').listLinks())];
   const matches = all.filter((l) => (!category || l.category === category) && quickLinkMatches(l, terms));
   const rows = matches.slice(0, limit).map((l) => ({
     name: l.name,

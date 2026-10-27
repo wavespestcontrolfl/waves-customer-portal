@@ -129,6 +129,18 @@ describe('search_quick_links', () => {
     expect(linkLibrary.listLinks).not.toHaveBeenCalled();
   });
 
+  test('the portal login and cancel plan links ride first, with the same url and clause as the composers\' sheet', async () => {
+    const result = await executeCustomerLinkTool('search_quick_links', { category: 'customer' }, { isAdmin: true });
+    expect(result.links.map((l) => l.name)).toEqual(['Portal login', 'Cancel plan link']);
+    const clientSource = require('fs').readFileSync(require('path').join(__dirname, '../../client/src/lib/composerLinks.js'), 'utf8');
+    for (const link of result.links) {
+      expect(clientSource).toContain(`url: "${link.url.replace(/^https:\/\//, '')}"`);
+      expect(clientSource).toContain(`clause: "${link.line.split(': https://')[0]}"`);
+    }
+    expect((await executeCustomerLinkTool('search_quick_links', { query: 'app' }, { isAdmin: true })).links.map((l) => l.name))
+      .toEqual(['Portal login', 'App Store (iPhone)']);
+  });
+
   test('an unreadable library is a plain error, never a throw', async () => {
     linkLibrary.listLinks.mockRejectedValue(new Error('db down'));
     expect(await executeCustomerLinkTool('search_quick_links', { query: 'app' }, { isAdmin: true })).toEqual({ error: expect.stringMatching(/Quick Links library/) });

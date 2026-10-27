@@ -268,7 +268,15 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
 
 // Page-specific additions beyond a page's own domain (owner ruling 2026-10-07
 // Q5: "he accepted" is said on the Customers page and the dashboard too).
-const PAGE_EXTRA_TOOL_NAMES = Object.freeze({ customers: ['accept_estimate'], dashboard: ['accept_estimate'] });
+// Quick Links (owner 2026-10-27: links go into blog posts, schedule notes,
+// emails and texts) ride the pages that write those; Communications has them
+// by domain. Not every page: the Estimates list stays under 40 tools.
+const QUICK_LINKS = 'search_quick_links';
+const PAGE_EXTRA_TOOL_NAMES = Object.freeze({
+  customers: ['accept_estimate', QUICK_LINKS], dashboard: ['accept_estimate', QUICK_LINKS],
+  schedule: [QUICK_LINKS], dispatch: [QUICK_LINKS], seo: [QUICK_LINKS], blog: [QUICK_LINKS],
+  email: [QUICK_LINKS], reviews: [QUICK_LINKS], leads: [QUICK_LINKS],
+});
 
 // An ordinary admin page: not the technician rail and not the dedicated
 // estimate-drafting rail, both of which keep their own narrow tool lists.

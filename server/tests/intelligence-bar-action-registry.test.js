@@ -72,6 +72,15 @@ test('Estimates can discover real inventory executors without preloading every d
   }));
 });
 
+test('Quick Links load on the pages that write texts, emails, blog posts and schedule notes, not on Estimates', () => {
+  const names = (context) => registry.initialTools(context, { role: 'admin', context }).map(t => t.name);
+  for (const context of ['comms', 'customers', 'dashboard', 'schedule', 'dispatch', 'seo', 'blog', 'email', 'reviews', 'leads']) {
+    expect(names(context)).toContain('search_quick_links');
+  }
+  expect(names('estimates')).not.toContain('search_quick_links');
+  expect(names('tech')).not.toContain('search_quick_links');
+});
+
 test('the dedicated agent estimate workflow preloads its permitted draft tool', () => {
   const scope = { role: 'admin', context: 'agent_estimate' };
   expect(registry.initialTools(scope.context, scope).some(tool => tool.name === 'create_agent_estimate_draft')).toBe(true);
