@@ -1951,6 +1951,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "search_quick_links": {
+    "module": "customer-link-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "send_autopay_setup_link": {
     "module": "customer-link-tools.js",
     "domain": "comms",
