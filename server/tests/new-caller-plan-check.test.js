@@ -56,7 +56,8 @@ describe('the plan the call agreed', () => {
       quotes: ['it would be 107 every three months', 'so 428 for the year', 'plus the 99 setup'],
     });
     expect(planCheckDetail(plan)).toBe([
-      'Plan from the call: Quarterly Pest Control Service, $107.00 a visit, $428.00 a year. Prepay: pays per visit. $99 setup fee: said and accepted.',
+      'Plan from the call: Quarterly Pest Control Service. Agreed on the call: $107.00 per application + $428.00/year + $99.00 one-time. That is $107.00 a visit, $428.00 a year.',
+      '  Prepay: pays per visit. $99 setup fee: said and accepted.',
       '  Said on the call: "it would be 107 every three months"; "so 428 for the year"; "plus the 99 setup"',
       '  Checks: all six pass.',
       '  The plan is not set up. Set it up by hand, as today.',
@@ -72,8 +73,25 @@ describe('the plan the call agreed', () => {
   test('a price with no plan unit has no yearly total, and the bell says so', () => {
     const plan = check(extraction([price(110, 'unknown')]));
     expect(plan).toMatchObject({ perVisit: null, yearly: null, failed: ['one_yearly_total'], allPass: false });
-    expect(planCheckDetail(plan)).toContain('Plan from the call: Quarterly Pest Control Service, $110.00, no yearly total.');
+    expect(planCheckDetail(plan)).toContain('Plan from the call: Quarterly Pest Control Service. Agreed on the call: $110.00.\n');
     expect(planCheckDetail(plan)).toContain('Checks not passed: every accepted plan price gives the same yearly total.');
+  });
+
+  test('an accepted price with no unit beside a plan price leaves no single yearly total', () => {
+    const plan = check(extraction([price(107, 'per_application'), price(600, 'unknown')]));
+    expect(plan).toMatchObject({ perVisit: null, yearly: null, failed: ['one_yearly_total'] });
+    expect(planCheckRecord(plan)).toMatchObject({ all_pass: false, per_visit: null, yearly: null });
+  });
+
+  test('a range or conflicting prices show as said, with no total; a total from a call that failed a check is marked', () => {
+    const range = planCheckDetail(check(extraction([price(90, 'per_quarter', { amount_max_usd: 100 })])));
+    expect(range).toContain('Agreed on the call: $90.00–$100.00/quarter.\n');
+    expect(range).not.toContain('That is');
+    const conflict = planCheckDetail(check(extraction([price(75, 'per_month'), price(300, 'per_year')])));
+    expect(conflict).toContain('Agreed on the call: $75.00/month + $300.00/year.\n');
+    expect(conflict).not.toContain('That is');
+    expect(planCheckDetail(check(extraction([price(107, 'per_application')], { price_offered_by_staff: false }))))
+      .toContain('Agreed on the call: $107.00 per application. That is $107.00 a visit, $428.00 a year, if the call is right.');
   });
 
   test('the setup fee counts as said only at the fee\'s own amount', () => {

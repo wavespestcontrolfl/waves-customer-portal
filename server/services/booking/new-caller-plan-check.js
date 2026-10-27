@@ -18,7 +18,8 @@ const { findServiceByName } = require('../call-booking-catalog');
 
 const SERVICE_COLUMNS = ['id', 'service_key', 'name', 'short_name', 'billing_type', 'frequency', 'visits_per_year'];
 // A plan unit as the call reader spells it, and its count in a year; a price
-// per application counts the booked service's own visits a year.
+// per application counts the booked service's own visits a year. Any other
+// unit but one_time (unknown, none) has no yearly total.
 const PER_YEAR = Object.freeze({ per_application: null, per_quarter: 4, per_month: 12, per_year: 1 });
 // Two plan prices agree when their yearly totals are within 3%: "$107 a visit" and "$428 a year".
 const YEARLY_TOLERANCE = 0.03;
@@ -42,7 +43,7 @@ const round2 = (n) => Math.round(n * 100) / 100;
 const money = (n) => `$${n.toFixed(2)}`;
 
 // The six checks, each true or false. `terms` are the agreed price's terms (call-agreed-price.js) and
-// `totals` the yearly total of each plan term (null when it has none).
+// `totals` the yearly total of each term that is not a one-time price (null when it has none).
 function sixChecks({ request, terms, totals, bookedService, namedService }) {
   const known = totals.filter((n) => n != null);
   return {
@@ -72,11 +73,12 @@ function planCheck({ extraction, visit, bookedService = null, namedService = nul
   if (!agreed) return null;
   if (isAssessmentVisit({ service_type: visit?.service_type, catalog_service_key: bookedService?.service_key, catalog_service_name: bookedService?.name })) return null;
   const terms = [agreed, ...(agreed.additionalTerms || [])];
-  const planTerms = terms.filter((t) => Object.prototype.hasOwnProperty.call(PER_YEAR, t.unit));
   // On a one-time job only a price a month, a quarter or a year makes a plan; a price per application is the job's own.
-  if (bookedService?.billing_type !== 'recurring' && !planTerms.some((t) => PER_YEAR[t.unit])) return null;
+  if (bookedService?.billing_type !== 'recurring' && !terms.some((t) => PER_YEAR[t.unit])) return null;
 
   const visitsPerYear = Number(bookedService?.visits_per_year) > 0 ? Number(bookedService.visits_per_year) : null;
+  // Every term but a one-time price is part of the plan; one with no plan unit has no yearly total.
+  const planTerms = terms.filter((t) => t.unit !== 'one_time');
   const totals = planTerms.map((t) => {
     const count = t.unit === 'per_application' ? visitsPerYear : PER_YEAR[t.unit];
     return count ? round2(t.amount * count) : null;
@@ -88,14 +90,17 @@ function planCheck({ extraction, visit, bookedService = null, namedService = nul
   const setup = prices.find((p) => p.unit === 'one_time' && p.amount_usd === setupFee);
   const checks = sixChecks({ request, terms, totals, bookedService, namedService });
   const failed = Object.keys(CHECK_WORDS).filter((key) => !checks[key]);
+  // A price per visit and a yearly total only when the call's terms give one answer.
+  const yearly = checks.one_yearly_total && checks.final_price ? totals[0] : null;
   const [primary] = planTerms;
-  const yearly = totals[0] ?? null;
-  const perVisitFromYear = yearly != null && visitsPerYear ? round2(yearly / visitsPerYear) : null;
+  let perVisit = null;
+  if (yearly != null && primary.unit === 'per_application') perVisit = primary.amount;
+  else if (yearly != null && visitsPerYear) perVisit = round2(yearly / visitsPerYear);
 
   return {
     service: bookedService?.name || visit?.service_type || null,
     agreed: formatAgreedPriceLabel(agreed),
-    perVisit: primary?.unit === 'per_application' ? primary.amount : perVisitFromYear,
+    perVisit,
     yearly,
     prepay: Object.keys(PREPAY_WORDS).find((term) => accepted.some((p) => p.prepay_term === term)) || null,
     setupFee: { amount: setupFee, said: (setup && (setup.accepted === true ? 'accepted' : 'not_accepted')) || 'not_said' },
@@ -123,13 +128,14 @@ async function loadPlanCheck(conn, visit, extraction) {
   });
 }
 
-// The plan's lines in the check bell's detail.
+// The plan's lines in the check bell's detail: every agreed term as said, then what they
+// come to when they give one answer.
 function planCheckDetail(plan) {
-  const price = plan.yearly != null
-    ? `${plan.perVisit != null ? `${money(plan.perVisit)} a visit, ` : ''}${money(plan.yearly)} a year`
-    : `${plan.agreed}, no yearly total`;
+  const perVisit = plan.perVisit != null ? `${money(plan.perVisit)} a visit, ` : '';
+  const comesTo = plan.yearly == null ? '' : ` That is ${perVisit}${money(plan.yearly)} a year${plan.allPass ? '' : ', if the call is right'}.`;
   return [
-    `Plan from the call: ${plan.service || 'the booked service'}, ${price}. Prepay: ${PREPAY_WORDS[plan.prepay] || 'not said'}. $${plan.setupFee.amount} setup fee: ${SETUP_FEE_WORDS[plan.setupFee.said]}.`,
+    `Plan from the call: ${plan.service || 'the booked service'}. Agreed on the call: ${plan.agreed}.${comesTo}`,
+    `Prepay: ${PREPAY_WORDS[plan.prepay] || 'not said'}. $${plan.setupFee.amount} setup fee: ${SETUP_FEE_WORDS[plan.setupFee.said]}.`,
     ...(plan.quotes.length ? [`Said on the call: ${plan.quotes.map((q) => `"${q}"`).join('; ')}`] : []),
     plan.allPass ? 'Checks: all six pass.' : `Checks not passed: ${plan.failed.map((key) => CHECK_WORDS[key]).join('; ')}.`,
     'The plan is not set up. Set it up by hand, as today.',

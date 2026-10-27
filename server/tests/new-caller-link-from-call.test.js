@@ -234,8 +234,9 @@ describe('the agent links the office visit after the call checkpoint', () => {
     // The longest list of things to check still fits one why.
     expect(notify).toHaveBeenCalledWith('schedule', "Schedule — check Pat Example's visit on Fri Mar 7",
       'Check 4 things on this visit: a different address, a different time, no confirmation text and the plan price.', expect.objectContaining({
-        detail: expect.stringContaining('\n- Plan from the call: Quarterly Pest Control Service, $107.00 a visit, $428.00 a year. Prepay: not said. $99 setup fee: not said.'
-          + '\n  Said on the call: "it is 107 every three months"\n  Checks: all six pass.\n  The plan is not set up. Set it up by hand, as today.'),
+        detail: expect.stringContaining('\n- Plan from the call: Quarterly Pest Control Service. Agreed on the call: $107.00 per application. That is $107.00 a visit, $428.00 a year.'
+          + '\n  Prepay: not said. $99 setup fee: not said.\n  Said on the call: "it is 107 every three months"\n  Checks: all six pass.'
+          + '\n  The plan is not set up. Set it up by hand, as today.'),
         metadata: expect.objectContaining({
           checks: ['address', 'time', 'text_consent', 'plan'],
           plan_check: { all_pass: true, failed: [], per_visit: 107, yearly: 428, prepay: null, setup_fee_said: 'not_said' },
