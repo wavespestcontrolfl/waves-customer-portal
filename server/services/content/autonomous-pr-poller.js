@@ -149,9 +149,18 @@ function targetForRun(run) {
   const draft = parseJsonObject(run.draft_payload);
   const frontmatter = draft.frontmatter || {};
   const isNewPage = String(run.action_type || '') === 'new_supporting_blog';
+  // A multi-domain page's canonical is a template ("{{siteUrl}}/slug/") that
+  // each build resolves; stored on the draft it is not a URL. Skip any value
+  // with an unresolved {{token}} so resolveTargetForRun falls back to the
+  // brief's target_url instead of the live check throwing "Failed to parse
+  // URL" (and the merged run parking) on every tick.
+  const concrete = (value) => {
+    const s = String(value || '').trim();
+    return s.includes('{{') ? '' : s;
+  };
   const url = (isNewPage
-    ? String(frontmatter.canonical || '').trim()
-    : String(draft.page_url || draft.target_url || frontmatter.canonical || '').trim()) || null;
+    ? concrete(frontmatter.canonical)
+    : (concrete(draft.page_url) || concrete(draft.target_url) || concrete(frontmatter.canonical))) || null;
   return {
     url,
     keyword: frontmatter.primary_keyword || null,
