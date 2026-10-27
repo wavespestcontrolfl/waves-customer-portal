@@ -408,15 +408,17 @@ const STOP_LOG = {
 /**
  * Weekly cron step (scheduler), run after the report sync. Gated inside
  * (single source of truth): a disabled gate returns {skipped:'gated'} before
- * any network or DB read. Sequential; fail-open per permit.
+ * any network or DB read. Sequential; fail-open per permit. `maxBudgetMs`
+ * shortens the run's wall-clock budget (never lengthens it): the deploy-kill
+ * retry runs a short slice that fits between deploys.
  */
-async function syncPermitDetails({ sleep, now } = {}) {
+async function syncPermitDetails({ sleep, now, maxBudgetMs } = {}) {
   if (!permitDetailSyncLive()) return { skipped: 'gated' };
   const clock = now || Date.now;
   const nap = sleep || ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
   const t0 = clock();
   const limit = cap();
-  const budget = budgetMs();
+  const budget = Number.isFinite(maxBudgetMs) && maxBudgetMs > 0 ? Math.min(budgetMs(), maxBudgetMs) : budgetMs();
   const polite = createThrottle({ gapMs: minGapMs(), sleep: nap, now: clock, deadline: t0 + budget });
 
   const candidates = await selectCandidates(limit, t0);

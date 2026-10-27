@@ -1466,43 +1466,19 @@ function initScheduledJobs() {
   // :48 and :52 groups. The detail step then holds only the lease's one
   // connection, under the cron-lock holder cap, as it did from 4:08 AM.
   // =========================================================================
-  const runPermitSyncTick = async () => {
+  const runPermitSyncTick = async ({ afterKill = false } = {}) => {
     // ONE lease for the whole sequence (codex #5673 P1): with separate
     // leases a deploy overlap could run the detail step on one replica while
     // another still runs the report sync (stale candidates, concurrent ACA
-    // scraping) and then skip it there. Each step keeps its own try so a
-    // failure in one never skips the other.
-    await runExclusive('permit-sync', async () => {
-      const failures = [];
-      try {
-        const res = await require('./property-lookup/manatee-permit-sync').syncPermits();
-        if (res && !res.skipped) {
-          const part = (r) => (r ? `${r.written}/${r.fetched} rows` : 'failed');
-          logger.info(`Permit sync: pool ${part(res.pool)}; construction ${part(res.construction)}${res.errors.length ? `; errors: ${res.errors.join(' | ')}` : ''}`);
-        }
-      } catch (err) {
-        logger.error(`Permit sync failed: ${err.message}`);
-        failures.push(`report sync: ${err.message}`);
-      }
-      // Permit detail collection (building facts off each new-home permit's
-      // ACA record page → construction_permit_records). Runs AFTER the
-      // report sync so this week's new permits are candidates. Inert unless
-      // GATE_PERMIT_DETAIL_SYNC is exactly 'true' (checked inside
-      // syncPermitDetails). Slow by design (sequential, >=2 s between
-      // requests, per-run cap + time budget); never runs from a lookup.
-      try {
-        await require('./property-lookup/manatee-permit-detail').syncPermitDetails();
-      } catch (err) {
-        logger.error(`Permit detail sync failed: ${err.message}`);
-        failures.push(`detail sync: ${err.message}`);
-      }
-      // Both steps ran; a failure in either still reaches the lease so job
-      // health records it (a swallowed error would read as success).
-      if (failures.length) throw new Error(failures.join(' | '));
-    }).catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
+    // scraping) and then skip it there. The steps live in permit-sync-run.js:
+    // each keeps its own try so a failure in one never skips the other, and
+    // a retry after a deploy kill skips a report step already done and runs
+    // a short detail slice (2026-10-26: deploys killed all 4 full retries).
+    await runExclusive('permit-sync', () => require('./property-lookup/permit-sync-run').runPermitSyncSteps({ afterKill }))
+      .catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
   };
-  cron.schedule('41 7 * * 1', runPermitSyncTick, { timezone: 'America/New_York' });
-  registerDeployKillRetry('permit-sync', runPermitSyncTick);
+  cron.schedule('41 7 * * 1', () => runPermitSyncTick(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('permit-sync', () => runPermitSyncTick({ afterKill: true }));
 
   // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
