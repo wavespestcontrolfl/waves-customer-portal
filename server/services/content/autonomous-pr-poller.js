@@ -1519,6 +1519,19 @@ async function maybeAutoMerge(run, pr) {
     }
   }
 
+  // 2a. The astro repo's brand-isolation job must have passed on this head: a
+  //     hub brand/link leaking onto a spoke is invisible to the hub preview and
+  //     to Codex. After the Codex gate so remediation still runs on findings.
+  try {
+    await publisher.assertBrandIsolationClear(pr);
+  } catch (err) {
+    if (err?.code === 'BRAND_ISOLATION_REQUIRED' || err?.code === 'BRAND_ISOLATION_LOOKUP_FAILED') {
+      logger.info(`[autonomous-pr-poller] auto-merge blocked for run ${run.id} PR #${pr.number}: ${err.message}`);
+      return { pending: true, ...(err.transient ? { transient: true } : {}), reason: err.reason };
+    }
+    throw err; // unexpected — retry next tick
+  }
+
   // 2b. Hub-only kill switch (mirrors mergeAstro's assertOpenPublishPrIsHubOnly,
   //     which THIS path bypasses). Never auto-merge a spoke-targeted PR while
   //     the spoke blog network is disabled — a stale spoke PR from before the
