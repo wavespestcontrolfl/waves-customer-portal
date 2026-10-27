@@ -145,6 +145,13 @@ the card showed. It refuses a customer with a saved card (enrolling one turns
 Auto Pay on: a billing change for the Customers page), sends no `inline` link
 (a link-only Auto Pay link stays on the Customers page button), and never
 returns the bearer link.
+`search_quick_links` (same file, admin-only, read, scope `none`) searches the
+composer's Quick Links library (`link-library.js` `listLinks`: office Google
+review links, the manual rows, every sitemap page) with the sheet's
+every-word match and returns each row's ready `{clause}: {url}` line. The
+links are public, so `send_sms` / `draft_sms` carry them to any customer; it
+loads on the comms page and is found by discovery elsewhere (not
+`EVERY_PAGE_TOOL_NAMES`: the Estimates page list is capped under 40).
 Tech portal is isolated — no base tools, strictly read-only, lower
 max_tokens for field speed.
 

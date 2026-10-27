@@ -27,6 +27,7 @@ jest.mock('../services/autopay-setup-link', () => ({
   autopayDeliveryPreflight: jest.fn(),
   requestAutopaySetupLink: jest.fn(),
 }));
+jest.mock('../services/link-library', () => ({ listLinks: jest.fn() }));
 jest.mock('../services/composer-customer-links', () => ({
   AUTOPAY_SKIP_REASONS: jest.requireActual('../services/composer-customer-links').AUTOPAY_SKIP_REASONS,
   autopayLinkSendCheck: jest.fn(),
@@ -67,7 +68,8 @@ beforeEach(() => {
 describe('tool definitions', () => {
   test('the tool is side-effect flagged, admin-only in the executor, and offers every Insert Link kind the bar builds', () => {
     const byName = Object.fromEntries(CUSTOMER_LINK_TOOLS.map((t) => [t.name, t]));
-    expect(Object.keys(byName)).toEqual(['create_customer_link', 'send_autopay_setup_link']);
+    expect(Object.keys(byName)).toEqual(['search_quick_links', 'create_customer_link', 'send_autopay_setup_link']);
+    expect(byName.search_quick_links._sideEffects).toBeUndefined();
     expect(byName.create_customer_link._sideEffects).toBe(true);
     expect(byName.send_autopay_setup_link._sideEffects).toBe(true);
     // No link-only mode from the bar: sms or email. "link" is accepted only so the call reaches its coded
@@ -90,6 +92,46 @@ describe('tool definitions', () => {
     const result = await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'referral' }, { isAdmin: false });
     expect(result).toMatchObject({ code: 'permission_denied' });
     expect(db).not.toHaveBeenCalled();
+  });
+});
+
+describe('search_quick_links', () => {
+  const linkLibrary = require('../services/link-library');
+  const LIBRARY = [
+    { name: 'Google review — Parrish', url: 'https://g.page/r/parrish/review', clause: 'Leave us a Google review here', category: 'reviews', keywords: 'google review stars write parrish' },
+    { name: 'App Store (iPhone)', url: 'https://apps.apple.com/us/app/waves-pest-control/id1', clause: 'Download the Waves app on the App Store', category: 'app', keywords: 'app apple ios' },
+    { name: 'Termite Control Sarasota FL', url: 'https://www.wavespestcontrol.com/termite-control-sarasota-fl/', clause: null, category: 'website', keywords: null },
+    { name: 'Termite Inspection', url: 'https://www.wavespestcontrol.com/termite-inspection/', clause: null, category: 'website', keywords: null },
+  ];
+  beforeEach(() => { linkLibrary.listLinks.mockResolvedValue(LIBRARY); });
+
+  test('every word must match (name, url, keywords or group), and each row carries the ready SMS line; nothing is sent', async () => {
+    const result = await executeCustomerLinkTool('search_quick_links', { query: 'termite sarasota' }, { isAdmin: true });
+    expect(result).toEqual({
+      links: [{ name: 'Termite Control Sarasota FL', url: LIBRARY[2].url, category: 'website', line: `Termite Control Sarasota FL: ${LIBRARY[2].url}` }],
+      total_matches: 1,
+      sent: false,
+    });
+    const review = await executeCustomerLinkTool('search_quick_links', { query: 'Google Review Parrish' }, { isAdmin: true });
+    expect(review.links[0].line).toBe('Leave us a Google review here: https://g.page/r/parrish/review');
+  });
+
+  test('a category lists that group; a limit caps the rows and says how many more matched', async () => {
+    const result = await executeCustomerLinkTool('search_quick_links', { category: 'website', limit: 1 }, { isAdmin: true });
+    expect(result.links).toHaveLength(1);
+    expect(result.total_matches).toBe(2);
+    expect(result.note).toMatch(/1 more match/);
+  });
+
+  test('an unknown category is refused before the library is read; a technician token is refused', async () => {
+    expect(await executeCustomerLinkTool('search_quick_links', { category: 'pets' }, { isAdmin: true })).toMatchObject({ code: 'invalid_target' });
+    expect(await executeCustomerLinkTool('search_quick_links', { query: 'app' }, { isAdmin: false })).toMatchObject({ code: 'permission_denied' });
+    expect(linkLibrary.listLinks).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable library is a plain error, never a throw', async () => {
+    linkLibrary.listLinks.mockRejectedValue(new Error('db down'));
+    expect(await executeCustomerLinkTool('search_quick_links', { query: 'app' }, { isAdmin: true })).toEqual({ error: expect.stringMatching(/Quick Links library/) });
   });
 });
 

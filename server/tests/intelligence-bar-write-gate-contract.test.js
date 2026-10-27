@@ -379,6 +379,8 @@ const READ_ONLY = [
   'offer_choices',
   // address-tools.js: Google address check. Read only: no rows, no writes.
   'check_address',
+  // customer-link-tools.js: the Quick Links library search. Read only: public links, no customer rows.
+  'search_quick_links',
   // billing-reader-tools.js (W9): read-only per-customer invoice list and invoice detail
   // with a payments timeline (attempts kept apart from received payments).
   'get_customer_invoices', 'get_invoice_detail',
