@@ -7,6 +7,11 @@ const {
   isOnHost,
   matchKey,
   runWeeklyScan,
+  fetchFailureOf,
+  classifyFetchFailures,
+  watchInterrupt,
+  throwIfScanFailed,
+  FETCH_CLASS_SKIP_REASONS,
   attachLoginCredentials,
   scrapableVendors,
 } = require('../services/price-scan/weekly-scan');
@@ -264,6 +269,229 @@ describe('runWeeklyScan (injected deps)', () => {
     const scanMany = jest.fn(async () => { throw new Error("Cannot find module 'playwright'"); });
     const r = await runWeeklyScan({ vendorByName: siteoneOnly, vendors: VENDORS, specs, scanMany });
     expect(r).toEqual({ ok: false, reason: 'browser_unavailable', evaluated: 3 });
+  });
+});
+
+describe('fetch-failure classification', () => {
+  const prod = (name) => ({ name });
+  const okScan = (skipped = []) => ({ product: prod('A'), scan: { verified: [{ vendor: 'DoMyOwn' }], skipped } });
+
+  test('the fetch-class reason is exactly the one scanProduct writes when an adapter throws', () => {
+    expect(FETCH_CLASS_SKIP_REASONS).toEqual(['fetch_error']);
+  });
+
+  test('a thrown product is a failure', () => {
+    expect(fetchFailureOf({ product: prod('A'), error: new Error('Target closed') })).toEqual({ reason: 'error', detail: 'Target closed' });
+  });
+
+  test('every vendor fetch_error with nothing verified is a failure', () => {
+    const r = { product: prod('A'), scan: { verified: [], skipped: [{ vendor: 'DoMyOwn', reason: 'fetch_error', detail: 'browser closed' }, { vendor: 'Solutions', reason: 'fetch_error' }] } };
+    expect(fetchFailureOf(r)).toEqual({ reason: 'fetch_failed', detail: 'browser closed' });
+  });
+
+  test.each(['no_candidate', 'unverified', 'non_usd', 'no_proof_url'])('a real %s answer is NOT a fetch failure', (reason) => {
+    expect(fetchFailureOf({ product: prod('A'), scan: { verified: [], skipped: [{ vendor: 'DoMyOwn', reason }] } })).toBeNull();
+  });
+
+  test('one vendor answering "not found" next to a fetch error is not a failure', () => {
+    const r = { product: prod('A'), scan: { verified: [], skipped: [{ vendor: 'DoMyOwn', reason: 'fetch_error' }, { vendor: 'Solutions', reason: 'no_candidate' }] } };
+    expect(fetchFailureOf(r)).toBeNull();
+  });
+
+  test('a verified entry beats a fetch error on another vendor; no vendors at all is not a failure', () => {
+    expect(fetchFailureOf(okScan([{ vendor: 'Solutions', reason: 'fetch_error' }]))).toBeNull();
+    expect(fetchFailureOf({ product: prod('A'), scan: { verified: [], skipped: [] } })).toBeNull();
+    expect(fetchFailureOf(null)).toBeNull();
+  });
+
+  test('degraded at exactly half the evaluated products, not below', () => {
+    const bad = (n) => ({ product: prod(n), error: new Error('x') });
+    expect(classifyFetchFailures([bad('a'), okScan()], 2).degraded).toBe(true);
+    expect(classifyFetchFailures([bad('a'), okScan(), okScan()], 3).degraded).toBe(false);
+    expect(classifyFetchFailures([bad('a'), bad('b'), okScan()], 3).failedProducts.map((f) => f.product)).toEqual(['a', 'b']);
+  });
+
+  test('products the scan never returned still count against the evaluated total', () => {
+    // 4 evaluated, 2 results back (both failed): 2 of 4 failed = degraded; 1 of 4 is not.
+    expect(classifyFetchFailures([{ product: prod('a'), error: new Error('x') }, okScan()], 4).degraded).toBe(false);
+    expect(classifyFetchFailures([{ product: prod('a'), error: new Error('x') }, { product: prod('b'), error: new Error('x') }], 4).degraded).toBe(true);
+  });
+});
+
+describe('watchInterrupt', () => {
+  const fakeProc = () => {
+    const { EventEmitter } = require('events');
+    const p = new EventEmitter();
+    p.pid = 4242;
+    p.kill = jest.fn();
+    return p;
+  };
+
+  test('records the signal and removes its listeners on dispose', () => {
+    const p = fakeProc();
+    p.on('SIGTERM', () => {}); // the server's own shutdown handler stays in place
+    const w = watchInterrupt(p);
+    expect(p.listenerCount('SIGTERM')).toBe(2);
+    expect(p.listenerCount('SIGINT')).toBe(1);
+    expect(w.signal).toBeNull();
+    p.emit('SIGTERM');
+    expect(w.signal).toBe('SIGTERM');
+    expect(p.kill).not.toHaveBeenCalled(); // someone else handles the signal
+    w.dispose();
+    expect(p.listenerCount('SIGTERM')).toBe(1);
+    expect(p.listenerCount('SIGINT')).toBe(0);
+  });
+
+  test('dispose without a signal leaves no listener behind', () => {
+    const p = fakeProc();
+    const w = watchInterrupt(p);
+    w.dispose();
+    expect(p.listenerCount('SIGTERM')).toBe(0);
+    expect(p.listenerCount('SIGINT')).toBe(0);
+    expect(w.signal).toBeNull();
+  });
+
+  test('re-raises the signal when nothing else listens, so a script still stops', () => {
+    const p = fakeProc();
+    const w = watchInterrupt(p);
+    p.emit('SIGINT');
+    expect(w.signal).toBe('SIGINT');
+    expect(p.kill).toHaveBeenCalledWith(4242, 'SIGINT');
+  });
+});
+
+describe('throwIfScanFailed', () => {
+  test('passes healthy and clean-skip results through', () => {
+    const ok = { ok: true, evaluated: 3 };
+    expect(throwIfScanFailed(ok)).toBe(ok);
+    for (const reason of ['browser_unavailable', 'vendors_missing', 'no_scrapable_vendors']) {
+      expect(() => throwIfScanFailed({ ok: false, reason, evaluated: 0 })).not.toThrow();
+    }
+    expect(() => throwIfScanFailed(undefined)).not.toThrow();
+  });
+
+  test('throws a clear message with the reason and counts', () => {
+    expect(() => throwIfScanFailed({
+      ok: false, reason: 'interrupted', signal: 'SIGTERM', evaluated: 25, fetchFailed: 24, scanned: 1, draftId: 7,
+      failedProducts: [{ product: 'A', reason: 'error', detail: 'Target page, context or browser has been closed' }],
+    })).toThrow('price scan interrupted: 25 products evaluated, 24 with fetch failures, 1 scanned, got SIGTERM, draft 7 staged, first error: Target page, context or browser has been closed');
+    expect(() => throwIfScanFailed({ ok: false, reason: 'degraded', evaluated: 10, fetchFailed: 6 })).toThrow(/^price scan degraded: 10 products evaluated, 6 with fetch failures/);
+    expect(() => throwIfScanFailed({ ok: false, reason: 'scan_error', evaluated: 10, error: 'boom' })).toThrow('price scan scan_error: 10 products evaluated, first error: boom');
+  });
+});
+
+describe('runWeeklyScan failed-run classification (injected scanMany)', () => {
+  const siteoneOnly = async (db, name) => (name === 'SiteOne' ? { id: 'so', name } : null);
+  const mk = (n) => ({ product: { name: n, epaReg: `e-${n}` }, vendors: [] });
+  const specs = ['A', 'B', 'C', 'D'].map(mk);
+  const fetchFail = (name) => ({ product: { name }, scan: { verified: [], skipped: [{ vendor: 'DoMyOwn', reason: 'fetch_error', detail: 'Target closed' }, { vendor: 'Solutions Pest & Lawn', reason: 'fetch_error', detail: 'Target closed' }], opportunity: { isOpportunity: false } } });
+  const notFound = (name) => ({ product: { name }, scan: { verified: [], skipped: [{ vendor: 'DoMyOwn', reason: 'no_candidate' }, { vendor: 'Solutions Pest & Lawn', reason: 'unverified' }], opportunity: { isOpportunity: false } } });
+  const opp = (name, price, url) => ({ product: { name }, scan: { verified: [{ vendor: 'DoMyOwn' }], skipped: [], opportunity: { isOpportunity: true, baseline: { vendor: 'SiteOne', price: 95, quantity: '78 oz' }, best: { vendor: 'DoMyOwn', price, quantity: '78 oz', source_url: url } } } });
+  const base = { vendorByName: siteoneOnly, vendors: VENDORS, activeMatchKeys: new Set() };
+
+  test('the 10-26 incident: every fetch failed -> degraded, not ok:true', async () => {
+    const scanMany = jest.fn(async () => specs.map((s) => fetchFail(s.product.name)));
+    const createDraft = jest.fn();
+    const r = await runWeeklyScan({ ...base, specs, scanMany, createDraft });
+    expect(r).toMatchObject({ ok: false, reason: 'degraded', evaluated: 4, scanned: 4, opportunities: 0, fetchFailed: 4 });
+    expect(r.failedProducts).toHaveLength(4);
+    expect(r.failedProducts[0]).toEqual({ product: 'A', reason: 'fetch_failed', detail: 'Target closed' });
+    expect(createDraft).not.toHaveBeenCalled();
+  });
+
+  test('thrown products count too: 2 of 4 is degraded', async () => {
+    const scanMany = jest.fn(async () => [{ product: specs[0].product, error: new Error('Target closed') }, { product: specs[1].product, error: new Error('Target closed') }, notFound('C'), notFound('D')]);
+    const r = await runWeeklyScan({ ...base, specs, scanMany });
+    expect(r).toMatchObject({ ok: false, reason: 'degraded', errors: 2, fetchFailed: 2 });
+  });
+
+  test('a degraded run still stages the fresh matches it found', async () => {
+    const scanMany = jest.fn(async () => [opp('A', 89, 'https://d/a'), fetchFail('B'), fetchFail('C'), fetchFail('D')]);
+    const createDraft = jest.fn(async () => ({ id: 21, included_count: 1 }));
+    const r = await runWeeklyScan({ ...base, specs, scanMany, createDraft });
+    expect(createDraft).toHaveBeenCalledTimes(1);
+    expect(createDraft.mock.calls[0][1].map((m) => m.product)).toEqual(['A']);
+    expect(r).toMatchObject({ ok: false, reason: 'degraded', draftId: 21, includedCount: 1, fetchFailed: 3 });
+  });
+
+  test('a rerun does not re-stage a match an active draft already covers', async () => {
+    const scanMany = jest.fn(async () => [opp('A', 89, 'https://d/a'), fetchFail('B'), fetchFail('C'), fetchFail('D')]);
+    const createDraft = jest.fn();
+    const activeMatchKeys = new Set([matchKey({ product: 'A', competitor: { source_url: 'https://d/a', price: 89 }, baseline: { price: 95 } })]);
+    const r = await runWeeklyScan({ ...base, activeMatchKeys, specs, scanMany, createDraft });
+    expect(createDraft).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ ok: false, reason: 'degraded', duplicates: 1, draftId: null });
+  });
+
+  test('legitimate not-found / unverified answers on every product stay ok:true', async () => {
+    const scanMany = jest.fn(async () => specs.map((s) => notFound(s.product.name)));
+    const r = await runWeeklyScan({ ...base, specs, scanMany });
+    expect(r).toMatchObject({ ok: true, scanned: 4, opportunities: 0, fetchFailed: 0 });
+    expect(r.failedProducts).toBeUndefined();
+  });
+
+  test('under half failing stays ok:true and reports the count', async () => {
+    const scanMany = jest.fn(async () => [fetchFail('A'), notFound('B'), notFound('C'), notFound('D')]);
+    const r = await runWeeklyScan({ ...base, specs, scanMany });
+    expect(r).toMatchObject({ ok: true, fetchFailed: 1 });
+  });
+
+  test('a signal during the scan -> interrupted, matches still staged, listeners removed', async () => {
+    const before = [process.listenerCount('SIGTERM'), process.listenerCount('SIGINT')];
+    process.on('SIGTERM', () => {}); // stand-in for the server's shutdown handler
+    const stand = process.listenerCount('SIGTERM');
+    const scanMany = jest.fn(async () => {
+      process.emit('SIGTERM');
+      return [opp('A', 89, 'https://d/a'), fetchFail('B'), fetchFail('C'), fetchFail('D')];
+    });
+    const createDraft = jest.fn(async () => ({ id: 31, included_count: 1 }));
+    try {
+      const r = await runWeeklyScan({ ...base, specs, scanMany, createDraft });
+      expect(r).toMatchObject({ ok: false, reason: 'interrupted', signal: 'SIGTERM', draftId: 31 });
+      expect(r.failedProducts).toHaveLength(3);
+      expect(createDraft).toHaveBeenCalledTimes(1);
+      expect(process.listenerCount('SIGTERM')).toBe(stand); // ours is gone
+      expect(process.listenerCount('SIGINT')).toBe(before[1]);
+    } finally {
+      process.removeAllListeners('SIGTERM');
+    }
+  });
+
+  test('interrupted wins over degraded, even with no fetch failures recorded', async () => {
+    process.on('SIGINT', () => {});
+    const scanMany = jest.fn(async () => { process.emit('SIGINT'); return specs.map((s) => notFound(s.product.name)); });
+    try {
+      const r = await runWeeklyScan({ ...base, specs, scanMany });
+      expect(r).toMatchObject({ ok: false, reason: 'interrupted', signal: 'SIGINT', fetchFailed: 0 });
+    } finally {
+      process.removeAllListeners('SIGINT');
+    }
+  });
+
+  test('scanMany throwing after a signal is interrupted, not a browser skip', async () => {
+    process.on('SIGTERM', () => {});
+    const scanMany = jest.fn(async () => { process.emit('SIGTERM'); throw new Error('browserType.launch: Executable closed'); });
+    try {
+      const r = await runWeeklyScan({ ...base, specs, scanMany });
+      expect(r).toMatchObject({ ok: false, reason: 'interrupted', signal: 'SIGTERM', evaluated: 4 });
+    } finally {
+      process.removeAllListeners('SIGTERM');
+    }
+  });
+
+  test('an unexpected scanMany throw is a scan_error carrying the message; listeners are removed', async () => {
+    const before = process.listenerCount('SIGTERM');
+    const scanMany = jest.fn(async () => { throw new Error('db exploded'); });
+    const r = await runWeeklyScan({ ...base, specs, scanMany });
+    expect(r).toEqual({ ok: false, reason: 'scan_error', evaluated: 4, error: 'db exploded' });
+    expect(process.listenerCount('SIGTERM')).toBe(before);
+  });
+
+  test('a healthy run leaves no signal listener behind', async () => {
+    const before = [process.listenerCount('SIGTERM'), process.listenerCount('SIGINT')];
+    const scanMany = jest.fn(async () => specs.map((s) => notFound(s.product.name)));
+    await runWeeklyScan({ ...base, specs, scanMany });
+    expect([process.listenerCount('SIGTERM'), process.listenerCount('SIGINT')]).toEqual(before);
   });
 });
 

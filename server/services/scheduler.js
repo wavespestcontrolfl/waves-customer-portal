@@ -1866,19 +1866,42 @@ function initScheduledJobs() {
   // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.
   // Monday 6:00am ET.
   // =========================================================================
+  // The lock body, shared by the weekly tick and the catch-up rerun below. A scan a
+  // deploy interrupted, or that mostly hit fetch failures, throws here so job_health
+  // records 'failed' (it used to record 'success' with nothing scanned, 2026-10-26).
+  const runPriceScanBody = async () => {
+    const { runWeeklyScan, throwIfScanFailed } = require('./price-scan/weekly-scan');
+    const result = await runWeeklyScan();
+    logger.info(`[price-scan] cron run: ${JSON.stringify(result)}`);
+    throwIfScanFailed(result);
+  };
   cron.schedule('0 6 * * 1', async () => {
     if (!isEnabled('priceScanWeekly')) return;
     logger.info('Running: Weekly vendor price scan');
     try {
       // runExclusive: live scrapes + a single draft insert — a deploy overlap must
       // not double-scan or stage duplicate drafts.
-      await runExclusive('price-scan-weekly', async () => {
-        const { runWeeklyScan } = require('./price-scan/weekly-scan');
-        const result = await runWeeklyScan();
-        logger.info(`[price-scan] cron run: ${JSON.stringify(result)}`);
-      });
+      await runExclusive('price-scan-weekly', runPriceScanBody);
     } catch (err) {
       logger.error(`Weekly price scan failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Catch-up: hourly at :20, same gates as the weekly tick. Reruns the scan when the
+  // job_health row shows a failed run in the last 24 h, or a run that started 3+ h ago
+  // and never finished — at most three failed attempts in a row. The per-match draft
+  // dedup keeps a rerun from re-staging an ask already sitting in the queue.
+  cron.schedule('20 * * * *', async () => {
+    if (!isEnabled('priceScanWeekly')) return;
+    try {
+      const { decidePriceScanCatchUp, JOB_NAME } = require('./price-scan/catch-up');
+      const row = await db('job_health').where({ job_name: JOB_NAME }).first();
+      const decision = decidePriceScanCatchUp(row);
+      if (!decision.run) return;
+      logger.warn(`[price-scan] catch-up rerun (${decision.reason}; last status ${row.last_status}, ${row.consecutive_failures} failures in a row)`);
+      await runExclusive(JOB_NAME, runPriceScanBody);
+    } catch (err) {
+      logger.error(`Price scan catch-up failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
