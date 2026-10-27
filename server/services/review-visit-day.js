@@ -19,11 +19,16 @@
  *      after it: an early close of a future visit has none);
  *   3. with neither, the raw arrival stamp.
  *
+ * An earlier day is handed over as its ET calendar day ("YYYY-MM-DD"), never
+ * an instant: the drafter works in days, and an instant would be misread where
+ * a value is cut to its UTC date (review-ask-drafts.js dateOnly: an 8 PM ET
+ * arrival is the next UTC day).
+ *
  * Only the date handed to the drafter moves. The review_requests row keeps the
  * record's date (rate page, click guard, retry reuse).
  */
 const db = require('../models/db');
-const { etCalendarDayOf } = require('../utils/datetime-et');
+const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
 const { staleTimestampBounds, isStaleTimestamp } = require('./service-report/visit-timeline');
 
 function instantOf(value) {
@@ -44,11 +49,23 @@ function visitWorkedOn({ arrivedAt = null, scheduledDate = null, completedAt = n
   return arrival;
 }
 
-/** The earlier ET calendar day of `recordDate` and `workedOn`; either alone when the other is missing. */
+// A worked-on value's ET calendar day: a YYYY-MM-DD day as written, an instant in ET.
+function workedOnDay(workedOn) {
+  if (!workedOn) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(workedOn))) return String(workedOn);
+  const instant = instantOf(workedOn);
+  return instant ? etDateString(new Date(instant)) : null;
+}
+
+/**
+ * `recordDate` itself unless the visit was worked on an earlier ET day; then
+ * that day as "YYYY-MM-DD". With no record date, the worked-on day.
+ */
 function draftVisitDate(recordDate, workedOn) {
-  if (!workedOn) return recordDate || null;
-  if (!recordDate) return workedOn;
-  return etCalendarDayOf(workedOn) < etCalendarDayOf(recordDate) ? workedOn : recordDate;
+  const day = workedOnDay(workedOn);
+  if (!day) return recordDate || null;
+  if (!recordDate) return day;
+  return day < etCalendarDayOf(recordDate) ? day : recordDate;
 }
 
 /**

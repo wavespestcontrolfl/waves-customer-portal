@@ -46,11 +46,18 @@ describe('visitWorkedOn: the service report\'s staleness rule', () => {
 });
 
 describe('draftVisitDate: the earlier ET day wins', () => {
-  test('a visit worked on an earlier day than the record\'s date', () => {
+  test('a visit worked on an earlier day than the record\'s date: that ET day, as YYYY-MM-DD', () => {
     const record = new Date();
-    const worked = daysAgo(22).toISOString();
-    expect(draftVisitDate(record, worked)).toBe(worked);
+    const worked = daysAgo(22);
+    expect(draftVisitDate(record, worked.toISOString())).toBe(etCalendarDayOf(worked));
     expect(draftVisitDate(record, dayString(3))).toBe(dayString(3));
+  });
+
+  test('an evening arrival is its ET day, not its UTC day (an 8 PM ET stamp is the next UTC day)', () => {
+    expect(draftVisitDate('2026-10-26', '2026-10-25T00:30:00.000Z')).toBe('2026-10-24');
+    // Exactly midnight UTC is still an instant here, never read as a date-only value.
+    expect(draftVisitDate('2026-10-26', new Date('2026-10-25T00:00:00.000Z'))).toBe('2026-10-24');
+    expect(draftVisitDate('2026-10-25', '2026-10-25T00:30:00.000Z')).toBe('2026-10-24');
   });
 
   test('the same day (or a later one) keeps the record\'s date', () => {
@@ -75,7 +82,7 @@ describe('draftServiceDate: record first, then the cadence\'s visit', () => {
       scheduled_services: [{ id: 'ss-1', arrived_at: arrived, scheduled_date: dayString(10), completed_at: new Date() }],
     });
     const recordDate = new Date();
-    expect(await draftServiceDate({ recordDate, serviceRecordId: 'sr-1', scheduledServiceId: 'ss-other' }, database)).toBe(arrived.toISOString());
+    expect(await draftServiceDate({ recordDate, serviceRecordId: 'sr-1', scheduledServiceId: 'ss-other' }, database)).toBe(etCalendarDayOf(arrived));
   });
 
   test('a record with no visit link falls back to the cadence\'s visit', async () => {
