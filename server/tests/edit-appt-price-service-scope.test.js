@@ -13,6 +13,20 @@
 // before the route module (and its isEnabled closure) loads.
 process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE = 'true';
 
+// The route-level tests at the bottom drive the real handlers through a
+// swappable `db` (the admin-schedule-discount-provenance-fields.test.js
+// pattern): a scripted fake for series-summary, a rolled-back PostgreSQL
+// transaction for the service-line sheet's saves. The helper tests pass
+// their own connection and never touch it.
+jest.mock('../models/db', () => {
+  const db = (...args) => db.connection(...args);
+  db.raw = (...args) => db.connection.raw(...args);
+  db.transaction = (...args) => db.connection.transaction(...args);
+  Object.defineProperty(db, 'schema', { get: () => db.connection.schema });
+  Object.defineProperty(db, 'fn', { get: () => db.connection.fn });
+  return db;
+});
+
 const fs = require('fs');
 const path = require('path');
 
@@ -72,6 +86,7 @@ function makeConn(handler) {
         calls.push(['pluck', ...args]);
         return Promise.resolve(handler({ table, calls, op: 'pluck' }) || []);
       };
+      b.columnInfo = () => Promise.resolve(handler({ table, calls, op: 'columnInfo' }) || {});
       b.update = (data) => {
         calls.push(['update', data]);
         return { then: (res, rej) => Promise.resolve(handler({ table, calls, op: 'update', data })).then(res, rej) };
@@ -517,6 +532,10 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
     expect(gatesSrc).toMatch(/editApptPriceServiceScope: process\.env\.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true'/);
   });
 
+  it("the service-line sheet's gate is its own strict opt-in", () => {
+    expect(gatesSrc).toMatch(/serviceSheetPriceScope: process\.env\.GATE_SERVICE_SHEET_PRICE_SCOPE === 'true'/);
+  });
+
   it('update-details refuses a posted scope while the gate is off (never silently per-visit)', () => {
     expect(src).toMatch(/priceServiceScope !== undefined && !isEnabled\('editApptPriceServiceScope'\)/);
   });
@@ -765,5 +784,250 @@ describe('this_only edits on an anchored-split parent keep the seeder marker as 
     const skipped = {};
     applyStoredVisitFinancials(skipped, { estimated_price: {} }, template, [], [addon]);
     expect(skipped.estimated_price).toBe(80);
+  });
+});
+
+// The service-line sheet (MobileServiceEditModal) offers the same scope only
+// when series-summary says both gates are on: update-details refuses a posted
+// priceServiceScope while GATE_EDIT_APPT_PRICE_SERVICE_SCOPE is off, so the
+// sheet's own gate alone must never open it.
+describe('GET /:id/series-summary — canScopeSheetPrice', () => {
+  const FG = require('../config/feature-gates');
+  const db = require('../models/db');
+  const ROWS = {
+    'one-off': { id: 'one-off', is_recurring: false, recurring_parent_id: null },
+    p1: { id: 'p1', is_recurring: true, recurring_parent_id: null, recurring_pattern: 'quarterly', recurring_ongoing: true, scheduled_date: '2098-01-15' },
+    c1: { id: 'c1', is_recurring: true, recurring_parent_id: 'p1' },
+  };
+  const saved = {};
+  beforeEach(() => {
+    saved.scope = FG.gates.editApptPriceServiceScope;
+    saved.sheet = FG.gates.serviceSheetPriceScope;
+    db.connection = makeConn(({ table, calls, op }) => {
+      if (table !== 'scheduled_services') return null;
+      if (op === 'columnInfo') return { recurring_ongoing: {} };
+      if (op === 'first') {
+        const id = calls.find(([name, arg]) => name === 'where' && arg && arg.id)?.[1]?.id;
+        return ROWS[id] || null;
+      }
+      return []; // liveUpcomingSeriesVisits
+    });
+  });
+  afterEach(() => {
+    FG.gates.editApptPriceServiceScope = saved.scope;
+    FG.gates.serviceSheetPriceScope = saved.sheet;
+    db.connection = undefined;
+  });
+
+  const layer = adminScheduleRouter.stack.find((l) => l.route?.path === '/:id/series-summary' && l.route.methods.get);
+  async function seriesSummary(id) {
+    let payload = null;
+    let nextErr = null;
+    const res = { status() { return this; }, json(p) { payload = p; return this; } };
+    await layer.route.stack[layer.route.stack.length - 1].handle({ params: { id }, query: {}, headers: {} }, res, (err) => { nextErr = err; });
+    if (nextErr) throw nextErr;
+    return payload;
+  }
+
+  it.each([
+    [false, false, false],
+    [true, false, false],
+    [false, true, false],
+    [true, true, true],
+  ])('Edit appointment gate %s, sheet gate %s: canScopeSheetPrice is %s on a parent and a child', async (scopeGate, sheetGate, expected) => {
+    FG.gates.editApptPriceServiceScope = scopeGate;
+    FG.gates.serviceSheetPriceScope = sheetGate;
+    for (const id of ['p1', 'c1']) {
+      const body = await seriesSummary(id);
+      expect(body).toMatchObject({ series: true, parentId: 'p1', isParent: id === 'p1' });
+      expect(body.canScopeSheetPrice).toBe(expected);
+      // Edit appointment's own answer is untouched by the sheet's gate.
+      expect(body.canScopePriceService).toBe(scopeGate);
+    }
+  });
+
+  it('a one-off answers series:false and nothing else, whatever the gates', async () => {
+    FG.gates.editApptPriceServiceScope = true;
+    FG.gates.serviceSheetPriceScope = true;
+    expect(await seriesSummary('one-off')).toEqual({ series: false });
+  });
+});
+
+// The sheet's EXACT save body (MobileServiceEditModal handleSave, key for key)
+// through the real PUT /:id/update-details against migrated PostgreSQL. Each
+// test runs in a transaction that is rolled back. Series: parent (visit 1) →
+// child 1 → booster → child 2 → child 3, every base visit at $129.
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+
+postgres("PUT /:id/update-details — the service-line sheet's save body on a series (migrated PostgreSQL)", () => {
+  const { randomUUID } = require('node:crypto');
+  const FG = require('../config/feature-gates');
+  const DATES = { parent: '2040-03-05', c1: '2040-06-04', booster: '2040-07-09', c2: '2040-09-03', c3: '2040-12-03' };
+  let database;
+  let trx;
+  let rows;
+  let sheetGateBefore;
+
+  beforeAll(() => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+  });
+
+  beforeEach(async () => {
+    sheetGateBefore = FG.gates.serviceSheetPriceScope;
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    const customerId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${customerId}@example.invalid`, phone: `fixture-${customerId.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true,
+      pipeline_stage: 'active_customer',
+    });
+    const visit = async (overrides) => {
+      const [row] = await trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, service_type: 'Quarterly Pest Control',
+        service_key_snapshot: 'pest_general_quarterly', status: 'pending',
+        window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 30,
+        estimated_price: 129, primary_line_price: 129,
+        is_recurring: true, recurring_pattern: 'quarterly',
+        ...overrides,
+      }).returning('*');
+      return row;
+    };
+    const parent = await visit({ scheduled_date: DATES.parent, status: 'confirmed' });
+    const of = { recurring_parent_id: parent.id };
+    rows = {
+      parent,
+      c1: await visit({ ...of, scheduled_date: DATES.c1 }),
+      booster: await visit({ ...of, scheduled_date: DATES.booster, is_recurring: false, estimated_price: 49, primary_line_price: 49 }),
+      c2: await visit({ ...of, scheduled_date: DATES.c2 }),
+      c3: await visit({ ...of, scheduled_date: DATES.c3 }),
+    };
+  });
+
+  afterEach(async () => {
+    FG.gates.serviceSheetPriceScope = sheetGateBefore;
+    require('../models/db').connection = undefined;
+    if (trx) await trx.rollback();
+  });
+  afterAll(async () => { await database?.destroy(); });
+
+  // What the sheet posts for a visit read off the day feed (window bounds are
+  // the raw TIME strings that feed carries), with the scope only when the
+  // "Apply price change to" choice was on screen.
+  function sheetBody(key, { price, scope }) {
+    const row = rows[key];
+    return {
+      scheduledDate: DATES[key],
+      windowStart: row.window_start,
+      windowEnd: row.window_end,
+      autoDispatchLocked: false,
+      autoDispatchLockedWas: false,
+      estimatedDuration: row.estimated_duration_minutes,
+      technicianId: null,
+      notes: '',
+      estimatedPrice: price,
+      price: String(price),
+      ...(scope === undefined ? {} : { priceServiceScope: scope }),
+    };
+  }
+  const layer = adminScheduleRouter.stack.find((l) => l.route?.path === '/:id/update-details' && l.route.methods.put);
+  async function saveFromSheet(key, opts) {
+    let statusCode = 200;
+    let payload = null;
+    let nextErr = null;
+    const res = { status(code) { statusCode = code; return this; }, json(p) { payload = p; return this; } };
+    await layer.route.stack[layer.route.stack.length - 1].handle(
+      { params: { id: rows[key].id }, query: {}, body: sheetBody(key, opts), headers: {} }, res, (err) => { nextErr = err; },
+    );
+    if (nextErr) throw nextErr;
+    expect(statusCode).toBe(200);
+    return payload;
+  }
+  async function prices() {
+    const out = {};
+    for (const [key, row] of Object.entries(rows)) {
+      const now = await trx('scheduled_services').where({ id: row.id }).first('estimated_price', 'primary_line_price');
+      out[key] = [Number(now.estimated_price), Number(now.primary_line_price)];
+    }
+    return out;
+  }
+  const template = async () => (await trx('scheduled_services').where({ id: rows.parent.id }).first('recurring_template_overrides')).recurring_template_overrides;
+  // What a visit the plan adds later copies: the parent with its overrides.
+  const nextVisitPrice = async () => {
+    const parentNow = await trx('scheduled_services').where({ id: rows.parent.id }).first();
+    return Number(overlayRecurringTemplateOverrides(parentNow, { recurring_template_overrides: {} }).estimated_price);
+  };
+
+  it("visit 1, 'following': every upcoming base visit and the series template take the new price; the booster keeps its own", async () => {
+    const result = await saveFromSheet('parent', { price: 199, scope: 'following' });
+    expect(result.priceServiceScope).toEqual({ scope: 'following', updatedVisits: 3 });
+    expect(await prices()).toEqual({
+      parent: [199, 199], c1: [199, 199], booster: [49, 49], c2: [199, 199], c3: [199, 199],
+    });
+    expect(await template()).toMatchObject({ estimated_price: 199, primary_line_price: 199 });
+    expect(await nextVisitPrice()).toBe(199);
+  });
+
+  it("visit 1, 'this_only': only visit 1 changes, and the template is pinned at the old price so later visits keep it", async () => {
+    const result = await saveFromSheet('parent', { price: 199, scope: 'this_only' });
+    expect(result).not.toHaveProperty('priceServiceScope');
+    expect(await prices()).toEqual({
+      parent: [199, 199], c1: [129, 129], booster: [49, 49], c2: [129, 129], c3: [129, 129],
+    });
+    const pin = await template();
+    expect(Number(pin.estimated_price)).toBe(129);
+    expect(Number(pin.primary_line_price)).toBe(129);
+    expect(await nextVisitPrice()).toBe(129);
+  });
+
+  it("a later visit, 'following': that visit and the ones after it change, earlier visits do not, and the template follows", async () => {
+    const result = await saveFromSheet('c1', { price: 199, scope: 'following' });
+    expect(result.priceServiceScope).toEqual({ scope: 'following', updatedVisits: 2 });
+    expect(await prices()).toEqual({
+      parent: [129, 129], c1: [199, 199], booster: [49, 49], c2: [199, 199], c3: [199, 199],
+    });
+    expect(await template()).toMatchObject({ estimated_price: 199, primary_line_price: 199 });
+    expect(await nextVisitPrice()).toBe(199);
+  });
+
+  it("a later visit, 'this_only': only that visit changes and the template is not written", async () => {
+    const result = await saveFromSheet('c1', { price: 199, scope: 'this_only' });
+    expect(result).not.toHaveProperty('priceServiceScope');
+    expect(await prices()).toEqual({
+      parent: [129, 129], c1: [199, 199], booster: [49, 49], c2: [129, 129], c3: [129, 129],
+    });
+    expect(await template()).toBeNull();
+    expect(await nextVisitPrice()).toBe(129);
+  });
+
+  // Gate off, the sheet posts no scope: update-details must do exactly what it
+  // did before this lane, whichever way the sheet's gate is set (it reads only
+  // GATE_EDIT_APPT_PRICE_SERVICE_SCOPE, on here as in production).
+  it.each([[false], [true]])('no scope posted (sheet gate %s): the legacy unscoped save is unchanged', async (sheetGate) => {
+    FG.gates.serviceSheetPriceScope = sheetGate;
+    // Unpinned template: visit 1's own row is what later visits copy, so its
+    // new price becomes the series price (bug 4); the other visits stay.
+    const result = await saveFromSheet('parent', { price: 199 });
+    expect(result).not.toHaveProperty('priceServiceScope');
+    expect(await prices()).toEqual({
+      parent: [199, 199], c1: [129, 129], booster: [49, 49], c2: [129, 129], c3: [129, 129],
+    });
+    expect(await template()).toBeNull();
+    expect(await nextVisitPrice()).toBe(199);
+
+    // Already-pinned template: the legacy refresh stamps the new price.
+    await trx('scheduled_services').where({ id: rows.parent.id })
+      .update({ recurring_template_overrides: JSON.stringify({ estimated_price: 129, primary_line_price: 129 }) });
+    await saveFromSheet('parent', { price: 175 });
+    expect(await template()).toMatchObject({ estimated_price: 175, primary_line_price: 175 });
+    expect((await prices()).c1).toEqual([129, 129]);
   });
 });

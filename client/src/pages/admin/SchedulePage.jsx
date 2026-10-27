@@ -164,7 +164,7 @@ import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
-import { showScheduleSaveNotice } from "../../components/schedule/ScheduleSaveNotice";
+import { seriesScopeSaveNotice, showScheduleSaveNotice } from "../../components/schedule/ScheduleSaveNotice";
 import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
 import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
@@ -3661,12 +3661,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       // A 'following' scope rewrites visits the operator can't see from this
       // modal — report what actually moved rather than closing silently.
-      if (result?.priceServiceScope?.scope === "following") {
-        const n = Number(result.priceServiceScope.updatedVisits) || 0;
-        showScheduleSaveNotice(
-          `Price/service change applied to this visit and ${n} other upcoming visit${n === 1 ? "" : "s"} in the series. Visits the plan schedules later will use the new values too.`,
-        );
-      }
+      const scopeNotice = seriesScopeSaveNotice(result);
+      if (scopeNotice) showScheduleSaveNotice(scopeNotice);
       // Resizing a plan moves visits the operator can't see from this modal —
       // say what happened rather than closing on a silent change. The count
       // itself may fall short of the target when the cadence has nowhere left
