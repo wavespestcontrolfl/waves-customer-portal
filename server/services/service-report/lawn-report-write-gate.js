@@ -154,9 +154,17 @@ async function freezeReportFactsOnly({ service, knex } = {}) {
 // build, a write) alerts too: nothing later retries the freeze.
 function noClaimFor(instructionOut, wateringFreeze) {
   if (wateringFreeze || !featureGates.lawnWateringEveryVisitLive()) return null;
+  // Owner 2026-10-27: a visit closed on a later day than it was worked
+  // (report-data.js, lawn-watering-late-close.js) gets no text and no alert;
+  // first, so no other reason can turn it into an alert.
+  if (instructionOut.lateClose === true) return { reason: 'late_close', products: [] };
   if (instructionOut.productsLoadFailed || instructionOut.inputsFailed) return { reason: 'inputs_unreadable', products: [] };
   const instruction = instructionOut.instruction;
   if (instruction && !instruction.state && instruction.noClaim) return instruction.noClaim;
+  // The report was built, with no tech-confirmed photo read: the watering steps
+  // are built with the lawn report, so none were made. Its own reason, so the
+  // alert does not say the report failed.
+  if (instructionOut.noLawnRead === true) return { reason: 'no_lawn_read', products: [] };
   return { reason: 'report_not_built', products: [] };
 }
 
