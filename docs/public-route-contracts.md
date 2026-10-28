@@ -710,8 +710,10 @@ Each itemized row also carries `pastDue` — the server's ET-correct
 overdue verdict (open-balance `is_overdue`); the page renders a "Past due
 since" caption from it and does no date math, and points to the customer
 portal / Waves app instead of linking sibling invoices. `/invoice.pdf`
-prints the SAME itemization (one shared builder, `payPagePreviousBalance`)
-under a "Total due today" line — what the Pay button charges, never
+prints the SAME itemization (one shared builder, `payPagePreviousBalance`),
+and only when `/setup` would actually charge it (`payPageCombinedBalance`:
+no full-credit coverage, no required-save capture hold), under a "Total
+due today" line — what the Pay button charges, never
 labeled an account balance — with no sibling tokens and no service names
 (service names ride only the EMAILED invoice PDF, which reaches the
 customer's own saved recipient); gate off ⇒ no sibling read and the PDF

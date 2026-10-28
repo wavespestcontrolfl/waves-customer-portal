@@ -49,6 +49,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   gates: {},
 }));
+jest.mock('../routes/pay-v2', () => ({ payPageCombinedBalance: jest.fn(async () => null) }));
 jest.mock('../services/open-balance', () => ({
   openBalanceSummary: jest.fn(async () => ({ total: 0, count: 0, invoices: [] })),
 }));
@@ -59,6 +60,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { openBalanceSummary } = require('../services/open-balance');
 const { sendInvoiceEmail } = require('../services/invoice-email');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
+const { payPageCombinedBalance } = require('../routes/pay-v2');
 
 function chain({ first, result } = {}) {
   const q = {};
@@ -225,9 +227,10 @@ describe('sendInvoiceEmail previous-balance note', () => {
     expect(buildInvoicePDFBuffer.mock.calls[0][0].previous_balance).toBeUndefined();
   });
 
-  test('with the pay-page balance gate also on, the note says this link pays everything, and names the portal and app', async () => {
+  test('when the Pay button would collect the whole balance, the note says this link pays everything, and names the portal and app', async () => {
     isEnabled.mockImplementation((gate) => gate === 'balanceVisibility' || gate === 'payIncludeBalance');
-    openBalanceSummary.mockResolvedValue({ total: 234, count: 2, invoices: [{}, {}] });
+    openBalanceSummary.mockResolvedValue({ total: 234, count: 2, complete: true, invoices: [{}, {}] });
+    payPageCombinedBalance.mockResolvedValueOnce({ invoices: [{}, {}], total: 234, combinedTotal: 384 });
     mockDb(invoiceRow());
 
     await sendInvoiceEmail('inv-1');
@@ -237,5 +240,21 @@ describe('sendInvoiceEmail previous-balance note', () => {
       "Thanks for having us out!\n\nReminder: your account also has a previous balance of $234.00 from 2 earlier invoices. You can pay everything at once from this invoice's payment link, or see each invoice in your customer portal at portal.wavespestcontrol.com or in the Waves app.",
     );
     expect(args.payload.amount_due).toBe('$150.00');
+  });
+
+  test.each([
+    ['the combined charge leaves an open invoice out (stopped dunning, in-flight payment)', { invoices: [{}], total: 117, combinedTotal: 267 }],
+    ['setup would charge this invoice alone (credit, capture hold)', null],
+  ])('both gates on but %s: the note keeps pointing at each invoice\'s own link', async (_label, combined) => {
+    isEnabled.mockImplementation((gate) => gate === 'balanceVisibility' || gate === 'payIncludeBalance');
+    openBalanceSummary.mockResolvedValue({ total: 234, count: 2, complete: true, invoices: [{}, {}] });
+    payPageCombinedBalance.mockResolvedValueOnce(combined);
+    mockDb(invoiceRow());
+
+    await sendInvoiceEmail('inv-1');
+
+    const message = EmailTemplates.sendTemplate.mock.calls[0][0].payload.invoice_message;
+    expect(message).toContain('Each earlier invoice has its own payment link');
+    expect(message).not.toContain('pay everything at once');
   });
 });

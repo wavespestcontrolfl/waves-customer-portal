@@ -375,9 +375,24 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // saved billing recipient may see the note. (effectiveOverride also covers
   // the payer-AP reroute, belt-and-braces with the payer_id check.)
   let previousBalanceNote = '';
-  // With the pay-page balance gate on, this invoice's link pays everything at
-  // once, so the note says that instead of pointing at each invoice's own link.
-  if (previousBalance?.total > 0 && isEnabled('payIncludeBalance')) {
+  // "Pay everything at once" only when this invoice's Pay button would really
+  // collect the WHOLE stated balance: the pay page's combined selection must
+  // cover every open invoice counted here (it leaves out stopped-dunning and
+  // in-flight invoices, and credit or a capture hold make the charge
+  // single-invoice). Otherwise the note keeps pointing at each invoice's own
+  // link. Any lookup failure keeps the original wording.
+  let linkPaysEverything = false;
+  if (previousBalance?.complete && previousBalance.total > 0 && isEnabled('payIncludeBalance')) {
+    try {
+      const combined = await require('../routes/pay-v2').payPageCombinedBalance(invoice);
+      linkPaysEverything = !!combined
+        && combined.invoices.length === previousBalance.count
+        && Math.round(combined.total * 100) === Math.round(previousBalance.total * 100);
+    } catch (combinedErr) {
+      logger.warn(`[invoice-email] combined-balance check failed for ${invoice.invoice_number}: ${combinedErr.message}`);
+    }
+  }
+  if (previousBalance?.total > 0 && linkPaysEverything) {
     previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}. You can pay everything at once from this invoice's payment link, or see each invoice in your customer portal at portal.wavespestcontrol.com or in the Waves app.`;
   } else if (previousBalance?.total > 0) {
     previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;

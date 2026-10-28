@@ -213,9 +213,9 @@ describe('GET /pay/:token previous-balance itemization', () => {
 
 // The downloadable PDF prints the SAME previous balance the page shows, from
 // the same selection — and nothing at all with the gate off.
-async function getInvoicePdf(data) {
+async function getInvoicePdf(data, { customer = null } = {}) {
   InvoiceService.getByToken.mockResolvedValue(data);
-  db.mockImplementation(() => chain({ first: null }));
+  db.mockImplementation((table) => chain({ first: table === 'customers' ? customer : null }));
   const layer = payRouter.stack.find((l) => l.route?.path === '/:token/invoice.pdf' && l.route.methods.get);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   let error = null;
@@ -257,6 +257,14 @@ describe('GET /pay/:token/invoice.pdf previous balance', () => {
     const pdfInvoice = await getInvoicePdf(invoiceData());
     expect(pdfInvoice.previous_balance.invoices[0].pastDue).toBe(true);
     expect(JSON.stringify(pdfInvoice.previous_balance)).not.toContain('Lawn Care');
+  });
+
+  test('gate ON, required-save invoice with no chargeable saved method: setup charges it alone, so no combined block', async () => {
+    // /:token/setup sets holdCoverageForCapture here and skips the combined
+    // allocation; the PDF must not print a "Total due today" it won't charge.
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const pdfInvoice = await getInvoicePdf(invoiceData(), { customer: { id: 'cust-1', billing_mode: 'per_application' } });
+    expect(pdfInvoice).not.toHaveProperty('previous_balance');
   });
 
   test('gate ON, payer-billed invoice: the PDF never shows the homeowner balance', async () => {

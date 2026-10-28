@@ -2006,6 +2006,27 @@ async function payPagePreviousBalance(data, { creditWillCoverAnchor, onPayerReso
   };
 }
 
+// What the Pay button will charge beyond this invoice, decided the way
+// /:token/setup decides it: the gate is on, account credit does not fully
+// cover the anchor (an unverifiable credit counts as "might", so nothing is
+// promised), and no required-save capture hold is pending (setup's
+// holdCoverageForCapture skips the combined allocation). Null when the
+// charge would be this invoice alone. Shared by the invoice.pdf download
+// and the invoice email's "pay everything at once" line, so neither states
+// a combined total that setup will not charge.
+async function payPageCombinedBalance(data) {
+  if (!require('../config/feature-gates').isEnabled('payIncludeBalance')) return null;
+  let creditWillCoverAnchor;
+  try {
+    creditWillCoverAnchor = await invoiceCreditWouldFullyCover(data);
+  } catch {
+    return null;
+  }
+  if (creditWillCoverAnchor) return null;
+  if (await invoiceRequiresSavedMethod(data) && await invoiceCaptureNeeded(data)) return null;
+  return payPagePreviousBalance(data, { creditWillCoverAnchor });
+}
+
 // =========================================================================
 // GET /api/pay/:token/invoice.pdf — Branded invoice PDF for download/print
 // =========================================================================
@@ -2026,21 +2047,12 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
     if (!data.payer && data.payer_id) {
       data.payer = { company_name: 'Third-party payer', ap_email: null };
     }
-    // Same previous-balance block the page shows. Gate off: no extra reads,
-    // PDF exactly as before. A credit probe failure reads as unknown and
-    // itemizes, exactly as GET /:token.
-    if (require('../config/feature-gates').isEnabled('payIncludeBalance')) {
-      let creditWillCoverAnchor = false;
-      try {
-        creditWillCoverAnchor = await invoiceCreditWouldFullyCover(data);
-      } catch {
-        creditWillCoverAnchor = null;
-      }
-      const previousBalance = await payPagePreviousBalance(data, { creditWillCoverAnchor });
-      // This figure is what the Pay button charges, not the whole account
-      // (stopped-dunning and in-flight invoices are left out) — label it so.
-      if (previousBalance) data.previous_balance = { ...previousBalance, totalLabel: 'Total due today' };
-    }
+    // The page's previous-balance block, only when setup would actually
+    // charge it (gate off: no extra reads, PDF exactly as before).
+    const previousBalance = await payPageCombinedBalance(data);
+    // This figure is what the Pay button charges, not the whole account
+    // (stopped-dunning and in-flight invoices are left out) — label it so.
+    if (previousBalance) data.previous_balance = { ...previousBalance, totalLabel: 'Total due today' };
     generateInvoicePDF(data, res);
   } catch (err) {
     next(err);
@@ -2050,5 +2062,6 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
 module.exports = router;
 module.exports.invoiceRequiresSavedMethod = invoiceRequiresSavedMethod;
 module.exports.invoiceCaptureNeeded = invoiceCaptureNeeded;
+module.exports.payPageCombinedBalance = payPageCombinedBalance;
 module.exports.isZelleTransferEligible = isZelleTransferEligible;
 module.exports.payPageZelleVisibility = payPageZelleVisibility;
