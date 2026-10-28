@@ -3889,16 +3889,11 @@ The identical detection table is shared with `resolveLeadSource`
 use — see those entries below — so an AI-referred visitor is classified
 the same way regardless of which endpoint their lead lands on. Abuse
 guards on both endpoints: honeypot silent-200, then Turnstile, enforced
-under `GATE_LEAD_TURNSTILE`. Owner alert call (owner 2026-10-14): a verified
-lead places the paid Twilio call to Adam's cell (the announce call, or the
-Press-1 bridge under `GATE_LEAD_AUTO_BRIDGE`) ONLY when
-`GATE_LEAD_ALERT_CALL` is exactly `true` AND it is 8 AM-8 PM ET
-(`shouldPlaceLeadAlertCall`, `server/routes/lead-webhook.js`). Off (the
-default), no call goes out at any hour: the lead takes the after-hours path
-(the `new_lead` bell; the legacy lead SMS to the owner only if that bell
-fails). The gate never changes the response, the lead's one automated text,
-or the estimate draft. A diff that places the call with the gate off is a
-P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
+under `GATE_LEAD_TURNSTILE`. Owner alert (owner 2026-10-14): a verified lead never places a phone
+call to the owner at any hour. It takes the `new_lead` bell; the legacy
+lead SMS to the owner goes only if that bell fails. The alert never
+changes the response, the lead's one automated text, or the estimate
+draft. A diff that places a call from this route is a P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
 2026-10-24): a submission whose phone matches a live customers row still
 takes the existing-customer branch (its note; no leads row, no automated
 text, no draft, no new-lead bell) and the response is unchanged. When that

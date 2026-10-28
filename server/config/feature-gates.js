@@ -1901,13 +1901,6 @@ const gates = {
   // regardless. Complements the reactive competitor harvest (backlink-deep-harvest.js).
   localOpportunityProspector: isProd ? process.env.GATE_LOCAL_OPPORTUNITY_PROSPECTOR === 'true' : true,
 
-  // Lead Alert Call — the business-hours phone call to Adam's cell when a
-  // website quote form lands (announce, or Press-1 bridge under
-  // leadAutoBridge). Owner 2026-10-14: off for now. Off unless exactly
-  // 'true'; off, the lead is handled like an after-hours lead (new_lead
-  // bell, legacy SMS only as delivery fallback).
-  leadAlertCall: process.env.GATE_LEAD_ALERT_CALL === 'true',
-
   // Lead Call-Reply Ring — a web lead who answers our lead text with a bare
   // CALL between 8 AM and 8 PM ET rings Adam's cell with the press-1 bridge
   // (owner 2026-10-24, "ring my cell, like we had before"). One ring per
@@ -1943,11 +1936,6 @@ const gates = {
   // sms_reply_outcomes, with the AI draft's prompt_version. Measurement only:
   // sends, changes and holds nothing. Off unless exactly 'true'.
   smsReplyOutcomes: process.env.GATE_SMS_REPLY_OUTCOMES === 'true',
-
-  // Lead Auto-Bridge — when a website lead comes in during business hours,
-  // ring Adam and offer Press-1 to bridge directly to the customer. Off by
-  // default in prod until verified; admin-click bridge is unaffected.
-  leadAutoBridge: isProd ? process.env.GATE_LEAD_AUTO_BRIDGE === 'true' : true,
 
   // Lead Estimate Automation — generates priced draft estimates from new
   // lead-webhook submissions. Explicit opt-in everywhere so leads can keep
