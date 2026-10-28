@@ -267,6 +267,22 @@ describe('GET /pay/:token/invoice.pdf previous balance', () => {
     expect(pdfInvoice).not.toHaveProperty('previous_balance');
   });
 
+  test('gate ON, partial auto-credit: "Total due today" is net of the credit setup will apply', async () => {
+    // $150 anchor + $44.55 sibling, $20 opted-in credit: setup applies the
+    // credit to the anchor before the combined allocation, so it charges $174.55.
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    try {
+      const pdfInvoice = await getInvoicePdf(invoiceData(), {
+        customer: { id: 'cust-1', account_credits: '20.00', auto_apply_account_credit: true },
+      });
+      expect(pdfInvoice.previous_balance).toMatchObject({ total: 44.55, creditToApply: 20, combinedTotal: 174.55, totalLabel: 'Total due today' });
+    } finally {
+      gates.autoApplyAccountCredit = false;
+    }
+  });
+
   test('gate ON, payer-billed invoice: the PDF never shows the homeowner balance', async () => {
     isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
     const pdfInvoice = await getInvoicePdf(invoiceData({ payer_id: 'payer-1' }));

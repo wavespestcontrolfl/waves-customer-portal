@@ -2010,8 +2010,10 @@ async function payPagePreviousBalance(data, { creditWillCoverAnchor, onPayerReso
 // /:token/setup decides it: the gate is on, account credit does not fully
 // cover the anchor (an unverifiable credit counts as "might", so nothing is
 // promised), and no required-save capture hold is pending (setup's
-// holdCoverageForCapture skips the combined allocation). Null when the
-// charge would be this invoice alone. Shared by the invoice.pdf download
+// holdCoverageForCapture skips the combined allocation). A partial
+// auto-credit is netted out of combinedTotal (and reported as
+// creditToApply), as setup does. Null when the charge would be this invoice
+// alone. Shared by the invoice.pdf download
 // and the invoice email's "pay everything at once" line, so neither states
 // a combined total that setup will not charge.
 async function payPageCombinedBalance(data) {
@@ -2024,7 +2026,21 @@ async function payPageCombinedBalance(data) {
   }
   if (creditWillCoverAnchor) return null;
   if (await invoiceRequiresSavedMethod(data) && await invoiceCaptureNeeded(data)) return null;
-  return payPagePreviousBalance(data, { creditWillCoverAnchor });
+  // Setup applies a PARTIAL auto-credit to the anchor before building the
+  // combined allocation, so the total it charges is net of that credit.
+  let creditToApply;
+  try {
+    creditToApply = await invoiceProjectedCreditApplied(data);
+  } catch {
+    return null;
+  }
+  const balance = await payPagePreviousBalance(data, { creditWillCoverAnchor });
+  if (!balance || !(creditToApply > 0)) return balance;
+  return {
+    ...balance,
+    creditToApply,
+    combinedTotal: (Math.round(balance.combinedTotal * 100) - Math.round(creditToApply * 100)) / 100,
+  };
 }
 
 // =========================================================================

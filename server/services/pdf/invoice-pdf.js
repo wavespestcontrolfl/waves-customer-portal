@@ -446,7 +446,7 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
 // and every earlier invoice keeps its own number, amount, and reminders.
 // Callers decide eligibility and attach `invoice.previous_balance` =
 // { invoices: [{ invoiceNumber, serviceType?, serviceDate, dueDate, pastDue, amountDue }],
-//   moreCount, total, combinedTotal, totalLabel } — absent means the block
+//   moreCount, total, combinedTotal, totalLabel, creditToApply? } — absent means the block
 // never renders. `pastDue` is the caller's ET-correct verdict (open-balance
 // is_overdue); serviceType rides only where the caller allows it.
 function previousBalanceBlock(doc, previousBalance, x, y, width) {
@@ -493,7 +493,7 @@ function previousBalanceBlock(doc, previousBalance, x, y, width) {
     y += rowH;
   }
   // Totals plus the portal line stay together.
-  y = ensureRoom(doc, y, 58);
+  y = ensureRoom(doc, y, 72);
   y += 2;
   const labelX = x + width - 240;
   const valueX = x + width - 70;
@@ -503,6 +503,13 @@ function previousBalanceBlock(doc, previousBalance, x, y, width) {
   doc.text('Previous balance', labelX, y, { width: 160, align: 'right' });
   doc.text(currency(previousBalance.total), valueX, y, { width: 70, align: 'right' });
   y += 14;
+  // Pay-page download only: account credit setup will apply to this invoice,
+  // already netted out of combinedTotal, shown so the rows still add up.
+  if (Number(previousBalance.creditToApply) > 0) {
+    doc.text('Account credit applied at payment', labelX, y, { width: 160, align: 'right' });
+    doc.text(`− ${currency(previousBalance.creditToApply)}`, valueX, y, { width: 70, align: 'right' });
+    y += 14;
+  }
   if (Number(previousBalance.combinedTotal) > 0) {
     doc.font('Helvetica-Bold').fillColor(NAVY);
     doc.text(previousBalance.totalLabel || 'Total account balance', labelX, y, { width: 160, align: 'right' });
