@@ -305,6 +305,18 @@ it('shows a social post photo question as the hosted photo with its caption', as
   expect(screen.getByText('Fixture caption')).toBeInTheDocument();
 });
 
+it('shows an Ask Waves chat turn as the visitor message and the reply Jev judged', async () => {
+  mockList([yesNoRow({
+    capability: 'ask_waves_safety', question: 'Does the REPLY make a blanket safety claim?', subjectType: 'agent_messages',
+    subject: { type: 'agent_messages', text: 'Fixture chat reply', visitorMessage: 'Fixture visitor message', at: '2026-10-28T15:00:00Z' },
+  })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  expect(await screen.findByText('Fixture chat reply')).toBeInTheDocument();
+  expect(screen.getByText('Fixture visitor message')).toBeInTheDocument();
+  expect(screen.getByText('Visitor asked')).toBeInTheDocument();
+  expect(screen.queryByText('Waves said')).toBeNull();
+});
+
 it('never renders a social post image from a non-https address', async () => {
   mockList([yesNoRow({ subjectType: 'social_post', subject: { type: 'social_post', text: 'Fixture caption', imageUrl: 'javascript:alert(1)', at: '2026-10-03T12:00:00Z' } })]);
   render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);

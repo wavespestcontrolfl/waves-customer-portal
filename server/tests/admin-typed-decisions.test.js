@@ -25,7 +25,7 @@ jest.mock('../services/typed-decisions/eval', () => ({ evaluateCapabilities: (..
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-typed-decisions');
-const { callSubjectHash, smsSubjectHash, socialPostSubjectHash } = require('../services/typed-decisions/subject-hash');
+const { askWavesSubjectHash, callSubjectHash, smsSubjectHash, socialPostSubjectHash } = require('../services/typed-decisions/subject-hash');
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const SEEN = { p: 0.9, yes: true, confident: true };
@@ -220,6 +220,60 @@ describe('social post photo subjects (photo_privacy.v1)', () => {
     expect(body.code).toBe('subject_changed');
     expect(log.sms_log).toBeUndefined();
     expect(called(log, 'decision_reviews', 'update')).toEqual([]);
+  });
+});
+
+describe('Ask Waves chat subjects (ask_waves_safety.v1)', () => {
+  const MSG_ID = '44444444-4444-4444-8444-444444444444';
+  const VISITOR = 'Is the spray safe for my dog?';
+  const REPLY = 'Yes, it is safe once it dries.';
+  const HASH = askWavesSubjectHash({ visitorMessage: VISITOR, reply: REPLY });
+  const chatRow = (over = {}) => baseRow({
+    capability: 'ask_waves_safety', package_id: 'ask_waves_safety.v1', subject_type: 'agent_messages', subject_id: MSG_ID,
+    question_id: 'safety_claim', baseline_answers: JSON.stringify({ production: false }), subject_hash: HASH, ...over,
+  });
+  const assistant = (content = `[question] ${REPLY}`) => ({ id: MSG_ID, conversation_id: 'conv-1', content, created_at: new Date('2026-10-28T15:00:00Z') });
+
+  test('the queue shows the visitor message and the reply, without the intent tag, and the digest matches', async () => {
+    const log = installDb({
+      decision_reviews: { list: [chatRow()] },
+      agent_messages: { list: [assistant()], first: [{ content: VISITOR }] },
+    });
+    const { status, body } = await get('/reviews');
+    expect(status).toBe(200);
+    expect(body.reviews[0]).toMatchObject({ subjectType: 'agent_messages', providerLabel: 'Jev', subjectChanged: false, subjectVersion: HASH });
+    expect(body.reviews[0].subject).toEqual({ type: 'agent_messages', text: REPLY, visitorMessage: VISITOR, at: '2026-10-28T15:00:00.000Z' });
+    expect(body.reviews[0].question).toMatch(/blanket safety claim/);
+    // the visitor message is the newest user row at or before the assistant row, in the same conversation
+    expect(called(log, 'agent_messages', 'where')).toContainEqual([{ conversation_id: 'conv-1', role: 'user' }]);
+    expect(called(log, 'agent_messages', 'where')).toContainEqual(['created_at', '<=', new Date('2026-10-28T15:00:00Z')]);
+    expect(log.sms_log).toBeUndefined();
+  });
+
+  test('a reply or message edited after Jev answered is flagged and cannot be labeled', async () => {
+    installDb({
+      decision_reviews: { list: [chatRow()], first: [chatRow()] },
+      agent_messages: { list: [assistant('[question] A different reply.')], first: [{ content: VISITOR }, { content: VISITOR }] },
+    });
+    expect((await get('/reviews')).body.reviews[0].subjectChanged).toBe(true);
+    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: HASH });
+    expect(status).toBe(409);
+    expect(body.code).toBe('subject_changed');
+  });
+
+  test('an unchanged turn is labeled against its digest; a deleted message row cannot be labeled', async () => {
+    const log = installDb({
+      decision_reviews: { first: [chatRow()], returning: [chatRow({ label_status: 'confirmed_error' })] },
+      agent_messages: { list: [assistant()], first: [{ content: VISITOR }] },
+    });
+    const ok = await post(`/reviews/${ID}/label`, { verdict: 'jev_wrong', correct_value: false, seen_answer: SEEN, seen_subject: HASH });
+    expect(ok.status).toBe(200);
+    expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['subject_hash IS NOT DISTINCT FROM ?', [HASH]]);
+
+    installDb({ decision_reviews: { first: [chatRow()] }, agent_messages: { list: [] } });
+    const gone = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: HASH });
+    expect(gone.status).toBe(409);
+    expect(gone.body.code).toBe('subject_changed');
   });
 });
 
