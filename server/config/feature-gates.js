@@ -2055,15 +2055,6 @@ const gates = {
   // send risk and no post-flip backlog burst.
   estimateEngagementFollowup: process.env.GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP === 'true',
 
-  // Nightly critical-churn "CHURN ALERT" SMS to the owner's phone
-  // (retention-engine, 3AM Customer Intelligence Pipeline). Internal-only —
-  // it texts ADAM_PHONE, never a customer — but the owner paused health
-  // notifications 2026-07-11, so it fails CLOSED in every environment until
-  // explicitly re-enabled with GATE_CHURN_ALERT_SMS=true. Retention outreach
-  // drafts still queue as pending_approval either way; only the owner-alert
-  // SMS is gated.
-  churnAlertSms: process.env.GATE_CHURN_ALERT_SMS === 'true',
-
   // Abandoned-booking recovery — chases /book drop-offs (booking_intents) with a
   // ~1h recovery SMS + ~24h email. A customer-facing auto-send, so it FAILS CLOSED
   // (explicit opt-in in EVERY environment) per the house rule — a preview/dev env
@@ -2449,10 +2440,6 @@ const gates = {
   rescheduleProposalCard: gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD'),
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
-  // Customer-intelligence AI legs (nightly sentiment mining + retention
-  // drafts). Read at CALL time inside signal-detector / the 3 AM pipeline;
-  // this entry is for logGateStatus only. Dark by default (owner 2026-09-25).
-  customerIntelAi: gateEnvValue('GATE_CUSTOMER_INTEL_AI'),
   // Missing-departure/arrival tracking: flags a scheduled_services row whose
   // promised window (the last communicated arrival window — SMS/email/call
   // evidence, never the raw schedule) has passed with no en_route/arrived
@@ -6464,17 +6451,6 @@ function voiceRelayOpenaiInboundLive() {
   return process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true';
 }
 
-// GATE_CUSTOMER_INTEL_AI read at CALL time — the ONE reader for every entry
-// point into the customer-intelligence AI legs (nightly sentiment mining in
-// signal-detector, retention drafting in retention-engine, and the admin
-// route that triggers drafting by hand), so the documented "unset = no
-// provider call" guarantee holds on every path, not just the scheduler
-// (Codex #4825 P1). The `customerIntelAi` gates-map entry is for
-// logGateStatus only.
-function customerIntelAiLive() {
-  return gateEnvValue('GATE_CUSTOMER_INTEL_AI');
-}
-
 // GATE_LEAD_INSPECTION_LINK read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The `leadInspectionLink` gates-map
 // entry above is for logGateStatus only; this is the one canonical reader
@@ -8098,7 +8074,7 @@ function smsCourtesyAfterTemplateLive() {
   return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
