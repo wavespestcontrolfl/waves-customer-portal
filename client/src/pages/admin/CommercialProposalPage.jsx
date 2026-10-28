@@ -539,13 +539,14 @@ function CommercialProposalEditor() {
     setTaxRatePct(fill);
     setDirty(true);
   }, [locked, taxRatePct, anyTaxable, suggestedTaxRate]);
-  // The tax chip: the rate on the proposal is the suggestion (or becomes it the
-  // moment a line turns taxable, by the fill above). Anything else, an Override,
-  // or no suggestion at all shows the editable box.
+  // The tax chip: the rate on the proposal is the suggestion, or 0, which the
+  // fill above turns into the suggestion the moment a line is taxable (on the
+  // load's own render too, so the box never flashes first). A typed 0 sets
+  // taxOverride, so it keeps the box. Anything else, an Override, or no
+  // suggestion at all shows the editable box.
   const suggestedPct = suggestedTaxRate == null ? null : roundMoney(suggestedTaxRate * 10000) / 100;
   const currentPct = Number(taxRatePct) || 0;
-  const taxIsSuggested = suggestedPct != null
-    && (Math.abs(currentPct - suggestedPct) < 0.0001 || (currentPct === 0 && !anyTaxable));
+  const taxIsSuggested = suggestedPct != null && (Math.abs(currentPct - suggestedPct) < 0.0001 || currentPct === 0);
   const showTaxInput = !locked && (taxOverride || !taxIsSuggested);
   const suggestedTaxLabel = suggestedPct == null ? '' : `${formatPct(suggestedPct)}%${suggestedTaxSource ? ` · ${suggestedTaxSource}` : ''}`;
   const overrideTax = () => {
