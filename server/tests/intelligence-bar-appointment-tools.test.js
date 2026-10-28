@@ -2413,6 +2413,17 @@ describe('create_appointment — which property the visit is at (GATE_EDIT_APPT_
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject(STAMP);
   });
 
+  test('commit: the pin as the pending-action store hands it back (jsonb key order) still books', async () => {
+    switchOn(true);
+    customerProperties.bookingPropertyStamp.mockResolvedValueOnce(STAMP);
+    // jsonb orders keys by length, then bytes: the same values in a different order.
+    const stored = Object.fromEntries(Object.entries(STAMP).sort(([a], [b]) => a.length - b.length || a.localeCompare(b)));
+    expect(JSON.stringify(stored)).not.toBe(JSON.stringify(STAMP));
+    const { insertChain, run } = bookAt({ property_id: 'prop-rental', _booking_property: stored });
+    expect(await run()).toMatchObject({ success: true });
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject(STAMP);
+  });
+
   test('commit: an address that changed since the card, a property gone, or a property with no card pin books nothing', async () => {
     switchOn(true);
     customerProperties.bookingPropertyStamp.mockResolvedValueOnce({ ...STAMP, service_address_line1: '14 Sample Ct' });

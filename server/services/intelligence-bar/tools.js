@@ -3757,6 +3757,12 @@ function ibBookingWindowRefusal(timeWindow) {
 // applies). A named one must match the stamp the card pinned
 // (_booking_property, set by the route), re-read under the booking lock; a
 // named property with no pin was never shown on a card and is refused.
+// Compared field by field: the pin round-trips through ib_pending_actions
+// (jsonb, which reorders keys), so a serialized comparison would refuse an
+// unchanged property.
+const BOOKING_PROPERTY_FIELDS = ['property_id', 'service_address_line1', 'service_address_line2', 'service_address_city',
+  'service_address_state', 'service_address_zip', 'lat', 'lng'];
+const sameBookingProperty = (a, b) => BOOKING_PROPERTY_FIELDS.every((f) => String(a?.[f] ?? '') === String(b?.[f] ?? ''));
 async function lockedBookingProperty(trx, customerId, input) {
   if (input.property_id === undefined || input.property_id === null || input.property_id === '') return null;
   const changed = () => Object.assign(new Error('booking_property_changed'), { bookingPropertyChanged: true });
@@ -3768,7 +3774,7 @@ async function lockedBookingProperty(trx, customerId, input) {
     if (err?.code === 'INVALID_BOOKING_PROPERTY') throw changed();
     throw err;
   }
-  if (JSON.stringify(live) !== JSON.stringify(input._booking_property)) throw changed();
+  if (!sameBookingProperty(live, input._booking_property)) throw changed();
   return live;
 }
 
