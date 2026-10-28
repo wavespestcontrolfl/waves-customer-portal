@@ -9,6 +9,10 @@
  * POST /vehicles/:equipmentId         add a vehicle card (201 { card }).
  * GET  /rates?date=YYYY-MM-DD         each technician's and vehicle's computed rates and breakdown
  *                                     on that date (default today, Eastern).
+ * GET  /open-time?from=&to=           (L11b, also needs GATE_TECH_OPEN_TIME) the unbooked part of each
+ *                                     technician's paid days: totals per technician, and how many days were
+ *                                     left out and why. Default: the 30 days ending yesterday (Eastern); at
+ *                                     most 92 days. Read only.
  *
  * Off answers 404 { enabled: false } on every route but GET /, which answers 200 { enabled: false }
  * so the Settings page can tell "off" from an error. Every write is audited (ids only).
@@ -20,8 +24,9 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
-const { techCostRatesLive } = require('../config/feature-gates');
+const { techCostRatesLive, techOpenTimeLive } = require('../config/feature-gates');
 const { loadRatesForDate, dateString } = require('../services/tech-cost-rates');
+const { computeOpenTime } = require('../services/open-time');
 
 const router = express.Router();
 router.use(adminAuthenticate, requireAdmin);
@@ -32,6 +37,7 @@ router.use((req, res, next) => {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const on = () => typeof techCostRatesLive === 'function' && techCostRatesLive();
+const openTimeOn = () => typeof techOpenTimeLive === 'function' && techOpenTimeLive();
 
 class CardError extends Error {
   constructor(status, message) {
@@ -175,6 +181,43 @@ router.get('/rates', async (req, res) => {
     if (!validCalendarDate(date)) throw new CardError(400, 'date must be a real date (YYYY-MM-DD)');
     return res.json(await loadRatesForDate(db, date));
   } catch (err) { return fail(res, 'read rates', err); }
+});
+
+const OPEN_TIME_DEFAULT_DAYS = 30;
+const OPEN_TIME_MAX_DAYS = 92;
+const DAY_MS = 86400000;
+const shiftDay = (day, days) => new Date(Date.parse(`${day}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+
+router.get('/open-time', async (req, res) => {
+  try {
+    if (!openTimeOn()) return res.status(404).json({ enabled: false });
+    const yesterday = shiftDay(etDateString(), -1);
+    const to = req.query.to == null || req.query.to === '' ? yesterday : String(req.query.to);
+    const from = req.query.from == null || req.query.from === '' ? shiftDay(to, 1 - OPEN_TIME_DEFAULT_DAYS) : String(req.query.from);
+    if (!validCalendarDate(from) || !validCalendarDate(to)) throw new CardError(400, 'from and to must be real dates (YYYY-MM-DD)');
+    const span = (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS + 1;
+    if (span < 1) throw new CardError(400, 'from must not be after to');
+    if (span > OPEN_TIME_MAX_DAYS) throw new CardError(400, `Ask for at most ${OPEN_TIME_MAX_DAYS} days at a time.`);
+    const result = await computeOpenTime(db, { from, to });
+    const names = result.technicians.length
+      ? await db('technicians').whereIn('id', result.technicians.map((t) => t.technicianId)).select('id', 'name')
+      : [];
+    const nameOf = new Map(names.map((t) => [String(t.id), t.name]));
+    const byReason = {};
+    let leftOutVisits = 0;
+    for (const l of result.leftOut) {
+      byReason[l.reason] = (byReason[l.reason] || 0) + 1;
+      leftOutVisits += l.visits;
+    }
+    return res.json({
+      enabled: true,
+      from: result.from,
+      to: result.to,
+      totals: result.totals,
+      technicians: result.technicians.map((t) => ({ ...t, name: nameOf.get(String(t.technicianId)) || null })),
+      leftOut: { days: result.leftOut.length, visits: leftOutVisits, byReason },
+    });
+  } catch (err) { return fail(res, 'read open time', err); }
 });
 
 router.post('/technicians/:id', async (req, res) => {

@@ -2222,7 +2222,8 @@ function initScheduledJobs() {
   // site, drive minutes and drive miles per visit (visit_gps_legs) and a business / personal suggestion per trip
   // (trip_links). Shadow data: it writes only those two tables, never mileage_log, scheduled_services, job_costs,
   // pins or alerts, and sends nothing. Gate read per run; off = the run returns before any query. runExclusive records
-  // the job health.
+  // the job health. Right after it, the same tick re-costs the visits just linked (GATE_TECH_OPEN_TIME, dark; job
+  // job-cost-recost) so their drive minutes and miles reach job costs.
   cron.schedule('40 1 * * *', async () => {
     try {
       const lockRes = await runExclusive('trip-link', async () => {
@@ -2239,6 +2240,26 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[trip-link] tick failed: ${err.message}`);
+    }
+    // Then the costs (GATE_TECH_OPEN_TIME + GATE_TECH_COST_RATES, dark): re-cost the visits the trip link just
+    // linked, so their GPS drive minutes and miles reach job costs. Legs first, then costs. It runs whatever
+    // the trip link's outcome was (an earlier night's legs are still in the table). Gate off = returns before
+    // any query. runExclusive records the job health.
+    try {
+      const lockRes = await runExclusive('job-cost-recost', async () => {
+        const result = await require('./job-cost-recost').recostNightly();
+        if (result.recosted) logger.info(`[job-cost-recost] ${result.recosted} visit(s) re-costed`);
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`job-cost-recost tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('job-cost-recost').catch(() => {});
+        await recordJobEnd('job-cost-recost', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[job-cost-recost] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

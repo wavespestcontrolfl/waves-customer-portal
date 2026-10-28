@@ -200,3 +200,48 @@ describe('Phase 5 — overhead basis + COGS split', () => {
     });
   });
 });
+
+describe('L11b open time row (GATE_TECH_OPEN_TIME)', () => {
+  const FULL = {
+    revenue: 20000,
+    grossProfit: 11000,
+    marketing: { adSpend: 1500, fixedCosts: 500, referralRewards: 100 },
+    overhead: { vehicleMonthly: 850, insuranceMonthly: 400, softwareMonthly: 350, adminMonthly: 1000 },
+    monthFraction: 1,
+  };
+  // The output of the bridge before this change, for the FULL fixture, as a literal.
+  const TODAY_OUTPUT = JSON.parse('{"rows":[{"key":"revenue","label":"Revenue","amount":20000,"kind":"start"},{"key":"cogs","label":"COGS (labor \\u00b7 materials \\u00b7 drive)","amount":-9000,"kind":"minus"},{"key":"gross_profit","label":"Gross profit","amount":11000,"kind":"subtotal","marginPct":55},{"key":"marketing","label":"Marketing (ads \\u00b7 retainers \\u00b7 referral rewards)","amount":-2100,"kind":"minus"},{"key":"contribution","label":"Contribution","amount":8900,"kind":"subtotal","marginPct":44.5},{"key":"overhead","label":"Overhead (pricing-settings assumptions)","amount":-2600,"kind":"minus"},{"key":"ebitda","label":"Adjusted EBITDA","amount":6300,"kind":"result","marginPct":31.5}],"cogsDetail":null,"revenue":20000,"cogs":9000,"grossProfit":11000,"grossMarginPct":55,"marketing":{"adSpend":1500,"fixedCosts":500,"referralRewards":100,"total":2100},"contribution":8900,"contributionMarginPct":44.5,"overhead":{"vehicle":850,"insurance":400,"software":350,"admin":1000,"total":2600},"overheadEntered":true,"overheadBasis":"pricing_defaults","overheadEnteredAt":null,"ebitda":6300,"ebitdaMarginPct":31.5,"monthFraction":1,"vehicleFixedInCogs":0}');
+
+  test('absent, zero, negative or garbage open time is exactly today\'s output', () => {
+    expect(buildEbitdaBridge(FULL)).toEqual(TODAY_OUTPUT);
+    for (const openTime of [undefined, null, 0, -5, NaN, 'x']) {
+      expect(buildEbitdaBridge({ ...FULL, openTime })).toEqual(TODAY_OUTPUT);
+    }
+    expect(buildEbitdaBridge(FULL)).not.toHaveProperty('openTime');
+  });
+
+  test('an amount adds one minus row right after gross profit and comes out of contribution and EBITDA', () => {
+    const b = buildEbitdaBridge({ ...FULL, openTime: 400.5 });
+    expect(b.rows.map((r) => r.key)).toEqual([
+      'revenue', 'cogs', 'gross_profit', 'open_time', 'marketing', 'contribution', 'overhead', 'ebitda',
+    ]);
+    expect(b.rows.find((r) => r.key === 'open_time')).toEqual({
+      key: 'open_time', label: 'Open time (paid tech hours with no visit)', amount: -400.5, kind: 'minus',
+    });
+    expect(b.openTime).toBe(400.5);
+    expect(b.grossProfit).toBe(11000); // gross profit and COGS are untouched
+    expect(b.cogs).toBe(9000);
+    expect(b.contribution).toBe(8499.5); // 11000 - 400.5 - 2100
+    expect(b.ebitda).toBe(5899.5); // minus the 2600 overhead
+    // The other rows are today's.
+    const others = b.rows.filter((r) => r.key !== 'open_time' && r.key !== 'contribution' && r.key !== 'ebitda');
+    expect(others).toEqual(TODAY_OUTPUT.rows.filter((r) => !['contribution', 'ebitda'].includes(r.key)));
+  });
+
+  test('with no overhead entered the bridge stops at contribution, after open time', () => {
+    const b = buildEbitdaBridge({ ...FULL, overhead: null, openTime: 100 });
+    expect(b.rows[b.rows.length - 1].key).toBe('contribution');
+    expect(b.contribution).toBe(8800);
+    expect(b.ebitda).toBeNull();
+  });
+});
