@@ -4283,3 +4283,37 @@ describe('commit summary — visit-covered members are not separate stops (local
     expect(summarizeCommitResults([{ id: 'x', ok: false, error: 'boom' }])).toMatchObject({ ok: false, reason: 'boom', movedCount: 0, coveredCount: 0, failedCount: 1 });
   });
 });
+
+// Codex #6881 r3: the pickers' Google road times (GATE_PICKER_ROAD_CHECK)
+// are staff-only — the generic slot check asks for them only for an admin,
+// counts them against that admin (picker-road-spend.js), and gives the whole
+// batch ONE budget (pre-push audit: 25 concurrent checks must not each get
+// the per-request limit or buy a shared leg twice).
+describe('checkSlots: paid road times are staff-only', () => {
+  const SERVICE = '11111111-1111-4111-8111-111111111111';
+  const OTHER = '33333333-3333-4333-8333-333333333333';
+  const TECH = '22222222-2222-4222-8222-222222222222';
+  test.each([true, false])('admin caller %s', async (isAdmin) => {
+    const arrival = require('../services/scheduling/arrival-route');
+    const routing = jest.spyOn(arrival, 'arrivalWindowRoutingEnabled').mockReturnValue(true);
+    const check = jest.spyOn(arrival, 'checkArrivalPlacement').mockResolvedValue({ feasible: true });
+    try {
+      const { checkSlots } = require('../services/rain-out');
+      const out = await checkSlots({
+        targets: [SERVICE, OTHER].map((serviceId) => ({ date: '2035-01-02', window: { start: '09:00', end: '10:00' }, serviceId, technicianId: TECH })),
+        caller: { isAdmin, technicianId: TECH },
+      });
+      expect(out.ok).toBe(true);
+      const calls = check.mock.calls.map(([opts]) => opts);
+      expect(calls).toHaveLength(2);
+      // One budget for the whole batch.
+      expect(calls[0].pickerBudget).toMatchObject({ traffic: 0, plain: 0 });
+      expect(calls[1].pickerBudget).toBe(calls[0].pickerBudget);
+      if (isAdmin) expect(calls.every((opts) => opts.roads === true && opts.roadSpender === TECH)).toBe(true);
+      else expect(calls.every((opts) => opts.roads === false && opts.roadSpender === null)).toBe(true);
+    } finally {
+      routing.mockRestore();
+      check.mockRestore();
+    }
+  });
+});
