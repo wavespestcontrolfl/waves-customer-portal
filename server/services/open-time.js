@@ -12,7 +12,11 @@
  *                  visit and no clock row does not exist for this report: the truck clock-in (not live yet)
  *                  will close that gap.
  *   booked minutes the sum over the day's completed visits of job_costs.charged_on_job_minutes +
- *                  charged_drive_minutes (the minutes each visit's cost was charged for, job-costing.js)
+ *                  charged_drive_minutes (the minutes each visit's cost was charged for, job-costing.js). A
+ *                  visit belongs to the ET day it was WORKED, the trip link's rule (trip-link.js): its arrival
+ *                  stamp, else its completion stamp; a legacy row with neither falls back to its scheduled
+ *                  date. So a visit scheduled Monday and worked Tuesday books Tuesday, the day its clock row
+ *                  (time_entry_daily_summary.work_date) is on.
  *   open minutes   max(0, paid - booked); over minutes max(0, booked - paid)
  *   open cost      the card's labor cost per worked hour (cents) x open minutes / 60, rounded half up to a
  *                  whole cent ONCE per technician-day; totals add the rounded day figures.
@@ -26,7 +30,7 @@
  * was costed before the card, or never costed). Today and later days are never counted; a day in progress
  * is not a day's open time.
  */
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-et');
 const { cardInEffect, loadVisitRates, dateString } = require('./tech-cost-rates');
 
 const DAY_MS = 86400000;
@@ -34,6 +38,19 @@ const MISSING_RELATION_CODES = new Set(['42P01', '42703']);
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => (v == null || v === '' ? 0 : Number(v) || 0);
+
+// The ET day a visit was worked (see the header): arrival, else completion, else the scheduled date.
+function workedDay(row) {
+  const stamp = row.arrived_at || row.completed_at;
+  return stamp ? etDateString(new Date(stamp)) : dateString(row.scheduled_date);
+}
+
+// The instants of ET midnight at the start of `first` and after `last` (visit-gps-context.js etDayBounds).
+function windowBounds(first, last) {
+  const start = parseETDateTime(`${first}T00:00`);
+  const end = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${last}T00:00`), 1))}T00:00`);
+  return { start, end };
+}
 
 /** The ET days from..to inclusive that are before `today`, as YYYY-MM-DD. */
 function countedDays(from, to, today) {
@@ -120,15 +137,23 @@ async function loadDayCells(conn, days, technicianId) {
   const counted = new Set(days);
   const first = days[0];
   const last = days[days.length - 1];
+  const { start, end } = windowBounds(first, last);
   const visitQuery = conn('scheduled_services as ss')
     .leftJoin('job_costs as jc', 'jc.scheduled_service_id', 'ss.id')
     .where('ss.status', 'completed')
     .whereNotNull('ss.technician_id')
-    .where('ss.scheduled_date', '>=', first)
-    .where('ss.scheduled_date', '<=', last);
+    // Worked in the window (workedDay): arrived in it; else completed in it; else, with neither stamp,
+    // scheduled in it. Same three cases as the trip link's day query.
+    .where(function workedInWindow() {
+      this.where((q) => q.where('ss.arrived_at', '>=', start).where('ss.arrived_at', '<', end))
+        .orWhere((q) => q.whereNull('ss.arrived_at').where('ss.completed_at', '>=', start).where('ss.completed_at', '<', end))
+        .orWhere((q) => q.whereNull('ss.arrived_at').whereNull('ss.completed_at')
+          .where('ss.scheduled_date', '>=', first).where('ss.scheduled_date', '<=', last));
+    });
   if (technicianId) visitQuery.where('ss.technician_id', technicianId);
   const visitRows = await visitQuery.select(
-    'ss.id as id', 'ss.technician_id as technician_id', 'ss.scheduled_date as day',
+    'ss.id as id', 'ss.technician_id as technician_id', 'ss.arrived_at as arrived_at',
+    'ss.completed_at as completed_at', 'ss.scheduled_date as scheduled_date',
     'jc.charged_on_job_minutes as on_job', 'jc.charged_drive_minutes as drive',
   );
   const clockRows = await readClockRows(conn, first, last, technicianId);
@@ -141,7 +166,7 @@ async function loadDayCells(conn, days, technicianId) {
     return m.get(day);
   };
   for (const r of visitRows) {
-    const day = dateString(r.day);
+    const day = workedDay(r);
     if (!counted.has(day)) continue;
     const entry = cell(r.technician_id, day);
     // One scheduled service counts once even if it somehow has two job_costs rows: keep a row that has minutes.
@@ -207,4 +232,4 @@ async function computeOpenTime(conn, {
   return out;
 }
 
-module.exports = { computeOpenTime, openTimeForDay, countedDays };
+module.exports = { computeOpenTime, openTimeForDay, countedDays, workedDay };

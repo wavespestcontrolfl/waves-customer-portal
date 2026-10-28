@@ -178,6 +178,21 @@ postgres('open time on the migrated schema', () => {
     expect(byDay['2026-10-25']).toMatchObject({ paidMinutes: 240, paidSource: 'clock', bookedMinutes: 0, openMinutes: 240 });
   });
 
+  it('a visit books the ET day it was worked: scheduled Sunday, arrived Monday evening ET', async () => {
+    gatesOn();
+    await addCard();
+    const a = await addVisit({
+      scheduled_date: '2026-10-25',
+      arrived_at: '2026-10-27T01:00:00Z', // Monday 21:00 ET, already Tuesday in UTC
+      completed_at: '2026-10-27T02:00:00Z',
+    });
+    await jobCosting.calculateJobCost(a, trx);
+    const out = await computeOpenTime(trx, { from: '2026-10-24', to: '2026-10-26', today: TODAY });
+    expect(out.leftOut).toEqual([]);
+    expect(out.days.map((d) => d.day)).toEqual(['2026-10-26']);
+    expect(out.days[0]).toMatchObject({ paidSource: 'card', bookedMinutes: 84 });
+  });
+
   it('a visit costed before the card leaves its day out', async () => {
     await addCard();
     const early = await addVisit({ scheduled_date: '2026-10-24', actual_start_time: '2026-10-24T14:00:00Z', actual_end_time: '2026-10-24T15:00:00Z' });

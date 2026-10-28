@@ -6,7 +6,9 @@ jest.mock('../services/tech-cost-rates', () => ({
 }));
 
 const { cardInEffect, loadVisitRates } = require('../services/tech-cost-rates');
-const { computeOpenTime, openTimeForDay, countedDays } = require('../services/open-time');
+const {
+  computeOpenTime, openTimeForDay, countedDays, workedDay,
+} = require('../services/open-time');
 
 const RATE = 2725; // $27.25 per worked hour, in cents
 
@@ -31,8 +33,10 @@ function fakeConn({ visits = [], clock = [], clockError = null } = {}) {
   return conn;
 }
 
-const visit = (id, day, onJob, drive, tech = 'tech-1') => ({
-  id, technician_id: tech, day, on_job: onJob == null ? null : String(onJob), drive: drive == null ? null : String(drive),
+// A visit with no arrival or completion stamp belongs to its scheduled date (workedDay's legacy fallback).
+const visit = (id, day, onJob, drive, tech = 'tech-1', stamps = {}) => ({
+  id, technician_id: tech, scheduled_date: day, arrived_at: null, completed_at: null, ...stamps,
+  on_job: onJob == null ? null : String(onJob), drive: drive == null ? null : String(drive),
 });
 
 beforeEach(() => {
@@ -178,10 +182,35 @@ describe('computeOpenTime', () => {
     await expect(computeOpenTime(broken, { from: '2026-10-26', to: '2026-10-26', today: TODAY })).rejects.toThrow('boom');
   });
 
+  test('a visit books the ET day it was worked, not the day it was scheduled', async () => {
+    const conn = fakeConn({
+      visits: [
+        // Scheduled Sunday, arrived Monday 10:00 ET.
+        visit('a', '2026-10-25', 60, 20, 'tech-1', { arrived_at: new Date('2026-10-26T14:00:00Z') }),
+        // Arrived Monday 22:30 ET (already Tuesday in UTC): still Monday.
+        visit('b', '2026-10-26', 30, 10, 'tech-1', { arrived_at: new Date('2026-10-27T02:30:00Z') }),
+        // No arrival tap: the completion stamp decides (Monday 16:00 ET).
+        visit('c', '2026-10-24', 15, 5, 'tech-1', { completed_at: new Date('2026-10-26T20:00:00Z') }),
+      ],
+    });
+    const out = await computeOpenTime(conn, { from: '2026-10-24', to: '2026-10-26', today: TODAY });
+    expect(out.days.map((d) => d.day)).toEqual(['2026-10-26']);
+    expect(out.days[0]).toMatchObject({ paidSource: 'card', onJobMinutes: 105, driveMinutes: 35, bookedMinutes: 140 });
+    expect(out.leftOut).toEqual([]);
+  });
+
   test('one scheduled service with two job_costs rows counts once', async () => {
     const conn = fakeConn({ visits: [visit('a', '2026-10-26', null, null), visit('a', '2026-10-26', 60, 10)] });
     const out = await computeOpenTime(conn, { from: '2026-10-26', to: '2026-10-26', today: TODAY });
     expect(out.days[0]).toMatchObject({ bookedMinutes: 70 });
     expect(out.leftOut).toEqual([]);
+  });
+});
+
+describe('workedDay', () => {
+  test('arrival, else completion, else the scheduled date, in Eastern time', () => {
+    expect(workedDay({ arrived_at: '2026-10-27T03:59:00Z', completed_at: '2026-10-27T05:00:00Z', scheduled_date: '2026-10-25' })).toBe('2026-10-26');
+    expect(workedDay({ arrived_at: null, completed_at: '2026-10-27T04:00:00Z', scheduled_date: '2026-10-25' })).toBe('2026-10-27');
+    expect(workedDay({ arrived_at: null, completed_at: null, scheduled_date: '2026-10-25' })).toBe('2026-10-25');
   });
 });
