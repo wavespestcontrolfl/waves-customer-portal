@@ -1017,8 +1017,6 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true, ...require('./lawn-spot-target').contextKey() } : {}),
     // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. The key exists only while the gate is live, so gate off is byte-identical.
     ...(featureGates.fastCompleteWrapUpLive() ? { wrapUp: true } : {}),
-    // GATE_REPORT_CLEANUP_1020: the sheet's granular method default is on. The key exists only while the gate is live.
-    ...require('./service-report/report-cleanup-1020').methodCorrectionKey(),
     // GATE_ESTIMATE_LAWN_LIMITS: the turf profile lists carpetgrass, so a Celsius WG row on the sheet shows
     // this line. The key exists only while the gate is live AND the flag is set, so gate off is byte-identical.
     ...await carpetgrassCelsiusWarningKey(svc, knex),
