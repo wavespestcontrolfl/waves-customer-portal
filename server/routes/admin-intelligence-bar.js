@@ -17,7 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho, ibBookingPropertyProposal, bookingPropertyLabel,
   CARD_CANCEL_REFUSED_MESSAGE,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
@@ -1197,7 +1197,7 @@ function confirmationDisplayParams(toolName, params, preview) {
     const {
       price, customer_id: customerId, scheduled_date: scheduledDate, time_window: timeWindow,
       service_type: serviceType, technician_id: technicianId, technician_name: technicianName,
-      price_confirmed: _priceConfirmed, ...others
+      price_confirmed: _priceConfirmed, property_id: propertyId, ...others
     } = params;
     const money = (n) => `$${Number(n).toFixed(2)}`;
     // A member discount names itself and the list price it came off (owner
@@ -1223,6 +1223,9 @@ function confirmationDisplayParams(toolName, params, preview) {
     const when = bookingWhenLabel(scheduledDate, timeWindow);
     if (when) shown.when = when;
     if (serviceType !== undefined && serviceType !== null) shown.service = serviceType;
+    // The pinned property by its address (the id is opaque on a card).
+    if (preview?.pinned_property) shown.address = preview.pinned_property.address;
+    else if (propertyId !== undefined && propertyId !== null) shown.property_id = propertyId;
     if (!pinnedPrice && price !== undefined && price !== null) shown.price = price;
     else if (priceLine) shown.price = priceLine;
     // Show the pinned tech by NAME, once (the id is opaque on a card) — the
@@ -1236,7 +1239,7 @@ function confirmationDisplayParams(toolName, params, preview) {
     // Model-supplied extras can never overwrite or imitate a server-derived
     // card fact (GATE_IB_PLATFORM off lets extra fields through): the display
     // alias keys are dropped in any case, and the curated fields spread last.
-    const CARD_ALIAS_KEYS = new Set(['when', 'service', 'technician', 'price']);
+    const CARD_ALIAS_KEYS = new Set(['when', 'service', 'technician', 'price', 'address']);
     const extras = Object.fromEntries(Object.entries(others)
       .filter(([k]) => !CARD_ALIAS_KEYS.has(String(k).toLowerCase().replace(/[\s_-]+/g, ''))));
     return { ...extras, ...shown };
@@ -1721,6 +1724,25 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._booking_discount_name = booking.discountName;
       params._booking_discount_type = booking.discountType;
       params._booking_discount_amount = booking.discountAmount;
+      // Which property the visit is at (the Schedule screen's address picker):
+      // a named property's stamp is pinned and shown on the card, and the
+      // executor re-reads it under the booking lock; a customer with several
+      // active properties and none named is asked which one, no card.
+      let bookingProperty;
+      try {
+        bookingProperty = await ibBookingPropertyProposal(String(params.customer_id), params.property_id);
+      } catch {
+        return { failed: true, modelResult: { error: 'Could not read this customer\'s properties — try again in a moment. Nothing was changed.' } };
+      }
+      if (bookingProperty.error) return { failed: true, modelResult: bookingProperty };
+      if (bookingProperty.stamp) {
+        params.property_id = bookingProperty.stamp.property_id;
+        params._booking_property = bookingProperty.stamp;
+        preview = { ...preview, pinned_property: { id: bookingProperty.stamp.property_id, address: bookingPropertyLabel(bookingProperty.stamp) } };
+      } else {
+        delete params.property_id;
+        delete params._booking_property;
+      }
       // Whether another visit already overlaps this time when the card is
       // built (owner 2026-10-05). The executor books through an overlap that
       // already existed (warning only) but refuses one that is NEW since
