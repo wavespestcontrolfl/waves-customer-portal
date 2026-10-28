@@ -610,6 +610,68 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
       expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
     });
   });
+
+  describe('deliverConfirmation closes the 24h reminder when the confirmation is the day-before notice', () => {
+    // Booked for tomorrow: the confirmation already says when the visit is,
+    // so the cron's 24h "is tomorrow" text minutes later is a duplicate.
+    let updates;
+    function confirmDb() {
+      updates = [];
+      db.mockImplementation((table) => {
+        const q = {};
+        ['whereIn', 'whereRaw', 'whereNotNull', 'orderBy', 'select', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+        q.where = jest.fn((col) => { if (col === 'member_since') q.memberSince = true; return q; });
+        q.update = jest.fn(async (patch) => { if (table === 'appointment_reminders') updates.push(patch); return 1; });
+        const rows = {
+          notification_prefs: { appointment_confirmation_channel: 'email' },
+          customers: { id: 'c1', account_id: 'acct-1', is_primary_profile: true, first_name: 'Sample', email: 'sample@example.com' },
+          scheduled_services: { id: 'done-1' },
+        };
+        q.first = jest.fn(async () => (q.memberSince ? null : rows[table] ?? null));
+        return q;
+      });
+    }
+    const confirm = (apptTime) => deliverConfirmation(
+      { id: 'rem1' },
+      { scheduledServiceId: 'ss1', customerId: 'c1', apptTime, serviceLabel: 'Lawn Care' },
+    );
+    const tomorrowNoonET = () => {
+      const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+      return parseETDateTime(`${etDateString(addETDays(new Date(), 1))}T12:00`);
+    };
+    afterEach(() => AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValue({ ok: true }));
+
+    test('visit tomorrow: the confirmation write also closes reminder_24h_sent', async () => {
+      confirmDb();
+      AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValue({ ok: true });
+      await expect(confirm(tomorrowNoonET())).resolves.toBe(true);
+      expect(updates).toEqual([expect.objectContaining({ confirmation_sent: true, reminder_24h_sent: true })]);
+    });
+
+    test('visit tomorrow but more than 24 hours away: still closed (the day, not the hour count, decides)', async () => {
+      confirmDb();
+      const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+      const tomorrowLate = parseETDateTime(`${etDateString(addETDays(new Date(), 1))}T23:30`);
+      await expect(confirm(tomorrowLate)).resolves.toBe(true);
+      expect(updates).toEqual([expect.objectContaining({ confirmation_sent: true, reminder_24h_sent: true })]);
+    });
+
+    test('visit three days out: the 24h reminder stays armed', async () => {
+      confirmDb();
+      AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValue({ ok: true });
+      await expect(confirm(new Date(Date.now() + 3 * 86400000))).resolves.toBe(true);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toEqual(expect.objectContaining({ confirmation_sent: true }));
+      expect(updates[0]).not.toHaveProperty('reminder_24h_sent');
+    });
+
+    test('visit tomorrow but the confirmation did not go out: the 24h reminder stays armed as the notice', async () => {
+      confirmDb();
+      AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValue({ ok: false, reason: 'bounced' });
+      await confirm(tomorrowNoonET());
+      expect(updates.every((u) => !('reminder_24h_sent' in u))).toBe(true);
+    });
+  });
 });
 
 describe('deliverConfirmationByChannel (self-service booking paths)', () => {
