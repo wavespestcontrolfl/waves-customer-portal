@@ -303,7 +303,7 @@ const SCOPE_SNAPSHOT = {
     'get_expenses', 'get_inbox_summary', 'get_my_route', 'get_outreach_candidates', 'get_outstanding_balances', 'get_payer_ar_aging',
     'get_payout_details', 'get_recent_completions', 'get_revenue_breakdown', 'get_stock_movements', 'get_stripe_payment_intents',
     'get_today_briefing', 'get_top_revenue_customers', 'get_truck_status', 'get_twilio_failed_messages', 'get_unanswered_threads',
-    'get_unresponded_reviews', 'get_vendor_invoices', 'get_zone_density', 'list_call_partners', 'list_open_closeouts', 'search_reviews',
+    'get_unresponded_reviews', 'get_vendor_invoices', 'get_zone_density', 'list_call_partners', 'list_open_closeouts', 'list_suggested_replies', 'search_reviews',
     // Provider and operations text that can echo customer identifiers (the
     // route's PII list): alert bodies, error text, log lines, targeting
     // predicates, trip traces, redacted call quotes still keyed by call id.
@@ -388,6 +388,8 @@ const SCOPE_SNAPSHOT = {
     'create_invoice',
     // set_customer_bill_to carries customer_id: the Bill-To and invoices it moves are that customer's own.
     'set_customer_bill_to',
+    // The suggested-reply cards carry draft_id: a draft_id is a task record (validateRecordTarget binds the draft's customer to the task customer).
+    'approve_suggested_reply', 'revise_suggested_reply', 'ignore_suggested_reply',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.

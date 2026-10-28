@@ -127,6 +127,12 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // set_customer_bill_to (owner ruling 2026-10-21, IB gap #9): the customer page's Bill-To save, run in
   // process behind a card; a self-pay customer only, sends nothing.
   'set_customer_bill_to',
+  // Suggested replies (owner ask 2026-10-28, GATE_IB_MESSAGE_DRAFTS): the Communications page's Approve / Edit and send / Reject
+  // handlers, run in process behind a card. approve and revise TEXT the customer (always a card, owner login included);
+  // ignore sends nothing.
+  'approve_suggested_reply',
+  'revise_suggested_reply',
+  'ignore_suggested_reply',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.

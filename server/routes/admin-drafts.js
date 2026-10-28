@@ -671,6 +671,78 @@ async function finalizeDraftSend(draft, updates) {
   });
 }
 
+// ── Intelligence Bar seam ─────────────────────────────────────────────────
+// The bar's approve / revise / ignore cards run THESE handlers in process (approveDraftFromBar,
+// reviseDraftFromBar, rejectDraftFromBar, below), so the claim, the quiet-hours / opt-out / rental /
+// spam checks inside sendManualCustomerSms, the first-response stamp and the finalization are the
+// page's own. `req.ibDraftPins` is set only by those adapters (never an HTTP field); with no pins
+// every handler behaves exactly as before. Pins:
+//   draftText         the draft_response the card showed; added to the claim's WHERE, so the claim
+//                     (one atomic UPDATE on status 'pending') is the lock: a draft that was approved,
+//                     ignored or edited after the card is not claimed and nothing is sent.
+//   recipientPhone    the number the card showed; the resolved recipient must still be it.
+//   customerId        the customer the card showed (null when it showed none).
+//   latestInboundId   the newest inbound text from that number when the card was shown; a newer one
+//                     refuses, at the claim and again at the last await before the provider handoff.
+const BAR_PREVIEW_CHANGED = {
+  error: 'The suggested reply, its recipient or the conversation changed after the card was shown, so nothing was sent. Ask again for a fresh confirmation card.',
+  code: 'preview_changed',
+  preview_changed: true,
+};
+const barPinsChangedBody = () => ({ ...BAR_PREVIEW_CHANGED });
+
+// The claim's WHERE gains the carded text; with no pins the query is returned untouched.
+function barClaim(query, pins) {
+  return pins ? query.where('draft_response', pins.draftText) : query;
+}
+
+// The plain inbound-reply lane only: a campaign draft, a clarify ask or a photo-triage draft carries
+// guards that rewrite or retire the draft (and its text), so the carded text could not be the sent text.
+function isPlainReplyDraft(draft) {
+  return !draft.campaign_type && draft.intent !== 'estimate_clarify' && draft.intent !== 'photo_triage';
+}
+
+function barLaneRefusal(draft, pins) {
+  if (!pins || isPlainReplyDraft(draft)) return null;
+  return {
+    error: 'This draft is a campaign, estimate-question or photo-triage draft. Handle it from the Communications page.',
+    code: 'needs_communications_page',
+  };
+}
+
+async function latestInboundFrom(phone) {
+  const variants = [...new Set([phone, normalizeE164(phone)].filter(Boolean))];
+  if (!variants.length) return null;
+  const row = await db('sms_log')
+    .where({ direction: 'inbound' })
+    .whereIn('from_phone', variants)
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .first('id', 'created_at');
+  return row ? { id: String(row.id), created_at: row.created_at } : null;
+}
+
+async function barRecipientRefusal(recipient, pins) {
+  if (!pins) return null;
+  const changed = !samePhone(recipient.toPhone, pins.recipientPhone)
+    || String(recipient.customerId || '') !== String(pins.customerId || '');
+  if (changed) return barPinsChangedBody();
+  const latest = await latestInboundFrom(recipient.toPhone);
+  return String(latest?.id || '') !== String(pins.latestInboundId || '') ? barPinsChangedBody() : null;
+}
+
+// The last await before the provider handoff (sendCustomerMessage's preDispatchCheck): a text from
+// the customer that landed while the send pipeline ran stops the send and releases the claim.
+function barDispatchCheck(recipient, pins) {
+  if (!pins) return undefined;
+  return async () => {
+    const latest = await latestInboundFrom(recipient.toPhone);
+    return String(latest?.id || '') === String(pins.latestInboundId || '')
+      ? { ok: true }
+      : { ok: false, code: 'preview_changed', reason: 'The customer sent a new message after the card was shown; nothing was sent.' };
+  };
+}
+
 // GET /api/admin/drafts — pending drafts
 // Optional ?campaign_type= filter: 'reactivation' | 'upsell' scopes to that
 // campaign; 'none' scopes to legacy non-campaign drafts (inbound-reply lane).
@@ -787,16 +859,17 @@ router.get('/', async (req, res, next) => {
 });
 
 // PUT /api/admin/drafts/:id/approve — approve and send as-is
-router.put('/:id/approve', async (req, res, next) => {
+async function approveDraftHandler(req, res, next) {
   try {
+    const barPins = req.ibDraftPins || null;
     const requestedFromNumber = req.body?.fromNumber || null;
     if (requestedFromNumber && !TWILIO_NUMBERS.findByNumber(requestedFromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
 
     const claimTime = new Date();
-    const [draft] = await db('message_drafts')
-      .where({ id: req.params.id, status: 'pending' })
+    const [draft] = await barClaim(db('message_drafts')
+      .where({ id: req.params.id, status: 'pending' }), barPins)
       .update({
         status: 'approved',
         approved_by: req.technicianId,
@@ -806,7 +879,14 @@ router.put('/:id/approve', async (req, res, next) => {
     if (!draft) {
       const existing = await db('message_drafts').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Draft not found' });
-      return res.status(409).json({ error: 'Draft is no longer pending' });
+      return res.status(409).json(barPins ? barPinsChangedBody() : { error: 'Draft is no longer pending' });
+    }
+    // Bar only: a campaign, clarify or photo-triage draft stays on the page. Judged BEFORE any guard,
+    // because the campaign guard can retire the draft.
+    const barLane = barLaneRefusal(draft, barPins);
+    if (barLane) {
+      await releaseDraftClaim(draft.id);
+      return res.status(409).json(barLane);
     }
 
     // An Auto Pay setup link never rides draft approval: only the composer's
@@ -849,6 +929,12 @@ router.put('/:id/approve', async (req, res, next) => {
       else await releaseDraftClaim(draft.id);
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
+    // Bar only: the recipient and the conversation are what the card showed.
+    const barRecipient = await barRecipientRefusal(recipient, barPins);
+    if (barRecipient) {
+      await releaseDraftClaim(draft.id);
+      return res.status(409).json(barRecipient);
+    }
     const sendPolicy = sendPolicyForDraft(draft, recipient);
 
     // Clarify dispatch decision runs LAST — there is no await between its
@@ -873,7 +959,8 @@ router.put('/:id/approve', async (req, res, next) => {
         // shape exactly.
         ...sendPolicy,
         // At most one is set: clarify and photo-triage drafts are distinct intents.
-        preDispatchCheck: clarifyGuard.preDispatchCheck || photoTriageGuard.preDispatchCheck,
+        preDispatchCheck: clarifyGuard.preDispatchCheck || photoTriageGuard.preDispatchCheck
+          || barDispatchCheck(recipient, barPins),
         preProviderCheck: photoTriageGuard.preProviderCheck,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
@@ -956,11 +1043,13 @@ router.put('/:id/approve', async (req, res, next) => {
 
     res.json({ success: true, responseTimeSeconds: responseTime });
   } catch (err) { next(err); }
-});
+}
+router.put('/:id/approve', approveDraftHandler);
 
 // PUT /api/admin/drafts/:id/revise — edit and send
-router.put('/:id/revise', async (req, res, next) => {
+async function reviseDraftHandler(req, res, next) {
   try {
+    const barPins = req.ibDraftPins || null;
     const { revisedResponse } = req.body;
     if (!revisedResponse) return res.status(400).json({ error: 'revisedResponse required' });
     const linkedVisitIds = require('../services/street-level-hold').linkedVisitIdsFrom(req.body?.linkedVisitIds);
@@ -973,8 +1062,8 @@ router.put('/:id/revise', async (req, res, next) => {
     }
 
     const claimTime = new Date();
-    const [draft] = await db('message_drafts')
-      .where({ id: req.params.id, status: 'pending' })
+    const [draft] = await barClaim(db('message_drafts')
+      .where({ id: req.params.id, status: 'pending' }), barPins)
       .update({
         status: 'revised',
         revised_response: revisedResponse,
@@ -989,7 +1078,13 @@ router.put('/:id/revise', async (req, res, next) => {
     if (!draft) {
       const existing = await db('message_drafts').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Draft not found' });
-      return res.status(409).json({ error: 'Draft is no longer pending' });
+      return res.status(409).json(barPins ? barPinsChangedBody() : { error: 'Draft is no longer pending' });
+    }
+    // Bar only, as in approve: plain inbound-reply drafts only, judged before any guard.
+    const barLane = barLaneRefusal(draft, barPins);
+    if (barLane) {
+      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      return res.status(409).json(barLane);
     }
 
     // Photo-triage drafts are approve-as-written or reject (codex #4810
@@ -1025,6 +1120,11 @@ router.put('/:id/revise', async (req, res, next) => {
       else await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
+    const barRecipient = await barRecipientRefusal(recipient, barPins);
+    if (barRecipient) {
+      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      return res.status(409).json(barRecipient);
+    }
     const sendPolicy = sendPolicyForDraft(draft, recipient);
 
     const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
@@ -1041,7 +1141,7 @@ router.put('/:id/revise', async (req, res, next) => {
         // consentBasis); legacy null-purpose drafts keep the conversational
         // shape exactly.
         ...sendPolicy,
-        preDispatchCheck: clarifyGuard.preDispatchCheck,
+        preDispatchCheck: clarifyGuard.preDispatchCheck || barDispatchCheck(recipient, barPins),
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',
@@ -1117,16 +1217,18 @@ router.put('/:id/revise', async (req, res, next) => {
 
     res.json({ success: true, responseTimeSeconds: responseTime });
   } catch (err) { next(err); }
-});
+}
+router.put('/:id/revise', reviseDraftHandler);
 
 // PUT /api/admin/drafts/:id/reject
-router.put('/:id/reject', async (req, res, next) => {
+async function rejectDraftHandler(req, res, next) {
   try {
+    const barPins = req.ibDraftPins || null;
     // Pending-only, same as approve/revise: with a list surface, concurrent
     // owner sessions are real — an unconditional update-by-id would relabel
     // an already-SENT row as rejected and report success.
-    const updated = await db('message_drafts')
-      .where({ id: req.params.id, status: 'pending' })
+    const updated = await barClaim(db('message_drafts')
+      .where({ id: req.params.id, status: 'pending' }), barPins)
       .update({
         status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
         // Review provenance, see /:id/revise.
@@ -1135,11 +1237,12 @@ router.put('/:id/reject', async (req, res, next) => {
     if (!updated) {
       const existing = await db('message_drafts').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Draft not found' });
-      return res.status(409).json({ error: 'Draft is no longer pending' });
+      return res.status(409).json(barPins ? barPinsChangedBody() : { error: 'Draft is no longer pending' });
     }
     res.json({ success: true });
   } catch (err) { next(err); }
-});
+}
+router.put('/:id/reject', rejectDraftHandler);
 
 // GET /api/admin/drafts/stats — response time analytics
 router.get('/stats', async (req, res, next) => {
@@ -1232,6 +1335,35 @@ router.get('/:id', async (req, res, next) => {
 router._internals = {
   draftSendPolicyFields, blockedSendResponse, draftMessageType,
   CAMPAIGN_MESSAGE_TYPES, suppressedSendSentinel, finalizeDraftSend,
+  resolveDraftRecipient, parseFlags, isPlainReplyDraft, latestInboundFrom, draftImmediateOnlyLinkRefusal,
 };
+
+// The Intelligence Bar's approve / revise / ignore cards run the SAME handlers as PUT /:id/approve,
+// /:id/revise and /:id/reject without an HTTP request (the admin-customers.js adapter pattern): the
+// handler gets the request fields it reads and a capture response, and the promise resolves the reply it
+// would send, { status, json }. An error passed to next() rejects. `pins` (see the seam comment above)
+// are set only here.
+function runDraftHandlerFromBar(handler, { draftId, body, actor, pins }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const req = {
+      params: { id: String(draftId) },
+      body: body || {},
+      technicianId: actor?.technicianId || null,
+      ibDraftPins: pins,
+    };
+    Promise.resolve(handler(req, res, reject)).catch(reject);
+  });
+}
+const approveDraftFromBar = (args) => runDraftHandlerFromBar(approveDraftHandler, args);
+const reviseDraftFromBar = (args) => runDraftHandlerFromBar(reviseDraftHandler, args);
+const rejectDraftFromBar = (args) => runDraftHandlerFromBar(rejectDraftHandler, args);
+router.approveDraftFromBar = approveDraftFromBar;
+router.reviseDraftFromBar = reviseDraftFromBar;
+router.rejectDraftFromBar = rejectDraftFromBar;
 
 module.exports = router;

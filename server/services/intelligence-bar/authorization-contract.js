@@ -104,6 +104,10 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'create_payment_plan',
   // A stopped reminder sequence has no undo in the portal (the panel offers Resume only for paused or Auto Pay-held ones).
   'stop_invoice_reminders',
+  // A text cannot be unsent, and no page restores a rejected suggested reply.
+  'approve_suggested_reply',
+  'revise_suggested_reply',
+  'ignore_suggested_reply',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
@@ -134,6 +138,9 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   // The confirmed run texts and/or emails the customer their next payment reminder, or the payment plan confirmation.
   'send_invoice_reminder_now',
   'create_payment_plan',
+  // The confirmed run texts the customer the suggested reply (as written, or edited).
+  'approve_suggested_reply',
+  'revise_suggested_reply',
 ]);
 
 // send_invoice: its card lines come from its own preview
@@ -157,6 +164,8 @@ for (const name of ['pause_invoice_reminders', 'resume_invoice_reminders', 'stop
 CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
 // set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
+// The suggested-reply cards: their card lines come from their own preview (message-draft-tools.js cardLines).
+for (const name of ['approve_suggested_reply', 'revise_suggested_reply', 'ignore_suggested_reply']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -241,6 +250,9 @@ const ACTION_LABELS = {
   cancel_payment_plan: 'Cancel a payment plan',
   create_invoice: 'Create a draft invoice (sends nothing)',
   set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
+  approve_suggested_reply: 'Send a suggested reply as written',
+  revise_suggested_reply: 'Send an edited suggested reply',
+  ignore_suggested_reply: 'Dismiss a suggested reply (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -929,6 +941,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // set_customer_bill_to: the customer, the payer, the invoices that move and stay, and that nothing is sent.
   if (toolName === 'set_customer_bill_to' && preview?.preview === true) {
     for (const line of require('./bill-to-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // The suggested-reply cards: the exact text, the recipient (name and masked number) and the message it answers.
+  if (['approve_suggested_reply', 'revise_suggested_reply', 'ignore_suggested_reply'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./message-draft-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {

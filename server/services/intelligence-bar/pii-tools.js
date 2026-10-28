@@ -62,6 +62,11 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'create_invoice',
   // set_customer_bill_to previews name the customer, the payer and the invoices.
   'set_customer_bill_to',
+  // The suggested-reply tools name the customer, a masked number and the message bodies.
+  'list_suggested_replies',
+  'approve_suggested_reply',
+  'revise_suggested_reply',
+  'ignore_suggested_reply',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',
