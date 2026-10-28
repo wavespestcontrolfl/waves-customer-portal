@@ -132,7 +132,11 @@ describe('rescheduleOnce numbers the day after a staff move', () => {
     const result = await move(TARGET, { start: '09:00', end: '10:00' }, STAFF);
     expect(result.success).toBe(true);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
-    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'svc-1' });
+    // A staff move: its day is numbered on its picker's road times (GATE_SAVE_ROAD_TIMES).
+    expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true });
+    // ...and its check reads the same road times (GATE_SAVE_ROAD_TIMES).
+    expect(require('../services/scheduling/occupancy').findConflictingVisits).toHaveBeenCalledWith(
+      expect.objectContaining({ arrivalWindow: expect.objectContaining({ serviceId: 'svc-1', roads: 'cache' }) }));
     expect(placeMovedVisit.mock.invocationCallOrder[0]).toBeGreaterThan(trxScheduled.update.mock.invocationCallOrder[0]);
   });
 
@@ -146,6 +150,15 @@ describe('rescheduleOnce numbers the day after a staff move', () => {
     wireRescheduleMocks(service());
     await move(TARGET, { start: '09:00', end: '10:00' }, { overlapAdvisory: true, placeInRoute: true });
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    expect(placeMovedVisit).toHaveBeenCalledWith(expect.anything(), { serviceId: 'svc-1', staffSave: true });
+  });
+
+  // staffSave is the move's overlapAdvisory: the tech-out auto-mover (placeInRoute
+  // without it) keeps numbering its day on the model.
+  test('the tech-out auto-mover is no staff save', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/tech-out-auto-move.js'), 'utf8');
+    expect(src).toContain('placeInRoute: true');
+    expect(src).not.toContain('overlapAdvisory');
   });
 
   test('callers that never used the staff check keep today\'s behavior', async () => {
@@ -188,7 +201,7 @@ describe('the series and Edit saves place only the visit the staff check placed 
     const start = src.indexOf('async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {');
     const end = src.indexOf('// Read-only preview of what rescheduleSeries would touch', start);
     const body = src.slice(start, end);
-    const statement = 'await placeMovedVisit(trx, { serviceId: sib.id });';
+    const statement = 'await placeMovedVisit(trx, { serviceId: sib.id, staffSave: overlapAdvisory });';
     const call = body.indexOf(statement);
     expect(call).toBeGreaterThan(-1);
     expect(body.indexOf('placeMovedVisit(', call + statement.length)).toBe(-1);
@@ -199,7 +212,9 @@ describe('the series and Edit saves place only the visit the staff check placed 
   test('the Edit save places the edited visit after its moves, unless the office typed a new route number', () => {
     const src = read('../routes/admin-schedule.js');
     expect(src).toContain("if (useArrivalWindows && (scheduleMoveForNotice || assignmentNeedsChange) && !routeNumberTyped) {\n"
-      + "        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id });");
+      + "        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id, staffSave: true });");
+    // Its advisory check reads the pickers' road times too (GATE_SAVE_ROAD_TIMES).
+    expect(src).toContain("arrivalWindow: { serviceId: req.params.id, changes: updates, roads: 'cache' },");
     expect(src).toContain("const routeNumberTyped = Number.isInteger(updates.route_order)\n"
       + "        && updates.route_order !== (commsPeek?.route_order ?? null);");
   });

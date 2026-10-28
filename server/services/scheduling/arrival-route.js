@@ -903,8 +903,10 @@ async function persistArrivalOrder(conn, fit, targetId) {
  *  and leaves the numbers as they were. A day the check cannot certify (a save past its warning, a stop
  *  under way, a missing location, a shared stop) also stays as it was.
  *  Callers hold the tech-day fence; a busy one leaves the numbers to the
- *  writer holding it. Returns the order written, or null. */
-async function placeMovedVisit(conn, { serviceId, source } = {}) {
+ *  writer holding it. A staff save (`staffSave`, GATE_SAVE_ROAD_TIMES)
+ *  numbers a road day on the road times its check read. Returns the order
+ *  written, or null. */
+async function placeMovedVisit(conn, { serviceId, source, staffSave = false } = {}) {
   if (capacityEnabled() || !staffRouteInsertionLive() || !arrivalWindowRoutingEnabled()) return null;
   if (!conn?.isTransaction || !serviceId) return null;
   try {
@@ -918,6 +920,7 @@ async function placeMovedVisit(conn, { serviceId, source } = {}) {
       // the save probe certified this day from there, so the same order wins.
       const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
       if (!context || context.grouped) return null;
+      if (staffSave === true) context.travel = staffSaveTravel(date);
       const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
         windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true });
       if (!fit.feasible || !fit.routeOrder) return null;
@@ -980,6 +983,23 @@ function pickerRoadCheckLive() {
   return gateEnvValue('GATE_PICKER_ROAD_CHECK') && !capacityEnabled();
 }
 
+// GATE_SAVE_ROAD_TIMES (owner 2026-10-28, "yes do this"): a staff save's
+// check and its route number read the road times the pickers bought for that
+// day (`roads: 'cache'`), so a save agrees with the hour its picker offered.
+// Cache only: no Google call inside a save's transaction and no spend; a
+// drive no picker looked up keeps the model. Needs the pickers' road check.
+function saveRoadTimesLive() {
+  return gateEnvValue('GATE_SAVE_ROAD_TIMES') && pickerRoadCheckLive();
+}
+
+// A staff save's travel for `date`: on a road day, the road times the pickers
+// bought (cache only, never a purchase); otherwise null, the model.
+function staffSaveTravel(date) {
+  const roadTimes = require('./hint-road-times');
+  return saveRoadTimesLive() && roadTimes.onRoads(date, etDateString(new Date()))
+    ? roadTimes.createPickerTravel({ cacheOnly: true }) : null;
+}
+
 async function checkArrivalPlacement({
   windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, ...options
 }) {
@@ -987,6 +1007,8 @@ async function checkArrivalPlacement({
   const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
   const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false };
   const roadTimes = require('./hint-road-times');
+  // A staff save reads the road times its picker bought; it never buys.
+  if (context && roads === 'cache') context.travel = staffSaveTravel(options.date);
   if (context && live && roads === true && roadTimes.onRoads(options.date, etDateString(new Date()))) {
     context.travel = roadTimes.createPickerTravel({ spender: roadSpender, ...(pickerBudget ? { budget: pickerBudget } : {}) });
     // Three passes, as certifyArrivalPlacement: a re-timed leg is asked again.
@@ -1006,5 +1028,5 @@ module.exports = {
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
-  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight },
+  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },
 };

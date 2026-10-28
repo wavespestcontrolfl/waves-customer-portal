@@ -217,6 +217,8 @@ async function probeMoveConflicts({
       serviceId: target.id,
       technicianId: target.technicianId || null,
       changes: target.changes,
+      // A staff move reads the road times its picker bought (GATE_SAVE_ROAD_TIMES).
+      roads: 'cache',
       ...(arrivalExcludeServiceIds ? { excludeServiceIds: arrivalExcludeServiceIds } : {}),
     } } : {}),
   });
@@ -2358,7 +2360,9 @@ class SmartRebooker {
         // the day in that order and the board shows it where the box did.
         // A stop still shared with a live member is left as it was by the
         // placement itself (the check never placed it either).
-        await placeMovedVisit(trx, { serviceId });
+        // overlapAdvisory = a staff move (the tech-out mover is none): its day is
+        // numbered on the road times its picker bought (GATE_SAVE_ROAD_TIMES).
+        await placeMovedVisit(trx, { serviceId, staffSave: overlapAdvisory });
       }
 
       if (service.status !== landedStatus) {
@@ -4179,7 +4183,7 @@ class SmartRebooker {
           && (useArrivalWindows || options.placeInRoute === true)
           && (sibDateChanges || anchorTechChanges
             || String(updateData.window_start).slice(0, 5) !== String(sib.window_start || '').slice(0, 5))) {
-          await placeMovedVisit(trx, { serviceId: sib.id });
+          await placeMovedVisit(trx, { serviceId: sib.id, staffSave: overlapAdvisory });
         }
         if (awaitingPlacement || sibClashBeyondHorizon || (anchorCleared && sib.window_start)) {
           // The row just went timed → windowless: pre-close its reminder in
