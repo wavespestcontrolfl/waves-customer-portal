@@ -19,7 +19,7 @@ const { bidDeskLive, bidChecklistLive } = require('../../config/feature-gates');
 const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam } = require('./detector');
 const { attachPatch, reminderDue, datesDue, OPEN_STATUSES } = require('./rules');
 const alerts = require('./alerts');
-const { hasAlignedAuth } = require('../email/inbox-hygiene');
+const { hasAlignedAuth, hasStrictDmarcPass } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 
 // The email with `provider_verified` set: aligned SPF or DKIM for its own From domain in the stored
@@ -27,12 +27,16 @@ const { domainFromAddress } = require('../email/spam-blocker');
 // template only when this is true.
 // `gmail_spam_verified` is the strict reading (resinfo clauses from Google's own authserv-id only, whatever
 // GATE_EMAIL_AUTH_STRICT says): it alone may carry an email past Gmail's SPAM label.
+// `provider_verified_strict` is the strict reading or Google's own DMARC pass for the From domain: the OpenGov and
+// Charlotte County templates trust only it (Charlotte County's SPF names its bounce address only in a quoted string).
 function withProviderCheck(email) {
   const domain = domainFromAddress(email.from_address);
+  const strict = hasAlignedAuth(email.authentication_results, domain, { strict: true });
   return {
     ...email,
     provider_verified: hasAlignedAuth(email.authentication_results, domain),
-    gmail_spam_verified: hasAlignedAuth(email.authentication_results, domain, { strict: true }),
+    gmail_spam_verified: strict,
+    provider_verified_strict: strict || hasStrictDmarcPass(email.authentication_results, domain),
   };
 }
 
@@ -88,7 +92,9 @@ const columnsFor = () => (bidChecklistLive() ? [...BID_COLUMNS, ...BID_CHECKLIST
 
 // ---------- one email ----------
 
-async function findBid(trx, email, groupKey, groupBase = null) {
+const ADDS_TO_EXISTING = new Set(['addendum', 'reminder']);
+
+async function findBid(trx, email, groupKey, groupBase = null, kind = null) {
   const thread = email.gmail_thread_id;
   if (thread) {
     const byThread = await trx('bid_opportunities')
@@ -103,12 +109,19 @@ async function findBid(trx, email, groupKey, groupBase = null) {
   // decided is new work. (A reply in the bid's own thread above still joins it.)
   const exact = await trx('bid_opportunities').where({ group_key: groupKey }).whereIn('status', OPEN_STATUSES)
     .orderBy('created_at').first();
-  if (exact || !groupBase || groupKey !== groupBase) return exact || null;
-  // No package named: join the project's bid only when there is exactly one.
-  const candidates = await trx('bid_opportunities').whereIn('status', OPEN_STATUSES)
-    .where((q) => q.where({ group_key: groupBase }).orWhere('group_key', 'like', `${groupBase.replace(/[\\%_]/g, '\\$&')}#%`))
-    .orderBy('created_at').limit(2);
-  return candidates.length === 1 ? candidates[0] : null;
+  if (exact) return exact;
+  if (groupBase && groupKey === groupBase) {
+    // No package named: join the project's open bid only when there is exactly one.
+    const candidates = await trx('bid_opportunities').whereIn('status', OPEN_STATUSES)
+      .where((q) => q.where({ group_key: groupBase }).orWhere('group_key', 'like', `${groupBase.replace(/[\\%_]/g, '\\$&')}#%`))
+      .orderBy('created_at').limit(2);
+    if (candidates.length === 1) return candidates[0];
+  }
+  // An addendum or a reminder is never new work: with no open bid to join, one for a bid already decided joins that
+  // bid (the newest with the key), so a county's addendum to a bid we declined does not file it again. It rings
+  // nothing there (attachPatch: closed).
+  if (!ADDS_TO_EXISTING.has(kind)) return null;
+  return (await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first()) || null;
 }
 
 /**
@@ -142,7 +155,7 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
     if (await trx('bid_opportunity_emails').where({ email_id: email.id }).first('id')) return { skipped: 'already_filed' };
 
-    const found = await findBid(trx, email, parsed.group_key, parsed.group_base);
+    const found = await findBid(trx, email, parsed.group_key, parsed.group_base, kind);
     // Re-read the bid under a row lock: an operator saving a date between the read and the update must not be
     // overwritten (the advisory lock only orders intake writers).
     const existing = found ? await trx('bid_opportunities').where({ id: found.id }).forUpdate().first() : null;

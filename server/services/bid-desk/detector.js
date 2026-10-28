@@ -16,7 +16,14 @@
  *   Blue Book (ONETEAM) "Bid is due by <h:mm AM> (<Eastern|Central|Mountain|Pacific>) on <Month d, yyyy>",
  *                       "You've been invited to bid on a - <Project> in <City, ST>.", "We are looking for <trade>.",
  *                       "<GC> is sharing this project opportunity with you through The Blue Book Network's ONETEAM."
+ *   OpenGov             "<Agency> has invited you to the following opportunity:" or "<Agency> has just released the
+ *                       following opportunity:", then the title on the next line (no number, no dates)
+ *   Charlotte County    "Addendum Notification for <Bid|Quote> <26-676>", "An addendum has been added to Charlotte County
+ *                       Purchasing Request for <Bid|Quote>: <20260676> - <Title>", the division's address in the header
  * A Blue Book "Project Notification" (the network's own pick of a project, not a contractor's invite) is never a bid.
+ * OpenGov sends both notices by the vendor's registered categories (a "direct invite" to build cemetery columbaria came
+ * the day we registered), so an OpenGov notice is a bid only when its title names our trade (TRADE_WORDS). Charlotte
+ * County's notices follow the commodity codes we registered and are filed as before; the template only adds the keys.
  * A VendorLink broadcast can come from any agency in the country, so one is a bid only when the agency's address is
  * in the Tampa Bay to Southwest Florida ZIP areas (the same ones the SAM.gov reader files). Its "Vendor Commodity
  * Code Changed" list (every open bid that loosely matches, sent when the codes change) is never a bid.
@@ -31,6 +38,8 @@ const BC_DOMAIN = 'buildingconnected.com';
 const PROCORE_DOMAIN = 'procoretech.com';
 const VENDORLINK_DOMAIN = 'myvendorlink.com';
 const BLUEBOOK_DOMAIN = 'thebluebook.com';
+const OPENGOV_DOMAIN = 'opengov.com';
+const CHARLOTTE_DOMAIN = 'charlottecountyfl.gov';
 const PORTAL_DOMAINS = ['bonfirehub.com', 'opengov.com', 'demandstar.com', 'bidnetdirect.com', 'internationaleprocurement.com', 'myflorida.com'];
 const GOV_SUFFIXES = ['.gov', '.fl.us'];
 const INTERNAL_SUBJECT = /^\s*(?:FIX|ACT|FYI|OK)\s*:/;
@@ -52,6 +61,15 @@ const BB_LOOKING = /^We are looking for:?\s*(.*)$/i;
 // Hours to add to the GC's wall time to reach Eastern time (the US zones change clocks on the same dates).
 const BB_ZONE_HOURS = { eastern: 0, central: 1, mountain: 2, pacific: 3 };
 const REMINDER_WORDS = /\breminder\b|\bdue (?:soon|tomorrow|today)\b|\bclosing soon\b|\blast chance\b/i;
+// OpenGov notice line ("<Agency> has invited you to ..." or "<Agency> has just released ..."); the title is the next line.
+const OG_NOTICE = /^(.{2,160}?) has (?:invited you to|just released) the following opportunity:?$/i;
+// Work we bid on, read from an OpenGov broadcast title ("Pest Control Services", "Mole Cricket Application",
+// "Grounds Maintenance", "Lot Mowing"). A title without one of these is another trade's work.
+const TRADE_WORDS = /\b(?:pests?|termites?|mosquito(?:es)?|rodents?|rats?|exterminat\w*|fumigat\w*|insects?|insecticides?|bed ?bugs?|wildlife|mole crickets?|lawns?|turf|weeds?|herbicides?|fertiliz\w*|landscap\w*|grounds|mow(?:ing)?|vegetation|trees?|shrubs?)\b/i;
+// Charlotte County Purchasing notice lines.
+const CC_NOTICE = /^Addendum Notification for (?:Bid|Quote|Proposal|RFP|RFQ|ITB|ITN)\s+(\d{2}-\d{2,5})$/i;
+const CC_ADDED = /^An addendum has been added to Charlotte County Purchasing Request for (?:Bid|Quote|Proposal)s?\s*:\s*(?:\d{6,10}\s*-\s*)?(.+?)\.?$/i;
+const CC_DIVISION = /^Charlotte County Purchasing\b/i;
 
 const MONTH_INDEX = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
@@ -154,6 +172,12 @@ function senderKind(email) {
   if (inDomain(domain, PROCORE_DOMAIN)) return verified ? 'procore' : null;
   if (inDomain(domain, VENDORLINK_DOMAIN)) return verified ? 'vendorlink' : null;
   if (inDomain(domain, BLUEBOOK_DOMAIN)) return verified ? 'bluebook' : null;
+  // OpenGov and Charlotte County templates trust only the strict reading (`provider_verified_strict`: resinfo clauses
+  // or Google's DMARC pass; the loose one can be fooled by a quoted MAIL FROM). Anything less falls through to plain
+  // government mail (bid words in the subject).
+  const strict = email.provider_verified_strict === true;
+  if (strict && inDomain(domain, OPENGOV_DOMAIN)) return 'opengov';
+  if (strict && inDomain(domain, CHARLOTTE_DOMAIN)) return 'charlotte_county';
   if (PORTAL_DOMAINS.some((root) => inDomain(domain, root)) || GOV_SUFFIXES.some((suffix) => domain.endsWith(suffix))) {
     return 'gov_email';
   }
@@ -184,6 +208,9 @@ function detectBidEmail(email = {}) {
   return { bid: true, source, kind: classifyKind(email), reason: 'matched' };
 }
 
+// Senders whose bid-word mail is government mail (Charlotte County keeps its source; the template adds only keys).
+const GOV_SENDERS = new Set(['gov_email', 'charlotte_county']);
+
 // The source a bid from this sender would carry, or why the email is not a bid.
 function bidSource(email, sender, bidWords) {
   const subject = String(email.subject || '');
@@ -205,7 +232,15 @@ function bidSource(email, sender, bidWords) {
     return bluebookLines(email).some((line) => BB_INVITED.test(line) || BB_DUE.test(line))
       ? { source: 'bluebook' } : { reason: 'provider_not_bid' };
   }
-  if (bidWords) return { source: sender === 'gov_email' ? 'gov_email' : 'email_subject' };
+  if (sender === 'opengov') {
+    // Its notices carry no bid words. Bid words in the subject still file it as before; otherwise a notice needs our
+    // trade in its title, and account mail or any other OpenGov wording is not a bid.
+    if (bidWords) return { source: 'gov_email' };
+    const notice = opengovNotice(bodyLines(email));
+    if (notice) return TRADE_WORDS.test(notice.title) ? { source: 'gov_email' } : { reason: 'outside_trade' };
+    return { reason: 'provider_not_bid' };
+  }
+  if (bidWords) return { source: GOV_SENDERS.has(sender) ? 'gov_email' : 'email_subject' };
   return { reason: 'not_bid' };
 }
 
@@ -385,11 +420,40 @@ function bluebookDue(lines) {
   return null;
 }
 
+// The OpenGov notice (an invite or a release): the agency, and the title on the line after.
+function opengovNotice(lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = OG_NOTICE.exec(lines[i]);
+    if (match && lines[i + 1]) return { agency: match[1].trim(), title: lines[i + 1].trim() };
+  }
+  return null;
+}
+
+function parseOpenGov(lines) {
+  const notice = opengovNotice(lines);
+  return notice ? { gc_or_agency: notice.agency, project_title: notice.title } : {};
+}
+
+// "Addendum Notification for Bid 26-676", then "... Request for Bid: 20260676 - <Title>". The division's address line
+// (with its phone number dropped) is the location.
+function parseCharlotteCounty(lines) {
+  const out = {};
+  const value = (re) => lines.map((line) => re.exec(line)).find(Boolean)?.[1]?.trim() || null;
+  out.solicitation_number = value(CC_NOTICE);
+  out.project_title = value(CC_ADDED);
+  if (!out.solicitation_number || !out.project_title) return {};
+  out.gc_or_agency = lines.find((line) => CC_DIVISION.test(line)) || null;
+  const address = lines.find((line) => AREA_ZIP.test(line));
+  if (address) out.location = address.replace(/\s+\(?\d{3}\)?[-. ]\d{3}[-.]\d{4}$/, '').trim();
+  return out;
+}
+
 const normalizeTitle = (title) => String(title || '')
   .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 const TEMPLATE_PARSERS = {
   buildingconnected: parseBuildingConnected, procore: parseProcore, vendorlink: parseVendorLink, bluebook: parseBlueBook,
+  opengov: parseOpenGov, charlotte_county: parseCharlotteCounty,
 };
 
 // The cross-thread identity of a bid. Only a provider template names the GC and the project (read only when the
