@@ -44,13 +44,29 @@ const SCHEDULING_TRAVEL_BUDGET_MS = 15 * 60 * 1000;
 // searches fall back to the model ("~").
 const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 600, maxElements: 1500 };
 
-// `traffic: false` (the pickers' later days, GATE_PICKER_ROAD_CHECK): road
-// times without traffic (routingPreference TRAFFIC_UNAWARE, Google's
-// Essentials price, half the traffic-aware one). The answer does not depend
-// on the hour, so one lookup per pair of places serves every departure.
+// How a matrix source asks Google and keys its answers. `traffic: false`
+// (the pickers' later days, GATE_PICKER_ROAD_CHECK): road times without
+// traffic (routingPreference TRAFFIC_UNAWARE, Google's Essentials price, half
+// the traffic-aware one); the answer does not depend on the hour, so one
+// lookup per pair of places serves every departure.
+const MATRIX_MODES = {
+  traffic: {
+    source: 'google_traffic',
+    key: ({ date, from, to, departureMin }, pin) => `${date}|${Math.ceil(departureMin)}|${pin(from)}>${pin(to)}`,
+    preference: (batch) => ({ routingPreference: 'TRAFFIC_AWARE', departureTime: batch.departure.toISOString() }),
+  },
+  plain: {
+    source: 'google_road',
+    key: ({ from, to }, pin) => `${pin(from)}>${pin(to)}`,
+    preference: () => ({ routingPreference: 'TRAFFIC_UNAWARE' }),
+  },
+};
+
+// `signal` (the staff pickers' request, GATE_PICKER_ROAD_CHECK): once it
+// aborts (the picker closed or searched again), no queued request is sent.
 function createSchedulingTravel({
   maxRequests = 40, maxElements = 800, budgetMs = 6000, fetchImpl = fetch, now = () => Date.now(),
-  sharedBudget = schedulingTravelBudget, workers = 4, traffic = true,
+  sharedBudget = schedulingTravelBudget, workers = 4, traffic = true, signal = null,
 } = {}) {
   const sharedMaxRequests = sharedBudget.maxRequests ?? 40;
   const sharedMaxElements = sharedBudget.maxElements ?? 800;
@@ -58,17 +74,16 @@ function createSchedulingTravel({
   const results = new Map();
   const attempted = new Set();
   let deadline = null;
+  // An aborted request ends the budget's deadline: every worker already
+  // stops there before it sends the next queued request.
+  if (signal?.aborted) deadline = 0;
+  signal?.addEventListener('abort', () => { deadline = 0; }, { once: true });
   const apiKey = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
   let requests = 0;
   let elements = 0;
   const pin = (p) => `${Number(p.lat)},${Number(p.lng)}`;
-  const keyFor = traffic
-    ? ({ date, from, to, departureMin }) => `${date}|${Math.ceil(departureMin)}|${pin(from)}>${pin(to)}`
-    : ({ from, to }) => `${pin(from)}>${pin(to)}`;
-  const googleSource = traffic ? 'google_traffic' : 'google_road';
-  const preference = traffic
-    ? (batch) => ({ routingPreference: 'TRAFFIC_AWARE', departureTime: batch.departure.toISOString() })
-    : () => ({ routingPreference: 'TRAFFIC_UNAWARE' });
+  const mode = MATRIX_MODES[traffic ? 'traffic' : 'plain'];
+  const keyFor = (leg) => mode.key(leg, pin);
   const validPin = (p) => p?.lat != null && p?.lng != null
     && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))
     && Math.abs(Number(p.lat)) <= 90 && Math.abs(Number(p.lng)) <= 180
@@ -149,7 +164,7 @@ function createSchedulingTravel({
               'X-Goog-FieldMask': 'originIndex,destinationIndex,status,condition,duration,fallbackInfo' },
             body: JSON.stringify({ origins: [{ waypoint: toWaypoint(batch.from.lat, batch.from.lng) }],
               destinations: batch.legs.map((leg) => ({ waypoint: toWaypoint(leg.to.lat, leg.to.lng) })),
-              travelMode: 'DRIVE', ...preference(batch) }),
+              travelMode: 'DRIVE', ...mode.preference(batch) }),
             signal: AbortSignal.timeout(Math.max(1, Math.min(1800, deadline - now()))),
           });
           const data = response.ok ? await response.json() : null;
@@ -162,7 +177,7 @@ function createSchedulingTravel({
               if ((row.status?.code ?? 0) !== 0 || row.condition !== 'ROUTE_EXISTS'
                 || row.fallbackInfo || !Number.isFinite(seconds) || seconds < 0
                 || (seconds === 0 && pin(leg.from) !== pin(leg.to))) continue;
-              results.set(keyFor(leg), { minutes: Math.ceil(seconds / 60), source: googleSource, reason: null });
+              results.set(keyFor(leg), { minutes: Math.ceil(seconds / 60), source: mode.source, reason: null });
             }
             reason = 'partial_matrix';
           }

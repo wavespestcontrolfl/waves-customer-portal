@@ -972,10 +972,18 @@ async function recordCapacityDecision(conn, fit, targetId) {
 // (road times are preloaded before a scheduling lock). `roadSpender` = the
 // staff user the lookups are counted against (picker-road-spend.js); none =
 // no Google. `pickerBudget` = the request's shared budget, when it has one.
+// The staff pickers' Google route check (GATE_PICKER_ROAD_CHECK). Under
+// GATE_SCHEDULING_CAPACITY the pickers list the capacity engine's hours
+// (find-time.js findCapacitySlots), which this check does not drive, so it
+// stays off there too: a listed hour and its live check never disagree.
+function pickerRoadCheckLive() {
+  return gateEnvValue('GATE_PICKER_ROAD_CHECK') && !capacityEnabled();
+}
+
 async function checkArrivalPlacement({
   windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, ...options
 }) {
-  const live = gateEnvValue('GATE_PICKER_ROAD_CHECK');
+  const live = pickerRoadCheckLive();
   const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
   const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false };
   const roadTimes = require('./hint-road-times');
@@ -993,7 +1001,7 @@ async function checkArrivalPlacement({
 
 
 module.exports = {
-  arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
+  arrivalWindowRoutingEnabled, pickerRoadCheckLive, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,

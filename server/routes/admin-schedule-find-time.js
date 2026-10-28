@@ -53,7 +53,7 @@ const { createPickerBudget } = require('../services/scheduling/hint-road-times')
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
-const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
+const { arrivalWindowRoutingEnabled, pickerRoadCheckLive } = require('../services/scheduling/arrival-route');
 const { bookingPropertyStamp } = require('../services/customer-properties');
 const { isTechnicianRequest, technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
 
@@ -363,7 +363,7 @@ router.post('/', async (req, res) => {
     // technician's own picker keeps the model, so the tech portal can never
     // spend the shared allowance.
     const paidRoads = !isTech;
-    const pickerRoadCheck = hint && paidRoads && gateEnvValue('GATE_PICKER_ROAD_CHECK');
+    const pickerRoadCheck = hint && paidRoads && pickerRoadCheckLive();
     // One Google budget for everything this request asks (the list's route
     // check and the picked-hour verdict), counted against the staff user who
     // asked (picker-road-spend.js daily / monthly ceilings). A picker that

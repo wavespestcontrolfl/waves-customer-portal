@@ -125,3 +125,23 @@ test('the default stays traffic-aware at the leg\'s departure', async () => {
   expect(body.departureTime).toBe('2027-01-15T13:00:00.000Z');
   delete process.env.GOOGLE_MAPS_API_KEY;
 });
+
+// GATE_PICKER_ROAD_CHECK: a picker that closes (or searches again) aborts its
+// request; no request still queued is sent to Google after that.
+test('an aborted signal sends no queued request', async () => {
+  process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
+  const controller = new AbortController();
+  const fetchImpl = jest.fn(async () => {
+    controller.abort(); // the picker closes while the first request is out
+    return { ok: true, json: async () => [{ originIndex: 0, destinationIndex: 0, condition: 'ROUTE_EXISTS', duration: '601s' }] };
+  });
+  const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl, now: () => now.getTime(), workers: 1, signal: controller.signal });
+  const legs = [480, 540, 600].map((departureMin, i) => ({ date, from: RouteOptimizer.HQ, to: { lat: 27.5 + i / 100, lng: -82.4 }, departureMin }));
+  await provider.preload(legs);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+  // Already aborted: nothing at all.
+  const none = jest.fn();
+  await RouteOptimizer.createSchedulingTravel({ fetchImpl: none, now: () => now.getTime(), signal: controller.signal }).preload(legs);
+  expect(none).not.toHaveBeenCalled();
+  delete process.env.GOOGLE_MAPS_API_KEY;
+});

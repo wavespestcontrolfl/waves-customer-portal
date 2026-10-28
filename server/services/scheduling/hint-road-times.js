@@ -276,7 +276,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
   const sources = {};
   for (const mode of Object.keys(MODES)) {
     sources[mode] = (factories[mode] || (() => RouteOptimizer.createSchedulingTravel({
-      ...travelFor[mode], sharedBudget: RouteOptimizer.hintTravelBudget,
+      ...travelFor[mode], sharedBudget: RouteOptimizer.hintTravelBudget, signal: budget.signal,
     })))();
   }
   const asked = new Set();

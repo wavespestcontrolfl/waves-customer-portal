@@ -372,6 +372,24 @@ test.each([false, true])('Quick Move gets the route check on Google only with GA
   }
 });
 
+// Under GATE_SCHEDULING_CAPACITY the pickers list the capacity engine's hours,
+// which the road check does not drive: it stays off, so a listed hour and its
+// live check never disagree (Codex #6881 pre-push audit).
+test('the picker road check stays off under GATE_SCHEDULING_CAPACITY', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  process.env.GATE_PICKER_ROAD_CHECK = 'true';
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  const { pickerRoadCheckLive } = jest.requireActual('../services/scheduling/arrival-route');
+  try {
+    expect(pickerRoadCheckLive()).toBe(false);
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    expect(pickerRoadCheckLive()).toBe(true);
+  } finally {
+    delete process.env.GATE_PICKER_ROAD_CHECK;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+  }
+});
+
 // ── Picked-hour scoring ──────────────────────────────────────────────
 // A hint request may carry the hour already in the picker; the answer says
 // what THAT hour costs (drive into the stop + what the insertion adds) by
