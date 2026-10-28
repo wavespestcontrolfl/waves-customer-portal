@@ -299,13 +299,18 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     if (answer?.source === m.source && Number.isFinite(answer.minutes)) m.remember(r.key, r.asLeg, answer.minutes, t);
     return answer;
   }
+  // Buys `entries` from the mode's source; returns how many it never sent.
   async function buy(mode, entries) {
-    budget[mode] += entries.length;
+    if (!entries.length) return 0;
     entries.forEach(([key]) => asked.add(key));
+    const before = sources[mode].diagnostics().elements;
     await sources[mode].preload(entries.map(([, leg]) => leg));
+    const unsent = entries.length - (sources[mode].diagnostics().elements - before);
+    budget[mode] += entries.length - unsent;
     // Keep what Google answered in the process cache (lookup remembers), so
     // the next search, or the next picker for this visit, asks nothing.
     entries.forEach(([, leg]) => lookup(leg));
+    return unsent;
   }
   return {
     async preload(legs) {
@@ -320,11 +325,13 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
       const take = (mode) => [...want[mode]].slice(0, Math.max(0, REQUEST_MAX[mode] - budget[mode]));
       const entries = { traffic: take('traffic'), plain: take('plain') };
       if (!entries.traffic.length && !entries.plain.length) return;
-      const { reserveRoadSpend } = require('./picker-road-spend');
-      const reserved = await reserveRoadSpend({ spender, pro: entries.traffic.length, plain: entries.plain.length });
+      const spend = require('./picker-road-spend');
+      const reserved = await spend.reserveRoadSpend({ spender, pro: entries.traffic.length, plain: entries.plain.length });
       if (!reserved.allowed) { budget.refused = reserved.reason; return; }
-      if (budget.signal?.aborted) return;
-      await Promise.all(Object.keys(entries).filter((mode) => entries[mode].length).map((mode) => buy(mode, entries[mode])));
+      const [pro, plain] = await Promise.all([buy('traffic', entries.traffic), buy('plain', entries.plain)]);
+      // Lookups the source never sent (its burst allowance, its deadline, a
+      // closed picker) were not bought: give them back.
+      await spend.releaseRoadSpend({ spender, pro, plain, day: reserved.day });
     },
     lookup,
   };

@@ -12,7 +12,8 @@
  *   - the account's day stays within PICKER_ROAD_DAILY_CAP_CENTS,
  *   - the account's month stays within PICKER_ROAD_MONTHLY_CAP_CENTS.
  * Any cap crossed = the transaction rolls back (nothing counted) and the
- * search uses the app's own drive model ("~") instead of Google.
+ * search uses the app's own drive model ("~") instead of Google. Lookups the
+ * Google source then never sends are given back (releaseRoadSpend).
  *
  * Cost per lookup (Google's list price, before the monthly free usage):
  * traffic-aware = Route Matrix Pro, 1 cent; plain road time = Essentials,
@@ -103,7 +104,7 @@ async function reserveRoadSpend({ spender, pro = 0, plain = 0, now = new Date(),
       logger.info(`[picker-road-spend] +${pro} traffic-aware, +${plain} plain lookups: today $${(accountDay / 1000).toFixed(2)}`
         + ` of $${(limits.dayMills / 1000).toFixed(2)}`);
     });
-    return { allowed: true };
+    return { allowed: true, day };
   } catch (err) {
     if (err instanceof CapReached) {
       warn(`${err.message} reached: Google road times paused, the pickers use the model`);
@@ -114,4 +115,25 @@ async function reserveRoadSpend({ spender, pro = 0, plain = 0, now = new Date(),
   }
 }
 
-module.exports = { reserveRoadSpend, caps, costMills, _test: { MILLS } };
+/**
+ * Give back reserved lookups the Google source never sent (its 15-minute
+ * burst allowance, its deadline, or a closed picker stopped them), on the
+ * reservation's own `day`, for the account and the staff user. A request that
+ * was sent stays counted, answered or not. Never throws: a failed release
+ * leaves the count high, the safe side.
+ */
+async function releaseRoadSpend({ spender, pro = 0, plain = 0, day, conn = db } = {}) {
+  if (!spender || !day || (!(pro > 0) && !(plain > 0))) return;
+  try {
+    await conn.raw(
+      `UPDATE picker_road_spend
+       SET pro_elements = GREATEST(0, pro_elements - ?), plain_elements = GREATEST(0, plain_elements - ?), updated_at = now()
+       WHERE day = ?::date AND bucket IN (?, ?)`,
+      [pro, plain, day, ACCOUNT, `staff:${spender}`],
+    );
+  } catch (err) {
+    warn(`release failed, the day's count stays high: ${err && err.message}`);
+  }
+}
+
+module.exports = { reserveRoadSpend, releaseRoadSpend, caps, costMills, _test: { MILLS } };

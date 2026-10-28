@@ -17,11 +17,14 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/scheduling/picker-road-spend', () => ({ reserveRoadSpend: jest.fn(async () => ({ allowed: true })) }));
+jest.mock('../services/scheduling/picker-road-spend', () => ({
+  reserveRoadSpend: jest.fn(async () => ({ allowed: true, day: '2027-03-01' })),
+  releaseRoadSpend: jest.fn(async () => {}),
+}));
 
 const { evaluateArrivalPlacement } = require('../services/scheduling/arrival-route');
 const { createPickerTravel, createPickerBudget, _test } = require('../services/scheduling/hint-road-times');
-const { reserveRoadSpend } = require('../services/scheduling/picker-road-spend');
+const { reserveRoadSpend, releaseRoadSpend } = require('../services/scheduling/picker-road-spend');
 
 // 10:00 ET on 2027-03-01.
 const NOW = new Date('2027-03-01T15:00:00Z');
@@ -72,6 +75,7 @@ describe('createPickerTravel', () => {
     _test.roadCache.clear();
     _test.plainCache.clear();
     reserveRoadSpend.mockClear();
+    releaseRoadSpend.mockClear();
     delete process.env.PICKER_ROAD_TRAFFIC_DAYS;
     delete process.env.PICKER_ROAD_PLAIN_DAYS;
   });
@@ -83,37 +87,38 @@ describe('createPickerTravel', () => {
     return d.toISOString().slice(0, 10);
   };
   // Inner sources that record what they were asked and answer as Google would.
-  // Like createSchedulingTravel: only a leg it was asked for has Google's
-  // answer; any other leg gets the conservative model.
-  const fakeSources = () => {
+  // Like createSchedulingTravel: only a leg it sent has Google's answer (any
+  // other leg gets the conservative model), and diagnostics() counts what it
+  // sent. `sends: false` = a source that sends nothing (its burst allowance,
+  // deadline or a closed picker).
+  const fakeSources = ({ sends = true } = {}) => {
     const asked = { traffic: [], plain: [] };
     const trafficKey = (leg) => `${leg.date}@${leg.departureMin}|${leg.to.lat}`;
     const pairKey = (leg) => `${leg.from.lat}>${leg.to.lat}`;
     const got = { traffic: new Set(), plain: new Set() };
+    const sent = { traffic: 0, plain: 0 };
     const model = { minutes: 99, source: 'conservative_model', reason: 'request_budget' };
+    const source = (mode, keyOf, answer, label) => () => ({
+      preload: async (legs) => {
+        if (!sends) return;
+        asked[mode].push(...legs.map(label));
+        legs.forEach((leg) => got[mode].add(keyOf(leg)));
+        sent[mode] += legs.length;
+      },
+      lookup: (leg) => (got[mode].has(keyOf(leg)) ? answer : model),
+      diagnostics: () => ({ requests: sent[mode], elements: sent[mode] }),
+    });
     return {
       asked,
       factories: {
-        traffic: () => ({
-          preload: async (legs) => {
-            asked.traffic.push(...legs.map((leg) => `${leg.date}@${leg.departureMin}`));
-            legs.forEach((leg) => got.traffic.add(trafficKey(leg)));
-          },
-          lookup: (leg) => (got.traffic.has(trafficKey(leg)) ? { minutes: 17, source: 'google_traffic', reason: null } : model),
-        }),
-        plain: () => ({
-          preload: async (legs) => {
-            asked.plain.push(...legs.map((leg) => leg.date));
-            legs.forEach((leg) => got.plain.add(pairKey(leg)));
-          },
-          lookup: (leg) => (got.plain.has(pairKey(leg)) ? { minutes: 14, source: 'google_road', reason: null } : model),
-        }),
+        traffic: source('traffic', trafficKey, { minutes: 17, source: 'google_traffic', reason: null }, (leg) => `${leg.date}@${leg.departureMin}`),
+        plain: source('plain', pairKey, { minutes: 14, source: 'google_road', reason: null }, (leg) => leg.date),
       },
     };
   };
   const leg = (date, departureMin, to = TO) => ({ date, from: FROM, to, departureMin });
-  const make = (opts = {}) => {
-    const fake = fakeSources();
+  const make = (opts = {}, fakeOpts = {}) => {
+    const fake = fakeSources(fakeOpts);
     const travel = createPickerTravel({ spender: 'staff-1', factories: fake.factories, now: () => NOW.getTime(), ...opts });
     return { ...fake, travel };
   };
@@ -201,6 +206,24 @@ describe('createPickerTravel', () => {
     expect(first.asked.traffic).toHaveLength(120);
     expect(second.asked.traffic).toHaveLength(_test.REQUEST_MAX.traffic - 120);
     expect(budget.traffic).toBe(_test.REQUEST_MAX.traffic);
+  });
+
+  // Pre-push audit #6881 (P1): a reservation the source never sent (burst
+  // allowance, deadline, closed picker) is given back, on its own day.
+  test('lookups the source never sent are given back', async () => {
+    const budget = createPickerBudget();
+    const { travel, asked } = make({ budget }, { sends: false });
+    await travel.preload([leg(plus(1), 9 * 60), leg(plus(3), 9 * 60)]);
+    expect(asked).toEqual({ traffic: [], plain: [] });
+    expect(reserveRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 1, plain: 1 });
+    expect(releaseRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 1, plain: 1, day: '2027-03-01' });
+    expect(budget).toMatchObject({ traffic: 0, plain: 0 });
+  });
+
+  test('lookups the source sent stay counted', async () => {
+    const { travel } = make();
+    await travel.preload([leg(plus(1), 9 * 60), leg(plus(3), 9 * 60)]);
+    expect(releaseRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 0, plain: 0, day: '2027-03-01' });
   });
 
   test('a second look is served from the cache', async () => {

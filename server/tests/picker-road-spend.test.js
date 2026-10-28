@@ -14,7 +14,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
-const { reserveRoadSpend, caps, costMills } = require('../services/scheduling/picker-road-spend');
+const { reserveRoadSpend, releaseRoadSpend, caps, costMills } = require('../services/scheduling/picker-road-spend');
 
 const NOW = new Date('2026-11-12T15:00:00Z'); // 10:00 ET, Nov 12
 
@@ -67,7 +67,7 @@ describe('reserveRoadSpend', () => {
 
   test('counts the account and the staff user in one upsert, on the Eastern day', async () => {
     const { conn, seen } = fakeConn({ rows: counted(30, 60, 30, 60) });
-    await expect(reserveRoadSpend({ spender: 's1', pro: 30, plain: 60, conn, now: NOW })).resolves.toEqual({ allowed: true });
+    await expect(reserveRoadSpend({ spender: 's1', pro: 30, plain: 60, conn, now: NOW })).resolves.toEqual({ allowed: true, day: '2026-11-12' });
     expect(seen.committed).toBe(true);
     const [{ sql, bindings }] = seen.raw;
     expect(sql).toMatch(/INSERT INTO picker_road_spend \(bucket, day, pro_elements, plain_elements\)/);
@@ -101,7 +101,7 @@ describe('reserveRoadSpend', () => {
   test('exactly at a ceiling is still allowed', async () => {
     process.env.PICKER_ROAD_DAILY_CAP_CENTS = '200';
     const { conn } = fakeConn({ rows: counted(200, 0, 200, 0) });
-    await expect(reserveRoadSpend({ spender: 's1', pro: 10, conn, now: NOW })).resolves.toEqual({ allowed: true });
+    await expect(reserveRoadSpend({ spender: 's1', pro: 10, conn, now: NOW })).resolves.toEqual({ allowed: true, day: '2026-11-12' });
   });
 
   test('no counter: no Google (fail closed)', async () => {
@@ -125,6 +125,33 @@ describe('reserveRoadSpend', () => {
     expect(c.dayMills).toBe(3500);
     expect(c.userDayMills).toBe(caps.DEFAULTS.userDailyCents * 10);
     expect(c.monthMills).toBe(caps.DEFAULTS.monthlyCents * 10);
+  });
+});
+
+describe('releaseRoadSpend', () => {
+  test('gives back unsent lookups on the reservation day, for the account and the staff user, never below zero', async () => {
+    const raw = jest.fn(async () => ({ rowCount: 2 }));
+    await releaseRoadSpend({ spender: 's1', pro: 3, plain: 5, day: '2026-11-12', conn: { raw } });
+    const [sql, bindings] = raw.mock.calls[0];
+    expect(sql).toMatch(/UPDATE picker_road_spend/);
+    expect(sql).toMatch(/GREATEST\(0, pro_elements - \?\)/);
+    expect(sql).toMatch(/GREATEST\(0, plain_elements - \?\)/);
+    expect(bindings).toEqual([3, 5, '2026-11-12', 'all', 'staff:s1']);
+  });
+
+  test.each([
+    ['nothing unsent', { spender: 's1', pro: 0, plain: 0, day: '2026-11-12' }],
+    ['no staff user', { spender: null, pro: 2, plain: 0, day: '2026-11-12' }],
+    ['no reservation day', { spender: 's1', pro: 2, plain: 0 }],
+  ])('%s: no write', async (_name, args) => {
+    const raw = jest.fn();
+    await releaseRoadSpend({ ...args, conn: { raw } });
+    expect(raw).not.toHaveBeenCalled();
+  });
+
+  test('a failed release never throws (the count stays high)', async () => {
+    const raw = jest.fn(async () => { throw new Error('connection reset'); });
+    await expect(releaseRoadSpend({ spender: 's1', pro: 1, day: '2026-11-12', conn: { raw } })).resolves.toBeUndefined();
   });
 });
 
