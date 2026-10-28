@@ -88,7 +88,9 @@ const columnsFor = () => (bidChecklistLive() ? [...BID_COLUMNS, ...BID_CHECKLIST
 
 // ---------- one email ----------
 
-async function findBid(trx, email, groupKey, groupBase = null) {
+const ADDS_TO_EXISTING = new Set(['addendum', 'reminder']);
+
+async function findBid(trx, email, groupKey, groupBase = null, kind = null) {
   const thread = email.gmail_thread_id;
   if (thread) {
     const byThread = await trx('bid_opportunities')
@@ -103,6 +105,12 @@ async function findBid(trx, email, groupKey, groupBase = null) {
   // decided is new work. (A reply in the bid's own thread above still joins it.)
   const exact = await trx('bid_opportunities').where({ group_key: groupKey }).whereIn('status', OPEN_STATUSES)
     .orderBy('created_at').first();
+  // An addendum or a reminder is never new work: one for a bid already decided joins that bid (the newest with the
+  // key), so a county's addendum to a bid we declined does not file it again. It rings nothing (attachPatch: closed).
+  if (!exact && ADDS_TO_EXISTING.has(kind)) {
+    const decided = await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first();
+    if (decided) return decided;
+  }
   if (exact || !groupBase || groupKey !== groupBase) return exact || null;
   // No package named: join the project's bid only when there is exactly one.
   const candidates = await trx('bid_opportunities').whereIn('status', OPEN_STATUSES)
@@ -142,7 +150,7 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
     if (await trx('bid_opportunity_emails').where({ email_id: email.id }).first('id')) return { skipped: 'already_filed' };
 
-    const found = await findBid(trx, email, parsed.group_key, parsed.group_base);
+    const found = await findBid(trx, email, parsed.group_key, parsed.group_base, kind);
     // Re-read the bid under a row lock: an operator saving a date between the read and the update must not be
     // overwritten (the advisory lock only orders intake writers).
     const existing = found ? await trx('bid_opportunities').where({ id: found.id }).forUpdate().first() : null;

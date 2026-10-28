@@ -432,6 +432,31 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(again.bidId).not.toBe(bidId);
     });
 
+    test('a county addendum in a new thread joins the bid it names, even after it was declined, and rings nothing', async () => {
+      // Charlotte County sends every addendum in its own thread; the notice template gives them one key.
+      const ccEmail = (subjectNumber, threadId) => storeEmail({
+        from_address: 'bcc-purchasing@charlottecountyfl.gov', from_name: 'Charlotte County Purchasing', gmail_thread_id: threadId,
+        subject: `Charlotte County Purchasing Addendum Notification for Bid ${subjectNumber}`, body_text: [
+          'Charlotte County Purchasing Division', '100 Sample Circle, Suite 1 Sampleport, FL 33948 941-555-0100',
+          `Addendum Notification for Bid ${subjectNumber}`,
+          `An addendum has been added to Charlotte County Purchasing Request for Bid: 20260601 - Sample Park Grounds Maintenance`,
+        ].join('\n'),
+      });
+      const first = await service.ingestEmail(await ccEmail('26-601', 't-cc-1'));
+      expect(first.created).toBe(true);
+      expect(await bidRow(first.bidId)).toMatchObject({ solicitation_number: '26-601', group_key: expect.stringContaining('|26 601') });
+      const second = await service.ingestEmail(await ccEmail('26-601', 't-cc-2'));
+      expect(second).toMatchObject({ created: false, bidId: first.bidId });
+      await mockPg('bid_opportunities').where({ id: first.bidId }).update({ status: 'no_bid' });
+      raiseAdminAlert.mockClear();
+      const third = await service.ingestEmail(await ccEmail('26-601', 't-cc-3'));
+      expect(third).toMatchObject({ created: false, bidId: first.bidId, kind: 'addendum' });
+      expect(await links(first.bidId)).toHaveLength(3);
+      expect(await bidRow(first.bidId)).toMatchObject({ status: 'no_bid' });
+      expect(rung('new')).toHaveLength(0);
+      expect(rung('addendum')).toHaveLength(0);
+    });
+
     test('the late pass pages past non-bid mail to a late bid row', async () => {
       await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
       await storeEmail({ from_address: 'friend@example.test', subject: 'Lunch?', created_at: new Date(NOW.getTime() - 2 * 60000), received_at: new Date(NOW.getTime() - 2 * 60000) });

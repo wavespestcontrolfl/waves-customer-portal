@@ -375,6 +375,87 @@ describe('VendorLink solicitation broadcasts', () => {
   });
 });
 
+// The SHAPE of OpenGov's notices (the delivered text part); invented agency and titles.
+const OG_BODY = (line = 'Sample County has just released the following opportunity:', title = 'Sample County Pest Control Services') => [
+  'Hi Pat,', '', line, title, '', 'View Opportunity:', 'https://url000.opengov.example/ls/click?upn=fixture', '',
+  'You are receiving this email because Sample County wanted to notify all their vendors about this opportunity.',
+].join('\n');
+const ogNotice = (over = {}) => email({
+  from_address: 'procurement-notifications@opengov.com', from_name: 'OpenGov Procurement',
+  subject: 'New Opportunity Issued by Sample County: Sample County Pest Control Services', body_text: OG_BODY(), ...over,
+});
+
+describe('OpenGov notices', () => {
+  test('a release or an invite whose title names our trade is a bid, read from the fixed template', () => {
+    expect(detectBidEmail(ogNotice())).toMatchObject({ bid: true, source: 'gov_email', kind: 'invite' });
+    expect(parseBidEmail(ogNotice())).toMatchObject({
+      template: 'opengov', gc_or_agency: 'Sample County', project_title: 'Sample County Pest Control Services', due_at: null,
+    });
+    const invite = ogNotice({
+      subject: 'City of Sampleton has invited you to: Mole Cricket Application',
+      body_text: OG_BODY('City of Sampleton has invited you to the following opportunity:', 'Mole Cricket Application'),
+    });
+    expect(detectBidEmail(invite)).toMatchObject({ bid: true, source: 'gov_email' });
+    expect(parseBidEmail(invite)).toMatchObject({ gc_or_agency: 'City of Sampleton', project_title: 'Mole Cricket Application' });
+  });
+
+  test('a title from another trade is not a bid, invite or release (both follow registered categories)', () => {
+    expect(detectBidEmail(ogNotice({ body_text: OG_BODY(undefined, 'Sample County Parking Lot Sweeping') })))
+      .toMatchObject({ bid: false, reason: 'outside_trade' });
+    expect(detectBidEmail(ogNotice({
+      body_text: OG_BODY('City of Sampleton has invited you to the following opportunity:', 'Construction of Two (2) Granite Benches'),
+    }))).toMatchObject({ bid: false, reason: 'outside_trade' });
+  });
+
+  test('account mail is not a bid; a forged OpenGov notice is read as plain government mail', () => {
+    expect(detectBidEmail(ogNotice({ subject: 'Welcome to OpenGov Procurement!', body_text: 'Thank you for signing up with OpenGov Procurement!' })))
+      .toMatchObject({ bid: false, reason: 'provider_not_bid' });
+    expect(detectBidEmail(ogNotice({ provider_verified: false }))).toMatchObject({ bid: false, reason: 'not_bid' });
+    expect(parseBidEmail(ogNotice({ provider_verified: false }))).toMatchObject({ template: null, group_key: null });
+  });
+});
+
+// The SHAPE of a Charlotte County Purchasing addendum notice (htmlToText of the delivered HTML); invented title.
+const CC_BODY = (number = '26-601', title = 'Sample Park Grounds Maintenance') => [
+  'Charlotte County Purchasing Division', '100 Sample Circle, Suite 1 Sampleport, FL 33948 941-555-0100',
+  'Date: 10/27/2026', `Addendum Notification for Bid ${number}`,
+  `An addendum has been added to Charlotte County Purchasing Request for Bid: 20${number.replace('-', '0')} - ${title}`,
+  `Select this link ${number} view the addendum and details for the Request for Bid on the Charlotte County Purchasing Bids online website.`,
+  "You are receiving this email because your company is registered in Charlotte County's Purchasing Vendor Database to receive notifications based on Commodity Codes.",
+].join('\n');
+const ccNotice = (over = {}) => email({
+  from_address: 'bcc-purchasing@charlottecountyfl.gov', from_name: 'Charlotte County Purchasing',
+  subject: 'Charlotte County Purchasing Addendum Notification for Bid 26-601', body_text: '', body_html: `<p>${CC_BODY().split('\n').join('</p><p>')}</p>`, ...over,
+});
+
+describe('Charlotte County Purchasing notices', () => {
+  test('an addendum notice is filed as before and now carries the agency, number, title and place', () => {
+    expect(detectBidEmail(ccNotice())).toMatchObject({ bid: true, source: 'gov_email', kind: 'addendum' });
+    expect(parseBidEmail(ccNotice())).toMatchObject({
+      template: 'charlotte_county',
+      gc_or_agency: 'Charlotte County Purchasing Division',
+      solicitation_number: '26-601',
+      project_title: 'Sample Park Grounds Maintenance',
+      location: '100 Sample Circle, Suite 1 Sampleport, FL 33948',
+      due_at: null,
+    });
+  });
+
+  test('two addenda of one bid in different threads share a key; another number does not', () => {
+    const first = parseBidEmail(ccNotice());
+    expect(first.group_key).toBe('charlotte county purchasing division|sample park grounds maintenance|26 601');
+    expect(parseBidEmail(ccNotice({ gmail_thread_id: 't-2' })).group_key).toBe(first.group_key);
+    expect(parseBidEmail(ccNotice({ body_html: CC_BODY('26-602').split('\n').join('<br>') })).group_key).not.toBe(first.group_key);
+  });
+
+  test('registration mail is not a bid; a forged notice files on its subject alone with no key', () => {
+    expect(detectBidEmail(ccNotice({ subject: 'Vendor Registration Complete', body_html: '<p>Thank you for registering.</p>' })))
+      .toMatchObject({ bid: false, reason: 'not_bid' });
+    expect(detectBidEmail(ccNotice({ provider_verified: false }))).toMatchObject({ bid: true, source: 'gov_email', kind: 'addendum' });
+    expect(parseBidEmail(ccNotice({ provider_verified: false }))).toMatchObject({ template: null, group_key: null });
+  });
+});
+
 // The SHAPE of a Blue Book Network ONETEAM invite (htmlToText of the delivered HTML); invented contractor and place.
 const BB_LINES = (due = 'Bid is due by 5:00 PM (Pacific) on September 14, 2026') => [
   '96', 'Invitation to Bid', due,
