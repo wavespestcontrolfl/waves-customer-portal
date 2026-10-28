@@ -441,6 +441,59 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   return y;
 }
 
+// Previous balance (the customer's OTHER open self-pay invoices), below this
+// invoice's own totals. Display-only: TOTAL above stays this invoice's own,
+// and every earlier invoice keeps its own number, amount, and reminders.
+// Callers decide eligibility and attach `invoice.previous_balance` =
+// { invoices: [{ invoiceNumber, serviceDate, dueDate, amountDue }],
+//   moreCount, total, combinedTotal } — absent means the block never renders.
+function previousBalanceBlock(doc, previousBalance, x, y, width) {
+  const invoices = Array.isArray(previousBalance?.invoices) ? previousBalance.invoices : [];
+  if (!invoices.length || !(Number(previousBalance.total) > 0)) return y;
+  const moreCount = Number(previousBalance.moreCount || 0);
+  const rowH = 14;
+  // Keep the heading and caption with at least the first row.
+  y = ensureRoom(doc, y + 16, 32 + rowH);
+  y = sectionLabel(doc, 'Previous balance', x, y);
+  doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(MUTED)
+    .text('Earlier invoices that are still unpaid. They are not part of the TOTAL above.', x, y, { width });
+  y += 12;
+  doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
+  y += 6;
+  doc.fontSize(PDF_TYPE.body).font('Helvetica');
+  for (const inv of invoices) {
+    y = ensureRoom(doc, y, rowH);
+    const service = inv.serviceDate ? `Service ${formatInvoiceDateOnly(inv.serviceDate)}` : '';
+    const due = inv.dueDate ? `Due ${formatInvoiceDateOnly(inv.dueDate)}` : '';
+    doc.fillColor(INK).text(`Invoice ${inv.invoiceNumber || '—'}`, x, y, { width: 150 });
+    doc.fillColor(BODY).text([service, due].filter(Boolean).join(' · '), x + 150, y, { width: width - 230 });
+    doc.fillColor(INK).text(currency(inv.amountDue), x + width - 70, y, { width: 70, align: 'right' });
+    y += rowH;
+  }
+  if (moreCount > 0) {
+    y = ensureRoom(doc, y, rowH);
+    doc.fillColor(MUTED).text(`+ ${moreCount} more earlier invoice${moreCount === 1 ? '' : 's'}`, x, y, { width: width - 80 });
+    y += rowH;
+  }
+  y = ensureRoom(doc, y, 44);
+  y += 2;
+  const labelX = x + width - 240;
+  const valueX = x + width - 70;
+  doc.moveTo(labelX - 10, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
+  y += 8;
+  doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY);
+  doc.text('Previous balance', labelX, y, { width: 160, align: 'right' });
+  doc.text(currency(previousBalance.total), valueX, y, { width: 70, align: 'right' });
+  y += 14;
+  if (Number(previousBalance.combinedTotal) > 0) {
+    doc.font('Helvetica-Bold').fillColor(NAVY);
+    doc.text('Total account balance', labelX, y, { width: 160, align: 'right' });
+    doc.text(currency(previousBalance.combinedTotal), valueX, y, { width: 70, align: 'right' });
+    y += 14;
+  }
+  return y;
+}
+
 function footerBar(doc, tagline) {
   drawFieldFooter(doc, {
     tagline: tagline || 'Thank you for choosing Waves',
@@ -480,6 +533,7 @@ function generateInvoicePDF(invoice, res) {
   y = annualPrepayCallout(doc, invoice.annual_prepay, L, y, W);
   y = lineItemsTable(doc, invoice.line_items, L, y, W);
   y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer });
+  if (!isSettled) y = previousBalanceBlock(doc, invoice.previous_balance, L, y, W);
 
   if (invoice.notes) {
     y += 10;

@@ -210,6 +210,57 @@ describe('GET /pay/:token previous-balance itemization', () => {
   });
 });
 
+// The downloadable PDF prints the SAME previous balance the page shows, from
+// the same selection — and nothing at all with the gate off.
+async function getInvoicePdf(data) {
+  InvoiceService.getByToken.mockResolvedValue(data);
+  db.mockImplementation(() => chain({ first: null }));
+  const layer = payRouter.stack.find((l) => l.route?.path === '/:token/invoice.pdf' && l.route.methods.get);
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+  let error = null;
+  await handler({ params: { token: data.token } }, {}, (err) => { error = err; });
+  if (error) throw error;
+  const { generateInvoicePDF } = require('../services/pdf/invoice-pdf');
+  return generateInvoicePDF.mock.calls[0][0];
+}
+
+describe('GET /pay/:token/invoice.pdf previous balance', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isEnabled.mockImplementation(() => false);
+    openBalance.openBalanceInvoices.mockImplementation(async () => [siblingRow()]);
+  });
+
+  test('gate OFF: the PDF gets no previous balance and no sibling read runs', async () => {
+    const pdfInvoice = await getInvoicePdf(invoiceData());
+    expect(pdfInvoice).not.toHaveProperty('previous_balance');
+    expect(openBalance.openBalanceInvoices).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: the PDF carries the itemization the page shows — never sibling tokens', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const pdfInvoice = await getInvoicePdf(invoiceData());
+    expect(pdfInvoice.previous_balance).toEqual({
+      invoices: [{ invoiceNumber: 'INV-OLD', serviceDate: '2026-08-01', dueDate: '2026-08-15', amountDue: 44.55 }],
+      total: 44.55,
+      combinedTotal: 194.55,
+    });
+    expect(JSON.stringify(pdfInvoice.previous_balance)).not.toContain(SIBLING_TOKEN);
+  });
+
+  test('gate ON, payer-billed invoice: the PDF never shows the homeowner balance', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const pdfInvoice = await getInvoicePdf(invoiceData({ payer_id: 'payer-1' }));
+    expect(pdfInvoice).not.toHaveProperty('previous_balance');
+  });
+
+  test('gate ON, paid invoice: no previous balance block', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const pdfInvoice = await getInvoicePdf(invoiceData({ status: 'paid' }));
+    expect(pdfInvoice).not.toHaveProperty('previous_balance');
+  });
+});
+
 // The visit note on this unauthenticated page follows the one rule for
 // customer renders (context-aggregator.js customerSafeVisitNotes, owner ruling 2026-10-01): the
 // reviewed report text only. The invoice keeps the note as it stood when

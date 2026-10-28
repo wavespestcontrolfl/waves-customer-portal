@@ -281,8 +281,36 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     codePrefix: invoiceShortCodePrefix(invoice),
     ...payerCodeMarker(invoice, recipient, [customer.email, getInvoiceEmailRecipients(customer, prefs || {})[0]?.email]),
   });
+  // The previous-balance read behind the email note below AND the attached
+  // PDF's "Previous balance" block, so the two always agree. Same gate and
+  // recipient rules as the note (see its comment). The PDF additionally needs
+  // a COMPLETE read: it prints a "Total account balance", and a total missing
+  // a row is worse than no block. Lookup failure sends exactly as today.
+  let previousBalance = null;
+  if (isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id && !effectiveOverride) {
+    try {
+      const { openBalanceSummary } = require('./open-balance');
+      previousBalance = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id, displayLimit: 10 });
+    } catch (prevErr) {
+      logger.warn(`[invoice-email] previous-balance lookup failed for ${invoice.invoice_number}: ${prevErr.message}`);
+    }
+  }
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
   invoiceForPdf.annual_prepay = await loadInvoiceAnnualPrepay(invoiceForPdf);
+  if (previousBalance?.complete && previousBalance.total > 0) {
+    const totalCents = Math.round(previousBalance.total * 100);
+    invoiceForPdf.previous_balance = {
+      invoices: previousBalance.invoices.map((inv) => ({
+        invoiceNumber: inv.invoice_number,
+        serviceDate: inv.service_date,
+        dueDate: inv.due_date,
+        amountDue: invoiceAmountDue(inv),
+      })),
+      moreCount: previousBalance.moreCount,
+      total: totalCents / 100,
+      combinedTotal: (totalCents + Math.round(amountDue * 100)) / 100,
+    };
+  }
   let pdfBuffer;
   try {
     pdfBuffer = await buildInvoicePDFBuffer(invoiceForPdf);
@@ -342,16 +370,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // saved billing recipient may see the note. (effectiveOverride also covers
   // the payer-AP reroute, belt-and-braces with the payer_id check.)
   let previousBalanceNote = '';
-  if (isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id && !effectiveOverride) {
-    try {
-      const { openBalanceSummary } = require('./open-balance');
-      const prev = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id });
-      if (prev.total > 0) {
-        previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(prev.total)} from ${prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
-      }
-    } catch (prevErr) {
-      logger.warn(`[invoice-email] previous-balance lookup failed for ${invoice.invoice_number}: ${prevErr.message}`);
-    }
+  if (previousBalance?.total > 0) {
+    previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
   }
   const previousBalanceEscaped = previousBalanceNote
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

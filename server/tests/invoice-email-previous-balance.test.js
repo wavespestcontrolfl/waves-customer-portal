@@ -58,6 +58,7 @@ const EmailTemplates = require('../services/email-template-library');
 const { isEnabled } = require('../config/feature-gates');
 const { openBalanceSummary } = require('../services/open-balance');
 const { sendInvoiceEmail } = require('../services/invoice-email');
+const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 
 function chain({ first, result } = {}) {
   const q = {};
@@ -116,7 +117,7 @@ describe('sendInvoiceEmail previous-balance note', () => {
     const result = await sendInvoiceEmail('inv-1');
 
     expect(result.ok).toBe(true);
-    expect(openBalanceSummary).toHaveBeenCalledWith('cust-1', { excludeInvoiceId: 'inv-1' });
+    expect(openBalanceSummary).toHaveBeenCalledWith('cust-1', { excludeInvoiceId: 'inv-1', displayLimit: 10 });
     const args = EmailTemplates.sendTemplate.mock.calls[0][0];
     expect(args.payload.invoice_message).toBe(
       'Thanks for having us out!\n\nReminder: your account also has a previous balance of $450.00 from 2 earlier invoices, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.',
@@ -175,5 +176,51 @@ describe('sendInvoiceEmail previous-balance note', () => {
     expect(result.ok).toBe(true);
     const args = EmailTemplates.sendTemplate.mock.calls[0][0];
     expect(args.payload.invoice_message).toBe('Thanks for having us out!');
+  });
+
+  test('the attached PDF carries the same previous balance, itemized, with the account total', async () => {
+    isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
+    openBalanceSummary.mockResolvedValue({
+      total: 300.1,
+      count: 2,
+      moreCount: 0,
+      complete: true,
+      invoices: [
+        { invoice_number: 'INV-OLD-1', service_date: '2026-08-01', due_date: '2026-08-15', total: '200.10', credit_applied: 0 },
+        { invoice_number: 'INV-OLD-2', service_date: '2026-09-01', due_date: '2026-09-15', total: '120.00', credit_applied: '20.00' },
+      ],
+    });
+    mockDb(invoiceRow());
+
+    await sendInvoiceEmail('inv-1');
+
+    expect(buildInvoicePDFBuffer.mock.calls[0][0].previous_balance).toEqual({
+      invoices: [
+        { invoiceNumber: 'INV-OLD-1', serviceDate: '2026-08-01', dueDate: '2026-08-15', amountDue: 200.1 },
+        { invoiceNumber: 'INV-OLD-2', serviceDate: '2026-09-01', dueDate: '2026-09-15', amountDue: 100 },
+      ],
+      moreCount: 0,
+      total: 300.1,
+      combinedTotal: 450.1,
+    });
+  });
+
+  test('an incomplete balance read keeps the email note but prints no account total on the PDF', async () => {
+    isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
+    openBalanceSummary.mockResolvedValue({ total: 450, count: 2, moreCount: 0, complete: false, invoices: [{}, {}] });
+    mockDb(invoiceRow());
+
+    await sendInvoiceEmail('inv-1');
+
+    expect(buildInvoicePDFBuffer.mock.calls[0][0].previous_balance).toBeUndefined();
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.invoice_message).toContain('previous balance of $450.00');
+  });
+
+  test('gate off: the PDF gets no previous balance', async () => {
+    mockDb(invoiceRow());
+
+    await sendInvoiceEmail('inv-1');
+
+    expect(buildInvoicePDFBuffer.mock.calls[0][0].previous_balance).toBeUndefined();
   });
 });

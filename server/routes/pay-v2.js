@@ -614,30 +614,10 @@ router.get('/:token', async (req, res, next) => {
       // closed (credit_unverifiable) instead of offering Zelle on an unseen credit.
       creditWillCoverAnchor = null;
     }
-    if (isInvoiceCollectibleStatus(data.status) && !data.payer_id && !creditWillCoverAnchor) {
-      const PayCombined = require('../services/pay-combined');
-      const siblings = await PayCombined.combinedEligibleSiblings(data, {
-        reusePaymentIntentId: data.stripe_payment_intent_id || null,
-        onPayerResolved: () => { payerOwnedLive = true; },
-      });
-      if (siblings?.length) {
-        const prevTotalCents = siblings.reduce((sum, inv) => sum + PayCombined.amountDueCents(inv), 0);
-        previousBalance = {
-          invoices: siblings.map((inv) => ({
-            invoiceNumber: inv.invoice_number,
-            // NO serviceType (codex r14 P1): /pay/:token is an
-            // unauthenticated forwarded bearer surface — the owner-approved
-            // exception covers sibling numbers, dates, and amounts only,
-            // never the customer's service history.
-            serviceDate: inv.service_date,
-            dueDate: inv.due_date,
-            amountDue: PayCombined.amountDueCents(inv) / 100,
-          })),
-          total: prevTotalCents / 100,
-          combinedTotal: (prevTotalCents + PayCombined.amountDueCents(data)) / 100,
-        };
-      }
-    }
+    previousBalance = await payPagePreviousBalance(data, {
+      creditWillCoverAnchor,
+      onPayerResolved: () => { payerOwnedLive = true; },
+    });
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
     // Off-Stripe tenders (see isZelleTransferEligible for the full
@@ -1993,6 +1973,37 @@ router.post('/:token/error', clientPaymentErrorLimiter, async (req, res) => {
   }
 });
 
+// The pay page's previous-balance itemization (owner ruling 2026-08-16; see
+// the GET /:token comment for the disclosure contract): the customer's other
+// open self-pay invoices — numbers, dates, amounts, NEVER tokens — and the
+// combined total the Pay button charges, or null when nothing is itemized.
+// Shared with the invoice.pdf download so the printed invoice lists exactly
+// what the page shows and charges.
+async function payPagePreviousBalance(data, { creditWillCoverAnchor, onPayerResolved } = {}) {
+  if (!isInvoiceCollectibleStatus(data.status) || data.payer_id || creditWillCoverAnchor) return null;
+  const PayCombined = require('../services/pay-combined');
+  const siblings = await PayCombined.combinedEligibleSiblings(data, {
+    reusePaymentIntentId: data.stripe_payment_intent_id || null,
+    onPayerResolved,
+  });
+  if (!siblings?.length) return null;
+  const prevTotalCents = siblings.reduce((sum, inv) => sum + PayCombined.amountDueCents(inv), 0);
+  return {
+    invoices: siblings.map((inv) => ({
+      invoiceNumber: inv.invoice_number,
+      // NO serviceType (codex r14 P1): /pay/:token is an
+      // unauthenticated forwarded bearer surface — the owner-approved
+      // exception covers sibling numbers, dates, and amounts only,
+      // never the customer's service history.
+      serviceDate: inv.service_date,
+      dueDate: inv.due_date,
+      amountDue: PayCombined.amountDueCents(inv) / 100,
+    })),
+    total: prevTotalCents / 100,
+    combinedTotal: (prevTotalCents + PayCombined.amountDueCents(data)) / 100,
+  };
+}
+
 // =========================================================================
 // GET /api/pay/:token/invoice.pdf — Branded invoice PDF for download/print
 // =========================================================================
@@ -2012,6 +2023,19 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
     // block stays non-self-pay (mirrors the JSON pay-page fail-closed state).
     if (!data.payer && data.payer_id) {
       data.payer = { company_name: 'Third-party payer', ap_email: null };
+    }
+    // Same previous-balance block the page shows. Gate off: no extra reads,
+    // PDF exactly as before. A credit probe failure reads as unknown and
+    // itemizes, exactly as GET /:token.
+    if (require('../config/feature-gates').isEnabled('payIncludeBalance')) {
+      let creditWillCoverAnchor = false;
+      try {
+        creditWillCoverAnchor = await invoiceCreditWouldFullyCover(data);
+      } catch {
+        creditWillCoverAnchor = null;
+      }
+      const previousBalance = await payPagePreviousBalance(data, { creditWillCoverAnchor });
+      if (previousBalance) data.previous_balance = previousBalance;
     }
     generateInvoicePDF(data, res);
   } catch (err) {
