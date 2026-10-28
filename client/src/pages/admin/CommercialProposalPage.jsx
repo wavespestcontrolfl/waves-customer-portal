@@ -11,7 +11,7 @@ import ProposalBidForm from '../../components/estimates/ProposalBidForm';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
 import ProposalProjectCosting from '../../components/estimates/ProposalProjectCosting';
 import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
-import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS } from '@commercial-agreement-terms';
+import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, normalizeTermText } from '@commercial-agreement-terms';
 import { formatETDateTime } from '../../lib/timezone';
 
 // Commercial proposal builder — the full-page surface for authoring the
@@ -61,10 +61,11 @@ const PER_YEAR = Object.fromEntries(FREQUENCY_OPTIONS.map((f) => [f.value, f.per
 const money = (n) =>
   `$${(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-const emptyLine = () => ({
-  id: crypto.randomUUID(), description: '', quantity: 1, unit: '', unitPrice: 0, frequency: 'monthly', taxable: false,
+// `taxable`: a row the operator adds starts on its service's tax rule (defaultTaxable in the editor).
+const emptyLine = (taxable = false) => ({
+  id: crypto.randomUUID(), description: '', quantity: 1, unit: '', unitPrice: 0, frequency: 'monthly', taxable,
 });
-const emptyBuilding = (i) => ({ name: `Building ${i + 1}`, note: '', lineItems: [emptyLine()] });
+const emptyBuilding = (i, taxable = false) => ({ name: `Building ${i + 1}`, note: '', lineItems: [emptyLine(taxable)] });
 
 const roundMoney = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -122,6 +123,24 @@ const PROGRAM_FAMILY_OPTIONS = [
 // priced — same predicate everywhere so the sidebar shows what will save.
 const programRowIsPriced = (p) => String(p.label || '').trim()
   && Number(p.frequencyPerYear) >= 1 && Number(p.pricePerApplication) > 0;
+
+// Standard / Not stated / Custom for each fixed agreement term (owner 2026-10-28 builder scope). Standard is the
+// agreement's own text, compared the way online signing compares it; Not stated leaves it blank so the agreement
+// governs. Both sign online. Custom is typed wording, which online signing refuses.
+const TERM_CHOICE_KEYS = ['initialTermMonths', 'renewal', 'priceAdjustment', 'cancellation'];
+const standardTermText = (key) => String(AGREEMENT_TERMS[key]);
+function termChoiceOf(key, value) {
+  const text = String(value ?? '').trim();
+  if (!text) return 'none';
+  if (key === 'initialTermMonths') return Number(text) === AGREEMENT_TERMS.initialTermMonths ? 'standard' : 'custom';
+  return normalizeTermText(text) === normalizeTermText(standardTermText(key)) ? 'standard' : 'custom';
+}
+const termChoicesOf = (terms) => Object.fromEntries(TERM_CHOICE_KEYS.map((key) => [key, termChoiceOf(key, terms[key])]));
+
+const PAYMENT_TERM_LABELS = {
+  [AUTOPAY_PAYMENT_TERMS]: 'Auto Pay', [INVOICE_PAYMENT_TERMS]: 'Net-30', net15: 'Net-15', due_on_receipt: 'Due on receipt',
+};
+const formatPct = (pct) => String(roundMoney(pct));
 
 
 // Mirrors server computeProposalTotals so totals update live as you type.
@@ -240,10 +259,12 @@ function CommercialProposalEditor() {
   const [preparedFor, setPreparedFor] = useState('');
   const [propertyAddress, setPropertyAddress] = useState('');
   const [taxRatePct, setTaxRatePct] = useState('0');
-  // Server-resolved tax suggestion (fraction, e.g. 0.07) and whether the field
-  // currently holds that suggestion (drives the hint under the field).
+  // Server-resolved tax suggestion (fraction, e.g. 0.07; 0 = exempt; null = no
+  // lookup) and where it came from ("Sarasota County"). The rate shows as a
+  // read-only chip with that source until the operator overrides it.
   const [suggestedTaxRate, setSuggestedTaxRate] = useState(null);
-  const [taxAutoFilled, setTaxAutoFilled] = useState(false);
+  const [suggestedTaxSource, setSuggestedTaxSource] = useState(null);
+  const [taxOverride, setTaxOverride] = useState(false);
   const taxOperatorEditedRef = React.useRef(false);
   // The estimate whose terms prefill already ran (first load only; see applyLoaded).
   const termsPrefilledForRef = React.useRef(null);
@@ -278,6 +299,10 @@ function CommercialProposalEditor() {
     paymentTerms: '', initialTermMonths: '', renewal: '',
     priceAdjustment: '', cancellation: '', accessRequirements: '',
   });
+  // Standard / Not stated / Custom per fixed term: derived from the texts on
+  // load, then the operator's pick (a Custom pick keeps its box open even
+  // while the text still reads like the standard).
+  const [termChoices, setTermChoices] = useState(() => termChoicesOf({}));
   // Engine-composed prospect research (commercial proposal lane). Read-only
   // context for pricing the walkthrough — never sent to the customer.
   const [prospectBrief, setProspectBrief] = useState(null);
@@ -331,8 +356,13 @@ function CommercialProposalEditor() {
     setTitle(p.title || 'Commercial Service Proposal');
     setPreparedFor(p.preparedFor || est?.customerName || '');
     setPropertyAddress(p.propertyAddress || est?.address || '');
-    setTaxRatePct(String((Number(p.taxRate) || 0) * 100));
-    setSuggestedTaxRate(Number(data.suggestedTaxRate) > 0 ? Number(data.suggestedTaxRate) : null);
+    // Percent to 4 places: 0.07 * 100 is 7.000000000000001 in floating point.
+    setTaxRatePct(String(roundMoney((Number(p.taxRate) || 0) * 10000) / 100));
+    // 0 is a real answer (exempt) and stays apart from null (no lookup).
+    const suggested = data.suggestedTaxRate == null ? NaN : Number(data.suggestedTaxRate);
+    const hasSuggestion = Number.isFinite(suggested) && suggested >= 0;
+    setSuggestedTaxRate(hasSuggestion ? suggested : null);
+    setSuggestedTaxSource(hasSuggestion ? (data.suggestedTaxSource || null) : null);
     setTerms(p.terms || '');
     setValidThrough(p.validThrough || '');
     setProjectCosting(data.projectCosting || { revenueYears: 1, rows: [] });
@@ -409,14 +439,16 @@ function CommercialProposalEditor() {
       ? commercialTermsPrefill({ locked: lockReason(est), saved: p.commercialTerms, billByInvoice: !!est.billByInvoice, autopayEnabled: data.commercialAutopayEnabled === true })
       : null;
     if (est) termsPrefilledForRef.current = est.id;
-    setCommercialTerms(prefill || {
+    const loadedTerms = prefill || {
       paymentTerms: p.commercialTerms?.paymentTerms || '',
       initialTermMonths: p.commercialTerms?.initialTermMonths != null ? String(p.commercialTerms.initialTermMonths) : '',
       renewal: p.commercialTerms?.renewal || '',
       priceAdjustment: p.commercialTerms?.priceAdjustment || '',
       cancellation: p.commercialTerms?.cancellation || '',
       accessRequirements: p.commercialTerms?.accessRequirements || '',
-    });
+    };
+    setCommercialTerms(loadedTerms);
+    setTermChoices(termChoicesOf(loadedTerms));
     setProspectBrief(data.prospectBrief || null);
     setCommercialAgreement(data.commercialAgreement || null);
     // An already-authored proposal means download/send are meaningful now.
@@ -463,9 +495,36 @@ function CommercialProposalEditor() {
     });
     if (fill == null) return;
     setTaxRatePct(fill);
-    setTaxAutoFilled(true);
     setDirty(true);
   }, [locked, taxRatePct, anyTaxable, suggestedTaxRate]);
+  // The tax chip: the rate on the proposal is the suggestion (or becomes it the
+  // moment a line turns taxable, by the fill above). Anything else, an Override,
+  // or no suggestion at all shows the editable box.
+  const suggestedPct = suggestedTaxRate == null ? null : roundMoney(suggestedTaxRate * 10000) / 100;
+  const currentPct = Number(taxRatePct) || 0;
+  const taxIsSuggested = suggestedPct != null
+    && (Math.abs(currentPct - suggestedPct) < 0.0001 || (currentPct === 0 && !anyTaxable));
+  const showTaxInput = !locked && (taxOverride || !taxIsSuggested);
+  const suggestedTaxLabel = suggestedPct == null ? '' : `${formatPct(suggestedPct)}%${suggestedTaxSource ? ` · ${suggestedTaxSource}` : ''}`;
+  const overrideTax = () => {
+    taxOperatorEditedRef.current = true;
+    setTaxOverride(true);
+    // The box opens on the rate the chip showed, never a hidden 0.
+    if (currentPct === 0 && suggestedPct > 0) { setTaxRatePct(String(suggestedPct)); markEdit(); }
+  };
+  const applySuggestedTax = () => {
+    taxOperatorEditedRef.current = false;
+    setTaxOverride(false);
+    setTaxRatePct(String(suggestedPct));
+    markEdit();
+  };
+  // A row the operator adds starts Taxable by its service's rule (owner
+  // 2026-10-28 builder scope): the served family registry carries the
+  // canonical commercialTaxableDefault per family (lawn and tree & shrub not
+  // taxable, the rest taxable). Building lines and corrective work have no
+  // service type, so they take the 'other' family's rule. Saved rows keep
+  // their switch as saved.
+  const defaultTaxable = (family) => familyRegistryRef.current?.[family]?.taxable === true;
   // Sidebar mirrors what SAVES: in programs mode the payload omits the
   // buildings entirely, so their (hidden) line items must not count.
   const totals = useMemo(
@@ -587,8 +646,7 @@ function CommercialProposalEditor() {
         // FL commercial default only when the current rate is zero/unset
         // (codex 1A-ii r3); the operator reviews it like everything else.
         if (monetaryFilled > 0 && draft?.suggestedTaxRate && !(Number(live.taxRate) > 0)) {
-          setTaxRatePct(String(draft.suggestedTaxRate * 100));
-          setTaxAutoFilled(true);
+          setTaxRatePct(String(roundMoney(draft.suggestedTaxRate * 10000) / 100));
         }
         // Monetary sections were installed — the on-screen SYNTHESIZED
         // building lines describe the same charges and would double-count
@@ -627,10 +685,10 @@ function CommercialProposalEditor() {
       lineItems: b.lineItems.map((l, i) => (i === li ? { ...l, ...patch } : l)),
     }));
 
-  const addLine = (bi) => mutateBuilding(bi, (b) => ({ ...b, lineItems: [...b.lineItems, emptyLine()] }));
+  const addLine = (bi) => mutateBuilding(bi, (b) => ({ ...b, lineItems: [...b.lineItems, emptyLine(defaultTaxable('other'))] }));
   const removeLine = (bi, li) =>
     mutateBuilding(bi, (b) => ({ ...b, lineItems: b.lineItems.filter((_, i) => i !== li) }));
-  const addBuilding = () => { markBuildingsEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length)]); };
+  const addBuilding = () => { markBuildingsEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length, defaultTaxable('other'))]); };
   const duplicateBuilding = (bi) => {
     markBuildingsEdit();
     setBuildings((prev) => {
@@ -728,7 +786,9 @@ function CommercialProposalEditor() {
       next.genExclusions = exc.provenance;
       // Generated taxability is family-derived — resync it to the new
       // family's default (the visible Tax switch stays operator-editable).
-      if (newReg && (inc.hadGenerated || exc.hadGenerated)) next.taxable = newReg.taxable === true;
+      // A row added here whose switch the operator has not touched follows
+      // its family the same way (the new-row default).
+      if (newReg && (inc.hadGenerated || exc.hadGenerated || (p.isNew && !p.taxTouched))) next.taxable = newReg.taxable === true;
       return next;
     }));
     // Generated responsibilities follow the same swap, pruning ONLY via the
@@ -762,6 +822,20 @@ function CommercialProposalEditor() {
       setResponsibilitiesText([...kept, ...installLines].join('\n'));
     }
     generatedRespByFamilyRef.current = Object.keys(nextProvenance).length ? nextProvenance : null;
+  };
+
+  // Standard / Not stated / Custom for one fixed term. Custom starts from the
+  // current wording (the standard text when there was none), so the operator
+  // edits it instead of retyping it.
+  const chooseTerm = (key, choice) => {
+    markEdit();
+    setTermChoices((prev) => ({ ...prev, [key]: choice }));
+    setCommercialTerms((prev) => {
+      const standard = standardTermText(key);
+      if (choice === 'standard') return { ...prev, [key]: standard };
+      if (choice === 'none') return { ...prev, [key]: '' };
+      return { ...prev, [key]: prev[key] || standard };
+    });
   };
 
   // Render-assigned mirror of the current form state: save()'s retry loop
@@ -1186,16 +1260,40 @@ function CommercialProposalEditor() {
                   <Input value={propertyAddress} disabled={!!locked} className="mt-1"
                     onChange={(e) => { setPropertyAddress(e.target.value); touch(); }} />
                 </label>
-                <label className="block">
-                  <span className={LABEL}>Tax rate (%) — taxable lines only</span>
-                  <Input type="number" min="0" step="0.01" value={taxRatePct} disabled={!!locked} className="mt-1"
-                    onChange={(e) => { taxOperatorEditedRef.current = true; setTaxAutoFilled(false); setTaxRatePct(e.target.value); touch(); }} />
-                  {taxAutoFilled && !locked && Number(taxRatePct) > 0 && (
-                    <span className="mt-1 block text-12 text-zinc-500">
-                      Filled from the customer's county rate — edit if exempt.
-                    </span>
+                <div className="block">
+                  {showTaxInput ? (
+                    <label className="block">
+                      <span className={LABEL}>Tax rate (%) — taxable lines only</span>
+                      <Input type="number" min="0" step="0.01" value={taxRatePct} className="mt-1"
+                        onChange={(e) => { taxOperatorEditedRef.current = true; setTaxOverride(true); setTaxRatePct(e.target.value); touch(); }} />
+                    </label>
+                  ) : (
+                    <>
+                      <span className={LABEL}>Tax rate — taxable lines only</span>
+                      <div className="mt-1 flex items-center gap-2">
+                        <span data-testid="tax-rate-chip"
+                          className="inline-flex min-w-0 items-center h-11 md:h-9 px-3 rounded-sm border border-hairline border-zinc-300 bg-zinc-50 text-14 md:text-13 tabular-nums text-zinc-900">
+                          <span className="truncate">
+                            {locked
+                              ? `${formatPct(currentPct)}%${suggestedPct != null && Math.abs(currentPct - suggestedPct) < 0.0001 && suggestedTaxSource ? ` · ${suggestedTaxSource}` : ''}`
+                              : suggestedTaxLabel}
+                          </span>
+                        </span>
+                        {!locked && (
+                          <Button variant="ghost" size="sm" onClick={overrideTax}>Override</Button>
+                        )}
+                      </div>
+                    </>
                   )}
-                </label>
+                  {showTaxInput && suggestedPct != null && (
+                    <button type="button" className="mt-1 block bg-transparent border-0 p-0 cursor-pointer text-12 text-zinc-600 underline underline-offset-2" onClick={applySuggestedTax}>
+                      Use {suggestedTaxLabel}
+                    </button>
+                  )}
+                  {showTaxInput && suggestedPct == null && (
+                    <span className="mt-1 block text-12 text-zinc-500">The county rate could not be looked up. Enter the rate.</span>
+                  )}
+                </div>
               </div>
             </CardBody>
           </Card>
@@ -1350,7 +1448,7 @@ function CommercialProposalEditor() {
                 <div key={idx} className="space-y-2 border-b border-hairline border-zinc-100 pb-3 last:border-0 last:pb-0">
                   <div className="flex flex-wrap gap-2 items-center">
                     <Select
-                      size="sm" className="w-32 shrink-0" value={p.service} disabled={!!locked} title="Service family"
+                      size="sm" className="w-32 shrink-0" value={p.service} disabled={!!locked} title="Service family" aria-label="Service family"
                       onChange={(e) => changeProgramFamily(idx, e.target.value)}
                     >
                       {PROGRAM_FAMILY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
@@ -1393,8 +1491,8 @@ function CommercialProposalEditor() {
                       onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, visitMinutes: e.target.value } : it))); }}
                     />
                     <div className="flex items-center gap-1 shrink-0" title="Taxable program">
-                      <Switch checked={p.taxable} disabled={!!locked}
-                        onChange={(v) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v } : it))); }} />
+                      <Switch checked={p.taxable} disabled={!!locked} aria-label="Taxable program"
+                        onChange={(v) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v, taxTouched: true } : it))); }} />
                       <span className="text-12 text-zinc-500">Tax</span>
                     </div>
                     <span className="text-12 text-zinc-500 tabular-nums shrink-0">
@@ -1436,7 +1534,7 @@ function CommercialProposalEditor() {
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { id: crypto.randomUUID(), service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, visitMinutes: '', taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [] }]); }}>
+                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { id: crypto.randomUUID(), service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, visitMinutes: '', taxable: defaultTaxable('pest'), note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [], isNew: true }]); }}>
                   <Plus size={14} /> Add program
                 </Button>
               )}
@@ -1451,7 +1549,7 @@ function CommercialProposalEditor() {
               </span>
               {!locked && buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim())) && (
                 <Button variant="secondary" size="sm"
-                  onClick={() => { markBuildingsEdit(); setBuildings([emptyBuilding(0)]); }}>
+                  onClick={() => { markBuildingsEdit(); setBuildings([emptyBuilding(0, defaultTaxable('other'))]); }}>
                   <Trash2 size={14} /> Clear building lines
                 </Button>
               )}
@@ -1527,7 +1625,7 @@ function CommercialProposalEditor() {
                         ))}
                       </Select>
                       <div className="col-span-1 md:col-span-1 flex md:justify-center items-center gap-1" title="Taxable line">
-                        <Switch checked={li.taxable} disabled={!!locked}
+                        <Switch checked={li.taxable} disabled={!!locked} aria-label="Taxable line"
                           onChange={(v) => updateLine(bi, lii, { taxable: v })} />
                         <span className="md:hidden text-12 text-zinc-500">Taxable</span>
                       </div>
@@ -1645,7 +1743,7 @@ function CommercialProposalEditor() {
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { id: crypto.randomUUID(), label: '', amount: 0, taxable: false, includesText: '' }]); }}>
+                  onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { id: crypto.randomUUID(), label: '', amount: 0, taxable: defaultTaxable('other'), includesText: '' }]); }}>
                   <Plus size={14} /> Add corrective work
                 </Button>
               )}
@@ -1702,8 +1800,15 @@ function CommercialProposalEditor() {
                     {!estimate?.billByInvoice && (autopayEnabled || commercialTerms.paymentTerms === AUTOPAY_PAYMENT_TERMS) && (
                       <option value={AUTOPAY_PAYMENT_TERMS}>Auto Pay</option>
                     )}
-                    <option value="due_on_receipt" disabled={!estimate?.billByInvoice}>Due on receipt</option>
-                    <option value="net15" disabled={!estimate?.billByInvoice}>Net-15</option>
+                    {/* Net-15 and Due on receipt have no signed-agreement
+                        wording (owner 2026-10-28 builder scope), so they are
+                        not offered; a proposal already on one shows it so it
+                        can be changed. */}
+                    {['due_on_receipt', 'net15'].includes(commercialTerms.paymentTerms) && (
+                      <option value={commercialTerms.paymentTerms} disabled={!estimate?.billByInvoice}>
+                        {PAYMENT_TERM_LABELS[commercialTerms.paymentTerms]} (no online signing)
+                      </option>
+                    )}
                     <option value="net30" disabled={!estimate?.billByInvoice}>Net-30</option>
                   </Select>
                   {!estimate?.billByInvoice && (
@@ -1718,23 +1823,53 @@ function CommercialProposalEditor() {
                     contractual sentence can never silently truncate on save
                     (codex #3297 r2). */}
                 {[
-                  ['initialTermMonths', 'Initial term (months, 0 = month-to-month)', 'number', 'e.g. 12', undefined],
-                  ['renewal', 'Renewal', 'text', 'e.g. Renews month-to-month after the initial term', 120],
-                  ['priceAdjustment', 'Price adjustment', 'text', 'e.g. Rates reviewed annually with 30-day notice', 160],
-                  ['cancellation', 'Cancellation', 'text', 'e.g. 30-day written notice, no cancellation fee', 160],
-                ].map(([key, label, type, placeholder, maxLength]) => (
-                  <label key={key} className="block">
-                    <span className={LABEL}>{label}</span>
-                    <Input
-                      size="sm" className="mt-1" type={type}
-                      min={type === 'number' ? '0' : undefined} step={type === 'number' ? '1' : undefined}
-                      max={key === 'initialTermMonths' ? '60' : undefined}
-                      maxLength={maxLength}
-                      value={commercialTerms[key]} disabled={!!locked} placeholder={placeholder}
-                      onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
-                    />
-                  </label>
-                ))}
+                  ['initialTermMonths', 'Initial term', undefined],
+                  ['renewal', 'Renewal', 120],
+                  ['priceAdjustment', 'Price adjustment', 160],
+                  ['cancellation', 'Cancellation', 160],
+                ].map(([key, label, maxLength]) => {
+                  const choice = termChoices[key];
+                  return (
+                    <div key={key}>
+                      <label className="block">
+                        <span className={LABEL}>{label}</span>
+                        <Select size="sm" className="mt-1" value={choice} disabled={!!locked}
+                          onChange={(e) => chooseTerm(key, e.target.value)}>
+                          <option value="standard">{key === 'initialTermMonths' ? `${AGREEMENT_TERMS.initialTermMonths} months (standard)` : 'Standard'}</option>
+                          <option value="none">Not stated</option>
+                          <option value="custom">Custom</option>
+                        </Select>
+                      </label>
+                      {choice === 'standard' && key !== 'initialTermMonths' && (
+                        <p className="mt-1 text-12 text-zinc-500">{standardTermText(key)}</p>
+                      )}
+                      {choice === 'none' && (
+                        <p className="mt-1 text-12 text-zinc-500">
+                          Left off the proposal.{commercialAgreement ? ' The agreement the customer signs online still states its own.' : ''}
+                        </p>
+                      )}
+                      {choice === 'custom' && (key === 'initialTermMonths' ? (
+                        <Input
+                          size="sm" className="mt-1" type="number" min="0" max="60" step="1"
+                          aria-label="Initial term in months" placeholder="Months (0 = month-to-month)"
+                          value={commercialTerms[key]} disabled={!!locked}
+                          onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
+                        />
+                      ) : (
+                        <Textarea
+                          className="mt-1" rows={2} maxLength={maxLength} aria-label={`${label} wording`}
+                          value={commercialTerms[key]} disabled={!!locked}
+                          onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
+                        />
+                      ))}
+                      {/* GATE_COMMERCIAL_PROPOSAL_SIGN on (the status line exists): typed
+                          wording that differs from the standard blocks online signing. */}
+                      {choice === 'custom' && commercialAgreement && termChoiceOf(key, commercialTerms[key]) === 'custom' && (
+                        <p className="mt-1 text-12 text-zinc-500">Custom wording turns off online signing for this proposal.</p>
+                      )}
+                    </div>
+                  );
+                })}
                 <label className="block sm:col-span-2">
                   <span className={LABEL}>Property access</span>
                   <Input
