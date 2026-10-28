@@ -2143,12 +2143,15 @@ function CommercialProposalEditor() {
 
       {/* Below lg the sidebar sits under the whole form, so this bar keeps
           the first-year total and Save in reach while scrolling. Sticky
-          inside the admin content column, whose bottom padding already clears
-          the phone tab bar and the safe area; -bottom-4 lets the bar sit on
-          the tab bar instead of leaving that padding's 16px of page showing
-          under it. */}
+          inside the admin content column (#admin-main), whose bottom padding
+          insets the sticky edge (WebKit, Chromium and Firefox alike). The
+          offset cancels the padding's breathing room so no page shows under
+          the bar (AdminLayoutV2 MAIN_PADDING): on a phone the padding is the
+          56px tab bar + safe area + 16px, so -16px seats the bar on the tab
+          bar; from md the shell pads 24px with no tab bar, so -24px seats it
+          on the window edge. */}
       {isPhone && (
-        <div className="sticky -bottom-4 z-30 -mx-4 mt-5 border-t border-hairline border-zinc-200 bg-white px-4 py-2">
+        <div className="sticky -bottom-4 md:-bottom-6 z-30 -mx-4 mt-5 border-t border-hairline border-zinc-200 bg-white px-4 py-2">
           <div className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
               <div className={LABEL}>First-year total</div>
