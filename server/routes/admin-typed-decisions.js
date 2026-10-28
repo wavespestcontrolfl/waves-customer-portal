@@ -117,23 +117,27 @@ function publicSubject({ hash: _hash, ...rest }) {
 // the shadow recorded against, with the visitor message just before it. The
 // chat log writes both rows in one statement, so they share a created_at: the
 // visitor message is the newest user row of the conversation at or before the
-// assistant row's time. The assistant text carries the leading "[<intent>] "
-// tag logIntakeExchange adds (always exactly one, so any one leading tag is
-// stripped and no second copy of the intent list can drift); the digest is
-// built from the message and reply exactly as the shadow built Jev's state
-// (askWavesSubjectHash).
+// assistant row's time. That comparison runs in SQL, where created_at keeps its
+// microseconds: a JS Date keeps only milliseconds and would miss the user row
+// written in the same statement. The assistant text carries the leading
+// "[<intent>] " tag logIntakeExchange adds (always exactly one, so any one
+// leading tag is stripped and no second copy of the intent list can drift); the
+// digest is built from the message and reply exactly as the shadow built Jev's
+// state (askWavesSubjectHash).
 const CHAT_INTENT_TAG_RE = /^\[[a-z_]+\] /;
+const CHAT_VISITOR_MESSAGE_SQL = `(SELECT u.content FROM agent_messages u
+  WHERE u.conversation_id = a.conversation_id AND u.role = 'user' AND u.created_at <= a.created_at
+  ORDER BY u.created_at DESC LIMIT 1) AS visitor_message`;
 async function readChatTurns(ids) {
-  const assistants = await db('agent_messages').whereIn('id', ids).where({ role: 'assistant' })
-    .select('id', 'conversation_id', 'content', 'created_at');
+  const assistants = await db('agent_messages as a').whereIn('a.id', ids).where('a.role', 'assistant')
+    .select('a.id', 'a.content', 'a.created_at', db.raw(CHAT_VISITOR_MESSAGE_SQL));
   const turns = new Map();
-  await Promise.all(assistants.map(async (a) => {
-    const user = await db('agent_messages').where({ conversation_id: a.conversation_id, role: 'user' })
-      .where('created_at', '<=', a.created_at).orderBy('created_at', 'desc').first('content');
+  for (const a of assistants) {
     const reply = String(a.content || '').replace(CHAT_INTENT_TAG_RE, '');
-    const visitorMessage = user ? String(user.content || '') : null;
-    turns.set(a.id, { visitorMessage, reply, at: a.created_at, hash: user ? askWavesSubjectHash({ visitorMessage, reply }) : null });
-  }));
+    const found = a.visitor_message !== null && a.visitor_message !== undefined;
+    const visitorMessage = found ? String(a.visitor_message) : null;
+    turns.set(a.id, { visitorMessage, reply, at: a.created_at, hash: found ? askWavesSubjectHash({ visitorMessage, reply }) : null });
+  }
   return turns;
 }
 

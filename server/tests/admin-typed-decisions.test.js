@@ -232,28 +232,39 @@ describe('Ask Waves chat subjects (ask_waves_safety.v1)', () => {
     capability: 'ask_waves_safety', package_id: 'ask_waves_safety.v1', subject_type: 'agent_messages', subject_id: MSG_ID,
     question_id: 'safety_claim', baseline_answers: JSON.stringify({ production: false }), subject_hash: HASH, ...over,
   });
-  const assistant = (content = `[question] ${REPLY}`) => ({ id: MSG_ID, conversation_id: 'conv-1', content, created_at: new Date('2026-10-28T15:00:00Z') });
+  // One row per assistant message, with the visitor message the SQL subquery paired to it.
+  const CHAT = 'agent_messages as a';
+  const assistant = (content = `[question] ${REPLY}`, visitor = VISITOR) => ({ id: MSG_ID, content, created_at: new Date('2026-10-28T15:00:00Z'), visitor_message: visitor });
 
   test('the queue shows the visitor message and the reply, without the intent tag, and the digest matches', async () => {
     const log = installDb({
       decision_reviews: { list: [chatRow()] },
-      agent_messages: { list: [assistant()], first: [{ content: VISITOR }] },
+      [CHAT]: { list: [assistant()] },
     });
     const { status, body } = await get('/reviews');
     expect(status).toBe(200);
     expect(body.reviews[0]).toMatchObject({ subjectType: 'agent_messages', providerLabel: 'Jev', subjectChanged: false, subjectVersion: HASH });
     expect(body.reviews[0].subject).toEqual({ type: 'agent_messages', text: REPLY, visitorMessage: VISITOR, at: '2026-10-28T15:00:00.000Z' });
     expect(body.reviews[0].question).toMatch(/blanket safety claim/);
-    // the visitor message is the newest user row at or before the assistant row, in the same conversation
-    expect(called(log, 'agent_messages', 'where')).toContainEqual([{ conversation_id: 'conv-1', role: 'user' }]);
-    expect(called(log, 'agent_messages', 'where')).toContainEqual(['created_at', '<=', new Date('2026-10-28T15:00:00Z')]);
+    expect(called(log, CHAT, 'whereIn')).toContainEqual(['a.id', [MSG_ID]]);
+    expect(called(log, CHAT, 'where')).toContainEqual(['a.role', 'assistant']);
+    // The pairing runs in SQL (microsecond created_at), never against a JS Date (milliseconds).
+    const [[pairing]] = db.raw.mock.calls;
+    expect(pairing).toMatch(/u\.conversation_id = a\.conversation_id AND u\.role = 'user' AND u\.created_at <= a\.created_at/);
+    expect(pairing).toMatch(/ORDER BY u\.created_at DESC LIMIT 1/);
     expect(log.sms_log).toBeUndefined();
+  });
+
+  test('any one leading intent tag is stripped, underscores included', async () => {
+    installDb({ decision_reviews: { list: [chatRow()] }, [CHAT]: { list: [assistant(`[existing_customer] ${REPLY}`)] } });
+    const { body } = await get('/reviews');
+    expect(body.reviews[0]).toMatchObject({ subjectChanged: false, subject: { text: REPLY } });
   });
 
   test('a reply or message edited after Jev answered is flagged and cannot be labeled', async () => {
     installDb({
       decision_reviews: { list: [chatRow()], first: [chatRow()] },
-      agent_messages: { list: [assistant('[question] A different reply.')], first: [{ content: VISITOR }, { content: VISITOR }] },
+      [CHAT]: { list: [assistant('[question] A different reply.')] },
     });
     expect((await get('/reviews')).body.reviews[0].subjectChanged).toBe(true);
     const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: HASH });
@@ -264,13 +275,13 @@ describe('Ask Waves chat subjects (ask_waves_safety.v1)', () => {
   test('an unchanged turn is labeled against its digest; a deleted message row cannot be labeled', async () => {
     const log = installDb({
       decision_reviews: { first: [chatRow()], returning: [chatRow({ label_status: 'confirmed_error' })] },
-      agent_messages: { list: [assistant()], first: [{ content: VISITOR }] },
+      [CHAT]: { list: [assistant()] },
     });
     const ok = await post(`/reviews/${ID}/label`, { verdict: 'jev_wrong', correct_value: false, seen_answer: SEEN, seen_subject: HASH });
     expect(ok.status).toBe(200);
     expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['subject_hash IS NOT DISTINCT FROM ?', [HASH]]);
 
-    installDb({ decision_reviews: { first: [chatRow()] }, agent_messages: { list: [] } });
+    installDb({ decision_reviews: { first: [chatRow()] }, [CHAT]: { list: [] } });
     const gone = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: HASH });
     expect(gone.status).toBe(409);
     expect(gone.body.code).toBe('subject_changed');
