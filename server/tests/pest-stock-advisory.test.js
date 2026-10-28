@@ -1,4 +1,4 @@
-// GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): a pest visit's completion may take a product's stock
+// Owner 2026-10-20, "dont block": a pest visit's completion may take a product's stock
 // below zero instead of refusing it, and the office gets one alert per product while it stays below zero. The
 // PostgreSQL proofs (a real pest packet; a restock closing the alert) are in visit-completion-packets-postgres.test.js
 // and purchase-receipts-postgres.test.js.
@@ -14,70 +14,30 @@ const {
   deductProductInventory, isPestStockAdvisoryCompletion, isLawnTsStockAdvisoryCompletion, isStockAdvisoryCompletion, notifyOfficeOfStockShortfalls,
 } = require('../services/complete-scheduled-service');
 
-const GATE = 'GATE_PEST_STOCK_ADVISORY';
-const LAWN_TS_GATE = 'GATE_LAWN_TS_STOCK_ADVISORY';
-const savedGate = process.env[GATE];
-const savedLawnTsGate = process.env[LAWN_TS_GATE];
 afterEach(() => {
-  if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate;
-  if (savedLawnTsGate === undefined) delete process.env[LAWN_TS_GATE]; else process.env[LAWN_TS_GATE] = savedLawnTsGate;
   jest.clearAllMocks();
 });
 
 describe('which completions may take stock below zero', () => {
-  test.each(['Quarterly Pest Control', 'Pest Control Re-Service', 'Pest & Rodent Control'])('gate on: %s may', (serviceType) => {
-    process.env[GATE] = 'true';
+  test.each(['Quarterly Pest Control', 'Pest Control Re-Service', 'Pest & Rodent Control'])('%s may', (serviceType) => {
     expect(isPestStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
     expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
   });
 
-  test.each(['Lawn Care', 'Tree & Shrub Care', 'Mosquito Control', 'Termite Bait Station'])('pest gate on: %s may not', (serviceType) => {
-    delete process.env[LAWN_TS_GATE];
-    process.env[GATE] = 'true';
-    expect(isPestStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
-    expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
-  });
-
-  test.each([[undefined], ['TRUE'], ['1']])('gate %s: a pest visit may not', (value) => {
-    if (value === undefined) delete process.env[GATE]; else process.env[GATE] = value;
-    expect(isStockAdvisoryCompletion({ service_type: 'Quarterly Pest Control' })).toBe(false);
-  });
-
-  test('a WaveGuard lawn completion stays advisory with the gate off', () => {
-    delete process.env[GATE];
-    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care', cust_waveguard_tier: 'Gold' })).toBe(true);
-  });
-});
-
-describe('which completions may take stock below zero under GATE_LAWN_TS_STOCK_ADVISORY', () => {
-  test.each(['Lawn Care', 'Lawn Care Re-Service', 'Tree & Shrub Care', 'Shrub Fertilization'])('gate on: a non-member %s may', (serviceType) => {
-    delete process.env[GATE];
-    process.env[LAWN_TS_GATE] = 'true';
+  test.each(['Lawn Care', 'Lawn Care Re-Service', 'Tree & Shrub Care', 'Shrub Fertilization'])('a lawn or tree & shrub visit, any tier: %s may', (serviceType) => {
     expect(isLawnTsStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
+    expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
     expect(isStockAdvisoryCompletion({ service_type: serviceType, cust_waveguard_tier: 'Commercial' })).toBe(true);
   });
 
-  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion', 'Quarterly Pest Control'])('gate on: %s may not', (serviceType) => {
-    delete process.env[GATE];
-    process.env[LAWN_TS_GATE] = 'true';
+  test('a WaveGuard lawn completion may', () => {
+    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care', cust_waveguard_tier: 'Gold' })).toBe(true);
+  });
+
+  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion'])('%s may not', (serviceType) => {
+    expect(isPestStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
     expect(isLawnTsStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
     expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
-  });
-
-  test.each([[undefined], [''], ['TRUE'], ['1']])('gate %p: a non-member lawn and a tree & shrub visit may not', (value) => {
-    delete process.env[GATE];
-    if (value === undefined) delete process.env[LAWN_TS_GATE]; else process.env[LAWN_TS_GATE] = value;
-    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care' })).toBe(false);
-    expect(isStockAdvisoryCompletion({ service_type: 'Tree & Shrub Care' })).toBe(false);
-  });
-
-  test('the pest gate does not open lawn, and this gate does not open pest', () => {
-    process.env[GATE] = 'true';
-    delete process.env[LAWN_TS_GATE];
-    expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care' })).toBe(false);
-    delete process.env[GATE];
-    process.env[LAWN_TS_GATE] = 'true';
-    expect(isStockAdvisoryCompletion({ service_type: 'Quarterly Pest Control' })).toBe(false);
   });
 });
 
@@ -221,8 +181,7 @@ describe('the office alert for a lawn or tree & shrub visit', () => {
     ['Lawn Care', 'lawn'],
     ['Tree & Shrub Care', 'tree & shrub'],
     ['Quarterly Pest Control', 'pest'],
-  ])('a non-member %s record alerts, and the text names a %s visit, whatever the live gate says', async (serviceType, label) => {
-    delete process.env[LAWN_TS_GATE];
+  ])('a non-member %s record alerts, and the text names a %s visit, ', async (serviceType, label) => {
     const [, spec, opts] = await alertFor({ id: 'visit-1', service_type: serviceType });
     expect(spec).toMatchObject({ action: 'restock Taurus SC', why: `Taurus SC went below zero in stock after a ${label} visit.` });
     expect(opts).toMatchObject({ dedupeKey: 'stock-shortfall:prod-1', dedupeOpenOnly: true });
@@ -245,21 +204,14 @@ describe('the office alert for a lawn or tree & shrub visit', () => {
     expect(() => compose.composeAdminAlert(spec)).not.toThrow();
   });
 
-  test('a WaveGuard lawn record alerts only while GATE_LAWN_TS_STOCK_ADVISORY is live', async () => {
+  test('a WaveGuard lawn record alerts too', async () => {
     const svc = { id: 'visit-1', service_type: 'Lawn Care', cust_waveguard_tier: 'Gold' };
-    delete process.env[LAWN_TS_GATE];
-    const quiet = catalog({ 'prod-1': '-3' });
-    await notifyOfficeOfStockShortfalls({ svc, record, database: quiet });
-    expect(quiet.transaction).not.toHaveBeenCalled();
-    expect(compose.raiseAdminAlert).not.toHaveBeenCalled();
-    process.env[LAWN_TS_GATE] = 'true';
     await notifyOfficeOfStockShortfalls({ svc, record, database: catalog({ 'prod-1': '-3' }) });
     expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
     expect(compose.raiseAdminAlert.mock.calls[0][1].why).toBe('Taurus SC went below zero in stock after a lawn visit.');
   });
 
   test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion'])('a %s record never alerts', async (serviceType) => {
-    process.env[LAWN_TS_GATE] = 'true';
     const database = catalog({ 'prod-1': '-3' });
     await notifyOfficeOfStockShortfalls({ svc: { id: 'visit-1', service_type: serviceType }, record, database });
     expect(database.transaction).not.toHaveBeenCalled();

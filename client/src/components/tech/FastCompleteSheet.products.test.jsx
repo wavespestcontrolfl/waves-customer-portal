@@ -285,7 +285,7 @@ describe('FastCompleteSheet + Other product picker', () => {
     expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz', targets: ['Ants'] });
   });
 
-  // GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): /complete takes the stock below zero instead.
+  // Owner 2026-10-20, "dont block": /complete takes the stock below zero instead.
   test('stockAdvisory: a house-mix stock at zero holds nothing; the line says the office will restock it', async () => {
     const request = makeRequest({ products: CATALOG.map((p) => (p.id === 'taurus' ? { ...p, inventory_on_hand: '0.0000' } : p)), stockAdvisory: true });
     await openSheet(request);

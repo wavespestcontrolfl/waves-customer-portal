@@ -1,5 +1,5 @@
 /**
- * GATE_PEST_STOCK_ADVISORY: a pest visit that took a product below zero leaves one open office alert for it. The
+ * A pest visit that took a product below zero leaves one open office alert for it. The
  * Products table's inline stock edit (PUT /:id) writes the count and a correction movement directly, so it must close
  * that alert like adjustStock does, or the stale open row would hide the next real shortfall (dedupeOpenOnly).
  */

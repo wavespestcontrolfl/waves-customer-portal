@@ -13134,7 +13134,7 @@ export function CompletionPanel({
     useState(null);
   const [treatmentPlanAppointmentAssignment, setTreatmentPlanAppointmentAssignment] =
     useState(null);
-  // GATE_LAWN_TS_STOCK_ADVISORY: the plan says /complete takes this lawn visit's stock below zero (any tier).
+  // The plan says /complete takes this lawn visit's stock below zero (any tier).
   const [treatmentPlanStockAdvisory, setTreatmentPlanStockAdvisory] = useState(false);
   const [treatmentPlanInventoryBlocks, setTreatmentPlanInventoryBlocks] =
     useState([]);
@@ -14309,7 +14309,7 @@ export function CompletionPanel({
   // rejects them product-by-product regardless of the advisory posture, so
   // letting the submit through would trap the tech on a closeout error
   // (codex P2 r4 on #3179).
-  // A non-member lawn visit is advisory too while the plan says so (GATE_LAWN_TS_STOCK_ADVISORY).
+  // A non-member lawn visit is advisory too while the plan says so.
   const treatmentPlanGatingInventoryBlocks = inventoryAdvisoryTier || treatmentPlanStockAdvisory
     ? treatmentPlanInventoryBlocks.filter(
         (block) => block?.code === "inventory_product_inactive",

@@ -259,7 +259,7 @@ describe('the visit step', () => {
     expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
   });
 
-  // GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): the context says /complete takes this visit's stock
+  // Owner 2026-10-20, "dont block": the context says /complete takes this visit's stock
   // below zero, so nothing holds, a line names each product at 0, and the office gets the alert (server side).
   test('stockAdvisory: a stock at zero holds nothing, the line shows on both steps, and the visit goes out', async () => {
     const products = () => CATALOG.map((p) => (p.id === 'taurus' ? { ...p, inventory_unit: 'fl_oz', inventory_on_hand: '0.0000' } : p));

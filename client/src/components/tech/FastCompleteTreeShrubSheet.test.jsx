@@ -293,7 +293,7 @@ describe('recoverable states', () => {
     expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
   });
 
-  // GATE_LAWN_TS_STOCK_ADVISORY (owner 2026-10-20): /complete takes the stock below zero instead, and the context says so.
+  // Owner 2026-10-20: /complete takes the stock below zero instead, and the context says so.
   test('stockAdvisory: a product at 0 stock holds nothing; the line says the office will restock it', async () => {
     const zero = { ...CONTEXT, stockAdvisory: true, products: CONTEXT.products.map((p) => (p.id === 'iron' ? { ...p, inventory_on_hand: 0, inventory_unit: 'fl_oz' } : p)) };
     const restocked = { ...zero, products: zero.products.map((p) => (p.id === 'iron' ? { ...p, inventory_on_hand: 64 } : p)) };

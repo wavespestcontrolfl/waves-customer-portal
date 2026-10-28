@@ -591,18 +591,19 @@ function isWaveGuardLawnCompletion(svc) {
     && detectServiceLine(svc?.service_type) === 'lawn';
 }
 
-// GATE_PEST_STOCK_ADVISORY (owner 2026-10-20, "dont block"): a pest visit's completion treats stock as advisory too,
+// Owner 2026-10-20, "dont block": a pest visit's completion treats stock as advisory too,
 // by the server's own service line (as WaveGuard lawn above); the pest sheet's context reads the same answer, so the
 // sheet never lets through what /complete refuses.
 function isPestStockAdvisoryCompletion(svc) {
-  return require('../config/feature-gates').pestStockAdvisoryLive() && detectServiceLine(svc?.service_type) === 'pest';
+  return detectServiceLine(svc?.service_type) === 'pest';
 }
 
-// GATE_LAWN_TS_STOCK_ADVISORY: a lawn or tree & shrub visit (services/stock-advisory.js).
+// A lawn or tree & shrub visit (services/stock-advisory.js).
 const { isLawnTsStockAdvisoryCompletion } = require('./stock-advisory');
 
-// A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing.
-const isStockAdvisoryCompletion = (svc) => isWaveGuardLawnCompletion(svc) || isPestStockAdvisoryCompletion(svc) || isLawnTsStockAdvisoryCompletion(svc);
+// A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing: a pest, lawn
+// (any tier, WaveGuard included) or tree & shrub visit.
+const isStockAdvisoryCompletion = (svc) => isPestStockAdvisoryCompletion(svc) || isLawnTsStockAdvisoryCompletion(svc);
 
 // Plan/approval-engine block messages predate the advisory policy and can
 // still phrase conditions as approval mandates ("manager review is required
@@ -1639,9 +1640,8 @@ async function deductProductInventory(trx, {
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
   // allowNegative is passed ONLY for an advisory-stock completion
-  // (isStockAdvisoryCompletion): a WaveGuard lawn closeout (owner directive
-  // 2026-08-03) or, under GATE_PEST_STOCK_ADVISORY / GATE_LAWN_TS_STOCK_ADVISORY,
-  // a pest, lawn or tree & shrub visit (owner 2026-10-20). The deduction proceeds,
+  // (isStockAdvisoryCompletion): a lawn closeout (WaveGuard since the owner
+  // directive 2026-08-03), a pest or a tree & shrub visit (owner 2026-10-20). The deduction proceeds,
   // inventory_on_hand goes negative, and the movement/snapshot below record the
   // insufficient-stock state for audit (a shortfall also alerts the office:
   // notifyOfficeOfStockShortfalls). Every other completion keeps the hard
@@ -2148,7 +2148,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   }
 }
 
-// GATE_PEST_STOCK_ADVISORY / GATE_LAWN_TS_STOCK_ADVISORY (owner 2026-10-20, "dont block"): one office alert for each
+// Owner 2026-10-20, "dont block": one office alert for each
 // product this pest, lawn or tree & shrub visit took below zero, raised after the record is saved and never blocking. The key is the product's, and only an OPEN row
 // dedupes (dedupeOpenOnly): a retry, a resume or the next visit that overdraws it again finds the standing alert and
 // does not ring; a restock or count back to zero or above closes it (inventory-operations.js), and a person may mark
@@ -2156,13 +2156,12 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
 // product's row lock, the lock a restock or count takes before it closes the alert: a restock can never land between
 // the read and the insert (it would leave a stale open alert that hides the next real one), and a product already
 // back to zero or above gets none. Called after the record's transaction has committed, so no lock is held here.
-// Decided from the committed record, not the live gate: a pest, non-member lawn or tree & shrub record holds a
-// shortfall only when its gate was on at the save. A WaveGuard lawn record has held one since 2026-08-03 with no alert,
-// so it alerts only while GATE_LAWN_TS_STOCK_ADVISORY is live (off restores today's quiet WaveGuard behavior).
+// Decided from the committed record: a pest, lawn (WaveGuard included) or tree & shrub record alerts for each
+// shortfall it holds.
 const STOCK_ALERT_VISIT_LABELS = { pest: 'pest', lawn: 'lawn', tree_shrub: 'tree & shrub' };
 async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
   const visitLabel = STOCK_ALERT_VISIT_LABELS[detectServiceLine(svc?.service_type)];
-  if (!visitLabel || (isWaveGuardLawnCompletion(svc) && !require('../config/feature-gates').lawnTsStockAdvisoryLive())) return;
+  if (!visitLabel) return;
   const { raiseAdminAlert, breaksAlertRules, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
   const { stockShortfallKey } = require('../services/inventory-operations');
   let notes = record?.structured_notes || {};
@@ -8374,9 +8373,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
               serviceProduct,
               serviceRecord: record,
               scheduledService: svc,
-              // Advisory inventory posture: WaveGuard lawn, and a pest visit
-              // under GATE_PEST_STOCK_ADVISORY, a lawn or tree & shrub visit
-              // under GATE_LAWN_TS_STOCK_ADVISORY (isStockAdvisoryCompletion).
+              // Advisory inventory posture: a pest, lawn or tree & shrub visit
+              // (isStockAdvisoryCompletion).
               allowNegative: isStockAdvisoryCompletion(svc),
             });
             inventoryDeductions.push(deduction);
@@ -9645,9 +9643,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
-    // GATE_PEST_STOCK_ADVISORY / GATE_LAWN_TS_STOCK_ADVISORY: the office alert for each product this pest, lawn or tree &
-    // shrub visit took below zero. Never blocks. Decided from the committed record (notifyOfficeOfStockShortfalls picks the
-    // visit's line), so a resume (or a packet's effects phase) after the gate is turned off still alerts the office.
+    // The office alert for each product this pest, lawn or tree & shrub visit took below zero. Never blocks. Decided
+    // from the committed record (notifyOfficeOfStockShortfalls picks the visit's line), so a resume (or a packet's
+    // effects phase) still alerts the office.
     if (record?.id) await notifyOfficeOfStockShortfalls({ svc, record });
 
     // An area add-on row recorded above the add-on's governed rate (protocols.json area_addon): the same

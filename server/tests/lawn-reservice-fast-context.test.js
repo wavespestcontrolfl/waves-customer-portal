@@ -16,7 +16,6 @@ const {
   lawnReserviceIneligibleReason,
   lawnMethodChoices,
   LAWN_METHODS,
-  loadStockAdvisory,
 } = require('../services/lawn-reservice-fast-context');
 
 const LAWN_PROFILE = {
@@ -435,35 +434,20 @@ describe('methods, areas and lawn size', () => {
   });
 });
 
-describe('loadStockAdvisory (WaveGuard lawn completions record 0 stock as an advisory)', () => {
-  const svc = { id: 'svc-1', customer_id: 'cust-1', service_type: 'Lawn Care Re-Service' };
-  test('a WaveGuard member tier on a lawn visit is advisory', async () => {
-    expect(await loadStockAdvisory(svc, fakeKnex({ customers: { waveguard_tier: 'Gold' } }))).toBe(true);
-  });
-  test('no tier, the Commercial tier, or a failed read keeps the hold', async () => {
-    expect(await loadStockAdvisory(svc, fakeKnex({ customers: { waveguard_tier: null } }))).toBe(false);
-    expect(await loadStockAdvisory(svc, fakeKnex({ customers: { waveguard_tier: 'Commercial' } }))).toBe(false);
-    expect(await loadStockAdvisory(svc, fakeKnex({ customers: new Error('boom') }))).toBe(false);
-  });
-});
+describe('the context\'s stockAdvisory (the server\'s own classifier)', () => {
+  const build = (visitExtra = {}) => buildLawnReserviceFastContext('visit-1', fakeKnex({
+    scheduled_services: visit(visitExtra), products_catalog: catalog,
+  }));
 
-describe('loadStockAdvisory under GATE_LAWN_TS_STOCK_ADVISORY (the server\'s own classifier)', () => {
-  const svc = { id: 'svc-1', customer_id: 'cust-1', service_type: 'Lawn Care Re-Service' };
-  const saved = process.env.GATE_LAWN_TS_STOCK_ADVISORY;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_LAWN_TS_STOCK_ADVISORY; else process.env.GATE_LAWN_TS_STOCK_ADVISORY = saved;
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(LAWN_PROFILE);
   });
-  test('gate on: a non-member and a Commercial-tier lawn visit are advisory too', async () => {
-    process.env.GATE_LAWN_TS_STOCK_ADVISORY = 'true';
-    expect(await loadStockAdvisory(svc, fakeKnex({ customers: { waveguard_tier: null } }))).toBe(true);
-    expect(await loadStockAdvisory(svc, fakeKnex({ customers: { waveguard_tier: 'Commercial' } }))).toBe(true);
+
+  test('a lawn visit is advisory, whatever the customer\'s tier', async () => {
+    expect((await build()).stockAdvisory).toBe(true);
   });
-  test('gate on: a failed read still keeps the hold', async () => {
-    process.env.GATE_LAWN_TS_STOCK_ADVISORY = 'true';
-    expect(await loadStockAdvisory(svc, fakeKnex({ customers: new Error('boom') }))).toBe(false);
-  });
-  test('gate on: a visit that is not a lawn or tree & shrub visit keeps the hold', async () => {
-    process.env.GATE_LAWN_TS_STOCK_ADVISORY = 'true';
-    expect(await loadStockAdvisory({ ...svc, service_type: 'Mosquito Control' }, fakeKnex({ customers: { waveguard_tier: null } }))).toBe(false);
+  test('a visit that is not a lawn or tree & shrub visit keeps the hold', async () => {
+    expect((await build({ service_type: 'Mosquito Control' })).stockAdvisory).toBe(false);
   });
 });
