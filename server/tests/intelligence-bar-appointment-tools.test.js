@@ -2413,6 +2413,17 @@ describe('create_appointment — which property the visit is at (GATE_EDIT_APPT_
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject(STAMP);
   });
 
+  test('a card at one property never replaces or blocks the same booking at the customer\'s other property (Codex #6906 P2)', () => {
+    const { intentKey } = require('../services/intelligence-bar/pending-actions');
+    const base = { customer_id: 'cust-1', _booking_service_id: 'svc-1', scheduled_date: '2099-01-15' };
+    expect(intentKey('create_appointment', { ...base, property_id: 'prop-home' }))
+      .not.toBe(intentKey('create_appointment', { ...base, property_id: 'prop-rental' }));
+    // Same property: still one booking. No property: the key is unchanged.
+    expect(intentKey('create_appointment', { ...base, property_id: 'prop-home', time_window: '10:00 AM' }))
+      .toBe(intentKey('create_appointment', { ...base, property_id: 'prop-home' }));
+    expect(intentKey('create_appointment', base)).toBe('cust-1|svc:svc-1|2099-01-15');
+  });
+
   test('commit: the pin as the pending-action store hands it back (jsonb key order) still books', async () => {
     switchOn(true);
     customerProperties.bookingPropertyStamp.mockResolvedValueOnce(STAMP);
