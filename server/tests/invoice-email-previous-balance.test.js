@@ -178,7 +178,7 @@ describe('sendInvoiceEmail previous-balance note', () => {
     expect(args.payload.invoice_message).toBe('Thanks for having us out!');
   });
 
-  test('the attached PDF carries the same previous balance, itemized, with the account total', async () => {
+  test('the attached PDF carries the same previous balance, itemized with service names and past-due flags, with the account total', async () => {
     isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
     openBalanceSummary.mockResolvedValue({
       total: 300.1,
@@ -186,8 +186,8 @@ describe('sendInvoiceEmail previous-balance note', () => {
       moreCount: 0,
       complete: true,
       invoices: [
-        { invoice_number: 'INV-OLD-1', service_date: '2026-08-01', due_date: '2026-08-15', total: '200.10', credit_applied: 0 },
-        { invoice_number: 'INV-OLD-2', service_date: '2026-09-01', due_date: '2026-09-15', total: '120.00', credit_applied: '20.00' },
+        { invoice_number: 'INV-OLD-1', service_type: 'Quarterly Pest Control', service_date: '2026-08-01', due_date: '2026-08-15', is_overdue: true, total: '200.10', credit_applied: 0 },
+        { invoice_number: 'INV-OLD-2', service_type: null, service_date: '2026-09-01', due_date: '2026-09-15', is_overdue: false, total: '120.00', credit_applied: '20.00' },
       ],
     });
     mockDb(invoiceRow());
@@ -196,12 +196,13 @@ describe('sendInvoiceEmail previous-balance note', () => {
 
     expect(buildInvoicePDFBuffer.mock.calls[0][0].previous_balance).toEqual({
       invoices: [
-        { invoiceNumber: 'INV-OLD-1', serviceDate: '2026-08-01', dueDate: '2026-08-15', amountDue: 200.1 },
-        { invoiceNumber: 'INV-OLD-2', serviceDate: '2026-09-01', dueDate: '2026-09-15', amountDue: 100 },
+        { invoiceNumber: 'INV-OLD-1', serviceType: 'Quarterly Pest Control', serviceDate: '2026-08-01', dueDate: '2026-08-15', pastDue: true, amountDue: 200.1 },
+        { invoiceNumber: 'INV-OLD-2', serviceType: null, serviceDate: '2026-09-01', dueDate: '2026-09-15', pastDue: false, amountDue: 100 },
       ],
       moreCount: 0,
       total: 300.1,
       combinedTotal: 450.1,
+      totalLabel: 'Total account balance',
     });
   });
 
@@ -222,5 +223,19 @@ describe('sendInvoiceEmail previous-balance note', () => {
     await sendInvoiceEmail('inv-1');
 
     expect(buildInvoicePDFBuffer.mock.calls[0][0].previous_balance).toBeUndefined();
+  });
+
+  test('with the pay-page balance gate also on, the note says this link pays everything, and names the portal and app', async () => {
+    isEnabled.mockImplementation((gate) => gate === 'balanceVisibility' || gate === 'payIncludeBalance');
+    openBalanceSummary.mockResolvedValue({ total: 234, count: 2, invoices: [{}, {}] });
+    mockDb(invoiceRow());
+
+    await sendInvoiceEmail('inv-1');
+
+    const args = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(args.payload.invoice_message).toBe(
+      "Thanks for having us out!\n\nReminder: your account also has a previous balance of $234.00 from 2 earlier invoices. You can pay everything at once from this invoice's payment link, or see each invoice in your customer portal at portal.wavespestcontrol.com or in the Waves app.",
+    );
+    expect(args.payload.amount_due).toBe('$150.00');
   });
 });

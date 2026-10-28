@@ -154,6 +154,7 @@ describe('GET /pay/:token previous-balance itemization', () => {
         // customer's service history.
         serviceDate: '2026-08-01',
         dueDate: '2026-08-15',
+        pastDue: false,
         amountDue: 44.55,
       }],
       total: 44.55,
@@ -241,11 +242,21 @@ describe('GET /pay/:token/invoice.pdf previous balance', () => {
     isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
     const pdfInvoice = await getInvoicePdf(invoiceData());
     expect(pdfInvoice.previous_balance).toEqual({
-      invoices: [{ invoiceNumber: 'INV-OLD', serviceDate: '2026-08-01', dueDate: '2026-08-15', amountDue: 44.55 }],
+      invoices: [{ invoiceNumber: 'INV-OLD', serviceDate: '2026-08-01', dueDate: '2026-08-15', pastDue: false, amountDue: 44.55 }],
       total: 44.55,
       combinedTotal: 194.55,
+      // What the Pay button charges, not the whole account.
+      totalLabel: 'Total due today',
     });
     expect(JSON.stringify(pdfInvoice.previous_balance)).not.toContain(SIBLING_TOKEN);
+  });
+
+  test('gate ON: past-due comes from the open-balance overdue verdict, and no service names ride the PDF', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    openBalance.openBalanceInvoices.mockImplementation(async () => [{ ...siblingRow(), is_overdue: true }]);
+    const pdfInvoice = await getInvoicePdf(invoiceData());
+    expect(pdfInvoice.previous_balance.invoices[0].pastDue).toBe(true);
+    expect(JSON.stringify(pdfInvoice.previous_balance)).not.toContain('Lawn Care');
   });
 
   test('gate ON, payer-billed invoice: the PDF never shows the homeowner balance', async () => {

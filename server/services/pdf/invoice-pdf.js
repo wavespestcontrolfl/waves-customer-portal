@@ -445,37 +445,55 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
 // invoice's own totals. Display-only: TOTAL above stays this invoice's own,
 // and every earlier invoice keeps its own number, amount, and reminders.
 // Callers decide eligibility and attach `invoice.previous_balance` =
-// { invoices: [{ invoiceNumber, serviceDate, dueDate, amountDue }],
-//   moreCount, total, combinedTotal } — absent means the block never renders.
+// { invoices: [{ invoiceNumber, serviceType?, serviceDate, dueDate, pastDue, amountDue }],
+//   moreCount, total, combinedTotal, totalLabel } — absent means the block
+// never renders. `pastDue` is the caller's ET-correct verdict (open-balance
+// is_overdue); serviceType rides only where the caller allows it.
 function previousBalanceBlock(doc, previousBalance, x, y, width) {
   const invoices = Array.isArray(previousBalance?.invoices) ? previousBalance.invoices : [];
   if (!invoices.length || !(Number(previousBalance.total) > 0)) return y;
   const moreCount = Number(previousBalance.moreCount || 0);
   const rowH = 14;
+  const captionH = 12;
+  const leftW = 230;
   // Keep the heading and caption with at least the first row.
-  y = ensureRoom(doc, y + 16, 32 + rowH);
+  y = ensureRoom(doc, y + 16, 32 + rowH + captionH);
   y = sectionLabel(doc, 'Previous balance', x, y);
   doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(MUTED)
     .text('Earlier invoices that are still unpaid. They are not part of the TOTAL above.', x, y, { width });
   y += 12;
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 6;
-  doc.fontSize(PDF_TYPE.body).font('Helvetica');
   for (const inv of invoices) {
-    y = ensureRoom(doc, y, rowH);
+    doc.fontSize(PDF_TYPE.body).font('Helvetica');
+    const left = `Invoice ${inv.invoiceNumber || '—'}${inv.serviceType ? ` · ${String(inv.serviceType).slice(0, 80)}` : ''}`;
     const service = inv.serviceDate ? `Service ${formatInvoiceDateOnly(inv.serviceDate)}` : '';
-    const due = inv.dueDate ? `Due ${formatInvoiceDateOnly(inv.dueDate)}` : '';
-    doc.fillColor(INK).text(`Invoice ${inv.invoiceNumber || '—'}`, x, y, { width: 150 });
-    doc.fillColor(BODY).text([service, due].filter(Boolean).join(' · '), x + 150, y, { width: width - 230 });
+    // A past-due row states its due date in the caption below; don't repeat it.
+    const due = inv.dueDate && !inv.pastDue ? `Due ${formatInvoiceDateOnly(inv.dueDate)}` : '';
+    const middle = [service, due].filter(Boolean).join(' · ');
+    const middleW = width - leftW - 80;
+    const textH = Math.max(rowH, doc.heightOfString(left, { width: leftW }), doc.heightOfString(middle, { width: middleW }));
+    const pastDueLine = inv.pastDue && inv.dueDate;
+    y = ensureRoom(doc, y, textH + (pastDueLine ? captionH : 0));
+    doc.fillColor(INK).text(left, x, y, { width: leftW });
+    doc.fillColor(BODY).text(middle, x + leftW, y, { width: middleW });
     doc.fillColor(INK).text(currency(inv.amountDue), x + width - 70, y, { width: 70, align: 'right' });
-    y += rowH;
+    y += textH;
+    if (pastDueLine) {
+      doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(RED)
+        .text(`Past due since ${formatInvoiceDateOnly(inv.dueDate)}`, x, y, { width: leftW });
+      y += captionH;
+    }
+    y += 2;
   }
+  doc.fontSize(PDF_TYPE.body).font('Helvetica');
   if (moreCount > 0) {
     y = ensureRoom(doc, y, rowH);
     doc.fillColor(MUTED).text(`+ ${moreCount} more earlier invoice${moreCount === 1 ? '' : 's'}`, x, y, { width: width - 80 });
     y += rowH;
   }
-  y = ensureRoom(doc, y, 44);
+  // Totals plus the portal line stay together.
+  y = ensureRoom(doc, y, 58);
   y += 2;
   const labelX = x + width - 240;
   const valueX = x + width - 70;
@@ -487,10 +505,14 @@ function previousBalanceBlock(doc, previousBalance, x, y, width) {
   y += 14;
   if (Number(previousBalance.combinedTotal) > 0) {
     doc.font('Helvetica-Bold').fillColor(NAVY);
-    doc.text('Total account balance', labelX, y, { width: 160, align: 'right' });
+    doc.text(previousBalance.totalLabel || 'Total account balance', labelX, y, { width: 160, align: 'right' });
     doc.text(currency(previousBalance.combinedTotal), valueX, y, { width: 70, align: 'right' });
     y += 14;
   }
+  y += 6;
+  doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(MUTED)
+    .text('See every invoice in detail in your customer portal at portal.wavespestcontrol.com or in the Waves app.', x, y, { width });
+  y += 14;
   return y;
 }
 

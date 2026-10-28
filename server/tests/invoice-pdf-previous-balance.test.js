@@ -12,12 +12,13 @@ const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 
 const previousBalance = {
   invoices: [
-    { invoiceNumber: 'INV-OLD-1', serviceDate: '2026-08-01', dueDate: '2026-08-15', amountDue: 200.1 },
-    { invoiceNumber: 'INV-OLD-2', serviceDate: '2026-09-01', dueDate: '2026-09-15', amountDue: 100 },
+    { invoiceNumber: 'INV-OLD-1', serviceType: 'Quarterly Pest Control', serviceDate: '2026-08-01', dueDate: '2026-08-15', pastDue: true, amountDue: 200.1 },
+    { invoiceNumber: 'INV-OLD-2', serviceDate: '2026-09-01', dueDate: '2026-09-15', pastDue: false, amountDue: 100 },
   ],
   moreCount: 1,
   total: 345.1,
   combinedTotal: 495.1,
+  totalLabel: 'Total account balance',
 };
 
 function invoice(overrides = {}) {
@@ -43,15 +44,28 @@ describe('invoice PDF previous balance', () => {
   test('an open invoice lists each earlier invoice, the previous balance, and the account total; TOTAL stays its own', async () => {
     const text = await renderedText(invoice({ previous_balance: previousBalance }));
     expect(text).toContain('PREVIOUS BALANCE');
-    expect(text).toContain('Invoice INV-OLD-1');
+    expect(text).toContain('Invoice INV-OLD-1 · Quarterly Pest Control');
     expect(text).toContain('$200.10');
     expect(text).toContain('Invoice INV-OLD-2');
+    // Past-due is the caller's flag: only the flagged row gets the caption,
+    // and its due date is not repeated in the middle column.
+    expect(text).toContain('Past due since August 15, 2026');
+    expect(text).not.toContain('Past due since September 15, 2026');
+    expect(text).not.toContain('Due August 15, 2026');
+    expect(text).toContain('Service September 1, 2026 · Due September 15, 2026');
+    expect(text).toContain('portal.wavespestcontrol.com or in the Waves app');
     expect(text).toContain('+ 1 more earlier invoice');
     expect(text).toContain('$345.10');
     expect(text).toContain('Total account balance');
     expect(text).toContain('$495.10');
     // This invoice's own TOTAL is unchanged.
     expect(text).toMatch(/TOTAL\n\$150\.00/);
+  });
+
+  test('the pay-page download labels its total as what the Pay button charges', async () => {
+    const text = await renderedText(invoice({ previous_balance: { ...previousBalance, totalLabel: 'Total due today' } }));
+    expect(text).toContain('Total due today');
+    expect(text).not.toContain('Total account balance');
   });
 
   test('no previous_balance: no block', async () => {

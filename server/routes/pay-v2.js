@@ -1997,6 +1997,8 @@ async function payPagePreviousBalance(data, { creditWillCoverAnchor, onPayerReso
       // never the customer's service history.
       serviceDate: inv.service_date,
       dueDate: inv.due_date,
+      // open-balance's ET-correct overdue verdict — renderers do no date math.
+      pastDue: inv.is_overdue === true,
       amountDue: PayCombined.amountDueCents(inv) / 100,
     })),
     total: prevTotalCents / 100,
@@ -2035,7 +2037,9 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
         creditWillCoverAnchor = null;
       }
       const previousBalance = await payPagePreviousBalance(data, { creditWillCoverAnchor });
-      if (previousBalance) data.previous_balance = previousBalance;
+      // This figure is what the Pay button charges, not the whole account
+      // (stopped-dunning and in-flight invoices are left out) — label it so.
+      if (previousBalance) data.previous_balance = { ...previousBalance, totalLabel: 'Total due today' };
     }
     generateInvoicePDF(data, res);
   } catch (err) {

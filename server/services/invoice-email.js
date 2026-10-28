@@ -302,13 +302,18 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     invoiceForPdf.previous_balance = {
       invoices: previousBalance.invoices.map((inv) => ({
         invoiceNumber: inv.invoice_number,
+        // Service names ride the EMAILED PDF only: it reaches the customer's
+        // own saved recipient. The public /pay surfaces never carry them.
+        serviceType: inv.service_type || null,
         serviceDate: inv.service_date,
         dueDate: inv.due_date,
+        pastDue: inv.is_overdue === true,
         amountDue: invoiceAmountDue(inv),
       })),
       moreCount: previousBalance.moreCount,
       total: totalCents / 100,
       combinedTotal: (totalCents + Math.round(amountDue * 100)) / 100,
+      totalLabel: 'Total account balance',
     };
   }
   let pdfBuffer;
@@ -370,7 +375,11 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // saved billing recipient may see the note. (effectiveOverride also covers
   // the payer-AP reroute, belt-and-braces with the payer_id check.)
   let previousBalanceNote = '';
-  if (previousBalance?.total > 0) {
+  // With the pay-page balance gate on, this invoice's link pays everything at
+  // once, so the note says that instead of pointing at each invoice's own link.
+  if (previousBalance?.total > 0 && isEnabled('payIncludeBalance')) {
+    previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}. You can pay everything at once from this invoice's payment link, or see each invoice in your customer portal at portal.wavespestcontrol.com or in the Waves app.`;
+  } else if (previousBalance?.total > 0) {
     previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
   }
   const previousBalanceEscaped = previousBalanceNote

@@ -2987,7 +2987,12 @@ export default function PayPageV2() {
                 const combinedSetup = stripeSetup?.combined;
                 const prev = combinedSetup
                   ? (() => {
-                    const others = combinedSetup.invoices.filter((i) => !i.isCurrent);
+                    // The setup breakdown carries no past-due verdict (it is
+                    // money-path data); keep the GET preview's, by invoice number.
+                    const pastDueByNumber = new Map((data.previousBalance?.invoices || []).map((i) => [i.invoiceNumber, i.pastDue === true]));
+                    const others = combinedSetup.invoices
+                      .filter((i) => !i.isCurrent)
+                      .map((i) => ({ ...i, pastDue: pastDueByNumber.get(i.invoiceNumber) === true }));
                     return {
                       invoices: others,
                       total: Math.round(others.reduce((s, i) => s + Number(i.amountDue || 0), 0) * 100) / 100,
@@ -3012,7 +3017,11 @@ export default function PayPageV2() {
                       return (
                         <SummaryRow
                           key={inv.invoiceNumber}
-                          label={`Invoice ${inv.invoiceNumber}${inv.serviceType ? ` — ${inv.serviceType}` : ''}${rowDate ? ` (${fmtDate(rowDate)})` : ''}`}
+                          label={<>
+                            {`Invoice ${inv.invoiceNumber}${inv.serviceType ? ` — ${inv.serviceType}` : ''}${rowDate ? ` (${fmtDate(rowDate)})` : ''}`}
+                            {/* pastDue is the server's ET-correct overdue verdict (open-balance is_overdue) — no date math here. */}
+                            {inv.pastDue && inv.dueDate && <span style={{ display: 'block', color: DOC.danger, fontSize: FS.body, fontWeight: FW.medium }}>Past due since {fmtDate(inv.dueDate)}</span>}
+                          </>}
                           value={fmtCurrency(inv.amountDue)}
                           muted
                         />
@@ -3020,6 +3029,9 @@ export default function PayPageV2() {
                     })}
                     <SummaryRow label="Previous balance" value={fmtCurrency(prev.total)} />
                     <SummaryRow label="Total due today" value={fmtCurrency(prev.combinedTotal)} strong />
+                    <div style={{ marginTop: SP.sm, fontSize: FS.body, color: DOC.muted, fontFamily: DOC_FONT }}>
+                      See every invoice in detail in your <a href="/login" style={{ color: DOC.ink, fontWeight: FW.semibold }}>customer portal</a> or the Waves app.
+                    </div>
                   </>
                 );
               })()}
