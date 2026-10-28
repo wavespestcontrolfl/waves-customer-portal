@@ -319,3 +319,31 @@ describe('bot-check breaker (per adapter, per browser context)', () => {
     expect(authenticate).not.toHaveBeenCalled();
   });
 });
+
+describe('candidateTier: one ranking for a scraped candidate', () => {
+  const { candidateTier, CANDIDATE_TIER } = require('../services/price-scan/adapters/base');
+  const product = { name: 'Termidor SC', quantity: '78 oz', epaReg: '7969-210' };
+  const page = (over = {}) => ({
+    name: 'Termidor SC Termiticide/Insecticide - 78 oz', text: 'EPA Reg. No. 7969-210', quantity: '78 oz', availability: 'in_stock', ...over,
+  });
+
+  test('verified, buyable and EPA-confirmed is IDEAL', () => {
+    expect(candidateTier(page(), product)).toBe(CANDIDATE_TIER.IDEAL);
+  });
+  test('verified and buyable without the EPA on the page is BUYABLE', () => {
+    expect(candidateTier(page({ text: 'termite control' }), product)).toBe(CANDIDATE_TIER.BUYABLE);
+  });
+  test('a product with no EPA to confirm is IDEAL on name and size', () => {
+    expect(candidateTier(page({ text: 'termite control' }), { ...product, epaReg: null })).toBe(CANDIDATE_TIER.IDEAL);
+  });
+  test('verified but out of stock is UNBUYABLE, even with the EPA confirmed', () => {
+    expect(candidateTier(page({ availability: 'out_of_stock' }), product)).toBe(CANDIDATE_TIER.UNBUYABLE);
+  });
+  test('a priced page at another size does not confirm: UNVERIFIED', () => {
+    expect(candidateTier(page({ name: 'Termidor SC Termiticide/Insecticide - 20 oz', quantity: '20 oz' }), product)).toBe(CANDIDATE_TIER.UNVERIFIED);
+  });
+  test('lower is better: IDEAL < BUYABLE < UNBUYABLE < UNVERIFIED < NONE', () => {
+    const t = CANDIDATE_TIER;
+    expect([t.IDEAL, t.BUYABLE, t.UNBUYABLE, t.UNVERIFIED, t.NONE]).toEqual([0, 1, 2, 3, 4]);
+  });
+});

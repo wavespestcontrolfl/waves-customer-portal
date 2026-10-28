@@ -428,6 +428,27 @@ function shortSearchQuery(product) {
   return searchQuery(product).split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
 }
 
+// How good one scraped candidate is, lower = better (fetchCandidate keeps the first page at
+// the best tier and returns a tier-0 page at once). PURE apart from verifyMatch.
+//   IDEAL       verified, buyable, and EPA-confirmed (or the product has no EPA to confirm)
+//   BUYABLE     verified and buyable, EPA not confirmed — a single-letter formulation suffix
+//               the slug can't encode (catalog "Talstar P" vs page "Talstar Professional")
+//               lets a sibling like "Talstar XTRA" pass name+size on brand overlap alone
+//   UNBUYABLE   verified but out of stock / backorder (compare drops it, so any buyable
+//               match must beat it, even one found later)
+//   UNVERIFIED  a priced page that did not confirm (a precise 'unverified' skip)
+const CANDIDATE_TIER = Object.freeze({ IDEAL: 0, BUYABLE: 1, UNBUYABLE: 2, UNVERIFIED: 3, NONE: 4 });
+function candidateTier(cand, product) {
+  const verdict = verifyMatch(
+    { name: cand.name, text: cand.text, quantity: cand.quantity, competingOffers: cand.competing_same_size },
+    product,
+  );
+  if (!verdict.matched) return CANDIDATE_TIER.UNVERIFIED;
+  if (isUnavailable(cand)) return CANDIDATE_TIER.UNBUYABLE;
+  const epaOk = !(product && product.epaReg) || verdict.signals.epa;
+  return epaOk ? CANDIDATE_TIER.IDEAL : CANDIDATE_TIER.BUYABLE;
+}
+
 function makeAdapter(config) {
   const timeout = config.timeout || DEFAULT_TIMEOUT;
 
@@ -588,6 +609,25 @@ function makeAdapter(config) {
     }
   }
 
+  // The ranked product URLs to try for a search-backed vendor. The full catalog name goes
+  // first; an adapter with shortQueryFallback also tries the first two words ONCE when the
+  // full name finds nothing (skipped when that IS the full name). A search that lands
+  // straight on a product page (searchMayLandOnProduct) yields just that page.
+  async function candidateUrls(page, vendor, product) {
+    const queries = [product];
+    const shortQ = config.shortQueryFallback ? shortSearchQuery(product) : null;
+    if (shortQ && shortQ !== searchQuery(product)) queries.push({ ...product, searchQuery: shortQ });
+    const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
+    for (const query of queries) {
+      const found = await searchOnce(page, vendor, query);
+      if (!found) return [];
+      if (found.landedUrl) return [found.landedUrl];
+      const picked = selectSearchCandidates(found.links, product, cap);
+      if (picked.length) return picked;
+    }
+    return [];
+  }
+
   async function fetchCandidate(page, vendor, product) {
     assertBreakerClosed(page, vendor);
     await ensureAuthenticated(page, vendor);
@@ -595,33 +635,14 @@ function makeAdapter(config) {
     const directUrl = vendor.url || (config.buildProductUrl && config.buildProductUrl(product, vendor));
     if (directUrl) return scrapeCandidate(page, vendor, product, directUrl);
 
-    // Otherwise search the vendor and open the best matches.
-    let found = await searchOnce(page, vendor, product);
-    if (!found) return null;
-    // OPT-IN: a long catalog name can find nothing on a store that matches short names. Retry
-    // ONCE with the first two words (skipped when that IS the full query); the candidates it
-    // yields go through the same verify flow below.
-    if (config.shortQueryFallback && !found.landedUrl && !found.links.length) {
-      const shortQ = shortSearchQuery(product);
-      if (shortQ && shortQ !== searchQuery(product)) {
-        found = (await searchOnce(page, vendor, { ...product, searchQuery: shortQ })) || found;
-      }
-    }
-
     // Search is fuzzy + relevance-ranked, and slug heuristics can't always tell
     // same-brand variants apart (Talstar P vs Talstar XTRA). So open the top-ranked
     // results in turn and let verifyMatch (EPA / formulation / size) pick the real
-    // one — returning the first that VERIFIES rather than betting on a single link.
-    const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
-    const candidates = found.landedUrl
-      ? [found.landedUrl]
-      : selectSearchCandidates(found.links, product, cap);
-    const wantsEpa = !!(product && product.epaReg);
-    let fallback = null; // best-ranked priced page, if nothing verifies (-> precise 'unverified')
-    let firstBuyable = null; // first BUYABLE name+size match lacking EPA confirmation
-    let firstUnbuyable = null; // first verified match that isn't buyable (compare drops it)
+    // one — the first tier-0 page wins at once, else the best tier seen (first wins a tie).
+    let best = null;
+    let bestTier = CANDIDATE_TIER.NONE;
     let candidateError = null; // a per-candidate nav/scrape failure, surfaced only if nothing verifies
-    for (const url of candidates) {
+    for (const url of await candidateUrls(page, vendor, product)) {
       let cand;
       try {
         cand = await scrapeCandidate(page, vendor, product, url);
@@ -635,40 +656,25 @@ function makeAdapter(config) {
         continue;
       }
       if (!cand) continue;
-      if (!fallback) fallback = cand;
-      const verdict = verifyMatch(
-        { name: cand.name, text: cand.text, quantity: cand.quantity, competingOffers: cand.competing_same_size },
-        product,
-      );
-      if (!verdict.matched) continue;
-      const buyable = !isUnavailable(cand); // out_of_stock / backorder can't be an opportunity
-      // Prefer an EPA-confirmed match — a single-letter formulation suffix the slug can't
-      // encode (catalog "Talstar P" vs page "Talstar Professional") lets a sibling like
-      // "Talstar XTRA" pass name+size on brand overlap alone — BUT only among BUYABLE
-      // pages: an out-of-stock EPA hit gets dropped by compare, so it must never beat an
-      // already-found buyable match. Ideal (EPA-ok AND buyable, or no EPA needed) wins now.
-      if ((!wantsEpa || verdict.signals.epa) && buyable) return cand;
-      if (buyable) { if (!firstBuyable) firstBuyable = cand; } // buyable but EPA not confirmed
-      else if (!firstUnbuyable) firstUnbuyable = cand; // verified but unbuyable
+      const tier = candidateTier(cand, product);
+      if (tier === CANDIDATE_TIER.IDEAL) return cand;
+      if (tier < bestTier) { best = cand; bestTier = tier; }
     }
-    // A buyable match (can actually be an opportunity) beats a verified-but-unbuyable one
-    // (compare would drop it). Only these two are actual verifyMatch passes.
-    const verified = firstBuyable || firstUnbuyable;
     // If NOTHING verified and a candidate threw, surface that error as a precise
     // 'fetch_error': the scan was INCOMPLETE (the candidate that timed out might have
-    // been the real match), so we must not let a priced-but-unverified fallback report a
+    // been the real match), so we must not let a priced-but-unverified page report a
     // clean 'unverified' — that reads as "found it, no match here, don't retry" when the
     // truth is "a fetch failed, retry". Only a verified match suppresses the error.
-    if (!verified && candidateError) throw candidateError;
+    if (bestTier >= CANDIDATE_TIER.UNVERIFIED && candidateError) throw candidateError;
     // A verified match wins; else the best priced page is a precise 'unverified' skip
     // (we did reach a page, it just didn't confirm).
-    return verified || fallback;
+    return best;
   }
 
   return { key: config.key, config, fetchCandidate };
 }
 
 module.exports = {
-  makeAdapter, collectSnapshot, applySizeHint, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
+  makeAdapter, candidateTier, CANDIDATE_TIER, collectSnapshot, applySizeHint, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
   searchQuery, targetOzOf, isBotCheckSignals, landedOnProductUrl, shortSearchQuery, BOT_CHECK_BREAKER_LIMIT, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };
