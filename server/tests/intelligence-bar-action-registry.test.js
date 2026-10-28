@@ -345,7 +345,9 @@ const SCOPE_SNAPSHOT = {
   phone_keyed: ['get_partner_call_history'],
   email_keyed: ['check_email_suppression'],
   address_keyed: ['lookup_property'],
-  route_wide: ['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments'],
+  // resolve_dispatch_alert (the Action Queue spans every customer's visits) and unblock_sender (the blocklist is not one
+  // customer's record): refused inside a customer-scoped task rather than classed as none.
+  route_wide: ['optimize_all_routes', 'optimize_tech_route', 'resolve_dispatch_alert', 'swap_tech_assignments', 'unblock_sender'],
   record: [
     // reads: a customer or record selector confines the rows to one customer
     'check_customer_status', 'compute_estimate', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',

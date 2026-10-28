@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibSetBillToLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
@@ -81,6 +81,8 @@ const MODULES = [
   ['payment-plan-tools', 'PAYMENT_PLAN_TOOLS', 'executePaymentPlanTool'],
   ['create-invoice-tools', 'CREATE_INVOICE_TOOLS', 'executeCreateInvoiceTool'],
   ['bill-to-tools', 'BILL_TO_TOOLS', 'executeBillToTool'],
+  ['dispatch-alert-tools', 'DISPATCH_ALERT_TOOLS', 'executeDispatchAlertTool'],
+  ['unblock-sender-tools', 'UNBLOCK_SENDER_TOOLS', 'executeUnblockSenderTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
   ['admin-write-tools', 'ADMIN_WRITE_TOOLS', 'executeAdminWriteTool'],
@@ -161,6 +163,8 @@ const GATED_ACTIONS = {
   cancel_payment_plan: () => ibPaymentPlanLive(),
   create_invoice: () => ibCreateInvoiceLive(),
   set_customer_bill_to: () => ibSetBillToLive(),
+  resolve_dispatch_alert: () => ibResolveDispatchAlertLive(),
+  unblock_sender: () => ibUnblockSenderLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
   find_admin_edits: () => adminWriteLive(),
