@@ -323,15 +323,23 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     if (answer?.source === m.source && Number.isFinite(answer.minutes)) m.remember(r.key, r.asLeg, answer.minutes, t);
     return answer;
   }
-  // Buys `legs` from the mode's source; returns how many it never sent.
-  async function buy(mode, legs) {
-    if (!legs.length) return 0;
+  // Buys `entries` ([key, leg as Google is asked for it]) from the mode's
+  // source; returns how many it never sent.
+  async function buy(mode, entries) {
+    if (!entries.length) return 0;
+    const m = MODES[mode];
     const before = sources[mode].diagnostics().elements;
-    await sources[mode].preload(legs);
-    // Keep what Google answered in the process cache (lookup remembers), so
-    // the next search, or the next picker for this visit, asks nothing.
-    legs.forEach((leg) => lookup(leg));
-    return legs.length - (sources[mode].diagnostics().elements - before);
+    await sources[mode].preload(entries.map(([, leg]) => leg));
+    // Keep what Google answered in the process cache under the key it was
+    // bought for (the leg is already shaped: never shape it twice), so the
+    // other checks of this request, the next search, or the next picker for
+    // this visit ask nothing (pre-push audit #6881).
+    const t = now();
+    for (const [key, leg] of entries) {
+      const answer = sources[mode].lookup(leg);
+      if (answer?.source === m.source && Number.isFinite(answer.minutes)) m.remember(key, leg, answer.minutes, t);
+    }
+    return entries.length - (sources[mode].diagnostics().elements - before);
   }
   // Buys the claimed legs within the durable ceilings; what was never bought
   // (refused, or never sent) leaves the request's budget too.
@@ -363,7 +371,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
         // Claimed before any await, so concurrent checks cannot oversubscribe.
         budget[r.mode] += 1;
         budget.claimed.set(r.key, settled);
-        want[r.mode].push(r.asLeg);
+        want[r.mode].push([r.key, r.asLeg]);
       }
       try {
         if (want.traffic.length || want.plain.length) await purchase(want);

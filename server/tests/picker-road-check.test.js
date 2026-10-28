@@ -243,6 +243,20 @@ describe('createPickerTravel', () => {
     }
   });
 
+  // Pre-push audit #6881 (P1): at 10:00 a 10:30 leg is asked for 11:00; the
+  // answer must be cached under that key (not shaped again into 12:00), or a
+  // check waiting on the claim reads the model.
+  test("a waiting check reads the claimed leg's answer when today's floor moved its departure", async () => {
+    const budget = createPickerBudget();
+    const a = make({ budget });
+    const b = make({ budget });
+    const today = [leg(DATE, 10 * 60 + 30)];
+    await Promise.all([a.travel.preload(today), b.travel.preload(today)]);
+    expect(a.asked.traffic.length + b.asked.traffic.length).toBe(1);
+    expect(b.travel.lookup(today[0])).toEqual({ minutes: 17, source: 'google_traffic', reason: null });
+    expect(a.travel.lookup(today[0])).toEqual({ minutes: 17, source: 'google_traffic', reason: null });
+  });
+
   test('concurrent checks cannot oversubscribe the request budget', async () => {
     const budget = createPickerBudget();
     const many = (n, lat) => Array.from({ length: n }, (_, i) => leg(plus(1), 9 * 60, { lat: lat + i / 1000, lng: -82.3 }));
