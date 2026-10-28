@@ -36,13 +36,15 @@ const SCHEDULING_TRAVEL_BUDGET_MS = 15 * 60 * 1000;
 
 /** Request-scoped road estimates under both local and shared provider limits.
  * The caller preloads before taking any scheduling lock. */
-// The admin picker's own allowance (best-times chips, GATE_BEST_TIMES_ROAD_TIMES,
-// and the pickers' route check, GATE_PICKER_ROAD_CHECK): separate from the
-// one above, so staff picks never spend customer booking's. Per process and
-// reset on a deploy, so it only smooths bursts: the pickers' durable daily
-// and monthly ceilings live in scheduling/picker-road-spend.js. Past it,
-// searches fall back to the model ("~").
-const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 600, maxElements: 1500 };
+// The admin picker's own allowance (best-times chips, GATE_BEST_TIMES_ROAD_TIMES):
+// separate from the one above, so staff picks never spend customer booking's.
+const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 240, maxElements: 600 };
+// The staff pickers' route check (GATE_PICKER_ROAD_CHECK) has its own, so it
+// never raises the chips' ceiling. Per process and reset on a deploy, so it
+// only smooths bursts: both are also counted against the durable daily and
+// monthly ceilings (scheduling/picker-road-spend.js). Past it, searches fall
+// back to the model ("~").
+const pickerTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 600, maxElements: 1500 };
 
 // How a matrix source asks Google and keys its answers. `traffic: false`
 // (the pickers' later days, GATE_PICKER_ROAD_CHECK): road times without
@@ -657,6 +659,7 @@ module.exports = {
   callGoogleRoutesAPI,
   createSchedulingTravel,
   hintTravelBudget,
+  pickerTravelBudget,
   nearestNeighborOptimize,
   calcUnoptimizedDistance,
   haversine,

@@ -88,31 +88,46 @@ function etNow(ms) {
   return { date: etDateString(d), minute: p.hour * 60 + p.minute };
 }
 
+// Reserves `pro` traffic-aware and `plain` road-time lookups for `spender`
+// against the durable ceilings (picker-road-spend.js), runs `send` (which
+// returns { pro, plain } it never sent: its burst allowance, its deadline, a
+// closed picker), and gives those back on the reservation's day. A refusal
+// returns { allowed: false, reason } and `send` never runs.
+async function buyWithinCeilings({ spender, pro = 0, plain = 0 }, send) {
+  const spend = require('./picker-road-spend');
+  const reserved = await spend.reserveRoadSpend({ spender, pro, plain });
+  if (!reserved.allowed) return reserved;
+  const unsent = await send();
+  await spend.releaseRoadSpend({ spender, ...unsent, day: reserved.day });
+  return { allowed: true, unsent };
+}
+
 /**
  * Re-price `chips` (summary hour rows that still carry GAP_LEGS). Returns new
  * objects with drive_in_minutes / detour_minutes from Google and
  * drive_source 'google', or the input numbers with drive_source 'estimate'.
  * Never throws.
  */
-async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now() } = {}) {
+async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(), paid = false, spender = null } = {}) {
   // Only gap chips (GAP_LEGS) are re-priced; a capacity chip stays an
   // estimate (Codex #6045 r9: its admission and numbers stay on the model).
   // An hour the route check already drove on Google (GATE_PICKER_ROAD_CHECK)
   // keeps that label.
   const estimate = (c) => ({ ...c, drive_source: c.drive_source === 'google' ? 'google' : 'estimate' });
   if (!Array.isArray(chips) || !chips.length) return [];
-  if (!gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES')) return chips.map(estimate);
+  // Staff only (Codex #6881 security): a technician's chips keep the model.
+  if (!paid || !gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES')) return chips.map(estimate);
   try {
     const t = now();
     const nowEt = etNow(t);
     const plans = chips.map((chip) => chipLegs(chip, nowEt));
-    const missing = [];
+    const missing = new Map();
     for (const legs of plans) {
       if (!legs) continue;
-      for (const leg of Object.values(legs)) if (cachedMinutes(leg, t) == null) missing.push(leg);
+      for (const leg of Object.values(legs)) if (cachedMinutes(leg, t) == null) missing.set(legKey(leg), leg);
     }
     let travel = null;
-    if (missing.length) {
+    if (missing.size) {
       const factory = travelFactory || (() => {
         const RouteOptimizer = require('../route-optimizer');
         return RouteOptimizer.createSchedulingTravel({
@@ -120,7 +135,12 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now() 
         });
       });
       travel = factory();
-      await travel.preload(missing);
+      // Counted against the pickers' durable ceilings, like the route check.
+      const bought = await buyWithinCeilings({ spender, pro: missing.size }, async () => {
+        await travel.preload([...missing.values()]);
+        return { pro: missing.size - travel.diagnostics().elements, plain: 0 };
+      });
+      if (!bought.allowed) return chips.map(estimate);
     }
     const minutesFor = (leg) => {
       const hit = cachedMinutes(leg, t);
@@ -281,7 +301,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
   const sources = {};
   for (const mode of Object.keys(MODES)) {
     sources[mode] = (factories[mode] || (() => RouteOptimizer.createSchedulingTravel({
-      ...travelFor[mode], sharedBudget: RouteOptimizer.hintTravelBudget, signal: budget.signal,
+      ...travelFor[mode], sharedBudget: RouteOptimizer.pickerTravelBudget, signal: budget.signal,
     })))();
   }
   // The leg as Google is asked for it, with its mode and key; null = the model.
@@ -313,22 +333,17 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     legs.forEach((leg) => lookup(leg));
     return legs.length - (sources[mode].diagnostics().elements - before);
   }
-  // Reserves the claimed legs against the durable ceilings, buys them, and
-  // gives back what the source never sent (its burst allowance, its deadline,
-  // a closed picker) to the ceilings and the request's budget.
+  // Buys the claimed legs within the durable ceilings; what was never bought
+  // (refused, or never sent) leaves the request's budget too.
   async function purchase(want) {
-    const spend = require('./picker-road-spend');
-    const reserved = await spend.reserveRoadSpend({ spender, pro: want.traffic.length, plain: want.plain.length });
-    if (!reserved.allowed) {
-      budget.refused = reserved.reason;
-      budget.traffic -= want.traffic.length;
-      budget.plain -= want.plain.length;
-      return;
-    }
-    const [pro, plain] = await Promise.all([buy('traffic', want.traffic), buy('plain', want.plain)]);
-    budget.traffic -= pro;
-    budget.plain -= plain;
-    await spend.releaseRoadSpend({ spender, pro, plain, day: reserved.day });
+    const bought = await buyWithinCeilings({ spender, pro: want.traffic.length, plain: want.plain.length }, async () => {
+      const [pro, plain] = await Promise.all([buy('traffic', want.traffic), buy('plain', want.plain)]);
+      return { pro, plain };
+    });
+    const unsent = bought.allowed ? bought.unsent : { pro: want.traffic.length, plain: want.plain.length };
+    if (!bought.allowed) budget.refused = bought.reason;
+    budget.traffic -= unsent.pro;
+    budget.plain -= unsent.plain;
   }
   return {
     async preload(legs) {

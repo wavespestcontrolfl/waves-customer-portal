@@ -517,6 +517,9 @@ router.post('/', async (req, res) => {
       // stop reaches around this service (rain-fit.js bookingRainPlan).
       serviceTypes: rainPlan.services,
       rainSpan: rainPlan.rainSpan,
+      // The chips' Google prices are staff-only and counted against the
+      // staff user who asked (Codex #6881 security).
+      paidRoads, roadSpender: req.technicianId,
     });
     const pickedOut = built.picked;
 
