@@ -405,6 +405,13 @@ describe('OpenGov notices', () => {
     expect(detectBidEmail(ogNotice({
       body_text: OG_BODY('City of Sampleton has invited you to the following opportunity:', 'Construction of Two (2) Granite Benches'),
     }))).toMatchObject({ bid: false, reason: 'outside_trade' });
+    // Mowing is grounds work: filed.
+    expect(detectBidEmail(ogNotice({ body_text: OG_BODY(undefined, 'Lot Mowing - Annual Contract') }))).toMatchObject({ bid: true });
+  });
+
+  test('bid words in the subject still file a notice whatever its title, as before the template', () => {
+    expect(detectBidEmail(ogNotice({ subject: 'RFQ 27-04 Sample County Parking Lot Sweeping', body_text: OG_BODY(undefined, 'Sample County Parking Lot Sweeping') })))
+      .toMatchObject({ bid: true, source: 'gov_email' });
   });
 
   test('account mail is not a bid; a forged OpenGov notice is read as plain government mail', () => {

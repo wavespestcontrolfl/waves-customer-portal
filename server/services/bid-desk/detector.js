@@ -64,8 +64,8 @@ const REMINDER_WORDS = /\breminder\b|\bdue (?:soon|tomorrow|today)\b|\bclosing s
 // OpenGov notice line ("<Agency> has invited you to ..." or "<Agency> has just released ..."); the title is the next line.
 const OG_NOTICE = /^(.{2,160}?) has (?:invited you to|just released) the following opportunity:?$/i;
 // Work we bid on, read from an OpenGov broadcast title ("Pest Control Services", "Mole Cricket Application",
-// "Grounds Maintenance"). A title without one of these is another trade's work.
-const TRADE_WORDS = /\b(?:pests?|termites?|mosquito(?:es)?|rodents?|rats?|exterminat\w*|fumigat\w*|insects?|insecticides?|bed ?bugs?|wildlife|mole crickets?|lawns?|turf|weeds?|herbicides?|fertiliz\w*|landscap\w*|grounds|vegetation|trees?|shrubs?)\b/i;
+// "Grounds Maintenance", "Lot Mowing"). A title without one of these is another trade's work.
+const TRADE_WORDS = /\b(?:pests?|termites?|mosquito(?:es)?|rodents?|rats?|exterminat\w*|fumigat\w*|insects?|insecticides?|bed ?bugs?|wildlife|mole crickets?|lawns?|turf|weeds?|herbicides?|fertiliz\w*|landscap\w*|grounds|mow(?:ing)?|vegetation|trees?|shrubs?)\b/i;
 // Charlotte County Purchasing notice lines.
 const CC_NOTICE = /^Addendum Notification for (?:Bid|Quote|Proposal|RFP|RFQ|ITB|ITN)\s+(\d{2}-\d{2,5})$/i;
 const CC_ADDED = /^An addendum has been added to Charlotte County Purchasing Request for (?:Bid|Quote|Proposal)s?\s*:\s*(?:\d{6,10}\s*-\s*)?(.+?)\.?$/i;
@@ -230,10 +230,12 @@ function bidSource(email, sender, bidWords) {
       ? { source: 'bluebook' } : { reason: 'provider_not_bid' };
   }
   if (sender === 'opengov') {
-    // Its notices carry no bid words; account mail and any other OpenGov wording fall back to the subject rule.
+    // Its notices carry no bid words. Bid words in the subject still file it as before; otherwise a notice needs our
+    // trade in its title, and account mail or any other OpenGov wording is not a bid.
+    if (bidWords) return { source: 'gov_email' };
     const notice = opengovNotice(bodyLines(email));
     if (notice) return TRADE_WORDS.test(notice.title) ? { source: 'gov_email' } : { reason: 'outside_trade' };
-    return bidWords ? { source: 'gov_email' } : { reason: 'provider_not_bid' };
+    return { reason: 'provider_not_bid' };
   }
   if (bidWords) return { source: GOV_SENDERS.has(sender) ? 'gov_email' : 'email_subject' };
   return { reason: 'not_bid' };

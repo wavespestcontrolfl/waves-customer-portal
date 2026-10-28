@@ -105,18 +105,19 @@ async function findBid(trx, email, groupKey, groupBase = null, kind = null) {
   // decided is new work. (A reply in the bid's own thread above still joins it.)
   const exact = await trx('bid_opportunities').where({ group_key: groupKey }).whereIn('status', OPEN_STATUSES)
     .orderBy('created_at').first();
-  // An addendum or a reminder is never new work: one for a bid already decided joins that bid (the newest with the
-  // key), so a county's addendum to a bid we declined does not file it again. It rings nothing (attachPatch: closed).
-  if (!exact && ADDS_TO_EXISTING.has(kind)) {
-    const decided = await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first();
-    if (decided) return decided;
+  if (exact) return exact;
+  if (groupBase && groupKey === groupBase) {
+    // No package named: join the project's open bid only when there is exactly one.
+    const candidates = await trx('bid_opportunities').whereIn('status', OPEN_STATUSES)
+      .where((q) => q.where({ group_key: groupBase }).orWhere('group_key', 'like', `${groupBase.replace(/[\\%_]/g, '\\$&')}#%`))
+      .orderBy('created_at').limit(2);
+    if (candidates.length === 1) return candidates[0];
   }
-  if (exact || !groupBase || groupKey !== groupBase) return exact || null;
-  // No package named: join the project's bid only when there is exactly one.
-  const candidates = await trx('bid_opportunities').whereIn('status', OPEN_STATUSES)
-    .where((q) => q.where({ group_key: groupBase }).orWhere('group_key', 'like', `${groupBase.replace(/[\\%_]/g, '\\$&')}#%`))
-    .orderBy('created_at').limit(2);
-  return candidates.length === 1 ? candidates[0] : null;
+  // An addendum or a reminder is never new work: with no open bid to join, one for a bid already decided joins that
+  // bid (the newest with the key), so a county's addendum to a bid we declined does not file it again. It rings
+  // nothing there (attachPatch: closed).
+  if (!ADDS_TO_EXISTING.has(kind)) return null;
+  return (await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first()) || null;
 }
 
 /**

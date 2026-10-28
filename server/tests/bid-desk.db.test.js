@@ -457,6 +457,18 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(rung('addendum')).toHaveLength(0);
     });
 
+    test('an addendum naming no package joins the project\'s one open package bid before a decided bid of the project', async () => {
+      const bare = BC_BODY().replace(': Pest Control', '');
+      const decided = await service.ingestEmail(await storeEmail({ body_text: bare }));
+      await mockPg('bid_opportunities').where({ id: decided.bidId }).update({ status: 'no_bid' });
+      const open = await service.ingestEmail(await storeEmail());
+      expect(open.created).toBe(true);
+      raiseAdminAlert.mockClear();
+      const addendum = await service.ingestEmail(await storeEmail({ subject: 'Addendum 1 - Sample Ridge Residences', body_text: bare }));
+      expect(addendum).toMatchObject({ created: false, bidId: open.bidId, kind: 'addendum' });
+      expect(rung('addendum')).toHaveLength(1);
+    });
+
     test('the late pass pages past non-bid mail to a late bid row', async () => {
       await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
       await storeEmail({ from_address: 'friend@example.test', subject: 'Lunch?', created_at: new Date(NOW.getTime() - 2 * 60000), received_at: new Date(NOW.getTime() - 2 * 60000) });
