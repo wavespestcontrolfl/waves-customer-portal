@@ -132,12 +132,15 @@ describe('createPickerTravel', () => {
     expect(reserveRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 4, plain: 0 });
   });
 
-  test('a leg that already left today is never asked: the model', async () => {
+  // Codex #6881: the first drive of a same-day search leaves this minute (or
+  // at an on-site job's estimated end, already past); it is still to come.
+  test("today's drive leaving now or at a past estimate is asked at the next whole hour", async () => {
     const { travel, asked } = make();
-    await travel.preload([leg(DATE, 9 * 60 + 30)]);
-    expect(asked.traffic).toEqual([]);
-    expect(reserveRoadSpend).not.toHaveBeenCalled();
-    expect(travel.lookup(leg(DATE, 9 * 60 + 30))).toMatchObject({ source: 'conservative_model' });
+    await travel.preload([leg(DATE, 10 * 60), leg(DATE, 9 * 60 + 30)]);
+    expect(asked.traffic).toEqual([`${DATE}@660`]);
+    expect(reserveRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 1, plain: 0 });
+    expect(travel.lookup(leg(DATE, 10 * 60))).toEqual({ minutes: 17, source: 'google_traffic', reason: null });
+    expect(travel.lookup(leg(DATE, 9 * 60 + 30))).toEqual({ minutes: 17, source: 'google_traffic', reason: null });
   });
 
   test('the next days: one road time without traffic per pair of places, whatever the hour', async () => {

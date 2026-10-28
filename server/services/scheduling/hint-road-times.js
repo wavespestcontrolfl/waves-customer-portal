@@ -224,16 +224,16 @@ function onRoads(ymd, todayYmd, windows = roadWindows()) {
 function legMode(leg, nowEt, windows) {
   const offset = dayOffset(leg.date, nowEt.date);
   if (offset < 0) return null;
-  if (offset < windows.traffic) {
-    // A leg that has already left today: Google answers no past departure.
-    return offset === 0 && leg.departureMin <= nowEt.minute ? null : 'traffic';
-  }
+  if (offset < windows.traffic) return 'traffic';
   return offset < windows.traffic + windows.plain ? 'plain' : null;
 }
 
 // The departure Google is asked for (the cache key uses it too, in preload and
 // lookup alike): the leg's part of the day; today never before the next whole
-// hour.
+// hour. Every drive in today's simulation is still to come (the route goes on
+// from the stop the tech is at), even one the simulation starts this minute or
+// at an on-site job's estimated end already past (Codex #6881): Google answers
+// no past departure, so it is asked for the next hour.
 function trafficLeg(leg, nowEt) {
   const at = leg.departureMin < TRAFFIC_EDGES[0] ? TRAFFIC_TIMES[0]
     : leg.departureMin < TRAFFIC_EDGES[1] ? TRAFFIC_TIMES[1] : TRAFFIC_TIMES[2];
