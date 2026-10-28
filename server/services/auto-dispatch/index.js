@@ -1128,7 +1128,8 @@ async function evaluateServiceForRun(service, run) {
     // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
     conflictMoves: config.conflictMovesEnabled === true,
     // GATE_AUTO_DISPATCH_ROAD_CHECK: the run's one road-time reader (null = off).
-    roadTravel: run.roadTravel,
+    // ..._AT_APPLY: null here in apply mode; pass 2 sets it (holdBeforeRoadCheck).
+    roadTravel: roadCheck.pass1Travel(config, run.roadTravel),
     // GATE_AUTO_DISPATCH_ARRIVAL_SEARCH='true': the candidate search uses
     // find-time's arrival-window engine (candidate-slots.js); pass 2 reuses
     // this ctx, so the re-check before a move searches the same way.
@@ -1274,6 +1275,30 @@ function sundayBudget(config) {
   };
 }
 
+// The cap-held reason's note for a grouped visit (its whole visit moves together).
+function groupedNote(unitSize) {
+  return unitSize > 1 ? `, grouped visit of ${unitSize}` : '';
+}
+
+// GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY (owner 2026-10-28): before the live
+// re-evaluation, a move the per-run cap already holds is logged as cap-held
+// without one, so no road check is bought for it. Any other move gets the
+// run's road reader, so Google is asked only for a move about to be written.
+// True = held and logged. Gate off (or a dry run): does nothing.
+async function holdBeforeRoadCheck(pm, run) {
+  const { config, totals, runId } = run;
+  if (!roadCheck.deferredToApply(config)) return false;
+  if (totals.changed < config.maxChangesPerRun) {
+    pm.ctx.roadTravel = run.roadTravel;
+    return false;
+  }
+  const unitSize = await unitMoveSize(pm.service, pm.result.best);
+  totals.recommended++; // same as the cap-held path in applyPlannedMove
+  noteUnmoved(run, pm.service, 'MAX_CHANGES_REACHED');
+  await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${pm.result.improvement}${groupedNote(unitSize)})`, ...pm.result.audit });
+  return true;
+}
+
 // Pass 2 for one planned move: the supersession check, the apply-time guard
 // recheck, a live re-evaluation and the per-run cap, then the apply and its
 // audit. Resolves to `fresh` — the live re-evaluation — for the failure
@@ -1302,6 +1327,8 @@ async function applyPlannedMove(pm, run, attempt) {
     return audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: limited.reason_code, reason_description: limited.reason_description, ...pm.result.audit });
   }
 
+  if (await holdBeforeRoadCheck(pm, run)) return null;
+
   const fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
   attempt.fresh = fresh;
   noteEvaluation(run, pm.service, fresh, pm.ctx);
@@ -1317,8 +1344,7 @@ async function applyPlannedMove(pm, run, attempt) {
   if (totals.changed + unitSize > config.maxChangesPerRun) {
     totals.recommended++; // cap-held but still a valid move — count it in the summary
     noteUnmoved(run, pm.service, 'MAX_CHANGES_REACHED');
-    const grouped = unitSize > 1 ? `, grouped visit of ${unitSize}` : '';
-    return audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${grouped})`, ...fresh.audit });
+    return audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${groupedNote(unitSize)})`, ...fresh.audit });
   }
 
   // DAY RULES: past the run's Sunday budget a Sunday move is held like a
