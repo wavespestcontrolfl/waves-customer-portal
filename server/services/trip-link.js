@@ -430,6 +430,6 @@ async function runTripLinkNightly({ now = new Date(), conn = db } = {}) {
 }
 
 module.exports = {
-  linkDay, runTripLinkNightly, nightlyDays, computeDay, matchVisit, visitWindow, driveLeg, kindOfPoint, purposeFor, groupVisits,
+  linkDay, runTripLinkNightly, nightlyDays, lateArrivals, computeDay, matchVisit, visitWindow, driveLeg, kindOfPoint, purposeFor, groupVisits,
   tripLinkLive, ALGORITHM_VERSION, WINDOW_BEFORE_MIN, WINDOW_AFTER_MIN, LATE_CLOSE_DAYS,
 };

@@ -94,6 +94,8 @@ describe("Cost cards section", () => {
     beforeEach(() => {
       handlers["GET /admin/cost-cards"] = () => response(listing());
       handlers["GET /admin/cost-cards/rates"] = () => response(rates);
+      // GATE_TECH_OPEN_TIME off by default: the open time route answers 404.
+      handlers["GET /admin/cost-cards/open-time"] = () => response({ enabled: false }, 404);
     });
 
     it("shows each technician's card and the breakdown, per year, per paid hour and per worked hour", async () => {
@@ -245,6 +247,85 @@ describe("Cost cards section", () => {
       render(<CostCardsSection />);
       expect((await screen.findAllByText(/No card yet\. Costing uses the company labor rate/)).length).toBeGreaterThan(0);
       expect(screen.queryByRole("table", { name: "Cost breakdown" })).not.toBeInTheDocument();
+    });
+    describe("open time panel (GATE_TECH_OPEN_TIME)", () => {
+      const openTime = (over = {}) => ({
+        enabled: true,
+        from: "2026-09-27",
+        to: "2026-10-25",
+        totals: { days: 3, paidMinutes: 1800, bookedMinutes: 900, openMinutes: 900, openCostCents: 40875, bookedShare: 0.5 },
+        technicians: [{
+          technicianId: "tech-1", name: "Sample Tech", days: 3, paidMinutes: 1800, bookedMinutes: 900, onJobMinutes: 700,
+          driveMinutes: 200, openMinutes: 900, overMinutes: 0, openCostCents: 40875, bookedShare: 0.5,
+        }],
+        leftOut: { days: 0, visits: 0, byReason: {} },
+        ...over,
+      });
+
+      it("a 404 renders nothing: no panel, no error text", async () => {
+        render(<CostCardsSection />);
+        await screen.findByText("Sample Tech");
+        await waitFor(() => expect(calls.some((c) => c.path === "/admin/cost-cards/open-time")).toBe(true));
+        expect(screen.queryByText("Open time, last 30 days")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("open-time")).not.toBeInTheDocument();
+        expect(screen.queryByText(/Request failed/)).not.toBeInTheDocument();
+      });
+
+      it("shows one row per technician: days, paid, booked, open hours, open cost and booked share", async () => {
+        handlers["GET /admin/cost-cards/open-time"] = () => response(openTime());
+        render(<CostCardsSection />);
+        expect(await screen.findByText("Open time, last 30 days")).toBeInTheDocument();
+        const table = screen.getByRole("table", { name: "Open time by technician" });
+        for (const heading of ["Technician", "Days", "Paid hours", "Booked hours (on site + drive)", "Open hours", "Open cost", "Booked share"]) {
+          expect(within(table).getByText(heading)).toBeInTheDocument();
+        }
+        const row = within(table).getByText("Sample Tech").closest("tr");
+        expect(within(row).getByText("3")).toBeInTheDocument();
+        expect(within(row).getByText("30")).toBeInTheDocument(); // 1800 paid minutes
+        expect(within(row).getAllByText("15")).toHaveLength(2); // 900 booked minutes and 900 open minutes
+        expect(within(row).getByText("$408.75")).toBeInTheDocument();
+        expect(within(row).getByText("50%")).toBeInTheDocument();
+        expect(screen.getByText("Paid hours come from the time clock, else the card's paid hours a day on days with a visit.")).toBeInTheDocument();
+        expect(screen.queryByText(/left out/)).not.toBeInTheDocument();
+        expect(calls.find((c) => c.path === "/admin/cost-cards/open-time").method).toBe("GET");
+      });
+
+      it("says how many days were left out because visits were costed before the card", async () => {
+        handlers["GET /admin/cost-cards/open-time"] = () => response(openTime({ leftOut: { days: 4, visits: 6, byReason: { costed_before_card: 4 } } }));
+        render(<CostCardsSection />);
+        expect(await screen.findByText("4 days left out: visits costed before the card.")).toBeInTheDocument();
+      });
+
+      it("no finished day with a card yet reads as a plain sentence", async () => {
+        handlers["GET /admin/cost-cards/open-time"] = () => response(openTime({ technicians: [], totals: { days: 0 }, leftOut: { days: 1, visits: 1, byReason: { costed_before_card: 1 } } }));
+        render(<CostCardsSection />);
+        expect(await screen.findByText("No finished days with a cost card yet.")).toBeInTheDocument();
+        expect(screen.getByText("1 day left out: visits costed before the card.")).toBeInTheDocument();
+        expect(screen.queryByRole("table", { name: "Open time by technician" })).not.toBeInTheDocument();
+      });
+
+      it("saving a card reloads the open time too, so a new or back-dated card shows there", async () => {
+        let openTimeReads = 0;
+        handlers["GET /admin/cost-cards/open-time"] = () => {
+          openTimeReads += 1;
+          return response(openTimeReads === 1 ? openTime() : openTime({ technicians: [{ ...openTime().technicians[0], openCostCents: 12300 }] }));
+        };
+        handlers["POST /admin/cost-cards/technicians/tech-2"] = () => response({ card: { id: "card-2", technicianId: "tech-2" } }, 201);
+        render(<CostCardsSection />);
+        expect(await screen.findByText("$408.75")).toBeInTheDocument();
+        const form = (await screen.findByText("Add card for Second Sample")).parentElement;
+        fireEvent.change(within(form).getByLabelText("Hourly wage"), { target: { value: "21" } });
+        fireEvent.click(within(form).getByRole("button", { name: "Add card" }));
+        expect(await screen.findByText("$123.00")).toBeInTheDocument();
+        expect(openTimeReads).toBe(2);
+      });
+
+      it("a failed load shows the reason and leaves the cards alone", async () => {
+        handlers["GET /admin/cost-cards/open-time"] = () => response({ error: "Cost cards failed. Try again." }, 500);
+        render(<CostCardsSection />);
+        expect(await screen.findByText("Cost cards failed. Try again.")).toBeInTheDocument();
+        expect(screen.getByText("Sample Tech")).toBeInTheDocument();
+      });
     });
   });
 });

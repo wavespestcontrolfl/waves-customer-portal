@@ -69,6 +69,7 @@ function fakeDb({
   vehicleCards = [VEHICLE_CARD],
   technicians = [{ id: 'tech-1', pay_rate: '21.00' }],
   legs = null, // null = the table does not exist; an array = the table with these rows
+  jobCostColumns = {}, // the columns job_costs reports (L11b: charged_on_job_minutes, charged_drive_minutes)
 } = {}) {
   const SR_COLS = {
     scheduled_service_id: {}, status: {}, revenue: {}, material_cost: {}, labor_hours: {}, labor_cost: {}, drive_cost: {},
@@ -110,7 +111,7 @@ function fakeDb({
         return chain;
       },
       limit: () => Promise.resolve(record ? [record] : []),
-      columnInfo: () => Promise.resolve(SR_COLS),
+      columnInfo: () => Promise.resolve(table === 'job_costs' ? jobCostColumns : SR_COLS),
       select: () => Promise.resolve([]),
       forUpdate: () => chain,
       first: (...cols) => {
@@ -430,6 +431,61 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
     test('a Date from the database reads as its calendar day (local midnight)', async () => {
       const res = await calculateJobCost('svc-1', fakeDb({ svc: { ...SVC, scheduled_date: new Date(2026, 7, 31) }, technicianCards: cards, legs: [] }));
       expect(res.labor_cost).toBe(42);
+    });
+  });
+
+  describe('L11b: the minutes the cost was charged for', () => {
+    const COLS = { charged_on_job_minutes: {}, charged_drive_minutes: {} };
+
+    test('a card applied: on-job and drive minutes are stored on the job_costs row', async () => {
+      process.env[GATE] = 'true';
+      const db = fakeDb({
+        jobCostColumns: COLS,
+        legs: [{ scheduled_service_id: 'svc-1', status: 'matched', drive_minutes: '20.50', drive_miles: '8.00' }],
+      });
+      const res = await calculateJobCost('svc-1', db);
+      expect(db.writes.jobCosts[0]).toMatchObject({ charged_on_job_minutes: 60, charged_drive_minutes: 20.5 });
+      expect(res.charged_on_job_minutes).toBe(60);
+      // The cost math is L11a's: nothing about the dollars moved.
+      expect(res.labor_cost).toBe(36.56); // $27.25 x 80.5 minutes / 60
+    });
+
+    test('no card applied (gate off, or no card): both are NULL, and the dollars are today\'s', async () => {
+      const off = fakeDb({ jobCostColumns: COLS });
+      const offRes = await calculateJobCost('svc-1', off);
+      expect(off.writes.jobCosts[0]).toMatchObject({ charged_on_job_minutes: null, charged_drive_minutes: null });
+      expect(offRes.labor_cost).toBe(35);
+      expect(offRes.drive_cost).toBe(6);
+      process.env[GATE] = 'true';
+      const noCard = fakeDb({ jobCostColumns: COLS, technicianCards: [] });
+      await calculateJobCost('svc-1', noCard);
+      expect(noCard.writes.jobCosts[0]).toMatchObject({ charged_on_job_minutes: null, charged_drive_minutes: null });
+    });
+
+    test('a pending visit with a card: its on-job minutes, no drive minutes', async () => {
+      process.env[GATE] = 'true';
+      const db = fakeDb({ jobCostColumns: COLS, svc: { ...SVC, status: 'scheduled' }, legs: [] });
+      await calculateJobCost('svc-1', db);
+      expect(db.writes.jobCosts[0]).toMatchObject({ charged_on_job_minutes: 60, charged_drive_minutes: 0 });
+    });
+
+    test('the keys are absent when the columns do not exist, with or without a card', async () => {
+      for (const gate of [undefined, 'true']) {
+        if (gate) process.env[GATE] = gate; else delete process.env[GATE];
+        const db = fakeDb({ legs: [] });
+        const res = await calculateJobCost('svc-1', db);
+        expect(db.writes.jobCosts[0]).not.toHaveProperty('charged_on_job_minutes');
+        expect(db.writes.jobCosts[0]).not.toHaveProperty('charged_drive_minutes');
+        expect(res).not.toHaveProperty('charged_drive_minutes');
+      }
+    });
+
+    test('only the column that exists is written', async () => {
+      process.env[GATE] = 'true';
+      const db = fakeDb({ jobCostColumns: { charged_on_job_minutes: {} }, legs: [] });
+      await calculateJobCost('svc-1', db);
+      expect(db.writes.jobCosts[0]).toHaveProperty('charged_on_job_minutes', 60);
+      expect(db.writes.jobCosts[0]).not.toHaveProperty('charged_drive_minutes');
     });
   });
 });

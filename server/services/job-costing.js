@@ -37,6 +37,11 @@
  * else the measured per-stop defaults below. Gate off, or no card = the lines
  * above, unchanged.
  *
+ * With a card applied, job_costs also keeps the two minute figures the cost was charged for
+ * (charged_on_job_minutes, charged_drive_minutes; L11b), which the open time report adds up against a
+ * technician's paid day. NULL = no card applied. They are written only when those columns exist, and
+ * they change no cost figure.
+ *
  * Idempotent: re-running replaces the prior job_costs row and re-writes the
  * service_records financials for the same scheduled_service_id.
  *
@@ -175,6 +180,20 @@ async function visitGpsLegsTableExists(db) {
   }
   visitGpsLegsMissingAt = visitGpsLegsTableKnown ? 0 : Date.now();
   return visitGpsLegsTableKnown;
+}
+
+// The two charged-minutes columns on job_costs (L11b). Read per call, like the service_records columns:
+// a database or a mock without them gets today's row object, keys and all.
+async function chargedMinuteColumns(db) {
+  try {
+    const info = await db('job_costs').columnInfo();
+    return {
+      onJob: !!(info && info.charged_on_job_minutes),
+      drive: !!(info && info.charged_drive_minutes),
+    };
+  } catch {
+    return { onJob: false, drive: false };
+  }
 }
 
 // The drive one visit is charged (GATE_TECH_COST_RATES). None for a visit
@@ -787,6 +806,11 @@ async function calculateJobCost(scheduledServiceId, db, {
     margin_pct: fin.gross_margin_pct,
     products_used: JSON.stringify(breakdown),
   };
+  // L11b: the minutes this cost was charged for, NULL when no cost card applied (a re-cost without a
+  // card clears an earlier pair). Only keys whose column exists, so older schemas see today's row.
+  const chargedColumns = await chargedMinuteColumns(db);
+  if (chargedColumns.onJob) row.charged_on_job_minutes = costRatesApplied ? round2(costRatesApplied.onJobMinutes) : null;
+  if (chargedColumns.drive) row.charged_drive_minutes = costRatesApplied ? round2(costRatesApplied.driveMinutes) : null;
 
   // Correction-stamp fence, ATOMIC with the financial writes (codex P2
   // #3152 rounds 8+9): the durable time_on_site_adjusted_minutes stamp was

@@ -21,6 +21,8 @@ import {
 // Cost cards (GATE_TECH_COST_RATES). Lives on Settings > Operating costs. The
 // server answers { enabled: false } while the gate is off, and then nothing here
 // renders. Cards are never edited: a change is a new card with an effective date.
+// The Open time panel (GATE_TECH_OPEN_TIME) sits under the cards; its route answers
+// 404 while that gate is off, and then the panel renders nothing.
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -34,7 +36,11 @@ function adminFetch(path, options = {}) {
     },
   }).then(async (r) => {
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data?.error || `Request failed (${r.status})`);
+    if (!r.ok) {
+      const err = new Error(data?.error || `Request failed (${r.status})`);
+      err.status = r.status;
+      throw err;
+    }
     return data;
   });
 }
@@ -277,10 +283,94 @@ function cardSummary(card) {
   return `In effect since ${card.effectiveDate}: ${kind}, ${plain(card.paidHoursPerWeek)} paid hours a week, ${plain(card.paidDaysOffPerYear, 1)} paid days off a year.`;
 }
 
+const hours = (minutes) => String(Math.round((Number(minutes) || 0) / 6) / 10);
+const percent = (share) => (share == null ? "" : `${Math.round(share * 1000) / 10}%`);
+
+const LEFT_OUT_TEXT = {
+  costed_before_card: "visits costed before the card",
+  no_card: "no cost card in effect",
+  no_rate: "the card gives no hourly cost",
+};
+
+// Open time (GATE_TECH_OPEN_TIME): the paid hours of each technician's finished days that no visit carries.
+// `version` changes each time the section reloads (a saved card), so a new or back-dated card shows here too.
+function OpenTimePanel({ version }) {
+  const [report, setReport] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let live = true;
+    adminFetch("/admin/cost-cards/open-time")
+      .then((data) => { if (live) { setReport(data); setError(null); } })
+      .catch((err) => {
+        if (!live) return;
+        if (err.status === 404) { setReport(null); setError(null); } else setError(err.message || "Could not load open time.");
+      });
+    return () => { live = false; };
+  }, [version]);
+
+  if (error) return <ActionFeedback error>{error}</ActionFeedback>;
+  if (!report || report.enabled !== true) return null;
+  const leftOut = report.leftOut || { days: 0, byReason: {} };
+
+  return (
+    <Card data-testid="open-time">
+      <CardHeader>
+        <CardTitle>Open time, last 30 days</CardTitle>
+        <p className="mt-1 text-ui-body text-ink-secondary">
+          Paid hours with no visit booked, at each technician&apos;s cost per worked hour. A visit carries only its own
+          on-site and drive time, so customer margins stay steady; open time shows what an empty schedule costs.
+        </p>
+      </CardHeader>
+      <CardBody className="space-y-3">
+        {report.technicians.length > 0 ? (
+          <Table aria-label="Open time by technician">
+            <THead>
+              <TR>
+                <TH>Technician</TH>
+                <TH className="text-right">Days</TH>
+                <TH className="text-right">Paid hours</TH>
+                <TH className="text-right">Booked hours (on site + drive)</TH>
+                <TH className="text-right">Open hours</TH>
+                <TH className="text-right">Open cost</TH>
+                <TH className="text-right">Booked share</TH>
+              </TR>
+            </THead>
+            <TBody>
+              {report.technicians.map((t) => (
+                <TR key={t.technicianId}>
+                  <TD>{t.name || "Technician"}</TD>
+                  <TD className="text-right u-nums">{t.days}</TD>
+                  <TD className="text-right u-nums">{hours(t.paidMinutes)}</TD>
+                  <TD className="text-right u-nums">{hours(t.bookedMinutes)}</TD>
+                  <TD className="text-right u-nums">{hours(t.openMinutes)}</TD>
+                  <TD className="text-right u-nums">{money(t.openCostCents)}</TD>
+                  <TD className="text-right u-nums">{percent(t.bookedShare)}</TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
+        ) : (
+          <p className="text-ui-body text-ink-secondary">No finished days with a cost card yet.</p>
+        )}
+        <p className="text-ui-caption text-ink-secondary">
+          Paid hours come from the time clock, else the card&apos;s paid hours a day on days with a visit.
+        </p>
+        {Object.entries(leftOut.byReason || {}).map(([reason, count]) => (
+          <p key={reason} className="text-ui-caption text-ink-secondary">
+            {count} {count === 1 ? "day" : "days"} left out: {LEFT_OUT_TEXT[reason] || "not enough data"}.
+          </p>
+        ))}
+      </CardBody>
+    </Card>
+  );
+}
+
 export default function CostCardsSection() {
   const [data, setData] = useState(null);
   const [rates, setRates] = useState(null);
   const [error, setError] = useState(null);
+  const [version, setVersion] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -293,6 +383,7 @@ export default function CostCardsSection() {
       setData(cards);
       setRates(computed);
       setError(null);
+      setVersion((v) => v + 1);
     } catch (err) {
       setError(err.message || "Could not load cost cards.");
     }
@@ -354,6 +445,8 @@ export default function CostCardsSection() {
           </Card>
         );
       })}
+
+      <OpenTimePanel version={version} />
     </div>
   );
 }

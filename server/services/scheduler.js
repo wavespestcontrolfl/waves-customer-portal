@@ -2222,12 +2222,41 @@ function initScheduledJobs() {
   // site, drive minutes and drive miles per visit (visit_gps_legs) and a business / personal suggestion per trip
   // (trip_links). Shadow data: it writes only those two tables, never mileage_log, scheduled_services, job_costs,
   // pins or alerts, and sends nothing. Gate read per run; off = the run returns before any query. runExclusive records
-  // the job health.
+  // the job health. Right after it, inside the same lease, the tick re-costs the visits just linked
+  // (GATE_TECH_OPEN_TIME, dark; job job-cost-recost) so their drive minutes and miles reach job costs.
+  //
+  // The re-cost (GATE_TECH_OPEN_TIME + GATE_TECH_COST_RATES): legs first, then costs, under the trip-link lease
+  // (Codex #6901 r1): only the replica that linked re-costs, after its legs are written; a replica that lost the
+  // lease re-costs nothing, so it cannot read old legs while the winner is still linking. It runs whatever the
+  // link's outcome was (an earlier night's legs are still in the table). The nested runExclusive keeps its own job
+  // health on the same lock session, and it never throws out of here, so a link error stays the link's.
+  const runNightlyRecost = async () => {
+    try {
+      const lockRes = await runExclusive('job-cost-recost', async () => {
+        const result = await require('./job-cost-recost').recostNightly();
+        if (result.recosted) logger.info(`[job-cost-recost] ${result.recosted} visit(s) re-costed`);
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`job-cost-recost tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('job-cost-recost').catch(() => {});
+        await recordJobEnd('job-cost-recost', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[job-cost-recost] tick failed: ${err.message}`);
+    }
+  };
   cron.schedule('40 1 * * *', async () => {
     try {
       const lockRes = await runExclusive('trip-link', async () => {
-        const result = await require('./trip-link').runTripLinkNightly();
-        if (result.legs) logger.info(`[trip-link] ${result.day}: ${result.legs.matched}/${result.legs.total} visit(s) matched`);
+        try {
+          const result = await require('./trip-link').runTripLinkNightly();
+          if (result.legs) logger.info(`[trip-link] ${result.day}: ${result.legs.matched}/${result.legs.total} visit(s) matched`);
+        } finally {
+          await runNightlyRecost();
+        }
       });
       if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
