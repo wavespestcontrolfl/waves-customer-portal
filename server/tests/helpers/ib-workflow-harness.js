@@ -449,6 +449,9 @@ async function initHarness({ databaseUrl, mockModel, providers = {} }, held) {
       });
       const body = {
         prompt, context, session_id: sessionId, request_key: requestKey || crypto.randomUUID(),
+        // A case that continues a saved conversation (a correction of what the last turn recorded) passes the thread the
+        // earlier answer returned, as the client does; the cases that never saw a thread send none.
+        ...(options.thread ? { thread_id: options.thread.id, thread_seq: options.thread.seq } : {}),
         ...(Array.isArray(conversationHistory) ? { conversationHistory } : {}),
         pageData: { route: page.route || '/admin/customers', ...(page.customerId ? { customerId: page.customerId } : {}), ...(page.leadId ? { leadId: page.leadId } : {}), ...(page.appointmentId ? { appointmentId: page.appointmentId } : {}) },
       };

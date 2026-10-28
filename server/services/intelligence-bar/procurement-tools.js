@@ -1492,12 +1492,42 @@ function isNotAnInstruction(text) {
 // a receipt, and so is "1 bottle" after "We ordered Taurus SC" then "It
 // arrived".
 function operationMatches(toolName, texts, preview) {
+  // A correction after a receipt ("that was 2 gallons, not 2 quarts") asks for no operation of its own: it corrects the
+  // receipt an EARLIER operator turn described, so that turn must read as a receipt.
+  if (toolName === 'adjust_stock' && preview.movement_type === 'correction' && CORRECTION_FOLLOW_UP_RE.test(texts[0] || '')) {
+    return texts.slice(1).map(textOperation).find(Boolean) === 'receipt';
+  }
   const operation = texts.map(textOperation).find(Boolean) || null;
   if (toolName === 'adjust_stock') {
     return operation === 'receipt' && (preview.movement_type == null || preview.movement_type === 'restock');
   }
+  // Receiving a restock request is a receipt of the request's own product.
+  if (toolName === 'update_restock_request') return operation === 'receipt' && preview.action === 'receive';
   return toolName === 'create_restock_request' && operation === 'order';
 }
+
+// Receipt words the operator may add after the receipt itself ("..., show me what we have now"): a read request that
+// carries no write content. The receipt tools ground on the words before it; a bare "Show me ..." has nothing before it.
+const READ_TAIL_RE = /^(.+?)\s*[,;]?\s*(?:and\s+)?(?:then\s+)?(?:please\s+)?(?:show|tell)\s+me\b[^.!?]*[.!?]?\s*$/i;
+const RECEIPT_TOOL_NAMES = new Set(['adjust_stock', 'update_restock_request']);
+function withoutReadTail(toolName, prompt) {
+  if (!RECEIPT_TOOL_NAMES.has(toolName)) return prompt;
+  const match = String(prompt || '').match(READ_TAIL_RE);
+  return match && match[1].trim() ? match[1].trim() : prompt;
+}
+
+// "Reorder four more jugs of Talak from the vendor and record the three that just came in": the first clause asks for an
+// order the bar cannot place, the second records a receipt. The receipt clause names no product, so it takes the one the
+// order clause names. Both clauses must read cleanly (a closed vocabulary around exactly one product), else nothing grounds.
+const ORDER_THEN_RECEIPT_RE = /^\s*(?:please\s+)?(?:re)?order\s+(.+?)(?:\s+from\s+(?:the|our)\s+(?:vendor|supplier))?\s*(?:,|;|\band\b)\s*(?:then\s+)?((?:record|log|add)\s+.+?)[.!]?\s*$/i;
+function orderThenReceiptClauses(text) {
+  const match = String(text || '').match(ORDER_THEN_RECEIPT_RE);
+  return match ? { orderPart: match[1], receiptPart: match[2] } : null;
+}
+
+// "that was 2 gallons, not 2 quarts": a stated correction of the amount just recorded. A closed grammar (amounts only).
+const CORRECTION_AMOUNT = '(?:[0-9]+(?:\\.[0-9]+)?|one|two|three|four|five|six|seven|eight|nine|ten)\\s*(?:fl\\s*oz|oz|ounces?|gal(?:lons?)?|qts?|quarts?|pts?|pints?|lbs?|pounds?|liters?|ml|grams?|kg|bottles?|jugs?|bags?|cases?|cans?|containers?)';
+const CORRECTION_FOLLOW_UP_RE = new RegExp(`^\\s*(?:(?:no|sorry|oops|actually)\\b[\\s,.:;!-]*)*(?:that|it|this)\\s+(?:was|is)\\s+${CORRECTION_AMOUNT}\\s*[,;]?\\s*(?:and\\s+)?not\\s+${CORRECTION_AMOUNT}\\s*[.!]?\\s*$`, 'i');
 
 const TARGET_UNAVAILABLE = Object.freeze({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
 
@@ -1507,7 +1537,20 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
   return grounded?.mismatch ? { ...TARGET_UNAVAILABLE, code: 'target_relationship_mismatch' } : TARGET_UNAVAILABLE;
 }
 
-async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName }) {
+// "We received 2 gallons of Taurus SC": the operator named exactly the product the receive preview acts on, and that product
+// has exactly one active restock request (the one being received). Anything else asks, as before.
+async function resolveReceiptByNamedProduct(prompt, preview, actorId, threadId, threadSeq) {
+  const grounded = await resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName: 'update_restock_request' });
+  if (grounded.error) return grounded;
+  const { requests } = await require('../inventory-restock-queue').listRestockRequests({
+    productId: grounded.productId, status: 'active', limit: 2,
+  });
+  if (requests.length !== 1 || requests[0].id !== preview.request?.id) return TARGET_UNAVAILABLE;
+  return { productId: grounded.productId, requestId: preview.request.id };
+}
+
+async function groundOperatorNamedProduct(rawPrompt, preview, actorId, threadId, { observedSeq, toolName }) {
+  const prompt = withoutReadTail(toolName, rawPrompt);
   if (!preview?.product?.id || isNotAnInstruction(prompt)) return null;
   // `texts` are the operator's words the grounding rests on (this prompt,
   // plus the prior turn that named the product): they must also ask for the
@@ -1532,10 +1575,24 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
   const current = await productsNamedIn(prompt);
   // A prompt that names anything (or carries a conflict) stands on its own.
   if (current.conflict || current.named.size) return decide(current, [prompt]);
+  // An order clause plus a receipt clause: the order clause names the product, the receipt clause only records it.
+  const compound = toolName === 'adjust_stock' ? orderThenReceiptClauses(prompt) : null;
+  if (compound) {
+    const ordered = await productsNamedIn(compound.orderPart);
+    if (!isBareFollowUp(compound.receiptPart) || ordered.conflict || ordered.named.size !== 1) return null;
+    const [orderedId] = ordered.named;
+    if (orderedId !== preview.product.id) return { mismatch: true };
+    return operationMatches(toolName, [compound.receiptPart], preview) ? { productId: orderedId } : null;
+  }
   // A stale tab never grounds off turns it never saw (two tabs on one
   // thread): observedSeq is the requesting tab's own tail seq, from the
   // route's thread_seq. Without one there is no prior-turn grounding at all.
-  if (!isBareFollowUp(prompt) || !Number.isInteger(observedSeq)) return null;
+  // A stated correction ("that was 2 gallons, not 2 quarts") reads the same earlier turns as a bare reply does.
+  // Only a correction movement answers it: a restock or a write-off built on "that was 2 gallons, not 2 quarts" would add
+  // the amount a second time.
+  const correction = CORRECTION_FOLLOW_UP_RE.test(prompt);
+  if (correction && !(toolName === 'adjust_stock' && preview.movement_type === 'correction')) return null;
+  if (!(isBareFollowUp(prompt) || correction) || !Number.isInteger(observedSeq)) return null;
   const IbThreads = require('./threads');
   // Newest first and resolved ONE AT A TIME, never concatenated: a turn
   // ending "...Demand" and the next-older turn beginning "CS..." must never
@@ -1561,8 +1618,12 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
-async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq }) {
+async function resolveInventoryWriteTarget({ toolName, prompt: operatorPrompt, pageData = {}, preview, actorId, threadId, threadSeq }) {
   const { targetClause, UUID_RE } = require('./task-context');
+  // A read request after the receipt ("..., show me what we have now") is not part of the target the receipt names.
+  const prompt = withoutReadTail(toolName, operatorPrompt);
+  // Two clauses (an order the bar cannot place, then a receipt) never read as one target phrase.
+  const orderThenReceipt = toolName === 'adjust_stock' && orderThenReceiptClauses(prompt);
   // A colon/quote can be part of a catalog identity. Never turn a qualified
   // product into the shorter base product by applying the contact-body split.
   // The anchored inventory grammar below excludes communication/note intents.
@@ -1587,7 +1648,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     const productName = namedClause.match(/^(?:mark|record|cancel|receive)\s+(?:the\s+)?restock request for\s+(.+?)(?:\s+as\s+(?:ordered|received|cancelled))?$/i)?.[1]
       || namedClause.match(/^I ordered (?:the\s+)?(.+)$/i)?.[1]
       || namedClause.match(/^cancel (?:that|the)\s+(.+?)\s+request$/i)?.[1];
-    if (!productName) return unavailable;
+    if (!productName) return resolveReceiptByNamedProduct(prompt, preview, actorId, threadId, threadSeq);
     const resolved = await resolveProduct({ product_name: productName });
     if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
     const { requests } = await require('../inventory-restock-queue').listRestockRequests({
@@ -1616,7 +1677,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     /^(?:put|add)\s+(.+?)\s+(?:on|to)\s+(?:the\s+)?(?:restock|reorder)\s+list$/i,
     /^(?:restock|reorder)\s+(.+)$/i,
   ];
-  const selected = patterns.map(pattern => clause.match(pattern)?.[1]).find(Boolean);
+  const selected = orderThenReceipt ? null : patterns.map(pattern => clause.match(pattern)?.[1]).find(Boolean);
   // No pattern matched at all, so the operator named no target the grammar
   // can read: this is the one place the free-phrasing fallback runs (and,
   // for a bare follow-up like "1 bottle", recent operator turns).
