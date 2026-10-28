@@ -304,16 +304,28 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
       ...travelFor[mode], sharedBudget: RouteOptimizer.pickerTravelBudget, signal: budget.signal,
     })))();
   }
+  // Read once per source, not per leg: lookup runs for every leg of every order
+  // a search simulates, and reading the Eastern clock (two Intl formatters) per
+  // leg made searches take 8-10 s in production (audit 10-28). The clock's
+  // answer changes once a minute (Eastern offsets are whole hours), so one read
+  // a minute gives the same keys.
+  const windows = roadWindows();
+  let clock = { minute: null, et: null };
+  const etAt = (t) => {
+    const minute = Math.floor(t / 60000);
+    if (minute !== clock.minute) clock = { minute, et: etNow(t) };
+    return clock.et;
+  };
   // The leg as Google is asked for it, with its mode and key; null = the model.
   const resolve = (leg, nowEt) => {
-    const mode = legMode(leg, nowEt, roadWindows());
+    const mode = legMode(leg, nowEt, windows);
     if (!mode) return null;
     const asLeg = MODES[mode].shape(leg, nowEt);
     return { mode, asLeg, key: MODES[mode].key(asLeg) };
   };
   function lookup(leg) {
     const t = now();
-    const r = resolve(leg, etNow(t));
+    const r = resolve(leg, etAt(t));
     // Past legs and later days: never asked, so the conservative model.
     if (!r) return sources.traffic.lookup(leg);
     const m = MODES[r.mode];
@@ -324,9 +336,9 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     return answer;
   }
   // Buys `entries` ([key, leg as Google is asked for it]) from the mode's
-  // source; returns how many it never sent.
+  // source; returns how many it never sent and how many Google answered.
   async function buy(mode, entries) {
-    if (!entries.length) return 0;
+    if (!entries.length) return { unsent: 0, answered: 0 };
     const m = MODES[mode];
     const before = sources[mode].diagnostics().elements;
     await sources[mode].preload(entries.map(([, leg]) => leg));
@@ -335,29 +347,38 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     // other checks of this request, the next search, or the next picker for
     // this visit ask nothing (pre-push audit #6881).
     const t = now();
+    let answered = 0;
     for (const [key, leg] of entries) {
       const answer = sources[mode].lookup(leg);
-      if (answer?.source === m.source && Number.isFinite(answer.minutes)) m.remember(key, leg, answer.minutes, t);
+      if (answer?.source !== m.source || !Number.isFinite(answer.minutes)) continue;
+      m.remember(key, leg, answer.minutes, t);
+      answered += 1;
     }
-    return entries.length - (sources[mode].diagnostics().elements - before);
+    return { unsent: entries.length - (sources[mode].diagnostics().elements - before), answered };
   }
   // Buys the claimed legs within the durable ceilings; what was never bought
-  // (refused, or never sent) leaves the request's budget too.
+  // (refused, or never sent) leaves the request's budget too. A sent lookup is
+  // paid whether Google answered it or not (an error or a timeout keeps the
+  // model), so each purchase logs both counts.
   async function purchase(want) {
+    let answered = 0;
     const bought = await buyWithinCeilings({ spender, pro: want.traffic.length, plain: want.plain.length }, async () => {
       const [pro, plain] = await Promise.all([buy('traffic', want.traffic), buy('plain', want.plain)]);
-      return { pro, plain };
+      answered = pro.answered + plain.answered;
+      return { pro: pro.unsent, plain: plain.unsent };
     });
     const unsent = bought.allowed ? bought.unsent : { pro: want.traffic.length, plain: want.plain.length };
     if (!bought.allowed) budget.refused = bought.reason;
     budget.traffic -= unsent.pro;
     budget.plain -= unsent.plain;
+    const sent = want.traffic.length + want.plain.length - unsent.pro - unsent.plain;
+    if (sent > 0) logger.info(`[picker-road] ${sent} lookups sent, ${answered} answered by Google`);
   }
   return {
     async preload(legs) {
       if (budget.signal?.aborted || budget.refused) return;
       const t = now();
-      const nowEt = etNow(t);
+      const nowEt = etAt(t);
       const want = { traffic: [], plain: [] };
       const waits = new Set();
       let settle;
