@@ -118,9 +118,11 @@ function publicSubject({ hash: _hash, ...rest }) {
 // chat log writes both rows in one statement, so they share a created_at: the
 // visitor message is the newest user row of the conversation at or before the
 // assistant row's time. The assistant text carries the leading "[<intent>] "
-// tag logIntakeExchange adds; the digest is built from the message and reply
-// exactly as the shadow built Jev's state (askWavesSubjectHash).
-const CHAT_INTENT_TAG_RE = /^\[(?:quote|question|existing_customer|emergency|other)\] /;
+// tag logIntakeExchange adds (always exactly one, so any one leading tag is
+// stripped and no second copy of the intent list can drift); the digest is
+// built from the message and reply exactly as the shadow built Jev's state
+// (askWavesSubjectHash).
+const CHAT_INTENT_TAG_RE = /^\[[a-z_]+\] /;
 async function readChatTurns(ids) {
   const assistants = await db('agent_messages').whereIn('id', ids).where({ role: 'assistant' })
     .select('id', 'conversation_id', 'content', 'created_at');
