@@ -68,6 +68,12 @@ describe('invoice PDF previous balance', () => {
     expect(text).not.toContain('Total account balance');
   });
 
+  test('a Date-typed due date (what node-pg returns for DATE) prints the past-due caption', async () => {
+    const dated = { ...previousBalance, invoices: [{ ...previousBalance.invoices[0], dueDate: new Date('2026-08-15T04:00:00Z') }] };
+    const text = await renderedText(invoice({ previous_balance: dated }));
+    expect(text).toContain('Past due since August 15, 2026');
+  });
+
   test('no previous_balance: no block', async () => {
     const text = await renderedText(invoice());
     expect(text).not.toContain('PREVIOUS BALANCE');
