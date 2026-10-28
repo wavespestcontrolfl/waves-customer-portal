@@ -376,6 +376,58 @@ function applySizeHint(snapshot) {
   return snapshot;
 }
 
+// ---- Bot-check (Cloudflare challenge) detection ------------------------------------------
+// Some vendors (DoMyOwn, Keystone) answer the headless scan with Cloudflare's "Just a moment"
+// check. We only DETECT it, report it as VENDOR_BLOCKED and stop early; nothing here tries to
+// get past it.
+const BOT_CHECK_BREAKER_LIMIT = 2; // blocks for one adapter in one browser context before we stop loading pages
+
+// Runs in the browser: the few page signals the Node-side matcher needs (field names are
+// prefixed so a snapshot-shaped object can never be mistaken for these).
+function readBotCheckSignals() {
+  const body = document.body ? (document.body.innerText || '') : '';
+  return {
+    botCheckTitle: document.title || '',
+    botCheckBody: body.slice(0, 4000),
+    botCheckForm: !!document.querySelector('#challenge-form, #cf-challenge-running, .cf-browser-verification'),
+  };
+}
+
+// PURE: do these page signals look like a Cloudflare challenge page?
+function isBotCheckSignals(sig) {
+  if (!sig || typeof sig !== 'object') return false;
+  if (/^\s*just a moment/i.test(String(sig.botCheckTitle || ''))) return true;
+  if (/performing security verification|verify you are human/i.test(String(sig.botCheckBody || ''))) return true;
+  return sig.botCheckForm === true;
+}
+
+function vendorBlockedError(label) {
+  const err = new Error(`${label} blocked the scan with a bot check (Cloudflare)`);
+  err.code = 'VENDOR_BLOCKED';
+  return err;
+}
+
+// Landed on the vendor's own host at a URL that is not the search-results path = the search
+// redirected straight to a product page (a single exact hit). PURE.
+function landedOnProductUrl(landedUrl, searchUrl) {
+  try {
+    const landed = new URL(String(landedUrl));
+    const search = new URL(String(searchUrl));
+    const host = (h) => h.toLowerCase().replace(/^www\./, '');
+    if (host(landed.hostname) !== host(search.hostname)) return false;
+    if (landed.pathname === '/' || landed.pathname === search.pathname) return false;
+    if (/\/catalogsearch\//i.test(landed.pathname)) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// The shorter retry query: the first two whitespace tokens of the full one.
+function shortSearchQuery(product) {
+  return searchQuery(product).split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
+}
+
 function makeAdapter(config) {
   const timeout = config.timeout || DEFAULT_TIMEOUT;
 
@@ -384,6 +436,7 @@ function makeAdapter(config) {
   // never settles); an optional short settle lets client-rendered prices paint.
   async function scrapeCandidate(page, vendor, product, url) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    await assertNotBotChecked(page, vendor);
     if (config.settleMs) await page.waitForTimeout(config.settleMs);
     // Option cards render client-side (e.g. DoMyOwn product-cards.js) — wait for them
     // before snapshotting, else the size+price variants aren't in the DOM yet.
@@ -448,6 +501,68 @@ function makeAdapter(config) {
     };
   }
 
+  const vendorLabelOf = (vendor) => (vendor && vendor.name) || config.key;
+
+  // Per-run breaker, kept on the browser context like the login state: after
+  // BOT_CHECK_BREAKER_LIMIT blocks for this adapter, later products fail at once without
+  // loading a page (a blocked vendor would otherwise cost a page load, and for DoMyOwn a
+  // 9 s search wait, for every product in the run).
+  function blockState(page) {
+    if (!page || typeof page.context !== 'function') return null;
+    const ctx = page.context();
+    if (!ctx) return null;
+    ctx.__priceScanBlocked = ctx.__priceScanBlocked || new Map();
+    return ctx.__priceScanBlocked;
+  }
+  function assertBreakerClosed(page, vendor) {
+    const state = blockState(page);
+    if (state && (state.get(config.key) || 0) >= BOT_CHECK_BREAKER_LIMIT) throw vendorBlockedError(vendorLabelOf(vendor));
+  }
+  async function assertNotBotChecked(page, vendor) {
+    let sig = null;
+    try {
+      sig = await page.evaluate(readBotCheckSignals);
+    } catch (e) {
+      return; // a page that cannot be read is the normal fetch path's problem, not a bot check
+    }
+    if (!isBotCheckSignals(sig)) return;
+    const state = blockState(page);
+    if (state) state.set(config.key, (state.get(config.key) || 0) + 1);
+    throw vendorBlockedError(vendorLabelOf(vendor));
+  }
+
+  // One search round trip: load the results page, then either report that it redirected to a
+  // product page (opt-in) or collect the result links. Returns { landedUrl, links }.
+  async function searchOnce(page, vendor, product) {
+    const searchUrl = config.buildSearchUrl ? config.buildSearchUrl(product, vendor) : null;
+    if (!searchUrl) return null;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
+    await assertNotBotChecked(page, vendor);
+    // OPT-IN: a single exact hit redirects straight to the product page. Check BEFORE the
+    // result-link wait (it would burn the whole wait) and before collecting links (a product
+    // page carries related-product links that are not search results).
+    if (config.searchMayLandOnProduct && typeof page.url === 'function') {
+      const here = page.url();
+      if (landedOnProductUrl(here, searchUrl)) return { landedUrl: here, links: [] };
+    }
+    // OPT-IN wait: only adapters whose results are injected by a client-side widget set
+    // searchWaitMs (DoMyOwn's Reflektion search). For server-rendered adapters the
+    // results are already in the DOM, so we must NOT block here — otherwise a no-match
+    // (or a stale search path) burns the full timeout per product, adding minutes to a
+    // serial multi-product run. waitForSelector returns as soon as a link appears, so a
+    // successful dynamic search is still fast; only a genuine no-match waits it out.
+    if (config.searchWaitMs) {
+      // Wait for ANY configured link selector (comma-joined = CSS "or"): a store whose search
+      // sometimes lands on a server-rendered listing instead of the widget (DIY Pest) must not
+      // burn the full wait when its links are already there.
+      const waitSel = (config.productLinkSelectors && config.productLinkSelectors.length)
+        ? config.productLinkSelectors.join(', ')
+        : 'a.product-link';
+      await page.waitForSelector(waitSel, { timeout: config.searchWaitMs }).catch(() => {});
+    }
+    return { landedUrl: null, links: await collectResultLinks(page, config) };
+  }
+
   // Log in ONCE per browser context for adapters that need authentication (e.g. Veseris
   // account pricing). runScanMany shares one context across all product pages, so the
   // login cookies persist — we authenticate on the first product and reuse the session for
@@ -474,29 +589,23 @@ function makeAdapter(config) {
   }
 
   async function fetchCandidate(page, vendor, product) {
+    assertBreakerClosed(page, vendor);
     await ensureAuthenticated(page, vendor);
     // Direct URL (explicit vendor.url or a builder) — one shot.
     const directUrl = vendor.url || (config.buildProductUrl && config.buildProductUrl(product, vendor));
     if (directUrl) return scrapeCandidate(page, vendor, product, directUrl);
 
     // Otherwise search the vendor and open the best matches.
-    const searchUrl = config.buildSearchUrl ? config.buildSearchUrl(product, vendor) : null;
-    if (!searchUrl) return null;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout });
-    // OPT-IN wait: only adapters whose results are injected by a client-side widget set
-    // searchWaitMs (DoMyOwn's Reflektion search). For server-rendered adapters the
-    // results are already in the DOM, so we must NOT block here — otherwise a no-match
-    // (or a stale search path) burns the full timeout per product, adding minutes to a
-    // serial multi-product run. waitForSelector returns as soon as a link appears, so a
-    // successful dynamic search is still fast; only a genuine no-match waits it out.
-    if (config.searchWaitMs) {
-      // Wait for ANY configured link selector (comma-joined = CSS "or"): a store whose search
-      // sometimes lands on a server-rendered listing instead of the widget (DIY Pest) must not
-      // burn the full wait when its links are already there.
-      const waitSel = (config.productLinkSelectors && config.productLinkSelectors.length)
-        ? config.productLinkSelectors.join(', ')
-        : 'a.product-link';
-      await page.waitForSelector(waitSel, { timeout: config.searchWaitMs }).catch(() => {});
+    let found = await searchOnce(page, vendor, product);
+    if (!found) return null;
+    // OPT-IN: a long catalog name can find nothing on a store that matches short names. Retry
+    // ONCE with the first two words (skipped when that IS the full query); the candidates it
+    // yields go through the same verify flow below.
+    if (config.shortQueryFallback && !found.landedUrl && !found.links.length) {
+      const shortQ = shortSearchQuery(product);
+      if (shortQ && shortQ !== searchQuery(product)) {
+        found = (await searchOnce(page, vendor, { ...product, searchQuery: shortQ })) || found;
+      }
     }
 
     // Search is fuzzy + relevance-ranked, and slug heuristics can't always tell
@@ -504,7 +613,9 @@ function makeAdapter(config) {
     // results in turn and let verifyMatch (EPA / formulation / size) pick the real
     // one — returning the first that VERIFIES rather than betting on a single link.
     const cap = config.maxSearchCandidates || MAX_SEARCH_CANDIDATES;
-    const candidates = selectSearchCandidates(await collectResultLinks(page, config), product, cap);
+    const candidates = found.landedUrl
+      ? [found.landedUrl]
+      : selectSearchCandidates(found.links, product, cap);
     const wantsEpa = !!(product && product.epaReg);
     let fallback = null; // best-ranked priced page, if nothing verifies (-> precise 'unverified')
     let firstBuyable = null; // first BUYABLE name+size match lacking EPA confirmation
@@ -515,6 +626,7 @@ function makeAdapter(config) {
       try {
         cand = await scrapeCandidate(page, vendor, product, url);
       } catch (err) {
+        if (err && err.code === 'VENDOR_BLOCKED') throw err; // a bot check ends the product at once
         // A transient nav timeout / scrape failure on ONE candidate must not abort the
         // product — the real match is often the very next link (the search is fuzzy and
         // relevance-ranked). Remember the error so an all-fail run still reports
@@ -558,5 +670,5 @@ function makeAdapter(config) {
 
 module.exports = {
   makeAdapter, collectSnapshot, applySizeHint, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
-  searchQuery, targetOzOf, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
+  searchQuery, targetOzOf, isBotCheckSignals, landedOnProductUrl, shortSearchQuery, BOT_CHECK_BREAKER_LIMIT, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };

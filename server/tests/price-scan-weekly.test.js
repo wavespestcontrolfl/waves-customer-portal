@@ -280,6 +280,21 @@ describe('fetch-failure classification', () => {
     expect(FETCH_CLASS_SKIP_REASONS).toEqual(['fetch_error']);
   });
 
+  test('"blocked" is not fetch-class: a vendor that always blocks never degrades a run', () => {
+    expect(FETCH_CLASS_SKIP_REASONS).not.toContain('blocked');
+    const blocked = (n) => ({ product: prod(n), scan: { verified: [], skipped: [{ vendor: 'DoMyOwn', reason: 'blocked', detail: 'DoMyOwn blocked the scan with a bot check (Cloudflare)' }] } });
+    expect(fetchFailureOf(blocked('a'))).toBeNull();
+    const all = classifyFetchFailures([blocked('a'), blocked('b'), blocked('c')], 3);
+    expect(all).toEqual({ failedProducts: [], degraded: false });
+  });
+
+  test('"blocked" shows in the per-vendor breakdown', () => {
+    const r = (reason) => ({ product: prod('A'), scan: { verified: [], skipped: [{ vendor: 'DoMyOwn', reason }, { vendor: 'Keystone', reason: 'blocked' }] } });
+    const b = tallyBreakdown([r('blocked'), r('blocked'), r('no_candidate')]);
+    expect(b.vendors.DoMyOwn.skipped).toEqual({ blocked: 2, no_candidate: 1 });
+    expect(b.vendors.Keystone.skipped).toEqual({ blocked: 3 });
+  });
+
   test('a thrown product is a failure', () => {
     expect(fetchFailureOf({ product: prod('A'), error: new Error('Target closed') })).toEqual({ reason: 'error', detail: 'Target closed' });
   });
