@@ -52,7 +52,8 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule, validateRule, rulesForTargets, MODES: WATERING_MODES } = require('./lawn-watering-rule');
-const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold, SETUP_INVITE_LINE } = require('./lawn-watering-instruction');
+const { buildWateringInstruction, lateCloseInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold, SETUP_INVITE_LINE } = require('./lawn-watering-instruction');
+const { lawnVisitClosedLate } = require('./lawn-watering-late-close');
 const lawnWaterInRain = require('./lawn-water-in-rain');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
@@ -1498,8 +1499,6 @@ function workflowEventTimestamp(workflowEvents = [], type) {
 }
 
 function resolveReportArrivalTime(service = {}, scheduledService = {}, options = {}) {
-  const structured = options.structured || {};
-  const serviceData = options.serviceData || {};
   // Same per-candidate staleness rule as the visit timeline: a stale
   // canonical column from an aborted pre-reschedule attempt must neither
   // render nor shadow a genuine later source. This anchor feeds
@@ -1509,7 +1508,19 @@ function resolveReportArrivalTime(service = {}, scheduledService = {}, options =
     service.scheduled_date,
     scheduledService?.scheduled_date,
   );
-  const candidates = [
+  for (const value of reportArrivalCandidates(service, scheduledService, options)) {
+    const timestamp = validTimestamp(value);
+    if (timestamp && !isStaleTimestamp(timestamp, bounds)) return timestamp;
+  }
+  return null;
+}
+
+// Every arrival source, in the order the report trusts them. Shared with the
+// lawn watering late-close check, which applies the same staleness rule.
+function reportArrivalCandidates(service = {}, scheduledService = {}, options = {}) {
+  const structured = options.structured || {};
+  const serviceData = options.serviceData || {};
+  return [
     service.arrived_at,
     service.actual_start_time,
     service.check_in_time,
@@ -1523,11 +1534,6 @@ function resolveReportArrivalTime(service = {}, scheduledService = {}, options =
     scheduledService?.actual_start_time,
     scheduledService?.check_in_time,
   ];
-  for (const value of candidates) {
-    const timestamp = validTimestamp(value);
-    if (timestamp && !isStaleTimestamp(timestamp, bounds)) return timestamp;
-  }
-  return null;
 }
 
 function resolveReportCompletionTime(service = {}, scheduledService = {}, options = {}) {
@@ -2791,7 +2797,11 @@ class PinnedAssessmentUnavailable extends Error {
 // to expect" block drops repeated sentences. Cached lawn PDFs must re-key.
 // p11 (owner 2026-10-23): the April program line says "a slow-release feeding" (the 12x April bag is the polymer-coated 44-0-0), not "a light
 // feeding". Cached April lawn PDFs and renders must re-key.
-const LAWN_RENDER_STRATEGY = 'p11-lawn-slow-release-20261023';
+// p12 (owner 2026-10-27): a lawn visit closed on a later day than it was worked
+// renders no watering steps (lawn-watering-late-close.js); an unfrozen one used
+// to print steps anchored to the close day. Cached lawn PDFs and renders must
+// re-key.
+const LAWN_RENDER_STRATEGY = 'p12-lawn-late-close-20261027';
 
 // ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a
@@ -3935,7 +3945,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
 // customer's portal setup gives them). A later render that has to regenerate
 // (nothing frozen) passes nothing, so what an unfrozen render prints and what
 // its PDF key covers are unchanged.
-async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion = false }) {
+//
+// lateClose (owner 2026-10-27, lawn-watering-late-close.js): the visit was
+// closed on a later day than it was worked, so the completion time is not the
+// treatment time. No steps, and nothing is read: the caller decides it from the
+// visit's own stamps, so the report, its completion freeze and the Fast
+// Complete preview agree.
+async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion = false, lateClose = false }) {
+  if (lateClose === true) return lateCloseInstruction();
   const waterContext = lawnAssessment?.waterContext || {};
   let runtime = null;
   if (!waterContext.scheduleUnconfirmed) {
@@ -5147,6 +5164,21 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   );
   const serviceRecordTiming = publicTimingFields(service, publicTimingBounds);
   const scheduledServiceTiming = publicTimingFields(scheduledService || {}, publicTimingBounds);
+  // Owner 2026-10-27: a lawn visit closed on a later day than it was worked gets
+  // no watering steps, text or alert (lawn-watering-late-close.js). Part of
+  // GATE_LAWN_WATERING_EVERY_VISIT (its item 4): off, the payload is as before.
+  const lawnClosedLate = serviceLine === 'lawn' && featureGates.lawnWateringEveryVisitLive() && lawnVisitClosedLate({
+    arrivals: reportArrivalCandidates(service, scheduledService, timingOptions).map(validTimestamp),
+    scheduledDates: [service.scheduled_date, scheduledService?.scheduled_date],
+    completedAt: completionTime,
+  });
+  // For the completion freeze (lawn-report-write-gate.js): why a visit with no
+  // lawn report froze no watering steps. The steps are built with the lawn
+  // report, which needs a tech-confirmed photo read.
+  if (serviceLine === 'lawn' && opts.wateringInstructionOut && typeof opts.wateringInstructionOut === 'object') {
+    opts.wateringInstructionOut.lateClose = lawnClosedLate;
+    opts.wateringInstructionOut.noLawnRead = !lawnAssessment;
+  }
   const centerLat = numberOrNull(service.customer_latitude ?? service.latitude ?? service.lat);
   const centerLng = numberOrNull(service.customer_longitude ?? service.longitude ?? service.lng);
   const mapCenter = centerLat != null && centerLng != null ? { lat: centerLat, lng: centerLng } : null;
@@ -5844,7 +5876,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // only from a complete rule set: a failed catalog read builds none).
           wateringInstruction = readFrozenWateringInstruction(structured)
             || (rulesUnknown ? null
-              : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion: !!opts.wateringInstructionOut }));
+              : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex, forCompletion: !!opts.wateringInstructionOut, lateClose: lawnClosedLate }));
         } catch { wateringInstruction = null; wateringInputsFailed = true; readFailures.add('watering_inputs'); }
         // An UNFROZEN render whose inputs could not be read omits the customer's
         // watering direction: serve it, never cache it, and let a pinned delivery

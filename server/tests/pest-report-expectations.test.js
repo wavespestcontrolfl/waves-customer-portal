@@ -88,6 +88,7 @@ describe('every catalog product name this map claims to know classifies (codex P
   const CATALOG_NAMES = [
     ['Taurus SC', 'non_repellent'],
     ['Alpine WSG', 'non_repellent'],
+    ['Atticus Antapex WSG', 'non_repellent'],
     ['Atticus Talak', 'pyrethroid'],
     ['Demand CS', 'pyrethroid'],
     ['Onslaught Fastcap', 'pyrethroid'],
@@ -217,6 +218,17 @@ describe('buildWhatToExpect', () => {
       expect(out.lines[0]).toMatch(/^We applied a dinotefuran-based non-repellent\. Insects can't detect the treated zone/);
       expect(out.lines[0]).not.toMatch(/ants/i);
       expect(out.lines[0]).not.toMatch(/colony/i);
+    });
+
+    it('Atticus Antapex WSG (the catalog row since 2026-10-26) reads like Alpine WSG: dinotefuran-based, no roach timeframe', () => {
+      // Its label states no roach die-off time either, so a roach-only application gives no window.
+      for (const name of ['Alpine WSG', 'Atticus Antapex WSG']) {
+        const roach = buildWhatToExpect({ products: [{ name, targets: ['Roaches'] }] });
+        expect(roach.lines[0]).toMatch(/^We applied a dinotefuran-based non-repellent\. Insects can't detect the treated zone/);
+        expect(roach.lines[0]).not.toMatch(/spike|few days|couple of weeks/);
+      }
+      const ants = buildWhatToExpect({ products: [{ name: 'Atticus Antapex WSG', targets: ['Ants'] }] });
+      expect(ants.lines[0]).toMatch(/dinotefuran-based non-repellent/);
     });
 
     it('no targets recorded (e.g. the grounding path) → pest-neutral transfer wording', () => {
@@ -406,6 +418,7 @@ describe('buildWhatToExpect — owner wording rules 2026-10-01', () => {
   const ALL = [
     { name: 'Taurus SC', targets: ['Ants'], method: 'perimeter_spray', methodInferred: false },
     { name: 'Alpine WSG' },
+    { name: 'Atticus Antapex WSG' },
     { name: 'Atticus Talak', method: 'perimeter_spray', methodInferred: false },
     { name: 'Demand CS' },
     { name: 'Onslaught Fastcap' },
@@ -419,7 +432,7 @@ describe('buildWhatToExpect — owner wording rules 2026-10-01', () => {
   it.each(ALL.map((p) => [p.name, p]))('%s gets a line with no brand name and no die/kill wording', (_name, product) => {
     const out = buildWhatToExpect({ products: [product] });
     expect(out.lines).toHaveLength(1);
-    expect(out.lines[0]).not.toMatch(/Taurus|Alpine|Advion|Talak|Demand|Onslaught|Delta Dust|Gentrol|Tekko/);
+    expect(out.lines[0]).not.toMatch(/Taurus|Alpine|Antapex|Advion|Talak|Demand|Onslaught|Delta Dust|Gentrol|Tekko/);
     expect(out.lines[0]).not.toMatch(/\b(die|dies|dying|dead|kill\w*)\b/i);
   });
 

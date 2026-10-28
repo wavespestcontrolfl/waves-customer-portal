@@ -121,7 +121,7 @@ const INPUT = {
   protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
   inventoryReview: [
     { serviceKey: 'pest', productName: 'Talstar P', status: 'in_stock', onHand: 8 },
-    { serviceKey: 'pest', productName: 'Alpine WSG', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Atticus Antapex WSG', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Gentrol Complete EC3', status: 'in_stock', onHand: 8 },
@@ -676,7 +676,7 @@ describe('Agent Estimate draft tool', () => {
     });
 
     expect(result.lane_reasons).toEqual(expect.arrayContaining([
-      'inventory review for pest is missing protocol product: Alpine WSG',
+      'inventory review for pest is missing protocol product: Atticus Antapex WSG',
       'inventory review for pest is missing protocol product: Advion WDG Granular',
     ]));
   });

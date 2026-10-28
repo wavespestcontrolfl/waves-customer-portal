@@ -5031,6 +5031,10 @@ const ReviewService = {
 
       if (!persistedBody && recipientIsAccountHolder) {
         const Drafter = require("./review-ask-drafter");
+        // The drafter's date is the day the visit was worked when that is earlier than
+        // the record's date (a late close stamps the close day): review-visit-day.js,
+        // owner 2026-10-27. The request row keeps the record's date.
+        const { draftServiceDate } = require("./review-visit-day");
         const draftInput = {
           customer,
           recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
@@ -5040,8 +5044,8 @@ const ReviewService = {
           serviceDate,
         };
         const drafted = techVoice
-          ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: contact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: voiceVisit.serviceDate, serviceType: voiceVisit.serviceType, sequenceId, channel: "sms" }) : null)
-          : await Drafter.draftAskBody(draftInput);
+          ? await (voiceVisit ? Drafter.draftTechVoice({ ...draftInput, recipientName: contact.name, techName: voiceTechName, serviceRecordId: voiceVisit.serviceRecordId, serviceDate: await draftServiceDate({ recordDate: voiceVisit.serviceDate, serviceRecordId: voiceVisit.serviceRecordId, scheduledServiceId }), serviceType: voiceVisit.serviceType, sequenceId, channel: "sms" }) : null)
+          : await Drafter.draftAskBody({ ...draftInput, serviceDate: await draftServiceDate({ recordDate: serviceDate, serviceRecordId, scheduledServiceId }) });
         // A draft that repeats an earlier touch throws HeldTouch: nothing is
         // sent for this step (the sequence runner records the hold).
         if (drafted) persistedBody = drafted;
@@ -5104,7 +5108,8 @@ const ReviewService = {
             serviceType,
             techName,
             sequenceStep,
-            serviceDate,
+            // The day the visit was worked, as for the SMS drafts (review-visit-day.js).
+            serviceDate: await require("./review-visit-day").draftServiceDate({ recordDate: serviceDate, serviceRecordId, scheduledServiceId }),
           };
           const drafted = await Drafter.draftEmailIntro(draftInput);
           if (drafted) persistedBody = drafted;

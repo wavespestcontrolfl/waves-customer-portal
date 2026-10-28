@@ -4,7 +4,7 @@
 // its saved center and zoom.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const loadBestMapImage = vi.hoisted(() => vi.fn());
@@ -275,6 +275,7 @@ describe('a saved layout', () => {
     await stepped(zoomOut(), 20);
     fireEvent.click(screen.getByRole('button', { name: 'Pump' }));
     tap(frame, 320, 360);
+    within(screen.getByTestId('layout-pump-checklist')).getAllByRole('checkbox').forEach((box) => fireEvent.click(box));
     adminFetch.mockResolvedValueOnce({ layout: { savedAt: '2026-10-26T15:30:00Z' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
     await waitFor(() => expect(screen.getByTestId('layout-save-status').textContent).toMatch(/^Saved /));

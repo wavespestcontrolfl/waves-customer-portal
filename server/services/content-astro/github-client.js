@@ -496,6 +496,20 @@ async function getPr(number) {
   return ghFetch(`/repos/${owner}/${repo}/pulls/${number}`);
 }
 
+// Actions API readers. The content token (a fine-grained PAT) cannot read
+// /commits/{sha}/check-runs, but it can read workflow runs and their jobs.
+async function listWorkflowRunsForHead(headSha) {
+  const { owner, repo } = env();
+  const json = await ghFetch(`/repos/${owner}/${repo}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=100`);
+  return json?.workflow_runs || [];
+}
+
+async function listWorkflowRunJobs(runId) {
+  const { owner, repo } = env();
+  const json = await ghFetch(`/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`);
+  return json?.jobs || [];
+}
+
 async function closePr(number) {
   const { owner, repo } = env();
   return ghFetch(`/repos/${owner}/${repo}/pulls/${number}`, {
@@ -587,6 +601,8 @@ module.exports = {
   listPrReviewComments,
   mergePr,
   getPr,
+  listWorkflowRunsForHead,
+  listWorkflowRunJobs,
   closePr,
   updatePr,
   getBlob,

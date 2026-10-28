@@ -1186,3 +1186,84 @@ describe('GATE_LAWN_WATER_IN_RAIN on the report payload', () => {
     });
   });
 });
+
+// Owner 2026-10-27: a lawn visit closed on a later day than it was worked gets no watering steps, text or alert
+// (lawn-watering-late-close.js). On 2026-10-26 a close-out job closed visits worked Oct 1-22 as real completions:
+// the steps read the close as the treatment ("Today's treatment needs about 1/2 inch of water by Mon, Nov 9").
+describe('late close on the report payload', () => {
+  // Part of GATE_LAWN_WATERING_EVERY_VISIT, which reads as on only with its two prerequisites.
+  const KEYS = ['GATE_LAWN_WATERING_RULE', 'GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_EVERY_VISIT'];
+  let saved;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+    for (const k of KEYS) process.env[k] = 'true';
+  });
+  afterEach(() => {
+    for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  });
+  // A checked rule: under the every-visit gate a guessed (default) rule is no claim of its own.
+  const WATER_IN_LABEL = { ...WATER_IN, source: 'label' };
+  // Worked Oct 3 at 3:44 PM ET, closed Oct 26 at 10:39 AM ET.
+  const worked = (rule, extra = {}) => ({
+    ...serviceWith(rule), arrived_at: '2026-10-03T19:44:00Z', completed_at: '2026-10-26T14:39:57Z', service_date: '2026-10-26', ...extra,
+  });
+  const visitFixtures = (scheduledDate, extra = {}) => ({
+    ...fixtures(),
+    scheduled_services: [{ id: 'ss-current', customer_id: 'cust-lawn-w1', scheduled_date: scheduledDate, status: 'completed', service_type: 'Lawn Care Treatment Program' }],
+    ...extra,
+  });
+
+  test('a visit worked on an earlier day: no steps on the report, and the completion freeze hears why', async () => {
+    const out = {};
+    const data = await buildReportV1Data(worked(WATER_IN_LABEL), 'token-w1', makeKnex(visitFixtures('2026-10-03')), { wateringInstructionOut: out });
+    expect(data.reportV2).toBeTruthy();
+    expect(data.reportV2.banner).toBeUndefined();
+    expect(out.lateClose).toBe(true);
+    expect(out.noLawnRead).toBe(false);
+    expect(out.instruction).toMatchObject({ state: null, lines: [] });
+    expect(out.instruction.noClaim).toEqual({ reason: 'late_close', products: [] });
+    // A render with nothing frozen judges it the same way.
+    expect((await buildReportV1Data(worked(WATER_IN_LABEL), 'token-w1', makeKnex(visitFixtures('2026-10-03')))).reportV2.banner).toBeUndefined();
+  });
+
+  test('the same visit closed the same day keeps its steps', async () => {
+    const out = {};
+    const sameDay = worked(WATER_IN_LABEL, { arrived_at: '2026-10-26T13:40:00Z' });
+    const data = await buildReportV1Data(sameDay, 'token-w1', makeKnex(visitFixtures('2026-10-26')), { wateringInstructionOut: out });
+    expect(data.reportV2.banner.lines.length).toBeGreaterThan(0);
+    expect(out.lateClose).toBe(false);
+    expect(out.instruction.state).toBe('water_in');
+  });
+
+  test('a stale check-in from before a reschedule is not a late close', async () => {
+    // The Oct 3 stamp predates the visit's own scheduled day (Oct 26): an earlier, aborted attempt.
+    const out = {};
+    const data = await buildReportV1Data(worked(WATER_IN_LABEL), 'token-w1', makeKnex(visitFixtures('2026-10-26')), { wateringInstructionOut: out });
+    expect(out.lateClose).toBe(false);
+    expect(data.reportV2.banner.lines.length).toBeGreaterThan(0);
+  });
+
+  test('a lawn visit with no confirmed photo read: no lawn report, and the freeze hears that, not a failure', async () => {
+    const out = {};
+    const sameDay = worked(WATER_IN_LABEL, { arrived_at: '2026-10-26T13:40:00Z' });
+    const data = await buildReportV1Data(sameDay, 'token-w1', makeKnex(visitFixtures('2026-10-26', { lawn_assessments: [] })), { wateringInstructionOut: out });
+    expect(data.reportV2).toBeFalsy();
+    expect(out).toMatchObject({ lateClose: false, noLawnRead: true });
+    expect(out.instruction).toBeUndefined();
+  });
+
+  test('gate off: the payload is as before (steps from the close time), so unsetting the gate rolls it back', async () => {
+    delete process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+    const out = {};
+    const data = await buildReportV1Data(worked(WATER_IN_LABEL), 'token-w1', makeKnex(visitFixtures('2026-10-03')), { wateringInstructionOut: out });
+    expect(out.lateClose).toBe(false);
+    expect(data.reportV2.banner.lines.length).toBeGreaterThan(0);
+  });
+
+  test('a late close frozen before the rule replays as frozen (the report is a record)', async () => {
+    const frozen = { state: 'water_in', lines: ['Today’s treatment needs about ½ inch of water by Mon, Nov 9 at 9 AM.', 'Rain and your regular watering both count.'], minutes: { spray: null, rotor: null, unknown: false, measured: null }, completedAt: '2026-10-26T14:39:57.468Z' };
+    const service = worked(WATER_IN_LABEL, { structured_notes: JSON.stringify({ lawnWateringFreeze: { wateringInstruction: frozen } }) });
+    const data = await buildReportV1Data(service, 'token-w1', makeKnex(visitFixtures('2026-10-03')));
+    expect(data.reportV2.banner.lines).toEqual(frozen.lines);
+  });
+});

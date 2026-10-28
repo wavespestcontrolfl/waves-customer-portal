@@ -416,19 +416,26 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   let returnScheduledInsert;
   let fencedCustomer;
   let loadedCustomer;
+  // The idempotent-replay lookup's answer (null = no earlier booking at this start), and the live visit behind it,
+  // linked to another estimate: a replay check that filters by source_estimate_id finds nothing for this one.
+  let replayExisting = null;
 
   function trxTable(table) {
     if (table === 'self_booked_appointments') {
       let counting = false;
+      // A replay lookup bound to this booking's own estimate (whereExists on its linked visit) finds nothing:
+      // replayExisting belongs to another estimate.
+      let boundToEstimate = false;
       const b = {
         where: () => b,
         whereNot: () => b,
         // Effective-date day-cap predicate (SELF_BOOKING_EFFECTIVE_DATE_SQL)
         whereRaw: () => b,
+        whereExists: () => { boundToEstimate = true; return b; },
         modify(fn) { fn(b); return b; },
         count: () => { counting = true; return b; },
-        // replay lookup → none; global day-cap count → 0 (under cap)
-        first: () => Promise.resolve(counting ? { count: 0 } : null),
+        // replay lookup → none unless a test sets replayExisting; global day-cap count → 0 (under cap)
+        first: () => Promise.resolve(counting ? { count: 0 } : (boundToEstimate ? null : replayExisting)),
         insert: () => ({ returning: () => Promise.resolve([{ id: 'sb-1' }]) }),
       };
       return b;
@@ -450,15 +457,22 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     }
     if (table === 'scheduled_services') {
       let counting = false;
+      const wheres = [];
       const b = {
         leftJoin: () => b,
-        where: () => b,
+        where: (...args) => { wheres.push(args); return b; },
         whereNotIn: () => b,
         whereRaw: () => b,
+        modify(fn) { fn(b); return b; },
         // The day cap counts VOICE bookings off this table too (they write no
         // self_booked_appointments row) — none here, so the cap is unchanged.
         count: () => { counting = true; return b; },
-        first: () => Promise.resolve(counting ? { count: 0 } : null), // conflict re-check → free
+        // conflict re-check → free; the replay's live-visit check → a live visit behind replayExisting.
+        first: () => {
+          if (counting) return Promise.resolve({ count: 0 });
+          const replayCheck = wheres.some(([arg]) => arg && typeof arg === 'object' && 'self_booking_id' in arg);
+          return Promise.resolve(replayCheck && replayExisting ? { id: 'visit-behind-replay' } : null);
+        },
         // Global tech-blind probe (shared occupancy module, round 3): its
         // chain tails with .select(...).orderBy(...) and resolves rows —
         // empty here, so the probe passes and the flow reaches the insert.
@@ -601,6 +615,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     jest.clearAllMocks();
     capturedScheduledInsert = undefined;
     returnScheduledInsert = false;
+    replayExisting = null;
     fencedCustomer = { ...CUST };
     loadedCustomer = { ...CUST };
     mockOwnershipTables();
@@ -706,13 +721,20 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
 
     // Codex #6869 P1: the offer was built at customerBookingLocation's fallback for a customer with no saved pin, so
     // the commit re-derives that fallback (and stamps it on the visit) instead of failing its own location fence.
-    test('a customer with no saved pin books at the canonical fallback its offer used, stamped on the visit', async () => {
+    // Both estimate-page bookings (an estimateGuard) offer at customerBookingLocation: the paid first visit and the free
+    // estimate assessment (no billing).
+    const okGuard = () => ({ estimateId: EST_ID, revalidate: jest.fn().mockResolvedValue('ok') });
+    test.each([
+      ['the paid first visit', {}],
+      ['the free estimate assessment', { billing: undefined, serviceKey: 'lawn_inspection', serviceType: 'Waves Assessment', dedupeLane: false }],
+    ])('%s: a customer with no saved pin books at the canonical fallback its offer used, stamped on the visit', async (_label, visit) => {
       loadedCustomer = { ...CUST, latitude: null, longitude: null };
       fencedCustomer = { ...loadedCustomer };
       const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
       try {
-        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG } }))).rejects.toThrow(SENTINEL);
-        expect(capturedScheduledInsert).toMatchObject({ lat: LAT, lng: LNG, estimated_price: 81.67, service_address_line1: CUST.address_line1 });
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG }, estimateGuard: okGuard(), ...visit })))
+          .rejects.toThrow(SENTINEL);
+        expect(capturedScheduledInsert).toMatchObject({ lat: LAT, lng: LNG, service_address_line1: CUST.address_line1 });
       } finally { geocodeSpy.mockRestore(); }
     });
 
@@ -721,10 +743,22 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       fencedCustomer = { ...loadedCustomer };
       const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: 27.5, lng: -82.4 });
       try {
-        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG } })))
+        await expect(createSelfBooking(firstVisitPayload({ expectedLocation: { lat: LAT, lng: LNG }, estimateGuard: okGuard() })))
           .resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
         expect(capturedScheduledInsert).toBeUndefined();
       } finally { geocodeSpy.mockRestore(); }
+    });
+
+    // Pre-push audit P0: two signed proposals for one customer, booked at the same start.
+    test('a paid booking never replays another estimate\'s booking at the same start; a free assessment still replays its own', async () => {
+      replayExisting = { id: 'sb-other', confirmation_code: 'WAV-1' };
+      await expect(createSelfBooking(firstVisitPayload({ estimateGuard: okGuard() }))).rejects.toThrow(SENTINEL);
+      // Not a replay: the booking went on to insert its own priced visit.
+      expect(capturedScheduledInsert).toMatchObject({ estimated_price: 81.67, create_invoice_on_complete: true });
+      capturedScheduledInsert = undefined;
+      await expect(createSelfBooking(firstVisitPayload({ billing: undefined, serviceKey: 'lawn_inspection', serviceType: 'Waves Assessment' })))
+        .resolves.toMatchObject({ ok: true, body: { replayed: true } });
+      expect(capturedScheduledInsert).toBeUndefined();
     });
 
     test('a guard with no re-check function fails closed', async () => {

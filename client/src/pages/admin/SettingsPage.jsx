@@ -24,6 +24,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
 import PortalUsageTab from "../../components/admin/PortalUsageTab";
+import CostCardsSection from "./CostCardsSection";
 import { trackAdminPageView } from "../../lib/adminUsage";
 import { DEFAULT_KPI_TARGETS } from "@kpi-targets";
 import { KPI_METRIC_LABELS } from "./dashboard/kpi-targets";
@@ -809,6 +810,7 @@ function OperatingCostsSettingsTab({ canAdmin }) {
           </div>
         </CardBody>
       </Card>
+      <CostCardsSection />
     </div>
   );
 }

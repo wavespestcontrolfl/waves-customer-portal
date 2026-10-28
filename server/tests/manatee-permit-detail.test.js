@@ -500,6 +500,34 @@ describe('syncPermitDetails', () => {
     expect(out.attempted).toBe(1);
   });
 
+  test('maxBudgetMs shortens the run (the deploy-kill retry slice)', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    stubDb([cand('BLD9801-0611'), cand('BLD9801-0612'), cand('BLD9801-0613')]);
+    fakeAca({
+      'BLD9801-0611': { pages: [okPage('BLD9801-0611')] },
+      'BLD9801-0612': { pages: [okPage('BLD9801-0612')] },
+      'BLD9801-0613': { pages: [okPage('BLD9801-0613')] },
+    }, { clock, tickMs: 3000 });
+    // Default budget is 60 min; the 15 s cap fits one permit (~14 s), as above.
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep, maxBudgetMs: 15000 });
+    expect(out).toMatchObject({ stopped: 'budget', attempted: 1, ok: 1 });
+  });
+
+  test('maxBudgetMs never lengthens the configured budget', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    process.env.PERMIT_DETAIL_SYNC_BUDGET_MS = '15000';
+    const clock = fakeClock();
+    stubDb([cand('BLD9801-0621'), cand('BLD9801-0622'), cand('BLD9801-0623')]);
+    fakeAca({
+      'BLD9801-0621': { pages: [okPage('BLD9801-0621')] },
+      'BLD9801-0622': { pages: [okPage('BLD9801-0622')] },
+      'BLD9801-0623': { pages: [okPage('BLD9801-0623')] },
+    }, { clock, tickMs: 3000 });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep, maxBudgetMs: 60 * 60 * 1000 });
+    expect(out).toMatchObject({ stopped: 'budget', attempted: 1 });
+  });
+
   test('five consecutive no_fields stop the run and log ONE structural warning', async () => {
     process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
     const clock = fakeClock();

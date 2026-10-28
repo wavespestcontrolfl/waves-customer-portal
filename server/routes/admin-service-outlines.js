@@ -18,11 +18,7 @@ const {
   hashToken,
   regenerationTurfType,
 } = require('../services/lawn-service-outline');
-const {
-  SERVICE_LINE: TREE_SHRUB_LINE,
-  buildTreeShrubOutline,
-  treeShrubOutlineLive,
-} = require('../services/tree-shrub-service-outline');
+const { outlineProgram } = require('../services/service-outline-programs');
 
 const router = express.Router();
 
@@ -47,26 +43,23 @@ const LAWN_SERVICE_OUTLINE_SUPPRESSION_TEMPLATE = {
   suppression_group_key: 'service_operational',
 };
 
-// GATE_TS_OUTLINE: a request with serviceLine 'tree_shrub' builds the Tree & Shrub outline (tree-shrub-service-outline.js);
-// every other request builds the lawn outline exactly as before. Off = a Tree & Shrub request is refused.
-const TREE_SHRUB_OFF_ERROR = 'Tree & Shrub outlines are not turned on.';
-
-function isTreeShrub(serviceLine) {
-  return serviceLine === TREE_SHRUB_LINE;
-}
-
-function treeShrubOff(serviceLine) {
-  return isTreeShrub(serviceLine) && !treeShrubOutlineLive();
+// A request that names a program's service line (service-outline-programs.js: Tree & Shrub GATE_TS_OUTLINE, Pest
+// Control GATE_PEST_OUTLINE) builds that program's outline; every other request builds the lawn outline exactly as
+// before. A program whose gate is off is refused.
+function programOffError(serviceLine) {
+  const program = outlineProgram(serviceLine);
+  return program && !program.live() ? program.offError : null;
 }
 
 function buildServiceOutline({ estimate, input }) {
-  return isTreeShrub(input.serviceLine) ? buildTreeShrubOutline({ db, estimate, input }) : buildOutline({ db, estimate, input });
+  const program = outlineProgram(input.serviceLine);
+  return program ? program.build({ db, estimate, input }) : buildOutline({ db, estimate, input });
 }
 
-// The version stamps a packet keeps: the Tree & Shrub outline carries its own; the lawn outline's come from the lawn
-// module, as before.
+// The version stamps a packet keeps: a program's outline carries its own; the lawn outline's come from the lawn module,
+// as before.
 function outlineStamps(outline) {
-  if (isTreeShrub(outline.meta?.serviceLine)) {
+  if (outlineProgram(outline.meta?.serviceLine)) {
     const { templateVersion, contentLibraryVersion: content, protocolVersion: protocol, productRegistryVersion } = outline.meta;
     return { templateVersion, contentLibraryVersion: content, protocolVersion: protocol, productRegistryVersion };
   }
@@ -78,11 +71,8 @@ function outlineStamps(outline) {
   };
 }
 
-// The customer text and email name the packet's program.
-const SEND_COPY = Object.freeze({
-  lawn_care: Object.freeze({ program: 'lawn care', title: 'Your Waves Lawn Care Program Overview', messageType: 'lawn_service_outline' }),
-  [TREE_SHRUB_LINE]: Object.freeze({ program: 'tree and shrub', title: 'Your Waves Tree & Shrub Program Overview', messageType: 'tree_shrub_service_outline' }),
-});
+// The customer text and email name the packet's program (a program's own `send` words, else the lawn outline's).
+const LAWN_SEND_COPY = Object.freeze({ program: 'lawn care', title: 'Your Waves Lawn Care Program Overview', messageType: 'lawn_service_outline' });
 
 function publicUrlForToken(token) {
   return `${publicPortalUrl()}/service-outlines/${encodeURIComponent(token)}`;
@@ -166,7 +156,7 @@ function coerceInput(body = {}, { partial = false } = {}) {
 
   const serviceLine = body.serviceLine || body.service_line;
   return {
-    ...(isTreeShrub(serviceLine) ? { serviceLine: TREE_SHRUB_LINE } : {}),
+    ...(outlineProgram(serviceLine) ? { serviceLine } : {}),
     turfType: body.turfType || body.turf_type || null,
     detailLevel: body.detailLevel || 'standard',
     includeProductCards: body.includeProductCards === true,
@@ -205,19 +195,19 @@ async function insertPacket(trx, { estimate, outline, input, req, rawToken, stat
   const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 45);
   const turf = outline.meta.turf;
   const rule = outline.meta.jurisdictionRule;
-  const treeShrub = isTreeShrub(outline.meta.serviceLine);
+  const programLine = outlineProgram(outline.meta.serviceLine) ? outline.meta.serviceLine : null;
   const stamps = outlineStamps(outline);
   const row = {
     customer_id: estimate.customer_id || null,
     lead_id: estimate.lead_id || null,
     estimate_id: estimate.id,
-    service_line: treeShrub ? TREE_SHRUB_LINE : 'lawn_care',
+    service_line: programLine || 'lawn_care',
     status,
     title: outline.content.title,
     turf_type: turf.turfType,
     turf_confidence: turf.confidence,
     mixed_turf_flag: turf.mixed,
-    protocol_track: treeShrub ? TREE_SHRUB_LINE : turf.turfType,
+    protocol_track: programLine || turf.turfType,
     service_tier: input.serviceTier || outline.estimateSnapshot.tier || null,
     month: outline.inputSnapshot.month,
     season_band: outline.inputSnapshot.seasonBand,
@@ -268,7 +258,7 @@ function inputFromPacket(packet) {
   const snapshot = packet?.input_snapshot_json || {};
   return {
     // A regenerated outline keeps its program.
-    ...(isTreeShrub(packet?.service_line) ? { serviceLine: TREE_SHRUB_LINE } : {}),
+    ...(outlineProgram(packet?.service_line) ? { serviceLine: packet.service_line } : {}),
     turfType: regenerationTurfType(packet),
     detailLevel: snapshot.detailLevel || 'standard',
     includeProductCards: Array.isArray(packet?.content_json?.productCards) && packet.content_json.productCards.length > 0,
@@ -289,7 +279,8 @@ router.post('/preview', async (req, res, next) => {
     const estimate = await loadEstimate(req.body.estimateId || req.body.estimate_id);
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const input = coerceInput(req.body);
-    if (treeShrubOff(input.serviceLine)) return res.status(409).json({ error: TREE_SHRUB_OFF_ERROR });
+    const offError = programOffError(input.serviceLine);
+    if (offError) return res.status(409).json({ error: offError });
     const outline = await buildServiceOutline({ estimate, input });
     res.json({
       outline: outline.content,
@@ -307,7 +298,8 @@ router.post('/', async (req, res, next) => {
     const estimate = await loadEstimate(req.body.estimateId || req.body.estimate_id);
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const input = coerceInput(req.body);
-    if (treeShrubOff(input.serviceLine)) return res.status(409).json({ error: TREE_SHRUB_OFF_ERROR });
+    const offError = programOffError(input.serviceLine);
+    if (offError) return res.status(409).json({ error: offError });
     const outline = await buildServiceOutline({ estimate, input });
     const rawToken = createPublicToken();
     const packet = await db.transaction((trx) => insertPacket(trx, {
@@ -460,7 +452,8 @@ router.post('/:id/regenerate', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found for this outline' });
 
     const input = { ...inputFromPacket(sourcePacket), ...coerceInput(req.body || {}, { partial: true }) };
-    if (treeShrubOff(input.serviceLine)) return res.status(409).json({ error: TREE_SHRUB_OFF_ERROR });
+    const offError = programOffError(input.serviceLine);
+    if (offError) return res.status(409).json({ error: offError });
     const outline = await buildServiceOutline({ estimate, input });
     const rawToken = createPublicToken();
     const revokeOld = req.body.revokeOld !== false;
@@ -512,8 +505,9 @@ router.post('/:id/send', async (req, res, next) => {
       return res.status(422).json({ error: 'Service outline must be approved before it can be sent' });
     }
     if (packet.revoked_at) return res.status(422).json({ error: 'Revoked service outline cannot be sent' });
-    if (treeShrubOff(packet.service_line)) return res.status(409).json({ error: TREE_SHRUB_OFF_ERROR });
-    const sendCopy = SEND_COPY[isTreeShrub(packet.service_line) ? TREE_SHRUB_LINE : 'lawn_care'];
+    const offError = programOffError(packet.service_line);
+    if (offError) return res.status(409).json({ error: offError });
+    const sendCopy = outlineProgram(packet.service_line)?.send || LAWN_SEND_COPY;
     if (packet.expires_at && new Date(packet.expires_at) <= new Date()) {
       return res.status(422).json({ error: 'Expired service outline cannot be sent' });
     }

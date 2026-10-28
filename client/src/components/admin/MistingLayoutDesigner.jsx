@@ -32,6 +32,7 @@ import useMistingZoom from './misting-designer/useMistingZoom';
 import {
   CONCEPT_LABEL,
   CountsPanel,
+  PumpChecklist,
   EditsClearedNotice,
   ExtrasClearedNotice,
   MapCanvas,
@@ -118,6 +119,7 @@ function DesignerBody({ address, lat, lng, limits, estimateId, saved, replacesOt
               <CountsPanel layout={layout} note={limitNote(totals.count, limits)} riserNote={riserLimitNote(layout.risers.length, limits)} />
               <MistingLegend />
             </div>
+            <PumpChecklist layout={layout} />
           </>
         )}
       </DialogBody>

@@ -36,6 +36,7 @@ const APPROVED_CATALOG_PRODUCTS = [
   { name: 'Taurus SC', epaReg: '53883-279' },
   { name: 'Atticus Talak', epaReg: '91234-145' }, // catalog's canonical name — NOT "... 7.9 F"
   { name: 'Alpine WSG', epaReg: '499-561' },
+  { name: 'Atticus Antapex WSG', epaReg: '91234-401' }, // same entry: the catalog row since 2026-10-26
   { name: 'Demand CS', epaReg: '100-1066' },
   { name: 'Onslaught Fastcap', epaReg: '1021-2574' },
   { name: 'Advion Evolution Cockroach Gel Bait', epaReg: '100-1484' },
@@ -185,6 +186,26 @@ describe('reportProductCopyFor — public shape', () => {
     const copy = reportProductCopyFor({ epaReg, name, city: 'Bradenton' });
     expect(copy).not.toBeNull();
     expect(copy).not.toHaveProperty('also_labeled_for');
+  });
+
+  it('Alpine WSG and Atticus Antapex WSG share one entry, by either registration or either name', () => {
+    // The catalog row became Atticus Antapex WSG (EPA 91234-401) on 2026-10-26; visit lines recorded
+    // earlier keep BASF's 499-561 and 'Alpine WSG'. Neither may lose its copy.
+    const entry = findReportProductCopyEntry({ epaReg: '499-561', name: 'Alpine WSG' });
+    expect(entry).not.toBeNull();
+    expect(findReportProductCopyEntry({ epaReg: '91234-401', name: 'Atticus Antapex WSG' })).toBe(entry);
+    expect(findReportProductCopyEntry({ epaReg: null, name: 'Atticus Antapex WSG' })).toBe(entry);
+    expect(findReportProductCopyEntry({ epaReg: null, name: 'Antapex WSG' })).toBe(entry);
+    expect(findReportProductCopyEntry({ epaReg: null, name: 'Alpine WSG' })).toBe(entry);
+    // A registration is authoritative: the Antapex name never borrows the entry under another registration.
+    expect(findReportProductCopyEntry({ epaReg: '1-1', name: 'Atticus Antapex WSG' })).toBeNull();
+    // The Antapex label excludes Pharaoh ants, as Alpine's did, and names the same listed groups.
+    expect(entry.labelPestsExcept).toEqual(['Pharaoh ants']);
+    expect(entry.labelPests).toEqual(expect.arrayContaining(['ants', 'cockroaches', 'spiders', 'Paper wasps', 'Yellowjackets']));
+    expect(entry.alsoLabeledForPestCount).toBe(30);
+    // The customer sentences are unchanged: they hold for the non-repellent dinotefuran under either name.
+    expect(entry.howItWorks).toBe('A non-repellent. Pests don’t avoid it, so we use it on ant trails, entry points and the cracks where roaches hide.');
+    expect(entry.petsKids).toBe('Keep people and pets off treated areas until the spray has dried.');
   });
 
   it('Gentrol IGR and Gentrol Complete EC3 share one entry, by either registration or either name', () => {

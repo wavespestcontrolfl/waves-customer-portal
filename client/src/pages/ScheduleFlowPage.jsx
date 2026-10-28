@@ -1073,10 +1073,10 @@ const INPUT_STYLE = {
   color: S.text, background: '#fff', border: `1px solid ${S.softBorder}`, borderRadius: 10,
 };
 
-function GoneCard() {
+function GoneCard({ title = "We couldn't find that lead" }) {
   return (
     <Card>
-      <CardTitle>We couldn&apos;t find that lead</CardTitle>
+      <CardTitle>{title}</CardTitle>
       <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
         This link may be out of date. Text or call us and we&apos;ll get a time on the calendar.
       </div>
@@ -1099,7 +1099,7 @@ function ExpiredLinkCard() {
 
 // already_booked / converted: the lead already has a visit on the books
 // (their own open assessment, or — once converted — any future visit).
-function InspectionCoveredCard({ data }) {
+function InspectionCoveredCard({ data, serviceName = 'free consultation' }) {
   const visit = data?.visit;
   const converted = data?.state === 'converted';
   return (
@@ -1114,7 +1114,7 @@ function InspectionCoveredCard({ data }) {
         {converted ? (
           <>You&apos;re already a Waves customer{visit ? <> with a visit on the books</> : ''}.</>
         ) : (
-          <>Your free consultation is already scheduled.</>
+          <>Your {serviceName} is already scheduled.</>
         )}
         {visit ? (
           <>
@@ -1351,12 +1351,12 @@ function EmailPickCard({ slot, movedNotice, error: submitError, showError, submi
   );
 }
 
-function InspectionHero({ data, details, onDetails, onChangeAddress, topCard = null }) {
+function InspectionHero({ data, details, onDetails, onChangeAddress, topCard = null, eyebrow = 'Free consultation' }) {
   const lead = data?.lead || {};
   return (
     <>
       <div style={{ margin: '8px 2px 20px' }}>
-        <div data-gt="eyebrow" style={DOC_EYEBROW}>Free consultation</div>
+        <div data-gt="eyebrow" style={DOC_EYEBROW}>{eyebrow}</div>
         <h1 style={{ margin: 0, fontFamily: FONTS.serif, fontSize: 'clamp(30px, 5vw, 40px)', fontWeight: 500, lineHeight: 1.1, color: S.text }}>
           {lead.first_name ? `Hi ${lead.first_name} — ` : ''}pick a time for us to stop by
         </h1>
@@ -1410,13 +1410,13 @@ function InspectionHero({ data, details, onDetails, onChangeAddress, topCard = n
   );
 }
 
-function InspectionSuccessCard({ result }) {
+function InspectionSuccessCard({ result, serviceName = 'free consultation' }) {
   const visit = result?.visit || {};
   return (
     <Card>
       <CardTitle>You&apos;re on the calendar</CardTitle>
       <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
-        Your free consultation is set for <strong style={{ color: S.text }}>{formatDateLabel(visit.date)}</strong>, arrival window{' '}
+        Your {serviceName} is set for <strong style={{ color: S.text }}>{formatDateLabel(visit.date)}</strong>, arrival window{' '}
         <strong style={{ color: S.text }}>{arrivalWindowLabel(visit.window?.start) || result.startLabel}</strong>.
         {/* No delivery promise: a confirmation follows the profile's own
             preferences, and an additional-property profile starts with
@@ -1576,9 +1576,31 @@ const FLOWS = {
     pickedNote: () => null,
   },
 };
+// "Book a free Waves Assessment first" from an estimate (GATE_ESTIMATE_ASSESSMENT_FIRST): the inspection page itself,
+// keyed by the estimate's token (routes/estimate-assessment-public.js answers the same contract). The customer and the
+// property come from the estimate, so there is no address to change and no emailed time to preselect.
+const ASSESSMENT_NAME = 'free Waves Assessment';
+FLOWS.assessment = {
+  ...FLOWS.inspection,
+  endpoint: 'estimate-assessment',
+  notFound: { title: "We couldn't find that estimate", body: "This link may be out of date. Text or call us and we'll get a time on the calendar." },
+  loadErrorTitle: "We couldn't load your assessment times",
+  // The server answers gone (not offered for this estimate) and already_booked; no address or area states.
+  blocked: (data) => {
+    if (!data) return null;
+    if (data.state === 'gone') return <GoneCard title="This estimate can't book an assessment online" />;
+    if (data.state === 'already_booked') return <InspectionCoveredCard data={data} serviceName={ASSESSMENT_NAME} />;
+    return null;
+  },
+  Hero: (props) => <InspectionHero {...props} onChangeAddress={null} eyebrow="Free Waves Assessment" />,
+  Success: ({ result }) => <InspectionSuccessCard result={result} serviceName={ASSESSMENT_NAME} />,
+};
 
 export default function ScheduleFlowPage({ flow }) {
   const cfg = FLOWS[flow];
+  // The estimate-token assessment page answers the inspection contract (terminal states, error codes, the service
+  // area notice); only the lead-only address and emailed-time features stay inspection's own.
+  const inspectionLike = flow === 'inspection' || flow === 'assessment';
   const { token } = useParams();
   useGlassSurface(true);
   const [data, setData] = useState(null);
@@ -1836,7 +1858,7 @@ export default function ScheduleFlowPage({ flow }) {
     // Inspection: a terminal state (already_booked / converted / gone) from
     // the server's eligibility re-check replaces the page, exactly as the
     // commit path does (Codex #4737 r11 P2).
-    if (flow === 'inspection' && body.state && body.state !== 'ok') {
+    if (inspectionLike && body.state && body.state !== 'ok') {
       setData(body);
       return { summary: null };
     }
@@ -1886,7 +1908,7 @@ export default function ScheduleFlowPage({ flow }) {
       }
       // Inspection only: the geocoded address falls outside the service
       // area — STOP with the dedicated card instead of a generic error.
-      if (flow === 'inspection' && body.error === 'out_of_area') {
+      if (inspectionLike && body.error === 'out_of_area') {
         setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
         return;
       }
@@ -1894,14 +1916,14 @@ export default function ScheduleFlowPage({ flow }) {
       // usually caught earlier by the address gate) — recoverable, stay on
       // the picker with an inline message rather than showing the raw error
       // code or a generic failure line.
-      if (flow === 'inspection' && body.error === 'address_unresolved') {
+      if (inspectionLike && body.error === 'address_unresolved') {
         setSubmitError("We couldn't verify that address. Please text or call us and we'll get you booked.");
         return;
       }
       // Inspection only: the service-area check itself couldn't run — not a
       // verdict, so stay on the picker and let them retry rather than
       // stopping on the out-of-area card.
-      if (flow === 'inspection' && body.error === 'service_area_unavailable') {
+      if (inspectionLike && body.error === 'service_area_unavailable') {
         setSubmitError("We couldn't confirm your service area just now. Please try again, or text or call us.");
         return;
       }
@@ -1914,7 +1936,7 @@ export default function ScheduleFlowPage({ flow }) {
       // state — not just ALREADY_BOOKED, which previously left converted/
       // gone falling through to a generic "something went wrong" line
       // (Codex pre-push P1, 2026-09-24).
-      if (flow === 'inspection' && res.ok && body.state && body.state !== 'ok') {
+      if (inspectionLike && res.ok && body.state && body.state !== 'ok') {
         setSelectedSlot(null);
         setData(body);
         return;
@@ -1942,7 +1964,7 @@ export default function ScheduleFlowPage({ flow }) {
         }
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
-        } else if (flow === 'inspection') {
+        } else if (inspectionLike) {
           // The server's own refresh attempt came back empty — fall back
           // to a client-side refresh through the SAME address-aware helper
           // showAllTimes uses, never the bare load()/GET below: an
@@ -2118,7 +2140,7 @@ export default function ScheduleFlowPage({ flow }) {
           empty={(
             <EmptyTimesCard
               aiFiltered={aiFiltered}
-              serviceAreaUnavailable={flow === 'inspection' && !!data?.service_area_unavailable}
+              serviceAreaUnavailable={inspectionLike && !!data?.service_area_unavailable}
               locationReviewRequired={flow === 'reservice' && !!data?.location_review_required}
               onRetry={load}
             />

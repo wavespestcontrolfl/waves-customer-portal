@@ -18,7 +18,7 @@ const valid = (over = {}) => ({
     { x: 100, y: 600, kind: 'fence', lineIndex: 1 },
   ],
   risers: [{ x: 50, y: 60 }],
-  pump: { x: 70, y: 80 },
+  pump: { x: 70, y: 80, checks: { outlet: true, level: true, dry: true, stucco: true } },
   zones: [{ kind: 'pool', x: 300, y: 300, radiusFt: 15 }],
   ...over,
 });
@@ -31,13 +31,13 @@ describe('validateLayoutPayload', () => {
     expect(out).toMatchObject({ nozzleCount: 3, eaveCount: 2, fenceCount: 1, riserCount: 1, mapWidth: 1280, mapHeight: 960, zoom: 20 });
     // 600 px + 300 px of line at zoom 20, converted with the same math as the client.
     expect(out.linearFt).toBeCloseTo(Math.round(900 * feetPerPixel(26.95, 20) * 10) / 10, 5);
-    expect(out.pump).toEqual({ x: 70, y: 80 });
+    expect(out.pump).toEqual({ x: 70, y: 80, checks: { outlet: true, level: true, dry: true, stucco: true } });
     expect(out.zones).toEqual([{ kind: 'pool', x: 300, y: 300, radiusFt: 15 }]);
   });
 
   test('a layout with no lines, risers or zones is fine if it has a nozzle (placed by hand) and the pump', () => {
     const out = validateLayoutPayload(valid({ lines: [], risers: [], zones: [] }));
-    expect(out).toMatchObject({ riserCount: 0, linearFt: 0, pump: { x: 70, y: 80 } });
+    expect(out).toMatchObject({ riserCount: 0, linearFt: 0, pump: { x: 70, y: 80, checks: { outlet: true, level: true, dry: true, stucco: true } } });
     expect(out.nozzles.every((n) => n.lineIndex === null)).toBe(true);
   });
 
@@ -67,6 +67,34 @@ describe('validateLayoutPayload', () => {
     problem({ pump: null }, /needs the pump placed/);
     problem({ pump: undefined }, /needs the pump placed/);
     expect(() => validateLayoutPayload(valid())).not.toThrow();
+  });
+
+  describe('the pump spot checklist (Pynamite manual)', () => {
+    const pumpWith = (checks) => ({ pump: { x: 70, y: 80, ...(checks === undefined ? {} : { checks }) } });
+    const all = { outlet: true, level: true, dry: true, stucco: true };
+
+    test('needs all four checks true', () => {
+      problem(pumpWith(undefined), /Confirm the pump checklist/);
+      problem(pumpWith(null), /Confirm the pump checklist/);
+      problem(pumpWith({}), /Confirm the pump checklist/);
+      ['outlet', 'level', 'dry', 'stucco'].forEach((key) => {
+        problem(pumpWith({ ...all, [key]: false }), /Confirm the pump checklist/);
+        const missing = { ...all };
+        delete missing[key];
+        problem(pumpWith(missing), /Confirm the pump checklist/);
+      });
+      expect(validateLayoutPayload(valid(pumpWith(all))).pump.checks).toEqual(all);
+    });
+
+    test('rejects an unknown key, a non-boolean value and a non-object', () => {
+      problem(pumpWith({ ...all, shade: true }), /unknown key: shade/);
+      ['true', 1, 'yes', null, [], {}].forEach((v) => problem(pumpWith({ ...all, level: v }), /level must be true or false/));
+      ['yes', true, [true]].forEach((v) => problem(pumpWith(v), /pump checks must be an object/));
+    });
+
+    test('stores only the four known keys', () => {
+      expect(Object.keys(validateLayoutPayload(valid(pumpWith(all))).pump.checks).sort()).toEqual(['dry', 'level', 'outlet', 'stucco']);
+    });
   });
 
   test('accepts bed lines, which add no nozzles and no eave or fence length, and counts every riser', () => {

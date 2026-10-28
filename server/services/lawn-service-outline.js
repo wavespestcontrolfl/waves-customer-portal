@@ -1064,6 +1064,29 @@ function activeIngredientText(row) {
   return text ? text.toLowerCase() : null;
 }
 
+// The catalog rows the Pest Control and Mosquito outlines read: one query by exact name, active rows only (a retired
+// product never prints), the first row per name (a duplicate row with a stale formula never wins). A failed read is [],
+// so the product section leaves out rather than showing names without their ingredients.
+async function loadActiveCatalogRows(db, names) {
+  let rows;
+  try {
+    rows = await db('products_catalog')
+      .whereIn('name', names)
+      .where('active', true)
+      .select('name', 'display_name', 'active_ingredient', 'category', 'product_type');
+  } catch {
+    return [];
+  }
+  const seen = new Set();
+  const first = [];
+  for (const row of rows || []) {
+    if (seen.has(row.name)) continue;
+    seen.add(row.name);
+    first.push(row);
+  }
+  return first;
+}
+
 // The catalog read is one query by exact name (the v13 recipe uses catalog names). A failed read leaves the section
 // out rather than showing names without their ingredients.
 async function loadV13ProductList(db, trackKey) {
@@ -1332,9 +1355,11 @@ module.exports = {
   resolveJurisdictionId,
   resolveSeasonBand,
   validateContent,
-  // Shared with the Tree & Shrub outline (tree-shrub-service-outline.js, GATE_TS_OUTLINE).
+  // Shared with the Tree & Shrub, Pest Control and Mosquito outlines (tree-shrub-, pest- and mosquito-service-outline.js).
   V13_COPY,
   WATERING_ORDER,
+  activeIngredientText,
+  loadActiveCatalogRows,
   addressSummary,
   estimateSnapshot,
   estimateViewPath,

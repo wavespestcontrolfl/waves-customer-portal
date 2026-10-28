@@ -171,4 +171,32 @@ describe('Phase 5 — overhead basis + COGS split', () => {
     });
     expect(b.overhead.total).toBe(2000);
   });
+  describe('vehicle fixed cost already in COGS (vehicle cost cards)', () => {
+    const entered = { basis: 'entered', components: { payroll: 3000, rent: 1000, vehicle: 1000 } };
+
+    test('the vehicle overhead keeps only the part the visits do not already carry', () => {
+      const plain = buildEbitdaBridge({ ...BASE, monthFraction: 0.5, overhead: entered });
+      const netted = buildEbitdaBridge({ ...BASE, monthFraction: 0.5, overhead: entered, allocated: { vehicle: 300 } });
+      expect(plain.overhead.vehicle).toBe(500);
+      expect(netted.overhead.vehicle).toBe(200);
+      expect(netted.overhead.total).toBe(plain.overhead.total - 300);
+      expect(netted.ebitda).toBe(plain.ebitda + 300);
+      expect(netted.vehicleFixedInCogs).toBe(300);
+    });
+
+    test('it never nets more than the vehicle overhead, and none allocated changes nothing', () => {
+      const over = buildEbitdaBridge({ ...BASE, monthFraction: 0.5, overhead: entered, allocated: { vehicle: 900 } });
+      expect(over.overhead.vehicle).toBe(0);
+      expect(over.vehicleFixedInCogs).toBe(500);
+      const none = buildEbitdaBridge({ ...BASE, monthFraction: 0.5, overhead: entered, allocated: { vehicle: null } });
+      expect(none).toEqual(buildEbitdaBridge({ ...BASE, monthFraction: 0.5, overhead: entered }));
+      expect(none.vehicleFixedInCogs).toBe(0);
+    });
+
+    test('an overhead with no vehicle line is left alone', () => {
+      const b = buildEbitdaBridge({ ...BASE, overhead: { basis: 'entered', components: { payroll: 3000 } }, allocated: { vehicle: 300 } });
+      expect(b.overhead).toEqual({ payroll: 3000, total: 3000 });
+      expect(b.vehicleFixedInCogs).toBe(0);
+    });
+  });
 });

@@ -68,6 +68,7 @@ function fixtureFor(url, options = {}) {
   if (path === "/admin/settings/service-coverage/reset") return { config: serviceCoverage };
   if (path === "/admin/revenue/settings") return { settings: { ovh_office_payroll: "1200", overhead_entered_at: "2026-09-01" } };
   if (path === "/admin/kpi-targets") return { targets: [] };
+  if (path === "/admin/cost-cards") return { enabled: false };
   if (path === "/admin/communications/link-library") {
     return options.method === "POST"
       ? { ok: true }

@@ -15,7 +15,7 @@ import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
 const SERVICE_INCLUSIONS = {
   pest_control: [
     'Exterior perimeter protection around entry-prone areas',
-    'Interior service support when activity is reported',
+    'Interior treatment on the first visit, then whenever you ask',
     'Free re-service between recurring visits',
   ],
   lawn_care: [

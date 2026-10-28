@@ -10386,7 +10386,7 @@ const SERVICE_CATALOG = [
     frequencies: ['Quarterly (4x)', 'Bi-Monthly (6x)', 'Monthly (12x)'],
     basePrice: 55, description: 'Interior + exterior treatment, granular perimeter band, bait station check, cobweb sweep on all eaves',
     // Advion granules are not used on pest visits (owner 2026-10-24); its catalog row is retired.
-    products: ['Demand CS', 'Alpine WSG'],
+    products: ['Demand CS', 'Atticus Antapex WSG'],
   },
   {
     id: 'lawn_care', name: 'Lawn Care', icon: 'sprout',

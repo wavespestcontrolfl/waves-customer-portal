@@ -32,11 +32,13 @@ import { etDateString } from "../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
-// The program a packet describes: a Tree & Shrub packet (GATE_TS_OUTLINE) says so in content.serviceLine; every other
-// packet is a lawn outline.
+// The program a packet describes: a Tree & Shrub (GATE_TS_OUTLINE), Pest Control (GATE_PEST_OUTLINE) or Mosquito
+// (GATE_MOSQUITO_OUTLINE) packet says so in content.serviceLine; every other packet is a lawn outline.
 const PROGRAMS = {
   lawn_care: { badge: "Lawn Care Program", pageTitle: "Your Lawn Care Program Overview | Waves" },
   tree_shrub: { badge: "Tree & Shrub Program", pageTitle: "Your Tree & Shrub Program Overview | Waves" },
+  pest_control: { badge: "Pest Control Program", pageTitle: "Your Pest Control Program Overview | Waves" },
+  mosquito: { badge: "Mosquito Program", pageTitle: "Your Mosquito Program Overview | Waves" },
 };
 const programFor = (content) => PROGRAMS[content?.serviceLine] || PROGRAMS.lawn_care;
 
@@ -248,7 +250,8 @@ function MonthsVisual({ months = [], labels = {}, limitLabel }) {
               className={`group rounded-md border ${m.limited ? "border-waves-gold/40 bg-waves-gold-light" : "border-zinc-200 bg-white"}`}
             >
               <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-3 [&::-webkit-details-marker]:hidden">
-                <span className="w-10 flex-shrink-0 text-sm font-bold uppercase tracking-wide text-waves-blue-deeper">{m.label}</span>
+                {/* min-w, not w: a Pest Control row is a season ("Winter"), wider than a month's three letters. */}
+                <span className="min-w-10 flex-shrink-0 text-sm font-bold uppercase tracking-wide text-waves-blue-deeper">{m.label}</span>
                 <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
                   {m.main.map((step) => (
                     <span key={step} className="inline-flex items-center gap-1.5 text-sm font-semibold text-waves-blue-deeper">

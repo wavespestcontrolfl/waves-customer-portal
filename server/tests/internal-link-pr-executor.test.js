@@ -1308,6 +1308,9 @@ describe('internal-link PR auto-merge', () => {
     GitHubClient.listIssueComments = jest.fn(async () => [{ user: { login: 'waves-bot' }, body: `@codex review\n\nPlease review this autonomous internal-link PR on head \`${HEAD}\`.`, created_at: new Date(Date.now() - 3 * 3600e3).toISOString() }]);
     GitHubClient.listPrReviews = jest.fn(async () => []);
     GitHubClient.listPrReviewComments = jest.fn(async () => []);
+    // The astro brand-isolation job is green on the head by default.
+    GitHubClient.listWorkflowRunsForHead = jest.fn(async (sha) => [{ id: 9, path: '.github/workflows/brand-isolation.yml', status: 'completed', conclusion: 'success', head_sha: sha }]);
+    GitHubClient.listWorkflowRunJobs = jest.fn(async () => [{ name: 'brand-isolation', status: 'completed', conclusion: 'success' }, { name: 'meta-descriptions', status: 'completed', conclusion: 'success' }]);
     instance = new InternalLinkPrExecutor();
     instance._markTaskMerged = jest.fn();
     instance._closeLinkPr = jest.fn(async () => true);
@@ -1453,6 +1456,23 @@ describe('internal-link PR auto-merge', () => {
   test('closes when the PR touches a file no task names', async () => {
     GitHubClient.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/a.md' }, { filename: 'astro.config.mjs' }]);
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'diff_files_unexpected' });
+  });
+
+  test('a failed brand-isolation job on the head holds the link PR (never closes it) and nothing merges', async () => {
+    GitHubClient.listWorkflowRunJobs.mockResolvedValueOnce([{ name: 'brand-isolation', status: 'completed', conclusion: 'failure' }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'brand_isolation_failure' });
+    expect(GitHubClient.listWorkflowRunsForHead).toHaveBeenCalledWith(HEAD);
+    expect(instance._closeLinkPr).not.toHaveBeenCalled();
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('brand-isolation not started yet, or a lookup outage, holds the link PR without closing it', async () => {
+    GitHubClient.listWorkflowRunsForHead.mockResolvedValueOnce([]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'brand_isolation_pending' });
+    GitHubClient.listWorkflowRunsForHead.mockRejectedValueOnce(new Error('github 500'));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'brand_isolation_lookup_failed' });
+    expect(instance._closeLinkPr).not.toHaveBeenCalled();
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 
   test('never merges a head the executor did not push, or a stale/failed preview', async () => {

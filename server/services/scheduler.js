@@ -1466,43 +1466,19 @@ function initScheduledJobs() {
   // :48 and :52 groups. The detail step then holds only the lease's one
   // connection, under the cron-lock holder cap, as it did from 4:08 AM.
   // =========================================================================
-  const runPermitSyncTick = async () => {
+  const runPermitSyncTick = async ({ afterKill = false } = {}) => {
     // ONE lease for the whole sequence (codex #5673 P1): with separate
     // leases a deploy overlap could run the detail step on one replica while
     // another still runs the report sync (stale candidates, concurrent ACA
-    // scraping) and then skip it there. Each step keeps its own try so a
-    // failure in one never skips the other.
-    await runExclusive('permit-sync', async () => {
-      const failures = [];
-      try {
-        const res = await require('./property-lookup/manatee-permit-sync').syncPermits();
-        if (res && !res.skipped) {
-          const part = (r) => (r ? `${r.written}/${r.fetched} rows` : 'failed');
-          logger.info(`Permit sync: pool ${part(res.pool)}; construction ${part(res.construction)}${res.errors.length ? `; errors: ${res.errors.join(' | ')}` : ''}`);
-        }
-      } catch (err) {
-        logger.error(`Permit sync failed: ${err.message}`);
-        failures.push(`report sync: ${err.message}`);
-      }
-      // Permit detail collection (building facts off each new-home permit's
-      // ACA record page → construction_permit_records). Runs AFTER the
-      // report sync so this week's new permits are candidates. Inert unless
-      // GATE_PERMIT_DETAIL_SYNC is exactly 'true' (checked inside
-      // syncPermitDetails). Slow by design (sequential, >=2 s between
-      // requests, per-run cap + time budget); never runs from a lookup.
-      try {
-        await require('./property-lookup/manatee-permit-detail').syncPermitDetails();
-      } catch (err) {
-        logger.error(`Permit detail sync failed: ${err.message}`);
-        failures.push(`detail sync: ${err.message}`);
-      }
-      // Both steps ran; a failure in either still reaches the lease so job
-      // health records it (a swallowed error would read as success).
-      if (failures.length) throw new Error(failures.join(' | '));
-    }).catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
+    // scraping) and then skip it there. The steps live in permit-sync-run.js:
+    // each keeps its own try so a failure in one never skips the other, and
+    // a retry after a deploy kill skips a report step already done and runs
+    // a short detail slice (2026-10-26: deploys killed all 4 full retries).
+    await runExclusive('permit-sync', () => require('./property-lookup/permit-sync-run').runPermitSyncSteps({ afterKill }))
+      .catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
   };
-  cron.schedule('41 7 * * 1', runPermitSyncTick, { timezone: 'America/New_York' });
-  registerDeployKillRetry('permit-sync', runPermitSyncTick);
+  cron.schedule('41 7 * * 1', () => runPermitSyncTick(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('permit-sync', () => runPermitSyncTick({ afterKill: true }));
 
   // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
@@ -1890,19 +1866,50 @@ function initScheduledJobs() {
   // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.
   // Monday 6:00am ET.
   // =========================================================================
+  // The lock body, shared by the weekly tick and the catch-up rerun below. A scan a
+  // deploy interrupted, or that mostly hit fetch failures, throws here so job_health
+  // records 'failed' (it used to record 'success' with nothing scanned, 2026-10-26).
+  const runPriceScanBody = async () => {
+    const { runWeeklyScan, throwIfScanFailed } = require('./price-scan/weekly-scan');
+    const result = await runWeeklyScan();
+    logger.info(`[price-scan] cron run: ${JSON.stringify(result)}`);
+    throwIfScanFailed(result);
+  };
   cron.schedule('0 6 * * 1', async () => {
     if (!isEnabled('priceScanWeekly')) return;
     logger.info('Running: Weekly vendor price scan');
     try {
       // runExclusive: live scrapes + a single draft insert — a deploy overlap must
       // not double-scan or stage duplicate drafts.
-      await runExclusive('price-scan-weekly', async () => {
-        const { runWeeklyScan } = require('./price-scan/weekly-scan');
-        const result = await runWeeklyScan();
-        logger.info(`[price-scan] cron run: ${JSON.stringify(result)}`);
-      });
+      await runExclusive('price-scan-weekly', runPriceScanBody);
     } catch (err) {
       logger.error(`Weekly price scan failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Catch-up: hourly at :20, same gates as the weekly tick. Reruns the scan when the
+  // job_health row shows a failed run in the last 24 h, or a run that started 3+ h ago
+  // and never finished — at most three failed attempts in a row. The per-match draft
+  // dedup keeps a rerun from re-staging an ask already sitting in the queue.
+  // The first read is a cheap filter. The decision is made AGAIN under a separate
+  // retry lock (the deploy-kill-retry pattern): the scan lock only stops overlap, so a
+  // tick that waited for a slot while another instance finished the rerun would
+  // otherwise start a second scan from a stale row.
+  cron.schedule('20 * * * *', async () => {
+    if (!isEnabled('priceScanWeekly')) return;
+    try {
+      const { decidePriceScanCatchUp, JOB_NAME } = require('./price-scan/catch-up');
+      const readRow = () => db('job_health').where({ job_name: JOB_NAME }).first();
+      if (!decidePriceScanCatchUp(await readRow()).run) return;
+      await runExclusive(`${JOB_NAME}-catch-up`, async () => {
+        const row = await readRow();
+        const decision = decidePriceScanCatchUp(row);
+        if (!decision.run) return;
+        logger.warn(`[price-scan] catch-up rerun (${decision.reason}; last status ${row.last_status}, ${row.consecutive_failures} failures in a row)`);
+        await runExclusive(JOB_NAME, runPriceScanBody);
+      }, { recordHealth: false });
+    } catch (err) {
+      logger.error(`Price scan catch-up failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2207,6 +2214,31 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[pin-parked-check] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 01:40 — trip link (GATE_TRIP_LINK, dark): links yesterday's Bouncie trips and truck stops, and the day
+  // before's again (trip events can arrive late), to the completed visits they served and stores the GPS minutes on
+  // site, drive minutes and drive miles per visit (visit_gps_legs) and a business / personal suggestion per trip
+  // (trip_links). Shadow data: it writes only those two tables, never mileage_log, scheduled_services, job_costs,
+  // pins or alerts, and sends nothing. Gate read per run; off = the run returns before any query. runExclusive records
+  // the job health.
+  cron.schedule('40 1 * * *', async () => {
+    try {
+      const lockRes = await runExclusive('trip-link', async () => {
+        const result = await require('./trip-link').runTripLinkNightly();
+        if (result.legs) logger.info(`[trip-link] ${result.day}: ${result.legs.matched}/${result.legs.total} visit(s) matched`);
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`trip-link tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('trip-link').catch(() => {});
+        await recordJobEnd('trip-link', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[trip-link] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
