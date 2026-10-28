@@ -4,6 +4,8 @@ const {
   parsePriceTextCents,
   offerPrice,
   extractJsonLdOffer,
+  collectJsonLdOffers,
+  dedupeExactOffers,
   extractDomPrice,
   pickVariantOffer,
   variantsFromOptionCards,
@@ -712,6 +714,45 @@ describe('price-scan extract', () => {
     test('single offer still rejected when neither name nor title carries the size', () => {
       const ld = JSON.stringify({ '@type': 'Product', name: 'Hydretain ES Plus', offers: { '@type': 'Offer', price: 122.47, priceCurrency: 'USD' } });
       expect(offerFromSnapshot({ jsonLd: [ld], title: 'Hydretain ES Plus' }, { targetOz: 320 })).toBeNull();
+    });
+    describe('duplicate Product JSON-LD blocks (Veseris prints the same block twice)', () => {
+      const veserisBlock = (schemaUrl) => JSON.stringify({
+        '@context': 'https://schema.org', '@type': 'Product', name: 'Termidor SC Termiticide/Insecticide - 78 oz',
+        offers: { '@type': 'Offer', price: 152.1, priceCurrency: 'USD', availability: schemaUrl },
+      });
+      const twice = [veserisBlock('http://schema.org/InStock'), veserisBlock('https://schema.org/InStock')];
+      const title = 'Termidor SC Termiticide/Insecticide - 78 oz';
+
+      test('two identical offers collapse to one, so the size still ties to the page title', () => {
+        const got = extractJsonLdOffer(twice, { targetOz: 78, title });
+        expect(got).toEqual({ price: 152.1, currency: 'USD', availability: 'in_stock', name: title, competingSameSize: false });
+      });
+      test('a nameless duplicated offer is tied to the target size by the title (the single-offer branch)', () => {
+        const nameless = () => JSON.stringify({ '@type': 'Product', offers: { '@type': 'Offer', price: 111.82, priceCurrency: 'USD', availability: 'http://schema.org/InStock' } });
+        const dup = [nameless(), nameless().replace('http://', 'https://')];
+        expect(extractJsonLdOffer(dup, { targetOz: 78, title: 'Taurus SC - 78 oz' })).toMatchObject({ price: 111.82, competingSameSize: false });
+        expect(extractJsonLdOffer(dup, { targetOz: 78, title: 'Taurus SC' })).toBeNull(); // still no size evidence
+      });
+      test('offerFromSnapshot reads the duplicated page (no DOM fallthrough, no null)', () => {
+        expect(offerFromSnapshot({ jsonLd: twice, title }, { targetOz: 78 })).toMatchObject({ price: 152.1, availability: 'in_stock' });
+      });
+      test('collectJsonLdOffers still returns every block (other callers see both)', () => {
+        expect(collectJsonLdOffers(twice)).toHaveLength(2);
+      });
+      test('two DIFFERENT nameless offers still cannot be tied to a size', () => {
+        const a = JSON.stringify({ '@type': 'Product', offers: { '@type': 'Offer', price: 100, priceCurrency: 'USD' } });
+        const b = JSON.stringify({ '@type': 'Product', offers: { '@type': 'Offer', price: 90, priceCurrency: 'USD' } });
+        expect(extractJsonLdOffer([a, b], { targetOz: 78, title })).toBeNull();
+      });
+      test('two different same-size offers still compete (cheapest wins, flagged)', () => {
+        const mk = (price) => JSON.stringify({ '@type': 'Product', name: 'Termidor SC 78 oz', offers: { '@type': 'Offer', name: 'Termidor SC 78 oz', price, priceCurrency: 'USD', availability: 'InStock' } });
+        expect(extractJsonLdOffer([mk(152.1), mk(140)], { targetOz: 78 })).toMatchObject({ price: 140, competingSameSize: true });
+      });
+      test('same price but a different availability is a different offer', () => {
+        const mk = (avail) => JSON.stringify({ '@type': 'Product', name: 'Termidor SC 78 oz', offers: { '@type': 'Offer', name: 'Termidor SC 78 oz', price: 152.1, priceCurrency: 'USD', availability: avail } });
+        expect(dedupeExactOffers(collectJsonLdOffers([mk('InStock'), mk('OutOfStock')]))).toHaveLength(2);
+        expect(dedupeExactOffers(collectJsonLdOffers([mk('InStock'), mk('https://schema.org/InStock')]))).toHaveLength(1);
+      });
     });
     test('a variant offer is flagged fromVariant and does NOT inherit page-level stock text', () => {
       // availabilityText is the default selection's stock, not the matched child's — the
