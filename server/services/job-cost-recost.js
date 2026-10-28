@@ -8,7 +8,10 @@
  *
  * Only a completed visit with a technician whose cost card is in effect on the visit date is re-costed: with
  * no card, costing would not change. A re-cost is cost only: revenue is kept as recorded
- * (keepRecordedRevenue). calculateJobCost also runs syncCustomerAdAttribution for a completed visit, as the
+ * (keepRecordedRevenue). keepRecordedRevenue keeps the revenue of the visit's service record, so a visit
+ * with no single service record (none, or an ambiguous legacy match) or with no revenue written on it is
+ * skipped: calculateJobCost would derive its revenue again from today's price or plan and rewrite the
+ * ledger (Codex #6901 r1). Such a visit keeps its completion-time cost. calculateJobCost also runs syncCustomerAdAttribution for a completed visit, as the
  * admin recalculation does. Finding: that sync is idempotent. It re-sums the customer's completed job_costs
  * rows under a lock on the primary ad_service_attribution row and rewrites the same funnel fields
  * (completed_revenue, gross_profit, margin, projected LTV, updated_at); it sends nothing and raises nothing,
@@ -36,17 +39,24 @@ function gateOn(name) {
  * @returns {Promise<{recosted:number, skipped:number, failed:number}>}
  */
 async function recostVisits(conn, scheduledServiceIds, { dryRun = false } = {}) {
-  const { calculateJobCost } = require('./job-costing');
+  const { calculateJobCost, resolveServiceRecord } = require('./job-costing');
   const out = { recosted: 0, skipped: 0, failed: 0 };
+  const srCols = await conn('service_records').columnInfo().catch(() => ({}));
   for (const id of scheduledServiceIds) {
     try {
-      const svc = await conn('scheduled_services').where({ id }).first('id', 'status', 'technician_id', 'scheduled_date');
+      const svc = await conn('scheduled_services').where({ id }).first();
       if (!svc || svc.status !== 'completed' || !svc.technician_id) {
         out.skipped += 1;
         continue;
       }
       // No card in effect (or no rate from it) = costing would not change.
       if (!(await loadVisitRates(conn, svc.technician_id, dateString(svc.scheduled_date)))) {
+        out.skipped += 1;
+        continue;
+      }
+      // Revenue is kept only through one service record that has it written (see the header).
+      const { record, ambiguous } = await resolveServiceRecord(conn, svc, srCols);
+      if (!record || ambiguous || record.revenue == null || !(Number(record.revenue) >= 0)) {
         out.skipped += 1;
         continue;
       }

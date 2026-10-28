@@ -214,6 +214,11 @@ postgres('open time on the migrated schema', () => {
     gatesOn();
     await addCard();
     const id = await addVisit();
+    // Its service record carries the revenue the re-cost keeps (keepRecordedRevenue).
+    await trx('service_records').insert({
+      scheduled_service_id: id, customer_id: customerId, technician_id: techId, service_date: '2026-10-26',
+      service_type: 'Quarterly Pest Control Service', status: 'completed', revenue: 117,
+    });
     await jobCosting.calculateJobCost(id, trx);
     expect(Number((await jobCost(id)).charged_drive_minutes)).toBe(24);
     await trx('visit_gps_legs').insert({
@@ -228,6 +233,27 @@ postgres('open time on the migrated schema', () => {
     expect(Number(after.charged_drive_minutes)).toBe(12);
     expect(Number(after.charged_on_job_minutes)).toBe(60);
     expect(after.revenue).toBe(revenueBefore); // a cost-only run
+    expect(Number(after.revenue)).toBe(117);
+  });
+
+  it('the nightly re-cost skips a visit with no service record: its ledger revenue is never derived again', async () => {
+    gatesOn();
+    await addCard();
+    const id = await addVisit();
+    await jobCosting.calculateJobCost(id, trx);
+    const before = await jobCost(id);
+    // The visit's price changes after it was costed; a re-cost with no record would book the new price.
+    await trx('scheduled_services').where({ id }).update({ estimated_price: 199 });
+    await trx('visit_gps_legs').insert({
+      scheduled_service_id: id, leg_group_key: id, technician_id: techId, service_date: '2026-10-26', status: 'matched',
+      drive_minutes: 12, drive_miles: 5, shared_stop_count: 1, algorithm_version: 1,
+    });
+    jobCosting._resetVisitGpsLegsCache();
+    const result = await recostNightly({ now: new Date('2026-10-27T05:40:00Z'), conn: trx });
+    expect(result).toMatchObject({ recosted: 0, skipped: 1, failed: 0 });
+    const after = await jobCost(id);
+    expect(after.revenue).toBe(before.revenue);
+    expect(Number(after.charged_drive_minutes)).toBe(24); // left at its completion-time cost
   });
 
   it('the nightly re-cost does nothing with either gate off, and recostVisits skips a visit with no card', async () => {

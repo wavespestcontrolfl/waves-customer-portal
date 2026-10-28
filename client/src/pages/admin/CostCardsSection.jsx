@@ -293,17 +293,21 @@ const LEFT_OUT_TEXT = {
 };
 
 // Open time (GATE_TECH_OPEN_TIME): the paid hours of each technician's finished days that no visit carries.
-function OpenTimePanel() {
+// `version` changes each time the section reloads (a saved card), so a new or back-dated card shows here too.
+function OpenTimePanel({ version }) {
   const [report, setReport] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     let live = true;
     adminFetch("/admin/cost-cards/open-time")
-      .then((data) => { if (live) setReport(data); })
-      .catch((err) => { if (live && err.status !== 404) setError(err.message || "Could not load open time."); });
+      .then((data) => { if (live) { setReport(data); setError(null); } })
+      .catch((err) => {
+        if (!live) return;
+        if (err.status === 404) { setReport(null); setError(null); } else setError(err.message || "Could not load open time.");
+      });
     return () => { live = false; };
-  }, []);
+  }, [version]);
 
   if (error) return <ActionFeedback error>{error}</ActionFeedback>;
   if (!report || report.enabled !== true) return null;
@@ -366,6 +370,7 @@ export default function CostCardsSection() {
   const [data, setData] = useState(null);
   const [rates, setRates] = useState(null);
   const [error, setError] = useState(null);
+  const [version, setVersion] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -378,6 +383,7 @@ export default function CostCardsSection() {
       setData(cards);
       setRates(computed);
       setError(null);
+      setVersion((v) => v + 1);
     } catch (err) {
       setError(err.message || "Could not load cost cards.");
     }
@@ -440,7 +446,7 @@ export default function CostCardsSection() {
         );
       })}
 
-      <OpenTimePanel />
+      <OpenTimePanel version={version} />
     </div>
   );
 }

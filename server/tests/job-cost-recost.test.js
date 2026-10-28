@@ -8,7 +8,7 @@ jest.mock('../config/feature-gates', () => ({
   techOpenTimeLive: jest.fn(),
   techCostRatesLive: jest.fn(),
 }));
-jest.mock('../services/job-costing', () => ({ calculateJobCost: jest.fn() }));
+jest.mock('../services/job-costing', () => ({ calculateJobCost: jest.fn(), resolveServiceRecord: jest.fn() }));
 jest.mock('../services/tech-cost-rates', () => ({
   loadVisitRates: jest.fn(),
   dateString: (v) => (typeof v === 'string' ? v.slice(0, 10) : null),
@@ -20,7 +20,7 @@ jest.mock('../services/trip-link', () => ({
 
 const gates = require('../config/feature-gates');
 const logger = require('../services/logger');
-const { calculateJobCost } = require('../services/job-costing');
+const { calculateJobCost, resolveServiceRecord } = require('../services/job-costing');
 const { loadVisitRates } = require('../services/tech-cost-rates');
 const tripLink = require('../services/trip-link');
 const { recostVisits, recostNightly } = require('../services/job-cost-recost');
@@ -43,6 +43,7 @@ function fakeConn({ legIds = [] } = {}) {
       first: () => Promise.resolve(VISITS[chain.cond && chain.cond.id]),
       whereIn: (col, values) => { chain.days = values; return chain; },
       pluck: () => Promise.resolve(legIds),
+      columnInfo: () => Promise.resolve({ scheduled_service_id: {}, revenue: {} }),
     };
     return chain;
   };
@@ -56,6 +57,8 @@ beforeEach(() => {
   gates.techCostRatesLive.mockReturnValue(true);
   loadVisitRates.mockImplementation(async (conn, technicianId) => (technicianId === 'tech-nocard' ? null : { cardId: 'card-1', laborPerWorkedHourCents: 2725 }));
   calculateJobCost.mockResolvedValue({});
+  // One service record with its revenue written: the re-cost keeps it (keepRecordedRevenue).
+  resolveServiceRecord.mockResolvedValue({ record: { id: 'sr-1', revenue: '129.00' }, ambiguous: false });
   tripLink.lateArrivals.mockResolvedValue([]);
   tripLink.nightlyDays.mockReturnValue(['2026-10-26', '2026-10-25']);
 });
@@ -74,6 +77,26 @@ describe('recostVisits', () => {
     const result = await recostVisits(fakeConn(), ['svc-nocard', 'svc-pending', 'svc-notech', 'svc-missing']);
     expect(result).toEqual({ recosted: 0, skipped: 4, failed: 0 });
     expect(calculateJobCost).not.toHaveBeenCalled();
+  });
+
+  test('no single service record with revenue written: skipped, so the ledger revenue is never derived again', async () => {
+    const cases = [
+      { record: null, ambiguous: false }, // reportless visit
+      { record: { id: 'sr-a', revenue: '129.00' }, ambiguous: true }, // ambiguous legacy match
+      { record: { id: 'sr-b', revenue: null }, ambiguous: false }, // no revenue written yet
+      { record: { id: 'sr-c', revenue: '-5.00' }, ambiguous: false }, // keepRecordedRevenue would not keep it
+    ];
+    for (const resolution of cases) resolveServiceRecord.mockResolvedValueOnce(resolution);
+    const result = await recostVisits(fakeConn(), ['svc-ok', 'svc-ok', 'svc-ok', 'svc-ok']);
+    expect(result).toEqual({ recosted: 0, skipped: 4, failed: 0 });
+    expect(calculateJobCost).not.toHaveBeenCalled();
+  });
+
+  test('a recorded $0 is revenue written: the visit is re-costed and keeps it', async () => {
+    resolveServiceRecord.mockResolvedValueOnce({ record: { id: 'sr-0', revenue: '0.00' }, ambiguous: false });
+    const result = await recostVisits(fakeConn(), ['svc-ok']);
+    expect(result).toEqual({ recosted: 1, skipped: 0, failed: 0 });
+    expect(calculateJobCost).toHaveBeenCalledWith('svc-ok', expect.anything(), { keepRecordedRevenue: true });
   });
 
   test('one failure does not stop the others, and the log carries the id and error code only', async () => {

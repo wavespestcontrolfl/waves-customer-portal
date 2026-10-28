@@ -304,6 +304,22 @@ describe("Cost cards section", () => {
         expect(screen.queryByRole("table", { name: "Open time by technician" })).not.toBeInTheDocument();
       });
 
+      it("saving a card reloads the open time too, so a new or back-dated card shows there", async () => {
+        let openTimeReads = 0;
+        handlers["GET /admin/cost-cards/open-time"] = () => {
+          openTimeReads += 1;
+          return response(openTimeReads === 1 ? openTime() : openTime({ technicians: [{ ...openTime().technicians[0], openCostCents: 12300 }] }));
+        };
+        handlers["POST /admin/cost-cards/technicians/tech-2"] = () => response({ card: { id: "card-2", technicianId: "tech-2" } }, 201);
+        render(<CostCardsSection />);
+        expect(await screen.findByText("$408.75")).toBeInTheDocument();
+        const form = (await screen.findByText("Add card for Second Sample")).parentElement;
+        fireEvent.change(within(form).getByLabelText("Hourly wage"), { target: { value: "21" } });
+        fireEvent.click(within(form).getByRole("button", { name: "Add card" }));
+        expect(await screen.findByText("$123.00")).toBeInTheDocument();
+        expect(openTimeReads).toBe(2);
+      });
+
       it("a failed load shows the reason and leaves the cards alone", async () => {
         handlers["GET /admin/cost-cards/open-time"] = () => response({ error: "Cost cards failed. Try again." }, 500);
         render(<CostCardsSection />);
