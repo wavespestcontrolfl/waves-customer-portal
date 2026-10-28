@@ -241,9 +241,14 @@ function trafficLeg(leg, nowEt) {
   return { ...leg, departureMin: Math.max(at, floor) };
 }
 
-/** One per request: what its travel sources may buy, and whether it was closed. */
+/**
+ * One per request (or per batch of checks): what its travel sources may buy,
+ * whether it was closed, and the legs one of them is already buying
+ * (`claimed`: key -> settled when that purchase ends), so concurrent checks
+ * never oversubscribe it or buy the same leg twice.
+ */
 function createPickerBudget({ signal = null } = {}) {
-  return { traffic: 0, plain: 0, signal, refused: null };
+  return { traffic: 0, plain: 0, signal, refused: null, claimed: new Map() };
 }
 
 // The two Google answers a leg can get: how it is keyed and cached.
@@ -279,7 +284,6 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
       ...travelFor[mode], sharedBudget: RouteOptimizer.hintTravelBudget, signal: budget.signal,
     })))();
   }
-  const asked = new Set();
   // The leg as Google is asked for it, with its mode and key; null = the model.
   const resolve = (leg, nowEt) => {
     const mode = legMode(leg, nowEt, roadWindows());
@@ -299,39 +303,59 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     if (answer?.source === m.source && Number.isFinite(answer.minutes)) m.remember(r.key, r.asLeg, answer.minutes, t);
     return answer;
   }
-  // Buys `entries` from the mode's source; returns how many it never sent.
-  async function buy(mode, entries) {
-    if (!entries.length) return 0;
-    entries.forEach(([key]) => asked.add(key));
+  // Buys `legs` from the mode's source; returns how many it never sent.
+  async function buy(mode, legs) {
+    if (!legs.length) return 0;
     const before = sources[mode].diagnostics().elements;
-    await sources[mode].preload(entries.map(([, leg]) => leg));
-    const unsent = entries.length - (sources[mode].diagnostics().elements - before);
-    budget[mode] += entries.length - unsent;
+    await sources[mode].preload(legs);
     // Keep what Google answered in the process cache (lookup remembers), so
     // the next search, or the next picker for this visit, asks nothing.
-    entries.forEach(([, leg]) => lookup(leg));
-    return unsent;
+    legs.forEach((leg) => lookup(leg));
+    return legs.length - (sources[mode].diagnostics().elements - before);
+  }
+  // Reserves the claimed legs against the durable ceilings, buys them, and
+  // gives back what the source never sent (its burst allowance, its deadline,
+  // a closed picker) to the ceilings and the request's budget.
+  async function purchase(want) {
+    const spend = require('./picker-road-spend');
+    const reserved = await spend.reserveRoadSpend({ spender, pro: want.traffic.length, plain: want.plain.length });
+    if (!reserved.allowed) {
+      budget.refused = reserved.reason;
+      budget.traffic -= want.traffic.length;
+      budget.plain -= want.plain.length;
+      return;
+    }
+    const [pro, plain] = await Promise.all([buy('traffic', want.traffic), buy('plain', want.plain)]);
+    budget.traffic -= pro;
+    budget.plain -= plain;
+    await spend.releaseRoadSpend({ spender, pro, plain, day: reserved.day });
   }
   return {
     async preload(legs) {
       if (budget.signal?.aborted || budget.refused) return;
       const t = now();
       const nowEt = etNow(t);
-      const want = { traffic: new Map(), plain: new Map() };
+      const want = { traffic: [], plain: [] };
+      const waits = new Set();
+      let settle;
+      const settled = new Promise((done) => { settle = done; });
       for (const leg of legs) {
         const r = resolve(leg, nowEt);
-        if (r && !asked.has(r.key) && MODES[r.mode].cached(r.key, r.asLeg, t) == null) want[r.mode].set(r.key, r.asLeg);
+        if (!r || MODES[r.mode].cached(r.key, r.asLeg, t) != null) continue;
+        // Another check of this request is buying it: wait for that answer.
+        if (budget.claimed.has(r.key)) { waits.add(budget.claimed.get(r.key)); continue; }
+        if (budget[r.mode] >= REQUEST_MAX[r.mode]) continue;
+        // Claimed before any await, so concurrent checks cannot oversubscribe.
+        budget[r.mode] += 1;
+        budget.claimed.set(r.key, settled);
+        want[r.mode].push(r.asLeg);
       }
-      const take = (mode) => [...want[mode]].slice(0, Math.max(0, REQUEST_MAX[mode] - budget[mode]));
-      const entries = { traffic: take('traffic'), plain: take('plain') };
-      if (!entries.traffic.length && !entries.plain.length) return;
-      const spend = require('./picker-road-spend');
-      const reserved = await spend.reserveRoadSpend({ spender, pro: entries.traffic.length, plain: entries.plain.length });
-      if (!reserved.allowed) { budget.refused = reserved.reason; return; }
-      const [pro, plain] = await Promise.all([buy('traffic', entries.traffic), buy('plain', entries.plain)]);
-      // Lookups the source never sent (its burst allowance, its deadline, a
-      // closed picker) were not bought: give them back.
-      await spend.releaseRoadSpend({ spender, pro, plain, day: reserved.day });
+      try {
+        if (want.traffic.length || want.plain.length) await purchase(want);
+      } finally {
+        settle();
+      }
+      await Promise.all(waits);
     },
     lookup,
   };

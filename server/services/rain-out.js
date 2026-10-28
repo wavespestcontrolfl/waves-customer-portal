@@ -1329,6 +1329,10 @@ async function checkSlots({ targets, caller = null } = {}) {
   }));
   // results[i] answers targets[i] — the bulk bars rely on the alignment.
   const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
+  // One Google budget for the whole batch (up to 25 checks at once), so an
+  // admin's batch keeps the per-request limit and buys a shared leg once
+  // (GATE_PICKER_ROAD_CHECK). A technician's checks never use it.
+  const batchBudget = require('./scheduling/hint-road-times').createPickerBudget();
   const results = await Promise.all(parsed.map(async (p) => {
     if (p.serviceId && arrivalWindowRoutingEnabled()) {
       try {
@@ -1336,11 +1340,12 @@ async function checkSlots({ targets, caller = null } = {}) {
           serviceId: p.serviceId, date: p.date, technicianId: p.technicianId,
           windowStart: p.window.start, windowEnd: p.window.end,
           durationMinutes: p.durationMinutes, excludeServiceIds: p.excludeServiceIds,
-          // The pickers' Google road times (GATE_PICKER_ROAD_CHECK) are
-          // staff-only: a technician's check stays on the model. Counted
-          // against the admin who asked (picker-road-spend.js).
+          // The pickers' Google road times are staff-only: a technician's
+          // check stays on the model. Counted against the admin who asked
+          // (picker-road-spend.js).
           roads: caller?.isAdmin === true,
           roadSpender: caller?.isAdmin === true ? caller.technicianId || null : null,
+          pickerBudget: batchBudget,
         });
         return { conflicts: fit.feasible ? [] : [{ id: p.serviceId, warning: fit.warning, reason: fit.reason }] };
       } catch (err) {

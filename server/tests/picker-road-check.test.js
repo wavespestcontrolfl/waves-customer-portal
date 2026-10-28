@@ -226,6 +226,33 @@ describe('createPickerTravel', () => {
     expect(releaseRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 0, plain: 0, day: '2027-03-01' });
   });
 
+  // Pre-push audit #6881 (P1): a batch of slot checks shares one budget; run
+  // at once, they must neither oversubscribe it nor buy a shared leg twice.
+  test('concurrent checks on one budget buy a shared leg once, and both get its answer', async () => {
+    const budget = createPickerBudget();
+    const a = make({ budget });
+    const b = make({ budget });
+    const shared = [leg(plus(1), 9 * 60), leg(plus(3), 9 * 60)];
+    await Promise.all([a.travel.preload(shared), b.travel.preload(shared)]);
+    expect(a.asked.traffic.length + b.asked.traffic.length).toBe(1);
+    expect(a.asked.plain.length + b.asked.plain.length).toBe(1);
+    expect(reserveRoadSpend).toHaveBeenCalledTimes(1);
+    for (const t of [a.travel, b.travel]) {
+      expect(t.lookup(shared[0])).toMatchObject({ source: 'google_traffic' });
+      expect(t.lookup(shared[1])).toMatchObject({ source: 'google_road' });
+    }
+  });
+
+  test('concurrent checks cannot oversubscribe the request budget', async () => {
+    const budget = createPickerBudget();
+    const many = (n, lat) => Array.from({ length: n }, (_, i) => leg(plus(1), 9 * 60, { lat: lat + i / 1000, lng: -82.3 }));
+    const a = make({ budget });
+    const b = make({ budget });
+    await Promise.all([a.travel.preload(many(120, 27)), b.travel.preload(many(120, 28))]);
+    expect(a.asked.traffic.length + b.asked.traffic.length).toBe(_test.REQUEST_MAX.traffic);
+    expect(budget.traffic).toBe(_test.REQUEST_MAX.traffic);
+  });
+
   test('a second look is served from the cache', async () => {
     const legs = [leg(plus(1), 10 * 60 + 5), leg(plus(1), 10 * 60 + 40), leg(plus(3), 9 * 60)];
     const first = make();
