@@ -173,14 +173,21 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
     expect(v2.aftercare.wateringHold).toBeUndefined();
   });
 
-  test('gate off: no banner, no overlay, and the payload does not depend on the rule at all', async () => {
+  test('gate off: no banner, no overlay, and the payload does not depend on the rule beyond the neutral watering line', async () => {
     delete process.env.GATE_LAWN_WATERING_RULE;
     const withRule = await render(HOLD);
     const withoutRule = await render(null);
     expect(withRule.reportV2.banner).toBeUndefined();
     expect(withRule.reportV2.aftercare.evidenceSource).toBeUndefined();
     expect(JSON.stringify(withRule)).not.toMatch(/afterHold|holdUntil|product_instruction/);
-    expect(JSON.parse(JSON.stringify(withRule))).toEqual(JSON.parse(JSON.stringify(withoutRule)));
+    // The service report cleanup reads the products' own frozen rule: a hold on any product blanks the neutral
+    // "No special watering" line (an empty line, not neutral copy). Everything else is the same payload.
+    expect(withRule.reportV2.aftercare).toMatchObject({ watering: '', neutral: false });
+    expect(withoutRule.reportV2.aftercare.watering).toMatch(/^No special watering/);
+    const same = JSON.parse(JSON.stringify(withRule));
+    same.reportV2.aftercare.watering = withoutRule.reportV2.aftercare.watering;
+    same.reportV2.aftercare.neutral = withoutRule.reportV2.aftercare.neutral;
+    expect(same).toEqual(JSON.parse(JSON.stringify(withoutRule)));
   });
 
   describe('later reads replay the frozen instruction', () => {
@@ -239,7 +246,8 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       const out = {};
       const failed = await buildReportV1Data(serviceWith(WATER_IN), 'token-w1', makeKnex({ ...fixtures(), property_preferences: FAIL }), { wateringInstructionOut: out });
       expect(failed.reportV2.banner).toBeUndefined();
-      expect(failed.reportV2.aftercare.evidenceSource).toBeUndefined(); // legacy path
+      // No instruction: the aftercare is the products' own frozen water-in line (the service report cleanup), never a credited instruction.
+      expect(failed.reportV2.aftercare).toMatchObject({ watering: 'Water in about ¼ inch within 24 hours.', creditableWaterIn: false, evidenceSource: 'product_instruction' });
       expect(out.instruction).toBeNull(); // the write gate freezes only a truthy claim
       expect(out.inputsFailed).toBe(true); // the write gate turns this into the office alert (GATE_LAWN_WATERING_EVERY_VISIT)
       // The render omitted the direction: PDF storage must refuse it (the

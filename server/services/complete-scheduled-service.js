@@ -251,7 +251,7 @@ function inferServiceReportApplicationMethod(product = {}, productInput = {}, se
   const explicit = normalizeServiceReportApplicationMethod(
     productInput.applicationMethod || productInput.method || product.application_method || product.method,
   );
-  // GATE_REPORT_CLEANUP_1020: a granular product is never stored with a broadcast spray method, whatever the sheet sent.
+  // A granular product is never stored with a broadcast spray method, whatever the sheet sent.
   if (explicit) return correctedGranularMethod(explicit, product);
   const category = String(product.category || product.product_category || '').toLowerCase();
   if (category.includes('bait') || category.includes('gel') || category.includes('glue')) return 'bait_placement';

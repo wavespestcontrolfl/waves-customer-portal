@@ -1,6 +1,5 @@
-// GATE_REPORT_CLEANUP_1020: the pure helpers behind the simple report's cleanup
-// items. ServiceReportDocument calls them only when the payload says
-// `reportCleanup === true`; gate off, the document prints as it always did.
+// The pure helpers behind the simple report's cleanup items (rate basis,
+// repeated sentences, the trouble-spot photo).
 
 // The words after the slash of a stored rate unit ("lb/1000sf" is lb per
 // 1,000 sq ft). A basis not listed here is not guessed at.
