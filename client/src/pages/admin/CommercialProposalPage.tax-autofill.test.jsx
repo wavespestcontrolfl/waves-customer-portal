@@ -53,8 +53,9 @@ const savedTaxRate = async () => {
 
 it('shows the county rate as a chip with its source, and fills it on load when a line is taxable', async () => {
   await mount({ taxable: true });
-  expect(chip()).toHaveTextContent('7% · Manatee County');
+  // From the load's first render: the box never flashes before the fill.
   expect(taxBox()).toBeNull();
+  expect(await screen.findByTestId('tax-rate-chip')).toHaveTextContent('7% · Manatee County');
   await waitFor(() => expect(screen.getByText(TAX_AT_7)).toBeInTheDocument());
   expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
 });
