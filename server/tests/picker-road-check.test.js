@@ -25,6 +25,7 @@ jest.mock('../services/scheduling/picker-road-spend', () => ({
 const { evaluateArrivalPlacement } = require('../services/scheduling/arrival-route');
 const { createPickerTravel, createPickerBudget, _test } = require('../services/scheduling/hint-road-times');
 const { reserveRoadSpend, releaseRoadSpend } = require('../services/scheduling/picker-road-spend');
+const logger = require('../services/logger');
 
 // 10:00 ET on 2027-03-01.
 const NOW = new Date('2027-03-01T15:00:00Z');
@@ -76,6 +77,7 @@ describe('createPickerTravel', () => {
     _test.plainCache.clear();
     reserveRoadSpend.mockClear();
     releaseRoadSpend.mockClear();
+    logger.info.mockClear();
     delete process.env.PICKER_ROAD_TRAFFIC_DAYS;
     delete process.env.PICKER_ROAD_PLAIN_DAYS;
   });
@@ -90,8 +92,9 @@ describe('createPickerTravel', () => {
   // Like createSchedulingTravel: only a leg it sent has Google's answer (any
   // other leg gets the conservative model), and diagnostics() counts what it
   // sent. `sends: false` = a source that sends nothing (its burst allowance,
-  // deadline or a closed picker).
-  const fakeSources = ({ sends = true } = {}) => {
+  // deadline or a closed picker); `answers: false` = Google got the lookups
+  // but answered none (an error or a timeout).
+  const fakeSources = ({ sends = true, answers = true } = {}) => {
     const asked = { traffic: [], plain: [] };
     const trafficKey = (leg) => `${leg.date}@${leg.departureMin}|${leg.to.lat}`;
     const pairKey = (leg) => `${leg.from.lat}>${leg.to.lat}`;
@@ -105,7 +108,7 @@ describe('createPickerTravel', () => {
         legs.forEach((leg) => got[mode].add(keyOf(leg)));
         sent[mode] += legs.length;
       },
-      lookup: (leg) => (got[mode].has(keyOf(leg)) ? answer : model),
+      lookup: (leg) => (answers && got[mode].has(keyOf(leg)) ? answer : model),
       diagnostics: () => ({ requests: sent[mode], elements: sent[mode] }),
     });
     return {
@@ -175,6 +178,27 @@ describe('createPickerTravel', () => {
     expect(asked.plain).toEqual([]);
   });
 
+  // A search looks up every leg of every order it simulates (hundreds of
+  // thousands of calls); reading the Eastern clock on each one made production
+  // searches take 8-10 s (audit 10-28). One read a minute gives the same keys.
+  test('lookup reads the Eastern clock once a minute, not once per leg', () => {
+    const et = require('../utils/datetime-et');
+    const reads = jest.spyOn(et, 'etParts');
+    let t = NOW.getTime();
+    const { travel } = make({ now: () => t });
+    for (let i = 0; i < 500; i += 1) travel.lookup(leg(i % 2 ? DATE : plus(3), 9 * 60 + (i % 240)));
+    expect(reads).toHaveBeenCalledTimes(1);
+    t += 60 * 1000;
+    // The next minute reads it again: today's floor moves to the next hour.
+    travel.lookup(leg(DATE, 9 * 60));
+    expect(reads).toHaveBeenCalledTimes(2);
+    // So does a clock that steps back: one slot, keyed by the minute.
+    t -= 60 * 1000;
+    travel.lookup(leg(DATE, 9 * 60));
+    expect(reads).toHaveBeenCalledTimes(3);
+    reads.mockRestore();
+  });
+
   test('a ceiling refusal buys nothing, and the rest of the request stays on the model', async () => {
     reserveRoadSpend.mockResolvedValueOnce({ allowed: false, reason: 'daily_cap' });
     const budget = createPickerBudget();
@@ -220,10 +244,20 @@ describe('createPickerTravel', () => {
     expect(budget).toMatchObject({ traffic: 0, plain: 0 });
   });
 
-  test('lookups the source sent stay counted', async () => {
+  test('lookups the source sent stay counted, and the purchase logs what Google answered', async () => {
     const { travel } = make();
     await travel.preload([leg(plus(1), 9 * 60), leg(plus(3), 9 * 60)]);
     expect(releaseRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 0, plain: 0, day: '2027-03-01' });
+    expect(logger.info).toHaveBeenCalledWith('[picker-road] 2 lookups sent, 2 answered by Google');
+  });
+
+  // An error or a timeout is still paid; the log line is the only place it shows.
+  test('lookups Google got but did not answer stay counted and show in the log', async () => {
+    const { travel } = make({}, { answers: false });
+    await travel.preload([leg(plus(1), 9 * 60), leg(plus(3), 9 * 60)]);
+    expect(releaseRoadSpend).toHaveBeenCalledWith({ spender: 'staff-1', pro: 0, plain: 0, day: '2027-03-01' });
+    expect(logger.info).toHaveBeenCalledWith('[picker-road] 2 lookups sent, 0 answered by Google');
+    expect(travel.lookup(leg(plus(1), 9 * 60))).toMatchObject({ source: 'conservative_model' });
   });
 
   // Pre-push audit #6881 (P1): a batch of slot checks shares one budget; run
