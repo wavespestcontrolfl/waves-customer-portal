@@ -58,7 +58,7 @@ jest.mock('../services/rain-out', () => ({
 }));
 jest.mock('../services/scheduling/hint-road-times', () => ({
   priceChipsOnRoads: jest.fn(async (chips) => chips),
-  priceOpenTimesOnRoads: jest.fn(async (days) => days),
+  createPickerBudget: jest.fn(() => ({ traffic: 0, plain: 0, signal: null, refused: null })),
 }));
 jest.mock('../services/technician-capabilities', () => ({ inactiveCapabilitiesForServices: jest.fn(async () => []) }));
 
@@ -67,7 +67,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { loadOccupancy } = require('../services/rain-out');
 const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
 const { getHourlyRainOutlook } = require('../services/weather-forecast');
-const { priceChipsOnRoads, priceOpenTimesOnRoads } = require('../services/scheduling/hint-road-times');
+const { priceChipsOnRoads } = require('../services/scheduling/hint-road-times');
 const { inactiveCapabilitiesForServices } = require('../services/technician-capabilities');
 const { buildOpenTimes, OPEN_TIMES_MAX_DAYS } = require('../services/scheduling/find-time-hints');
 const findTimeRouter = require('../routes/admin-schedule-find-time');
@@ -168,9 +168,6 @@ test('gate on: four weeks, every technician, no picked verdict, no best-times ro
   expect(body.picked).toBeUndefined();
   expect(checkArrivalPlacement).not.toHaveBeenCalled();
   expect(priceChipsOnRoads).not.toHaveBeenCalled();
-  // The whole list goes to the road pricing, not a handful of chips.
-  expect(priceOpenTimesOnRoads).toHaveBeenCalledTimes(1);
-  expect(priceOpenTimesOnRoads.mock.calls[0][0]).toHaveLength(28);
   // A neutral booking needs no forecast.
   expect(getHourlyRainOutlook).not.toHaveBeenCalled();
   expect(sep1.hours[0].rain_tier).toBeNull();
@@ -275,12 +272,4 @@ test('GATE_BOARD_OPEN_TIMES is off unless set and rides the admin schedule day v
   expect(read('true')).toBe(true);
   const day = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
   expect(day).toContain("boardOpenTimes: isEnabled('boardOpenTimes')");
-});
-
-test("a technician's own list (paidRoads: false) never asks Google (Codex #6881 security)", async () => {
-  priceOpenTimesOnRoads.mockClear();
-  const days = [{ date: '2026-09-01', status: 'open', hours: [{ start_time: '09:00', end_time: '10:00', detour_minutes: 4, technician: ADAM }] }];
-  const listed = await buildOpenTimes(days, { today: '2026-08-31', lat: 27.4, lng: -82.5, paidRoads: false });
-  expect(priceOpenTimesOnRoads).not.toHaveBeenCalled();
-  expect(listed[0].hours[0]).toMatchObject({ start_time: '09:00', detour_minutes: 4 });
 });

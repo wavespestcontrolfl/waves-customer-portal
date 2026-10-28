@@ -4285,11 +4285,12 @@ describe('commit summary — visit-covered members are not separate stops (local
 });
 
 // Codex #6881 r3: the pickers' Google road times (GATE_PICKER_ROAD_CHECK)
-// are staff-only — the generic slot check asks for them only for an admin.
+// are staff-only — the generic slot check asks for them only for an admin,
+// and counts them against that admin (picker-road-spend.js).
 describe('checkSlots: paid road times are staff-only', () => {
   const SERVICE = '11111111-1111-4111-8111-111111111111';
   const TECH = '22222222-2222-4222-8222-222222222222';
-  test.each([[true, true], [false, false]])('admin caller %s → roads %s', async (isAdmin, roads) => {
+  test.each([[true, true, TECH], [false, false, null]])('admin caller %s → roads %s, counted against %s', async (isAdmin, roads, roadSpender) => {
     const arrival = require('../services/scheduling/arrival-route');
     const routing = jest.spyOn(arrival, 'arrivalWindowRoutingEnabled').mockReturnValue(true);
     const check = jest.spyOn(arrival, 'checkArrivalPlacement').mockResolvedValue({ feasible: true });
@@ -4300,7 +4301,7 @@ describe('checkSlots: paid road times are staff-only', () => {
         caller: { isAdmin, technicianId: TECH },
       });
       expect(out.ok).toBe(true);
-      expect(check).toHaveBeenCalledWith(expect.objectContaining({ serviceId: SERVICE, roads }));
+      expect(check).toHaveBeenCalledWith(expect.objectContaining({ serviceId: SERVICE, roads, roadSpender }));
     } finally {
       routing.mockRestore();
       check.mockRestore();

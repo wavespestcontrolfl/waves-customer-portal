@@ -1337,8 +1337,10 @@ async function checkSlots({ targets, caller = null } = {}) {
           windowStart: p.window.start, windowEnd: p.window.end,
           durationMinutes: p.durationMinutes, excludeServiceIds: p.excludeServiceIds,
           // The pickers' Google road times (GATE_PICKER_ROAD_CHECK) are
-          // staff-only: a technician's check stays on the model.
+          // staff-only: a technician's check stays on the model. Counted
+          // against the admin who asked (picker-road-spend.js).
           roads: caller?.isAdmin === true,
+          roadSpender: caller?.isAdmin === true ? caller.technicianId || null : null,
         });
         return { conflicts: fit.feasible ? [] : [{ id: p.serviceId, warning: fit.warning, reason: fit.reason }] };
       } catch (err) {

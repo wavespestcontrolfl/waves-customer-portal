@@ -32,7 +32,7 @@ jest.mock('../utils/datetime-et', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
-  adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
+  adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; req.technicianId = 'staff-admin'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
   // find-time is admin-only (ADMIN-BUG-R07); this suite only ever exercises
   // the admin path (techRole set to 'admin' above), so requireAdmin passes.
@@ -355,9 +355,15 @@ test.each([false, true])('Quick Move gets the route check on Google only with GA
     if (gateOn) {
       expect(opts.arrivalWindow).toEqual(expect.objectContaining({ serviceId: 'svc-1', unit: true, alone: false }));
       expect(opts.pickerRoadCheck).toBe(true);
+      // Counted against the staff user who asked, on one budget per request
+      // that the request's close aborts (picker-road-spend.js).
+      expect(opts.roadSpender).toBe('staff-admin');
+      expect(opts.pickerBudget).toMatchObject({ traffic: 0, plain: 0, refused: null });
+      expect(opts.pickerBudget.signal).toBeInstanceOf(AbortSignal);
     } else {
       expect(opts).not.toHaveProperty('arrivalWindow');
       expect(opts).not.toHaveProperty('pickerRoadCheck');
+      expect(opts).not.toHaveProperty('pickerBudget');
     }
   } finally {
     delete process.env.GATE_PICKER_ROAD_CHECK;

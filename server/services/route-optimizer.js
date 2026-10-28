@@ -36,17 +36,21 @@ const SCHEDULING_TRAVEL_BUDGET_MS = 15 * 60 * 1000;
 
 /** Request-scoped road estimates under both local and shared provider limits.
  * The caller preloads before taking any scheduling lock. */
-// The admin picker's own allowance (best-times chips and the open-times list,
-// GATE_BEST_TIMES_ROAD_TIMES): separate from the one above, so staff picks
-// never spend customer booking's. Sized for the four-week list and the
-// pickers' Google route check (owner 2026-10-26: "raise the limits if you
-// have to"): a cold search is up to ~1,200 legs, and repeat looks are served
-// from hint-road-times' cache. Past it, searches fall back to the model ("~").
-const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 2400, maxElements: 6000 };
+// The admin picker's own allowance (best-times chips, GATE_BEST_TIMES_ROAD_TIMES,
+// and the pickers' route check, GATE_PICKER_ROAD_CHECK): separate from the
+// one above, so staff picks never spend customer booking's. Per process and
+// reset on a deploy, so it only smooths bursts: the pickers' durable daily
+// and monthly ceilings live in scheduling/picker-road-spend.js. Past it,
+// searches fall back to the model ("~").
+const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 600, maxElements: 1500 };
 
+// `traffic: false` (the pickers' later days, GATE_PICKER_ROAD_CHECK): road
+// times without traffic (routingPreference TRAFFIC_UNAWARE, Google's
+// Essentials price, half the traffic-aware one). The answer does not depend
+// on the hour, so one lookup per pair of places serves every departure.
 function createSchedulingTravel({
   maxRequests = 40, maxElements = 800, budgetMs = 6000, fetchImpl = fetch, now = () => Date.now(),
-  sharedBudget = schedulingTravelBudget, workers = 4,
+  sharedBudget = schedulingTravelBudget, workers = 4, traffic = true,
 } = {}) {
   const sharedMaxRequests = sharedBudget.maxRequests ?? 40;
   const sharedMaxElements = sharedBudget.maxElements ?? 800;
@@ -58,7 +62,13 @@ function createSchedulingTravel({
   let requests = 0;
   let elements = 0;
   const pin = (p) => `${Number(p.lat)},${Number(p.lng)}`;
-  const keyFor = ({ date, from, to, departureMin }) => `${date}|${Math.ceil(departureMin)}|${pin(from)}>${pin(to)}`;
+  const keyFor = traffic
+    ? ({ date, from, to, departureMin }) => `${date}|${Math.ceil(departureMin)}|${pin(from)}>${pin(to)}`
+    : ({ from, to }) => `${pin(from)}>${pin(to)}`;
+  const googleSource = traffic ? 'google_traffic' : 'google_road';
+  const preference = traffic
+    ? (batch) => ({ routingPreference: 'TRAFFIC_AWARE', departureTime: batch.departure.toISOString() })
+    : () => ({ routingPreference: 'TRAFFIC_UNAWARE' });
   const validPin = (p) => p?.lat != null && p?.lng != null
     && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))
     && Math.abs(Number(p.lat)) <= 90 && Math.abs(Number(p.lng)) <= 180
@@ -87,6 +97,13 @@ function createSchedulingTravel({
       const key = keyFor(leg);
       if (attempted.has(key) || !validPin(leg.from) || !validPin(leg.to)) continue;
       attempted.add(key);
+      if (!traffic) {
+        // No departure: one origin, up to 25 destinations, any hour.
+        const batchKey = pin(leg.from);
+        if (!batches.has(batchKey)) batches.set(batchKey, { departure: null, from: leg.from, legs: [] });
+        batches.get(batchKey).legs.push(leg);
+        continue;
+      }
       const minutes = Math.ceil(leg.departureMin);
       const departure = parseETDateTime(`${leg.date}T${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`);
       if (!departure || !Number.isFinite(departure.getTime()) || departure.getTime() < now()) {
@@ -132,7 +149,7 @@ function createSchedulingTravel({
               'X-Goog-FieldMask': 'originIndex,destinationIndex,status,condition,duration,fallbackInfo' },
             body: JSON.stringify({ origins: [{ waypoint: toWaypoint(batch.from.lat, batch.from.lng) }],
               destinations: batch.legs.map((leg) => ({ waypoint: toWaypoint(leg.to.lat, leg.to.lng) })),
-              travelMode: 'DRIVE', routingPreference: 'TRAFFIC_AWARE', departureTime: batch.departure.toISOString() }),
+              travelMode: 'DRIVE', ...preference(batch) }),
             signal: AbortSignal.timeout(Math.max(1, Math.min(1800, deadline - now()))),
           });
           const data = response.ok ? await response.json() : null;
@@ -145,7 +162,7 @@ function createSchedulingTravel({
               if ((row.status?.code ?? 0) !== 0 || row.condition !== 'ROUTE_EXISTS'
                 || row.fallbackInfo || !Number.isFinite(seconds) || seconds < 0
                 || (seconds === 0 && pin(leg.from) !== pin(leg.to))) continue;
-              results.set(keyFor(leg), { minutes: Math.ceil(seconds / 60), source: 'google_traffic', reason: null });
+              results.set(keyFor(leg), { minutes: Math.ceil(seconds / 60), source: googleSource, reason: null });
             }
             reason = 'partial_matrix';
           }

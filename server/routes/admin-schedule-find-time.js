@@ -49,6 +49,7 @@ const {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech, hintSearchPlan, buildHintSummary, loadSummaryDayFacts,
 } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
+const { createPickerBudget } = require('../services/scheduling/hint-road-times');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
@@ -68,6 +69,14 @@ const MAX_FIND_TIME_DAYS = 90;
 // currently service, with technicianId forced to themselves so the ranked
 // search never walks another technician's route (ADMIN-BUG-R07).
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// Aborted when the client goes away before the answer is sent (the picker
+// closed, or a new search replaced this one): the Google lookups check it.
+function closedSignal(res) {
+  const controller = new AbortController();
+  res.on?.('close', () => { if (!res.writableEnded) controller.abort(); });
+  return controller.signal;
+}
 
 function httpError(status, message) {
   const err = new Error(message);
@@ -355,6 +364,11 @@ router.post('/', async (req, res) => {
     // spend the shared allowance.
     const paidRoads = !isTech;
     const pickerRoadCheck = hint && paidRoads && gateEnvValue('GATE_PICKER_ROAD_CHECK');
+    // One Google budget for everything this request asks (the list's route
+    // check and the picked-hour verdict), counted against the staff user who
+    // asked (picker-road-spend.js daily / monthly ceilings). A picker that
+    // closes or re-searches aborts its request: nothing more is bought.
+    const pickerBudget = pickerRoadCheck ? createPickerBudget({ signal: closedSignal(res) }) : null;
     const routeCheck = arrivalWindows === true || (pickerRoadCheck && req.body?.quickMove === true);
     const useArrivalWindows = hint && serviceId && routeCheck && arrivalWindowRoutingEnabled();
     // New Appointment has no visit yet (GATE_NEW_APPT_ROUTE_TIMES, owner
@@ -420,7 +434,8 @@ router.post('/', async (req, res) => {
       // GATE_COMBO_ROUTE_CHECK decides; for a visit alone, neither matters.
       ...(hint && serviceId && routeCheck ? { arrivalWindow: { serviceId, changes: hintChanges, unit: !moveAlone, alone: moveAlone } } : {}),
       ...(newVisitRoute ? { arrivalWindow: { prospective: { lat: target.lat, lng: target.lng, estimated_duration_minutes: spanMin } } } : {}),
-      ...(pickerRoadCheck && (useArrivalWindows || newVisitRoute) ? { pickerRoadCheck: true } : {}),
+      ...(pickerRoadCheck && (useArrivalWindows || newVisitRoute)
+        ? { pickerRoadCheck: true, roadSpender: req.technicianId, pickerBudget } : {}),
       slotStepMinutes: plan.step,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
@@ -450,6 +465,7 @@ router.post('/', async (req, res) => {
         rawSlots, from: plan.verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
         withReason: plan.summary, moveAlone, paidRoads,
+        ...(pickerBudget ? { roadSpender: req.technicianId, pickerBudget } : {}),
       })
       : undefined;
 
@@ -501,7 +517,6 @@ router.post('/', async (req, res) => {
       // stop reaches around this service (rain-fit.js bookingRainPlan).
       serviceTypes: rainPlan.services,
       rainSpan: rainPlan.rainSpan,
-      paidRoads,
     });
     const pickedOut = built.picked;
 

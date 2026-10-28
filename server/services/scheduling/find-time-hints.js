@@ -211,7 +211,10 @@ function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMi
 // the picked window joins it so the checker's context is the row the save
 // would write — the save probe passes `changes: updates` the same way, and
 // derives the work span from THAT window, not the stored one (r7 P2).
-async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone, paidRoads = true }) {
+async function pickedByArrivalChecker({
+  pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone,
+  paidRoads = true, roadSpender = null, pickerBudget = null,
+}) {
   // Summary mode names WHY there is no verdict, so the strip can say
   // "can't check this day" instead of going silent; the three-line hint
   // keeps its no-verdict contract (undefined).
@@ -226,8 +229,9 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
       unit: !moveAlone, alone: !!moveAlone,
       changes: { ...changes, window_start: pickedWindow.start, window_end: pickedWindow.end },
       windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
-      // Staff only: a technician's own picker spends no Google (Codex #6881).
-      roads: paidRoads === true,
+      // Staff only: a technician's own picker spends no Google (Codex #6881),
+      // counted against the staff user who asked (picker-road-spend.js).
+      roads: paidRoads === true, roadSpender, pickerBudget,
     });
     // A whole visit (unit): the technician must be able to do every service
     // on it, as the offered hours require. One switched off = no verdict at
@@ -304,6 +308,7 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
 async function scorePickedHour({
   rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
   serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false, moveAlone = false, paidRoads = true,
+  roadSpender = null, pickerBudget = null,
 }) {
   const pickedMin = toMin(pickedStart);
   // `withReason` (summary mode): an hour no verdict can cover still gets a
@@ -314,7 +319,9 @@ async function scorePickedHour({
   if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return uncheckable;
   const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
   return useArrivalWindows
-    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone, paidRoads })
+    ? pickedByArrivalChecker({
+      pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone, paidRoads, roadSpender, pickerBudget,
+    })
     : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason });
 }
 
@@ -675,25 +682,17 @@ function withChipValues(days, rows, hourly) {
 }
 
 // The open-times box's day rows: every hour that fits, each with its
-// technician and its drive numbers priced on real roads
-// (GATE_BEST_TIMES_ROAD_TIMES; owner 2026-10-26 — the list showed only
-// straight-line estimates). For a booking the rain ranking reads (GATE_BOOKING_RAIN_RANK),
+// technician. For a booking the rain ranking reads (GATE_BOOKING_RAIN_RANK),
 // each hour also carries its rain tier (rain-fit.js rainTier: 0 sorts
 // first), so the box's Best order puts an outdoor job's wet hours after its
-// dry ones, as the best-times rows do. Both lookups fail open: no tiers,
-// drive order only; or the model's numbers, marked as estimates.
-// `paidRoads: false` (a technician's own picker) keeps the model's numbers.
-async function buildOpenTimes(days, { today, lat, lng, serviceTypes = [], rainSpan = null, paidRoads = true, deps = {} }) {
+// dry ones, as the best-times rows do. The forecast lookup fails open: no
+// tiers, drive order only.
+async function buildOpenTimes(days, { today, lat, lng, serviceTypes = [], rainSpan = null, deps = {} }) {
   const fit = bookingRainFit(serviceTypes);
-  const priceOnRoads = !paidRoads ? async (list) => list
-    : deps.priceOpenTimesOnRoads || require('./hint-road-times').priceOpenTimesOnRoads;
-  const [hourly, priced] = await Promise.all([
-    rankingNeedsForecast(fit, days, today, null)
-      ? (deps.hourlyRain || boundedHourlyRain)(lat, lng, true).catch(() => null) : null,
-    priceOnRoads(days),
-  ]);
+  const hourly = rankingNeedsForecast(fit, days, today, null)
+    ? await (deps.hourlyRain || boundedHourlyRain)(lat, lng, true).catch(() => null) : null;
   const tierOf = rainTierOf(fit, hourly, today, rainSpan);
-  return priced.map((day) => ({
+  return days.map((day) => ({
     ...day,
     hours: day.hours.map((h) => ({ ...h, rain_tier: tierOf ? tierOf({ ...h, date: day.date }) : null })),
   }));
@@ -706,12 +705,12 @@ const OPEN_TIMES_SLOW_MS = 3000;
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
   rejectionsByDate, startedAt, closedDates, offDates, lastResortDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
-  serviceTypes = [], rainSpan = null, paidRoads = true,
+  serviceTypes = [], rainSpan = null,
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates, lastResortDates });
   if (plan.openTimes) {
-    const listed = await buildOpenTimes(days, { today, lat: target?.lat, lng: target?.lng, serviceTypes, rainSpan, paidRoads });
+    const listed = await buildOpenTimes(days, { today, lat: target?.lat, lng: target?.lng, serviceTypes, rainSpan });
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs > OPEN_TIMES_SLOW_MS) logger.warn(`[find-time] open times search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
     return { summary: { days: listed, open_times: { from: plan.from, to: plan.to }, elapsed_ms: elapsedMs }, picked: undefined };

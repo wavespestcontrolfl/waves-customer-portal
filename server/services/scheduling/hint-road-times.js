@@ -150,79 +150,187 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now() 
   }
 }
 
-// The open-times list's own spend (owner 2026-10-26, "make it as accurate as
-// possible, raise the limits if you have to"): four weeks of route gaps, not
-// a handful of chips, so more requests in flight and a longer deadline than
-// the chips' — still on the picker's allowance (hintTravelBudget).
-const OPEN_TIMES_TRAVEL = { maxRequests: 240, maxElements: 600, budgetMs: 6000, workers: 12 };
+// Google inside the staff pickers' route check (GATE_PICKER_ROAD_CHECK).
+// Owner 2026-10-26: "we need to run Google inside the scheduling check
+// itself"; 2026-10-27: run it on every create, reschedule and move, "we just
+// have to make sure costs are appropriate". Measured on real routes (10-27
+// replay, one technician): asking for every leg at every departure hour for
+// seven days bought ~500 lookups (~$5) a search, 95-100% of them legs to and
+// from the searched customer, which no cache can share between customers.
+// So each leg gets the cheapest Google answer that still fits its day:
+//   - today and tomorrow (PICKER_ROAD_TRAFFIC_DAYS, default 2): traffic-aware
+//     (Google's "Pro" price, 1 cent a lookup) at three departure times a day
+//     (09:00 before 11:00, 12:00 before 14:00, 16:00 after) instead of every
+//     hour, so one answer serves every simulation leaving in that part of
+//     the day; today never earlier than the next whole hour;
+//   - the next days (PICKER_ROAD_PLAIN_DAYS, default 5): road time without
+//     traffic ("Essentials", half a cent), one lookup per pair of places
+//     whatever the hour;
+//   - later days: the app's model ("~").
+// Every lookup is reserved first against the per-request budget and the
+// durable daily / monthly ceilings (picker-road-spend.js); refused, or a
+// closed picker (the request's abort signal), = the model.
+const TRAFFIC_TIMES = [9 * 60, 12 * 60, 16 * 60];
+const TRAFFIC_EDGES = [11 * 60, 14 * 60];
+// Per request (every travel source the request builds shares one budget):
+// about five times a one-technician cold search (~31 traffic, ~60 plain).
+const REQUEST_MAX = { traffic: 150, plain: 300 };
+const TRAFFIC_TRAVEL = { maxRequests: 150, maxElements: REQUEST_MAX.traffic, budgetMs: 8000, workers: 8 };
+const PLAIN_TRAVEL = { maxRequests: 60, maxElements: REQUEST_MAX.plain, budgetMs: 8000, workers: 4, traffic: false };
+// A road time without traffic does not change from hour to hour.
+const PLAIN_TTL_MS = 24 * 60 * 60 * 1000;
+const PLAIN_CACHE_MAX = 20000;
+const plainCache = new Map();
 
-function openTimesTravel() {
-  const RouteOptimizer = require('../route-optimizer');
-  return RouteOptimizer.createSchedulingTravel({ ...OPEN_TIMES_TRAVEL, sharedBudget: RouteOptimizer.hintTravelBudget });
+const pairKey = (leg) => `${pinKey(leg.from)}>${pinKey(leg.to)}`;
+
+function plainCached(key, now) {
+  const hit = plainCache.get(key);
+  if (!hit) return null;
+  if (now - hit.at > PLAIN_TTL_MS) { plainCache.delete(key); return null; }
+  return hit.minutes;
 }
 
-/**
- * The open-times list's day rows (GATE_OPEN_TIMES_BOX) priced on real roads:
- * every hour on the list, each at its own departures (Codex #6881: a gap's
- * later hours leave into different traffic), so Best ranks every date on
- * Google's numbers rather than on the straight-line model. Legs two hours
- * share (the drive in and the base leg of one gap) are asked once. Every
- * hour carries drive_source: 'google', or 'estimate' when the gate is off
- * or a leg did not come back. Never throws.
- */
-async function priceOpenTimesOnRoads(days, { travelFactory = openTimesTravel, now } = {}) {
-  const hours = (days || []).flatMap((day) => (day.hours || []).map((hour) => ({ ...hour, date: day.date })));
-  const priced = await priceChipsOnRoads(hours, { travelFactory, now });
-  let i = 0;
-  return (days || []).map((day) => ({
-    ...day,
-    hours: (day.hours || []).map((hour) => {
-      const p = priced[i++];
-      if (p?.drive_source !== 'google') return { ...hour, drive_source: hour.drive_source === 'google' ? 'google' : 'estimate' };
-      return { ...hour, drive_in_minutes: p.drive_in_minutes, detour_minutes: p.detour_minutes, drive_source: 'google' };
-    }),
-  }));
+function rememberPlain(key, minutes, now) {
+  if (plainCache.size >= PLAIN_CACHE_MAX) plainCache.delete(plainCache.keys().next().value);
+  plainCache.set(key, { minutes, at: now });
 }
 
-// Google inside the staff pickers' route check (GATE_PICKER_ROAD_CHECK, owner
-// 2026-10-26: "we need to run Google inside the scheduling check itself").
-// The check simulates every hour at every place on the route, so each leg
-// leaves at many slightly different minutes. Departures are rounded up to
-// the hour (never earlier, so a leg never asks for the past): one Google
-// answer serves every simulation leaving in that hour. Answers live in the
-// same 6-hour process cache as the chips, so a second look costs nothing.
-// Per search: up to 1,200 legs (Google bills per leg; ~$12 at the traffic
-// rate), so one search never spends more than that.
-const PICKER_CHECK_TRAVEL = { maxRequests: 400, maxElements: 1200, budgetMs: 8000, workers: 16 };
-const DEPARTURE_STEP_MIN = 60;
+function envDays(name, fallback) {
+  const raw = process.env[name];
+  if (raw !== undefined && /^\s*\d+\s*$/.test(String(raw))) {
+    const n = parseInt(raw, 10);
+    if (n >= 0 && n <= 28) return n;
+  }
+  return fallback;
+}
+
+/** { traffic, plain } days from today on Google (read at call time). */
+function roadWindows() {
+  return { traffic: envDays('PICKER_ROAD_TRAFFIC_DAYS', 2), plain: envDays('PICKER_ROAD_PLAIN_DAYS', 5) };
+}
+
+function dayOffset(ymd, todayYmd) {
+  return Math.round((Date.parse(`${ymd}T12:00:00Z`) - Date.parse(`${todayYmd}T12:00:00Z`)) / 86400000);
+}
+
+/** Whether `ymd` gets any Google answer (the finder attaches travel only then). */
+function onRoads(ymd, todayYmd, windows = roadWindows()) {
+  const offset = dayOffset(ymd, todayYmd);
+  return offset >= 0 && offset < windows.traffic + windows.plain;
+}
+
+// 'traffic', 'plain', or null: the model.
+function legMode(leg, nowEt, windows) {
+  const offset = dayOffset(leg.date, nowEt.date);
+  if (offset < 0) return null;
+  if (offset < windows.traffic) {
+    // A leg that has already left today: Google answers no past departure.
+    return offset === 0 && leg.departureMin <= nowEt.minute ? null : 'traffic';
+  }
+  return offset < windows.traffic + windows.plain ? 'plain' : null;
+}
+
+// The departure Google is asked for (the cache key uses it too, in preload and
+// lookup alike): the leg's part of the day; today never before the next whole
+// hour.
+function trafficLeg(leg, nowEt) {
+  const at = leg.departureMin < TRAFFIC_EDGES[0] ? TRAFFIC_TIMES[0]
+    : leg.departureMin < TRAFFIC_EDGES[1] ? TRAFFIC_TIMES[1] : TRAFFIC_TIMES[2];
+  const floor = leg.date === nowEt.date ? (Math.floor(nowEt.minute / 60) + 1) * 60 : 0;
+  return { ...leg, departureMin: Math.max(at, floor) };
+}
+
+/** One per request: what its travel sources may buy, and whether it was closed. */
+function createPickerBudget({ signal = null } = {}) {
+  return { traffic: 0, plain: 0, signal, refused: null };
+}
+
+// The two Google answers a leg can get: how it is keyed and cached.
+const MODES = {
+  traffic: {
+    source: 'google_traffic',
+    shape: trafficLeg,
+    key: (leg) => legKey(leg),
+    cached: (_key, leg, t) => cachedMinutes(leg, t),
+    remember: (_key, leg, minutes, t) => remember(leg, minutes, t),
+  },
+  plain: {
+    source: 'google_road',
+    shape: (leg) => leg,
+    key: pairKey,
+    cached: (key, _leg, t) => plainCached(key, t),
+    remember: (key, _leg, minutes, t) => rememberPlain(key, minutes, t),
+  },
+};
 
 /**
  * A travel source for loadArrivalRouteContext ({ preload, lookup }, the
- * createSchedulingTravel shape) on the picker's allowance. A leg Google did
- * not answer gets the inner source's conservative model, labelled as such.
+ * createSchedulingTravel shape). `spender` = the staff user the lookups are
+ * reserved for; `budget` = the request's shared budget. A leg Google did not
+ * answer gets the inner source's conservative model, labelled as such.
  */
-function createPickerTravel({ factory, now = () => Date.now() } = {}) {
-  const inner = (factory || (() => {
-    const RouteOptimizer = require('../route-optimizer');
-    return RouteOptimizer.createSchedulingTravel({ ...PICKER_CHECK_TRAVEL, sharedBudget: RouteOptimizer.hintTravelBudget });
-  }))();
-  const bucket = (leg) => ({ ...leg, departureMin: Math.ceil(leg.departureMin / DEPARTURE_STEP_MIN) * DEPARTURE_STEP_MIN });
+function createPickerTravel({ spender = null, budget = createPickerBudget(), factories = {}, now = () => Date.now() } = {}) {
+  const RouteOptimizer = require('../route-optimizer');
+  const travelFor = { traffic: TRAFFIC_TRAVEL, plain: PLAIN_TRAVEL };
+  const sources = {};
+  for (const mode of Object.keys(MODES)) {
+    sources[mode] = (factories[mode] || (() => RouteOptimizer.createSchedulingTravel({
+      ...travelFor[mode], sharedBudget: RouteOptimizer.hintTravelBudget,
+    })))();
+  }
+  const asked = new Set();
+  // The leg as Google is asked for it, with its mode and key; null = the model.
+  const resolve = (leg, nowEt) => {
+    const mode = legMode(leg, nowEt, roadWindows());
+    if (!mode) return null;
+    const asLeg = MODES[mode].shape(leg, nowEt);
+    return { mode, asLeg, key: MODES[mode].key(asLeg) };
+  };
+  function lookup(leg) {
+    const t = now();
+    const r = resolve(leg, etNow(t));
+    // Past legs and later days: never asked, so the conservative model.
+    if (!r) return sources.traffic.lookup(leg);
+    const m = MODES[r.mode];
+    const hit = m.cached(r.key, r.asLeg, t);
+    if (hit != null) return { minutes: hit, source: m.source, reason: null };
+    const answer = sources[r.mode].lookup(r.asLeg);
+    if (answer?.source === m.source && Number.isFinite(answer.minutes)) m.remember(r.key, r.asLeg, answer.minutes, t);
+    return answer;
+  }
+  async function buy(mode, entries) {
+    budget[mode] += entries.length;
+    entries.forEach(([key]) => asked.add(key));
+    await sources[mode].preload(entries.map(([, leg]) => leg));
+    // Keep what Google answered in the process cache (lookup remembers), so
+    // the next search, or the next picker for this visit, asks nothing.
+    entries.forEach(([, leg]) => lookup(leg));
+  }
   return {
     async preload(legs) {
+      if (budget.signal?.aborted || budget.refused) return;
       const t = now();
-      const missing = legs.map(bucket).filter((leg) => cachedMinutes(leg, t) == null);
-      if (missing.length) await inner.preload(missing);
+      const nowEt = etNow(t);
+      const want = { traffic: new Map(), plain: new Map() };
+      for (const leg of legs) {
+        const r = resolve(leg, nowEt);
+        if (r && !asked.has(r.key) && MODES[r.mode].cached(r.key, r.asLeg, t) == null) want[r.mode].set(r.key, r.asLeg);
+      }
+      const take = (mode) => [...want[mode]].slice(0, Math.max(0, REQUEST_MAX[mode] - budget[mode]));
+      const entries = { traffic: take('traffic'), plain: take('plain') };
+      if (!entries.traffic.length && !entries.plain.length) return;
+      const { reserveRoadSpend } = require('./picker-road-spend');
+      const reserved = await reserveRoadSpend({ spender, pro: entries.traffic.length, plain: entries.plain.length });
+      if (!reserved.allowed) { budget.refused = reserved.reason; return; }
+      if (budget.signal?.aborted) return;
+      await Promise.all(Object.keys(entries).filter((mode) => entries[mode].length).map((mode) => buy(mode, entries[mode])));
     },
-    lookup(leg) {
-      const b = bucket(leg);
-      const t = now();
-      const hit = cachedMinutes(b, t);
-      if (hit != null) return { minutes: hit, source: 'google_traffic', reason: null };
-      const answer = inner.lookup(b);
-      if (answer?.source === 'google_traffic' && Number.isFinite(answer.minutes)) remember(b, answer.minutes, t);
-      return answer;
-    },
+    lookup,
   };
 }
 
-module.exports = { priceChipsOnRoads, priceOpenTimesOnRoads, createPickerTravel, _test: { roadCache, chipLegs } };
+module.exports = {
+  priceChipsOnRoads, createPickerTravel, createPickerBudget, roadWindows, onRoads,
+  _test: { roadCache, plainCache, chipLegs, trafficLeg, legMode, REQUEST_MAX },
+};

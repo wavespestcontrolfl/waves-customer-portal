@@ -107,17 +107,10 @@ function enumerateDates(from, to, { includeWeekends = false } = {}) {
 // arrival window. Evaluate every on-the-hour promise against the COMPLETE
 // resulting route, not just the gap between two stored service-end blocks.
 // Staff pickers under GATE_PICKER_ROAD_CHECK (owner 2026-10-26: Google
-// inside the check, "Next 7 days"): today and the six days after it are
-// checked on Google road times; a later day is checked on the model and its
-// best hour re-checked on Google, so the times shown carry road numbers.
-const ROAD_CHECK_DAYS = 7;
-
-function plusDays(ymd, days) {
-  const d = new Date(`${ymd}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
+// inside the check, "Next 7 days"; 2026-10-27: "make sure costs are
+// appropriate"): today and the next days (hint-road-times.js roadWindows:
+// traffic-aware for two days, road times without traffic for five) are
+// checked on Google; later days on the model ("~").
 // Three passes, as findCapacitySlots does: a leg Google re-timed moves the
 // departures after it, which are then asked at their new hour.
 async function preloadRouteLegs(travel, items, collect) {
@@ -128,6 +121,9 @@ async function preloadRouteLegs(travel, items, collect) {
     await travel.preload(legs);
   }
 }
+
+// A fit whose every leg came back from Google (with or without traffic).
+const GOOGLE_SOURCES = new Set(['google_traffic', 'google_road']);
 
 function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
   const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
@@ -140,7 +136,7 @@ function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
     estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
     route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
     latest_start_min: timeToMinutes(windowStart),
-    ...(fit.travelSource ? { drive_source: fit.travelSource === 'google_traffic' ? 'google' : 'estimate' } : {}),
+    ...(fit.travelSource ? { drive_source: GOOGLE_SOURCES.has(fit.travelSource) ? 'google' : 'estimate' } : {}),
   };
 }
 
@@ -161,8 +157,9 @@ async function findArrivalWindowSlots(opts) {
   // driven on Google or re-checked (the source itself asks Google for
   // nothing until a route preloads through it).
   const roadCheck = opts.pickerRoadCheck === true;
-  const roadUntil = plusDays(today, ROAD_CHECK_DAYS - 1);
-  const roadTravel = require('./hint-road-times').createPickerTravel();
+  const roads = require('./hint-road-times');
+  const windows = roads.roadWindows();
+  const roadTravel = roads.createPickerTravel({ spender: opts.roadSpender, budget: opts.pickerBudget });
   const slots = [];
   // Refusal counts per date (same shape as findCapacitySlots'), so the
   // availability strip can tell a day whose route could not be verified
@@ -204,8 +201,8 @@ async function findArrivalWindowSlots(opts) {
       routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES } });
     }
   }
-  // This week's routes are driven on Google (GATE_PICKER_ROAD_CHECK).
-  const onRoads = routes.filter((route) => roadCheck && route.date <= roadUntil);
+  // The road days' routes are driven on Google (GATE_PICKER_ROAD_CHECK).
+  const onRoads = routes.filter((route) => roadCheck && roads.onRoads(route.date, today, windows));
   onRoads.forEach((route) => { route.context.travel = roadTravel; });
   await preloadRouteLegs(roadTravel, onRoads,
     (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs }));
@@ -219,21 +216,6 @@ async function findArrivalWindowSlots(opts) {
     }
     route.slots = candidates.placements.map(({ windowStart, windowEnd, fit }) => arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }));
     slots.push(...route.slots);
-  }
-  // The model decided which hours fit on a later day; Google gives its best
-  // hour road numbers. An hour Google cannot certify keeps the model's, marked.
-  const recheck = routes.filter((route) => roadCheck && route.date > roadUntil && route.slots.length).map((route) => ({
-    context: { ...route.context, travel: roadTravel },
-    slot: route.slots.reduce((best, s) => (s.detour_minutes < best.detour_minutes ? s : best)),
-  }));
-  const recheckOptions = ({ slot }) => ({ windowStart: slot.start_time, windowEnd: slot.end_time, durationMinutes });
-  await preloadRouteLegs(roadTravel, recheck,
-    (item, legs) => evaluateArrivalPlacement(item.context, { ...recheckOptions(item), collectLegs: legs }));
-  for (const item of recheck) {
-    const fit = evaluateArrivalPlacement(item.context, recheckOptions(item));
-    // arrivalSlot labels the numbers: 'google' only when every leg was.
-    Object.assign(item.slot, fit.feasible ? arrivalSlot({ date: item.slot.date, tech: item.slot.technician, dateFrom,
-      windowStart: item.slot.start_time, windowEnd: item.slot.end_time, fit }) : { drive_source: 'estimate' });
   }
   slots.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes
     || a.arrival_delay_minutes - b.arrival_delay_minutes || a.start_time.localeCompare(b.start_time));

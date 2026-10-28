@@ -84,3 +84,44 @@ test.each(['requests', 'elements'])('new and concurrent providers share the paid
     else process.env.GOOGLE_MAPS_API_KEY = oldKey;
   }
 });
+
+// GATE_PICKER_ROAD_CHECK's later road days (owner 2026-10-27, "make sure costs
+// are appropriate"): a road time without traffic is Google's Essentials price
+// (half the traffic-aware one) and does not depend on the hour, so one lookup
+// per pair of places serves every departure on any day.
+test('traffic: false asks TRAFFIC_UNAWARE with no departure, once per pair of places', async () => {
+  process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
+  const fetchImpl = jest.fn(async (_url, init) => ({ ok: true, json: async () => JSON.parse(init.body).destinations.map((_d, i) => (
+    { originIndex: 0, destinationIndex: i, status: {}, condition: 'ROUTE_EXISTS', duration: '541s' }
+  )) }));
+  const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl, now: () => now.getTime(), traffic: false });
+  const to = { lat: 27.5, lng: -82.4 };
+  const other = { lat: 27.6, lng: -82.5 };
+  const legs = [
+    { date, from: RouteOptimizer.HQ, to, departureMin: 480 },
+    { date: '2027-01-18', from: RouteOptimizer.HQ, to, departureMin: 900 },
+    { date, from: RouteOptimizer.HQ, to: other, departureMin: 600 },
+  ];
+  await provider.preload(legs);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+  const body = JSON.parse(fetchImpl.mock.calls[0][1].body);
+  expect(body.routingPreference).toBe('TRAFFIC_UNAWARE');
+  expect(body).not.toHaveProperty('departureTime');
+  // One origin, its two destinations: two elements, not three.
+  expect(body.destinations).toHaveLength(2);
+  expect(provider.diagnostics()).toEqual({ requests: 1, elements: 2 });
+  // Any day, any hour: the same answer.
+  expect(provider.lookup({ date: '2027-02-01', from: RouteOptimizer.HQ, to, departureMin: 1000 })).toEqual({ minutes: 10, source: 'google_road', reason: null });
+  delete process.env.GOOGLE_MAPS_API_KEY;
+});
+
+test('the default stays traffic-aware at the leg\'s departure', async () => {
+  process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
+  const fetchImpl = jest.fn(async () => ({ ok: true, json: async () => [{ originIndex: 0, destinationIndex: 0, condition: 'ROUTE_EXISTS', duration: '601s' }] }));
+  const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl, now: () => now.getTime() });
+  await provider.preload([{ date, from: RouteOptimizer.HQ, to: { lat: 27.5, lng: -82.4 }, departureMin: 480 }]);
+  const body = JSON.parse(fetchImpl.mock.calls[0][1].body);
+  expect(body.routingPreference).toBe('TRAFFIC_AWARE');
+  expect(body.departureTime).toBe('2027-01-15T13:00:00.000Z');
+  delete process.env.GOOGLE_MAPS_API_KEY;
+});

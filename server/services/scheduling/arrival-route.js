@@ -457,6 +457,14 @@ function targetUnroutable(capacity, target, windowStart, windowEnd, grouped) {
  *  today from HQ. Returns null when today's live state (or a coordinate
  *  gap) cannot certify a route — the caller returns `unverified` for it,
  *  same as every reason below. */
+// 'google_traffic' when every leg came back traffic-aware, 'google_road' when
+// every leg came back from Google and some without traffic, else the model.
+function pickerTravelSource(legs) {
+  if (legs.every(leg => leg.source === 'google_traffic')) return 'google_traffic';
+  if (legs.every(leg => leg.source === 'google_traffic' || leg.source === 'google_road')) return 'google_road';
+  return 'conservative_model';
+}
+
 function resolvePlacementOrigin(context, capacity, departureMin, target, own) {
   // The night tool's van departure (context.vanDepartureMin): the van may
   // leave before the shift opens, so a farther first stop still makes an
@@ -616,10 +624,9 @@ function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, 
     // The order a staff save writes (placeMovedVisit).
     ...(staffInsert ? { routeOrder } : {}),
     // A staff picker's Google check (GATE_PICKER_ROAD_CHECK): whether every
-    // leg it drove came from Google, so the box can drop the "~".
-    ...(!capacity && roadTravel ? {
-      travelSource: usedLegs.every(leg => leg.source === 'google_traffic') ? 'google_traffic' : 'conservative_model',
-    } : {}),
+    // leg it drove came from Google (with traffic, or a road time without
+    // traffic on the later road days), so the box can drop the "~".
+    ...(!capacity && roadTravel ? { travelSource: pickerTravelSource(usedLegs) } : {}),
     arrivalDelayMinutes: arrival.arrivalMin + (target.arrivalOffsetMinutes || 0) - minuteOfDay(windowStart),
     arrivals: simulation.arrivals.map(row => ({ id: row.id, arrival: hhmm(row.arrivalMin), departure: hhmm(row.departureMin), drive: row.driveMin })),
   };
@@ -957,17 +964,23 @@ async function recordCapacityDecision(conn, fit, targetId) {
 // Staff checks agree with the pickers' list (GATE_PICKER_ROAD_CHECK): a
 // route under way today continues from the tech's current stop (a caller
 // may opt out: the automatic tech-out mover). `roads: true` also drives the
-// placement on the same Google road times (the pickers' hour-rounded cache,
-// so an hour the list offered is mostly answered from it). Opt-in (Codex
-// #6881 r3): only a staff caller outside any lock asks — never a technician
-// (the allowance is staff-only) and never a save probe inside its
-// transaction (road times are preloaded before a scheduling lock).
-async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, roads = false, ...options }) {
+// placement on the same Google road times as the list (the pickers' road
+// days and cache, so an hour the list offered is mostly answered from it;
+// a later day stays on the model, as in the list). Opt-in (Codex #6881 r3):
+// only a staff caller outside any lock asks — never a technician (the
+// allowance is staff-only) and never a save probe inside its transaction
+// (road times are preloaded before a scheduling lock). `roadSpender` = the
+// staff user the lookups are counted against (picker-road-spend.js); none =
+// no Google. `pickerBudget` = the request's shared budget, when it has one.
+async function checkArrivalPlacement({
+  windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, ...options
+}) {
   const live = gateEnvValue('GATE_PICKER_ROAD_CHECK');
   const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
   const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false };
-  if (context && live && roads === true) {
-    context.travel = require('./hint-road-times').createPickerTravel();
+  const roadTimes = require('./hint-road-times');
+  if (context && live && roads === true && roadTimes.onRoads(options.date, etDateString(new Date()))) {
+    context.travel = roadTimes.createPickerTravel({ spender: roadSpender, ...(pickerBudget ? { budget: pickerBudget } : {}) });
     // Three passes, as certifyArrivalPlacement: a re-timed leg is asked again.
     for (let pass = 0; pass < 3; pass++) {
       const legs = [];
