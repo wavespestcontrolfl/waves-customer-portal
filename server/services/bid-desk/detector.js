@@ -172,9 +172,12 @@ function senderKind(email) {
   if (inDomain(domain, PROCORE_DOMAIN)) return verified ? 'procore' : null;
   if (inDomain(domain, VENDORLINK_DOMAIN)) return verified ? 'vendorlink' : null;
   if (inDomain(domain, BLUEBOOK_DOMAIN)) return verified ? 'bluebook' : null;
-  // Unverified OpenGov or Charlotte County mail falls through to plain government mail (bid words in the subject).
-  if (verified && inDomain(domain, OPENGOV_DOMAIN)) return 'opengov';
-  if (verified && inDomain(domain, CHARLOTTE_DOMAIN)) return 'charlotte_county';
+  // OpenGov and Charlotte County templates trust only the strict reading (`provider_verified_strict`: resinfo clauses
+  // or Google's DMARC pass; the loose one can be fooled by a quoted MAIL FROM). Anything less falls through to plain
+  // government mail (bid words in the subject).
+  const strict = email.provider_verified_strict === true;
+  if (strict && inDomain(domain, OPENGOV_DOMAIN)) return 'opengov';
+  if (strict && inDomain(domain, CHARLOTTE_DOMAIN)) return 'charlotte_county';
   if (PORTAL_DOMAINS.some((root) => inDomain(domain, root)) || GOV_SUFFIXES.some((suffix) => domain.endsWith(suffix))) {
     return 'gov_email';
   }

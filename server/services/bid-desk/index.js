@@ -19,7 +19,7 @@ const { bidDeskLive, bidChecklistLive } = require('../../config/feature-gates');
 const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam } = require('./detector');
 const { attachPatch, reminderDue, datesDue, OPEN_STATUSES } = require('./rules');
 const alerts = require('./alerts');
-const { hasAlignedAuth } = require('../email/inbox-hygiene');
+const { hasAlignedAuth, hasStrictDmarcPass } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 
 // The email with `provider_verified` set: aligned SPF or DKIM for its own From domain in the stored
@@ -27,12 +27,16 @@ const { domainFromAddress } = require('../email/spam-blocker');
 // template only when this is true.
 // `gmail_spam_verified` is the strict reading (resinfo clauses from Google's own authserv-id only, whatever
 // GATE_EMAIL_AUTH_STRICT says): it alone may carry an email past Gmail's SPAM label.
+// `provider_verified_strict` is the strict reading or Google's own DMARC pass for the From domain: the OpenGov and
+// Charlotte County templates trust only it (Charlotte County's SPF names its bounce address only in a quoted string).
 function withProviderCheck(email) {
   const domain = domainFromAddress(email.from_address);
+  const strict = hasAlignedAuth(email.authentication_results, domain, { strict: true });
   return {
     ...email,
     provider_verified: hasAlignedAuth(email.authentication_results, domain),
-    gmail_spam_verified: hasAlignedAuth(email.authentication_results, domain, { strict: true }),
+    gmail_spam_verified: strict,
+    provider_verified_strict: strict || hasStrictDmarcPass(email.authentication_results, domain),
   };
 }
 

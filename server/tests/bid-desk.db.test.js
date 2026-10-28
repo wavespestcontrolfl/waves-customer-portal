@@ -434,8 +434,10 @@ describeDb('Bid Desk (PostgreSQL)', () => {
 
     test('a county addendum in a new thread joins the bid it names, even after it was declined, and rings nothing', async () => {
       // Charlotte County sends every addendum in its own thread; the notice template gives them one key.
+      // Its stored header as delivered: broken DKIM, SPF naming the bounce address only in a quoted string, DMARC pass.
       const ccEmail = (subjectNumber, threadId) => storeEmail({
         from_address: 'bcc-purchasing@charlottecountyfl.gov', from_name: 'Charlotte County Purchasing', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=permerror (no key for signature) header.i=@charlottecountyfl.gov header.s=s1; spf=pass (google.com: domain of bounces+1-2@em1.charlottecountyfl.gov designates 192.0.2.1 as permitted sender) smtp.mailfrom="bounces+1-2@em1.charlottecountyfl.gov"; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=charlottecountyfl.gov',
         subject: `Charlotte County Purchasing Addendum Notification for Bid ${subjectNumber}`, body_text: [
           'Charlotte County Purchasing Division', '100 Sample Circle, Suite 1 Sampleport, FL 33948 941-555-0100',
           `Addendum Notification for Bid ${subjectNumber}`,

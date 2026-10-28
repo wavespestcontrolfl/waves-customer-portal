@@ -382,7 +382,8 @@ const OG_BODY = (line = 'Sample County has just released the following opportuni
 ].join('\n');
 const ogNotice = (over = {}) => email({
   from_address: 'procurement-notifications@opengov.com', from_name: 'OpenGov Procurement',
-  subject: 'New Opportunity Issued by Sample County: Sample County Pest Control Services', body_text: OG_BODY(), ...over,
+  subject: 'New Opportunity Issued by Sample County: Sample County Pest Control Services', body_text: OG_BODY(),
+  provider_verified_strict: true, ...over,
 });
 
 describe('OpenGov notices', () => {
@@ -414,11 +415,14 @@ describe('OpenGov notices', () => {
       .toMatchObject({ bid: true, source: 'gov_email' });
   });
 
-  test('account mail is not a bid; a forged OpenGov notice is read as plain government mail', () => {
+  test('account mail is not a bid; a notice without the strict sender check is read as plain government mail', () => {
     expect(detectBidEmail(ogNotice({ subject: 'Welcome to OpenGov Procurement!', body_text: 'Thank you for signing up with OpenGov Procurement!' })))
       .toMatchObject({ bid: false, reason: 'provider_not_bid' });
-    expect(detectBidEmail(ogNotice({ provider_verified: false }))).toMatchObject({ bid: false, reason: 'not_bid' });
-    expect(parseBidEmail(ogNotice({ provider_verified: false }))).toMatchObject({ template: null, group_key: null });
+    // The loose check alone (a quoted MAIL FROM can fool it) never unlocks the template.
+    for (const over of [{ provider_verified_strict: false }, { provider_verified: false, provider_verified_strict: false }]) {
+      expect(detectBidEmail(ogNotice(over))).toMatchObject({ bid: false, reason: 'not_bid' });
+      expect(parseBidEmail(ogNotice(over))).toMatchObject({ template: null, group_key: null });
+    }
   });
 });
 
@@ -432,7 +436,8 @@ const CC_BODY = (number = '26-601', title = 'Sample Park Grounds Maintenance') =
 ].join('\n');
 const ccNotice = (over = {}) => email({
   from_address: 'bcc-purchasing@charlottecountyfl.gov', from_name: 'Charlotte County Purchasing',
-  subject: 'Charlotte County Purchasing Addendum Notification for Bid 26-601', body_text: '', body_html: `<p>${CC_BODY().split('\n').join('</p><p>')}</p>`, ...over,
+  subject: 'Charlotte County Purchasing Addendum Notification for Bid 26-601', body_text: '', body_html: `<p>${CC_BODY().split('\n').join('</p><p>')}</p>`,
+  provider_verified_strict: true, ...over,
 });
 
 describe('Charlotte County Purchasing notices', () => {
@@ -455,11 +460,11 @@ describe('Charlotte County Purchasing notices', () => {
     expect(parseBidEmail(ccNotice({ body_html: CC_BODY('26-602').split('\n').join('<br>') })).group_key).not.toBe(first.group_key);
   });
 
-  test('registration mail is not a bid; a forged notice files on its subject alone with no key', () => {
+  test('registration mail is not a bid; a notice without the strict sender check files on its subject alone with no key', () => {
     expect(detectBidEmail(ccNotice({ subject: 'Vendor Registration Complete', body_html: '<p>Thank you for registering.</p>' })))
       .toMatchObject({ bid: false, reason: 'not_bid' });
-    expect(detectBidEmail(ccNotice({ provider_verified: false }))).toMatchObject({ bid: true, source: 'gov_email', kind: 'addendum' });
-    expect(parseBidEmail(ccNotice({ provider_verified: false }))).toMatchObject({ template: null, group_key: null });
+    expect(detectBidEmail(ccNotice({ provider_verified_strict: false }))).toMatchObject({ bid: true, source: 'gov_email', kind: 'addendum' });
+    expect(parseBidEmail(ccNotice({ provider_verified_strict: false }))).toMatchObject({ template: null, group_key: null });
   });
 });
 
