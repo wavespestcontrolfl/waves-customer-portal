@@ -241,6 +241,18 @@ describe('annual prepay renewal helpers', () => {
     expect(_private.addMonthsSameDay('2026-05-14', 12)).toBe('2027-05-14');
   });
 
+  test('lawn rounds coverage is refused for any service that is not the lawn plan (Codex #7008 r6)', () => {
+    const { lawnRoundsCoverageError } = require('../services/prepay-cadence');
+    expect(lawnRoundsCoverageError('lawn_rounds_9', 'Lawn Care (Every 6 Weeks)')).toBeNull();
+    expect(lawnRoundsCoverageError('lawn_rounds_9', 'St. Augustine Turf Program')).toBeNull();
+    for (const service of ['Tree & Shrub Care (Every 6 Weeks)', 'Pest Control + Lawn', 'Mosquito Control', '', null]) {
+      expect(lawnRoundsCoverageError('lawn_rounds_9', service)).toEqual(expect.objectContaining({ code: 'LAWN_ROUNDS_NOT_LAWN' }));
+    }
+    // Any other cadence is untouched by the check.
+    expect(lawnRoundsCoverageError('every_6_weeks', 'Tree & Shrub Care (Every 6 Weeks)')).toBeNull();
+    expect(lawnRoundsCoverageError(null, 'Tree & Shrub Care')).toBeNull();
+  });
+
   test('normalizes annual prepay cadences to their month spacing', () => {
     expect(_private.normalizeCoverageCadence('Bi-Monthly')).toBe('bimonthly');
     expect(_private.normalizeCoverageCadence('Semi-Annual')).toBe('semiannual');

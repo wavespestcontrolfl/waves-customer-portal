@@ -75,4 +75,21 @@ function prepayCoverageCadenceForPattern(cadence) {
   }
 }
 
-module.exports = { visitsPerYearForCadence, prepayCoverageCadenceForPattern };
+// Lawn 9x rounds (lawn_rounds_9) is the lawn plan's own calendar. A term staff
+// set up may carry it only when it covers a lawn service: the seeder's
+// serviceKeyFor family 'lawn_care', the same test that writes a series as
+// rounds. Any other service on that cadence would seed its visits on the lawn
+// round calendar (Codex #7008 r6). Returns { error, code } for the 400, or
+// null. Lives here, not in annual-prepay-renewals, so a route test that mocks
+// that module whole still runs the real check.
+function lawnRoundsCoverageError(coverageCadence, coverageServiceType) {
+  if (prepayCoverageCadenceForPattern(coverageCadence) !== 'lawn_rounds_9') return null;
+  const { serviceKeyFor } = require('./recurring-appointment-seeder');
+  if (serviceKeyFor({ service_type: String(coverageServiceType || '') }) === 'lawn_care') return null;
+  return {
+    error: 'Lawn rounds (9 a year) covers a lawn plan only. Pick the visit cadence of the service covered.',
+    code: 'LAWN_ROUNDS_NOT_LAWN',
+  };
+}
+
+module.exports = { visitsPerYearForCadence, prepayCoverageCadenceForPattern, lawnRoundsCoverageError };

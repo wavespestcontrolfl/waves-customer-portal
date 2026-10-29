@@ -313,6 +313,25 @@ describe('_private.deliverySettledLiveCredit — the annual-prepay-invoice route
 // "Tree & Shrub Care" visits make annual-prepay-renewals infer a quarterly
 // schedule — the retired plan. The gate must see the plan as the term will
 // run it, on both prepay endpoints.
+describe('lawn rounds cadence covers a lawn plan only (Codex #7008 r6)', () => {
+  test('POST /:id/annual-prepay refuses lawn_rounds_9 for Tree & Shrub before any write', async () => {
+    const { res, next } = await recordPrepay({ serviceType: 'Tree & Shrub Care (Every 6 Weeks)', coverageCadence: 'lawn_rounds_9', visitCount: 9 });
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'LAWN_ROUNDS_NOT_LAWN' }));
+    expect(committed.invoices).toHaveLength(0);
+    expect(committed.annual_prepay_terms).toHaveLength(0);
+  });
+
+  test('every staff prepay entry point runs the one check', () => {
+    const fs = require('fs');
+    const customers = fs.readFileSync(require.resolve('../routes/admin-customers'), 'utf8');
+    expect(customers.match(/lawnRoundsCoverageError\(coverageCadence, coverageServiceType\)/g) || []).toHaveLength(2);
+    const invoices = fs.readFileSync(require.resolve('../routes/admin-invoices'), 'utf8');
+    expect(invoices).toMatch(/lawnRoundsCoverageError\(resolvedCadence, resolvedServiceType\)/);
+  });
+});
+
 describe('retired-plan gate reads the effective count/cadence (codex r17)', () => {
   const { annualPrepayRetiredPlanLabels } = router._private;
   const namesRetired = (labels) => labels.map(retiredSaleKeyForLabel).filter(Boolean);

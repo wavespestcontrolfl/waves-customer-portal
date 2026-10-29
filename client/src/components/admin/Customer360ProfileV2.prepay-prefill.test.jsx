@@ -339,4 +339,27 @@ describe.each([['Record', AnnualPrepayModal], ['Invoice', AnnualPrepayInvoiceMod
     fireEvent.change(serviceInput, { target: { value: 'Every 6 weeks Lawn Care' } });
     expect(cadenceSelectOf().value).toBe('lawn_rounds_9');
   });
+
+  it('switching Service covered to a non-lawn six-week service leaves the rounds cadence (Codex #7008 r6)', () => {
+    render_({ prepaidPlans: [{ serviceType: 'Lawn Care', recurringPattern: 'lawn_rounds_9' }] });
+    const serviceInput = screen.getByPlaceholderText('Search services or enter a custom label');
+    fireEvent.change(serviceInput, { target: { value: 'Tree & Shrub Care (Every 6 Weeks)' } });
+    const select = cadenceSelectOf();
+    expect(select.value).toBe('every_6_weeks');
+    // The rounds option is the lawn plan's own: not offered for another service.
+    expect(Array.from(select.options).some((o) => o.value === 'lawn_rounds_9')).toBe(false);
+  });
+
+  it('a non-lawn label that names no cadence also leaves rounds (9-visit every 6 weeks)', () => {
+    render_({ prepaidPlans: [{ serviceType: 'Lawn Care', recurringPattern: 'lawn_rounds_9' }] });
+    fireEvent.change(screen.getByPlaceholderText('Search services or enter a custom label'), { target: { value: 'Tree & Shrub Care' } });
+    expect(cadenceSelectOf().value).toBe('every_6_weeks');
+    expect(document.querySelector('input[type="number"][step="1"]')).toHaveValue(9);
+  });
+
+  it('a pest bundle that mentions lawn is not the lawn plan', () => {
+    render_({ prepaidPlans: [{ serviceType: 'Lawn Care', recurringPattern: 'lawn_rounds_9' }] });
+    fireEvent.change(screen.getByPlaceholderText('Search services or enter a custom label'), { target: { value: 'Pest Control + Lawn (Every 6 Weeks)' } });
+    expect(cadenceSelectOf().value).toBe('every_6_weeks');
+  });
 });
