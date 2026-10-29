@@ -56,6 +56,45 @@ quote in `detail`. `server/services/admin-alert-names.js` has the helpers (`fitA
 long name inside the 60-character headline; `whyWithQuote` budgets the quote). Where an
 alert is about a visit or an invoice, the link opens that visit or invoice, not a list page.
 
+### A ninth part: Buttons (optional; owner 2026-10-29)
+
+A row may carry up to three buttons, so a person can act from the bell without opening the page.
+The owner's rules ("ok go" on the plan, Oct 29):
+
+1. A button does only what a button on the linked page already does, through the same server
+   step and the same checks.
+2. The server reads the record again at the tap. It never trusts the row's words.
+3. No button texts or emails a customer, moves money or flips a gate, unless the owner rules so
+   for that kind of notification. A kind whose step can do one of those holds the button back in
+   those cases, and the page does it instead.
+4. The server sets a row's buttons when it raises the row. The phone or browser cannot add one:
+   a tap names a button the row carries, and nothing else runs.
+5. A tap records who pressed what and when (`metadata.buttonTaps`, one entry per tap), and
+   closes the row. One tap runs at a time: it claims the row in one conditional write against the
+   version the bell served, so a second tap at the same moment, or after, does nothing.
+
+How: `buttons: { kind, items: [{ id, label, prompt?, args? }] }` in the spec, kept as
+`metadata.buttons`. `kind` names a handler in `server/services/admin-alert-buttons.js` (`KINDS`).
+`id` is a slug; `label` is at most 32 characters; `prompt` is one sentence of at most 110 characters
+that the bell asks before it sends (give one to any step the bell cannot undo); `args` holds up to
+four short strings or numbers that the handler checks again at the tap. `composeAdminAlert` checks
+the shape and the section 3 tokens in labels and prompts. The bell list serves a row's buttons as
+`actions` (`{ id, label, prompt }`) to the admin role only, on open rows, while the kind's gate is
+on. A tap is `POST /api/admin/notifications/:id/actions/:actionId` with the row's `version` (the
+Done fence). A changed row, a second tap or a refusal by the step answers 409 with a short message,
+and the bell reloads its list.
+
+Kinds today:
+- `referral_inbound` (`server/services/referral-inbound-bell.js`, `GATE_REFERRAL_INBOUND_BELL`): the
+  row for a card in Referrals → Queue, with **Confirm <referrer>** and **Not a referral**, the
+  Queue's own `confirmInboundReferral` and `dismissInboundReferral`. Confirm is offered only for one
+  sure referrer (the link code's owner, or the one customer whose first and last name match the name
+  the caller gave), only while the program pays rewards at the first visit, only before the
+  friend's first plan visit, and only when it is not the referrer's 3rd, 5th or 10th referral. Then
+  the tap sends nothing and moves no money: the $25 credits and the referrer's 9:00 AM email follow
+  the first plan visit. The confirm step itself (`deferredOnly`) checks each of these again under its
+  locks and saves nothing when one fails. Any other case is answered in the Queue.
+
 ## 3. Never in a headline or a why
 
 Timestamps and ISO dates, UUIDs and hashes, table and column names, `GATE_*` and other
@@ -187,6 +226,7 @@ checks stay in the bell). The Agents Activity feed shows every routed row (`meta
 | Claude's own reminders and our engineering faults leave the bell: an admin row with `metadata.opsJob` (unless `opsWho` is `person`) or in a named fault class is written Activity-only and stamped `who = claude`, `severity` `broken` for a fault; customer-contact categories, registry events, customer-tied rows and `ops_digest` rows are never routed | `server/services/admin-alert-routing.js`, applied in `NotificationService.create` and `notifyAdmin`; `server/scripts/reroute-claude-queue-rows.js` moves rows already open | enforced while `GATE_ALERT_CLAUDE_QUEUE` is on (dark by default) |
 | Retention: a bell row idle 30 days, and an `fyi` row idle 7 days, is marked done (never deleted, read state kept). Not built: the 14-day Monday summary for an unread `needs-you` row | `runAdminAlertRetention` in `server/services/admin-alert-retention.js`, nightly 1:32 AM ET, gate `GATE_ALERT_RETENTION` (`shadow` records one audit_log summary, `true` expires); undo with `server/scripts/undo-admin-alert-retention.js` | enforced when the gate is `true` |
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
+| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default) |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
@@ -202,6 +242,7 @@ metadata.severity    needs-you | broken | fyi
 metadata.subject     { type, id }
 metadata.doneWhen    predicate name
 metadata.who         person | claude | either
+metadata.buttons     { kind, items } when the spec has buttons (section 2, part 9)
 ```
 
 Then, by severity:
