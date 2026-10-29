@@ -1449,7 +1449,9 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
   // reviews/overrides it like every generated value.
   const anyTaxable = [...(outPrograms || []), ...(outCorrective || [])].some((entry) => entry.taxable === true);
   const suggestedTaxRate = anyTaxable
-    ? await resolveCommercialPrepayBaseRate(estimate.customer_id ?? estimate.customerId ?? null, { database })
+    ? await resolveCommercialPrepayBaseRate(estimate.customer_id ?? estimate.customerId ?? null, {
+      database, propertyId: estimate.property_id || estimate.propertyId || undefined,
+    })
     : null;
   return {
     propertyScope: derivePropertyScope(estimateData),

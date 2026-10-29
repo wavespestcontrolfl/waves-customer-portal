@@ -9950,7 +9950,7 @@ async function handleEstimateView(req, res, next) {
     // total matches the tax-inclusive invoice the converter creates. Async, so
     // resolve here and pass into the (sync) renderPage. Non-commercial → 0.
     const prepayBaseRate = isCommercialAutoAcceptEstimate(estimate)
-      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true })
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true, propertyId: estimate.property_id || undefined })
       : 0;
 
     // Does accepting this estimate bill MONTHLY? (codex #3128 r6) The
@@ -11563,7 +11563,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       try { acceptResolvedCustomerId = (await matchAcceptCustomerByPhone(estimate))?.match?.id || null; } catch { /* no match → new-customer default rate, same as the converter */ }
     }
     const prepayDisplayBaseRate = annualPrepaySelected && isCommercialAccept
-      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(acceptResolvedCustomerId, {})
+      ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(acceptResolvedCustomerId, { propertyId: estimate.property_id || undefined })
       : 0;
     const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
       ? (() => {
