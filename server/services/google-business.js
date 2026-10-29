@@ -131,6 +131,23 @@ async function mutationFetch(url, init) {
   catch (e) { if (e && typeof e === 'object' && !isPreSendFailure(e)) e.transport = true; throw e; }
 }
 
+// Google answers an occasional single 503 UNAVAILABLE on reviews.list and the
+// next hourly sync succeeds; without a retry that blip rings the owner's
+// "sync degraded" bell. Reads only: mutations are never retried.
+const GBP_READ_RETRY_DELAYS_MS = [2000, 8000];
+const GBP_TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+// Backoff wait that ends early, with a throw, if the caller's deadline
+// signal aborts, so a retry never outlives the caller's deadline.
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('GBP review lookup aborted (deadline)'));
+    const onAbort = () => { clearTimeout(timer); reject(new Error('GBP review lookup aborted (deadline)')); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 async function readJsonOrThrow(res, label) {
   const text = await res.text();
   const ct = (res.headers.get('content-type') || '').toLowerCase();
@@ -380,9 +397,16 @@ class GoogleBusinessService {
     const params = new URLSearchParams({ pageSize: String(pageSize) });
     if (pageToken) params.set('pageToken', pageToken);
     const url = `https://mybusiness.googleapis.com/v4/${locationResourceName}/reviews?${params.toString()}`;
-    const res = await fetch(url, { headers, ...(signal ? { signal } : {}) });
-    const data = await readJsonOrThrow(res, 'GBP getReviews');
-    return data;
+    const delays = this._reviewRetryDelaysMs || GBP_READ_RETRY_DELAYS_MS;
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(url, { headers, ...(signal ? { signal } : {}) });
+      if (res.ok || !GBP_TRANSIENT_STATUSES.has(res.status) || attempt >= delays.length) {
+        return readJsonOrThrow(res, 'GBP getReviews');
+      }
+      await res.text().catch(() => {});
+      logger.warn(`GBP getReviews ${res.status}: retrying (attempt ${attempt + 2} of ${delays.length + 1}) in ${delays[attempt]}ms`);
+      await abortableDelay(delays[attempt], signal);
+    }
   }
 
   // `signal` lets a caller with a total deadline cancel the paginated
