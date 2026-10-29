@@ -32,6 +32,8 @@ const { executeMessageDraftTool, MESSAGE_DRAFT_TOOLS, cardLines } = require('../
 const registry = require('../services/intelligence-bar/action-registry');
 const gates = require('../services/intelligence-bar/write-gates');
 const ownerDirect = require('../services/intelligence-bar/owner-direct');
+const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const { buildContract } = require('../services/intelligence-bar/authorization-contract');
 
 const ID = '00000000-0000-4000-8000-00000000d701';
@@ -242,6 +244,47 @@ describe('approve_suggested_reply preview', () => {
     mockRoute._internals.draftImmediateOnlyLinkRefusal.mockResolvedValue(null);
     mockProposalRefusal.mockResolvedValue({ success: false, error: 'Customer opted out', code: 'OPTED_OUT', blocked: true });
     expect(await run('approve_suggested_reply', { draft_id: ID })).toMatchObject({ code: 'OPTED_OUT', blocked: true });
+  });
+});
+
+// The sender (send-customer-message.js) delivers normalizeGsmPunctuation(stripSmsUrlScheme(body)); the card must show that text.
+describe('the card shows what the sender delivers', () => {
+  const SMART = 'We\u2019ll be there Thursday \u2014 \u201Cmorning\u201D. Details: https://wavespestcontrol.com/appointments/abc';
+  const delivered = (t) => normalizeGsmPunctuation(stripSmsUrlScheme(t));
+
+  test('approve: final_text is the delivered text; the raw draft stays the claim\'s pin', async () => {
+    state.draft.draft_response = SMART;
+    const card = await run('approve_suggested_reply', { draft_id: ID });
+    expect(card.final_text).toBe(delivered(SMART));
+    expect(card.final_text).not.toMatch(/[\u2019\u2014\u201C\u201D]|https:\/\//);
+    expect(card.final_text).toContain('wavespestcontrol.com/appointments/abc');
+    expect(card._version).toMatchObject({ draft_text: SMART, final_text: delivered(SMART) });
+    expect(cardLines('approve_suggested_reply', card)[0].text).toBe(`Text to Robin Sample (\u20260142): "${delivered(SMART)}"`);
+    const out = await confirm('approve_suggested_reply', card);
+    expect(out.sent_text).toBe(delivered(SMART));
+    expect(mockRoute.approveDraftFromBar).toHaveBeenCalledWith(expect.objectContaining({ pins: expect.objectContaining({ draftText: SMART }) }));
+  });
+
+  test('revise: a smart-punctuation, https revision is carded and posted as the delivered text', async () => {
+    const revised = 'Thursday at 10 \u2013 we\u2019ll see you. https://wavespestcontrol.com/pay/xyz';
+    const card = await run('revise_suggested_reply', { draft_id: ID, revised_text: revised });
+    expect(card.final_text).toBe(delivered(revised));
+    expect(card.suggested_text).toBe(TEXT);
+    const out = await confirm('revise_suggested_reply', card, { revised_text: revised });
+    expect(out.sent_text).toBe(delivered(revised));
+    expect(mockRoute.reviseDraftFromBar).toHaveBeenCalledWith(expect.objectContaining({ body: { revisedResponse: delivered(revised) } }));
+  });
+
+  test('a revision that differs only by punctuation the sender normalizes is the same text', async () => {
+    state.draft.draft_response = 'We\u2019ll see you then.';
+    expect(await run('revise_suggested_reply', { draft_id: ID, revised_text: "We'll see you then." })).toMatchObject({ code: 'same_as_suggestion' });
+  });
+
+  test('the link check sees the raw draft as well as the delivered text', async () => {
+    state.draft.draft_response = SMART;
+    await run('approve_suggested_reply', { draft_id: ID });
+    const seen = mockRoute._internals.draftImmediateOnlyLinkRefusal.mock.calls.map((c) => c[0]);
+    expect(seen).toEqual(expect.arrayContaining([SMART, delivered(SMART)]));
   });
 });
 

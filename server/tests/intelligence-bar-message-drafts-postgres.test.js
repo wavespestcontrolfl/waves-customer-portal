@@ -26,6 +26,8 @@ jest.setTimeout(30000);
 const db = require('../models/db');
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const drafts = require('../routes/admin-drafts');
+const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const { executeMessageDraftTool } = require('../services/intelligence-bar/message-draft-tools');
 
 const ADMIN = { isAdmin: true, technicianId: null };
@@ -96,6 +98,32 @@ const TEXT = 'Yes, Thursday works. See you then!';
     expect(sendManualCustomerSms.mock.calls[0][0]).toMatchObject({ to: PHONE, body: TEXT, entryPoint: 'admin_draft_approve' });
     expect(await row(id)).toMatchObject({ status: 'approved', final_response: TEXT });
     expect((await row(id)).sent_at).not.toBeNull();
+  });
+
+  test('smart punctuation and an https link: the card shows what the sender delivers, and the page claims on the raw draft', async () => {
+    const SMART = 'We\u2019ll be there Thursday \u2014 \u201Cmorning\u201D. https://wavespestcontrol.com/appointments/abc';
+    const delivered = (t) => normalizeGsmPunctuation(stripSmsUrlScheme(t));
+    const c = await customer();
+    const id = await draft(c, await inbound(c), { draft_response: SMART });
+    const preview = await card('approve_suggested_reply', id);
+    expect(preview.final_text).toBe(delivered(SMART));
+    expect(await confirm('approve_suggested_reply', preview, id)).toMatchObject({ success: true, sent_text: delivered(SMART) });
+    // The page's sender gets the raw stored draft and applies the transformation itself: same text as the card.
+    const sentBody = sendManualCustomerSms.mock.calls[0][0].body;
+    expect(sentBody).toBe(SMART);
+    expect(delivered(sentBody)).toBe(preview.final_text);
+    expect(await row(id)).toMatchObject({ status: 'approved' });
+  });
+
+  test('revise with the same transformations is carded and sent as the delivered text', async () => {
+    const REV = 'Thursday at 10 \u2013 we\u2019ll see you. https://wavespestcontrol.com/pay/xyz';
+    const delivered = (t) => normalizeGsmPunctuation(stripSmsUrlScheme(t));
+    const c = await customer();
+    const id = await draft(c, await inbound(c));
+    const preview = await card('revise_suggested_reply', id, { revised_text: REV });
+    expect(await confirm('revise_suggested_reply', preview, id, { revised_text: REV })).toMatchObject({ success: true });
+    expect(delivered(sendManualCustomerSms.mock.calls[0][0].body)).toBe(preview.final_text);
+    expect(sendManualCustomerSms.mock.calls[0][0].body).toBe(delivered(REV));
   });
 
   test('a double Confirm sends once: the second is refused and nothing more goes out', async () => {

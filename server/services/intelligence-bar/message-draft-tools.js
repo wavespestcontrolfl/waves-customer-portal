@@ -32,6 +32,10 @@
  * Dark behind GATE_IB_MESSAGE_DRAFTS (which needs GATE_IB_PLATFORM). Admin only, like the page's own mutations.
  */
 const db = require('../../models/db');
+// The sender's own body normalization (send-customer-message.js applies this to every customer SMS before delivery): the card
+// shows what it will deliver, so these are the sender's functions, imported, never re-implemented.
+const { normalizeGsmPunctuation } = require('../messaging/gsm-normalize');
+const { stripSmsUrlScheme } = require('../messaging/sms-link-policy');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 
@@ -165,11 +169,17 @@ async function listSuggestedReplies(input = {}) {
 const TOOL_ACTION = { approve_suggested_reply: 'approve', revise_suggested_reply: 'revise', ignore_suggested_reply: 'ignore' };
 const HANDLED_WORDS = { approved: 'approved and sent', revised: 'edited and sent', sent: 'sent', rejected: 'ignored', pending: 'waiting' };
 
-async function sendRefusal(text, recipient, customerId) {
+// What the sender delivers for a body (send-customer-message.js, before delivery): smart punctuation to plain GSM, URL scheme stripped.
+const deliveredText = (text) => normalizeGsmPunctuation(stripSmsUrlScheme(String(text ?? '')));
+
+// rawText is what the page handler checks and claims (the stored draft, or the carded revision); text is what is delivered.
+async function sendRefusal({ rawText, text }, recipient, customerId) {
   // A link only the composer may send (the page refuses it too), and a number that cannot be texted.
   try {
-    const link = await drafts()._internals.draftImmediateOnlyLinkRefusal(text);
-    if (link) return refusal(link, 'needs_communications_page');
+    for (const body of new Set([rawText, text])) {
+      const link = await drafts()._internals.draftImmediateOnlyLinkRefusal(body);
+      if (link) return refusal(link, 'needs_communications_page');
+    }
   } catch (err) {
     logger.warn(`[intelligence-bar:message-drafts] link check unavailable (${err?.code || err?.name || 'error'})`);
   }
@@ -200,13 +210,16 @@ async function loadPlannableDraft(input) {
 }
 
 // The text a send would carry: the suggestion, or the operator's revision.
+// finalText is what the sender will deliver (the card shows it, the confirm pins it, and a revision is posted as it); rawText is
+// what the page claims on for approve (the stored draft, untouched) and checks for links.
 function finalTextFor(action, text, input) {
-  if (action !== 'revise') return { finalText: text };
-  const finalText = String(input.revised_text ?? '').trim();
-  if (!finalText) return refusal('revised_text is required', 'invalid_target');
+  if (action !== 'revise') return { finalText: deliveredText(text), rawText: text };
+  const revised = String(input.revised_text ?? '').trim();
+  if (!revised) return refusal('revised_text is required', 'invalid_target');
+  const finalText = deliveredText(revised);
   if (finalText.length > MAX_REPLY_CHARS) return refusal(`The revised text is over ${MAX_REPLY_CHARS} characters. Shorten it.`, 'text_too_long');
-  if (finalText === text.trim()) return refusal('The revised text is the same as the suggestion. Use approve_suggested_reply to send it as written.', 'same_as_suggestion');
-  return { finalText };
+  if (finalText === deliveredText(text).trim()) return refusal('The revised text is the same as the suggestion. Use approve_suggested_reply to send it as written.', 'same_as_suggestion');
+  return { finalText, rawText: finalText };
 }
 
 async function buildPlan(toolName, input = {}) {
@@ -222,9 +235,9 @@ async function buildPlan(toolName, input = {}) {
 
   const texted = finalTextFor(action, text, input);
   if (texted.error) return texted;
-  const { finalText } = texted;
+  const { finalText, rawText } = texted;
   if (action !== 'ignore') {
-    const blocked = await sendRefusal(finalText, recipient, recipient.customerId);
+    const blocked = await sendRefusal({ rawText, text: finalText }, recipient, recipient.customerId);
     if (blocked) return blocked;
   }
 
