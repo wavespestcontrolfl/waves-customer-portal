@@ -137,6 +137,22 @@ describe('prepay year end bell settled years', () => {
   });
 });
 
+describe('prepay year end bell next year', () => {
+  const { isNextYearOf } = _private;
+  const year = row({ term_start: '2025-11-24', term_end: '2026-11-24', coverage_service_type: 'Quarterly Pest Control' });
+  test.each([
+    ['the Customer 360 default (the day after this year ends)', { term_start: '2026-11-25' }, true],
+    ['a start a month before this year ends', { term_start: '2026-10-24' }, true],
+    ['a second plan that began mid-year', { term_start: '2026-05-01' }, false],
+    ['the same year itself', { id: 'term-1', term_start: '2026-11-25' }, false],
+    ['the same service named with other spacing and case', { term_start: '2026-11-25', coverage_service_type: ' quarterly  pest control ' }, true],
+    ['another named service', { term_start: '2026-11-25', coverage_service_type: 'Monthly Lawn Care' }, false],
+    ['an unnamed coverage', { term_start: '2026-11-25', coverage_service_type: null }, true],
+  ])('%s', (_name, laterFields, expected) => {
+    expect(isNextYearOf({ id: 'term-2', coverage_service_type: 'Quarterly Pest Control', ...laterFields }, year)).toBe(expected);
+  });
+});
+
 describe('prepay year end bell gate', () => {
   const db = require('../models/db');
   afterEach(() => { delete process.env.GATE_PREPAY_YEAR_END_BELL; });

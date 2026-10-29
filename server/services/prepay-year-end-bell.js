@@ -17,7 +17,9 @@
  * (annual_plan_version set) are out of scope: they have their own notice flow.
  *
  * A year is SETTLED, so its bell closes and is never raised, when any of these hold:
- *   a. the customer has a LATER term that is paid and live (coveredTermsAsOf);
+ *   a. the customer has NEXT year's term paid and live (coveredTermsAsOf): not a termite
+ *      plan, starting no earlier than a month before this year ends, and for the same
+ *      service when both terms name one;
  *   b. the term's decision is cancel or switch plan, or its status says so;
  *   c. the customer's billing mode is no longer annual_prepay;
  *   d. the customer is deleted.
@@ -40,6 +42,9 @@ const TERM_END_LEAD_DAYS = 30;
 // ... until this many days after (a late raise still helps: the year just ended).
 const LATE_RAISE_DAYS = 60;
 const KEY_PREFIX = 'prepay-year-end:';
+// Next year's term starts no earlier than this many days before this year ends (Customer 360
+// starts it the day after; a second plan that began mid-year is not next year's prepay).
+const NEXT_YEAR_START_SLACK_DAYS = 31;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RAISE_STATUSES = Object.freeze(['active', 'renewal_pending', 'renewed']);
 const DECLINED_STATUSES = Object.freeze(['cancelled', 'canceled', 'switch_plan']);
@@ -159,21 +164,23 @@ async function candidateTerms(conn, today, openTermIds = []) {
       if (openTermIds.length) scope.orWhereIn('t.id', openTermIds);
     })
     .select(
-      't.id', 't.customer_id', 't.status', 't.renewal_decision', 't.prepay_amount',
+      't.id', 't.customer_id', 't.status', 't.renewal_decision', 't.prepay_amount', 't.coverage_service_type',
       conn.raw("to_char(t.term_start, 'YYYY-MM-DD') as term_start"),
       conn.raw("to_char(t.term_end, 'YYYY-MM-DD') as term_end"),
       'c.first_name', 'c.last_name', 'c.company_name', 'c.billing_mode', 'c.deleted_at as customer_deleted_at',
     );
 }
 
-// Later terms that are paid and live, per customer, from the same query the completion gate and
-// the term sweep share. An unpaid next-year term is not in it.
+// Non-termite terms that are paid and live, per customer, from the same query the completion gate
+// and the term sweep share. An unpaid next-year term is not in it, and a termite plan's paid year
+// never counts as a pest or lawn prepay.
 async function paidTermsByCustomer(conn, customerIds) {
   if (!customerIds.length) return new Map();
   const AnnualPrepayRenewals = require('./annual-prepay-renewals');
   const rows = await AnnualPrepayRenewals.coveredTermsAsOf(conn, null)
     .whereIn('t.customer_id', customerIds)
-    .select('t.id', 't.customer_id', conn.raw("to_char(t.term_start, 'YYYY-MM-DD') as term_start"));
+    .whereNull('t.annual_plan_version')
+    .select('t.id', 't.customer_id', 't.coverage_service_type', conn.raw("to_char(t.term_start, 'YYYY-MM-DD') as term_start"));
   const byCustomer = new Map();
   for (const row of rows) {
     const list = byCustomer.get(row.customer_id) || [];
@@ -183,8 +190,26 @@ async function paidTermsByCustomer(conn, customerIds) {
   return byCustomer;
 }
 
+function shiftDay(day, days) {
+  const at = dayDate(day);
+  at.setUTCDate(at.getUTCDate() + days);
+  return at.toISOString().slice(0, 10);
+}
+
+const coverageKey = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase() || null;
+
+// Next year's prepay for this year: another term starting no earlier than a month before this year
+// ends, covering the same service when both terms name one (an unnamed coverage matches any).
+function isNextYearOf(later, row) {
+  const laterCoverage = coverageKey(later.coverage_service_type);
+  const rowCoverage = coverageKey(row.coverage_service_type);
+  return later.id !== row.id
+    && later.term_start >= shiftDay(row.term_end, -NEXT_YEAR_START_SLACK_DAYS)
+    && (!laterCoverage || !rowCoverage || laterCoverage === rowCoverage);
+}
+
 const hasLaterPaidTerm = (row, byCustomer) => (byCustomer.get(row.customer_id) || [])
-  .some((later) => later.id !== row.id && later.term_start > row.term_start);
+  .some((later) => isNextYearOf(later, row));
 
 async function raiseOne(conn, row) {
   const consequence = await consequenceFor(conn, row.id).catch((err) => {
@@ -244,7 +269,7 @@ async function runPrepayYearEndBell({ conn = db, today = etDateString() } = {}) 
 module.exports = {
   runPrepayYearEndBell,
   _private: {
-    alertKey, termIdOfKey, alertSpec, alertDetail, consequenceFor, ongoingRoots, settledReason, inRaiseWindow, hasLaterPaidTerm,
+    alertKey, termIdOfKey, alertSpec, alertDetail, consequenceFor, ongoingRoots, settledReason, inRaiseWindow, hasLaterPaidTerm, isNextYearOf,
     STOPS, CHECK_PRICE, TERM_END_LEAD_DAYS, LATE_RAISE_DAYS,
   },
 };

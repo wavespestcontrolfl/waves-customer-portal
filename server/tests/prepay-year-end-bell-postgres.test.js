@@ -151,6 +151,23 @@ postgres('prepay year end bell (PostgreSQL)', () => {
     expect(await openBells(id)).toHaveLength(1);
   });
 
+  test('a paid termite plan year never counts as next year\'s prepay', async () => {
+    const owner = await customer();
+    const id = await term(owner);
+    await term(owner, { status: 'active', start: '2026-11-25', end: '2027-11-24', planVersion: 'v3' });
+    await run();
+    expect(await run()).toEqual({ raised: 0, closed: 0 });
+    expect(await openBells(id)).toHaveLength(1);
+  });
+
+  test('a second paid plan that began mid-year does not close it', async () => {
+    const owner = await customer();
+    const id = await term(owner);
+    await term(owner, { status: 'active', start: '2026-05-01', end: '2027-04-30' });
+    await run();
+    expect(await openBells(id)).toHaveLength(1);
+  });
+
   test('an EARLIER paid term does not close it', async () => {
     const owner = await customer();
     await term(owner, { start: '2024-11-24', end: '2025-11-24' });
