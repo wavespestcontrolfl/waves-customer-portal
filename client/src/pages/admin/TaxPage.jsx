@@ -1911,6 +1911,7 @@ export function FilingCalendarTab() {
               {f.extendedDueDate && (
                 <span>Extended: {fmtD(f.extendedDueDate)}</span>
               )}
+              {f.bankSeenOn && <span>Seen in the bank on {fmtD(f.bankSeenOn)}</span>}
               {f.amountDue && (
                 <span>
                   Amount:{" "}
@@ -2012,6 +2013,16 @@ export function FilingCalendarTab() {
                   }}
                 >
                   Filed: {fmtD(f.filedDate)}
+                </span>
+              )}
+              {f.bankSeenOn && (
+                <span
+                  style={{
+                    fontSize: 14,
+                    color: "#71717A",
+                  }}
+                >
+                  Seen in the bank on {fmtD(f.bankSeenOn)}
                 </span>
               )}
               {f.amountPaid && (
@@ -6247,6 +6258,38 @@ function BankImportTab() {
                           Dismiss
                         </Button>
                       </span>
+                    </div>
+                  )}
+                  {bankRowClaimable(r) && r.direction === "debit" && r.suggestion?.payrollCandidates?.length > 0 && (
+                    <div className="mb-1 text-14 text-ink-primary" style={{ whiteSpace: "normal" }}>
+                      {r.suggestion.payrollCandidates.map((c) => (
+                        <div key={c.id} className="mb-1">
+                          {c.kind === "check"
+                            ? `Paycheck for ${c.name}, ${fmtM(c.netCents / 100)}, pay date ${fmtD(c.payDate)}${c.nearMiss ? " (one cent off)" : ""}`
+                            : `${c.title}, ${fmtM(c.amountCents / 100)}, due ${fmtD(c.dueDate)}${c.nearMiss ? " (one cent off)" : ""}`}
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            className="ml-2"
+                            disabled={!!busy}
+                            onClick={() =>
+                              act(
+                                "link-payroll",
+                                `/admin/tax/bank-import/${r.id}/link-payroll`,
+                                c.kind === "check" ? { checkId: c.id } : { filingId: c.id },
+                              )
+                            }
+                          >
+                            {c.kind === "check" ? "Link paycheck" : "Link tax payment"}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {r.suggestion?.payrollMatch && (
+                    <div className="text-14 text-ink-secondary" style={{ whiteSpace: "normal" }}>
+                      {r.suggestion.payrollMatch.checkId ? "Matched to a paycheck" : "Matched to a payroll tax payment"}
+                      {r.suggestion.payrollMatch.by === "auto" ? " automatically" : ""}
                     </div>
                   )}
                   {/* a transfer-flagged CREDIT with candidates falls through

@@ -33,6 +33,13 @@ function StatusChip({ status }) {
 
 const hoursWord = hours => `${hours} h`;
 
+// Bank status of a final check (GATE_PAYROLL_BANK_MATCH): only a run read with the gate on carries it.
+function bankWords(bank) {
+  if (bank.state === 'matched') return `Bank: matched ${dayLabel(bank.date)}`;
+  if (bank.state === 'needs_pick') return 'Bank: needs your pick (Tax page, Bank Import)';
+  return 'Bank: not seen yet';
+}
+
 function StubLine({ label, value, strong = false }) {
   return <div className={`flex justify-between gap-4 py-0.5 ${strong ? 'font-medium' : ''}`}>
     <span>{label}</span><span className="tabular-nums">{value}</span>
@@ -159,6 +166,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
   // Only a pay run drafted with time off turned on carries these figures.
   const showPto = run.checks.some(check => check.ptoPayCents > 0);
   const showHoliday = run.checks.some(check => check.holidayPayCents > 0);
+  const showBank = isFinal && run.checks.some(check => check.bank);
   return <>
     <Table aria-label="Paychecks">
       <THead><TR>
@@ -168,6 +176,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
         <TH align="right">Rate</TH><TH align="right">Gross</TH>
         <TH align="right">Federal income tax</TH><TH align="right">Social Security</TH><TH align="right">Medicare</TH><TH align="right">Net</TH>
         {isFinal && <TH>Check</TH>}
+        {showBank && <TH>Bank</TH>}
       </TR></THead>
       <TBody>
         {run.checks.map(check => <TR key={check.id}>
@@ -188,6 +197,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
               <div><Button variant="secondary" onClick={() => onStub(check)} aria-label={`Stub for ${check.name}`}>Stub</Button></div>
             </div>
           </TD>}
+          {showBank && <TD>{check.bank ? bankWords(check.bank) : ''}</TD>}
         </TR>)}
       </TBody>
     </Table>

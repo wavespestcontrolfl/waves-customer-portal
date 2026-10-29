@@ -6,6 +6,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { etParts, etDateString, validCalendarDate } = require('../utils/datetime-et');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const { taxPeriodFor } = require('../utils/tax-period');
+const featureGates = require('../config/feature-gates');
 const {
   buildPnlReport, getPeriodRange, paidRevenueForWindow, salesTaxCollectedForWindow,
   rateAsOf, dateCellStr, prorateAssetDepreciation, annotateMidQuarter,
@@ -15,6 +16,9 @@ const { invoiceAmountDue } = require('../services/invoice-helpers');
 const TaxCalculator = require('../services/tax-calculator');
 
 router.use(adminAuthenticate, requireAdmin);
+
+// GATE_PAYROLL_BANK_MATCH, read at call time (the typeof guard keeps a feature-gates test mock without the reader working: off).
+const payrollBankMatchOn = () => typeof featureGates.payrollBankMatchLive === 'function' && featureGates.payrollBankMatchLive();
 
 // ═══════════════════════════════════════════════════════════════
 // DASHBOARD
@@ -741,6 +745,14 @@ router.get('/filings', async (req, res, next) => {
     if (year) query = query.whereRaw("period_label LIKE ?", [`%${year}%`]);
     if (status) query = query.where('status', status);
     const filings = await query;
+    // Payroll bank match: the date a payroll tax payment was seen in the bank. Shown next to the row;
+    // the owner's own Mark filed / paid stays the only thing that changes its status.
+    let seenInBank = null;
+    if (payrollBankMatchOn() && filings.length) {
+      seenInBank = new Map((await db('bank_transactions').whereIn('matched_tax_filing_id', filings.map(f => f.id))
+        .select('matched_tax_filing_id', db.raw("to_char(txn_date, 'YYYY-MM-DD') as txn_date")))
+        .map(line => [line.matched_tax_filing_id, line.txn_date]));
+    }
     res.json({
       filings: filings.map(f => ({
         id: f.id, filingType: f.filing_type, title: f.title,
@@ -750,6 +762,7 @@ router.get('/filings', async (req, res, next) => {
         amountPaid: f.amount_paid ? parseFloat(f.amount_paid) : null,
         filedDate: f.filed_date, paidDate: f.paid_date,
         confirmationNumber: f.confirmation_number, notes: f.notes,
+        ...(seenInBank && seenInBank.has(f.id) ? { bankSeenOn: seenInBank.get(f.id) } : {}),
       })),
     });
   } catch (err) { next(err); }
@@ -2368,7 +2381,13 @@ router.get('/bank-import/transactions', async (req, res, next) => {
     }
     const rows = await q.select('*');
     // with GATE_TAX_LEDGER off, nothing a ledger rule wrote reaches this tab
-    const shown = rows.slice(0, limit).map((r) => (r.suggestion && r.suggestion.rule ? { ...r, suggestion: taxLedgerRules.visibleSuggestion(r.suggestion) } : r));
+    const payrollOn = payrollBankMatchOn();
+    const shown = rows.slice(0, limit).map((raw) => {
+      // the payroll link columns exist only for the gate: off, a row has exactly today's keys
+      const { matched_payroll_check_id: _check, matched_tax_filing_id: _filing, ...rest } = raw;
+      const r = payrollOn ? raw : rest;
+      return r.suggestion && r.suggestion.rule ? { ...r, suggestion: taxLedgerRules.visibleSuggestion(r.suggestion) } : r;
+    });
     res.json({ transactions: shown, hasMore: rows.length > limit, offset, limit });
   } catch (err) { next(err); }
 });
@@ -2707,6 +2726,40 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
     }
     if (!claimed) return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// Payroll bank match (GATE_PAYROLL_BANK_MATCH): the owner's pick for a suggested paycheck or payroll tax
+// row. Same claim as the automatic match (a locked paycheck or calendar row, an expense in "Payroll
+// (counted from pay runs)", the line linked), judged by the matcher's amount and date rules. Never
+// marks the calendar row paid and moves no money.
+router.post('/bank-import/:id/link-payroll', async (req, res, next) => {
+  try {
+    if (!payrollBankMatchOn()) return res.status(404).json({ error: 'payroll bank match is not turned on' });
+    const { checkId, filingId } = req.body || {};
+    if (!!checkId === !!filingId) return res.status(400).json({ error: 'send exactly one of checkId or filingId' });
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(checkId || filingId))) return res.status(400).json({ error: 'checkId or filingId must be an id' });
+    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status', 'suggestion');
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits link to paychecks' });
+    if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
+    const outcome = await bankImport.claimPayrollLink({
+      row,
+      check: checkId ? { id: String(checkId) } : null,
+      filing: filingId ? { id: String(filingId) } : null,
+      by: 'owner',
+    });
+    if (outcome.ok) return res.json({ success: true, expenseId: outcome.expense.id });
+    const messages = {
+      implausible: [400, 'that paycheck or tax row does not plausibly match this bank row (amount or date outside the matching window)'],
+      check_not_final: [409, 'that paycheck is not final'],
+      filing_gone: [409, 'that payroll tax row is gone'],
+      no_category: [409, 'the category "Payroll (counted from pay runs)" is missing'],
+      taken: [409, 'that paycheck or tax row is already linked to another bank row'],
+    };
+    const [status, error] = messages[outcome.reason] || [409, 'row was matched by someone else mid-flight'];
+    return res.status(status).json({ error });
   } catch (err) { next(err); }
 });
 

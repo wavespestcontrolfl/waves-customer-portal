@@ -16,7 +16,10 @@ const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const db = require('../models/db');
 const logger = require('./logger');
-const { gateEnvValue } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+const { gateEnvValue } = featureGates;
+const payrollMatch = require('./payroll-bank-match');
+const { taxPeriodFor } = require('../utils/tax-period');
 
 const PAYOUT_DATE_WINDOW_DAYS = 3;  // Stripe arrival vs bank posting drift
 const EXPENSE_DATE_WINDOW_DAYS = 5; // receipt date vs card posting drift
@@ -1421,8 +1424,249 @@ function manualLinkOnly(row) {
 // ledger rerun holding it for the owner) makes the claim UPDATE land nothing
 const NO_MANUAL_LINK_SQL = "coalesce(suggestion->>'manualLink','') <> 'true'";
 
+// ── Payroll bank match (GATE_PAYROLL_BANK_MATCH, owner 2026-10-28) ──────────
+// Paychecks and payroll tax payments are one more candidate source in THIS
+// flow: the pure pairing rules live in payroll-bank-match.js, and the claim
+// below follows the expense claim's rules (status CAS, bank-change and Income
+// guards, manualLink hold, locked targets, a unique index per target). An
+// exact one-to-one pair links the line and books it in the category the P&L
+// and Schedule C leave out ("Payroll (counted from pay runs)"); anything else
+// parks in suggestion.payrollCandidates for the owner. Never moves money and
+// never marks a calendar row paid. Gate off: none of this runs.
+const PAYROLL_NOTE_MARK = '[Payroll bank match]';
+const PAYROLL_CANDIDATE_KEYS = ['payrollCandidates', 'payrollCandidatesTotal'];
+function payrollBankMatchOn() {
+  return typeof featureGates.payrollBankMatchLive === 'function' && featureGates.payrollBankMatchLive();
+}
+
+// Finalized checks and payroll deposit / RT-6 calendar rows with no bank line yet, and the
+// unmatched business-account debits that could be the other half of a pair.
+async function loadPayrollMatchContext(conn = db) {
+  const checks = await conn('payroll_checks as pc')
+    .leftJoin('bank_transactions as bt', 'bt.matched_payroll_check_id', 'pc.id')
+    .where('pc.status', 'finalized')
+    .whereNull('bt.id')
+    .select('pc.id', 'pc.employee_name', 'pc.net_cents', 'pc.pay_method', 'pc.check_number', conn.raw("to_char(pc.pay_date, 'YYYY-MM-DD') as pay_date"));
+  const filings = await conn('tax_filing_calendar as f')
+    .leftJoin('bank_transactions as bt', 'bt.matched_tax_filing_id', 'f.id')
+    .where(function payrollRows() { this.where('f.source_key', 'like', 'payroll:941_deposit:%').orWhere('f.source_key', 'like', 'payroll:rt6:%'); })
+    .whereNull('bt.id')
+    .whereRaw('coalesce(f.amount_paid, f.amount_due) is not null')
+    .select('f.id', 'f.source_key', 'f.title', 'f.amount_due', 'f.amount_paid', conn.raw("to_char(f.due_date, 'YYYY-MM-DD') as due_date"));
+  const peerRows = await conn('bank_transactions')
+    .where({ status: 'unmatched', direction: 'debit', account_type: 'bank' })
+    .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type');
+  const peers = peerRows.map(p => ({ ...p, txn_date: toDateStr(p.txn_date) }));
+  return { checks, filings, peers };
+}
+
+function payrollPlanFor(row, txnDate, ctx, sug) {
+  const planRow = { id: row.id, txn_date: txnDate, description: row.description, amount: row.amount, direction: row.direction, account_type: row.account_type };
+  const net = payrollMatch.planNetPay({ row: planRow, checks: ctx.checks, peers: ctx.peers, rejected: sug.rejectedPayrollCheckIds || [] });
+  if (net.action !== 'none') return net;
+  return payrollMatch.planTaxPayment({ row: planRow, filings: ctx.filings, peers: ctx.peers, rejected: sug.rejectedTaxFilingIds || [] });
+}
+
+// Claim one bank line for a paycheck or a payroll tax row: ONE transaction, the bank row and the
+// target locked, an expense in the pay-run category inserted, the line linked. by = 'auto'
+// re-plans on a fresh read under the lock (a rival line or check that appeared since the
+// survey makes it a suggestion); by = 'owner' needs only the plausibility rules.
+// Returns { ok: true, expense } or { ok: false, reason }.
+async function claimPayrollLink({ row, check = null, filing = null, by = 'auto' }) {
+  const { PAY_RUN_CATEGORY_NAME } = require('./pay-run-books');
+  let result = { ok: false, reason: 'row_changed' };
+  try {
+    await db.transaction(async (trx) => {
+      const live = await trx('bank_transactions').where({ id: row.id }).forUpdate()
+        .first('id', 'status', 'amount', 'txn_date', 'description', 'direction', 'account_type', 'account_label', 'suggestion');
+      if (!live || live.status !== 'unmatched' || hasUnresolvedBankChange(live)
+        || (live.suggestion && live.suggestion.decision === 'income')) return;
+      if (by === 'auto' && manualLinkOnly(live)) return;
+      const txnDate = toDateStr(live.txn_date);
+      const planRow = { ...live, txn_date: txnDate };
+
+      let target;
+      if (check) {
+        target = await trx('payroll_checks').where({ id: check.id }).forUpdate()
+          .first('id', 'status', 'employee_name', 'net_cents', 'pay_method', 'check_number', trx.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"));
+        if (!target || target.status !== 'finalized') { result = { ok: false, reason: 'check_not_final' }; return; }
+        if (by === 'owner' && !payrollMatch.isPlausibleCheckLink(planRow, target)) { result = { ok: false, reason: 'implausible' }; return; }
+      } else {
+        target = await trx('tax_filing_calendar').where({ id: filing.id }).forUpdate()
+          .first('id', 'source_key', 'title', 'amount_due', 'amount_paid', trx.raw("to_char(due_date, 'YYYY-MM-DD') as due_date"));
+        if (!target || !payrollMatch.taxWindow(target)) { result = { ok: false, reason: 'filing_gone' }; return; }
+        if (by === 'owner' && !payrollMatch.isPlausibleTaxLink(planRow, target)) { result = { ok: false, reason: 'implausible' }; return; }
+      }
+      if (by === 'auto') {
+        const fresh = await loadPayrollMatchContext(trx);
+        const plan = payrollPlanFor(live, txnDate, fresh, live.suggestion || {});
+        const sameTarget = check ? plan.check && plan.check.id === check.id : plan.filing && plan.filing.id === filing.id;
+        if (plan.action !== 'link' || !sameTarget) { result = { ok: false, reason: 'no_longer_unique' }; return; }
+      }
+
+      const category = await trx('expense_categories').where({ name: PAY_RUN_CATEGORY_NAME, counted_from_pay_runs: true }).first('id');
+      if (!category) { result = { ok: false, reason: 'no_category' }; return; }
+      const period = taxPeriodFor(txnDate);
+      if (!period) { result = { ok: false, reason: 'bad_date' }; return; }
+
+      const taxKind = filing ? payrollMatch.taxWindow(target).tax : null;
+      const vendor = check ? target.employee_name : (taxKind === 'florida' ? 'Florida Department of Revenue' : 'IRS');
+      const [expense] = await trx('expenses').insert({
+        category_id: category.id,
+        description: String(live.description).slice(0, 300),
+        amount: live.amount,
+        // The deduction comes from the pay runs (pay-run-books), not from this bank line.
+        tax_deductible_amount: 0,
+        expense_date: period.date,
+        vendor_name: String(vendor || live.description).slice(0, 200),
+        payment_method: check && target.pay_method === 'check' ? 'check' : 'ach',
+        tax_year: period.tax_year,
+        quarter: period.quarter,
+        notes: `[Bank import ${live.account_label}] ${PAYROLL_NOTE_MARK} ${check ? 'net pay' : (taxKind === 'florida' ? 'Florida RT-6' : 'federal payroll tax deposit')}`,
+      }).returning('*');
+
+      const changed = await trx('bank_transactions')
+        .where({ id: live.id, status: 'unmatched' })
+        .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+        .whereRaw(NO_INCOME_DECISION_SQL)
+        .whereRaw(by === 'auto' ? NO_MANUAL_LINK_SQL : '1 = 1')
+        .update({
+          status: 'created_expense',
+          matched_expense_id: expense.id,
+          matched_payroll_check_id: check ? target.id : null,
+          matched_tax_filing_id: filing ? target.id : null,
+          match_method: check ? 'payroll_check' : 'payroll_tax',
+          matched_at: new Date(),
+          updated_at: new Date(),
+          suggestion: suggestionMerge({
+            payrollMatch: {
+              at: new Date().toISOString(),
+              by,
+              ...(check ? { checkId: target.id } : { filingId: target.id, tax: taxKind }),
+              expenseId: expense.id,
+            },
+          }, [...PAYROLL_CANDIDATE_KEYS, 'noMatch']),
+        });
+      if (!changed) throw Object.assign(new Error('row was matched by someone else mid-flight'), { code: 'PAYROLL_CLAIM_LOST' });
+      result = { ok: true, expense, target };
+    });
+  } catch (err) {
+    if (isUniqueViolation(err) || err.code === 'PAYROLL_CLAIM_LOST') return { ok: false, reason: 'taken' };
+    throw err;
+  }
+  return result;
+}
+
+// One bank debit against the payroll candidates. True = the line was linked (the caller skips
+// the rest of the flow). A payroll error never breaks the bank pass.
+async function payrollMatchStep(row, txnDate, ctx, summary) {
+  if (row.direction !== 'debit' || row.account_type !== 'bank') return false;
+  try {
+    const sug = row.suggestion || {};
+    const plan = payrollPlanFor(row, txnDate, ctx, sug);
+    if (plan.action === 'link' && !manualLinkOnly(row)) {
+      const claim = await claimPayrollLink({ row, check: plan.check || null, filing: plan.filing || null, by: 'auto' });
+      if (claim.ok) {
+        if (plan.check) { ctx.checks = ctx.checks.filter(c => c.id !== plan.check.id); summary.payrollChecksLinked++; } else { ctx.filings = ctx.filings.filter(f => f.id !== plan.filing.id); summary.payrollTaxLinked++; }
+        ctx.peers = ctx.peers.filter(p => p.id !== row.id);
+        return true;
+      }
+      return false;
+    }
+    const candidates = plan.action === 'link'
+      ? [plan.check ? { kind: 'check', id: plan.check.id, name: plan.check.employee_name, netCents: Number(plan.check.net_cents), payDate: plan.check.pay_date, checkNumber: plan.check.check_number || null }
+        : { kind: 'tax', id: plan.filing.id, title: plan.filing.title, amountCents: payrollMatch.filingCents(plan.filing), dueDate: plan.filing.due_date }]
+      : (plan.candidates || []);
+    if (candidates.length) {
+      if (JSON.stringify(sug.payrollCandidates || null) !== JSON.stringify(candidates)) {
+        summary.ambiguous++;
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
+          suggestion: suggestionMerge({ payrollCandidates: candidates, payrollCandidatesTotal: candidates.length }, ['noMatch']),
+          updated_at: new Date(),
+        });
+      }
+    } else if (sug.payrollCandidates) {
+      // the pair is gone (linked elsewhere, voided, out of window): a stale pick can only 409
+      await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
+        suggestion: suggestionMerge({}, PAYROLL_CANDIDATE_KEYS),
+        updated_at: new Date(),
+      });
+    }
+  } catch (err) {
+    logger.warn(`[bank-import] payroll match skipped for row ${row.id}: ${err.code || err.name || 'error'}`);
+  }
+  return false;
+}
+
+// A voided pay run unlinks the lines matched to its checks: the line returns to review, the
+// expense this match created is removed (it counted nothing in the books), and the audit trail
+// stays in suggestion.payrollUnlinked. The check is remembered as rejected for that line.
+async function releaseVoidedPayrollLinks() {
+  if (!payrollBankMatchOn()) return 0;
+  const rows = await db('bank_transactions as bt')
+    .join('payroll_checks as pc', 'pc.id', 'bt.matched_payroll_check_id')
+    .where('pc.status', 'voided')
+    .select('bt.id as id', 'bt.matched_payroll_check_id as check_id');
+  let released = 0;
+  for (const found of rows) {
+    try {
+      await db.transaction(async (trx) => {
+        const live = await trx('bank_transactions').where({ id: found.id, matched_payroll_check_id: found.check_id }).forUpdate()
+          .first('id', 'matched_expense_id', 'suggestion');
+        if (!live) return;
+        const rejectedIds = [...new Set([...((live.suggestion && live.suggestion.rejectedPayrollCheckIds) || []), found.check_id])];
+        const changed = await trx('bank_transactions').where({ id: live.id, matched_payroll_check_id: found.check_id }).update({
+          status: 'unmatched',
+          matched_expense_id: null,
+          matched_payroll_check_id: null,
+          match_method: null,
+          matched_at: null,
+          suggestion: suggestionMerge({
+            rejectedPayrollCheckIds: rejectedIds,
+            payrollUnlinked: { at: new Date().toISOString(), checkId: found.check_id, reason: 'the pay run was voided' },
+          }, ['payrollMatch']),
+          updated_at: new Date(),
+        });
+        if (!changed) return;
+        if (live.matched_expense_id) {
+          await trx('expenses').where({ id: live.matched_expense_id }).where('notes', 'like', `%${PAYROLL_NOTE_MARK}%`).del();
+        }
+        released++;
+      });
+    } catch (err) {
+      logger.warn(`[bank-import] voided payroll link on row ${found.id} not released: ${err.code || err.name || 'error'}`);
+    }
+  }
+  return released;
+}
+
+// Top of every gated pass: free a line whose expense was deleted (the owner's undo, see the unlink
+// route) from its paycheck link and remember the target as rejected, so the matcher does not
+// re-book what the owner just undid; then release the lines of voided pay runs.
+async function healPayrollLinks() {
+  const orphans = await db('bank_transactions')
+    .where({ status: 'unmatched' })
+    .where(function linked() { this.whereNotNull('matched_payroll_check_id').orWhereNotNull('matched_tax_filing_id'); })
+    .select('id', 'matched_payroll_check_id', 'matched_tax_filing_id', 'suggestion');
+  for (const o of orphans) {
+    const sug = o.suggestion || {};
+    const patch = {};
+    if (o.matched_payroll_check_id) patch.rejectedPayrollCheckIds = [...new Set([...(sug.rejectedPayrollCheckIds || []), o.matched_payroll_check_id])];
+    if (o.matched_tax_filing_id) patch.rejectedTaxFilingIds = [...new Set([...(sug.rejectedTaxFilingIds || []), o.matched_tax_filing_id])];
+    await db('bank_transactions').where({ id: o.id, status: 'unmatched' }).update({
+      matched_payroll_check_id: null,
+      matched_tax_filing_id: null,
+      suggestion: suggestionMerge(patch, ['payrollMatch']),
+      updated_at: new Date(),
+    });
+  }
+  return orphans.length + await releaseVoidedPayrollLinks();
+}
+
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
+  const payrollOn = payrollBankMatchOn();
+  if (payrollOn) await healPayrollLinks();
   const reconciliation = await retryPendingReconciliations();
   const bounded = Number.isFinite(limit) && limit > 0;
   const baseSelect = () => db('bank_transactions')
@@ -1442,7 +1686,9 @@ async function runDeterministicMatching({ limit } = {}) {
   // 'examined' is the ledger's marker (tax-ledger-rules): an owner rule or
   // an Income decision replaced this pass's transfer flag and kept the
   // examination evidence under that key, so the row is not a fresh row.
-  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch','examined'])";
+  const EXAMINED_SQL = payrollOn
+    ? "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch','examined','payrollCandidates'])"
+    : "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch','examined'])";
   // A processed row that produced NOTHING (no candidates at all, or a
   // credit the matcher never matches) must still leave the fresh pool, or a
   // bounded pass would rescan the same oldest rows forever while
@@ -1524,9 +1770,19 @@ async function runDeterministicMatching({ limit } = {}) {
   const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted, claimVerifyReverted: reconciliation.claimVerifyReverted, payoutVerifyReverted: reconciliation.payoutVerifyReverted };
   const ledgerOn = ledgerRulesOn();
   const rulingGuardSql = ledgerOn ? NO_OWNER_RULING_SQL : NO_DECISION_SQL;
+  let payrollCtx = null;
+  if (payrollOn) {
+    summary.payrollChecksLinked = 0;
+    summary.payrollTaxLinked = 0;
+    try { payrollCtx = await loadPayrollMatchContext(); } catch (err) {
+      logger.warn(`[bank-import] payroll match context not loaded: ${err.code || err.name || 'error'}`);
+    }
+  }
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
+    // Payroll first: net pay by bank transfer can read "transfer", which the next branch parks as an internal move.
+    if (payrollCtx && await payrollMatchStep(row, txnDate, payrollCtx, summary)) continue;
     // An operator's explicit unlink is a ruling: the automatic pass never
     // re-proposes ANY previously rejected target — including earlier
     // rejections, not just the latest. (Manual re-link stays possible.)
@@ -2061,6 +2317,8 @@ module.exports = {
   surveyPayoutCandidatesForRow,
   rejectedTargets,
   resetDanglingLinks,
+  claimPayrollLink,
+  releaseVoidedPayrollLinks,
   healEditedExpenseLinks,
   healUnreconciledLinks,
   healOrphanRefunds,

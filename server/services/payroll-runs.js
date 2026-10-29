@@ -52,7 +52,7 @@ const {
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
 const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
-const { shiftCloseReviewLive, payrollTimeOffLive } = require('../config/feature-gates');
+const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive } = require('../config/feature-gates');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_REASON = 500;
@@ -82,6 +82,10 @@ const EMPLOYER_TAX_KEYS = ['employer_social_security_cents', 'employer_medicare_
 // GATE_PAYROLL_TIME_OFF, read at call time. The typeof guard keeps a test mock of
 // feature-gates that lacks the reader working (off).
 const timeOffOn = () => typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
+
+// GATE_PAYROLL_BANK_MATCH, read at call time, with the same guard. On, a finalized check carries
+// its bank status; off, no response gains a key.
+const bankMatchOn = () => typeof payrollBankMatchLive === 'function' && payrollBankMatchLive();
 
 // payroll_checks time-off columns, read and written only with the gate on.
 const TIME_OFF_MINUTE_COLUMNS = ['pto_minutes', 'holiday_minutes'];
@@ -458,9 +462,26 @@ async function evaluate(conn, run, { lock = false } = {}) {
   return { checks, blocked, waiting };
 }
 
+// Bank status of each finalized check (GATE_PAYROLL_BANK_MATCH): matched with the date of the
+// bank line, needs the owner's pick when a suggestion names the check, else not seen yet.
+async function bankStatusByCheck(conn, rows) {
+  const ids = rows.map((row) => row.id);
+  const matched = new Map((await conn('bank_transactions').whereIn('matched_payroll_check_id', ids)
+    .select('matched_payroll_check_id', conn.raw("to_char(txn_date, 'YYYY-MM-DD') as txn_date")))
+    .map((line) => [line.matched_payroll_check_id, line.txn_date]));
+  const parked = await conn('bank_transactions').where({ status: 'unmatched' })
+    .whereRaw("jsonb_exists(suggestion, 'payrollCandidates')").select('suggestion');
+  const pickable = new Set();
+  for (const line of parked) for (const c of (line.suggestion.payrollCandidates || [])) if (c.kind === 'check') pickable.add(c.id);
+  return new Map(ids.map((id) => [id, matched.has(id)
+    ? { state: 'matched', date: matched.get(id) }
+    : { state: pickable.has(id) ? 'needs_pick' : 'not_seen' }]));
+}
+
 async function runView(conn, runId, { evaluation = null } = {}) {
   const run = await loadRun(conn, runId);
   const rows = await loadCheckRows(conn, runId);
+  const bank = bankMatchOn() && run.status === 'finalized' && rows.length ? await bankStatusByCheck(conn, rows) : null;
   const view = {
     id: run.id,
     weekStart: run.week_start,
@@ -471,7 +492,7 @@ async function runView(conn, runId, { evaluation = null } = {}) {
     finalizedAt: iso(run.finalized_at),
     voidedAt: iso(run.voided_at),
     voidReason: run.void_reason || null,
-    checks: rows.map(serializeCheck),
+    checks: rows.map((row) => (bank ? { ...serializeCheck(row), bank: bank.get(row.id) } : serializeCheck(row))),
     blocked: [],
     waiting: [],
     stale: false,
@@ -662,6 +683,14 @@ async function voidRun(runId, input, actor, conn = db) {
     await audit(trx, actorId, 'payroll.run_voided', 'payroll_runs', runId, { run_id: runId });
   });
   await syncPayrollFilingsSafe({ conn });
+  // Bank lines matched to this run's checks go back to review. Never fails the void.
+  if (bankMatchOn()) {
+    try {
+      await require('./bank-import').releaseVoidedPayrollLinks();
+    } catch (err) {
+      require('./logger').warn(`[payroll-runs] bank lines of a voided run not released: ${err.code || err.name || 'error'}`);
+    }
+  }
   return runView(conn, runId);
 }
 
