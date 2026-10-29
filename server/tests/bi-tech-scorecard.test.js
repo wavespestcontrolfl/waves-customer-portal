@@ -41,6 +41,7 @@ const actual = (o) => ({
   stops: o.stops, physicalStops: o.physical ?? o.stops, onSiteMinutes: o.onSite ?? null,
   onSiteCoverage: { covered: o.covered ?? 0, total: o.stops, unbaselined: o.unbaselined ?? 0 },
   driveMinutes: o.drive ?? null,
+  driveCoverage: o.drive == null ? null : { timed: o.timed ?? o.trips ?? 1, total: o.trips ?? 1 },
 });
 const dayRow = (technicianId, technician, a) => ({ technicianId, technician, actual: a });
 
@@ -90,7 +91,7 @@ describe('buildTechScorecard', () => {
       technicianId: A, daysWorked: 3, completedStops: 15, stopsPerDay: 5,
       onSiteMinutesPerStop: 25, onSiteTargetMinutes: 25, onSiteCoverage: { recorded: 15, completed: 15 },
       // 66 timed drive minutes over the 11 stops of the two days that have them
-      driveMinutesPerStop: 6, driveCoverage: { days: 2, of: 3 },
+      driveMinutesPerStop: 6, driveCoverage: { days: 2, of: 3, partialDays: 0 },
       callbacks: 1, reviewAsks: 6, revenuePerDay: 500, costPerDay: 280, lowSample: false, reasons: {},
     });
     expect(mockRates).toHaveBeenCalledWith(expect.anything(), A, '2026-10-26');
@@ -157,6 +158,21 @@ describe('buildTechScorecard', () => {
       { date: '2026-10-26', byTech: [dayRow(A, 'Ada', actual({ stops: 5, onSite: 125, covered: 5, unbaselined: 3 }))] },
     ] });
     expect((await buildTechScorecard(fakeConn(), NOW)).rows[0].onSiteCoverage).toEqual({ recorded: 5, completed: 8 });
+  });
+
+  test('a day with only some timed Bouncie trips is left out of drive per stop and counted as partial', async () => {
+    mockDayScorecard.mockResolvedValue({ days: [
+      { date: '2026-10-26', byTech: [dayRow(A, 'Ada', actual({ stops: 5, drive: 10, trips: 4, timed: 1 }))] },
+      { date: '2026-10-27', byTech: [dayRow(A, 'Ada', actual({ stops: 6, drive: 36, trips: 3 }))] },
+    ] });
+    const [row] = (await buildTechScorecard(fakeConn(), NOW)).rows;
+    expect(row).toMatchObject({ driveMinutesPerStop: 6, driveCoverage: { days: 1, of: 2, partialDays: 1 } });
+    mockDayScorecard.mockResolvedValue({ days: [
+      { date: '2026-10-26', byTech: [dayRow(A, 'Ada', actual({ stops: 5, drive: 10, trips: 4, timed: 1 }))] },
+    ] });
+    const [only] = (await buildTechScorecard(fakeConn(), NOW)).rows;
+    expect(only.driveMinutesPerStop).toBeNull();
+    expect(only.reasons.driveMinutesPerStop).toBe('Bouncie trips only partly timed');
   });
 
   test('a visit group with no proven physical stop count falls back to completed visits', async () => {

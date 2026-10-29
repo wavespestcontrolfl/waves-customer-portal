@@ -66,7 +66,7 @@ function totalsByTechnician(days) {
       if (!technicianId || !(stops > 0)) continue;
       const t = byTech.get(technicianId) || {
         technicianId, technician, dates: [], stops: 0,
-        onSiteMinutes: 0, onSiteRecorded: 0, onSiteCompleted: 0, driveMinutes: 0, driveStops: 0, driveDays: 0,
+        onSiteMinutes: 0, onSiteRecorded: 0, onSiteCompleted: 0, driveMinutes: 0, driveStops: 0, driveDays: 0, drivePartialDays: 0,
       };
       t.dates.push(day.date);
       t.stops += stops;
@@ -77,10 +77,15 @@ function totalsByTechnician(days) {
         t.onSiteMinutes += actual.onSiteMinutes;
         t.onSiteRecorded += actual.onSiteCoverage.covered;
       }
-      if (actual.driveMinutes != null) {
+      // Only a day whose every Bouncie trip has a duration counts: a partly timed day's sum would understate
+      // the drive and still divide by all its stops. It is counted apart as partialDays.
+      const trips = actual.driveCoverage;
+      if (actual.driveMinutes != null && trips && trips.total > 0 && trips.timed === trips.total) {
         t.driveMinutes += actual.driveMinutes;
         t.driveStops += stops;
         t.driveDays += 1;
+      } else if (actual.driveMinutes != null) {
+        t.drivePartialDays += 1;
       }
       byTech.set(technicianId, t);
     }
@@ -133,8 +138,9 @@ async function buildRow(conn, t, { callbacks, asks, leaderboard }) {
     onSiteTargetMinutes: ON_SITE_TARGET_MINUTES,
     onSiteCoverage: { recorded: t.onSiteRecorded, completed: t.onSiteCompleted },
     driveMinutesPerStop: known('driveMinutesPerStop',
-      t.driveStops ? round(t.driveMinutes / t.driveStops, 1) : null, 'no timed Bouncie trips'),
-    driveCoverage: { days: t.driveDays, of: daysWorked },
+      t.driveStops ? round(t.driveMinutes / t.driveStops, 1) : null,
+      t.drivePartialDays ? 'Bouncie trips only partly timed' : 'no timed Bouncie trips'),
+    driveCoverage: { days: t.driveDays, of: daysWorked, partialDays: t.drivePartialDays },
     callbacks: known('callbacks', callbacks ? (callbacks.get(id) || 0) : null, 'callback query failed'),
     reviewAsks: known('reviewAsks', asks ? (asks.get(id) || 0) : null, 'review ask query failed'),
     revenuePerDay: revenue == null ? null : round(revenue / daysWorked, 2),
