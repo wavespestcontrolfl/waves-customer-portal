@@ -597,6 +597,158 @@ postgres('payroll bank match in the bank import', () => {
       expect((await row(ids.irs)).status).toBe('created_expense');
     });
 
+    describe('post-claim verification of an automatic claim', () => {
+      // The claim commits, a competitor commits after its own re-plan, and only then does the verify run: the
+      // window a concurrent CSV upload, Plaid sync or pay run finalization can use.
+      const autoClaim = async () => {
+        const id = await line('CHECK 1042', '812.63', '2026-10-28');
+        const claim = await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'auto' });
+        expect(claim.ok).toBe(true);
+        expect((await row(id)).suggestion.payrollMatch).toMatchObject({ by: 'auto', verifyPending: true });
+        return { id, expenseId: claim.expense.id };
+      };
+      const releasedAsAmbiguous = async (id, expenseId) => {
+        const r = await row(id);
+        expect(r).toMatchObject({ status: 'unmatched', matched_expense_id: null, matched_payroll_check_id: null, match_method: null });
+        expect(r.suggestion.payrollMatch).toBeUndefined();
+        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'became_ambiguous', checkId: checkA, expenseId });
+        // the owner never turned this check down, so it is not remembered as rejected
+        expect(r.suggestion.rejectedPayrollCheckIds).toBeUndefined();
+        expect(r.suggestion.payrollCandidates.length).toBeGreaterThan(0);
+        // nothing deleted or edited: the expense is still there, in the pay-run category, as booked
+        expect(await trx('expenses').where({ id: expenseId }).first()).toMatchObject({ amount: '812.63', tax_deductible_amount: '812.63', category_id: await trx('expense_categories').where({ name: CATEGORY }).first('id').then((c) => c.id) });
+        return r;
+      };
+
+      it('clears the marker when the pairing is still the only one', async () => {
+        const { id } = await autoClaim();
+        expect(await bankImport.verifyPayrollClaim(id)).toBe('cleared');
+        const r = await row(id);
+        expect(r).toMatchObject({ status: 'created_expense', matched_payroll_check_id: checkA });
+        expect(r.suggestion.payrollMatch).toMatchObject({ by: 'auto', checkId: checkA });
+        expect(r.suggestion.payrollMatch.verifyPending).toBeUndefined();
+        // nothing left to verify
+        expect(await bankImport.verifyPayrollClaim(id)).toBeNull();
+      });
+
+      it('a normal pass leaves no marker behind', async () => {
+        const ids = await seedLines();
+        await bankImport.runDeterministicMatching();
+        for (const id of [ids.exact, ids.irs]) {
+          const r = await row(id);
+          expect(r.status).toBe('created_expense');
+          expect(r.suggestion.payrollMatch.verifyPending).toBeUndefined();
+        }
+      });
+
+      it('releases the link when a competing same-amount bank line committed after the claim', async () => {
+        const { id, expenseId } = await autoClaim();
+        const rival = await line('ONLINE TRANSFER', '812.63', '2026-10-29');
+        expect(await bankImport.verifyPayrollClaim(id)).toBe('released');
+        await releasedAsAmbiguous(id, expenseId);
+        expect((await row(rival)).status).toBe('unmatched');
+        // the next pass does not link either line; it names the kept expense beside the paycheck, creating nothing
+        await bankImport.runDeterministicMatching();
+        const parked = await row(id);
+        expect(parked.status).toBe('unmatched');
+        expect(parked.suggestion.payrollCandidates).toEqual([expect.objectContaining({
+          id: checkA, existingExpenses: [expect.objectContaining({ id: expenseId })],
+        })]);
+        expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
+      });
+
+      it('releases the link when a competing finalized check with the same net committed after the claim', async () => {
+        const { id, expenseId } = await autoClaim();
+        const twin = await insertCheck({ name: 'Sample Gamma', net: 81263 });
+        expect(await bankImport.verifyPayrollClaim(id)).toBe('released');
+        const r = await releasedAsAmbiguous(id, expenseId);
+        expect(r.suggestion.payrollCandidates.map((c) => c.id).sort()).toEqual([checkA, twin].sort());
+        expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
+      });
+
+      it('releases a competing tax payment line the same way', async () => {
+        const id = await line('IRS USATAXPYMT 270012345', '350.00', '2026-11-13');
+        const claim = await bankImport.claimPayrollLink({ row: await row(id), filing: { id: filingId }, by: 'auto' });
+        expect(claim.ok).toBe(true);
+        await line('IRS USATAXPYMT 270099999', '350.00', '2026-11-14');
+        expect(await bankImport.verifyPayrollClaim(id)).toBe('released');
+        const r = await row(id);
+        expect(r).toMatchObject({ status: 'unmatched', matched_tax_filing_id: null, matched_expense_id: null });
+        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'became_ambiguous', filingId, expenseId: claim.expense.id });
+        expect(r.suggestion.rejectedTaxFilingIds).toBeUndefined();
+        expect(await trx('expenses').where({ id: claim.expense.id }).first()).toBeDefined();
+      });
+
+      it('inside a matching pass: a competitor committing right after the claim sends the line back to review', async () => {
+        const id = await line('CHECK 1042', '812.63', '2026-10-28');
+        const real = trx;
+        let rival = null;
+        // the connection the service sees: the moment the claim's transaction returns ok, a second writer commits
+        mockConnection = new Proxy(real, {
+          get(target, key) {
+            if (key === 'transaction') {
+              return async (...args) => {
+                const result = await target.transaction(...args);
+                if (result && result.ok === true && !rival) rival = await line('ONLINE TRANSFER', '812.63', '2026-10-29');
+                return result;
+              };
+            }
+            const value = target[key];
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+        const summary = await bankImport.runDeterministicMatching();
+        mockConnection = real;
+        expect(rival).not.toBeNull();
+        expect(summary.payrollChecksLinked).toBe(0);
+        const r = await row(id);
+        expect(r.status).toBe('unmatched');
+        expect(r.suggestion.payrollUnlinked).toMatchObject({ reason: 'became_ambiguous', checkId: checkA });
+        expect(r.suggestion.payrollCandidates).toEqual([expect.objectContaining({ id: checkA })]);
+        expect((await row(rival)).status).toBe('unmatched');
+        expect(await trx('expenses').count('* as n').first()).toMatchObject({ n: '1' });
+      });
+
+      it('crash recovery: the next pass verifies a link whose marker was left behind', async () => {
+        const { id, expenseId } = await autoClaim();
+        const clean = await line('CHECK 1043', '770.10', '2026-10-29');
+        // a clean one: nothing competes, the sweep clears the marker
+        const other = await bankImport.claimPayrollLink({ row: await row(clean), check: { id: checkB }, by: 'auto' });
+        expect(other.ok).toBe(true);
+        await bankImport.runDeterministicMatching();
+        expect((await row(clean)).suggestion.payrollMatch.verifyPending).toBeUndefined();
+        expect((await row(id)).suggestion.payrollMatch.verifyPending).toBeUndefined();
+        expect((await row(id)).status).toBe('created_expense');
+
+        // an ambiguous one: a competitor arrived while the process was down
+        await trx('bank_transactions').where({ id }).update({ suggestion: trx.raw("jsonb_set(suggestion, '{payrollMatch,verifyPending}', 'true')") });
+        await line('ONLINE TRANSFER', '812.63', '2026-10-29');
+        await bankImport.runDeterministicMatching();
+        await releasedAsAmbiguous(id, expenseId);
+      });
+
+      it('an owner link never gets a marker, and a stale verify does not touch it', async () => {
+        const id = await line('CHECK 1042', '812.63', '2026-10-28');
+        const ok = await bankImport.claimPayrollLink({ row: await row(id), check: { id: checkA }, by: 'owner' });
+        expect(ok.ok).toBe(true);
+        expect((await row(id)).suggestion.payrollMatch).toMatchObject({ by: 'owner' });
+        expect((await row(id)).suggestion.payrollMatch.verifyPending).toBeUndefined();
+        await line('ONLINE TRANSFER', '812.63', '2026-10-29');
+        expect(await bankImport.verifyPayrollClaim(id)).toBeNull();
+        expect(await row(id)).toMatchObject({ status: 'created_expense', matched_payroll_check_id: checkA });
+        await bankImport.runDeterministicMatching();
+        expect(await row(id)).toMatchObject({ status: 'created_expense', matched_payroll_check_id: checkA });
+      });
+
+      it('with the gate off no marker is written and no verify runs', async () => {
+        delete process.env[GATE];
+        const id = await line('CHECK 1042', '812.63', '2026-10-28');
+        await trx('bank_transactions').where({ id }).update({ suggestion: JSON.stringify({ payrollMatch: { by: 'auto', verifyPending: true } }) });
+        await bankImport.runDeterministicMatching();
+        expect((await row(id)).suggestion.payrollMatch.verifyPending).toBe(true);
+      });
+    });
+
     it('keeps an undo: deleting the created expense frees the line and the matcher does not re-book it', async () => {
       const ids = await seedLines();
       await bankImport.runDeterministicMatching();

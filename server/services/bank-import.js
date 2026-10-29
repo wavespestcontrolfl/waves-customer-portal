@@ -1635,7 +1635,9 @@ async function claimPayrollLink({ row, check = null, filing = null, by = 'auto',
           matched_at: new Date(),
           updated_at: new Date(),
           suggestion: suggestionMerge({
-            payrollMatch: { at: new Date().toISOString(), by, ...book.evidence, expenseId: expense.id, ...kept },
+            // an automatic claim carries its verify marker (payrollMatch.verifyPending), committed with the link:
+            // see verifyPayrollClaim. An owner's pick is the owner's own judgement and gets none.
+            payrollMatch: { at: new Date().toISOString(), by, ...book.evidence, expenseId: expense.id, ...kept, ...(by === 'auto' ? { verifyPending: true } : {}) },
           }, [...PAYROLL_CANDIDATE_KEYS, 'noMatch']),
         });
       if (!changed) throw claimStop('taken');
@@ -1659,6 +1661,8 @@ async function payrollMatchStep(row, txnDate, ctx, summary) {
     if (plan.action === 'link' && !manualLinkOnly(row)) {
       const claim = await claimPayrollLink({ row, check: plan.check, filing: plan.filing, by: 'auto' });
       if (claim.ok) {
+        // post-claim verify: a competitor committed after the claim's own re-plan puts the line back to review
+        if (await verifyPayrollClaim(row.id) === 'released') { summary.ambiguous++; return true; }
         const kind = payrollKindOf(plan);
         const { pool, counter } = PAYROLL_TARGET_KINDS[kind];
         ctx[pool] = ctx[pool].filter(t => t.id !== plan[kind].id);
@@ -1711,6 +1715,77 @@ async function restoreReusedCategory(trx, live) {
   const category = await trx('expense_categories').where({ name: PAY_RUN_CATEGORY_NAME }).first('id');
   if (!category) return;
   await trx('expenses').where({ id: live.matched_expense_id, category_id: category.id }).update({ category_id: pm.prevCategoryId || null });
+}
+
+// Post-claim verify of an AUTOMATIC payroll claim (the payroll twin of the expense matcher's post-claim survey).
+// The claim re-plans under its lock, but READ COMMITTED lets a competitor (a CSV upload, a Plaid sync, a pay run
+// finalized) commit a second same-amount line or paycheck after that read and before the claim commits; nothing
+// the claim locked stops it. So the claim commits payrollMatch.verifyPending with the link, and this runs right
+// after it (and from the next pass's heal for a crash in between): in one transaction the bank line and the
+// target are locked in the claim's order, the pairing is re-judged on a fresh read with the claim virtually
+// undone (the target back among the open ones), and the marker is cleared when the answer is still 'link' to
+// the same target. Otherwise the line goes back to review with payrollUnlinked (reason 'became_ambiguous')
+// and the plan's candidates parked for the owner. The expense stays as it is (the next pass names it as the
+// existing expense) and the target is NOT remembered as rejected, as the owner never turned it down.
+// The marker is the claim generation: an unlink or an owner's relink replaces payrollMatch, so a stale verify
+// finds no marker and does nothing. Returns 'cleared', 'released', null (nothing to verify) or 'error'
+// (logged; the marker stays for the next pass). Never throws.
+async function verifyPayrollClaim(id) {
+  try {
+    return await db.transaction(async (trx) => {
+      const live = await trx('bank_transactions').where({ id }).forUpdate()
+        .first('id', 'status', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'matched_expense_id', 'matched_payroll_check_id', 'matched_tax_filing_id', 'suggestion');
+      const pm = live && live.suggestion && live.suggestion.payrollMatch;
+      const kind = live && (live.matched_payroll_check_id ? 'check' : 'filing');
+      const targetId = live && (live.matched_payroll_check_id || live.matched_tax_filing_id);
+      if (!pm || !pm.verifyPending || !targetId || !['created_expense', 'matched_expense'].includes(live.status)) return null;
+      const spec = PAYROLL_TARGET_KINDS[kind];
+      const target = await spec.lock(trx, targetId);
+      if (!target || !spec.usable(target)) return null; // a void or a calendar change has its own release
+      const fresh = await loadPayrollMatchContext(trx);
+      fresh[spec.pool].push(target);
+      const plan = payrollPlanFor(live, toDateStr(live.txn_date), fresh, live.suggestion);
+      const evidence = { ...pm };
+      delete evidence.verifyPending;
+      if (plan.action === 'link' && plan[kind] && plan[kind].id === targetId) {
+        await trx('bank_transactions').where({ id: live.id }).update({ suggestion: suggestionMerge({ payrollMatch: evidence }), updated_at: new Date() });
+        return 'cleared';
+      }
+      const candidates = payrollMatch.planCandidates(plan, live);
+      await trx('bank_transactions').where({ id: live.id }).update({
+        status: 'unmatched',
+        matched_expense_id: null,
+        matched_payroll_check_id: null,
+        matched_tax_filing_id: null,
+        match_method: null,
+        matched_at: null,
+        suggestion: suggestionMerge({
+          payrollUnlinked: { at: new Date().toISOString(), [`${kind}Id`]: targetId, expenseId: live.matched_expense_id, reason: 'became_ambiguous', was: evidence },
+          ...(candidates.length ? { payrollCandidates: candidates, payrollCandidatesTotal: candidates.length } : {}),
+        }, ['payrollMatch', 'noMatch']),
+        updated_at: new Date(),
+      });
+      await restoreReusedCategory(trx, live);
+      return 'released';
+    });
+  } catch (err) {
+    logger.warn(`[bank-import] payroll claim on row ${id} not verified: ${err.code || err.name || 'error'}`);
+    return 'error';
+  }
+}
+
+// Crash recovery for verifyPayrollClaim: every line still carrying the marker at the top of a gated pass.
+// The normal path clears the marker inline, so this only sees a claim whose process died before its verify.
+// Bounded like the expense claim sweep; returns how many lines it put back to review.
+async function verifyPendingPayrollClaims() {
+  const rows = await db('bank_transactions')
+    .whereIn('status', ['created_expense', 'matched_expense'])
+    .whereRaw("suggestion->'payrollMatch'->>'verifyPending' = 'true'")
+    .orderBy('updated_at', 'asc').orderBy('id', 'asc').limit(25)
+    .select('id');
+  let released = 0;
+  for (const r of rows) if (await verifyPayrollClaim(r.id) === 'released') released++;
+  return released;
 }
 
 // A voided pay run unlinks the lines matched to its checks: the line returns to review, the
@@ -1884,7 +1959,7 @@ async function clearPayrollLinks(trx, id) {
 
 // Top of every gated pass (and of every Bank Import snapshot): free a line whose expense was deleted or
 // unlinked (the owner's undo, an edit heal) from its paycheck link, then release the lines of voided
-// pay runs and reconcile tax links. Gate off: nothing.
+// pay runs, reconcile tax links, and finish the verify of an automatic claim a crash left pending. Gate off: nothing.
 async function healPayrollLinks() {
   if (!payrollBankMatchOn()) return 0;
   const orphans = await db('bank_transactions')
@@ -1897,7 +1972,7 @@ async function healPayrollLinks() {
   for (const o of orphans) {
     if (await db.transaction((trx) => clearPayrollLinks(trx, o.id))) cleared++;
   }
-  return cleared + await releaseVoidedPayrollLinks() + await reconcileTaxLinks();
+  return cleared + await releaseVoidedPayrollLinks() + await reconcileTaxLinks() + await verifyPendingPayrollClaims();
 }
 
 // The payroll side of one matching pass, decided from the gate ONCE. Gate off: a payrollCandidates suggestion
@@ -2577,6 +2652,7 @@ module.exports = {
   rejectedTargets,
   resetDanglingLinks,
   claimPayrollLink,
+  verifyPayrollClaim,
   unlinkPayrollMatched,
   healPayrollLinks,
   releaseVoidedPayrollLinks,
