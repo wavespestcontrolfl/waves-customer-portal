@@ -189,7 +189,7 @@ router.get('/:token', readLimiter, async (req, res, next) => {
     if (setup.blocked) return res.json(setup.blocked);
     let availability = null;
     try {
-      const built = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes });
+      const built = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, offer: true });
       availability = built ? inspection().shapeAvailability(built, setup.range) : null;
     } catch (err) {
       logger.error(`[estimate-assessment] availability failed for estimate ${resolved.estimate.id}: ${err.code || err.name || 'error'}`);
@@ -223,7 +223,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await inspection().buildAvailabilityForLead(setup.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config: setup.config,
-        duration: setup.catalog.durationMinutes, timeOfDay: when.timeOfDay,
+        duration: setup.catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true,
       });
     } catch (err) {
       logger.error(`[estimate-assessment] find-slots availability failed for estimate ${resolved.estimate.id}: ${err.code || err.name || 'error'}`);

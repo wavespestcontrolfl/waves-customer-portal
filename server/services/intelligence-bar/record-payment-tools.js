@@ -12,11 +12,22 @@
  * It records money ALREADY RECEIVED by hand (cash, check, Zelle, Venmo, PayPal, other). It never charges a
  * card, creates a Stripe payment, refunds or voids; refunds and charging a saved card stay closed.
  *
- * What the screen does (and so what the card promises). The screen has NO amount and NO date field: it
- * settles the WHOLE amount due (total minus account credit applied) and stamps the payment as of now (ET).
- * So the card takes `amount` only as a check against the balance due: it must equal it. A larger amount is
- * refused (no overpayment), a smaller one is refused (no partial payment on this screen). A payment date
- * other than today is refused.
+ * What the screen does (and so what the card promises). The card records the WHOLE amount due (total minus
+ * account credit applied and any part payment already received) and stamps the payment as of now (ET). The handler
+ * drops any amount in the card's body and fences the whole balance with expectedAmountCents.
+ * So the card takes `amount` as a check against the balance due: it must equal it. A larger amount is
+ * refused (no overpayment). A smaller one is a PART payment, offered only while GATE_IB_RECORD_PAYMENT_PARTIAL AND
+ * GATE_PARTIAL_PAYMENTS are both on (owner 2026-10-29, "the bar does what the Invoices page does"); with either off it
+ * is refused (partial_not_supported). A payment date other than today is refused.
+ *
+ * A part payment (the gated path). The card states the part, what will still be owed, that reminders continue for the rest,
+ * that no receipt goes out, and the amount owed it priced from. That amount owed is pinned in `_version` and rides to the
+ * handler as `part: { amountCents, owedCentsSeen }` (internal, built here, never from a request body); the route turns it into the
+ * writer's `amountCents` + `owedCentsSeen` + the internal `barApprovedPart` marker, so recordManualPayment applies the Invoices
+ * page's own part rules (Auto Pay, payment plan, annual prepay, payer-billed, an unsettled card dispute) and its double-submit
+ * fence (a second Confirm meets a different amount owed and is refused). The preview runs the same refusals, so they show on the
+ * card. A part is not a settlement: no paid flip, no receipt, no reminder stop, no review ask, no visit closeout (so the card
+ * pins no closeout visit), no pause clear, no plan completion; the invoice stays open.
  * The handler (services/invoice-manual-payment.js recordManualPayment) then: retires any open pay-page
  * card session for the invoice (cancelled so it cannot be charged later; a payment already in flight
  * refuses), marks the invoice paid with the method / reference / recorder, appends the operator note,
@@ -55,6 +66,12 @@ function recordPaymentLive() {
   return require('../../config/feature-gates').ibRecordPaymentLive() === true;
 }
 
+// A part payment is offered only while the bar's own part gate AND the Invoices page's part gate are both on (the writer re-checks both).
+function partPaymentsOffered() {
+  const gates = require('../../config/feature-gates');
+  return gates.ibRecordPaymentPartialLive() === true && gates.partialPaymentsLive() === true;
+}
+
 const REFERENCE_LIMIT = 200;
 const NOTE_LIMIT = 400;
 const CARD_WORDS = /(card|stripe|visa|master|amex|discover|credit|debit|apple|google|tap)/i;
@@ -63,16 +80,16 @@ const RECORD_PAYMENT_TOOLS = [
   {
     name: 'record_payment',
     description: `Record a payment the office ALREADY RECEIVED outside the portal (cash, a check, Zelle, Venmo, PayPal or another manual payment) against ONE existing open invoice: the Invoices page "Record payment". It marks the invoice paid; it never charges a card, creates a Stripe payment, refunds or voids anything. The first call returns a PREVIEW and writes nothing: the invoice, the customer, the balance due, the method and reference, that no receipt is sent, and every change. The operator approves on the confirmation card; the confirmed run re-checks all of it and refuses if anything changed.
-The Invoices page records the WHOLE balance due, as of today. So amount must equal the balance due on the invoice: a larger amount (overpayment) and a smaller one (a partial payment) are refused with the balance, and a payment date other than today is refused. Effects: the invoice becomes paid with the method and reference, a payment row is added, the invoice's reminders stop, an open pay-page card session on the invoice is cancelled, and a linked visit may be completed or a review ask enrolled (the card lists what applies). The customer is sent nothing: this tool does not send receipts. To send one afterwards, use resend_receipt or the Invoices page.
+The Invoices page records the WHOLE balance due, as of today. So amount must equal the balance due on the invoice: a larger amount (overpayment) is refused with the balance, and a payment date other than today is refused. An amount LESS than the balance due is a part payment: it is accepted only while part payments from the bar are switched on (the card says so and shows the part and what will still be owed; the invoice stays open and its reminders continue) and is otherwise refused with the balance. Effects: the invoice becomes paid with the method and reference, a payment row is added, the invoice's reminders stop, an open pay-page card session on the invoice is cancelled, and a linked visit may be completed or a review ask enrolled (the card lists what applies). The customer is sent nothing: this tool does not send receipts. To send one afterwards, use resend_receipt or the Invoices page.
 Pass amount in dollars, method (cash, check, zelle, venmo, paypal or other), and reference when there is one (check number, confirmation number). send_receipt is not accepted: it is refused as capability_unimplemented. Takes invoice_id OR invoice_number, exactly one.
-Refused: a paid, prepaid, void, refunded or canceled invoice, one billed to a payer or a payer's statement, an annual-plan invoice, an invoice with nothing due, a card payment (the bar does not take cards), a refund or negative amount, an amount that is not the balance due, a date other than today.
+Refused: a paid, prepaid, void, refunded or canceled invoice, one billed to a payer or a payer's statement, an annual-plan invoice, an invoice with nothing due, a card payment (the bar does not take cards), a refund or negative amount, an amount over the balance due (or under it while part payments are off), a date other than today. A part payment is also refused for a customer on Auto Pay, an invoice with a payment plan, and one with an unsettled card dispute.
 Use for: "record a payment", "customer paid cash", "mark paid by check", "she paid by check number 1042", "got a Zelle for this invoice", "log a Venmo payment", "mark this invoice paid".`,
     input_schema: {
       type: 'object',
       properties: {
         invoice_id: { type: 'string', format: 'uuid', description: 'The existing open invoice (from get_customer_invoices)' },
         invoice_number: { type: 'string', description: 'The invoice number, e.g. WPC-2026-0534 (use instead of invoice_id)' },
-        amount: { type: 'number', description: 'The dollars received. Must equal the balance due on the invoice (the Invoices page records the whole balance).' },
+        amount: { type: 'number', description: 'The dollars received. Equal to the balance due records the whole balance; less than it is a part payment (only while part payments from the bar are on); more is refused.' },
         method: { type: 'string', enum: VALID_PAYMENT_METHODS, description: 'How the money arrived: cash, check, zelle, venmo, paypal or other. Never a card.' },
         reference: { type: 'string', description: `Check number, Zelle / Venmo / PayPal confirmation number, money order number (up to ${REFERENCE_LIMIT} characters)` },
         note: { type: 'string', description: `Optional office note added to the invoice's notes (up to ${NOTE_LIMIT} characters)` },
@@ -107,7 +124,7 @@ const blank = (value) => value === undefined || value === null || value === '';
 
 function readAmount(raw) {
   const amount = Number(raw);
-  if (blank(raw) || !Number.isFinite(amount)) return refusal('amount is required: the dollars received, equal to the balance due', 'invalid_amount');
+  if (blank(raw) || !Number.isFinite(amount)) return refusal('amount is required: the dollars received (the balance due, or less for a part payment)', 'invalid_amount');
   if (amount < 0) return refusal('A negative amount is a refund. The bar does not refund; this card only records money received.', 'refund_not_supported');
   if (amount === 0) return refusal('amount must be more than $0.00', 'invalid_amount');
   const amountCents = toCents(amount);
@@ -155,8 +172,19 @@ function readInput(input) {
   return Object.assign({}, ...parts);
 }
 
+// The writer's own part-payment refusal, in its words; a check that cannot be read refuses too (fail closed).
+async function partRefusal(invoice, at) {
+  let why;
+  try {
+    why = await require('../invoice-manual-payment').partPaymentRefusal(db, invoice);
+  } catch {
+    why = 'The bar could not check whether a part payment is allowed on this invoice.';
+  }
+  return why ? refusal(`${why} Nothing was recorded. Record the whole balance, or use the Invoices page.`, 'part_not_allowed', at) : null;
+}
+
 // The refusals the card makes before it shows anything, in the handler's own words where the handler has them.
-async function invoiceRefusal(invoice, dueCents, amountCents) {
+async function invoiceRefusal(invoice, dueCents, amountCents, { part = false } = {}) {
   const at = { invoice_id: invoice.id };
   try {
     assertInvoiceCollectible(invoice);
@@ -171,8 +199,8 @@ async function invoiceRefusal(invoice, dueCents, amountCents) {
   if (amountCents > dueCents) {
     return refusal(`The balance due is ${money(dueCents)}, less than the ${money(amountCents)} given. The Invoices page records the balance due and takes no overpayment; nothing was recorded.`, 'amount_exceeds_balance', { ...at, balance_due: dueCents / 100 });
   }
-  if (amountCents < dueCents) {
-    return refusal(`The balance due is ${money(dueCents)}, more than the ${money(amountCents)} given. The Invoices page settles the whole balance and has no partial payment; nothing was recorded.`, 'partial_not_supported', { ...at, balance_due: dueCents / 100 });
+  if (amountCents < dueCents && !part) {
+    return refusal(`The balance due is ${money(dueCents)}, more than the ${money(amountCents)} given. This card settles the whole balance and takes no partial payment right now; nothing was recorded.`, 'partial_not_supported', { ...at, balance_due: dueCents / 100 });
   }
   // Whose debt it is: the live resolver (the same one the settlement re-runs under the row lock), fail closed.
   let selfPay;
@@ -200,6 +228,8 @@ async function invoiceRefusal(invoice, dueCents, amountCents) {
       return refusal(`This invoice's visit is ${terminal.replace('_', '-')}; nothing can be recorded. Void or reissue the invoice from the Invoices page.`, 'visit_terminal', at);
     }
   }
+  // A part payment meets the Invoices page's own part refusals (Auto Pay, a payment plan, an unsettled card dispute, ...): the writer's function.
+  if (part) return partRefusal(invoice, at);
   return null;
 }
 
@@ -220,6 +250,22 @@ function requestBody({ method, reference, note }) {
     ...(note ? { note } : {}),
     sendReceipt: false,
   };
+}
+
+function partEffects({ invoice, dueCents, partCents, method, reference, note }) {
+  const effects = [
+    { kind: 'billing', text: `Part payment of ${money(partCents)} by ${method}${reference ? `, reference ${reference}` : ''}, as of today, on invoice ${invoice.invoice_number}; ${money(dueCents - partCents)} will still be owed. The invoice stays open (${invoice.status}). A payment row for ${money(partCents)} is added to the ledger and ${money(partCents)} is added to the money received on the invoice.` },
+    { kind: 'billing', text: `The amount owed this card priced from is ${money(dueCents)}. If it has changed when you confirm (another payment, an edit, or this card confirmed twice), nothing is recorded and you need a fresh card.` },
+    { kind: 'billing', text: 'No card is charged, no Stripe payment is created, and nothing is refunded or voided. This records money already received.' },
+    ...(note ? [{ kind: 'operational', text: `The note is added to the invoice's notes: "${note}"` }] : []),
+    { kind: 'operational', text: 'The invoice\'s reminders continue for the rest: the reminder sequence is not stopped.' },
+    ...(invoice.stripe_payment_intent_id
+      ? [{ kind: 'operational', text: 'An open pay-page card session exists for this invoice: it is cancelled first so it cannot be charged later. A card payment already in flight stops the recording.' }]
+      : []),
+    { kind: 'operational', text: 'The invoice is not paid in full, so no linked visit is completed, no review ask is enrolled, no payment plan is completed and no billing pause is cleared by this step.' },
+    { kind: 'comms', text: 'No receipt is sent for a part payment, and none can be sent yet: a receipt becomes available once the rest is paid and the invoice is paid in full.' },
+  ];
+  return effects;
 }
 
 function planEffects({ invoice, dueCents, method, reference, note, closeout }) {
@@ -251,7 +297,7 @@ const closeoutPin = (closeout) => (closeout
   ? { visitId: closeout.visitId, serviceType: closeout.serviceType || null, date: closeout.date || null, status: closeout.status ?? null, updatedAtMs: msOf(closeout.updatedAt), resuming: closeout.resuming === true }
   : null);
 
-function versionOf({ invoice, dueCents, input, closeout, paymentDate, body }) {
+function versionOf({ invoice, dueCents, partCents, input, closeout, paymentDate, body }) {
   return {
     invoice_id: invoice.id,
     status: invoice.status,
@@ -259,6 +305,8 @@ function versionOf({ invoice, dueCents, input, closeout, paymentDate, body }) {
     total: toCents(invoice.total),
     credit: toCents(invoice.credit_applied),
     due: dueCents,
+    // The part the card showed (null = the whole balance); with `due` it is the amount owed the card priced from.
+    part: partCents,
     customer_id: invoice.customer_id,
     payer: digest([invoice.payer_id || null, invoice.payer_statement_id || null]),
     visit: invoice.scheduled_service_id || null,
@@ -282,16 +330,21 @@ async function buildPlan(input) {
   if (target.error) return target;
   const { invoice } = target;
   const dueCents = toCents(invoiceAmountDue(invoice));
-  const refused = await invoiceRefusal(invoice, dueCents, read.amountCents);
+  // A part payment: less than what is owed, while both part gates are on. Anything else less than owed is refused by invoiceRefusal.
+  const partCents = read.amountCents < dueCents && partPaymentsOffered() ? read.amountCents : null;
+  const refused = await invoiceRefusal(invoice, dueCents, read.amountCents, { part: partCents !== null });
   if (refused) return refused;
-  const probe = await closeoutProbe(invoice);
+  // A part completes no visit, so the card names none and pins none.
+  const probe = partCents !== null ? { closeout: null } : await closeoutProbe(invoice);
   if (probe.error) return probe.error;
   const { closeout } = probe;
   // One ET day for the whole card: shown, pinned, and re-asserted by the settlement's fence.
   const paymentDate = etDateString();
   const customer = await db('customers').where({ id: invoice.customer_id }).first('first_name', 'last_name', 'company_name');
   const body = requestBody({ method: read.method, reference: read.reference, note: read.note });
-  const effects = planEffects({ invoice, dueCents, method: read.method, reference: read.reference, note: read.note, closeout });
+  const effects = partCents !== null
+    ? partEffects({ invoice, dueCents, partCents, method: read.method, reference: read.reference, note: read.note })
+    : planEffects({ invoice, dueCents, method: read.method, reference: read.reference, note: read.note, closeout });
   return {
     preview: true,
     tool: 'record_payment',
@@ -302,6 +355,7 @@ async function buildPlan(input) {
     status: invoice.status,
     balance_due: dueCents / 100,
     amount: read.amountCents / 100,
+    ...(partCents !== null ? { part_payment: true, still_owed_after: (dueCents - partCents) / 100 } : {}),
     method: read.method,
     reference: read.reference || null,
     office_note: read.note || null,
@@ -309,12 +363,14 @@ async function buildPlan(input) {
     effects,
     receipt: 'No receipt is sent',
     sends_to_customer: false,
-    _version: versionOf({ invoice, dueCents, input: read, closeout, paymentDate, body }),
+    _version: versionOf({ invoice, dueCents, partCents, input: read, closeout, paymentDate, body }),
     _body: body,
     // What the settlement is handed (never shown): the amount due, the fence it runs before the Stripe retirement and again under
     // the invoice lock (record-payment-fences.js). Functions: not part of any pin or display.
     _approved: {
       expectedAmountCents: dueCents,
+      // A part payment: the figures the route hands the writer (never from the body). owedCentsSeen is the amount owed the card priced from.
+      ...(partCents !== null ? { part: { amountCents: partCents, owedCentsSeen: dueCents } } : {}),
       settlementFence: settlementFenceFor({ invoiceId: invoice.id, status: invoice.status, updatedAtMs: msOf(invoice.updated_at), columns: pinnedColumnsOf(invoice), closeoutTarget: closeout?.visitId || 'none', paymentDate, closeout: closeoutPin(closeout) }),
     },
     note: 'PREVIEW ONLY — nothing was recorded. Confirm records exactly this; if anything changed it refuses.',
@@ -351,6 +407,20 @@ function closeoutReport(promisedVisitId, closeout) {
   return { state: 'not_completed', note: `The linked visit was not closed (${reason}); the payment is recorded, close the visit from its page.` };
 }
 
+// The result of a part payment: the invoice stays open, and the writer's answer must carry the part it booked, equal to the card's.
+function partReport(plan, json, base) {
+  if (json?.partial?.amount === undefined || Math.round(Number(json.partial.amount) * 100) !== Math.round(plan.amount * 100) || json?.invoice?.status === 'paid') {
+    return { ...base, outcome_unknown: true, code: 'record_unverified',
+      error: 'The Invoices page answered, but the part payment does not read as recorded. Check the invoice before trying again.' };
+  }
+  const remaining = Number(json.partial.remaining);
+  logger.info(`[intelligence-bar:record-payment] recorded ${plan.method} part payment on invoice ${plan.invoice_id}`);
+  return {
+    ...base, success: true, partial: true, status: json.invoice?.status || plan.status, method: plan.method, amount: plan.amount, still_owed: remaining, sent_to_customer: false,
+    note: `Part payment of ${money(plan.amount * 100)} by ${plan.method} recorded on ${plan.invoice_number}; ${money(remaining * 100)} is still owed and the invoice stays open, with its reminders running. No receipt was sent: a receipt becomes available once the rest is paid.`,
+  };
+}
+
 async function commitRecord(input, actionContext) {
   const { plan, refusal: refused } = await verifiedPlan(input, input._verified_record_payment_version);
   if (refused) return refused;
@@ -364,6 +434,7 @@ async function commitRecord(input, actionContext) {
     return { ...base, failed: true, code: drift ? 'preview_changed' : status === 404 ? 'not_found' : 'record_refused',
       error: `The payment was not recorded: ${json?.error || 'the Invoices page refused it'}`, ...(drift ? { preview_changed: true } : {}) };
   }
+  if (plan.part_payment) return partReport(plan, json, base);
   if (json?.invoice?.status !== 'paid') {
     return { ...base, outcome_unknown: true, code: 'record_unverified',
       error: 'The Invoices page answered, but the invoice does not read as paid. Check the invoice before trying again.' };
@@ -381,6 +452,13 @@ async function commitRecord(input, actionContext) {
 
 function cardLines(toolName, preview) {
   if (toolName !== 'record_payment' || !preview || preview.preview !== true) return [];
+  if (preview.part_payment) {
+    return [
+      { kind: 'billing', text: `Record a PART payment on invoice ${preview.invoice_number} for ${preview.customer_name}: ${money(preview.amount * 100)} by ${preview.method}${preview.reference ? ` (reference ${preview.reference})` : ''}, as of ${preview.payment_date}` },
+      { kind: 'billing', text: `Part payment of ${money(preview.amount * 100)}; ${money(preview.still_owed_after * 100)} will still be owed (owed now: ${money(preview.balance_due * 100)}). The invoice stays open and its reminders continue.` },
+      ...(preview.effects || []).map(({ kind, text }) => ({ kind, text })),
+    ];
+  }
   return [
     { kind: 'billing', text: `Record a payment on invoice ${preview.invoice_number} for ${preview.customer_name}: ${money(preview.amount * 100)} by ${preview.method}${preview.reference ? ` (reference ${preview.reference})` : ''}, as of ${preview.payment_date}` },
     { kind: 'billing', text: `Balance due before: ${money(preview.balance_due * 100)}; after: $0.00 (the invoice is marked paid in full)` },

@@ -31,6 +31,7 @@ const { mapV1ToLegacyShape } = require('./pricing-engine/v1-legacy-mapper');
 const { loadExistingQualifyingServiceKeys, resolveCustomerQualifyingEvidence, isActivePlanCustomer, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { findCustomersAtAddress } = require('./customer-address-match');
 const { computeMembershipContext } = require('./estimate-membership-context');
+const { autoFillSoldBy } = require('./estimate-sold-by');
 
 function errorWithStatus(message, statusCode) {
   const err = new Error(message);
@@ -93,7 +94,14 @@ function estimateViewUrl(token) {
 function estimateEditVersion(row) {
   // Repeat opens do not change the offer. Keep first-view status/data and
   // every delivery/selection field in the witness so those still require review.
-  const { view_count: _viewCount, last_viewed_at: _lastViewedAt, ...content } = row;
+  // Sold by (GATE_COMMISSION_SOLD_BY) is who sold, not part of the offer: setting it must not
+  // invalidate an open edit, and the witness stays what it was before the columns existed.
+  const {
+    view_count: _viewCount, last_viewed_at: _lastViewedAt,
+    sold_by_technician_id: _soldBy, sold_by_source: _soldBySource, sold_by_lead_id: _soldByLead,
+    sold_by_set_by: _soldBySetBy, sold_by_set_at: _soldBySetAt,
+    ...content
+  } = row;
   return crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex');
 }
 
@@ -2554,7 +2562,7 @@ async function createOrReuseAdminEstimate({
           }
           clearEstimatePricingCache(existingEstimate.id);
           return {
-            estimate: updated,
+            estimate: await autoFillSoldBy(trx, updated, { now }),
             reused: true,
             memberLinkageWarning,
             pricingFallbackReason: pricingOut.fallbackReason || null,
@@ -2596,7 +2604,7 @@ async function createOrReuseAdminEstimate({
     }
 
     return {
-      estimate: created,
+      estimate: await autoFillSoldBy(trx, created, { now }),
       reused: false,
       memberLinkageWarning,
       pricingFallbackReason: pricingOut.fallbackReason || null,
@@ -3851,7 +3859,7 @@ async function reviseAdminEstimate({
         }
       }
     }
-    return row;
+    return autoFillSoldBy(trx, row, { now });
   });
   if (!updated) {
     throw errorWithStatus('Estimate was accepted, locked, converted, or expired while you were editing. Refresh and retry.', 409);

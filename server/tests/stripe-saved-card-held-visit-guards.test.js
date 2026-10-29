@@ -6,7 +6,7 @@
 describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards', () => {
   beforeEach(() => { jest.resetModules(); });
 
-  function load({ visit, contract }) {
+  function load({ visit, contract, appliedMarker = null, record = { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) } }) {
     const invoice = {
       id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
       subtotal: '200.00', total: '200.00', discount_amount: '0.00',
@@ -31,10 +31,18 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
         if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
         if (table === 'stripe_invoice_charge_attempts') return chargeAttempt;
         if (table === 'scheduled_services') return visit;
-        if (table === 'service_records') return { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed' }) };
+        if (table === 'service_records') return record;
         if (table === 'annual_prepay_terms') return { status: 'payment_pending', prepay_invoice_id: 'inv-1' };
         if (table === 'customer_contracts') return contract;
+        // Only the applied-prepayment marker lookup (it binds 'scheduled_service_prepaid') sees the marker.
+        if (table === 'payments') return markerLookup ? appliedMarker : null;
         return null;
+      });
+      let markerLookup = false;
+      const plainWhereRaw = chain.whereRaw;
+      chain.whereRaw = jest.fn((sql, bindings) => {
+        if (Array.isArray(bindings) && bindings.includes('scheduled_service_prepaid')) markerLookup = true;
+        return plainWhereRaw(sql, bindings);
       });
       chain.insert = jest.fn((payload) => {
         if (table === 'stripe_invoice_charge_attempts') chargeAttempt = { ...payload, created_at: new Date(), resolved_at: null };
@@ -94,5 +102,84 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
     await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...installationGuards, requireSignedContractId: 'contract-1' }))
       .rejects.toMatchObject({ code: 'CONTRACT_NOT_SIGNED' });
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  // requirePerformedVisit reads the visit's latest record under the visit lock (closeoutPerformedForCharge). The one opt-in
+  // exception, allowIssuedInvoiceCloseoutFor (the Auto Pay hold charge): the issued-invoice closeout job's own record for
+  // THIS invoice counts as performed. Everything else refuses exactly as before.
+  describe('requirePerformedVisit and allowIssuedInvoiceCloseoutFor', () => {
+    const performedGuards = { requireSelfPayScheduledServiceId: 'svc-1', requireCompletedVisit: true, requirePerformedVisit: true };
+    const notes = (fields) => ({ status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'completed', ...fields }) });
+    const closeoutFor = (invoiceId) => notes({ backfill: true, invoiceAlreadySent: true, issuedInvoiceCloseout: { invoiceId, trigger: 'sent', completedAt: '2026-10-29T14:00:00.000Z' } });
+    const refused = async (record, opts) => {
+      const { StripeService, stripeClient } = load({ visit: heldVisit, contract: null, record });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...performedGuards, ...opts }))
+        .rejects.toMatchObject({ code: 'VISIT_NOT_COMPLETED', message: expect.stringContaining('not a performed visit') });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    };
+    const proceeds = async (record, opts) => {
+      const { StripeService, stripeClient } = load({ visit: heldVisit, contract: null, record });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...performedGuards, ...opts }))
+        .rejects.not.toMatchObject({ code: 'VISIT_NOT_COMPLETED' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    };
+
+    test.each([
+      ['a backfill closeout', notes({ backfill: true })],
+      ['an issued-invoice closeout, without the option', closeoutFor('inv-1')],
+      ['inspection_only', notes({ visitOutcome: 'inspection_only' })],
+      ['customer_declined', notes({ visitOutcome: 'customer_declined' })],
+      ['incomplete', notes({ visitOutcome: 'incomplete' })],
+      ['a record that is not completed', { status: 'in_progress', structured_notes: '{}' }],
+      ['no record', null],
+    ])('%s refuses, unchanged', async (_label, record) => {
+      await refused(record, {});
+    });
+
+    test('a performed closeout is charged, unchanged', async () => {
+      await proceeds(notes({}), {});
+    });
+
+    test('the option lets the issued-invoice closeout of THIS invoice count as performed', async () => {
+      await proceeds(closeoutFor('inv-1'), { allowIssuedInvoiceCloseoutFor: 'inv-1' });
+    });
+
+    test.each([
+      ['a manual backfill with no marker', notes({ backfill: true })],
+      ['a marker naming another invoice', closeoutFor('inv-9')],
+      ['a marked closeout whose outcome is inspection_only', { status: 'completed', structured_notes: JSON.stringify({ visitOutcome: 'inspection_only', backfill: true, issuedInvoiceCloseout: { invoiceId: 'inv-1' } }) }],
+    ])('with the option, %s still refuses', async (_label, record) => {
+      await refused(record, { allowIssuedInvoiceCloseoutFor: 'inv-1' });
+    });
+
+    test('the option names the invoice being charged: another invoice id never widens the rule', async () => {
+      await refused(closeoutFor('inv-9'), { allowIssuedInvoiceCloseoutFor: 'inv-9' });
+    });
+  });
+
+  // requireNoUnappliedVisitPrepayment (the Auto Pay hold charge, every lane): billing-lane visitCarriesUnappliedPrepayment
+  // under the visit lock, the same predicate the extended anchor check uses.
+  describe('requireNoUnappliedVisitPrepayment', () => {
+    const guards = { requireSelfPayScheduledServiceId: 'svc-1', requireCompletedVisit: true };
+    const prepaidVisit = { ...heldVisit, prepaid_method: 'cash', prepaid_amount: '40.00' };
+
+    test('a cash prepayment on the visit that no payment marker applied to this invoice refuses before Stripe', async () => {
+      const { StripeService, stripeClient } = load({ visit: prepaidVisit, contract: null });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireNoUnappliedVisitPrepayment: true }))
+        .rejects.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['the option is off (every other caller)', prepaidVisit, null, false],
+      ['the prepayment was applied to this invoice (marker payment)', prepaidVisit, { id: 'pay-1' }, true],
+      ['the stamp is the annual-prepay invoice marker', { ...heldVisit, prepaid_method: 'annual_prepay_invoice', prepaid_amount: '40.00' }, null, true],
+      ['no prepayment amount', { ...heldVisit, prepaid_method: 'cash', prepaid_amount: null }, null, true],
+    ])('%s: the charge proceeds to Stripe', async (_label, visit, appliedMarker, option) => {
+      const { StripeService, stripeClient } = load({ visit, contract: null, appliedMarker });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireNoUnappliedVisitPrepayment: option }))
+        .rejects.not.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
   });
 });

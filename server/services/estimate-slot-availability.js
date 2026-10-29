@@ -563,6 +563,15 @@ function areaAddOnProfileFields(service, item, amount) {
   };
 }
 
+// Dead Rodent Removal & Odor Treatment: the engine's on-site minutes for the chosen access tier
+// (45 easy reach, 90 attic) are a duration floor for the booking, like an area add-on's minutes.
+// A row without them (an older save) keeps the catalog default.
+function deadAnimalProfileFields(service, item) {
+  if (service !== 'rodent_dead_animal_removal') return {};
+  const minutes = Math.ceil(Number(item.onSiteMinutes));
+  return minutes > 0 ? { durationMinutes: minutes } : {};
+}
+
 // Billable one-time services for a one-time accept, so the reserved appointment's
 // service label + notes show the actual mix (e.g. a pest visit plus a separately
 // billed Bora-Care wood treatment) instead of a generic "One-time service" that
@@ -709,7 +718,8 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     }
     // Third arg is the RAW engine key off the breakdown item — the catalog's
     // identity, distinct from the display category passed first.
-    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null, areaAddOnProfileFields(service, item, amount));
+    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null,
+      { ...areaAddOnProfileFields(service, item, amount), ...deadAnimalProfileFields(service, item) });
   }
   return rows;
 }
@@ -817,18 +827,20 @@ function seasonalDateSegments(dateFrom, dateTo, seasonal) {
   return segments.length ? segments : [[from, to]];
 }
 
-// A one-time visit that carries area add-ons reserves at least the sum of their
-// engine on-site minutes, whatever the capacity gate says (the default 60 would
-// book a three-add-on visit into one hour). The add-ons ride the visit's
-// primary service: when a non-add-on service is also sold it keeps the minutes
-// today's rule gives it (`base`) and the add-ons come on top; add-ons alone are
-// sized by the larger of `base` and their sum. No add-on, no change. The result
-// is not capped at MAX_ESTIMATE_SLOT_DURATION_MINUTES: a floor the cap lowered
-// would not be a floor. With the capacity gate on the catalog pass sums the same
-// minutes per service (resolveCatalogSlotProfile).
+// A one-time visit that carries area add-ons (or a Dead Rodent Removal line, whose
+// sold access tier carries its on-site minutes: 45 easy reach, 90 attic) reserves
+// at least the sum of their engine on-site minutes, whatever the capacity gate
+// says (the default 60 would book a three-add-on visit, or an attic search, into
+// one hour). These rows ride the visit's primary service: when another service is
+// also sold it keeps the minutes today's rule gives it (`base`) and theirs come on
+// top; alone they are sized by the larger of `base` and their sum. None, no
+// change. The result is not capped at MAX_ESTIMATE_SLOT_DURATION_MINUTES: a floor
+// the cap lowered would not be a floor. With the capacity gate on the catalog pass
+// sums the same minutes per service (resolveCatalogSlotProfile).
+const ON_SITE_MINUTE_ENGINE_KEYS = new Set([AREA_ADDON_ENGINE_KEY, 'rodent_dead_animal_removal']);
 function oneTimeVisitDurationMinutes(base, services, serviceMode) {
   if (serviceMode !== 'one_time') return base;
-  const addOns = services.filter((row) => row.engineKey === AREA_ADDON_ENGINE_KEY);
+  const addOns = services.filter((row) => ON_SITE_MINUTE_ENGINE_KEYS.has(row.engineKey));
   const addOnMinutes = addOns.reduce((sum, row) => sum + (Number(row.durationMinutes) || 0), 0);
   if (!(addOnMinutes > 0)) return base;
   const floor = addOns.length < services.length ? base + addOnMinutes : Math.max(base, addOnMinutes);
@@ -1803,14 +1815,13 @@ async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
 // Filter a customer-facing slot pool by time-of-day preference ('morning' |
 // 'afternoon' | 'evening' | 'any'). morning = before noon; afternoon/evening
 // fall inside the 12pm–5pm working window.
-function startInTimeOfDay(min, timeOfDay) {
-  if (!timeOfDay || timeOfDay === 'any' || min == null) return true;
-  return timeOfDay === 'morning' ? min < 12 * 60 : min >= 12 * 60;
-}
-
 function filterTimeOfDay(slots, timeOfDay) {
   if (!timeOfDay || timeOfDay === 'any') return slots;
-  return (Array.isArray(slots) ? slots : []).filter((s) => startInTimeOfDay(timeToMinutes(s.windowStart), timeOfDay));
+  return (Array.isArray(slots) ? slots : []).filter((s) => {
+    const min = timeToMinutes(s.windowStart);
+    if (min == null) return true;
+    return timeOfDay === 'morning' ? min < 12 * 60 : min >= 12 * 60;
+  });
 }
 
 // Drop any candidate on today's Eastern date whose displayed window starts
@@ -1920,6 +1931,42 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
   };
 }
 
+// Route check for the estimate page's lists (GATE_CUSTOMER_ROUTE_CHECK,
+// scheduling/customer-route-check.js). OFFER LISTS ONLY: a caller opts in with
+// `offer: true` (the page's available-slots and find-slots routes); every other
+// caller (reserve refresh, one-tap purchase, text-offer rechecks) gets 'off' and the
+// unfiltered list. Gate off: returns the list untouched and the module is never
+// loaded. Fail-open: any error serves the list as is.
+function routeCheckModeFor(userOpts) {
+  if (userOpts.offer !== true) return 'off';
+  try {
+    return require('./scheduling/customer-route-check').customerRouteCheckMode();
+  } catch {
+    return 'off';
+  }
+}
+
+// ONE check per request, over the FINAL eligible pool: after the collision, lead-time,
+// season, time-of-day and zone-day filters, right before the display selection. It sees
+// only slots the customer could be shown, so its floor is judged on that set and a
+// removal can never leave an empty picker (the floor returns the pool whole). The helper
+// returns the input's own objects in input order. Returns the pool unchanged with the
+// gate off or on any error.
+async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode }) {
+  try {
+    if (mode === 'off' || !pool.length) return pool;
+    const routeCheck = require('./scheduling/customer-route-check');
+    const checked = await routeCheck.filterOfferedSlots({
+      surface: 'estimate', mode, slots: pool, durationMinutes, today: new Date(),
+      target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes }, excludeEstimateId: estimateId },
+    });
+    return Array.isArray(checked.slots) ? checked.slots : pool;
+  } catch (err) {
+    logger.warn(`[customer-route-check] estimate check failed, serving the unfiltered list: ${err.message}`);
+    return pool;
+  }
+}
+
 // ---------- main ----------
 
 async function getAvailableSlots(estimateId, userOpts = {}) {
@@ -1977,6 +2024,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // serve — or hide — offers built under the old detour cap for the TTL.
   // null = config unreadable this request: neither read nor write the cache.
   const routeDayPolicyKey = await zoneRouteDaysPolicyKey(db);
+  const routeCheckMode = routeCheckModeFor(userOpts);
   const cacheKey = [
     estimateId,
     `route-days:${routeDayPolicyKey}`,
@@ -2021,6 +2069,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // built — a flip or buffer change must not serve now-prohibited slots
     // until TTL (GH codex #3803 r1 P1).
     travelGapEnabled() ? `travel-gap:${travelBufferMinutes()}` : 'travel-gap:off',
+    // Route check mode (GATE_CUSTOMER_ROUTE_CHECK) in the key: an off / shadow / true
+    // switch must not serve the other mode's list for the TTL. An entry built for a
+    // caller that did not ask for the check (offer unset) is always 'off'.
+    `route-check:${routeCheckMode}`,
   ].join(':');
   // opts.bypassCache (explicit, off by default): a caller that must act on
   // the CURRENT calendar — the texting AI's send-time recheck of a quoted
@@ -2246,16 +2298,6 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // customer grid (09:00-17:00, docs/public-route-contracts.md) — never
       // an 08:00 start (Codex r3 P0 on #4663).
       customerFacing: true,
-      // Slide shadow (GATE_SLOT_SLIDE_OFFER): the daypart, live lead time and
-      // zone-day funnel this picker applies to the results below, so a
-      // logged slide is one it could actually show. (A seeded funnel picks
-      // one day from the final pool, which isn't known yet — only the
-      // clustered funnel days are applied here.)
-      slideNewStartAllowed: (date, startMin) => {
-        if (funnelDays && !funnelDays.has(date)) return false;
-        if (startMin < earliestBookableMinuteForDate(date, new Date(), opts.minimumLeadMinutes)) return false;
-        return startInTimeOfDay(startMin, opts.timeOfDay);
-      },
       dateFrom: segFrom,
       dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,
@@ -2324,7 +2366,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     });
   }
   const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
-  const { slots: funneledBookable, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
+  const { slots: funneledEligible, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
+  // GATE_CUSTOMER_ROUTE_CHECK: drop only a start that would make another customer late,
+  // over the final eligible pool (every filter above has run). Inside this uncached
+  // builder, so a wrapper cache hit neither recomputes nor logs.
+  const funneledBookable = await routeCheckedPool(funneledEligible, {
+    coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
+  });
+  // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.
+  let countedBookable = bookable;
+  if (funneledBookable !== funneledEligible) {
+    const kept = new Set(funneledBookable);
+    const removed = new Set(funneledEligible.filter((slot) => !kept.has(slot)));
+    countedBookable = bookable.filter((slot) => !removed.has(slot));
+  }
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
@@ -2357,7 +2412,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // Admin diagnostics use getSlotDebug, which carries coords itself.
       // Funnel active → count the (time-filtered) days the customer can
       // see; inactive → the full bookable pool, exactly as before.
-      firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : bookable),
+      firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : countedBookable),
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
       includeWeekends: opts.includeWeekends,
@@ -2426,6 +2481,7 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
     dateFrom: when.dateFrom,
     dateTo: when.dateTo,
     timeOfDay: when.timeOfDay,
+    offer: userOpts.offer === true,
     // Widen the result set for a search — the window may span several days.
     maxResults: 8,
     expanderMaxResults: 4,

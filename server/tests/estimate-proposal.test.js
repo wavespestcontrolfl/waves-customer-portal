@@ -876,3 +876,15 @@ describe('one-time itemization reads the frozen send-snapshot bundle first (code
     ]);
   });
 });
+
+describe('normalizePaymentTerms: Net-60 (owner 2026-10-29)', () => {
+  const { normalizePaymentTerms } = require('../services/estimate-proposal');
+  test('every common spelling canonicalizes to the payer token, like Net-30', () => {
+    for (const raw of ['net60', 'Net-60', 'NET 60', 'net_60']) expect(normalizePaymentTerms(raw)).toBe('net60');
+    expect(normalizePaymentTerms('Net-30')).toBe('net30');
+  });
+  test('a term outside the payer vocabulary stays null', () => {
+    expect(normalizePaymentTerms('Net-90')).toBeNull();
+    expect(normalizePaymentTerms('60 days')).toBeNull();
+  });
+});

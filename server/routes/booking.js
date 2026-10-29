@@ -1571,6 +1571,48 @@ function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, 
   });
 }
 
+// Route check for the customer lists (GATE_CUSTOMER_ROUTE_CHECK, owner
+// 2026-10-29; services/scheduling/customer-route-check.js). A `surface`
+// ('book' | 'reschedule' | 'reservice' | 'inspection' | 'commercial_first_visit'
+// | 'voice') opts the caller in; with the gate off or no surface this returns
+// null and the module is never loaded. The target is the customer's pin as a
+// new stop, with the visit being moved (excludeServiceIds) left out of the
+// day. The voice agent is never filtered: its check runs detached, in shadow
+// only, after the answer is built (its tool call times out at 3 seconds).
+function routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today }) {
+  if (!surface) return null;
+  try {
+    const routeCheck = require('../services/scheduling/customer-route-check');
+    const mode = routeCheck.customerRouteCheckMode();
+    if (mode === 'off') return null;
+    return {
+      routeCheck, surface, voice: surface === 'voice', today,
+      mode: surface === 'voice' ? 'shadow' : mode,
+      durationMinutes: duration,
+      target: { prospective: { lat, lng, estimated_duration_minutes: duration }, excludeServiceIds },
+    };
+  } catch (err) {
+    logger.warn(`[customer-route-check] unavailable: ${err.message}`);
+    return null;
+  }
+}
+
+async function applyRouteCheck(plan, candidates) {
+  if (!plan || plan.voice) return candidates;
+  try {
+    return (await plan.routeCheck.filterOfferedSlots({ ...plan, slots: candidates })).slots || candidates;
+  } catch (err) {
+    logger.warn(`[customer-route-check] check failed, serving the unfiltered list: ${err.message}`);
+    return candidates;
+  }
+}
+
+function detachVoiceRouteCheck(plan, candidates) {
+  if (!plan || !plan.voice) return;
+  Promise.resolve().then(() => plan.routeCheck.filterOfferedSlots({ ...plan, slots: candidates }))
+    .catch((err) => logger.warn(`[customer-route-check] voice shadow check failed: ${err.message}`));
+}
+
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the whole-hour rules, then returns the
 // curated best-4 (best-3 under the re-service profile — see rankProfile
@@ -1591,7 +1633,7 @@ function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, 
 // lookup), so this function itself carries none of that branching. It only
 // ever reorders `slots`/`days`' is_best_fit; the offered slot SET
 // (days[].slots) is never filtered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface }) {
   config = applySchedulingPolicy(config);
   // The signed-offer policy tag for this build (minted inside addCandidate
   // below; createSelfBooking verifies with the same mapping). An offer built
@@ -1719,14 +1761,6 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // phone bookings follow the full 8am-6pm business-hours shift, matching
     // call-recording-processor.js's own sanity bound (Codex r3 P0 on #4663).
     customerFacing: selfServeNotice,
-    // Slide shadow (GATE_SLOT_SLIDE_OFFER): the same daypart + self-serve
-    // notice filters this function applies to find-time's results below,
-    // so a logged slide is one this request could actually show. The
-    slideNewStartAllowed: (date, startMin) => {
-      const startTime = `${String(Math.floor(startMin / 60)).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`;
-      return inTimeOfDay(startTime, timeOfDay)
-        && !(selfServeNotice && violatesSelfServeNotice({ date, startTime }, today));
-    },
     // Waves works weekends (Sat AND Sun) — the estimate slot flow already
     // offers Sundays (estimate-slot-availability defaults includeWeekends:true).
     // find-time's legacy default drops Sundays, which silently hid every Sunday
@@ -1983,7 +2017,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       }
     }
   }
-  const candidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
+  const stampedCandidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
+  // GATE_CUSTOMER_ROUTE_CHECK (customer-route-check.js): null with the gate
+  // off or no surface named, and nothing below runs.
+  const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today });
+  const candidates = await applyRouteCheck(routeCheck, stampedCandidates);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
     rankProfile, candidates, today, totalFeasible,
@@ -2054,7 +2092,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     for (const s of curatedSlots) stampRain(s, s.date);
   }
 
-  return {
+  const response = {
     // stops_that_day is internal ranking state (reserviceAdjustedScore) —
     // strip it here so every caller's payload shape stays byte-for-byte
     // identical to before this field existed.
@@ -2067,6 +2105,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     total_feasible: totalFeasible,
     ...rankProfileFields,
   };
+  detachVoiceRouteCheck(routeCheck, stampedCandidates);
+  return response;
 }
 
 // The /book funnel's default offer window — anchored to ET calendar days so it
@@ -2154,6 +2194,8 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
   const today = new Date();
   const { minDate, defaultTo } = bookingOfferWindow(config, today);
   return buildFunnelAvailability({
+    // Customer-facing text offers only; a staff-side pick (`internal`) is never filtered.
+    ...(internal ? {} : { surface: 'book' }),
     lat: pin[0], lng: pin[1], duration: resolveBookingDuration(null, config, funnelKey),
     rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
     // The /book page's own first request always sends expand=open
@@ -2226,6 +2268,9 @@ router.get('/availability', async (req, res, next) => {
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
     const availability = await buildFunnelAvailability({
+      // Offer list: the route check applies (GATE_CUSTOMER_ROUTE_CHECK). /confirm and the
+      // capture-intent revalidation rebuild without a surface and see the unfiltered list.
+      surface: 'book',
       lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
       // "expand=open" widens otherwise-empty days into full hourly windows — used
       // when the customer browses a specific date / "Find more dates".
@@ -2334,6 +2379,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
     const availability = await buildFunnelAvailability({
+      surface: 'book',
       lat: resolvedLat, lng: resolvedLng, duration,
       rangeFrom: when.dateFrom, rangeTo: when.dateTo, config, today,
       timeOfDay: when.timeOfDay,

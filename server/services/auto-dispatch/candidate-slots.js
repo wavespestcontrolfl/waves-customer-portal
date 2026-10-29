@@ -41,6 +41,7 @@ const { findAvailableSlots } = require('../scheduling/find-time');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { resolveGeo, driveMin, HQ } = require('./geo');
 const { toDateStr, shiftDateStr } = require('./dates');
+const { LAWN_ROUNDS_9, roundOf } = require('../lawn-rounds');
 const { flexCandidateRules } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
@@ -938,6 +939,17 @@ function searchWindow(service, ctx) {
     if (dateFrom < dueFrom) dateFrom = dueFrom;
     if (dateTo > dueTo) dateTo = dueTo;
   }
+  // A lawn_rounds_9 visit never leaves its round: a ±3 day hand-off or a ±5
+  // day flex move off the first or last days of a round would land in the next
+  // round, leaving this one empty and that one with two. A window that
+  // collapses is handled by the caller (dateFrom > dateTo).
+  if (service.recurring_pattern === LAWN_ROUNDS_9) {
+    const round = roundOf(toDateStr(service.recurring_dispatch_due_date) || toDateStr(service.scheduled_date));
+    if (round) {
+      if (dateFrom < round.start) dateFrom = round.start;
+      if (dateTo > round.end) dateTo = round.end;
+    }
+  }
   return { dateFrom, dateTo };
 }
 
@@ -1108,7 +1120,7 @@ module.exports = {
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
+    searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

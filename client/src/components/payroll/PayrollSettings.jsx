@@ -250,12 +250,115 @@ function AllowanceCell({ technician, onSaved }) {
   </form>;
 }
 
+// GATE_PAYROLL_PAY_LINES: whether federal overtime law covers the employee. W-2 box 12
+// code TT is filled only when it does. 'unset' = not set yet = no code TT.
+const COVERAGE_VALUES = { true: 'yes', false: 'no' };
+const coverageOf = technician => COVERAGE_VALUES[String(technician.flsaOvertimeCovered)] || 'unset';
+
+function CoverageCell({ technician, onSaved }) {
+  const current = coverageOf(technician);
+  const [value, setValue] = useState(current);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function save(event) {
+    event.preventDefault();
+    setBusy(true); setError('');
+    try {
+      await call(`/technicians/${technician.id}/flsa-coverage`, {
+        method: 'PUT',
+        body: { covered: value === 'unset' ? null : value === 'yes' },
+      });
+      onSaved(`Overtime coverage saved for ${technician.name}.`);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  return <form onSubmit={save} className="flex flex-wrap items-center gap-2">
+    <Select aria-label={`Federal overtime law covers ${technician.name}`} value={value} onChange={event => setValue(event.target.value)}>
+      <option value="unset">Not set</option>
+      <option value="yes">Covered</option>
+      <option value="no">Not covered</option>
+    </Select>
+    <Button type="submit" variant="secondary" disabled={busy || value === current}>Save</Button>
+    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+  </form>;
+}
+
+// GATE_PAYROLL_FAMILY_EMPLOYEE: the owner's parent or spouse. Waves pays no federal or Florida
+// unemployment tax on their pay. Present only when the server sends `familyEmployment`.
+const RELATIONSHIP_WORDS = { parent: 'Parent', spouse: 'Spouse' };
+const ENTITY_WORDS = { sole_proprietorship: 'sole proprietorship', single_member_llc: 'single-member LLC' };
+
+function FamilyCell({ technician, onSaved }) {
+  const current = technician.familyEmployment;
+  const [editing, setEditing] = useState(false);
+  const [relationship, setRelationship] = useState(current?.relationship || 'parent');
+  const [entity, setEntity] = useState(current?.entity || 'single_member_llc');
+  const [exemptFrom, setExemptFrom] = useState(current?.exemptFrom || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function send(event, body, text) {
+    event.preventDefault();
+    setBusy(true); setError('');
+    try {
+      await call(`/technicians/${technician.id}/family-employment`, { method: 'PUT', body });
+      onSaved(text);
+    } catch (failure) { setError(failure.message); }
+    setBusy(false);
+  }
+
+  if (!editing) {
+    return <div className="flex flex-wrap items-center gap-2">
+      <span>{current
+        ? `${RELATIONSHIP_WORDS[current.relationship]}, ${ENTITY_WORDS[current.entity]}, from ${dayLabel(current.exemptFrom)}`
+        : 'Not set'}</span>
+      <Button type="button" variant="secondary" onClick={() => setEditing(true)}>Edit</Button>
+    </div>;
+  }
+
+  return <form
+    onSubmit={event => send(event, { relationship, entity, exemptFrom }, `Family employee setting saved for ${technician.name}.`)}
+    className="grid gap-2"
+  >
+    <Select aria-label={`Relationship to the owner for ${technician.name}`} value={relationship} onChange={event => setRelationship(event.target.value)}>
+      <option value="parent">Parent</option>
+      <option value="spouse">Spouse</option>
+    </Select>
+    <Select aria-label={`Employer entity for ${technician.name}`} value={entity} onChange={event => setEntity(event.target.value)}>
+      <option value="single_member_llc">Single-member LLC (no S election)</option>
+      <option value="sole_proprietorship">Sole proprietorship</option>
+    </Select>
+    <Input
+      type="date" aria-label={`Family employee start date for ${technician.name}`} min="2020-01-01"
+      value={exemptFrom} onChange={event => setExemptFrom(event.target.value)}
+    />
+    <p className="m-0 text-ui-caption text-ink-secondary">
+      Waves pays no federal or Florida unemployment tax on this person's pay; income tax, Social Security and Medicare stay.
+      Clear it if Waves elects S corporation status or takes a partner.
+    </p>
+    <div className="flex flex-wrap items-center gap-2">
+      <Button type="submit" variant="secondary" disabled={busy || !exemptFrom}>Save</Button>
+      <Button
+        type="button" variant="secondary" disabled={busy || !current}
+        onClick={event => send(event, { relationship: null }, `Family employee setting cleared for ${technician.name}.`)}
+      >Clear</Button>
+      <Button type="button" variant="secondary" disabled={busy} onClick={() => setEditing(false)}>Cancel</Button>
+    </div>
+    {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
+  </form>;
+}
+
 function payMethodLabel(technician) {
   if (technician.payMethod === 'bank_transfer') {
     return <span>Bank transfer<span className="block text-ui-caption text-ink-secondary">Written OK {dayLabel(technician.payMethodConsentOn)}</span></span>;
   }
   return 'Paper check';
 }
+
+// A gated column shows only when the server sent its field (gate on).
+const hasField = (technicians, field) => Boolean(technicians) && technicians.some(tech => field in tech);
 
 export default function PayrollSettings() {
   const [technicians, setTechnicians] = useState(null);
@@ -276,7 +379,11 @@ export default function PayrollSettings() {
   const close = () => setDialog(null);
   const saved = text => { setDialog(null); setMessage(text); load(); };
   // Present only when the server has GATE_PAYROLL_TIME_OFF on.
-  const showAllowance = Boolean(technicians) && technicians.some(tech => 'ptoHoursPerYear' in tech);
+  const showAllowance = hasField(technicians, 'ptoHoursPerYear');
+  // Present only when the server has GATE_PAYROLL_PAY_LINES on.
+  const showCoverage = hasField(technicians, 'flsaOvertimeCovered');
+  // Present only when the server has GATE_PAYROLL_FAMILY_EMPLOYEE on.
+  const showFamily = hasField(technicians, 'familyEmployment');
 
   return <UiSurface density="touch" className="grid gap-4">
     <header>
@@ -292,6 +399,8 @@ export default function PayrollSettings() {
         <THead><TR>
           <TH>Employee</TH><TH>Pay rate</TH><TH>Pay method</TH><TH>Current W-4</TH>
           {showAllowance && <TH>Paid time off hours per year</TH>}
+          {showCoverage && <TH>Federal overtime law covers</TH>}
+          {showFamily && <TH>Family employee</TH>}
           <TH><span className="sr-only">Actions</span></TH>
         </TR></THead>
         <TBody>
@@ -301,6 +410,8 @@ export default function PayrollSettings() {
             <TD>{payMethodLabel(tech)}</TD>
             <TD><W4Summary w4={tech.currentW4} /></TD>
             {showAllowance && <TD><AllowanceCell key={`${tech.id}:${tech.ptoHoursPerYear}`} technician={tech} onSaved={saved} /></TD>}
+            {showCoverage && <TD><CoverageCell key={`${tech.id}:${tech.flsaOvertimeCovered}`} technician={tech} onSaved={saved} /></TD>}
+            {showFamily && <TD><FamilyCell key={`${tech.id}:${JSON.stringify(tech.familyEmployment)}`} technician={tech} onSaved={saved} /></TD>}
             <TD>
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setDialog({ kind: 'w4', tech })}>Enter W-4</Button>

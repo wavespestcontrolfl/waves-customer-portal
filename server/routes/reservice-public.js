@@ -258,7 +258,7 @@ async function loadLaneCatalog(database = db) {
 // the stored pin, else a staff-verified pin or the canonical geocode) — an
 // offer made anywhere else would be for a location the commit never uses
 // (Codex #4992 P1). Nothing resolvable, no offers.
-async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes }) {
+async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes, offer = false }) {
   const booking = require('./booking');
   const { customerBookingLocation, buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
 
@@ -274,6 +274,8 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     rangeTo,
     config,
     today: new Date(),
+    // Offer lists only (GATE_CUSTOMER_ROUTE_CHECK); every confirmation rebuild omits `offer`.
+    ...(offer ? { surface: 'reservice' } : {}),
     // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
     selfServeNotice: true,
     // Re-service rank profile (GATE_RESERVICE_RANK_AFTER_NEW, owner ruling
@@ -411,7 +413,7 @@ router.get('/:token', async (req, res, next) => {
 
     let availability = null;
     try {
-      availability = await buildAvailabilityForCustomer(customer, { ...range, config, duration: browseDuration, lanes: browseLanes });
+      availability = await buildAvailabilityForCustomer(customer, { ...range, config, duration: browseDuration, lanes: browseLanes, offer: true });
     } catch (err) {
       logger.error(`[reservice-public] availability failed for customer ${customer.id}: ${err.message}`);
     }
@@ -472,6 +474,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
       config,
       duration: browseDuration,
       lanes: browseLanes,
+      offer: true,
       timeOfDay: when.timeOfDay,
     }).catch((err) => {
       logger.error(`[reservice-public] find-slots availability failed for customer ${customer.id}: ${err.message}`);

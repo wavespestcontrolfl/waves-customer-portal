@@ -107,6 +107,7 @@ const {
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   resolvePalmCount,
   normalizeRoachType, assertFinitePriceFields,
+  priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled, buildPricingError,
 } = require('./service-pricing');
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, lineFlagsBlockPercentDiscount,
@@ -2267,6 +2268,29 @@ function generateEstimate(input) {
       guaranteeTerm: services.rodentGuaranteeCombo.guaranteeTerm || 12,
     });
     lineItems.push(result);
+  }
+
+  // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL, NEW QUOTES
+  // ONLY). One price per access tier (owner 2026-10-29): other rodent work on
+  // this estimate does not change it, and only `tier` is read from the request;
+  // staff discount on the estimate itself (manualDiscount). The gate is
+  // enforced BEFORE the commercial hand-off so a commercial property cannot
+  // swallow the input silently; a malformed envelope throws, never skips.
+  // Commercial property: always a manual quote (no scopedOneTime opt-in, and the
+  // key is not in COMMERCIAL_SCOPED_ONETIME_SERVICES).
+  if (services.deadAnimalRemoval) {
+    assertDeadAnimalRemovalEnabled();
+    const deadAnimalInput = services.deadAnimalRemoval;
+    if (deadAnimalInput !== true && Object.prototype.toString.call(deadAnimalInput) !== '[object Object]') {
+      throw buildPricingError('deadAnimalRemoval must be an object like { tier }', { field: 'deadAnimalRemoval' });
+    }
+    if (!useCommercialManualQuote(deadAnimalInput, 'pest_control')) {
+      const result = priceDeadAnimalRemoval({
+        tier: deadAnimalInput === true ? undefined : deadAnimalInput.tier,
+      });
+      (result.manualReviewReasons || []).forEach(addManualReviewReason);
+      lineItems.push(result);
+    }
   }
 
   // Commercial re-marking for scoped one-time lines (GATE_COMMERCIAL_ONETIME_

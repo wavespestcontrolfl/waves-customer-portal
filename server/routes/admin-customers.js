@@ -2578,10 +2578,10 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT COUNT(DISTINCT service_type) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND status NOT IN ('cancelled')) as service_type_count"),
       // rating column may not exist — use satisfaction_rating from treatment_outcomes or skip
       db.raw("(SELECT NULL) as last_rating"),
-      db.raw("(SELECT COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
+      db.raw("(SELECT COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
       // Invoice exception only, including third-party bills on the record.
       // This is not an assertion that the homeowner owes a self-pay balance.
-      db.raw("(SELECT COUNT(*) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue') AND GREATEST(total - COALESCE(credit_applied, 0), 0) > 0 AND ?) as overdue_invoice_count", [invoiceOverdueSql(db)]),
+      db.raw("(SELECT COUNT(*) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue') AND GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0 AND ?) as overdue_invoice_count", [invoiceOverdueSql(db)]),
       db.raw('? as health_score', [latestHealthValueRaw(healthColumns, 'score')]),
       db.raw('? as health_grade', [latestHealthValueRaw(healthColumns, 'grade')]),
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
@@ -3418,7 +3418,7 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_consumed_estimates: ${e.message}`); return null; });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans, addressNeighborRows, balanceSummary] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans, addressNeighborRows, balanceSummary, visitStatsRow] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -3544,6 +3544,21 @@ router.get('/:id', async (req, res, next) => {
         .catch(e => { logger.warn(`[customers:${c.id}] address_neighbors: ${e.message}`); return []; }),
       req.techRole === 'technician' ? null : openBalanceSummary(c.id, { displayLimit: 0 })
         .catch(e => { logger.warn(`[customers:${c.id}] balance_summary: ${e.message}`); return null; }),
+      // Visit stats count trips to the property, not service_records rows:
+      // one stop can carry several appointments (pest + lawn) and one
+      // appointment can carry sibling records from different completion
+      // rails, and scheduled / in_progress / incomplete / cancelled rows are
+      // not visits. A completed record per ET service day is one visit, over
+      // the whole history (the `services` list above is capped at 20).
+      db('service_records')
+        .where({ customer_id: c.id, status: 'completed' })
+        .whereNotNull('service_date')
+        .first(
+          db.raw('COUNT(DISTINCT service_date)::int AS count'),
+          db.raw('MIN(service_date) AS first_date'),
+          db.raw('MAX(service_date) AS last_date'),
+        )
+        .catch(e => { logger.warn(`[customers:${c.id}] visit_stats: ${e.message}`); return null; }),
     ]);
 
     // The invoices table stores the billed amount as `total`; the frontend reads
@@ -3554,14 +3569,16 @@ router.get('/:id', async (req, res, next) => {
     const mappedInvoices = (invoices || []).map(inv => {
       // Amount DUE / cash PAID both net out applied account credit (cents-safe
       // via invoiceAmountDue) — a partial credit reduces what's owed and the
-      // cash collected, so the gross `total` would overstate both.
+      // cash collected, so the gross `total` would overstate both. A paid
+      // invoice's cash includes any part payment (amount_paid), so it is priced
+      // with amount_paid 0; an open one reports the part payment it holds.
       const amountDue = invoiceAmountDue(inv);
       const isPaid = inv.status === 'paid' || inv.status === 'prepaid';
       const isCollectible = COLLECTIBLE_STATUSES.has(inv.status);
       return {
         ...inv,
         amount_due: isCollectible ? amountDue : 0,
-        amount_paid: isPaid ? amountDue : 0,
+        amount_paid: isPaid ? invoiceAmountDue({ ...inv, amount_paid: 0 }) : Number(inv.amount_paid) || 0,
       };
     });
     // Lifetime revenue is the net of all paid payments (Stripe + Zelle/manual),
@@ -3654,6 +3671,11 @@ router.get('/:id', async (req, res, next) => {
       })),
       tags: tags.map(t => t.tag),
       interactions, preferences: prefs, services, payments, scheduled, upcomingScheduled, smsLog,
+      visitStats: visitStatsRow ? {
+        count: Number(visitStatsRow.count || 0),
+        firstDate: dateOnlyForApi(visitStatsRow.first_date),
+        lastDate: dateOnlyForApi(visitStatsRow.last_date),
+      } : null,
       // Reference the stored quote through the existing net-price mapper.
       // No live catalog or current plan repricing belongs in historical quotes.
       estimates: estimates.map((estimate) => ({

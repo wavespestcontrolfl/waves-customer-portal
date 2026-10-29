@@ -6058,6 +6058,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       accessType: o.sanitationAccess || 'normal',
     };
   }
+  // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL, new quotes
+  // only: the engine refuses the input with a 400 when the gate is off). The
+  // access tier comes from the required Access select; no default, so an unchosen
+  // tier reaches the engine as a custom-quote line. Only the tier is sent: the
+  // price is one per tier, and staff discount on the estimate itself.
+  if (sel.has('RODENT_DEAD_ANIMAL')) {
+    services.deadAnimalRemoval = { tier: o.deadAnimalAccess || undefined };
+  }
 
   // Features — normalize v2's UPPERCASE enum shape to v1's lowercase boolean/string shape
   const features = {

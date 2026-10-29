@@ -636,6 +636,36 @@ function predictCompletionBilling({
   });
 }
 
+/**
+ * Does the visit carry an out-of-band (cash/Zelle) prepayment that THIS invoice does not show? True when
+ * scheduled_services.prepaid_method (other than the annual-prepay invoice marker) is set with prepaid_amount > 0 and
+ * no paid `payments` row marks it applied to this invoice (metadata.source 'scheduled_service_prepaid' with this
+ * invoice_id and this scheduled_service_id, written by the completion route's prepaid application). A backfill
+ * closeout skips that application, so its visit can keep the stamp with the invoice untouched. Unreadable state
+ * counts as unapplied (fail closed). Pure read, shared by verifyExtendedCompletionAnchor (under its locks), the Auto
+ * Pay hold sweep's verdict and chargeInvoiceWithSavedCard's requireNoUnappliedVisitPrepayment.
+ */
+async function visitCarriesUnappliedPrepayment({ dbConn, svc, invoice }) {
+  if (String(svc.prepaid_method || '') === ANNUAL_PREPAY_PREPAID_METHOD || !(Number(svc.prepaid_amount) > 0)) return false;
+  // An ALREADY-APPLIED prepayment (completion netted invoice.total and
+  // booked the scheduled_service_prepaid payment marker) leaves the
+  // stamp populated — the residual is legitimately chargeable
+  // (manual-audit P1: an unconditional refusal would permanently
+  // disable Auto Pay on every partial-prepay visit). Only an
+  // unapplied/racing prepayment refuses; unreadable state refuses.
+  try {
+    const appliedMarker = await dbConn('payments')
+      .where({ customer_id: svc.customer_id, status: 'paid' })
+      .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(invoice.id)])
+      .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [String(svc.id)])
+      .first('id');
+    return !appliedMarker;
+  } catch {
+    return true;
+  }
+}
+
 // Extended-completion cap-AUTHORITY revalidation
 // (GATE_COMPLETION_AUTOPAY_CHARGE), run UNDER the caller's already-held
 // customer/visit/invoice row locks — the one shared verdict both money
@@ -716,30 +746,9 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
   } catch {
     return { ok: false, reason: 'active_payment_plan_unverifiable' };
   }
-  // Out-of-band (cash/Zelle) prepayment on the LOCKED row (GitHub r2 P1):
-  // the route's netting decisions used a pre-lock snapshot — a prepayment
-  // recorded inside the window would be double-collected by a full charge.
-  // Fail closed to office review; legitimate partial-prepay netting
-  // happens at mint time, before this lane admits the invoice.
-  if (String(lockedSvc.prepaid_method || '') !== ANNUAL_PREPAY_PREPAID_METHOD
-    && Number(lockedSvc.prepaid_amount) > 0) {
-    // An ALREADY-APPLIED prepayment (completion netted invoice.total and
-    // booked the scheduled_service_prepaid payment marker) leaves the
-    // stamp populated — the residual is legitimately chargeable
-    // (manual-audit P1: an unconditional refusal would permanently
-    // disable Auto Pay on every partial-prepay visit). Only an
-    // unapplied/racing prepayment refuses; unreadable state refuses.
-    try {
-      const appliedMarker = await dbConn('payments')
-        .where({ customer_id: lockedSvc.customer_id, status: 'paid' })
-        .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
-        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(lockedInvoice.id)])
-        .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [String(lockedSvc.id)])
-        .first('id');
-      if (!appliedMarker) return { ok: false, reason: 'out_of_band_prepayment' };
-    } catch {
-      return { ok: false, reason: 'out_of_band_prepayment' };
-    }
+  // Out-of-band (cash/Zelle) prepayment on the LOCKED row (GitHub r2 P1): see visitCarriesUnappliedPrepayment.
+  if (await visitCarriesUnappliedPrepayment({ dbConn, svc: lockedSvc, invoice: lockedInvoice })) {
+    return { ok: false, reason: 'out_of_band_prepayment' };
   }
   // The hold rail owns estimate-flow one-time bookings (GitHub r2 P1):
   // a live hold re-checked under the money locks — the admission-side
@@ -1158,7 +1167,7 @@ async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}
     .whereRaw(`status NOT IN (${placeholders})`, [...INVOICE_UNCOLLECTIBLE_STATUSES])
     .whereRaw('payer_id IS NULL');
   // amount_due is the collectible amount: invoice-helpers.js invoiceAmountDue, the charge base
-  // every collection path prices from (total less credit_applied), not the gross total.
+  // every collection path prices from (total less credit_applied and amount_paid), not the gross total.
   const { invoiceAmountDue } = require('./invoice-helpers');
   // dues_month: the month the stamp names, for wording ('YYYY-MM', null when unreadable).
   const duesMonthOf = (raw) => {
@@ -1168,13 +1177,13 @@ async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}
       return item ? String(item[MEMBERSHIP_DUES_LINE_KEY]) : null;
     } catch { return null; }
   };
-  const shape = ({ id, total, status, credit_applied: creditApplied, line_items: lineItems }) => ({
-    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied }), dues_month: duesMonthOf(lineItems),
+  const shape = ({ id, total, status, credit_applied: creditApplied, amount_paid: amountPaid, line_items: lineItems }) => ({
+    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied, amount_paid: amountPaid }), dues_month: duesMonthOf(lineItems),
   });
-  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status', 'credit_applied', 'line_items');
+  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status', 'credit_applied', 'amount_paid', 'line_items');
   if (!lock || !rows.length) return rows.map(shape);
   const locked = await dbConn('invoices').whereIn('id', rows.map((r) => r.id)).orderBy('id', 'asc').forUpdate().noWait()
-    .select('id', 'total', 'status', 'credit_applied', 'line_items', 'customer_id', 'payer_id');
+    .select('id', 'total', 'status', 'credit_applied', 'amount_paid', 'line_items', 'customer_id', 'payer_id');
   return locked
     .filter((r) => String(r.customer_id) === String(customerId) && r.payer_id == null && !INVOICE_UNCOLLECTIBLE_STATUSES.includes(r.status))
     .map(shape);
@@ -1891,6 +1900,7 @@ async function refuseBillingLaneDriftInTrx(trx, svc) {
 
 module.exports = {
   refuseBillingLaneDriftInTrx,
+  visitCarriesUnappliedPrepayment,
   stampedZeroFreeLive,
   BILLING_MODES,
   hasAuthoritativeZeroPrice,

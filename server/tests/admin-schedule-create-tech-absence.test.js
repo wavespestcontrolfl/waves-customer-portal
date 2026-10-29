@@ -529,3 +529,94 @@ describe('POST / — admin create — New Appointment stop order', () => {
     expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 });
+
+// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): the
+// booked visit also gets the arrival-window route check Edit's save runs (a
+// SECOND, advisory probe after the insert; the overlap probe is unchanged), and
+// its warning joins `warnings`. The booking never fails on a route result.
+describe('POST / — admin create — GATE_ROUTE_CHECK_STAFF_SAVES route check', () => {
+  const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2099-07-03. Review the route before driving it.';
+  const body = {
+    customerId: 'cust-1',
+    scheduledDate: '2099-07-03',
+    windowStart: '10:00',
+    serviceType: 'General Pest Control',
+    sendConfirmationSms: false,
+    technicianId: 'tech-no-absence',
+    estimatedPrice: 89,
+  };
+  const arrivalCalls = () => findConflictingVisits.mock.calls.map(([a]) => a).filter((a) => a.arrivalWindow);
+  const overlapCalls = () => findConflictingVisits.mock.calls.map(([a]) => a).filter((a) => !a.arrivalWindow);
+  beforeEach(() => {
+    findConflictingVisits.mockImplementation(async (args) => (args.arrivalWindow
+      ? [{ id: args.arrivalWindow.serviceId, conflict_reason: 'arrival_window', warning: ROUTE_WARNING }] : []));
+  });
+  afterEach(() => {
+    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    delete process.env.GATE_NEW_APPT_STOP_ORDER;
+  });
+  const gateOn = () => {
+    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  };
+
+  test('gate off: no route probe, no extra warning; the overlap probe carries no arrivalWindow', async () => {
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(res.warnings || []).not.toContain(ROUTE_WARNING);
+    expect(arrivalCalls()).toHaveLength(0);
+    expect(overlapCalls()).toHaveLength(1);
+    expect(overlapCalls()[0]).not.toHaveProperty('arrivalWindow');
+  });
+
+  test('gate on: the booked visit is checked on cached road times, the warning is returned, and the booking still commits', async () => {
+    gateOn();
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(res.warnings).toContain(ROUTE_WARNING);
+    expect(inserts).toHaveLength(1);
+    expect(arrivalCalls()).toHaveLength(1);
+    expect(arrivalCalls()[0]).toMatchObject({
+      db: trx, date: '2099-07-03', windowStart: '10:00', windowEnd: '11:00', excludeServiceIds: ['new-1'],
+      arrivalWindow: { serviceId: 'new-1', roads: 'cache' },
+    });
+    // The overlap probe is the same call it was.
+    expect(overlapCalls()).toHaveLength(1);
+    expect(overlapCalls()[0]).not.toHaveProperty('arrivalWindow');
+  });
+
+  test('gate on, a recurring create: the parent visit only', async () => {
+    gateOn();
+    const { status } = await post({ ...body, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, createInvoice: true });
+    expect(status).toBe(201);
+    expect(arrivalCalls().map((a) => a.arrivalWindow.serviceId)).toEqual(['new-1']);
+  });
+
+  test('gate on: an unassigned booking is not route-checked', async () => {
+    gateOn();
+    const { status, body: res } = await post({ ...body, technicianId: undefined });
+    expect(status).toBe(201);
+    expect(res.warnings || []).not.toContain(ROUTE_WARNING);
+    expect(arrivalCalls()).toHaveLength(0);
+  });
+
+  test('gate on, GATE_NEW_APPT_STOP_ORDER on: the stop-order placement runs before the route check (Codex P1 on 9837f0c3d4)', async () => {
+    const { placeMovedVisit } = require('../services/scheduling/arrival-route');
+    gateOn();
+    process.env.GATE_NEW_APPT_STOP_ORDER = 'true';
+    const { status, body: res } = await post(body);
+    expect(status).toBe(201);
+    expect(res.warnings).toContain(ROUTE_WARNING);
+    expect(placeMovedVisit).toHaveBeenCalledTimes(1);
+    const arrivalIdx = findConflictingVisits.mock.calls.findIndex(([a]) => a.arrivalWindow);
+    expect(placeMovedVisit.mock.invocationCallOrder[0]).toBeLessThan(findConflictingVisits.mock.invocationCallOrder[arrivalIdx]);
+  });
+
+  test('gate on, GATE_NEW_APPT_STOP_ORDER off: the stop-order writer is untouched (this gate numbers nothing here)', async () => {
+    const { placeMovedVisit } = require('../services/scheduling/arrival-route');
+    gateOn();
+    await post(body);
+    expect(placeMovedVisit).not.toHaveBeenCalled();
+  });
+});

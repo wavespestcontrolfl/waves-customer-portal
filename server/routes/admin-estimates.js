@@ -31,6 +31,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
 const { nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem } = require('../utils/phone');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
+const { soldByLive, setEstimateSoldBy, listSellerCandidates, loadSoldByForList, soldByRowFields } = require('../services/estimate-sold-by');
 const {
   buildEstimatePricingAudit,
   buildEstimatePricingRiskBatch,
@@ -1286,6 +1287,37 @@ router.put('/:id', async (req, res, next) => {
       // builder drops its notice without a reload.
       addressUnverified: parseEstimateData(estimate.estimate_data)?.addressUnverified === true,
     });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+// GET /api/admin/estimates/sold-by/options — the active W-2 technicians an admin can pick as
+// "Sold by" (GATE_COMMISSION_SOLD_BY; 404 while the gate is off). Admin only: the path is not
+// on the staff GET allowlist above.
+router.get('/sold-by/options', async (req, res, next) => {
+  try {
+    if (!soldByLive()) return res.status(404).json({ error: 'Not found' });
+    res.json({ technicians: await listSellerCandidates() });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/estimates/:id/sold-by { technicianId | null } — an admin sets or clears who sold
+// the estimate (GATE_COMMISSION_SOLD_BY; 404 while the gate is off). Admin only, like every
+// estimate write. 409 once the customer accepts. Records who sold; pays and sends nothing.
+router.put('/:id/sold-by', async (req, res, next) => {
+  try {
+    if (!soldByLive()) return res.status(404).json({ error: 'Not found' });
+    if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'technicianId')) {
+      return res.status(400).json({ error: 'technicianId is required (a technician id, or null for no one).' });
+    }
+    const soldBy = await setEstimateSoldBy({
+      estimateId: req.params.id,
+      technicianId: req.body.technicianId,
+      actorId: req.technicianId,
+    });
+    res.json({ success: true, soldBy: { technicianId: soldBy.sold_by_technician_id, source: soldBy.sold_by_source } });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -4270,6 +4302,8 @@ router.get('/', async (req, res, next) => {
     const staffPreviewableIds = new Set(servedRows.filter((e) => !callBlocks.has(e.id)).map((e) => e.id));
     const perApplicationById = await perApplicationByEstimateId(estimates, parsedDataById, callBlocks);
     const acceptanceRecordIds = await acceptanceRecordIdSet(estimates);
+    // GATE_COMMISSION_SOLD_BY: null (no read, no key) while the gate is off.
+    const soldByById = await loadSoldByForList(db, estimates);
 
     res.json({
       estimates: estimates.map(e => {
@@ -4403,6 +4437,7 @@ router.get('/', async (req, res, next) => {
               createdAt: estData.agentDraftReview.createdAt || null,
             }
             : null,
+          ...soldByRowFields(soldByById, e.id),
           pricingRisk: pricingRiskById.get(e.id) || null,
           riskTypeNeedsReview: commercialRiskTypeReviewNeeded(estData),
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
@@ -4766,7 +4801,7 @@ router.put('/:id/proposal', async (req, res, next) => {
         : null;
       const autopayLive = require('../config/feature-gates').commercialAutopayLive();
       if (rawPaymentTerms != null && String(rawPaymentTerms).trim() !== '' && canonicalPaymentTerms === null) {
-        return res.status(400).json({ error: `Payment terms must be one of: ${autopayLive ? 'Auto Pay, ' : ''}Due on receipt, Net-15, Net-30.` });
+        return res.status(400).json({ error: `Payment terms must be one of: ${autopayLive ? 'Auto Pay, ' : ''}Due on receipt, Net-15, Net-30, Net-60.` });
       }
       const { AUTOPAY_PAYMENT_TERMS } = require('../../shared/commercial-agreement-terms.cjs');
       if (canonicalPaymentTerms === AUTOPAY_PAYMENT_TERMS) {
@@ -4775,10 +4810,10 @@ router.put('/:id/proposal', async (req, res, next) => {
         // invoice-mode proposal (that bills its first invoice on its terms). With the gate off, a proposal already
         // saved on Auto Pay keeps it; a new Auto Pay term is refused.
         if (!autopayLive && savedProposal.commercialTerms?.paymentTerms !== AUTOPAY_PAYMENT_TERMS) {
-          return res.status(400).json({ error: 'Payment terms must be one of: Due on receipt, Net-15, Net-30.' });
+          return res.status(400).json({ error: 'Payment terms must be one of: Due on receipt, Net-15, Net-30, Net-60.' });
         }
         if (estimate.bill_by_invoice) {
-          return res.status(400).json({ error: 'Auto Pay cannot be combined with Bill by invoice. Pick Net-30 for an invoiced proposal, or turn off Bill by invoice.' });
+          return res.status(400).json({ error: 'Auto Pay cannot be combined with Bill by invoice. Pick Net-30 or Net-60 for an invoiced proposal, or turn off Bill by invoice.' });
         }
       } else if (canonicalPaymentTerms && !estimate.bill_by_invoice) {
         // Structured payment terms exist because billing CONSUMES them (the
@@ -4809,7 +4844,7 @@ router.put('/:id/proposal', async (req, res, next) => {
         }
         if (payerResolution?.payerId != null && payerResolution.paymentTerms
           && payerResolution.paymentTerms !== canonicalPaymentTerms) {
-          const labels = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+          const labels = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30', net60: 'Net-60' };
           return res.status(400).json({
             error: `This customer bills through a payer on ${labels[payerResolution.paymentTerms] || payerResolution.paymentTerms} terms — set payment terms to match, or leave them unset.`,
           });

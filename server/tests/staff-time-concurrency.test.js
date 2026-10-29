@@ -546,6 +546,7 @@ describe('Staff active timer serialization', () => {
       { table: 'time_entries', label: 'entryLock', firstValue: entry },
       { table: 'time_entry_daily_summary', label: 'dayState', firstValue: undefined },
       { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
+      { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
       { table: 'time_weekly_summary', label: 'weekState', firstValue: undefined },
     ], events);
 
@@ -605,6 +606,7 @@ describe('Staff active timer serialization', () => {
       [
         { table: 'time_entry_daily_summary', label: 'approvedDay', firstValue: undefined },
         { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
+        { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
         {
           table: 'time_weekly_summary',
           label: 'approvedWeek',
@@ -696,6 +698,7 @@ describe('Staff active timer serialization', () => {
       { table: 'time_entries', label: 'entryLock', firstValue: entry },
       { table: 'time_entry_daily_summary', label: 'approvedDay', firstValue: undefined },
       { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
+      { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
       { table: 'time_weekly_summary', label: 'approvedWeek', firstValue: undefined },
       { table: 'time_entries', label: 'entryUpdate', returningValue: [saved] },
       { table: 'time_entries', label: 'dailyEntries', thenValue: [saved] },
@@ -765,6 +768,7 @@ describe('Staff active timer serialization', () => {
         firstValue: { id: 'daily-1', status: 'disputed' },
       },
       { table: 'payroll_checks', label: 'paidWeek', firstValue: undefined },
+      { table: 'payroll_pay_lines', label: 'paidLine', firstValue: undefined },
       {
         table: 'time_weekly_summary',
         label: 'weekState',
@@ -792,13 +796,13 @@ describe('Staff active timer serialization', () => {
       edited_by: 'admin-1',
     });
 
-    expect(specs[5].updatePayload).toMatchObject({
+    expect(specs[6].updatePayload).toMatchObject({
       approval_status: 'pending',
       approved_by: null,
       approved_at: null,
       approval_notes: null,
     });
-    expect(specs[7].updatePayload.status).toBe('pending');
+    expect(specs[8].updatePayload.status).toBe('pending');
     expectOrdered(events, [
       'entryUpdate.update',
       'remainingDispute.first',

@@ -794,6 +794,7 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_lesco_10_0_22', 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
   ['v13_lesco_44_0_0', 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
   ['v13_lesco_0_0_24', 'LESCO Black Out 0-0-24 AM Spar-TECH', 'fertilizer', 'fertilizer'],
+  ['v13_nutra_tech_k_acetate', 'LESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer', 'fertilizer', 'potassium support'],
   ['v13_tetrino', 'Tetrino Insecticide', 'pesticide', 'insecticide'],
   ['v13_arena', 'Arena 50 WDG', 'pesticide', 'insecticide'],
   ['v13_talak', 'Atticus Talak 7.9 F', 'pesticide', 'insecticide'],

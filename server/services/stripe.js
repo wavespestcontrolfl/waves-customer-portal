@@ -8,7 +8,7 @@ const { lockCustomerPaymentMethods } = require('../utils/payment-method-lock');
 const { assertNoCollectionHold, recordHoldOverride, excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
 
 // Rendered-version stamp for a consent captured through an intent (codex
@@ -456,6 +456,18 @@ async function resolveSettledInvoiceSavedCardChargeAttempt({
         resolution_notes: 'Automatically reconciled by succeeded webhook after local invoice/payment settlement',
       });
     return resolvedAttempt > 0 || resolvedOrphan > 0;
+  });
+}
+
+// The bank consent (payment-method-consent-text.js ACH_CONSENT_TEXT) authorizes a debit for an invoice on or after its
+// due date (or on the Auto Pay billing day the customer selected, an alternative EARLIER date: waiting for the due date
+// never exceeds the authorization, so it is ignored). Read against the LOCKED invoice with ET date-only strings. A bank
+// method on an invoice with no due date, or one due after today, has no authorized debit yet. Cards are unaffected.
+function assertBankDebitDue(method, lockedInvoice) {
+  if (!require('./autopay-eligibility').isBankMethodType(method.method_type)) return;
+  if (lockedInvoice.due_date && etCalendarDayOf(lockedInvoice.due_date) <= etDateString()) return;
+  throw Object.assign(new Error('Bank debit date has not arrived. The invoice can be debited on or after its due date.'), {
+    code: 'BANK_DEBIT_NOT_DUE',
   });
 }
 
@@ -2126,12 +2138,13 @@ const StripeService = {
       const projection = computeApplication({
         total: invoice.total,
         creditApplied: projectedCreditApplied,
+        amountPaid: invoice.amount_paid,
         balance: balance || 0,
       });
       projectedCreditApplied = projection.newCreditApplied;
     }
     const projectedAmountDue = Math.max(0, Math.round(
-      ((Number(invoice.total) || 0) - projectedCreditApplied) * 100,
+      ((Number(invoice.total) || 0) - projectedCreditApplied - (Number(invoice.amount_paid) || 0)) * 100,
     ) / 100);
     const chargeInfo = computeChargeAmount(projectedAmountDue, card.method_type, { funding });
     return {
@@ -2173,6 +2186,12 @@ const StripeService = {
   // is customer-favorable and allowed). Distinct from maxAuthorizedChargeCents,
   // which caps the PRE-surcharge amount due, and from expectedTotal, which
   // demands exact equality.
+  // opts.allowIssuedInvoiceCloseoutFor — an invoice id; with requirePerformedVisit only (the Auto Pay hold charge
+  // mode): the visit's latest record may be the issued-invoice closeout job's own (backfill true, visitOutcome
+  // 'completed', structured_notes.issuedInvoiceCloseout.invoiceId = THIS invoice) and still count as performed.
+  // Any other backfill, or a marker for another invoice, is refused as before (closeoutPerformedForCharge).
+  // opts.requireNoUnappliedVisitPrepayment — with requireSelfPayScheduledServiceId (the Auto Pay hold charge, every
+  // lane): refuse (UNAPPLIED_VISIT_PREPAYMENT) when the locked visit carries a prepayment not applied to this invoice.
   // opts.operatorOverride — a staff member explicitly ordered THIS charge
   // (admin card-on-file): skips the default collections-dispute-hold guard and
   // records the override (opts.overrideTrail = {actorId, ip, userAgent, route,
@@ -2184,7 +2203,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, allowIssuedInvoiceCloseoutFor = null, requireNoUnappliedVisitPrepayment = false, requireBankDebitDue = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2292,6 +2311,9 @@ const StripeService = {
         // assertInvoiceCollectible right below.)
         assertLockedInvoiceNotPayerBilled(lockedInvoice);
         assertInvoiceCollectible(lockedInvoice);
+        // Opt-in (the Auto Pay hold charge mode): a bank debit before the invoice's authorized debit date refuses here,
+        // before any credit apply or Stripe call.
+        if (requireBankDebitDue) assertBankDebitDue(card, lockedInvoice);
         // Frozen-consent hard cap, enforced against the LOCKED invoice
         // (Codex #3153 r7 P0) and BEFORE any account-credit application
         // (r8 P1: the fully-covered-by-credit early return would otherwise
@@ -2325,9 +2347,7 @@ const StripeService = {
         // refuses (a decrease — more credit applied, a downward edit — is
         // always fine). Opt-in (null = unchanged behavior).
         if (maxAuthorizedChargeCents != null) {
-          const lockedTotalCents = Math.round(Number(lockedInvoice.total || 0) * 100);
-          const lockedCreditCents = Math.round(Number(lockedInvoice.credit_applied || 0) * 100);
-          const lockedDueCents = Math.max(0, lockedTotalCents - lockedCreditCents);
+          const lockedDueCents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
           if (lockedDueCents > Math.round(Number(maxAuthorizedChargeCents))) {
             throw new Error('Invoice amount changed since it was reviewed. Review before charging.');
           }
@@ -2464,14 +2484,17 @@ const StripeService = {
           if (requirePerformedVisit) {
             const latestRecord = await trx('service_records').where({ scheduled_service_id: lockedSvc.id })
               .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('status', 'structured_notes');
-            let latestNotes = latestRecord?.structured_notes;
-            if (typeof latestNotes === 'string') { try { latestNotes = JSON.parse(latestNotes); } catch { latestNotes = null; } }
-            const outcome = String(latestNotes?.visitOutcome || '');
-            if (!latestRecord || String(latestRecord.status || '') !== 'completed'
-              || ['inspection_only', 'customer_declined', 'incomplete'].includes(outcome)
-              || String(latestNotes?.backfill || '') === 'true') {
+            // allowIssuedInvoiceCloseoutFor (opt-in, the Auto Pay hold charge): the issued-invoice closeout of THIS invoice counts.
+            if (!require('./visit-outcomes').closeoutPerformedForCharge(latestRecord, { issuedCloseoutInvoiceId: String(allowIssuedInvoiceCloseoutFor) === String(invoiceId) ? invoiceId : null })) {
               throw Object.assign(new Error('The visit\'s current closeout is not a performed visit. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
             }
+          }
+          // Opt-in (the Auto Pay hold charge, every lane): a cash/Zelle prepayment stamped on the visit that no paid
+          // scheduled_service_prepaid payment applied to THIS invoice (a backfill closeout skips that application) is
+          // never charged over. Read under this visit lock; the extended anchor check below shares the predicate.
+          if (requireNoUnappliedVisitPrepayment
+            && await require('./billing-lane').visitCarriesUnappliedPrepayment({ dbConn: trx, svc: lockedSvc, invoice: lockedInvoice })) {
+            throw Object.assign(new Error('The visit carries a prepayment this invoice does not show. Review before charging.'), { code: 'UNAPPLIED_VISIT_PREPAYMENT' });
           }
           // Opt-in (deferred annual prepay): the visit must still carry the
           // year's held stamp a closeout wrote; a re-closeout paid another
@@ -2882,7 +2905,9 @@ const StripeService = {
             // `total` here is the CASH charged (amount due + surcharge); add back
             // applied account credit so the invoice keeps its real total rather
             // than collapsing to the reduced cash amount with credit_applied set.
-            total: Math.round((total + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100,
+            // Earlier part payments stay in the bill too; they reset once this charge pays it (an ACH debit still clearing keeps them).
+            total: Math.round((total + (Number(lockedInvoice.credit_applied) || 0) + (Number(lockedInvoice.amount_paid) || 0)) * 100) / 100,
+            ...(status === 'paid' ? { amount_paid: 0 } : {}),
           });
         if (!invoiceRowsUpdated) throw new Error('Invoice is no longer collectible');
 
@@ -3395,6 +3420,21 @@ const StripeService = {
       throw new Error(
         'This payment is one share of a combined balance charge. Refund the FULL charge from the Stripe dashboard (every included invoice reopens), or issue account credit for a per-invoice adjustment.',
       );
+    }
+
+    // An invoice paid partly by hand (a part payment, GATE_PARTIAL_PAYMENTS) was not covered by this one charge: a refund of it here would
+    // settle the invoice as refunded while the part stays collected, and the refund math below assumes one payment covered the bill.
+    if (refundRowMeta.invoice_id) {
+      const partPayment = await db('payments')
+        .where({ status: 'paid' })
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(refundRowMeta.invoice_id)])
+        .whereRaw("metadata::jsonb ->> 'partial_payment' = 'true'")
+        .first('id');
+      if (partPayment) {
+        throw new Error(
+          'This invoice was also paid in part by hand (a part payment), so a card refund here would not match the bill. Handle the refund by hand, and ask for help.',
+        );
+      }
     }
 
     const paidCents = Math.round(parseFloat(payment.amount) * 100);
@@ -6322,10 +6362,12 @@ const StripeService = {
           // applied account credit so the invoice keeps its real total (credit +
           // cash) — without this, total would collapse to the reduced cash amount
           // and the credit_applied math (amount due) would double-count.
-          total: Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0)) * 100) / 100,
+          // Earlier part payments stay in the bill too; they reset once this charge pays it (an ACH debit still clearing keeps them).
+          total: Math.round((chargedTotal + (Number(lockedInvoice.credit_applied) || 0) + (Number(lockedInvoice.amount_paid) || 0)) * 100) / 100,
         };
         if (paymentStatus === 'paid') {
           invoiceUpdates.paid_at = new Date().toISOString();
+          invoiceUpdates.amount_paid = 0;
         }
 
         const invoiceRowsUpdated = await trx('invoices')

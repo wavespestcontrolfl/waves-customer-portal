@@ -58,12 +58,62 @@ const isAdminLink = (link) => typeof link === 'string' && link.startsWith('/admi
 // A needs-you alert's link must open the work: an admin page, never the Activity feed.
 const linkIsUsable = (link) => isAdminLink(link) && !ACTIVITY_FEED_LINK.test(link);
 
+// Part 9, Buttons (owner 2026-10-29): optional, set by the server when it raises the row and kept as
+// metadata.buttons, so the bell can only press a button the row carries. `kind` names the handler in
+// admin-alert-buttons.js that runs a tap; `items` are the buttons in order: a slug id, a short label, an
+// optional one-sentence `prompt` the bell asks before it sends, and optional `args` (short strings or
+// numbers the handler reads back and checks again at the tap).
+const MAX_BUTTONS = 3;
+const MAX_BUTTON_LABEL_CHARS = 32;
+const MAX_BUTTON_ARGS = 4;
+const BUTTON_ARG_KEY = /^[a-z][A-Za-z0-9]*$/;
+const textOf = (value) => (typeof value === 'string' ? value.trim() : '');
+const buttonArgOk = ([key, value]) => BUTTON_ARG_KEY.test(key)
+  && ((typeof value === 'string' && value.length <= 64) || (typeof value === 'number' && Number.isFinite(value)));
+const buttonArgsOk = (args) => typeof args === 'object' && !Array.isArray(args)
+  && Object.keys(args).length <= MAX_BUTTON_ARGS && Object.entries(args).every(buttonArgOk);
+// [slug, broken(item, idsSoFar)]: one button's own checks.
+const BUTTON_ITEM_RULES = [
+  ['button_id_invalid', (item, ids) => !(typeof item?.id === 'string' && DONE_WHEN.test(item.id)) || ids.has(item.id)],
+  ['button_label_missing', (item) => !textOf(item?.label)],
+  ['button_label_too_long', (item) => textOf(item?.label).length > MAX_BUTTON_LABEL_CHARS],
+  ['button_prompt_invalid', (item) => item?.prompt != null && !textOf(item.prompt)],
+  ['button_prompt_too_long', (item) => textOf(item?.prompt).length > MAX_WHY_CHARS],
+  ['button_prompt_multiple_sentences', (item) => hasSecondSentence(textOf(item?.prompt))],
+  ['button_args_invalid', (item) => item?.args != null && !buttonArgsOk(item.args)],
+];
+
+function buttonViolations(buttons) {
+  if (buttons == null) return [];
+  if (typeof buttons !== 'object' || Array.isArray(buttons)) return ['buttons_invalid'];
+  const v = [];
+  if (!(typeof buttons.kind === 'string' && DONE_WHEN.test(buttons.kind))) v.push('buttons_kind_invalid');
+  const { items } = buttons;
+  if (!Array.isArray(items) || !items.length || items.length > MAX_BUTTONS) return [...v, 'buttons_items_invalid'];
+  const ids = new Set();
+  for (const item of items) {
+    for (const [slug, broken] of BUTTON_ITEM_RULES) if (broken(item, ids)) v.push(slug);
+    ids.add(item?.id);
+    for (const [field, text] of [['button_label', textOf(item?.label)], ['button_prompt', textOf(item?.prompt)]]) {
+      for (const [slug, hit] of FORBIDDEN) if (text && hit(text)) v.push(`${field}_forbidden_token:${slug}`);
+    }
+  }
+  return [...new Set(v)];
+}
+
+const normalizedButtons = ({ kind, items }) => ({
+  kind,
+  items: items.map(({ id, label, prompt, args }) => ({
+    id, label: label.trim(), ...(prompt != null ? { prompt: prompt.trim() } : {}), ...(args != null ? { args: { ...args } } : {}),
+  })),
+});
+
 function ruleError(violations, message = `Admin alert breaks docs/admin-notifications.md: ${violations.join(', ')}`) {
   return Object.assign(new Error(message), { code: RULE_CODE, violations });
 }
 
 function composeAdminAlert(spec = {}) {
-  const { area, action, why, severity, link, subject, doneWhen, who } = spec;
+  const { area, action, why, severity, link, subject, doneWhen, who, buttons } = spec;
   const v = [];
   if (!AREAS.includes(area)) v.push('area_invalid');
   if (!SEVERITIES.includes(severity)) v.push('severity_invalid');
@@ -89,15 +139,19 @@ function composeAdminAlert(spec = {}) {
     if (!link) v.push('link_required');
     else if (ACTIVITY_FEED_LINK.test(link)) v.push('link_is_activity_feed');
   }
+  v.push(...buttonViolations(buttons));
   if (v.length) throw ruleError(v);
-  return { headline, why: whyText, link: link || null, metadata: { area, severity, subject: { type: subject.type, id }, doneWhen, who } };
+  return {
+    headline, why: whyText, link: link || null,
+    metadata: { area, severity, subject: { type: subject.type, id }, doneWhen, who, ...(buttons != null ? { buttons: normalizedButtons(buttons) } : {}) },
+  };
 }
 
 // The structured parts of a spec that are individually valid. The fallback below keeps
 // them: a copy violation (a customer's own words carrying a date) must not cost the
 // alert its subject, done-when and who, which is what a Claude session acts on.
 function validStructuredFields(spec = {}) {
-  const { area, severity, subject, doneWhen, who } = spec;
+  const { area, severity, subject, doneWhen, who, buttons } = spec;
   const id = subject?.id;
   const idOk = (typeof id === 'string' && id.trim()) || (typeof id === 'number' && Number.isFinite(id));
   return {
@@ -106,6 +160,7 @@ function validStructuredFields(spec = {}) {
     ...(SUBJECT_TYPES.includes(subject?.type) && idOk ? { subject: { type: subject.type, id } } : {}),
     ...(typeof doneWhen === 'string' && DONE_WHEN.test(doneWhen) ? { doneWhen } : {}),
     ...(WHO.includes(who) ? { who } : {}),
+    ...(buttons != null && !buttonViolations(buttons).length ? { buttons: normalizedButtons(buttons) } : {}),
   };
 }
 
@@ -147,6 +202,6 @@ function breaksAlertRules(text) {
 }
 
 module.exports = {
-  AREAS, SEVERITIES, WHO, SUBJECT_TYPES, MAX_HEADLINE_CHARS, MAX_WHY_CHARS,
-  composeAdminAlert, raiseAdminAlert, validStructuredFields, cutAtWord: truncateAtWord, firstSentence, breaksAlertRules,
+  AREAS, SEVERITIES, WHO, SUBJECT_TYPES, DONE_WHEN, MAX_HEADLINE_CHARS, MAX_WHY_CHARS, MAX_BUTTONS, MAX_BUTTON_LABEL_CHARS,
+  composeAdminAlert, buttonViolations, raiseAdminAlert, validStructuredFields, cutAtWord: truncateAtWord, firstSentence, breaksAlertRules,
 };

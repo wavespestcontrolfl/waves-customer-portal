@@ -82,7 +82,9 @@ jest.mock('../config/feature-gates', () => ({
   gateEnvValue: (gate) => process.env[gate] === 'true',
   smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
   customerTextToVisitTechLive: () => process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH === 'true',
+  smsBareYesReplyLive: () => process.env.GATE_SMS_BARE_YES_REPLY === 'true',
 }));
+jest.mock('../services/messaging/bare-yes-reply', () => ({ bareYesIsReply: jest.fn(async () => true) }));
 jest.mock('../services/visit-tech-relay', () => ({ relayCustomerTextToVisitTech: jest.fn(async () => 1), errorTag: (e) => String((e && (e.code || e.name)) || 'error') }));
 jest.mock('../services/reschedule-sms', () => ({ handleRescheduleReply: jest.fn(async () => ({ handled: false })) }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
@@ -169,10 +171,12 @@ beforeEach(() => {
   findKnownCallerCustomer.mockResolvedValue(null);
   isStaffTechSender.mockResolvedValue(false);
   delete process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH;
+  delete process.env.GATE_SMS_BARE_YES_REPLY;
 });
 afterAll(() => {
   if (savedOwner === undefined) delete process.env.ADAM_PHONE;
   else process.env.ADAM_PHONE = savedOwner;
+  delete process.env.GATE_SMS_BARE_YES_REPLY;
 });
 
 
@@ -241,6 +245,22 @@ describe('a known customer\'s text to an office line (GATE_CUSTOMER_TEXT_TO_VISI
     mockCustomersRows = [KNOWN];
     await receive('STOP', { from: CUSTOMER_CELL });
     expect(relayCustomerTextToVisitTech).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a bare YES is START and not relayed while GATE_SMS_BARE_YES_REPLY is off', async () => {
+    process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH = 'true';
+    mockCustomersRows = [KNOWN];
+    await receive('Yes', { from: CUSTOMER_CELL });
+    expect(relayCustomerTextToVisitTech).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a bare YES that GATE_SMS_BARE_YES_REPLY calls a reply reaches the relay (an answer to the technician)', async () => {
+    process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH = 'true';
+    process.env.GATE_SMS_BARE_YES_REPLY = 'true';
+    mockCustomersRows = [KNOWN];
+    const res = await receive('Yes', { from: CUSTOMER_CELL });
+    expect(res.statusCode).toBe(200);
+    expect(relayCustomerTextToVisitTech).toHaveBeenCalledWith({ from: CUSTOMER_CELL, body: 'Yes', mediaCount: 0 });
   });
 
   test('gate on: a staff sender is not relayed', async () => {

@@ -603,6 +603,17 @@ describe('one snapshot per customer × family', () => {
   });
 });
 
+describe('CADENCE_SQL reads a lawn rounds series as the 9x lawn plan', () => {
+  const { CADENCE_SQL } = rateReview.PLAN_LINE_SQL;
+  test('lawn_rounds_9 is every_6_weeks, ahead of every custom-interval line', () => {
+    const rounds = CADENCE_SQL.indexOf("WHEN s.recurring_pattern = 'lawn_rounds_9' THEN 'every_6_weeks'");
+    expect(rounds).toBeGreaterThan(-1);
+    expect(rounds).toBeLessThan(CADENCE_SQL.indexOf("s.recurring_pattern = 'custom' AND s.recurring_interval_days BETWEEN"));
+    // The existing 9x readings stay.
+    expect(CADENCE_SQL).toContain("s.recurring_pattern = 'every_6_weeks' OR (s.recurring_pattern = 'custom' AND s.recurring_interval_days = 42)");
+  });
+});
+
 describe('engine replay runs at the line\'s own cadence', () => {
   test('pest frequency and lawn tier follow the schedule, quote-time concessions come off', () => {
     const inputs = { homeSqFt: 2100, manualDiscount: { type: 'PERCENT', value: 10 }, services: { pest: { frequency: 'quarterly', roachType: 'none' }, lawn: { track: 'st_augustine', tier: 'enhanced' } }, lawnFreq: 9 };

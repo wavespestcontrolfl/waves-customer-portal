@@ -207,6 +207,19 @@ function normalizeIncomingConfigData(configKey, data) {
     delete normalized.stationSpacing;
     return normalized;
   }
+  if (configKey === 'rodent_dead_animal_removal' && data && typeof data === 'object' && !Array.isArray(data)) {
+    // `riding` is retired (owner 2026-10-29: one price per tier) and prices nothing. Stripping it on save keeps the
+    // row from advertising a dial that changes nothing; the panel's one-field inline edits save either way.
+    const normalized = { ...data };
+    for (const tier of ['reachable', 'attic']) {
+      const row = normalized[tier];
+      if (row && typeof row === 'object' && !Array.isArray(row) && 'riding' in row) {
+        const { riding: _retired, ...rest } = row;
+        normalized[tier] = rest;
+      }
+    }
+    return normalized;
+  }
   return data;
 }
 
@@ -251,6 +264,14 @@ function validateMosquitoMistingPricing(data) {
   return missing ? { ok: false, error: `mosquito_misting_pricing: ${missing} is missing. Send the whole object.` } : { ok: true };
 }
 
+// Dead Rodent Removal & Odor Treatment prices and on-site minutes (rodent_dead_animal_removal): bounded plain JSON numbers,
+// the whole object (a partial PUT would silently reset the tier it leaves out), the same validator the sync applies.
+function validateDeadAnimalRemovalPricing(data) {
+  const config = require('../services/pricing-engine/dead-animal-removal-config');
+  const verdict = config.normalizeDeadAnimalRemovalConfig(data);
+  return verdict.ok ? { ok: true } : { ok: false, error: `rodent_dead_animal_removal: ${verdict.error}` };
+}
+
 // The first key path of `shape` (objects only; arrays and values are leaves) that `data` does not carry, or null.
 function missingPricingKey(shape, data, path = '') {
   for (const key of Object.keys(shape)) {
@@ -268,6 +289,7 @@ function missingPricingKey(shape, data, path = '') {
 // PUT /:key's validator: a key with its own validator module first, then the shared per-key checks below.
 const OWN_VALIDATORS = { area_addon_pricing: validateAreaAddOnPricing };
 OWN_VALIDATORS.mosquito_misting_pricing = validateMosquitoMistingPricing;
+OWN_VALIDATORS.rodent_dead_animal_removal = validateDeadAnimalRemovalPricing;
 function validatePricingConfigFor(configKey, data, oldConfig) {
   return OWN_VALIDATORS[configKey] ? OWN_VALIDATORS[configKey](data) : validatePricingConfigData(configKey, data, oldConfig);
 }
@@ -805,6 +827,7 @@ async function ensureTable() {
       // rodent_trap_check_additional, not a pricing_config key.
       { config_key: 'rodent_trapping', name: 'Rodent Trapping (Standard — flat $350, setup + 1 trap check)', category: 'rodent', sort_order: 6, data: JSON.stringify({ included_followups: 1, emergency_multiplier: 1.20, emergency_minimum_surcharge: 75 }) },
       { config_key: 'rodent_sanitation', name: 'Rodent Sanitation Tiers (bleach + wipe)', category: 'rodent', sort_order: 7, data: JSON.stringify({ light: { base: 395, floor: 395, included_sqft: 300, additional_per_sqft: 0.20, included_debris_cuft: 0, additional_debris_per_cuft: 12 }, standard: { base: 695, floor: 695, included_sqft: 750, additional_per_sqft: 0.30, included_debris_cuft: 10, additional_debris_per_cuft: 12 }, heavy: { base: 995, floor: 995, included_sqft: 750, additional_per_sqft: 0.55, included_debris_cuft: 25, additional_debris_per_cuft: 12, crawlspace_multiplier: 1.15, tight_access_multiplier: 1.25 } }) },
+      { config_key: 'rodent_dead_animal_removal', name: 'Dead Rodent Removal & Odor Treatment (fixed tier prices)', category: 'rodent', sort_order: 11, data: JSON.stringify(require('../services/pricing-engine/dead-animal-removal-config').defaultDeadAnimalRemovalData()) },
       { config_key: 'rodent_bundles', name: 'Rodent Bundle Discounts', category: 'rodent', sort_order: 8, data: JSON.stringify({ trap_exclusion: { discount: 0.07, floor: 895 }, trap_sanitation: { discount: 0.05, floor: 895 }, full_remediation: { discount: 0.10, floors: { light: 1195, standard: 1495, heavy: 1995 } } }) },
       { config_key: 'rodent_guarantee', name: 'Rodent Annual Guarantee Tiers', category: 'rodent', sort_order: 9, data: JSON.stringify({ standard: 199, complex: 249, estate: 299, eligibility_requires: ['trappingCompleted','exclusionCompleted','sanitationCompletedOrPhotoBaseline','noActivityAfterFinalTrapCheck'] }) },
       { config_key: 'rodent_waveguard', name: 'Rodent WaveGuard Rules', category: 'rodent', sort_order: 10, data: JSON.stringify({ tier_qualifier: true, exclude_from_pct_discount: false, setup_credit: 0, note: 'Owner directive 2026-08-29: rodent bait is a full WaveGuard member — counts toward the tier and receives the tier discount.' }) },
@@ -1361,6 +1384,8 @@ router.post('/margin-check', async (req, res) => {
 const CONFIG_KEY_FEATURE_GATES = {
   termite_rental: 'GATE_TERMITE_STATION_RENTAL',
   termite_annual_plan: 'GATE_TERMITE_ANNUAL_PLAN',
+  // New quotes only: the estimator reads featureAvailable from this row to offer the Dead Rodent Removal choice.
+  rodent_dead_animal_removal: 'GATE_DEAD_ANIMAL_REMOVAL',
 };
 
 // Gated SUB-features that live inside a broader config row (the row itself

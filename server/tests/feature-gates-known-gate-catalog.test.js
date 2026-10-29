@@ -36,6 +36,8 @@ describe('knownGateCatalog', () => {
       'GATE_PEST_STRANDED_RECOVERY', 'GATE_EMAIL_TEMPLATE_AUTOMATIONS', 'GATE_SMS_OPERATIONAL_ACTIONS_SINCE',
       // off | shadow | auto, and shadow | true — read only through their mode lists in this file.
       'GATE_REVIEW_AUTO_REPLY', 'GATE_SMS_SPAM_CLASSIFIER',
+      // off | watch — read only through alertCatalogMode().
+      'GATE_ALERT_CATALOG',
     ]) {
       expect(catalog.get(name).kind).toBe('mode');
       expect(catalog.get(name).boolean).toBe(false);

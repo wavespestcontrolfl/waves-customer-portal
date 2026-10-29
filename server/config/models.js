@@ -578,6 +578,16 @@ const ROUTES = Object.freeze({
   // lawn-visit-referee.js): single-leg, no automatic fallback — a referee
   // miss leaves Gemini's read exactly as it was.
   lawnAssessmentReferee: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: LAWN_ASSESSMENT_REFEREE, effort: 'high' }),
+  // Lawn diagnosis perception backup (owner 2026-10-29, "sure add it"; an
+  // Analyze photos test came back canned while the AI Studio spend cap refused
+  // Gemini): lawn-diagnostic-prompt.js#runPerception reads the photos with
+  // Gemini first (a raw fetch) and, on any miss, sends the same photos and
+  // prompt here through llm/call.js#dispatch. Single leg: the lawn photo lane's
+  // OpenAI model, the same backup as TEXT_POLICIES.lawnVisitAssessment (owner
+  // rulings 2026-09-08 / 2026-09-29), moved by MODEL_OPENAI_LAWN_ASSESSMENT. No
+  // Claude perception leg; if both miss, the ladder's Claude VISION score
+  // composite stays the last rung.
+  lawnDiagnosisPerceptionBackup: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
   // Typed decisions (services/typed-decisions/jev.js): TypeSafe Jev answers
   // yes/no, choice and score questions. Single-leg by design, no cross-provider
   // fallback: nothing else answers typed questions, so callers fall back to

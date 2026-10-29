@@ -4734,7 +4734,11 @@ router.get('/:serviceId/reschedule-options', async (req, res, next) => {
     // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees why.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
-    const options = await SmartRebooker.findRescheduleOptions(req.params.serviceId);
+    // GATE_ROUTE_CHECK_STAFF_LISTS: only an admin's list may buy Google road
+    // times; a technician's stays on the estimate.
+    const options = await SmartRebooker.findRescheduleOptions(req.params.serviceId, undefined, {
+      caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
+    });
     res.json({ options });
   } catch (err) { next(err); }
 });

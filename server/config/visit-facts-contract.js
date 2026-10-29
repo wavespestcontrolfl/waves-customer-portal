@@ -1670,7 +1670,7 @@ const VISIT_FACTS_CONTRACT = {
   rodent_sanitation: {
     label: 'Rodent sanitation (typed rodent_sanitation form)',
     typedForm: 'rodent_sanitation',
-    catalogKeys: ['rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy'],
+    catalogKeys: ['rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy', 'rodent_dead_animal_removal'],
     voiceFill: true,
     facts: [
       ...typedFormFacts('rodent_sanitation'),

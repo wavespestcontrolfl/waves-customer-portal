@@ -595,7 +595,13 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern } = require('../services/recurring-appointment-seeder');
+const { lawn9xRoundsLive } = require('../config/feature-gates');
+// GATE_LAWN_9X_ROUNDS, read live; off when a feature-gates test mock lacks the reader.
+const lawnRoundsGateOn = () => typeof lawn9xRoundsLive === 'function' && !!lawn9xRoundsLive();
+// Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
+// The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows } = require('../services/lawn-rounds');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
 
@@ -636,7 +642,64 @@ function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
     weekday: (opts.weekday != null && opts.weekday !== '' && !isNaN(parseInt(opts.weekday)))
       ? parseInt(opts.weekday)
       : et.dayOfWeek,
+    // The series anchor, for lawn_rounds_9 only (see nextRecurringDate).
+    roundAnchor: dateOnly(baseDateStr),
   };
+}
+
+// Recurrence options for extending a series from its PARENT row (top-up,
+// auto-extend, visit-count reconcile, reseed, alert actions): the parent's
+// stored nth / weekday / interval, and the lawn round anchor.
+function seriesRecurrenceOptions(parent) {
+  return {
+    ...recurrenceOrdinalOptions(parent.scheduled_date, { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
+    intervalDays: parent.recurring_interval_days,
+    roundAnchor: seriesRoundAnchor(parent),
+  };
+}
+
+// Lawn rounds: the date whose offset in its round and weekday place every
+// visit of the series. A write that re-places the series from a new date
+// (a series move on a later visit, an Edit appointment cadence rewrite, make
+// recurring) stores that date on the parent, recurring_round_anchor_date: the
+// parent's own date is history and usually a completed visit. Unset, it is
+// the parent's cadence position, which a one-off move or a hand-off placement
+// does not change.
+function seriesRoundAnchor(parent) {
+  return dateOnly(parent?.recurring_round_anchor_date) || seriesCadencePosition(parent) || null;
+}
+
+// Lawn rounds: store `anchorDateStr` as the series round anchor
+// (seriesRoundAnchor) on the parent row. No-op for every other pattern, and
+// before the column exists.
+async function stampSeriesRoundAnchor(conn, parent, anchorDateStr) {
+  if (parent?.recurring_pattern !== LAWN_ROUNDS_9 || !parent?.id || !anchorDateStr) return;
+  const cols = await conn('scheduled_services').columnInfo();
+  if (!cols.recurring_round_anchor_date) return;
+  await conn('scheduled_services').where({ id: parent.id }).update({ recurring_round_anchor_date: anchorDateStr });
+}
+
+// Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): the pattern + interval a NEW series is
+// written with. The shared lawnRoundsSeriesPattern decides (residential lawn
+// 9x only); this adds the catalog row's key to the identity when the booking
+// names a service id, so a lawn plan whose label does not say "lawn" still
+// reads as lawn. Gate off, or any other series: the input comes back
+// unchanged and no query runs.
+async function lawnRoundsSeriesForBooking(conn, { pattern, intervalDays, serviceType, serviceId = null, serviceKey = null }) {
+  if (!lawnRoundsGateOn()) return { pattern, intervalDays };
+  let service = null;
+  if (serviceId) {
+    try {
+      service = await conn('services').where({ id: serviceId }).first('service_key', 'name');
+    } catch (e) { logger.warn(`[schedule] lawn rounds service lookup failed (label only): ${e.message}`); }
+  }
+  return lawnRoundsSeriesPattern({
+    pattern,
+    intervalDays,
+    service_type: serviceType,
+    service_key: service?.service_key || serviceKey || undefined,
+    name: service?.name || undefined,
+  });
 }
 
 // Generate the Nth recurring occurrence date given a base date + pattern config.
@@ -665,6 +728,11 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   // dates the series was seeded with (it would otherwise take the generic
   // 91-day fallback below and schedule winter visits).
   if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safeBaseStr, i, opts);
+  // Lawn 9x rounds: one visit in each of nine fixed rounds a year. Extension,
+  // top-up and reseed hop from the LATEST visit, so opts.roundAnchor (the
+  // series anchor, set by recurrenceOrdinalOptions) keeps the anchor's offset
+  // in every round; without it every hop drifts toward the round's end.
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safeBaseStr, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -713,7 +781,19 @@ function seasonalSafeShift(rawDate, pattern, skip, direction, blackoutDates = nu
   const shifted = clearOfBlackout(shiftPastWeekend(rawDate, skip, direction), blackoutDates, { skipWeekends: !!skip });
   // Null = the nudge's bounded search exhausted; callers skip the candidate.
   if (shifted == null) return null;
-  return clampDateToSeason(pattern, shifted, { skipWeekends: !!skip, blackoutDates });
+  const seasonal = clampDateToSeason(pattern, shifted, { skipWeekends: !!skip, blackoutDates });
+  // A lawn round is a window too: a weekend shift or a blackout nudge off the
+  // last day of a round must not land in the next one (two visits there, none
+  // here). The raw cadence date names the round the date belongs to.
+  return seasonal && clampDateToRound(pattern, seasonal, { skipWeekends: !!skip, blackoutDates, intendedDate: rawDate });
+}
+
+// True when the series already owns this date, or (lawn_rounds_9) a visit in
+// the same round: a series owes one visit a round, so a candidate whose round
+// is taken is a second visit, not a missing one. Every extension walk asks
+// this instead of seen.has(date).
+function seriesDateTaken(seen, pattern, date) {
+  return seen.has(date) || (pattern === LAWN_ROUNDS_9 && roundTaken(seen, date));
 }
 
 // Owner blackout layers ({ dates, weeklyDaysOff }) preloaded once per
@@ -790,12 +870,18 @@ function seriesExtendAnchor(latest, pattern, rOpts) {
   // that due date — the night tool never stamps an exception — so the next
   // extension projects from the due date, not the placement; otherwise every
   // hand-off could shift the plan by up to three days, compounding.
-  const anchorDate = (latest?.date_exception && latest?.date_exception_cadence_date)
-    ? latest.date_exception_cadence_date
-    : (latest?.recurring_dispatch_due_date || latest?.scheduled_date);
-  const latestStr = dateOnly(anchorDate) || '';
+  const latestStr = seriesCadencePosition(latest);
   if (!latestStr) return etDateString();
   return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
+}
+
+// A series row's cadence position (see seriesExtendAnchor): an exception's
+// recorded cadence date, else a hand-off's due date, else its own date.
+function seriesCadencePosition(row) {
+  const position = (row?.date_exception && row?.date_exception_cadence_date)
+    ? row.date_exception_cadence_date
+    : (row?.recurring_dispatch_due_date || row?.scheduled_date);
+  return dateOnly(position) || '';
 }
 
 // Compute booster appointment dates for a recurring series. Booster months
@@ -962,7 +1048,7 @@ function planCadenceRewriteTargets({
       // A cadence/anchor edit on an older parent must never re-date pending
       // children into the past (mirror of the extend planner's floor).
       if (candidate <= etDateString()) continue;
-      if (seenDates.has(candidate)) continue;
+      if (seriesDateTaken(seenDates, pattern, candidate)) continue;
       seenDates.add(candidate);
       nextDateStr = candidate;
     }
@@ -1036,7 +1122,7 @@ function planSpawnChildDates({ baseDateStr, pattern, rOpts, skip, dir, seen, spa
     // future-only floor as the other planners so a child can never land in
     // the past.
     if (nextDateStr <= etDateString()) continue;
-    if (seen.has(nextDateStr)) continue;
+    if (seriesDateTaken(seen, pattern, nextDateStr)) continue;
     seen.add(nextDateStr);
     dates.push(nextDateStr);
   }
@@ -1053,7 +1139,7 @@ function planSeriesExtendDates({ baseDateStr, pattern, rOpts, skip, dir, seen, n
     const nd = seasonalSafeShift(raw, pattern, skip, dir, blackoutDates);
     if (!nd) continue;
     if (recurringCandidateTooCloseToAnchor(baseDateStr, pattern, nd)) continue;
-    if (seen.has(nd)) continue;
+    if (seriesDateTaken(seen, pattern, nd)) continue;
     // The anchor can itself be in the past on a stalled series; a top-up must
     // still only ever land on future dates.
     if (nd <= etDateString()) continue;
@@ -1197,12 +1283,17 @@ async function planUpdateDetailsRecurrenceDates(conn, {
     nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
     weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
     intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
+    roundAnchor: dateOnly(parent.scheduled_date),
   });
 
   // Cadence rewrite of the pending children/boosters of a series parent.
   if (!shouldSpawn && recurringPattern && before.is_recurring && !before.recurring_parent_id
     && shouldRewritePendingRecurringRows(before, after)) {
     const baseDateStr = dateOnly(after.scheduled_date) || etDateString();
+    // Lawn rounds: the save stores the parent's date as the round anchor
+    // (stampSeriesRoundAnchor in the rewrite), so a top-up planned below
+    // from `after` hops from it as the write will.
+    if (after.recurring_pattern === LAWN_ROUNDS_9) after.recurring_round_anchor_date = baseDateStr;
     // The edit UI submits skipWeekends:false whenever recurring controls
     // are active, so a submitted false is the form default, NOT operator
     // intent — the saved preference ORs over it (hook B6 P1). Overriding
@@ -1230,8 +1321,9 @@ async function planUpdateDetailsRecurrenceDates(conn, {
       if (pendingChildren.length > 0) {
         reservedQuery.whereNotIn('id', pendingChildren.map((row) => row.id));
       }
-      const reservedRows = await reservedQuery.select('scheduled_date');
-      const seenDates = new Set(reservedRows.map((row) => dateOnly(row.scheduled_date) || '').filter(Boolean));
+      const reservedRows = await reservedQuery.select('scheduled_date', 'is_recurring');
+      // A booster blocks its day but owns no lawn round (SeriesDates).
+      const seenDates = seriesDatesFromRows(reservedRows, dateOnly);
       const { childTargets, boosterTargets } = planCadenceRewriteTargets({
         baseDateStr,
         pattern: recurringPattern,
@@ -1267,16 +1359,16 @@ async function planUpdateDetailsRecurrenceDates(conn, {
     // routinely-submitted false (hook B6 P1).
     const skip = (skipWeekends !== undefined ? !!skipWeekends : skipParent) || prefNoWeekends;
     const dir = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
-    const seen = new Set();
-    seen.add(dateOnly(baseDateStr) || '');
+    // A booster blocks its day but owns no lawn round (SeriesDates).
+    const seen = new SeriesDates([dateOnly(baseDateStr) || '']);
     try {
       const existingSeriesRows = await conn('scheduled_services')
         .where(function () { this.where('recurring_parent_id', before.id).orWhere('id', before.id); })
         .whereNotIn('status', ['cancelled', 'rescheduled'])
-        .select('scheduled_date');
+        .select('scheduled_date', 'is_recurring');
       for (const r of existingSeriesRows) {
         const d = dateOnly(r.scheduled_date);
-        if (d) seen.add(d);
+        if (d) (r.is_recurring === false ? seen.addExtra(d) : seen.add(d));
       }
     } catch { /* preload is protective; the base-date seed still guards */ }
     let existingUpcomingChildren = 0;
@@ -1318,13 +1410,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
         const live = await liveUpcomingSeriesVisits(conn, parentId);
         const need = target - live.length;
         if (need > 0) {
-          const rOpts = {
-            ...recurrenceOrdinalOptions(parent.scheduled_date, {
-              nth: parent.recurring_nth,
-              weekday: parent.recurring_weekday,
-            }),
-            intervalDays: parent.recurring_interval_days,
-          };
+          const rOpts = seriesRecurrenceOptions(parent);
           // B6: mirrors the reconcile WRITER's live-preference OR — a
           // divergent plan locks the weekend slot while the writer shifts
           // to a weekday and SERIES_CHANGED_RETRY loops forever (hook P1).
@@ -5802,9 +5888,7 @@ const DEAD_ATTACHED_INVOICE_STATUSES = Object.freeze(['void', 'canceled', 'cance
 
 function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, chargeGuardsClear = false, visitPayerBilled = false } = {}) {
   if (!invoice || DEAD_ATTACHED_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return null;
-  const amount = invoice.total != null
-    ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
-    : null;
+  const amount = invoice.total != null ? invoiceAmountDue(invoice) : null;
   if (['paid', 'prepaid'].includes(invoice.status)) {
     return { kind: 'prepaid', amount, conflictStampedPrice: false, source: 'attached_invoice' };
   }
@@ -6343,10 +6427,7 @@ async function seriesVerdictWalk(conn, parentId) {
   const latest = await latestLiveSeriesVisit(conn, parentId);
   if (!latest) return null;
   const pattern = parent.recurring_pattern;
-  const rOpts = {
-    ...recurrenceOrdinalOptions(parent.scheduled_date, { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
-    intervalDays: parent.recurring_interval_days,
-  };
+  const rOpts = seriesRecurrenceOptions(parent);
   const latestStr = seriesExtendAnchor(latest, pattern, rOpts);
   const skipParent = (cols.skip_weekends && !!parent.skip_weekends) || await customerPrefersNoWeekends(conn, parent.customer_id);
   const dirParent = cols.weekend_shift && parent.weekend_shift === 'back' ? 'back' : 'forward';
@@ -6703,7 +6784,7 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'title', 'notes');
+          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'amount_paid', 'payer_id', 'title', 'notes');
       } catch { /* scheduled_service_id may be absent before migration */ }
       // Whether the visit's recorded prepayment has ALREADY been consumed by
       // this invoice (Charge-now's applyPrepaidCredit reduces invoices.total
@@ -6938,6 +7019,7 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
         checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
         checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+        checkoutInvoiceAmountPaid: checkoutInvoice?.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
         checkoutInvoicePrepaidApplied,
         // The INVOICE's own Bill-To: a payer-billed invoice survives the
         // visit's payer being cleared/deactivated, and the Charge-now reuse
@@ -7397,7 +7479,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'title', 'notes');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'amount_paid', 'payer_id', 'title', 'notes');
         } catch { /* scheduled_service_id may be absent before migration */ }
         // Mirrors the day-view enrichment: has the visit's prepayment already
         // been consumed by this invoice? Gated to the prepaid+invoice overlap.
@@ -7465,7 +7547,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'credit_applied', 'payer_id');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'credit_applied', 'amount_paid', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
         const billingLane = {
           mode: lane.mode,
@@ -7620,6 +7702,7 @@ router.get('/week', async (req, res, next) => {
           checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
           checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
           checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+          checkoutInvoiceAmountPaid: checkoutInvoice?.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
           checkoutInvoicePrepaidApplied,
           // Same invoice-level Bill-To flag as the day payload (see there).
           checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
@@ -8412,8 +8495,8 @@ async function scheduleCreateHandler(req, res, next) {
   try {
     const {
       customerId, technicianId, scheduledDate, windowStart: windowStartRaw, windowEnd: windowEndRaw,
-      serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
-      recurringNth, recurringWeekday, recurringIntervalDays,
+      serviceType, timeWindow, notes, isRecurring, recurringCount, recurringOngoing,
+      recurringNth, recurringWeekday,
       skipWeekends, weekendShift,
       boosterMonths,
       discountId, discountType, discountAmount,
@@ -8426,6 +8509,8 @@ async function scheduleCreateHandler(req, res, next) {
       // (customer_properties.id). Absent → the sole-property anchor below.
       propertyId,
     } = req.body;
+    // Reassigned below when GATE_LAWN_9X_ROUNDS writes the series as rounds.
+    let { recurringPattern, recurringIntervalDays } = req.body;
 
     const separateProgram = req.body.duplicateSeriesOverride;
     if (separateProgram !== undefined) {
@@ -8484,6 +8569,16 @@ async function scheduleCreateHandler(req, res, next) {
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS): decided ONCE, before the prepay
+    // preflight, the date plan and every insert, so the parent and all of its
+    // children are written with the same pattern and no interval. Off, or any
+    // other service: both values stay exactly as posted.
+    if (isRecurring) {
+      ({ pattern: recurringPattern, intervalDays: recurringIntervalDays } = await lawnRoundsSeriesForBooking(db, {
+        pattern: recurringPattern, intervalDays: recurringIntervalDays, serviceType, serviceId,
+      }));
+    }
 
     // Duplicate-series guard: a second ACTIVE recurring series of the same
     // service family for one customer is almost always a booking mistake —
@@ -8734,8 +8829,14 @@ async function scheduleCreateHandler(req, res, next) {
       const prepayBookedPattern = (recurringPattern === 'custom' && Number(recurringIntervalDays) === 42)
         ? 'every_6_weeks'
         : recurringPattern;
-      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern);
-      const prepayCoverageCadence = prepayCoverageCadenceForPattern(prepayBookedPattern);
+      // A series written as lawn_rounds_9 (GATE_LAWN_9X_ROUNDS) has no prepay
+      // coverage yet: nine visits a year, but no supported coverage cadence,
+      // so it downgrades like seasonal_feb_oct (see prepayCoverageCadenceForPattern)
+      // with its own message.
+      const prepayRoundsSeries = prepayBookedPattern === LAWN_ROUNDS_9;
+      const coverageVisitCount = visitOverride.visitCount || visitsPerYearForCadence(prepayBookedPattern)
+        || (prepayRoundsSeries ? 9 : null);
+      const prepayCoverageCadence = prepayRoundsSeries ? null : prepayCoverageCadenceForPattern(prepayBookedPattern);
       const hasAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
       const hasBoosters = Array.isArray(boosterMonths) && boosterMonths.length > 0;
       // The quote's (single) recurring service name + cadence — sourced
@@ -8844,6 +8945,8 @@ async function scheduleCreateHandler(req, res, next) {
         downgrade(`Appointment booked as standard — annual prepay visit count is invalid (${visitOverride.error}).`);
       } else if (!isRecurring || !coverageVisitCount) {
         downgrade('Appointment booked as standard — annual prepay needs a recurring visit with a known cadence (or an explicit covered-visit count).');
+      } else if (prepayRoundsSeries) {
+        downgrade('Appointment booked as standard — annual prepay isn’t available yet for the nine-round lawn program.');
       } else if (!prepayCoverageCadence) {
         downgrade('Appointment booked as standard — annual prepay isn’t supported for this visit cadence (the year’s coverage schedule can’t be derived from it). Book on a monthly / every-6-weeks / bimonthly / quarterly / triannual / semiannual / annual cadence, or set up prepay from Customer 360.');
       } else if (visitOverride.visitCount && visitsPerYearForCadence(prepayBookedPattern)
@@ -9209,7 +9312,7 @@ async function scheduleCreateHandler(req, res, next) {
         const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipWeekendsEffective, shiftDir, seriesBlackoutDates);
         if (!nextDateStr) continue;
         if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
-        if (seriesDates.has(nextDateStr)) continue;
+        if (seriesDateTaken(seriesDates, recurringPattern, nextDateStr)) continue;
         seriesDates.add(nextDateStr);
         plannedChildDates.push(nextDateStr);
       }
@@ -10059,6 +10162,17 @@ async function scheduleCreateHandler(req, res, next) {
       if (newApptStopOrderLive()) {
         await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true });
       }
+      // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a no-op
+      // when off): AFTER the stop-order placement above (the check reads the
+      // visit where it is saved, so it must see the placed order), the booked
+      // visit gets the same arrival-window check Edit's save runs, on the road
+      // times the pickers already bought. WARN ONLY, in its own savepoint: it
+      // never blocks or fails the booking. The overlap probe above is
+      // unchanged.
+      bookingWarnings.push(...await require('../services/scheduling/staff-save-route-check').staffSaveRouteWarnings(trx, {
+        serviceId: svc.id, date: dateOnly(svc.scheduled_date), windowStart: svc.window_start, windowEnd: svc.window_end,
+        technicianId: svc.technician_id,
+      }));
     });
 
     // A lead / standalone quote (customer_id was NULL at booking) gets attached
@@ -10903,6 +11017,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // slot (owner ruling 2026-08-25 — staff-side saves never block on
     // schedule conflicts): { id, warning } per stacked row.
     const overlapWarnings = [];
+    // Route-check notes (GATE_ROUTE_CHECK_STAFF_SAVES): the arrival-window check's own
+    // warning text per visit, kept apart from the true overlaps above.
+    const routeWarnings = [];
     // Single-visit cancels whose series may need a visit added back
     // (owner ruling 2026-09-24) — evaluated ONCE per series after the whole
     // batch settled, so a bulk cancel that removes several visits of one
@@ -10941,6 +11058,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
         let pendingOverlapWarning = null;
         // The bulk overlap probe's window, kept for the committed-route recheck.
         let bulkProbedSlot = null;
+        // Route-check notes (GATE_ROUTE_CHECK_STAFF_SAVES): held and released the same way.
+        let pendingRouteWarnings = [];
         switch (action) {
           case 'reassign': {
             await db.transaction(async (trx) => {
@@ -11314,6 +11433,25 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   });
                   pendingOverlapWarning = again.length ? { id, warning: slotOverlapWarning(bulkTargetDate) } : null;
                 }
+                // Route check (GATE_ROUTE_CHECK_STAFF_SAVES, owner 2026-10-29; a
+                // no-op when off): a row whose slot moved has its technician's
+                // day numbered first in the order the arrival-window check
+                // certifies (inside this transaction; needs
+                // GATE_STAFF_ROUTE_INSERTION too), THEN gets the check Edit's
+                // save runs, on the road times the pickers already bought.
+                // Placement first: the check reads the row where it is saved, so
+                // a moved row not yet placed can read late in a stale order.
+                // ADVISORY ONLY: the notes go to the response's own `routeWarnings`
+                // (never into the overlap list); the move never fails on a route
+                // result.
+                if (bulkProbedSlot) {
+                  const routeCheck = require('../services/scheduling/staff-save-route-check');
+                  await routeCheck.placeStaffSavedVisit(trx, { serviceId: id, source: 'bulk_reschedule' });
+                  pendingRouteWarnings = await routeCheck.staffSaveRouteWarnings(trx, {
+                    serviceId: id, date: bulkTargetDate, windowStart: bulkProbedSlot.effStart, windowEnd: bulkProbedSlot.effEnd,
+                    technicianId: committedTechId,
+                  });
+                }
                 const nextStartRaw = updates.window_start !== undefined ? updates.window_start : svc.window_start;
                 const nextEndRaw = updates.window_end !== undefined ? updates.window_end : svc.window_end;
                 const slotMoved = prevDate !== bulkTargetDate
@@ -11632,6 +11770,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
         }
         updated.push(id);
         if (pendingOverlapWarning) overlapWarnings.push(pendingOverlapWarning);
+        for (const warning of pendingRouteWarnings) routeWarnings.push({ id, warning });
       } catch (e) {
         failed.push({ id, reason: e.message });
       }
@@ -11664,6 +11803,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       // Advisory occupancy-overlap notes — rows that committed onto an
       // occupied slot (gated probe; empty while the gate is off).
       overlapWarnings,
+      // Route results of the arrival-window check (GATE_ROUTE_CHECK_STAFF_SAVES),
+      // [{ id, warning }] with the checker's own text. Present only when the
+      // gate is on; never mixed into overlapWarnings.
+      ...(require('../services/scheduling/staff-save-route-check').routeCheckLive() ? { routeWarnings } : {}),
     });
   } catch (err) { next(err); }
 });
@@ -14067,7 +14210,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // Only honored behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE — see the
       // refusal below and the propagation block after the main row update.
       priceServiceScope,
-      isRecurring, recurringPattern, recurringCount, recurringOngoing,
+      isRecurring, recurringCount, recurringOngoing,
       spawnRecurringChildren,
       // Exact plan length for a series that ALREADY exists — the Edit
       // appointment Count field. Distinct from recurringCount (which seeds a
@@ -14089,7 +14232,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // this a plan another operator flipped to fixed gets flipped back (and
       // topped up) by an unrelated save (Codex #3337 r5 P1).
       recurringOngoingBaseline,
-      recurringNth, recurringWeekday, recurringIntervalDays,
+      recurringNth, recurringWeekday,
       skipWeekends, weekendShift,
       estimatedPrice,
       primaryLinePrice,
@@ -14108,6 +14251,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       expectedTotal,
     } = req.body;
     let { discountType, discountAmount } = req.body;
+    // Reassigned below when GATE_LAWN_9X_ROUNDS writes the new series as rounds.
+    let { recurringPattern, recurringIntervalDays } = req.body;
     if (expectedTotal !== undefined && expectedTotal !== null && !Number.isFinite(Number(expectedTotal))) {
       throw httpError(422, 'expectedTotal must be a number');
     }
@@ -14405,6 +14550,42 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       assignmentShouldRun = assignmentNeedsChange || normalizedAssignmentScope !== 'this_only';
       if (assignmentShouldRun && req.techRole !== 'admin') {
         return res.status(403).json({ error: 'Admin access required' });
+      }
+    }
+    // Lawn 9x rounds (GATE_LAWN_9X_ROUNDS), make-this-recurring only: a visit
+    // that is not yet in a series becomes a NEW series, so the parent update
+    // and every spawned child below carry the rounds pattern and no interval.
+    // A visit already in a series keeps the pattern its rows already carry,
+    // so a series never mixes the two.
+    if (isRecurring && spawnRecurringChildren !== false && recurringPattern && lawnRoundsGateOn()) {
+      const seriesCurrent = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .first('is_recurring', 'recurring_parent_id', 'service_type', 'service_id');
+      if (seriesCurrent && !seriesCurrent.is_recurring && !seriesCurrent.recurring_parent_id) {
+        // The EFFECTIVE identity of this save, resolved the way the service
+        // change below treats the request: a posted serviceId (truthy) is the
+        // catalog row; a posted null clears it (the static-fallback pick
+        // carries postedServiceKey, else the label); a label with no
+        // serviceId is the label alone, never the stored id; nothing posted
+        // keeps the stored identity.
+        let effectiveId = seriesCurrent.service_id;
+        let effectiveKey = null;
+        let effectiveLabel = seriesCurrent.service_type;
+        if (serviceId !== undefined) {
+          effectiveId = serviceId || null;
+          effectiveKey = !serviceId ? String(postedServiceKey || '').trim().toLowerCase() || null : null;
+          effectiveLabel = serviceType;
+        } else if (serviceType !== undefined) {
+          effectiveId = null;
+          effectiveLabel = serviceType;
+        }
+        ({ pattern: recurringPattern, intervalDays: recurringIntervalDays } = await lawnRoundsSeriesForBooking(db, {
+          pattern: recurringPattern,
+          intervalDays: recurringIntervalDays,
+          serviceType: effectiveLabel,
+          serviceId: effectiveId,
+          serviceKey: effectiveKey,
+        }));
       }
     }
     let editAnchorDate = scheduledDate;
@@ -16531,7 +16712,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
+            roundAnchor: baseDateStr,
           };
+          // Lawn rounds: the rewrite re-places the series from the parent's
+          // date, so later top-ups hop from it too (seriesRoundAnchor;
+          // planUpdateDetailsRecurrenceDates plans the same).
+          await stampSeriesRoundAnchor(trx, parent, baseDateStr);
           // B6: DATES honor the live weekday preference (ORed over both the
           // parent flag and the form's routinely-submitted false — the edit
           // UI always sends the checkbox), mirroring
@@ -16580,12 +16766,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             if (pendingChildren.length > 0) {
               reservedQuery.whereNotIn('id', pendingChildren.map((row) => row.id));
             }
-            const reservedRows = await reservedQuery.select('scheduled_date');
-            const seenDates = new Set(
-              reservedRows
-                .map((row) => dateOnly(row.scheduled_date) || '')
-                .filter(Boolean),
-            );
+            const reservedRows = await reservedQuery.select('scheduled_date', 'is_recurring');
+            // A booster blocks its day but owns no lawn round (SeriesDates);
+            // the same set planUpdateDetailsRecurrenceDates planned with.
+            const seenDates = seriesDatesFromRows(reservedRows, dateOnly);
             // Destination dates from the shared generator (the pre-trx lock
             // plan ran the same one). Every re-dated row is verified against
             // the held rung-1 keys and probed before its write below; the
@@ -16909,7 +17093,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
+            roundAnchor: baseDateStr,
           };
+          // Lawn rounds: the series is placed from this row's date.
+          await stampSeriesRoundAnchor(trx, parent, baseDateStr);
           // B6: DATES honor the live preference; the STAMPED flag stays the
           // operator's raw value (see the rewrite branch above).
           const spawnPrefNoWeekends = editPrefNoWeekends;
@@ -16933,16 +17120,16 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           // auto-extend/alert-extend date preloads), not just the base date:
           // seeded with the base date alone, a double-submit or re-edit
           // spawned duplicate children on the same dates.
-          const seenChildDates = new Set();
-          seenChildDates.add(dateOnly(baseDateStr) || '');
+          // A booster blocks its day but owns no lawn round (SeriesDates).
+          const seenChildDates = new SeriesDates([dateOnly(baseDateStr) || '']);
           try {
             const existingSeriesRows = await trx('scheduled_services')
               .where(function () { this.where('recurring_parent_id', parent.id).orWhere('id', parent.id); })
               .whereNotIn('status', ['cancelled', 'rescheduled'])
-              .select('scheduled_date');
+              .select('scheduled_date', 'is_recurring');
             for (const r of existingSeriesRows) {
               const d = dateOnly(r.scheduled_date);
-              if (d) seenChildDates.add(d);
+              if (d) (r.is_recurring === false ? seenChildDates.addExtra(d) : seenChildDates.add(d));
             }
           } catch { /* preload is protective; the base-date seed still guards */ }
           // A re-submit must top the series UP to the requested count, not
@@ -16973,14 +17160,15 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           {
             const gateCustomer = await trx('customers').where({ id: parent.customer_id }).first().catch(() => null);
             // Seeded from the SAME seenChildDates the insert loop walks with
-            // (a copy, so planning cannot mutate it). A fresh Set made the
+            // (a copy, so planning cannot mutate it; SeriesDates keeps which
+            // dates are boosters). A fresh Set made the
             // gate price early occurrences the loop then skips as already
             // occupied — on a top-up it would check one date and insert
             // another, and with cadence-sensitive add-ons the checked date
             // can carry an amount the inserted one does not (Codex P0).
             const gateDates = [baseDateStr, ...planSpawnChildDates({
               baseDateStr, pattern: recurringPattern, rOpts, skip: skipChild, dir: dirChild,
-              seen: new Set(seenChildDates), spawnCount, spawnTarget, blackoutDates: spawnBlackoutDates,
+              seen: new SeriesDates(seenChildDates), spawnCount, spawnTarget, blackoutDates: spawnBlackoutDates,
             })];
             const spawnInv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
             const spawnFloor = gateDates.reduce((min, d) => {
@@ -17041,7 +17229,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             // Mirror planSpawnChildDates' future-only floor (the pre-trx lock
             // plan) — the two walks must stay candidate-for-candidate equal.
             if (nextDateStr <= etDateString()) continue;
-            if (seenChildDates.has(nextDateStr)) continue;
+            if (seriesDateTaken(seenChildDates, recurringPattern, nextDateStr)) continue;
             seenChildDates.add(nextDateStr);
             // Children resolve the CURRENT catalog identity at insert — never
             // the parent label verbatim (a terminal parent keeps its retired
@@ -18880,6 +19068,10 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
       if (prepaidCents < Math.round(invoiceAmountDue(locked) * 100)) {
         return { reason: 'not_paid_in_full', invoice: locked };
       }
+      // A part payment is already on this invoice: the office settles the rest from the Invoices page (this flip would leave it in amount_paid).
+      if (Math.round((Number(locked.amount_paid) || 0) * 100) > 0) {
+        return { reason: 'part_payment', invoice: locked };
+      }
       const [updated] = await trx('invoices')
         .where({ id: locked.id })
         .update({
@@ -19306,8 +19498,15 @@ router.post('/:id/invoice', async (req, res, next) => {
         // $50 account credit, $164 prepayment — fully settled, never marked
         // paid).
         const creditAppliedCents = toCents(lockedInvoice.credit_applied);
-        const dueCents = Math.max(0, invoiceTotalCents - creditAppliedCents);
+        const amountPaidCents = toCents(lockedInvoice.amount_paid);
+        const dueCents = Math.max(0, invoiceTotalCents - creditAppliedCents - amountPaidCents);
         if (!(dueCents > 0)) {
+          return { invoice: lockedInvoice, prepaidCredit: 0 };
+        }
+        // A part payment is already on this invoice: this application reduces total and would paid-flip it with the part still in
+        // amount_paid. The office settles it from the Invoices page.
+        if (amountPaidCents > 0) {
+          logger.warn('[schedule] prepaid credit NOT applied — a part payment is on the invoice, the office records the rest', { invoiceId: lockedInvoice.id });
           return { invoice: lockedInvoice, prepaidCredit: 0 };
         }
         const existingCredit = await trx('payments')
@@ -19699,10 +19898,9 @@ async function loadActiveSeriesDates(conn, parentId) {
   const rows = await conn('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .whereNotIn('status', ['cancelled', 'rescheduled'])
-    .select('scheduled_date');
-  return new Set(rows
-    .map((r) => dateOnly(r.scheduled_date) || '')
-    .filter(Boolean));
+    .select('scheduled_date', 'is_recurring');
+  // A booster blocks its day but owns no lawn round (SeriesDates).
+  return seriesDatesFromRows(rows, dateOnly);
 }
 
 // The live (upcoming, non-terminal) BASE visits of a series, earliest first.
@@ -19907,7 +20105,7 @@ async function memberBillingInvoiceRows(conn, ids) {
       .orderBy('id')
       .forUpdate()
       .noWait()
-      .select('id', 'status', 'scheduled_service_id', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+      .select('id', 'status', 'scheduled_service_id', 'credit_applied', 'amount_paid', 'line_items', 'stripe_payment_intent_id', 'total');
   } catch (err) {
     if (err?.code !== '55P03') throw err;
     throw busy();
@@ -19936,6 +20134,7 @@ async function memberBillingInvoiceRows(conn, ids) {
         scheduled_service_id: originalIdOf.get(member),
         status: inv.status,
         credit_applied: inv.credit_applied ?? 0,
+        amount_paid: inv.amount_paid ?? 0,
         line_items: inv.line_items,
         stripe_payment_intent_id: inv.stripe_payment_intent_id ?? null,
         total: inv.total,
@@ -20225,7 +20424,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
     const invoiced = await conn('invoices')
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', [...NO_MONEY_HELD])
-      .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+      .select('scheduled_service_id', 'status', 'credit_applied', 'amount_paid', 'line_items', 'stripe_payment_intent_id', 'total');
     // liveInvoice also reaches an invoice
     // this visit carries WITHOUT its own
     // invoices.scheduled_service_id — the two indirect links the repricing
@@ -20250,7 +20449,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
           .whereNotIn('inv.status', [...NO_MONEY_HELD])
           .select(
             'sr.scheduled_service_id as scheduled_service_id',
-            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+            'inv.status', 'inv.credit_applied', 'inv.amount_paid', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
           );
         invoiced.push(...srLinked);
       }
@@ -20261,7 +20460,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
           .whereNotIn('inv.status', [...NO_MONEY_HELD])
           .select(
             'p.scheduled_service_id as scheduled_service_id',
-            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+            'inv.status', 'inv.credit_applied', 'inv.amount_paid', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
           );
         invoiced.push(...packetLinked);
       }
@@ -20284,6 +20483,8 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
     for (const inv of invoiced) {
       if (settled.has(String(inv.status || '').trim().toLowerCase())) {
         mark(inv.scheduled_service_id, 'attached to an invoice that has money on it');
+      } else if (Number(inv.amount_paid) > 0) {
+        mark(inv.scheduled_service_id, 'attached to an invoice that has a part payment on it');
       } else if (Number(inv.credit_applied) > 0) {
         mark(inv.scheduled_service_id, 'attached to an invoice with account credit already applied');
       } else if (hasDepositCreditLine(inv.line_items)) {
@@ -20502,13 +20703,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // gate is off or nothing is stamped).
   parent = overlayRecurringTemplateOverrides(parent, cols);
   const need = target - live.length;
-  const rOpts = {
-    ...recurrenceOrdinalOptions(parent.scheduled_date, {
-      nth: parent.recurring_nth,
-      weekday: parent.recurring_weekday,
-    }),
-    intervalDays: parent.recurring_interval_days,
-  };
+  const rOpts = seriesRecurrenceOptions(parent);
   // B6: top-up DATES honor the customer's live weekday preference even on
   // legacy series; the STAMPED flag stays the operator's raw value so
   // preference removal restores weekends without touching rows.
@@ -20901,7 +21096,7 @@ async function walkExtensionCandidates(ctx) {
       attempt++;
       continue;
     }
-    if (existingDates.has(candidate)) { attempt++; continue; }
+    if (seriesDateTaken(existingDates, parent.recurring_pattern, candidate)) { attempt++; continue; }
     // Another visit in the slot never skips it: the visit goes in on its
     // cadence date (cadenceSlotHandoffFields, below).
     nextStr = candidate;
@@ -20935,13 +21130,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
   // exclusion + booster exclusion rationale on the helper).
   const latest = await latestLiveSeriesVisit(conn, parentId);
   if (latest) {
-    const rOpts = {
-      ...recurrenceOrdinalOptions(parent.scheduled_date, {
-        nth: parent.recurring_nth,
-        weekday: parent.recurring_weekday,
-      }),
-      intervalDays: parent.recurring_interval_days,
-    };
+    const rOpts = seriesRecurrenceOptions(parent);
     const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
     // B6: auto-extend DATES honor the customer's live weekday
     // preference even on legacy series; the STAMPED flag stays the
@@ -21773,13 +21962,7 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
       break;
     }
     if (priorBookedThrough === null) priorBookedThrough = dateOnly(latest.scheduled_date) || null;
-    const rOpts = {
-      ...recurrenceOrdinalOptions(parent.scheduled_date, {
-        nth: parent.recurring_nth,
-        weekday: parent.recurring_weekday,
-      }),
-      intervalDays: parent.recurring_interval_days,
-    };
+    const rOpts = seriesRecurrenceOptions(parent);
     // seriesExtendAnchor already fast-forwards a stale anchor to today (or
     // returns the raw date unchanged when it's today-or-future) — exactly
     // "the last booked date" this horizon check needs, with no extra query.
@@ -22340,10 +22523,14 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   // In-term placement (GATE_CANCEL_RESEED_IN_TERM, read live): the gap the
   // cancel left inside this term, else the series-end append as before.
   const { cancelReseedInTermLive } = require('../config/feature-gates');
+  // Lawn rounds never use it (null = the series-end append): the gap picker aims
+  // at the middle of the widest gap, which can sit in a round that already has
+  // its visit. A cancelled round's replacement goes to the next round after
+  // the series end.
   const placementPicker = cancelReseedInTermLive()
-    ? ({ shift, takenDates }) => require('../services/recurring-series-cancel-reseed').pickInTermReseedDate({
+    ? ({ shift, takenDates }) => (parent.recurring_pattern === LAWN_ROUNDS_9 ? null : require('../services/recurring-series-cancel-reseed').pickInTermReseedDate({
       rows: term.seriesRows, window: term.window, todayStr: term.todayET, shift, takenDates, cancelledDate: cancelled.scheduled_date,
-    })
+    }))
     : null;
   const add = await addOneReseedVisit(trx, {
     parent,
@@ -24130,7 +24317,7 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
               .where('notes', 'like', `%Auto-generated from accepted estimate #${String(estimateId)}%`);
           });
       })
-      .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'paid_at',
+      .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'amount_paid', 'paid_at',
         'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
         'notes');
   } catch (err) {
@@ -24167,6 +24354,9 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     }
     if (status !== 'draft') {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is ${status}, not an unsent draft. Resolve it first, then mint the prepay from Customer 360` };
+    }
+    if (Number(inv.amount_paid || 0) > 0) {
+      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has a part payment on it. Resolve it from Invoices first` };
     }
     if (Number(inv.credit_applied || 0) > 0) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has account credit applied. Void it from Invoices (which returns the credit) and mint the prepay from Customer 360` };
@@ -24552,8 +24742,14 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       ? 'every_6_weeks'
       : input.rawCadence;
     if (!cadence || cadence === 'one_time') return blocked('needs a recurring visit');
-    const visitsPerYear = visitsPerYearForCadence(cadence);
-    const coverageCadence = prepayCoverageCadenceForPattern(cadence);
+    // A NEW series (the draft probe) that GATE_LAWN_9X_ROUNDS will write as
+    // lawn_rounds_9 has no prepay coverage yet: refused like seasonal_feb_oct.
+    // A committed series is read as it is stored.
+    const draftWrittenAsRounds = input.mode === 'draft' && lawnRoundsSeriesPattern({
+      pattern: input.rawCadence, intervalDays: input.intervalDays, service_type: coverageServiceType,
+    }).pattern === LAWN_ROUNDS_9;
+    const visitsPerYear = visitsPerYearForCadence(cadence) || (draftWrittenAsRounds ? 9 : null);
+    const coverageCadence = draftWrittenAsRounds ? null : prepayCoverageCadenceForPattern(cadence);
     if (!visitsPerYear || !coverageCadence) {
       return blocked('isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)');
     }
@@ -28356,13 +28552,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       return;
     }
 
-    const rOpts = {
-      ...recurrenceOrdinalOptions(parent.scheduled_date, {
-        nth: parent.recurring_nth,
-        weekday: parent.recurring_weekday,
-      }),
-      intervalDays: parent.recurring_interval_days,
-    };
+    const rOpts = seriesRecurrenceOptions(parent);
 
     // Honor skip-weekends preference set on the parent (POST + PUT + auto-
     // extend already do; the alert action endpoint must too or weekend
@@ -28422,7 +28612,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     if (action === 'extend') {
       const n = Math.min(Math.max(parseInt(count) || 4, 1), 12);
       owed = n;
-      const seen = new Set(seriesDateSeed);
+      const seen = new SeriesDates(seriesDateSeed);
       const maxAttempts = n * 4 + 30;
       let attempt = 1;
       let inserted = 0;
@@ -28435,7 +28625,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // The anchor can itself be in the past on a stalled series; an
         // extension must still only ever land on future dates.
         if (nd <= etDateString()) continue;
-        if (seen.has(nd)) continue;
+        if (seriesDateTaken(seen, parent.recurring_pattern, nd)) continue;
         seen.add(nd);
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
@@ -28519,7 +28709,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       const pendingCount = await countUpcomingSeriesVisits(trx, parentId);
       const need = Math.max(0, 3 - pendingCount);
       owed = need;
-      const seen = new Set(seriesDateSeed);
+      const seen = new SeriesDates(seriesDateSeed);
       const maxAttempts = need * 4 + 30;
       let attempt = 1;
       let inserted = 0;
@@ -28532,7 +28722,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // The anchor can itself be in the past on a stalled series; an
         // extension must still only ever land on future dates.
         if (nd <= etDateString()) continue;
-        if (seen.has(nd)) continue;
+        if (seriesDateTaken(seen, parent.recurring_pattern, nd)) continue;
         seen.add(nd);
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
@@ -29279,6 +29469,13 @@ router._test = {
   planSpawnChildDates,
   planSeriesExtendDates,
   seriesExtendAnchor,
+  seasonalSafeShift,
+  recurrenceOrdinalOptions,
+  seriesDateTaken,
+  seriesRecurrenceOptions,
+  seriesRoundAnchor,
+  stampSeriesRoundAnchor,
+  loadActiveSeriesDates,
   mintOrReuseScheduledServiceInvoice,
   duesInvoiceCoveringPlanVisit,
   recordPrepaidUnderDuesLock,

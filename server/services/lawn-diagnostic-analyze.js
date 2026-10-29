@@ -172,13 +172,14 @@ async function analyzePhotos(photos = []) {
 
 /**
  * Findings ladder — NEVER BLOCKS, but never publishes an UN-CHALLENGED diagnosis.
- *   multimodel (L1) ...... Gemini perceive + Opus challenge → diagnosis-level.
+ *   multimodel (L1) ...... Gemini perceive (OpenAI backup on a miss) + Opus challenge → diagnosis-level.
  *   challenge_degraded (L2) perception ok but challenge unavailable → SYMPTOM-only
  *                          (deterministic downgrade; names no cause, field-check copy).
  *   deterministic (L4) ... perception unusable → Claude+Gemini composite findings.
  *   minimal .............. nothing usable → no-diagnosis report.
  * The Claude+Gemini composite is the fallback only (analyzePhotos runs lazily), so
- * the happy path uses Gemini for vision and never touches Claude vision.
+ * the happy path uses Gemini for vision and never touches Claude vision. When Gemini
+ * misses, runPerception's OpenAI backup reads the photos before this ladder drops a rung.
  *
  * Returns { findings, findingsSource, fallbackReason, photoAnalysis, provenance }.
  * The caller supplies (and may pre-populate) nothing — provenance is built here.

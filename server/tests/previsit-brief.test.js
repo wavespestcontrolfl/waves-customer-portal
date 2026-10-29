@@ -48,6 +48,8 @@ jest.mock('../services/service-completion-profiles', () => ({
 const mockCheckLimits = jest.fn();
 jest.mock('../services/application-limits', () => ({
   checkLimits: (...args) => mockCheckLimits(...args),
+  // The catch-up's ledger check scopes its query the way every limit reader does (the real helper builds query conditions only).
+  scopeHistoryToTreatment: (...args) => jest.requireActual('../services/application-limits').scopeHistoryToTreatment(...args),
 }));
 jest.mock('../services/service-report/since-last-visit', () => ({
   buildSinceLastVisitContext: jest.fn(async () => ({
@@ -99,7 +101,7 @@ function makeDb(responses = {}) {
       return [];
     };
     const b = {};
-    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull',
+    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'whereNotIn', 'orWhereNotIn', 'whereNull',
       'whereNotNull', 'orWhereNot', 'orWhereNull', 'whereNot', 'whereBetween', 'join', 'leftJoin',
       'orderBy', 'limit', 'offset', 'select', 'groupBy']) {
       b[m] = (...args) => {
@@ -825,6 +827,171 @@ describe('lawn bounded product section', () => {
       expect(guidance.held_products).toEqual([]);
       expect(guidance.conditional_products.map((p) => [p.name, p.ratePer1000])).toEqual([[NUTRA, 12]]);
       expect(guidance.products.map((p) => p.name)).toEqual(['Dimension 2EW']);
+    });
+  });
+
+  describe('a 9x rounds visit (recurring_pattern lawn_rounds_9) reads the step of its round', () => {
+    const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
+    const febWindow = (gates) => ({
+      window: { key: 'feb_v13_spreader_green_up', month: 2, title: 'February Green-Up Feeding (spreader)', visitType: 'granular', goal: 'One spreader feeding' },
+      products: [
+        { productName: F24, productId: 'f24', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, analysis: { n: 24, p: 0, k: 11 }, gates },
+        { productName: 'Celsius WG', productId: 'cel', role: 'post_emergent_spot', applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz', defaultInPlan: false, gates: {} },
+      ],
+    });
+    const STORED = { targetN: '0.75 lb N/1000', blackoutSensitive: true };
+    const briefFor = async (extra, summary = febWindow({ ...STORED, roundsTargetN: '1.0 lb N/1000' })) => {
+      mockSummarize.mockReturnValue(summary);
+      const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', recurring_pattern: 'lawn_rounds_9', scheduled_date: '2027-03-20', ...extra }] }));
+      expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+      return storedBrief(state).brief.product_guidance;
+    };
+    const targetOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === F24).gates?.targetN;
+    beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
+    afterEach(() => { delete process.env.GATE_LAWN_V13; });
+
+    test('round 3 asks for the round\'s step window and states the rounds nitrogen target (1.0 lb N), not February\'s 0.75', async () => {
+      const guidance = await briefFor({});
+      expect(mockWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 3, month: 2 });
+      expect(guidance.window.key).toBe('feb_v13_spreader_green_up');
+      expect(targetOf(guidance)).toBe('1.0 lb N/1000');
+    });
+
+    test('a database without the stored rounds target states the recipe\'s own rounds variant (1.0 lb N)', async () => {
+      expect(targetOf(await briefFor({}, febWindow({ ...STORED })))).toBe('1.0 lb N/1000');
+    });
+
+    test('round 2 asks for April\'s window and no rounds target is stated', async () => {
+      await briefFor({ scheduled_date: '2027-02-10' }, { ...febWindow(STORED), window: { key: 'apr_v13_spreader_feeding', month: 4, title: 'April', visitType: 'granular', goal: 'g' } });
+      expect(mockWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 2, month: 4 });
+    });
+
+    test('a 12x or legacy 9x February visit asks for no round and keeps the stored 0.75 lb N', async () => {
+      for (const pattern of ['monthly', 'every_6_weeks', 'custom', null]) {
+        mockWindowContext.mockClear();
+        const guidance = await briefFor({ recurring_pattern: pattern, scheduled_date: '2027-02-10' }, febWindow({ ...STORED, roundsTargetN: '1.0 lb N/1000' }));
+        expect(mockWindowContext.mock.calls[0][1].roundStep).toBeUndefined();
+        expect(targetOf(guidance)).toBe('0.75 lb N/1000');
+      }
+    });
+
+    test('the stored northPortBlocked gate (the April month\'s) is left off a rounds visit dated before Apr 1 and kept inside the ban', async () => {
+      const april = { ...febWindow({ ...STORED }), window: { key: 'apr_v13_spreader_feeding', month: 4, title: 'April', visitType: 'granular', goal: 'g' } };
+      april.products[0] = { ...april.products[0], gates: { targetN: '0.5 lb N/1000', northPortBlocked: true } };
+      const gatesOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === F24).gates;
+      expect(gatesOf(await briefFor({ scheduled_date: '2027-02-20' }, april))).not.toHaveProperty('northPortBlocked');
+      // A 12x or legacy visit keeps the stored gate whatever the date.
+      expect(gatesOf(await briefFor({ scheduled_date: '2027-02-20', recurring_pattern: 'monthly' }, april))).toHaveProperty('northPortBlocked', true);
+      expect(gatesOf(await briefFor({ scheduled_date: '2027-04-05', recurring_pattern: 'lawn_rounds_9' }, april))).toHaveProperty('northPortBlocked', true);
+    });
+
+    test('North Port, round 3 on Apr 5: the 24-0-11 is a hold with the ban text and no dose; on Mar 25 it is guidance', async () => {
+      const held = await briefFor({ scheduled_date: '2027-04-05', service_address_city: 'North Port' });
+      expect(held.held_products).toHaveLength(1);
+      expect(held.held_products[0]).toMatchObject({ name: F24, hold: true });
+      expect(held.held_products[0].message).toBe(`${F24}: North Port bans nitrogen and phosphorus from April 1 to September 30. The plan holds this round-3 feeding back; do not apply it at this visit.`);
+      expect([...held.products, ...held.conditional_products].map((p) => p.name)).toEqual(['Celsius WG']);
+      const before = await briefFor({ scheduled_date: '2027-03-25', service_address_city: 'North Port' });
+      expect(before.held_products).toEqual([]);
+      const elsewhere = await briefFor({ scheduled_date: '2027-04-05', service_address_city: 'Sarasota' });
+      expect(elsewhere.held_products).toEqual([]);
+    });
+  });
+
+  // The spring pre-emergent catch-up (lawn-rounds-catchup.js): a new customer's first rounds visit in round 3 with no pre-emergent on the
+  // ledger this year also reads the March window's Dimension 2EW row, and the pocket reference names it.
+  describe('the spring pre-emergent catch-up on a first round-3 rounds visit', () => {
+    const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
+    const DIM_2EW = 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide';
+    const LABEL = 'Spring pre-emergent catch-up for a new customer';
+    const summaryWithCatchUp = () => ({
+      version: require('../services/lawn-program').LAWN_V13_VERSION,
+      window: { key: 'feb_v13_spreader_green_up', month: 2, title: 'February Green-Up Feeding (spreader)', visitType: 'granular', goal: 'One spreader feeding' },
+      products: [
+        { productName: F24, productId: 'f24', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, analysis: { n: 24, p: 0, k: 11 }, gates: { targetN: '0.75 lb N/1000' } },
+        { productName: DIM_2EW, protocolProductName: DIM_2EW, productId: 'd2ew', role: 'pre_emergent', applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz', defaultInPlan: true, gates: { annualCounter: 'prodiamine_oz_per_1000' } },
+      ],
+    });
+    // The decision's reads: the visit's parent, then an earlier visit of its series (`earlier`), then the ledger (`ledger`).
+    const briefFor = async ({ earlier = [], ledger = [], date = '2027-03-20', pattern = 'lawn_rounds_9', catalog = [{ id: 'd2ew', name: DIM_2EW, active: true }] } = {}) => {
+      mockSummarize.mockReturnValue(summaryWithCatchUp());
+      const visit = { ...SVC, service_type: 'Lawn Care Service', recurring_pattern: pattern, scheduled_date: date };
+      const state = useDb(baseResponses({
+        scheduled_services: (rec) => {
+          if (rec.ops.some(([method, args]) => method === 'first' && args[0] === 'recurring_parent_id')) return [{ recurring_parent_id: null }];
+          return rec.ops.some(([method]) => method === 'whereNot') ? earlier : [visit];
+        },
+        property_application_history: ledger,
+        products_catalog: catalog,
+      }));
+      expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+      return storedBrief(state).brief.product_guidance;
+    };
+    beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
+    afterEach(() => { delete process.env.GATE_LAWN_V13; });
+
+    test('asks the window read for the catch-up row and names the 2EW line as the spring pre-emergent catch-up', async () => {
+      const guidance = await briefFor();
+      expect(mockWindowContext.mock.calls[0][1].roundStep).toEqual({ round: 3, month: 2, catchUp: true });
+      const line = [...guidance.products, ...guidance.conditional_products].find((p) => p.name === DIM_2EW);
+      expect(line).toMatchObject({ ratePer1000: 0.5, rateUnit: 'fl oz', trigger: LABEL });
+      expect(line.gates).toMatchObject({ roundsCatchUp: LABEL, annualCounter: 'prodiamine_oz_per_1000' });
+      // It is a gated line of the visit, never a fixed product of the round.
+      expect(guidance.products.map((p) => p.name)).not.toContain(DIM_2EW);
+    });
+
+    // The plan's own settlement decides what the brief shows: a line the plan drops is no dose and no trigger here, and says why.
+    const UNAVAILABLE = (why) => `Spring pre-emergent catch-up for a new customer: not planned on this visit (${why}). The visit goes ahead without it; the office can book it as its own visit.`;
+    const shows = (guidance) => [...guidance.products, ...guidance.conditional_products].filter((p) => p.name === DIM_2EW);
+
+    test('a capped 2EW: no dose, no trigger, the unavailable text the plan uses', async () => {
+      mockCheckLimits.mockImplementation(async (_customer, productId) => (productId === 'd2ew'
+        ? { blocks: [{ type: 'annual_max_rate', message: 'Dimension 2EW: dithiopyr 114% of the yearly label cap.' }], warnings: [] }
+        : { allowed: true, blocks: [], warnings: [] }));
+      const guidance = await briefFor();
+      expect(shows(guidance)).toEqual([]);
+      expect(guidance.held_products).toEqual([{ name: DIM_2EW, role: 'pre_emergent', hold: true, message: UNAVAILABLE('a yearly application limit is reached') }]);
+      expect(JSON.stringify(guidance)).not.toContain('"trigger":"Spring');
+      expect(JSON.stringify(guidance)).not.toMatch(/0\.5|fl oz/);
+    });
+
+    test('an inactive 2EW product, and one missing from the catalog: unavailable, no dose', async () => {
+      const inactive = await briefFor({ catalog: [{ id: 'd2ew', name: DIM_2EW, active: false }] });
+      expect(shows(inactive)).toEqual([]);
+      expect(inactive.held_products[0].message).toBe(UNAVAILABLE(`${DIM_2EW} is inactive`));
+      const missing = await briefFor({ catalog: [] });
+      expect(shows(missing)).toEqual([]);
+      expect(missing.held_products[0].message).toBe(UNAVAILABLE('the product is not in the catalog'));
+    });
+
+    test('kept (no cap, active product): the dose and the trigger, and nothing held', async () => {
+      const guidance = await briefFor();
+      expect(shows(guidance)).toHaveLength(1);
+      expect(guidance.held_products).toEqual([]);
+    });
+
+    test('a failed limit read aborts the generation (strict): the catch-up is never shown unchecked', async () => {
+      mockSummarize.mockReturnValue(summaryWithCatchUp());
+      mockCheckLimits.mockRejectedValue(new Error('limits down'));
+      const state = useDb(baseResponses({
+        scheduled_services: (rec) => (rec.ops.some(([method, args]) => method === 'first' && args[0] === 'recurring_parent_id') ? [{ recurring_parent_id: null }]
+          : (rec.ops.some(([method]) => method === 'whereNot') ? [] : [{ ...SVC, service_type: 'Lawn Care Service', recurring_pattern: 'lawn_rounds_9', scheduled_date: '2027-03-20' }])),
+        products_catalog: [{ id: 'd2ew', name: DIM_2EW, active: true }],
+      }));
+      const result = await PrevisitBrief.generateVisitBrief('svc-1').catch((err) => ({ error: err }));
+      expect(result.error || result.generated === false).toBeTruthy();
+      expect(state.updates.scheduled_services || []).toEqual([]);
+    });
+
+    test.each([
+      ['a pre-emergent on the ledger this year', { ledger: [{ id: 'h1' }] }],
+      ['an earlier visit in the series', { earlier: [{ id: 'earlier' }] }],
+      ['a first round-4 visit (May 5)', { date: '2027-05-05' }],
+      ['a 12x March visit', { pattern: 'monthly' }],
+    ])('%s: no catch-up is asked for or named', async (_label, options) => {
+      const guidance = await briefFor(options);
+      expect(mockWindowContext.mock.calls[0][1].roundStep?.catchUp).toBeUndefined();
+      expect(JSON.stringify(guidance)).not.toContain(LABEL);
     });
   });
 

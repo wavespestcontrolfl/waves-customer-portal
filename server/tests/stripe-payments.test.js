@@ -548,7 +548,34 @@ describe('invoice assertInvoiceVoidable', () => {
   });
 });
 
-describe('invoice invoiceAmountDue (charge base = total − credit_applied)', () => {
+describe('invoice invoiceAmountDue (charge base = total − credit_applied − amount_paid)', () => {
+  test('amount_paid 0 or absent → today\'s numbers', () => {
+    expect(invoiceAmountDue({ total: 60, credit_applied: 25, amount_paid: 0 })).toBe(35);
+    expect(invoiceAmountDue({ total: 60, credit_applied: 25, amount_paid: '0.00' })).toBe(35);
+    expect(invoiceAmountDue({ total: 60, credit_applied: 25 })).toBe(35);
+  });
+
+  test('a part payment is owed no more: 200 total, 100 paid → 100', () => {
+    expect(invoiceAmountDue({ total: 200, credit_applied: 0, amount_paid: 100 })).toBe(100);
+    expect(invoiceAmountDue({ total: '200.00', credit_applied: '0.00', amount_paid: '100.00' })).toBe(100);
+  });
+
+  test('credit and a part payment both come off the total', () => {
+    expect(invoiceAmountDue({ total: 200, credit_applied: 50, amount_paid: 100 })).toBe(50);
+  });
+
+  test('paid in full by parts, or over → 0 (clamped, never negative)', () => {
+    expect(invoiceAmountDue({ total: 200, credit_applied: 0, amount_paid: 200 })).toBe(0);
+    expect(invoiceAmountDue({ total: 200, credit_applied: 50, amount_paid: 175 })).toBe(0);
+  });
+
+  test('cents math avoids float drift with amount_paid', () => {
+    expect(invoiceAmountDue({ total: 0.3, credit_applied: 0, amount_paid: 0.1 })).toBe(0.2);
+    expect(invoiceAmountDue({ total: 100.1, credit_applied: 0.05, amount_paid: 0.05 })).toBe(100);
+  });
+});
+
+describe('invoice invoiceAmountDue (credit only, amount_paid absent)', () => {
   test('no credit → full total', () => {
     expect(invoiceAmountDue({ total: 60, credit_applied: 0 })).toBe(60);
     expect(invoiceAmountDue({ total: 60 })).toBe(60);

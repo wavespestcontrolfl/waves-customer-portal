@@ -182,7 +182,7 @@ postgres('customer-level overdue reminders: one customer through a whole episode
       t.uuid('payer_id');
       t.uuid('scheduled_service_id');
       t.string('scheduled_send_error');
-      t.string('token'); t.string('title'); t.decimal('total', 10, 2); t.decimal('credit_applied', 10, 2);
+      t.string('token'); t.string('title'); t.decimal('total', 10, 2); t.decimal('credit_applied', 10, 2); t.decimal('amount_paid', 10, 2).notNullable().defaultTo(0);
       t.string('stripe_payment_intent_id'); t.date('service_date'); t.date('due_date'); t.string('invoice_number');
     });
     await app.schema.createTable('invoice_followup_sequences', (t) => {

@@ -55,6 +55,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | Termite Bait | ✅ quarterly monitoring billed per application | install only | ✅ |
 | Rodent | ✅ quarterly bait program + one-time trapping | — | ✅ bait program; trapping is separate |
 | WDO Inspection | — | ✅ ($250 flat code default) | — |
+| Dead Rodent Removal & Odor Treatment (`GATE_DEAD_ANIMAL_REMOVAL`; see §9) | — | ✅ one fixed price per tier: easy reach $199, attic search $299, inside a wall or ceiling = custom quote; other rodent work does not lower it | — (no tier credit; takes the one-time recurring-customer perk like other rodent one-time lines) |
 | Specialty (plugging, top-dressing, dethatching, trenching, BoraCare, pre-slab Termidor, foam-drill, German roach, bed bug, flea, wasp, exclusion) | varies | mostly one-time | varies |
 
 ---
@@ -337,6 +338,56 @@ catalog row ($95, billed at completion, members included, never
 bundle-discounted). Jobs sold before 2026-09-27 keep unlimited included checks.
 An emergency request adds the greater of 20% or $75.
 The active pricer does not apply the legacy footprint/lot adjustment arrays.
+
+**Dead Rodent Removal & Odor Treatment** (owner approved 2026-10-26, prices 2026-10-29; behind
+`GATE_DEAD_ANIMAL_REMOVAL`, on since 2026-10-29; one-time; line key `rodent_dead_animal_removal`;
+`generateEstimate({ services: { deadAnimalRemoval: { tier } } })`).
+`tier` is `reachable` (easy reach: garage, crawl-space opening, under a cabinet,
+attic floor near the hatch), `attic` (attic search, found by smell, insulation
+moved as needed) or `in_wall` (inside a wall or ceiling, needs an opening). There
+is no default tier: an unchosen tier or `in_wall` is a custom-quote line
+(`quoteRequired` and `requiresCustomQuote`, manual-review reason
+`dead_animal_access_not_chosen` or `dead_animal_in_wall_custom_quote`). An unknown
+tier string throws a 400 `PricingError`. There is ONE fixed price per tier in
+`constants.js` `RODENT.deadAnimalRemoval` (owner 2026-10-29: "make easy reach 199,
+and attic search 299" after a second market check, then "think we just have the 3
+options, and can discount if they have other work"). Other rodent work on the same
+estimate does not lower it; staff give a discount on the estimate itself
+(`manualDiscount`, percent or dollars), which reaches this line. The tier's price key
+is `alone` (it predates the one-price rule; the stored row keeps it). The owner's
+add-on cost formula is the floor under each price; it is not evaluated at quote time:
+
+    floor = ((on-site min + drive min) x $35/h / 60 + material + $8 admin) / 0.40,
+            rounded UP to the next price ending in 9
+            (drive = GLOBAL.DRIVE_TIME 20 min; admin = AREA_ADDONS.adminPerJob $8)
+
+| Tier | On site | Material | Floor -> price |
+|---|---:|---:|---:|
+| `reachable` | 45 min | $12 | (45 + 20) min: $37.92 + $12 + $8 = $57.92 / 0.40 = $144.79 -> $149 -> **$199** |
+| `attic` | 90 min | $15 | (90 + 20) min: $64.17 + $15 + $8 = $87.17 / 0.40 = $217.92 -> $219 -> **$299** |
+
+Until 2026-10-29 a second, lower "riding" price applied when the estimate had other
+priced rodent work; the owner retired it the same day. Only `tier` is read from the
+request. The line carries its stated cost in `costs` so the pricing audit costs it
+without an inventory mapping.
+A commercial property gets a commercial manual-quote line (no auto price). The line is
+discountable exactly like the other rodent one-time lines (the 15% recurring-customer
+perk; no bundle). The two prices and the two on-site minutes are DB-editable as
+`pricing_config.rodent_dead_animal_removal` (`dead-animal-removal-config.js` is the one
+validator for the admin PUT and the db-bridge sync: plain JSON numbers, prices $1 to
+$2,000, whole minutes 1 to 480, the whole row or nothing; the retired `riding` key never
+prices anything: a row may still carry an in-bounds value (ignored, so an earlier admin
+edit keeps its prices and minutes and the panel's inline edits save), and a Pricing Logic
+save strips it; a malformed or deleted row leaves the code defaults on the next sync). Migration `20261029160100` brings a row
+still holding the 10-29 seed, and the catalog's three price cells, to the one price.
+
+**Gate rule: NEW QUOTES ONLY.** With the gate off the estimator does not offer the
+service and the engine refuses a `services.deadAnimalRemoval` input with a 400
+`failClosed` `PricingError` (`DEAD_ANIMAL_REMOVAL_GATED`, thrown before the commercial
+hand-off), so nothing is dropped silently. An estimate already saved with the line
+stays a normal estimate: send, accept, booking and completion read the stored row, not
+this pricer, and work like any rodent line. Only a re-price (a new engine run) of that
+estimate with the gate off is refused.
 
 **WaveGuard:** `rodent_bait` is a tier qualifier and is eligible for the
 recurring tier percentage. The separate `rodent_guarantee` and

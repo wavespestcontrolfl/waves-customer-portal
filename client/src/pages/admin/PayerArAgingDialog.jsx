@@ -28,7 +28,7 @@ import { adminFetch } from "../../lib/adminFetch";
 
 const money = (n) =>
   n == null ? "—" : `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const termLabel = (v) => ({ net15: "Net 15", net30: "Net 30" }[v] || v);
+const termLabel = (v) => ({ net15: "Net 15", net30: "Net 30", net60: "Net 60" }[v] || v);
 
 export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
   const [ar, setAr] = useState(null);

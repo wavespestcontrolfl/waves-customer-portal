@@ -232,7 +232,10 @@ function assertConflictSnapshot(actual, options) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
+// Lawn 9x rounds (owner 2026-10-28): one visit in each of nine fixed rounds a
+// year. A rescheduled round visit stays inside its own round.
+const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundOf, roundOrdinal } = require('./lawn-rounds');
 const { clearOfBlackout } = require('./scheduling/blackout-nudge');
 
 // Series sibling-projection clash horizon (rescheduleSeries): a shifted
@@ -294,6 +297,20 @@ function isMonthBasedRecurrence(pattern) {
   return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT
     || !!MONTH_RECURRENCE_INTERVALS[pattern];
 }
+
+// Lawn rounds: true when a move would take a lawn_rounds_9 visit out of the
+// round it sits in. A round that has already ended (a missed visit being
+// rebooked) is the office's to place, so it is not held to its round. Exported
+// for tests.
+function leavesOwnRound(pattern, currentDate, targetDate, today = etDateString()) {
+  if (pattern !== LAWN_ROUNDS_9) return false;
+  const round = roundOf(currentDate);
+  if (!round || round.end < today) return false;
+  const target = String(targetDate || '').split('T')[0];
+  return !!target && (target < round.start || target > round.end);
+}
+
+const OUT_OF_ROUND_MESSAGE = 'This lawn visit has to stay inside its round. Contact the office if you need a different date.';
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
@@ -1052,6 +1069,9 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   // dates the series was seeded with (it would otherwise take the generic
   // 91-day fallback below and schedule winter visits).
   if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
+  // Lawn rounds: the same walk as the seeder (opts.roundAnchor is the series
+  // anchor when `safe` is a later visit of it).
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundDateFrom(opts.roundAnchor, safe, i);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -1194,7 +1214,9 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // forward off a closed day with the nudge the Edit appointment cadence
   // rewrite and the seeder share (scheduling/blackout-nudge.js); the anchor
   // stays as picked. Null = projected as before.
-  const projectSeriesDate = (raw) => {
+  // `roundSlot` (lawn rounds only): the cadence slot whose round the date must
+  // stay in. Defaults to `raw`'s own round, which is right for a cadence date.
+  const projectSeriesDate = (raw, roundSlot = null) => {
     let out = String(raw).split('T')[0];
     // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
     // the old seasonal-only scoping predates the ruling): a weekend-
@@ -1214,6 +1236,20 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
     // closed weeks) keeps the date: this projector always returns a date
     // (its write sites are not null-safe).
     out = clearOfBlackout(out, closedDays, { skipWeekends: seriesSkipWeekends }) || out;
+    // A lawn round is a window too: the weekend shift or a closed-day nudge
+    // must not carry the date into the next round. A cadence date stays in its
+    // own round. A date exception's shifted date (the anchor delta can carry it
+    // past its round's end) stays in the round of the occurrence's own cadence
+    // slot, never the shifted date's round: that would leave a round empty and
+    // put two visits in the next one. The clamp starts at the crossed round
+    // edge, so a distant exception (an admin move months away) still lands in
+    // its own round. If every day of the round is closed, the round's edge day
+    // itself is kept (closures ignored): the date never leaves its round.
+    if (pattern === LAWN_ROUNDS_9) {
+      const intendedDate = String(roundSlot || raw).split('T')[0];
+      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays, intendedDate })
+        || clampDateToRound(pattern, out, { intendedDate }) || out;
+    }
     if (pattern !== SEASONAL_FEB_OCT) return out;
     // The clamp can exhaust only on 75 straight in-season closed or weekend
     // days; the || keeps the always-a-date contract above if it ever does.
@@ -1242,14 +1278,30 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // weekend/season rules still apply to the shifted date.
   const deltaDays = calendarDaysBetween(dateOnly(service.scheduled_date), seriesDateStr);
   const anchorDate = String(newDate).split('T')[0];
-  const pureCadenceDate = (occurrenceIndex) => projectSeriesDate(
-    nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts),
+  // `step`: how many cadence steps after the anchor (see cadenceStep).
+  const pureCadenceDate = (step) => projectSeriesDate(
+    nextRecurringDate(newDate, parent.recurring_pattern, step, opts),
   );
+  // Lawn rounds: a later visit keeps its distance in ROUNDS from the moved
+  // visit (its series position against the anchor's), not its place in the
+  // list. After a skipped or cancelled round the list is shorter than the
+  // rounds it spans, and counting by list position would pull every later
+  // visit a round early (the skipped round filled, each later visit on another
+  // round's step). Every other pattern, and a caller that names no row,
+  // counts by list position.
+  const anchorRoundOrdinal = pattern === LAWN_ROUNDS_9 ? roundOrdinal(seriesPosition(service)) : null;
+  const cadenceStep = (occurrenceIndex, sib) => {
+    if (anchorRoundOrdinal == null || occurrenceIndex === 0 || !sib) return occurrenceIndex;
+    const own = roundOrdinal(seriesPosition(sib));
+    return own == null ? occurrenceIndex : Math.max(0, own - anchorRoundOrdinal);
+  };
   // Every date this projection has handed out — cadence slots AND exception
   // landings — so no two rows are written on one day and no exception's
   // recorded position ties with a written date.
   const usedDates = new Set();
-  const advancePastUsed = (start) => {
+  // `roundSlot` (lawn rounds only): the cadence slot whose round the walk stays
+  // in; defaults to `start`.
+  const advancePastUsed = (start, roundSlot = start) => {
     let out = start;
     for (let guard = 0; guard < 31 && usedDates.has(out); guard++) {
       let at = addETDays(parseETDateTime(`${out}T12:00`), 1);
@@ -1259,6 +1311,15 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
       }
       out = etDateString(at);
       out = clearOfBlackout(out, closedDays, { skipWeekends: seriesSkipWeekends }) || out;
+      if (pattern === LAWN_ROUNDS_9) {
+        // Same at a round edge: walk back into the round the slot belongs to,
+        // skipping the dates already handed out.
+        out = clampDateToRound(pattern, out, {
+          skipWeekends: seriesSkipWeekends,
+          blackoutDates: { ...closedDays, dates: new Set([...(closedDays?.dates || []), ...usedDates]) },
+          intendedDate: roundSlot,
+        }) || out;
+      }
       if (pattern === SEASONAL_FEB_OCT) {
         // At the season edge the clamp walks a November date back into
         // October, so it skips the dates already handed out as well: a walk
@@ -1284,21 +1345,21 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // Slots are reserved in index order, so positions stay strictly
   // increasing and unique against every date the sweep writes.
   const cadenceSlotByOccurrence = new Map();
-  const cadenceSlotDate = (occurrenceIndex) => {
+  const cadenceSlotDate = (occurrenceIndex, sib = null) => {
     if (cadenceSlotByOccurrence.has(occurrenceIndex)) return cadenceSlotByOccurrence.get(occurrenceIndex);
-    const slot = advancePastUsed(occurrenceIndex === 0 ? anchorDate : pureCadenceDate(occurrenceIndex));
+    const slot = advancePastUsed(occurrenceIndex === 0 ? anchorDate : pureCadenceDate(cadenceStep(occurrenceIndex, sib)));
     cadenceSlotByOccurrence.set(occurrenceIndex, slot);
     return slot;
   };
   const projectedByOccurrence = new Map();
   const projectOccurrenceDate = (occurrenceIndex, sib = null) => {
     if (projectedByOccurrence.has(occurrenceIndex)) return projectedByOccurrence.get(occurrenceIndex);
-    const slot = cadenceSlotDate(occurrenceIndex);
+    const slot = cadenceSlotDate(occurrenceIndex, sib);
     let out = slot;
     if (occurrenceIndex > 0 && sib && sib.date_exception === true) {
-      const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)));
+      const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)), slot);
       // Landing exactly on its own slot = the row rejoins the cadence.
-      out = shifted === slot ? slot : advancePastUsed(shifted);
+      out = shifted === slot ? slot : advancePastUsed(shifted, slot);
     }
     projectedByOccurrence.set(occurrenceIndex, out);
     return out;
@@ -1435,6 +1496,88 @@ class SmartRebooker {
       keptTechWorkDays = await db('technicians').where({ id: service.technician_id }).first('id', 'work_days');
     }
 
+    // The span the occupancy probe tests (and a route-checked search uses):
+    // date-independent, so computed once.
+    const effDuration = (() => {
+      // Callers that book a DIFFERENT span than the visit's own block
+      // (rain-out commits a one-hour slot) pass probeSpanMinutes so the
+      // probe tests exactly what they will submit.
+      const forced = parseInt(opts.probeSpanMinutes, 10);
+      if (Number.isInteger(forced) && forced > 0) return forced;
+      // Stored span FIRST, then the duration estimate — the same order
+      // the RescheduleModal uses to build the window it submits, so the
+      // probe tests exactly the block Select will commit.
+      if (service.window_start && service.window_end) {
+        const [h1, m1] = String(service.window_start).split(':').map(Number);
+        const [h2, m2] = String(service.window_end).split(':').map(Number);
+        const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
+        if (span > 0) return span;
+      }
+      const d = parseInt(service.estimated_duration_minutes, 10);
+      if (Number.isInteger(d) && d > 0) return d;
+      return 60;
+    })();
+
+    // True when the commit's own overlap probe finds a clash for this window.
+    // A probe failure keeps the candidate (legacy behavior) — the commit-time
+    // check still rejects a genuine clash.
+    const clashesAt = async (dateStr, windowStart, windowEnd) => {
+      try {
+        const clash = await findConflictingVisits({
+          db,
+          date: dateStr,
+          windowStart,
+          windowEnd,
+          excludeServiceIds: [String(serviceId)],
+          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+          // Travel gap: a CUSTOMER-FACING day option (rain-out sheet) must
+          // survive the commit's own probe. Admin reschedule-options stay
+          // overlap-only — staff saves are advisory (GH codex #3803 r3 P2).
+          ...(opts.travelGap === true ? { travel: { lat: service.lat ?? null, lng: service.lng ?? null } } : {}),
+          // Second technician (gate-scoped inside the probe): every committer
+          // of these days (rain-out, the admin picker) keeps the visit's own
+          // technician, and commit probes that technician's route — so the
+          // option is judged on the same route and offer == commit.
+          technicianId: service.technician_id || null,
+        });
+        return clash.length > 0;
+      } catch (err) {
+        logger.warn(`[rebooker] suggestion occupancy probe failed for ${dateStr}: ${err.message}`);
+        return false;
+      }
+    };
+
+    const buildOption = (candidate, window, extra = {}) => ({
+      date: candidate.dateStr,
+      dayOfWeek: candidate.candidateDate.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }),
+      displayDate: candidate.candidateDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }),
+      currentLoad: candidate.load,
+      sameAreaServices: candidate.sameAreaCount,
+      suggestedWindow: window,
+      score: candidate.score,
+      ...extra,
+    });
+
+    // Skip candidates whose committed block would deterministically 409:
+    // the picker submits window.start + the visit's own duration, so test
+    // exactly that span with the same occupancy predicate
+    // reschedule() enforces. Without this, busy days surface suggestions
+    // that can never be selected.
+    const admit = async (candidate) => {
+      const [h, m] = String(candidate.window.start).split(':').map(Number);
+      const endTotal = Math.min(h * 60 + (m || 0) + effDuration, 23 * 60 + 59);
+      const candidateEnd = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
+      if (await clashesAt(candidate.dateStr, candidate.window.start, candidateEnd)) return;
+      options.push(buildOption(candidate, candidate.window));
+    };
+
+    // GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29): the eligible days are
+    // collected and ranked by the dispatcher's route check instead of being
+    // probed one by one. Off, or the check cannot run: the loop below is the
+    // old one, call for call.
+    const routeRanked = require('./scheduling/route-ranked-days').routeRankedDaysLive();
+    const eligible = [];
+
     for (let d = 1; d <= 10; d++) {
       // ET calendar math — toISOString() reads the UTC date while displayDate
       // below formats in ET, so between 8 PM and midnight ET the customer would
@@ -1456,6 +1599,9 @@ class SmartRebooker {
         const month = Number(dateStr.slice(5, 7));
         if (month < 2 || month > 10) continue;
       }
+      // Same for a lawn round: reschedule() refuses a non-admin move out of
+      // the visit's round, so do not offer one.
+      if (reason && leavesOwnRound(service.recurring_pattern, service.scheduled_date, dateStr)) continue;
 
       const dayLoad = await db('scheduled_services')
         .where('scheduled_date', dateStr)
@@ -1483,71 +1629,25 @@ class SmartRebooker {
       if (candidateDate.getDay() === new Date(service.scheduled_date).getDay()) score += 8; // Same day of week
 
       const window = this.findBestWindow(service);
+      const candidate = { dateStr, candidateDate, load, sameAreaCount, score, window };
 
-      // Skip candidates whose committed block would deterministically 409:
-      // the picker submits window.start + the visit's own duration, so test
-      // exactly that span with the same occupancy predicate
-      // reschedule() enforces. Without this, busy days surface suggestions
-      // that can never be selected.
-      const effDuration = (() => {
-        // Callers that book a DIFFERENT span than the visit's own block
-        // (rain-out commits a one-hour slot) pass probeSpanMinutes so the
-        // probe tests exactly what they will submit.
-        const forced = parseInt(opts.probeSpanMinutes, 10);
-        if (Number.isInteger(forced) && forced > 0) return forced;
-        // Stored span FIRST, then the duration estimate — the same order
-        // the RescheduleModal uses to build the window it submits, so the
-        // probe tests exactly the block Select will commit.
-        if (service.window_start && service.window_end) {
-          const [h1, m1] = String(service.window_start).split(':').map(Number);
-          const [h2, m2] = String(service.window_end).split(':').map(Number);
-          const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
-          if (span > 0) return span;
-        }
-        const d = parseInt(service.estimated_duration_minutes, 10);
-        if (Number.isInteger(d) && d > 0) return d;
-        return 60;
-      })();
-      const startMin = (() => {
-        const [h, m] = String(window.start).split(':').map(Number);
-        return h * 60 + (m || 0);
-      })();
-      const endTotal = Math.min(startMin + effDuration, 23 * 60 + 59);
-      const candidateEnd = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
-      try {
-        const clash = await findConflictingVisits({
-          db,
-          date: dateStr,
-          windowStart: window.start,
-          windowEnd: candidateEnd,
-          excludeServiceIds: [String(serviceId)],
-          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
-          // Travel gap: a CUSTOMER-FACING day option (rain-out sheet) must
-          // survive the commit's own probe. Admin reschedule-options stay
-          // overlap-only — staff saves are advisory (GH codex #3803 r3 P2).
-          ...(opts.travelGap === true ? { travel: { lat: service.lat ?? null, lng: service.lng ?? null } } : {}),
-          // Second technician (gate-scoped inside the probe): every committer
-          // of these days (rain-out, the admin picker) keeps the visit's own
-          // technician, and commit probes that technician's route — so the
-          // option is judged on the same route and offer == commit.
-          technicianId: service.technician_id || null,
-        });
-        if (clash.length) continue;
-      } catch (err) {
-        // Occupancy probe failure keeps the candidate (legacy behavior) —
-        // the commit-time check still rejects a genuine clash.
-        logger.warn(`[rebooker] suggestion occupancy probe failed for ${dateStr}: ${err.message}`);
-      }
+      if (routeRanked) { eligible.push(candidate); continue; }
+      await admit(candidate);
+    }
 
-      options.push({
-        date: dateStr,
-        dayOfWeek: candidateDate.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }),
-        displayDate: candidateDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }),
-        currentLoad: load,
-        sameAreaServices: sameAreaCount,
-        suggestedWindow: window,
-        score,
+    if (routeRanked) {
+      const ranked = await require('./scheduling/route-ranked-days').rankRouteCheckedDays({
+        serviceId, service, candidates: eligible, durationMinutes: effDuration,
+        caller: opts.caller || null, clashesAt,
       });
+      if (ranked) {
+        return ranked.slice(0, 3).map((entry) => buildOption(entry.candidate, entry.window, entry.routeChecked
+          ? { routeChecked: true, ...(Number.isFinite(Number(entry.slot?.detour_minutes))
+            ? { driveMinutes: Math.round(Number(entry.slot.detour_minutes)) } : {}) }
+          : { routeChecked: false }));
+      }
+      // No day could be route-checked: today's list, from the same candidates.
+      for (const candidate of eligible) await admit(candidate);
     }
 
     options.sort((a, b) => b.score - a.score);
@@ -1776,6 +1876,16 @@ class SmartRebooker {
           code: 'OFF_SEASON',
         });
       }
+    }
+
+    // A lawn round visit stays inside its round (one visit a round, nine a
+    // year). Admin moves stay allowed, like the seasonal guard above.
+    if (initiatedBy !== 'admin' && leavesOwnRound(service.recurring_pattern, service.scheduled_date, newDateStr)) {
+      throw Object.assign(new Error(OUT_OF_ROUND_MESSAGE), {
+        statusCode: 409,
+        isOperational: true,
+        code: 'OUT_OF_ROUND',
+      });
     }
 
     const originalDate = service.scheduled_date;
@@ -2724,6 +2834,16 @@ class SmartRebooker {
         });
       }
     }
+    // A lawn round series keeps its anchor inside the anchor visit's own
+    // round: every later visit is placed from the anchor's offset, one per
+    // round, so an anchor in another round would push the whole series.
+    if (initiatedBy !== 'admin' && leavesOwnRound(parent.recurring_pattern, service.scheduled_date, seriesDateStr)) {
+      throw Object.assign(new Error(OUT_OF_ROUND_MESSAGE), {
+        statusCode: 409,
+        isOperational: true,
+        code: 'OUT_OF_ROUND',
+      });
+    }
     // An explicit clear of both bounds lands the anchor windowless — no slot
     // to have elapsed; the stored window is abandoned, not carried (codex
     // r10 P2).
@@ -3072,7 +3192,7 @@ class SmartRebooker {
             // the movable Sunday behind it collapses onto the same Monday
             // (codex r9 P1). Same rule the cadence-math comment above
             // states for counting.
-            cadenceSlotDate(oi);
+            cadenceSlotDate(oi, sib);
             continue;
           }
           const projected = projectOccurrenceDate(oi, sib);
@@ -3552,6 +3672,20 @@ class SmartRebooker {
           updated_at: trx.fn.now(),
         });
       }
+      // Lawn rounds: the moved visit's date now places every later visit (its
+      // offset in its round and its weekday). The parent's own date is history,
+      // so the anchor is stored beside it; a later top-up or extension reads it
+      // (admin-schedule seriesRoundAnchor) and lands where this move put the
+      // later visits.
+      if (parent.recurring_pattern === LAWN_ROUNDS_9) {
+        const anchorCols = await trx('scheduled_services').columnInfo();
+        if (anchorCols.recurring_round_anchor_date) {
+          await trx('scheduled_services').where({ id: parentId }).update({
+            recurring_round_anchor_date: dateOnly(newDate),
+            updated_at: trx.fn.now(),
+          });
+        }
+      }
       // GATE_SERIES_MOVE_CARRIES_VISIT — carry one occurrence's grouped-visit
       // partners to the occurrence's NEW stop, inside THIS transaction (so a
       // member can never commit while its partner did not), then re-key the
@@ -3808,7 +3942,7 @@ class SmartRebooker {
         // rejoined the series — clear the flag (the only clearing path until
         // an explicit rejoin operation exists).
         const rejoinsCadence = !isAnchor && sib.date_exception === true
-          && String(date).split('T')[0] === cadenceSlotDate(occurrenceIndex);
+          && String(date).split('T')[0] === cadenceSlotDate(occurrenceIndex, sib);
         // Exception bookkeeping: the anchor now DEFINES the cadence (any
         // exception it carried is spent); a kept exception's series position
         // moves to its new cadence slot; a rejoined row is plain cadence again.
@@ -3816,7 +3950,7 @@ class SmartRebooker {
           ? (sib.date_exception === true ? DATE_EXCEPTION_CLEAR : {})
           : (rejoinsCadence
             ? DATE_EXCEPTION_CLEAR
-            : (sib.date_exception === true ? { date_exception_cadence_date: cadenceSlotDate(occurrenceIndex) } : {}));
+            : (sib.date_exception === true ? { date_exception_cadence_date: cadenceSlotDate(occurrenceIndex, sib) } : {}));
         const updateData = {
           scheduled_date: date,
           window_start: occurrenceWindow.start,
@@ -4592,7 +4726,7 @@ class SmartRebooker {
       // row that does not move still reserves its cadence slot.
       for (let i = 0; i < nextIdx; i++) {
         if (i === 0 || RESCHEDULABLE_STATUSES.has(swept[i].status)) projectOccurrenceDate(i, swept[i]);
-        else cadenceSlotDate(i);
+        else cadenceSlotDate(i, swept[i]);
       }
       byDate[seriesDateStr] = projectOccurrenceDate(nextIdx, next);
     }
@@ -4657,7 +4791,7 @@ class SmartRebooker {
       if (!movable.includes(row)) {
         // Same slot reservation the sweep makes for a skipped/live row, so
         // the disclosed dates are the dates the move writes (codex r10 P2).
-        cadenceSlotDate(i);
+        cadenceSlotDate(i, row);
         continue;
       }
       const date = projectOccurrenceDate(i, row);
@@ -4837,6 +4971,8 @@ module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;
 module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
+module.exports.leavesOwnRound = leavesOwnRound;
+module.exports.makeSeriesProjector = makeSeriesProjector;
 // Exported for tests: the per-occurrence window derivation (rollback toggle +
 // admin window rules) the series mover applies to every sibling.
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;

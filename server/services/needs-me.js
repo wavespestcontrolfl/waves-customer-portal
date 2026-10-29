@@ -79,10 +79,10 @@ const digestKind = (row, meta) => meta.kind || legacyKindFromTitle(String(row.ti
 
 // A digest for the fyi audience (or kind) is information, never work: severity fyi, left out
 // of the list.
-// A registry event the registry marks informational (a payment received, a job
+// A registry event whose declared rule severity is fyi (a payment received, a job
 // completed) is a fact, not work: fyi, left out.
 function legacySeverity(row, meta) {
-  if (TRIGGER_REGISTRY[meta.triggerKey]?.informational) return 'fyi';
+  if (TRIGGER_REGISTRY[meta.triggerKey]?.rule?.severity === 'fyi') return 'fyi';
   if (row.category !== 'ops_digest') return 'needs-you';
   if (meta.audience === 'fyi') return 'fyi';
   const kind = digestKind(row, meta);

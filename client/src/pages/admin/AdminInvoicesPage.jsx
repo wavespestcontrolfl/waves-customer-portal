@@ -1698,6 +1698,11 @@ function InvoiceList({
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
   const [addressModalInvoice, setAddressModalInvoice] = useState(null);
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
+  // Undo payment: the list answer says whether GATE_UNDO_MANUAL_PAYMENT is on; the confirm asks the server whether THIS payment can still be undone.
+  const [undoPaymentEnabled, setUndoPaymentEnabled] = useState(false);
+  // GATE_PARTIAL_PAYMENTS: the Add payment amount can be typed (a smaller amount records a part payment).
+  const [partialPaymentsEnabled, setPartialPaymentsEnabled] = useState(false);
+  const [undoPaymentInvoice, setUndoPaymentInvoice] = useState(null);
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
   const [cancellingPlanInvoiceId, setCancellingPlanInvoiceId] = useState(null);
   // Reverse prepaid moves money, so it carries its own latch: the shared
@@ -1797,6 +1802,8 @@ function InvoiceList({
       );
       setTotal(Number(data.total ?? rows.length) || 0);
       setPage(Number(data.page || pageNo));
+      setUndoPaymentEnabled(data.undoPaymentEnabled === true);
+      setPartialPaymentsEnabled(data.partialPaymentsEnabled === true);
       if (!append) setSelected(new Set());
     },
     [
@@ -2690,6 +2697,17 @@ function InvoiceList({
                           <div className="text-ui-field font-medium text-zinc-900">
                             ${parseFloat(inv.total).toFixed(2)}
                           </div>{" "}
+                          {isAdminUser && invoicePaidSoFar(inv) > 0 && (
+                            <div
+                              style={{
+                                marginTop: 4,
+                              }}
+                              className="text-ui-body text-ink-secondary"
+                            >
+                              Paid so far ${invoicePaidSoFar(inv).toFixed(2)} · $
+                              {invoiceStillOwed(inv).toFixed(2)} owed
+                            </div>
+                          )}{" "}
                           <div
                             style={{
                               color: display.color,
@@ -3055,6 +3073,21 @@ function InvoiceList({
                               Reverse prepaid
                             </Button>
                           )}
+                          {isAdminUser && undoPaymentEnabled && offersUndoPayment(inv) && (
+                            <Button
+                              onClick={() => setUndoPaymentInvoice(inv)}
+                              title="Reverse this payment if it was recorded today and no receipt or reminder has gone out"
+                              variant="secondary"
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
+                            >
+                              Undo payment
+                            </Button>
+                          )}
                           {isAdminUser && inv.status === "void" && (
                             <Button
                               onClick={() => handleUnvoid(inv.id)}
@@ -3337,6 +3370,7 @@ function InvoiceList({
       {paymentModalInvoice && (
         <RecordPaymentModal
           invoice={paymentModalInvoice}
+          partialPaymentsEnabled={partialPaymentsEnabled}
           isMobile={isMobile}
           onClose={() => setPaymentModalInvoice(null)}
           onRecorded={(msg) => {
@@ -3346,6 +3380,19 @@ function InvoiceList({
             onRefresh();
           }}
           onError={(msg) => showToast(msg, "error")}
+        />
+      )}
+
+      {undoPaymentInvoice && (
+        <UndoPaymentModal
+          invoice={undoPaymentInvoice}
+          onClose={() => setUndoPaymentInvoice(null)}
+          onUndone={(msg) => {
+            setUndoPaymentInvoice(null);
+            showToast(msg);
+            load();
+            onRefresh();
+          }}
         />
       )}
 
@@ -4958,8 +5005,20 @@ function ApplyCreditModal({
 // Square-parity flow: log cash / check / Zelle / other against an open
 // invoice, mark it paid, and (by default) fire the receipt in the same
 // call. Reference field captures check #, Zelle confirmation, etc.
+// What is still owed on an invoice, in cents (the server's invoiceAmountDue: total, less account credit, less money already received).
+function invoiceStillOwed(inv) {
+  const cents = (value) => Math.round((Number(value) || 0) * 100);
+  return Math.max(0, cents(inv.total) - cents(inv.credit_applied) - cents(inv.amount_paid)) / 100;
+}
+// Money already received on an invoice that is still open (a part payment). Paid and closed invoices read 0 here.
+function invoicePaidSoFar(inv) {
+  if (["paid", "prepaid", "void", "refunded", "canceled", "cancelled"].includes(inv.status)) return 0;
+  return Math.max(0, Number(inv.amount_paid) || 0);
+}
+
 function RecordPaymentModal({
   invoice,
+  partialPaymentsEnabled = false,
   isMobile,
   onClose,
   onRecorded,
@@ -4975,6 +5034,10 @@ function RecordPaymentModal({
   const [reference, setReference] = useState("");
   const [note, setNote] = useState("");
   const [sendReceipt, setSendReceipt] = useState(true);
+  // The amount received, in dollars as typed. It starts at what is still owed; a smaller amount is a part payment.
+  const owed = invoiceStillOwed(invoice);
+  const paidSoFar = invoicePaidSoFar(invoice);
+  const [amountText, setAmountText] = useState(owed.toFixed(2));
   const [recipientLookup, setRecipientLookup] = useState(null);
   const [recipientsLoading, setRecipientsLoading] = useState(true);
   const [recipientLookupError, setRecipientLookupError] = useState("");
@@ -5038,7 +5101,17 @@ function RecordPaymentModal({
     hasEmail && `email to ${receiptEmail}`,
     hasPhone && "SMS",
   ].filter(Boolean);
-  const recordDisabled = saving || (sendReceipt && recipientsLoading);
+  // The typed amount in cents (NaN when it is not a dollar amount). Only read while the part-payment gate is on.
+  const typedAmount = amountText.trim();
+  const typedCents = /^\d+(\.\d{1,2})?$/.test(typedAmount)
+    ? Math.round(Number(typedAmount) * 100)
+    : NaN;
+  const owedCents = Math.round(owed * 100);
+  const amountInvalid =
+    partialPaymentsEnabled && !(typedCents > 0 && typedCents <= owedCents);
+  const isPart = partialPaymentsEnabled && !amountInvalid && typedCents < owedCents;
+  const recordDisabled =
+    saving || amountInvalid || (!isPart && sendReceipt && recipientsLoading);
   const handleRecord = async () => {
     if (savingRef.current) return;
     if (recordDisabled) return;
@@ -5054,11 +5127,22 @@ function RecordPaymentModal({
             method,
             reference: reference.trim() || undefined,
             note: note.trim() || undefined,
-            sendReceipt: sendReceipt && hasContact,
-            via: sendReceipt && hasContact ? receiptVia : undefined,
+            // A part payment sends no receipt: the invoice stays open.
+            sendReceipt: !isPart && sendReceipt && hasContact,
+            via: !isPart && sendReceipt && hasContact ? receiptVia : undefined,
+            // The server compares this with what is owed right now: equal records the whole balance, smaller a part payment.
+            amount: partialPaymentsEnabled ? typedCents / 100 : undefined,
+            // The amount owed this page showed: a repeat of the same submit meets a smaller amount owed and is refused, not booked twice.
+            owedSeen: partialPaymentsEnabled ? owedCents / 100 : undefined,
           }),
         },
       );
+      if (res.partial) {
+        onRecorded(
+          `Part payment recorded · $${Number(res.partial.remaining).toFixed(2)} still owed`,
+        );
+        return;
+      }
       const channels = [
         res.receipt?.email?.ok && "email",
         res.receipt?.sms?.ok && "sms",
@@ -5110,7 +5194,31 @@ function RecordPaymentModal({
           Invoice #{invoice.invoice_number} · $
           {parseFloat(invoice.total).toFixed(2)} · {invoice.first_name}{" "}
           {invoice.last_name}
+          {paidSoFar > 0 && (
+            <div>
+              Paid so far ${paidSoFar.toFixed(2)} · ${owed.toFixed(2)} still
+              owed
+            </div>
+          )}
         </div>
+        {partialPaymentsEnabled && (
+          <Field
+            label={<>Amount received</>}
+            className="min-w-0"
+            error={
+              amountInvalid
+                ? `Enter an amount above $0.00, up to $${owed.toFixed(2)}`
+                : undefined
+            }
+          >
+            <Input
+              value={amountText}
+              onChange={(e) => setAmountText(e.target.value.slice(0, 12))}
+              inputMode="decimal"
+              disabled={saving}
+            />
+          </Field>
+        )}
         <label
           style={{
             display: "block",
@@ -5179,6 +5287,7 @@ function RecordPaymentModal({
             contact shown below.
           </div>
         )}
+        {!isPart && (
         <label
           style={{
             display: "flex",
@@ -5233,6 +5342,7 @@ function RecordPaymentModal({
             )}
           </span>{" "}
         </label>
+        )}
         <div
           style={{
             marginTop: 14,
@@ -5242,8 +5352,9 @@ function RecordPaymentModal({
           }}
           className="bg-zinc-100 rounded-md text-ui-body text-ink-secondary"
         >
-          Marks this invoice paid and stops automated reminders. Use only after
-          the money has actually arrived.
+          {isPart
+            ? "Records part of the bill. The invoice stays open, reminders continue for what is still owed, and no receipt is sent. Use only after the money has actually arrived."
+            : "Marks this invoice paid and stops automated reminders. Use only after the money has actually arrived."}
         </div>
         <div
           style={{
@@ -5279,12 +5390,137 @@ function RecordPaymentModal({
             className="min-w-11"
             loading={saving}
           >
-            {sendReceipt && recipientsLoading
-              ? "Loading recipients…"
-              : sendReceipt && hasContact
-                ? "Record & send receipt"
-                : "Record payment"}
+            {isPart
+              ? "Record part payment"
+              : sendReceipt && recipientsLoading
+                ? "Loading recipients…"
+                : sendReceipt && hasContact
+                  ? "Record & send receipt"
+                  : "Record payment"}
           </Button>{" "}
+        </div>
+      </DialogBody>
+    </Dialog>
+  );
+}
+
+// Undo payment is offered on a paid invoice whose tender was typed in by the office (not a card) and was recorded in the last day and a
+// half. That is only a display filter so old paid rows carry no button; whether the payment CAN be undone is the server's answer,
+// asked when the confirm opens (GET /admin/invoices/:id/undo-payment) and again when it is submitted.
+const UNDO_PAYMENT_TENDERS = ["cash", "check", "zelle", "venmo", "paypal", "other"];
+const UNDO_PAYMENT_WINDOW_MS = 36 * 60 * 60 * 1000;
+function offersUndoPayment(inv) {
+  const recordedAt = inv.payment_recorded_at
+    ? new Date(inv.payment_recorded_at).getTime()
+    : NaN;
+  const recent = Date.now() - recordedAt < UNDO_PAYMENT_WINDOW_MS;
+  // A part payment leaves the invoice open with money received on it; the tender is the server's to check.
+  if (invoicePaidSoFar(inv) > 0) return recent;
+  return (
+    inv.status === "paid" &&
+    UNDO_PAYMENT_TENDERS.includes(inv.payment_method) &&
+    recent
+  );
+}
+
+function UndoPaymentModal({ invoice, onClose, onUndone }) {
+  const savingRef = useRef(false);
+  const [check, setCheck] = useState(null);
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [actionError, setActionError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    adminFetch(`/admin/invoices/${invoice.id}/undo-payment`)
+      .then((data) => alive && setCheck(data))
+      .catch((err) =>
+        alive &&
+        setCheck({
+          eligible: false,
+          message: err.message || "Could not check this payment",
+        }),
+      );
+    return () => {
+      alive = false;
+    };
+  }, [invoice.id]);
+  const handleUndo = async () => {
+    if (savingRef.current || !reason.trim()) return;
+    savingRef.current = true;
+    setActionError("");
+    setSaving(true);
+    try {
+      const res = await adminFetch(`/admin/invoices/${invoice.id}/undo-payment`, {
+        method: "POST",
+        // The payment the server described when this opened: if another one sits on the invoice now, the server refuses.
+        body: JSON.stringify({ reason: reason.trim(), paymentId: check.payment.id }),
+      });
+      onUndone(
+        check.payment.part
+          ? "Part payment undone"
+          : res.remindersRearmed === false
+            ? "Payment undone · reminders were not re-armed, check the reminder panel"
+            : "Payment undone · invoice is open again",
+      );
+    } catch (err) {
+      setActionError(err.message);
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog open={true} onClose={saving ? undefined : onClose} layer={400}>
+      <DialogBody className="space-y-4 text-ui-body text-zinc-900">
+        <DialogTitle>Undo payment</DialogTitle>
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
+        <div className="text-ui-body text-ink-secondary">
+          Invoice #{invoice.invoice_number} · {invoice.first_name}{" "}
+          {invoice.last_name}
+        </div>
+        {!check && <div className="text-ui-body text-ink-secondary">Checking this payment…</div>}
+        {check && !check.eligible && (
+          <ActionFeedback error>{check.message}</ActionFeedback>
+        )}
+        {check?.eligible && (
+          <>
+            <div className="text-ui-body">
+              {check.payment.part
+                ? `This reverses the $${Number(check.payment.amount).toFixed(2)} ${check.payment.method} part payment. The invoice stays open and reminders are not changed.`
+                : `This reverses the $${Number(check.payment.amount).toFixed(2)} ${check.payment.method} payment. The invoice opens again and reminders resume on their normal schedule.`}
+            </div>
+            <Field label={<>Reason (required)</>} className="min-w-0">
+              <Textarea
+                value={reason}
+                onChange={(e) => setReason(e.target.value.slice(0, 400))}
+                placeholder="e.g. Recorded on the wrong invoice"
+                rows={2}
+                style={{ resize: "vertical" }}
+                disabled={saving}
+              />
+            </Field>
+          </>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
+          <Button
+            onClick={onClose}
+            disabled={saving}
+            variant="secondary"
+            className="min-w-11"
+          >
+            {check?.eligible ? "Cancel" : "Close"}
+          </Button>
+          {check?.eligible && (
+            <Button
+              onClick={handleUndo}
+              disabled={saving || !reason.trim()}
+              variant="danger"
+              className="min-w-11"
+              loading={saving}
+            >
+              Undo payment
+            </Button>
+          )}
         </div>
       </DialogBody>
     </Dialog>

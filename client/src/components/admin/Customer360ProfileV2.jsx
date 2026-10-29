@@ -9060,7 +9060,9 @@ function CustomerBillingSummary({
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-ui-label font-medium text-zinc-900 truncate">
                     {plan.serviceType}
-                    {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
+                    {plan.recurringPattern
+                      ? ` · ${plan.recurringPattern === "lawn_rounds_9" ? "Lawn rounds (9 a year)" : plan.recurringPattern}`
+                      : ""}
                   </div>
                   <Badge tone={active ? "strong" : "neutral"}>
                     {active ? "Active" : "Used"}

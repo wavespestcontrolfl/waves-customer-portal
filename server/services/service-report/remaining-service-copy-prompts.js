@@ -296,6 +296,9 @@ const SERVICE_KEY_BINDINGS = Object.freeze({
   rodent_sanitation_light: ['rodent_sanitation', 'rodent_sanitation'],
   rodent_sanitation_standard: ['rodent_sanitation', 'rodent_sanitation'],
   rodent_sanitation_heavy: ['rodent_sanitation', 'rodent_sanitation'],
+  // Dead rodent removal completes on the rodent_sanitation form; the cleanup module's fences (no odor-removal or
+  // disinfection claim beyond the recorded work) are the right ones for it.
+  rodent_dead_animal_removal: ['rodent_sanitation', 'rodent_sanitation'],
   termite_bait: ['termite_stations', 'termite_bait_station'],
   termite_active_annual: ['termite_stations', 'termite_bait_station'],
   termite_active_bait_quarterly: ['termite_stations', 'termite_bait_station'],

@@ -150,7 +150,7 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
     expect(tableResults.lastOpenInvoicesCalls).toEqual(expect.arrayContaining([
       ['whereNull', ['payer_id']],
       ['whereNull', ['payer_statement_id']],
-      ['whereRaw', ['GREATEST(total - COALESCE(credit_applied, 0), 0) > 0']],
+      ['whereRaw', ['GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0']],
     ]));
   });
 

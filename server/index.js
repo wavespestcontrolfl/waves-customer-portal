@@ -2,6 +2,8 @@
 require('./config/load-env')();
 // Sentry must be initialized before all other imports
 require("./instrument.js");
+// AI credit key pool (GATE_AI_CREDIT_KEYS, dark): wraps globalThis.fetch once, before any module builds an Anthropic client.
+require('./services/llm/credit-key-pool').installCreditKeyPool();
 const Sentry = require("@sentry/node");
 
 // Prevent unhandled promise rejections from crashing the process
@@ -1016,6 +1018,7 @@ app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
 app.use('/api/admin/timesheets', require('./routes/admin-timesheet-approval'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/tech/pay-growth', require('./routes/tech-pay-growth'));
+app.use('/api/tech/payroll', require('./routes/tech-payroll'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
 app.use('/api/admin/consultations', require('./routes/admin-consultations'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));

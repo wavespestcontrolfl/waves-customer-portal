@@ -595,6 +595,59 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
   return sequencers.every(sequence => !simulate(sequence(groupedPending), []));
 }
 
+/** Why an `arrival_window` failure happened, from the same simulation re-run to report
+ *  lateness instead of stopping at the first miss (explain: true only). The new visit is
+ *  tried at EVERY position of the day's current order (n+1), whatever capacity mode or
+ *  GATE_STAFF_ROUTE_INSERTION do for the real placement, so one cramped order never speaks
+ *  for the day.
+ *
+ *  A position is VIABLE only if the new visit keeps its OWN 2-hour window there. A position
+ *  that misses it (typically the new visit appended after everyone) "saves" the other
+ *  customers only by breaking the new customer's promise, so it is not a way to keep the
+ *  hour: an hour that fits only by arriving late to the new customer is not offered, and
+ *  one that fits only by making somebody else late is removed. Per position:
+ *  - others(p): stops late with the visit there that are NOT late in the day without it.
+ *  - Any viable position with no others(p): the hour can be kept with every promise
+ *    kept, so nothing is confirmed.
+ *  - No viable position: the new customer cannot be reached in their own window anywhere
+ *    (`targetLate`); nobody else is blamed.
+ *  - Viable positions all with others(p): `newlyLateStopIds` is the UNION of the stops
+ *    made late at the viable positions.
+ *  - baselineLateStopIds: stops already late in the day without the new visit.
+ *  - dayEndExceeded: at some position the route runs past the day end. */
+const EXPLAIN_MAX_STOPS = 30;
+
+function explainLateness({ sequencers, groupedPending, simulate, target }) {
+  const lateIds = (order) => {
+    const simulation = simulate(order, [], { reportLate: true, dayEndMin: Infinity });
+    return simulation ? simulation.arrivals.filter(arrival => arrival.lateMinutes > 0).map(arrival => arrival.id) : null;
+  };
+  const baselines = sequencers.map(sequence => sequence(groupedPending));
+  const baselineLate = new Set(baselines.flatMap(baseline => lateIds(baseline) || []));
+  const orders = baselines.flatMap(baseline => (baseline.length > EXPLAIN_MAX_STOPS ? []
+    : Array.from({ length: baseline.length + 1 }, (_, i) => [...baseline.slice(0, i), target, ...baseline.slice(i)])));
+  const crowded = new Set();
+  let viable = 0;
+  let unconfirmed = orders.length === 0; // an unsimulable position, or a viable one that keeps everyone on time
+  let dayEndExceeded = false;
+  for (const order of orders) {
+    const late = lateIds(order);
+    if (late == null) {
+      unconfirmed = true;
+      continue;
+    }
+    if (!simulate(order, [], { reportLate: true })) dayEndExceeded = true;
+    if (late.includes(target.id)) continue;
+    viable += 1;
+    const others = late.filter(id => !baselineLate.has(id));
+    if (others.length) others.forEach(id => crowded.add(id));
+    else unconfirmed = true;
+  }
+  return { targetLate: orders.length > 0 && viable === 0,
+    newlyLateStopIds: viable > 0 && !unconfirmed ? [...crowded] : [],
+    baselineLateStopIds: [...baselineLate], dayEndExceeded };
+}
+
 /** Shape the certified winner into evaluateArrivalPlacement's public
  *  feasible result. */
 function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, own, windowStart, winner, origin, home = RouteOptimizer.HQ, roadTravel = false }) {
@@ -634,7 +687,10 @@ function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, 
 
 /** Pure evaluation shared by the hint, live conflict check, and save probe. */
 function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60,
-  departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true, place = false }) {
+  departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true, place = false,
+  // Optional diagnostics (customer route check): on an `arrival_window` failure, add `lateness`
+  // (see explainLateness). Unset: no extra work and the result is exactly what it was.
+  explain = false }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
   const capacity = capacityEnabled() || context.preserveCapacity;
@@ -672,7 +728,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // (nothing is written for it: only a move's result carries an order).
   const sequencers = (capacity || placement) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
-  const simulate = (order, usedLegs) => {
+  const simulate = (order, usedLegs, extra = {}) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
     return simulateArrivalRoute(RouteOptimizer, rangeForStop,
       // raw_estimate_minutes keeps the UNTOUCHED estimate for the co-visit
@@ -693,6 +749,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
         estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
         origin, startMin, dayEndMin, includeReturnInFinish: capacity, bufferMinutes, end: context.home || RouteOptimizer.HQ,
         blockedIntervals: (context.blocks || []).map(block => ({ startMin: minuteOfDay(block.start_time), endMin: minuteOfDay(block.end_time) })),
+        ...extra,
         ...(travel ? { legMinutes: (from, to, departureMin) => {
           const leg = { date, from, to, departureMin };
           const metric = travel.lookup(leg);
@@ -739,20 +796,25 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     return { ...fail, reason: 'day_overcommitted',
       warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` };
   }
-  if (!winner) return fail;
+  if (!winner) {
+    return explain ? { ...fail, lateness: explainLateness({ sequencers, groupedPending, simulate, target }) } : fail;
+  }
   return buildFeasibleResult({ target, capacity, staffInsert, startMin, own, windowStart, winner, origin, home: context.home || RouteOptimizer.HQ,
     roadTravel: !!context.travel });
 }
 
 /** One on-the-hour enumeration for the staff finder and read-only gap
- * measurements. Both evaluate the order the existing save would produce. */
-function enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin, latestServiceEndMin = 20 * 60, ...limits }) {
+ * measurements. Both evaluate the order the existing save would produce.
+ * `startsOnly` (a Set of 'HH:MM' window starts; the pickers' Google band,
+ * find-time.js preloadBandLegs) evaluates those hours alone. */
+function enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin, latestServiceEndMin = 20 * 60, startsOnly = null, ...limits }) {
   const placements = [];
   const rejections = {};
   let evaluated = 0;
   for (let start = Math.ceil(earliestStartMin / 60) * 60; start + durationMinutes <= latestServiceEndMin; start += 60) {
-    evaluated++;
     const windowStart = hhmm(start);
+    if (startsOnly && !startsOnly.has(windowStart)) continue;
+    evaluated++;
     const windowEnd = hhmm(start + durationMinutes);
     const fit = evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, ...limits });
     if (fit.feasible) placements.push({ windowStart, windowEnd, fit });
@@ -983,6 +1045,16 @@ function pickerRoadCheckLive() {
   return gateEnvValue('GATE_PICKER_ROAD_CHECK') && !capacityEnabled();
 }
 
+// GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29, "Route Check Everywhere"
+// build 1): the staff day lists (the Reschedule window's suggested days, the
+// Quick Move day buttons, the Intelligence Bar's find_available_slots) rank
+// and filter by the dispatcher's arrival-window route check
+// (scheduling/route-ranked-days.js). Read at call time; callers also need
+// arrivalWindowRoutingEnabled(). Unset = today's lists, byte for byte.
+function routeCheckStaffListsLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_STAFF_LISTS');
+}
+
 // GATE_SAVE_ROAD_TIMES (owner 2026-10-28, "yes do this"): a staff save's
 // check and its route number read the road times the pickers bought for that
 // day (`roads: 'cache'`), so a save agrees with the hour its picker offered.
@@ -990,6 +1062,28 @@ function pickerRoadCheckLive() {
 // drive no picker looked up keeps the model. Needs the pickers' road check.
 function saveRoadTimesLive() {
   return gateEnvValue('GATE_SAVE_ROAD_TIMES') && pickerRoadCheckLive();
+}
+
+// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, "start the builds", Route
+// Check Everywhere build 2a): the staff saves that checked only for an overlap
+// (New Appointment, lead booking, the Intelligence Bar's create, reschedule
+// and move-stops tools, bulk reschedule) also run the dispatcher's
+// arrival-window route check on the saved visit and show its warning. Warn
+// only: a route result never blocks a save. Cache road times only
+// (`roads: 'cache'`, no Google call). Needs the arrival-window route check
+// itself (arrivalWindowRoutingEnabled), the check that Edit's save runs.
+function routeCheckStaffSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_STAFF_SAVES') && arrivalWindowRoutingEnabled();
+}
+
+// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, "start the builds", Route
+// Check Everywhere build 2b): the automatic writers that create or move a
+// visit (completion and package follow-ups, annual prepay renewals, call
+// bookings) number the visit's technician day in the dispatcher's order
+// (placeMovedVisit, cache road times only). No warning, no notification, no
+// message, no Google call. Needs the arrival-window route check itself.
+function routeCheckAutoSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_AUTO_SAVES') && arrivalWindowRoutingEnabled();
 }
 
 // A staff save's travel for `date`: on a road day, the road times the pickers
@@ -1025,8 +1119,11 @@ async function checkArrivalPlacement({
 module.exports = {
   arrivalWindowRoutingEnabled, pickerRoadCheckLive, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
+  routeCheckStaffListsLive,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
   _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },
 };
+module.exports.routeCheckStaffSavesLive = routeCheckStaffSavesLive;
+module.exports.routeCheckAutoSavesLive = routeCheckAutoSavesLive;

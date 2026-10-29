@@ -1400,6 +1400,11 @@ function classifyServiceFamilyText(text) {
   // sanitation from bait — sold exclusion or trapping work must never adopt
   // (and restamp) a bait-station monitoring visit. Same regexes as
   // slot-reservation.
+  // Dead Rodent Removal & Odor Treatment (GATE_DEAD_ANIMAL_REMOVAL) is its own
+  // identity: left to the seeder's generic rodent bucket it would read as
+  // rodent_bait, and a sold removal would adopt (and restamp) a bait-station
+  // monitoring visit. Same regex as slot-reservation.
+  if (/dead\s*(?:rodent|animal)|rodent\s*dead\s*animal/.test(raw)) return 'rodent_dead_animal_removal';
   if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
   // Wire-mesh/seal wording is exclusion work (codex r19: the supported
   // rodent_wire_mesh catalog key carries no "exclusion" token).
@@ -1525,7 +1530,8 @@ function oneTimeItemFamilyKeys(item = {}) {
   // and a bait-station monitoring visit stayed adoptable.
   const hasSpecificRodent = [...keys].some(
     (k) => k === 'rodent_trapping' || k === 'rodent_exclusion'
-      || k === 'rodent_sanitation' || k === 'rodent_inspection',
+      || k === 'rodent_sanitation' || k === 'rodent_inspection'
+      || k === 'rodent_dead_animal_removal',
   );
   if (hasSpecificRodent) {
     keys.delete('rodent_bait');
@@ -6963,7 +6969,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // validity date any renderer may print (see proposal-sections.js).
       // Payment tokens are the canonical payer vocabulary → labels, same
       // map as client proposal-sections.js PAYMENT_TERM_LABELS.
-      const proposalPaymentLabel = { autopay: 'Auto Pay', due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+      const proposalPaymentLabel = { autopay: 'Auto Pay', due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30', net60: 'Net-60' };
       const proposalTermRows = proposalForCard.commercialTerms ? [
         ['Payment', proposalPaymentLabel[proposalForCard.commercialTerms.paymentTerms] || null],
         ['Initial term', proposalForCard.commercialTerms.initialTermMonths != null
@@ -13823,7 +13829,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           //    invoice to 'prepaid' — the post-commit block must run the
           //    credit-coverage settlement instead of a charge call that
           //    would refuse the settled status as a decline.
-          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status', 'total', 'credit_applied');
+          const appliedInvoiceRow = await trx('invoices').where({ id: invoiceIdResult }).first('status', 'total', 'credit_applied', 'amount_paid');
           prepayCoveredInTrxResult = String(appliedInvoiceRow?.status || '').toLowerCase() === 'prepaid';
           // 4) Verify the applied result still matches the ACKNOWLEDGED
           //    quote BEFORE commit (hook P1 r20): applyAccountCreditToInvoice
@@ -16451,7 +16457,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         const { membershipTierKey, NON_MEMBERSHIP_TIER_KEYS } = require('../services/membership-state');
         const prepayTierKey = membershipTierKey(prepayTier);
-        const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'payer_id');
+        const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'amount_paid', 'payer_id');
         const finalDue = finalRow ? require('../services/invoice-helpers').invoiceAmountDue(finalRow) : null;
         if (!prepaySmsPhone || !prepayTierKey || NON_MEMBERSHIP_TIER_KEYS.has(prepayTierKey)) {
           logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!prepaySmsPhone ? 'no live phone' : 'no WaveGuard membership tier'}`);
@@ -21058,6 +21064,16 @@ function findInitialRoachItem(_pestTiers, estData) {
   return null;
 }
 
+// Dead Rodent Removal & Odor Treatment rows carry the sold access tier and its on-site minutes (the booking's
+// duration floor) in two shapes: the legacy mapper's (deadAnimalTier, onSiteMinutes) and the raw engine line
+// item's (tier, durationMin), which is what an estimate whose only container is engineResult holds. Both are read.
+const DEAD_ANIMAL_TIERS = new Set(['reachable', 'attic', 'in_wall']);
+function deadAnimalBreakdownFields(item) {
+  const tier = [item.deadAnimalTier, item.tier].find((value) => DEAD_ANIMAL_TIERS.has(value)) || null;
+  const minutes = Number(item.onSiteMinutes ?? item.durationMin);
+  return { deadAnimalTier: tier, onSiteMinutes: minutes > 0 ? minutes : null };
+}
+
 function normalizeOneTimeBreakdown(estData) {
   // The authoritative container (estimate-result-container.js), the one the area add-on readers use.
   const result = storedEstimateContainer(estData);
@@ -21159,6 +21175,7 @@ function normalizeOneTimeBreakdown(estData) {
           includedCallbacks: item.includedCallbacks ?? null,
           unlimitedCallbacks: typeof item.unlimitedCallbacks === 'boolean' ? item.unlimitedCallbacks : null,
         } : {}),
+        ...(service === 'rodent_dead_animal_removal' ? deadAnimalBreakdownFields(item) : {}),
         includedScope: item.includedScope || null,
         retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
         atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
@@ -24006,7 +24023,7 @@ const SCOPE_OUT_OF_SCOPE_ENGINE_FLAGS = [
   ['rodentGuaranteeCombo', 'rodent'], ['rodentInspection', 'rodent'],
   ['rodentWireMesh', 'rodent'], ['rodentBirdBoxes', 'rodent'], ['rodentPlugging', 'rodent'],
   ['trapOnlyRetainer', 'rodent'], ['exclusion', 'rodent'], ['exclusionV2', 'rodent'],
-  ['sanitation', 'rodent'],
+  ['sanitation', 'rodent'], ['deadAnimalRemoval', 'rodent'],
   ['foam', 'foam_recurring'], ['foam_recurring', 'foam_recurring'],
   ['termiteFoam', 'termite_foam'],
   ['termite_bait', 'termite_bait'],
@@ -24032,7 +24049,7 @@ const SCOPE_OUT_OF_SCOPE_LEGACY_FLAGS = [
   ['svcWasp', 'stinging'],
   ['svcTs', 'tree_shrub'], ['svcInjection', 'tree_shrub'],
   ['svcRodentBait', 'rodent'], ['svcRodentTrap', 'rodent'],
-  ['svcRodentSanitation', 'rodent'], ['svcRodentGuarantee', 'rodent'],
+  ['svcRodentSanitation', 'rodent'], ['svcRodentDeadAnimal', 'rodent'], ['svcRodentGuarantee', 'rodent'],
   ['svcRodentWireMesh', 'rodent'], ['svcRodentBirdBox', 'rodent'],
   ['svcTrapOnlyRetainer', 'rodent'], ['svcExclusion', 'rodent'],
   ['svcFoam', 'termite_foam'],
@@ -28866,11 +28883,12 @@ function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
 // boundary keeps the review lane server-side. Quote-required items keep the
 // full set: quoteRequiredReasonCandidates humanizes them into the customer's
 // reason note (client lib quoteDisplay.js).
-// onSiteMinutes (area add-on rows) is the engine's internal labor estimate: the
-// booking path reads it from the unsanitized breakdown, the customer never sees it.
+// onSiteMinutes (area add-on and Dead Rodent Removal rows) is the engine's internal labor estimate: the
+// booking path reads it from the unsanitized breakdown, the customer never sees it. deadAnimalTier (a Dead
+// Rodent Removal row's access tier) is internal the same way.
 // pricingKnobs (area add-on rows) holds the target margin and the cost knobs the row was priced with (the replay reads
 // them from the stored estimate); the customer never sees them either.
-const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'pricingKnobs'];
+const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings', 'onSiteMinutes', 'deadAnimalTier', 'pricingKnobs'];
 function sanitizePublicOneTimeBreakdown(breakdown) {
   if (!breakdown || typeof breakdown !== 'object' || !Array.isArray(breakdown.items)) return breakdown;
   return {
