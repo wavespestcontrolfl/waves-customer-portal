@@ -62,7 +62,10 @@ beforeEach(() => {
 });
 
 const recordChains = () => db.mock.calls.map((c, i) => [c[0], db.mock.results[i].value]).filter(([t]) => t === 'service_records').map(([, c]) => c.calls);
-const propertyPredicates = (calls) => calls.filter((c) => (c[0] === 'where(fn)' && JSON.stringify(c[1]).includes('property_id')) || c[0] === 'whereRaw');
+// The one-record-per-appointment filter (portal-service-history
+// ONE_RECORD_PER_APPOINTMENT) is a whereRaw too, but not a property predicate.
+const isSiblingFilter = (c) => c[0] === 'whereRaw' && /sib\.scheduled_service_id/.test(String(c[1]));
+const propertyPredicates = (calls) => calls.filter((c) => (c[0] === 'where(fn)' && JSON.stringify(c[1]).includes('property_id')) || (c[0] === 'whereRaw' && !isSiblingFilter(c)));
 
 describe('GET /services?propertyScoped=1 — the selected house\'s last visit', () => {
   test('without the flag: today\'s customer-wide query, no scope resolution at all', async () => {
