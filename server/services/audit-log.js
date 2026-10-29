@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 const DATA_HYGIENE_AGENT_ACTOR_ID = '0d0c4979-b8b8-5a37-a82b-5a7d8f7a7c2f';
 
@@ -546,6 +547,39 @@ async function auditAlertWouldClose({ items, et_day, trx = null }) {
   return rows.length;
 }
 
+/**
+ * A bell-policy-muted admin alert (GATE_ALERT_CATALOG=watch, NotificationService.create).
+ * The 08-28 bell policy silences an admin row before any row exists, so this is the only
+ * trace. One row per Eastern day per distinct alert (category + trigger key + title stem),
+ * deduped in memory: a restart may write a second row for the same alert that day. The
+ * title stem has every digit run as '#', whitespace collapsed, cut at 80 characters.
+ * Always the module's own db, never a caller's transaction (it may roll back). Resolves to
+ * the number of rows written; a failed insert throws and the caller catches.
+ */
+const BELL_POLICY_MUTED_ACTION = 'notification.bell_policy.muted';
+const mutedSeen = new Map();
+async function auditBellPolicyMuted({ category, triggerKey = null, title = '' }) {
+  const etDay = etDateString();
+  const titleStem = String(title || '').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 80);
+  for (const day of mutedSeen.keys()) if (day !== etDay) mutedSeen.delete(day);
+  const seen = mutedSeen.get(etDay) || mutedSeen.set(etDay, new Set()).get(etDay);
+  const key = JSON.stringify([category, triggerKey, titleStem]);
+  if (seen.has(key)) return 0;
+  seen.add(key);
+  try {
+    await db('audit_log').insert({
+      actor_type: 'system',
+      action: BELL_POLICY_MUTED_ACTION,
+      resource_type: 'notification',
+      metadata: JSON.stringify({ category, triggerKey, titleStem, etDay }),
+    });
+  } catch (err) {
+    seen.delete(key);
+    throw err;
+  }
+  return 1;
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -594,6 +628,8 @@ module.exports = {
   auditInternalAdminAlertDeliveryIssue,
   auditAlertWouldClose,
   ALERT_WOULD_CLOSE_ACTION,
+  auditBellPolicyMuted,
+  BELL_POLICY_MUTED_ACTION,
   ipFromReq,
   uaFromReq,
 };
