@@ -485,6 +485,24 @@ postgres('payroll pay lines', () => {
       expect(byName(recomputed, 'Sample Alpha').reviewBonusCents).toBe(0);
     });
 
+    it('goes stale when the gate is turned off under a draft that shows pay lines, and finalize refuses its old token', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      const line = await addLine(id, { kind: 'hsa_employer', amountCents: 20000 });
+      const run = (await draft(W1)).body.run;
+      expect(byName(run, 'Sample Alpha').hsaEmployerCents).toBe(20000);
+      delete process.env.GATE_PAYROLL_PAY_LINES;
+      // No overtime: gross, taxes and net are the same without the HSA money, so only the stored figures differ.
+      const shown = (await api('GET', `/runs/${run.id}`)).body.run;
+      expect(shown.stale).toBe(true);
+      const refused = await api('POST', `/runs/${run.id}/finalize`, { body: { token: shown.token } });
+      expect(refused.status).toBe(409);
+      const fresh = (await api('GET', `/runs/${run.id}`)).body.run;
+      expect(fresh.stale).toBe(false);
+      expect(fresh.checks[0]).not.toHaveProperty('hsaEmployerCents');
+      expect((await lineRow(line.id)).status).toBe('open');
+    });
+
     it('goes stale when the span of a line changes under the same id and amount', async () => {
       const id = await readyTech('Sample Alpha');
       await approvedWeek(id, W3, '2400.00', '0.00');

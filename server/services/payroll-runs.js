@@ -279,8 +279,10 @@ function tokenOf(run, rows) {
       ...TIME_OFF_MINUTE_COLUMNS.map((key) => Number(row[key] || 0).toFixed(2)),
       ...TIME_OFF_PAY_COLUMNS.map((key) => Number(row[key] || 0)),
     ] : []),
-    // Adding, removing or changing a pay line after drafting changes the token too.
-    ...(withLines ? [...PAY_LINE_KEYS.map((key) => Number(row[key] || 0)), payLinesSignature(row)] : []),
+    // Adding, removing or changing a pay line after drafting changes the token too. A row that
+    // stored pay line figures keeps them in the token after the gate is turned off, so a draft
+    // that still shows them goes stale instead of finalizing without them.
+    ...(withLines || storedLines(row) ? [...PAY_LINE_KEYS.map((key) => Number(row[key] || 0)), payLinesSignature(row)] : []),
   ]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return crypto.createHash('sha256').update(JSON.stringify([run.week_start, run.pay_date, parts])).digest('hex').slice(0, 32);
 }
@@ -686,6 +688,7 @@ async function draftRun(input, actor, conn = db) {
   let runId;
   try {
     runId = await conn.transaction(async (trx) => {
+      if (payLinesOn()) await lockPayrollMutations(trx);
       if (await trx('payroll_runs').where({ week_start: start }).whereNot({ status: 'voided' }).forUpdate().first('id')) throw taken;
       const [inserted] = await trx('payroll_runs').insert({ week_start: start, pay_date: payDate, created_by: actorId }).returning('id');
       const id = inserted && inserted.id ? inserted.id : inserted;
@@ -709,6 +712,7 @@ async function recomputeRun(runId, actor, conn = db) {
   requireUuid(runId, 'Pay run');
   const actorId = actorOf(actor);
   await conn.transaction(async (trx) => {
+    if (payLinesOn()) await lockPayrollMutations(trx);
     const run = await loadRun(trx, runId, { lock: true });
     if (run.status !== 'draft') throw new PayrollError(409, 'Only a draft pay run can be recomputed.');
     const evaluation = await evaluate(trx, run, { lock: true });
@@ -726,7 +730,10 @@ async function recomputeRun(runId, actor, conn = db) {
 // released when the transaction ends. Take it before the first read.
 // Draft and recompute do not take it: they write draft rows only, never feed
 // another run, and finalize re-evaluates under this lock and compares the
-// review token, so a draft built on stale YTD cannot be finalized.
+// review token, so a draft built on stale YTD cannot be finalized. With
+// GATE_PAYROLL_PAY_LINES on they do take it: their evaluation locks pay lines
+// and the weekly timesheets of earlier weeks, rows two runs for different weeks
+// share, so without one lock two drafts could deadlock on them.
 // The lock itself lives in payroll-lock.js (time-tracking.js takes it shared).
 
 // A later finalized check for the same technician and year already counted this
