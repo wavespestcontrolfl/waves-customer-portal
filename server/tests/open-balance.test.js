@@ -60,7 +60,7 @@ describe('open-balance selection', () => {
       ['whereIn', ['invoices.status', ['sent', 'viewed', 'overdue']]],
       ['whereNull', ['invoices.payer_id']],
       ['whereNull', ['invoices.payer_statement_id']],
-      ['whereRaw', ['GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) > 0']],
+      ['whereRaw', ['GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0), 0) > 0']],
       ['orderBy', ['created_at', 'asc']],
       ['limit', [MAX_OPEN_INVOICES]],
       ['whereNot', ['id', 'inv-current']],

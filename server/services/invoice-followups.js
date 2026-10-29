@@ -899,7 +899,7 @@ async function selectAdoptionCandidates() {
     })
     .orderByRaw('COALESCE(i.sent_at, i.sms_sent_at, i.created_at) asc')
     .select(
-      'i.id as invoice_id', 'i.invoice_number', 'i.customer_id', 'i.total', 'i.credit_applied',
+      'i.id as invoice_id', 'i.invoice_number', 'i.customer_id', 'i.total', 'i.credit_applied', 'i.amount_paid',
       'i.sent_at', 'i.sms_sent_at', 'i.created_at',
     );
 
@@ -1084,7 +1084,7 @@ async function runPending() {
     .where(gates.divertMicrodepositDunning ? notOwnedOrMicrodepositCandidate : notOwnedByCustomerSchedule)
     .select(
       's.*',
-      'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.status as invoice_status',
+      'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.amount_paid', 'i.status as invoice_status',
       'i.payer_id as invoice_payer_id', 'i.scheduled_send_error as invoice_send_error',
       'i.stripe_payment_intent_id as invoice_stripe_pi',
       'i.service_date', 'i.due_date', 'i.invoice_number',
@@ -1890,7 +1890,7 @@ function approvedAmountChanged(bar, approved, row) {
 async function drawDunCredit({ row, customer, bar }) {
   const credit = require('./customer-credit');
   if (bar) {
-    const wouldApply = await credit.autoApplyWouldApply({ id: row.invoice_id, customer_id: customer.id, total: row.total, credit_applied: row.credit_applied });
+    const wouldApply = await credit.autoApplyWouldApply({ id: row.invoice_id, customer_id: customer.id, total: row.total, credit_applied: row.credit_applied, amount_paid: row.amount_paid });
     return wouldApply ? { refused: true, applied: 0 } : { applied: 0 };
   }
   try {
@@ -2187,7 +2187,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
   // state) — a credit-helper failure above must not bypass it.
   try {
     const fresh = await db('invoices').where({ id: row.invoice_id })
-      .first('total', 'credit_applied', 'status', 'title', 'token', 'due_date', 'invoice_number',
+      .first('total', 'credit_applied', 'amount_paid', 'status', 'title', 'token', 'due_date', 'invoice_number',
         'payer_id', 'scheduled_send_error');
     // FAIL CLOSED on an unreadable row (Codex #4311 r38 P1): this read is the
     // last-minute ownership backstop, and it sits inside a refresh block that
@@ -2210,6 +2210,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     if (fresh) {
       row.total = fresh.total;
       row.credit_applied = fresh.credit_applied;
+      row.amount_paid = fresh.amount_paid;
       row.title = fresh.title;
       row.token = fresh.token;
       row.due_date = fresh.due_date;
@@ -2307,7 +2308,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
       else {
         emailResult = mdPending
           ? await sendMicrodepositVerificationEmail({
-              invoice: { id: row.invoice_id, title: row.title, total: row.total, credit_applied: row.credit_applied },
+              invoice: { id: row.invoice_id, title: row.title, total: row.total, credit_applied: row.credit_applied, amount_paid: row.amount_paid },
               customer,
               touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
               enforceBillingPreference: !operatorInitiated,
@@ -4143,7 +4144,7 @@ function loadSendNowRow(seqId) {
     .where('s.id', seqId)
     .select(
       's.*',
-      'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied',
+      'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.amount_paid',
       'i.stripe_payment_intent_id as invoice_stripe_pi',
       'i.service_date', 'i.due_date', 'i.invoice_number',
     )

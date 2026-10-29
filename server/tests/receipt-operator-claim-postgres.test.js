@@ -102,6 +102,19 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await job(invoiceId)).toBeUndefined();
   });
 
+  test('requirePaid: the claim re-reads the invoice under the claim lock and takes nothing for a reopened one', async () => {
+    const reopened = randomUUID();
+    const paid = randomUUID();
+    await mockPg('invoices').insert([{ id: reopened, status: 'viewed', receipt_sent_at: null }, { id: paid, status: 'paid', receipt_sent_at: null }]);
+
+    expect(await claimReceiptJobForOperatorSend(reopened, { requirePaid: true })).toEqual({ notPaid: true });
+    expect(await job(reopened)).toBeUndefined();
+
+    const claim = await claimReceiptJobForOperatorSend(paid, { requirePaid: true });
+    expect(claim).toMatchObject({ id: expect.any(String) });
+    expect(await job(paid)).toMatchObject({ status: 'running', source: 'operator_send' });
+  });
+
   test('an enqueue during a claim the operator created is kept: still held from the drain, then queued when the email did not go out', async () => {
     const invoiceId = randomUUID();
     const claim = await claimReceiptJobForOperatorSend(invoiceId);

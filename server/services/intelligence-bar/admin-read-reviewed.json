@@ -38,7 +38,7 @@
     },
     {
       "endpoint": "/admin/customers",
-      "reviewed": "Handler (admin-customers.js GET /): customers select with a correlated-subquery projection, every row mapped by mapCustomerListRow to an explicit field list (names, contacts, address, tier, rate, pipeline stage, lead source, balance, last/next service, tags; no credential column), plus pipeline counts and filter lists; limit default 100, max 500 (truncation cuts the rest). The customers.* select is projected away by the mapper, so credential_table:customers is accepted. Free text: leadSourceDetail is declared a note; the default key-name rule withholds any other note-like key. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed for #6378: with suggest=1 (which the bar never sends; it is not in this row's query list) and GATE_CUSTOMER_SEARCH_FUZZY on, sound-alike rows are appended after the exact rows, same mapped columns, flagged approximate; the name index reads customers id, first_name, last_name, company_name only.",
+      "reviewed": "Handler (admin-customers.js GET /): customers select with a correlated-subquery projection, every row mapped by mapCustomerListRow to an explicit field list (names, contacts, address, tier, rate, pipeline stage, lead source, balance, last/next service, tags; no credential column), plus pipeline counts and filter lists; limit default 100, max 500 (truncation cuts the rest). The customers.* select is projected away by the mapper, so credential_table:customers is accepted. Free text: leadSourceDetail is declared a note; the default key-name rule withholds any other note-like key. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed for #6378: with suggest=1 (which the bar never sends; it is not in this row's query list) and GATE_CUSTOMER_SEARCH_FUZZY on, sound-alike rows are appended after the exact rows, same mapped columns, flagged approximate; the name index reads customers id, first_name, last_name, company_name only. Re-reviewed 2026-10-29 (partial payments PR 1a): balance_owed and overdue_invoice_count also subtract invoices.amount_paid; no new field, table, callee or write.",
       "scope": "broad",
       "query": [
         "area",
@@ -141,7 +141,7 @@
         "services/intelligence-bar/name-match.js#simFn",
         "services/intelligence-bar/name-match.js#soundsOf"
       ],
-      "hash": "7b7b76ef25859d9c8e79d43e1de13a43"
+      "hash": "b654421dc6fc83a2fbe539ca4b010922"
     },
     {
       "endpoint": "/admin/customers/:id/autopay-state",
@@ -1093,7 +1093,7 @@
     },
     {
       "endpoint": "/admin/invoices",
-      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly.",
+      "reviewed": "Handler + InvoiceService.list: invoices joined to customers, limit default 50 max 100, filters status, customer_id, from, to, search, archived, sort. Rows are invoices.* plus customer name and contact, card brand and last four, and the active payment plan. The row omits the pay token, the send claim token, the Stripe payment and charge ids and the receipt URL. Only customer_id is offered (not the customerId alias) so the scope parameter is the one the handler reads first. write:transaction is the optionalInvoiceRead helper, which only opens a nested transaction around a read. Free text: notes are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. limit is not offered: the route computes the page offset from the raw limit while the service caps the page at 100, so limit>100 with page>1 would skip rows (Codex #6366 r3); the default 50 pages correctly. Re-reviewed 2026-10-29 (#6976 Undo): the response adds undoPaymentEnabled, one boolean read from GATE_UNDO_MANUAL_PAYMENT (undoManualPaymentLive); no new table, row field or write, and the keep list leaves it out.",
       "scope": "customer",
       "scopeParam": "customer_id",
       "query": [
@@ -1194,7 +1194,7 @@
         "services/invoice.js#database.transaction",
         "services/invoice.js#read"
       ],
-      "hash": "30644e37a7a7565ab5c03c6df495d423"
+      "hash": "b465628b85cafc8316ebf23992b6ee90"
     },
     {
       "endpoint": "/admin/invoices/:id",
@@ -1331,7 +1331,7 @@
     },
     {
       "endpoint": "/admin/invoices/:id/credit-context",
-      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end.",
+      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): the select adds amount_paid and amount_due comes from invoiceAmountDue (invoice-helpers.js, cents arithmetic only); response fields unchanged.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1339,7 +1339,7 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "96f15a81a78285f3484d4d3bb08829b7"
+      "hash": "966040c64648289015b4000eb9634955"
     },
     {
       "endpoint": "/admin/invoices/:id/receipt-address",
@@ -1414,11 +1414,11 @@
     },
     {
       "endpoint": "/admin/invoices/stats",
-      "reviewed": "InvoiceService.getStats (invoice.js): COUNT/SUM FILTER selects over invoices and estimate_deposits, no row data returned; read end to end.",
+      "reviewed": "InvoiceService.getStats (invoice.js): COUNT/SUM FILTER selects over invoices and estimate_deposits, no row data returned; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): total_outstanding also subtracts amount_paid; still aggregates only, no row data.",
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "5f1baede15ae671322a26b851bf0ac26"
+      "hash": "863e1fc44f84a8028b7bc6481daca6c1"
     },
     {
       "endpoint": "/admin/job-forms/templates/by-service/:serviceType",

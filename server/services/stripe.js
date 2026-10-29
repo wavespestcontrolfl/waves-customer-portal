@@ -2126,12 +2126,13 @@ const StripeService = {
       const projection = computeApplication({
         total: invoice.total,
         creditApplied: projectedCreditApplied,
+        amountPaid: invoice.amount_paid,
         balance: balance || 0,
       });
       projectedCreditApplied = projection.newCreditApplied;
     }
     const projectedAmountDue = Math.max(0, Math.round(
-      ((Number(invoice.total) || 0) - projectedCreditApplied) * 100,
+      ((Number(invoice.total) || 0) - projectedCreditApplied - (Number(invoice.amount_paid) || 0)) * 100,
     ) / 100);
     const chargeInfo = computeChargeAmount(projectedAmountDue, card.method_type, { funding });
     return {
@@ -2331,9 +2332,7 @@ const StripeService = {
         // refuses (a decrease — more credit applied, a downward edit — is
         // always fine). Opt-in (null = unchanged behavior).
         if (maxAuthorizedChargeCents != null) {
-          const lockedTotalCents = Math.round(Number(lockedInvoice.total || 0) * 100);
-          const lockedCreditCents = Math.round(Number(lockedInvoice.credit_applied || 0) * 100);
-          const lockedDueCents = Math.max(0, lockedTotalCents - lockedCreditCents);
+          const lockedDueCents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
           if (lockedDueCents > Math.round(Number(maxAuthorizedChargeCents))) {
             throw new Error('Invoice amount changed since it was reviewed. Review before charging.');
           }

@@ -1390,7 +1390,7 @@ class ContextAggregator {
         // ceiling, far above any real account.
         .orderBy('created_at', 'desc')
         .limit(300)
-        .select('id', 'invoice_number', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'payer_statement_id', 'scheduled_service_id', 'scheduled_send_error', 'created_at')
+        .select('id', 'invoice_number', 'title', 'status', 'total', 'credit_applied', 'amount_paid', 'due_date', 'payer_id', 'payer_statement_id', 'scheduled_service_id', 'scheduled_send_error', 'created_at')
         // FAIL CLOSED (Codex r11): a lone invoice-query failure must not
         // read as "no invoices" — null marks billing UNAVAILABLE and the
         // facts render a visible unknown instead of "Balance: Current".

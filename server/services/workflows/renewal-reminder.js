@@ -57,6 +57,20 @@ async function runPrepayRestampLeg(prepay) {
   }
 }
 
+// Office bell before a prepaid year ends (GATE_PREPAY_YEAR_END_BELL, dark by default;
+// the runner returns before any query while the gate is off). Office only: it texts,
+// emails and charges nobody. Outside checkAndSend for the same complexity reason as the
+// legs above; never throws.
+async function runPrepayYearEndBellLeg() {
+  try {
+    const { runPrepayYearEndBell } = require('../prepay-year-end-bell');
+    const { raised, closed } = await runPrepayYearEndBell();
+    if (raised || closed) logger.info(`Prepay year end bell: raised=${raised}, closed=${closed}`);
+  } catch (err) {
+    logger.error(`Prepay year end bell failed: ${err.message}`);
+  }
+}
+
 class RenewalReminder {
   /**
    * Check all customers for upcoming renewal dates and send reminders
@@ -102,6 +116,10 @@ class RenewalReminder {
     // Independent try/catch (inside the helper), same as every other leg
     // in this workflow.
     await runTermiteRenewalChargeLeg();
+
+    // Office bell before a prepaid year ends (dark behind GATE_PREPAY_YEAR_END_BELL).
+    // Own try/catch inside the helper: a failure here must not silence the legs below.
+    await runPrepayYearEndBellLeg();
 
     // OWNER RULING (2026-07-13): "renewal" language is reserved for termite
     // bonds — the one service with a real fixed term. WaveGuard and mosquito

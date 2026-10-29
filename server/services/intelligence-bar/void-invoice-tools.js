@@ -183,7 +183,7 @@ async function buildPlan(input) {
     status: invoice.status,
     amount: money(invoice.total),
     credit_applied: money(credit),
-    amount_due: money(Math.max(0, cents(invoice.total) - cents(invoice.credit_applied)) / 100),
+    amount_due: money(Math.max(0, cents(invoice.total) - cents(invoice.credit_applied) - cents(invoice.amount_paid)) / 100),
     lines: lines.slice(0, 6).map(([description, amount]) => `${String(description).replace(/\s+/g, ' ').trim()} ${money(amount)}`),
     effects: planEffects({ invoice, credit, pi: piState.pi, visit, statementOpen: Boolean(statement && statement.status === 'open') }),
     sends_to_customer: false,

@@ -83,16 +83,20 @@ function invoiceStatusKey(status) {
 
 /**
  * The amount a customer must actually pay for an invoice: its total minus any
- * account credit already applied (credit_applied). Computed in integer cents to
- * avoid float drift, clamped at 0. This is the canonical "charge base" — every
- * Stripe/Terminal/autopay charge path and the webhook amount-verification must
- * price from THIS, not raw invoice.total, or a credit-applied invoice
- * over-collects (admin apply-credit forbids partials for exactly this reason).
+ * account credit already applied (credit_applied) and any partial payment
+ * already received (amount_paid, owner 2026-10-29). Computed in integer cents
+ * to avoid float drift, clamped at 0. This is the canonical "charge base" —
+ * every Stripe/Terminal/autopay charge path and the webhook amount-verification
+ * must price from THIS, not raw invoice.total, or a credit-applied or
+ * part-paid invoice over-collects (admin apply-credit forbids partials for
+ * exactly this reason). Callers must select amount_paid beside credit_applied:
+ * a missing column reads as 0.
  */
 function invoiceAmountDue(invoice) {
   const totalCents = Math.round((Number(invoice && invoice.total) || 0) * 100);
   const creditCents = Math.round((Number(invoice && invoice.credit_applied) || 0) * 100);
-  return Math.max(0, totalCents - creditCents) / 100;
+  const paidCents = Math.round((Number(invoice && invoice.amount_paid) || 0) * 100);
+  return Math.max(0, totalCents - creditCents - paidCents) / 100;
 }
 
 // Estimate-deposit credit an invoice carries, in cents: the absolute amounts of

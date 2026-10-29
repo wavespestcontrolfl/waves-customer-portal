@@ -13181,7 +13181,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         });
         if (creditResult?.applied > 0) {
           const fresh = await db('invoices').where({ id: invoice.id })
-            .first('status', 'credit_applied', 'prepaid_at', 'prepaid_by', 'prepaid_prev_status', 'paid_at');
+            .first('status', 'credit_applied', 'amount_paid', 'prepaid_at', 'prepaid_by', 'prepaid_prev_status', 'paid_at');
           if (fresh) invoice = { ...invoice, ...fresh };
           if (invoice.status === 'prepaid') { alreadyPaid = true; invoiceCreated = false; }
         }
@@ -13376,7 +13376,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // without moving the subtotal the cap compares — the
               // due-cents ceiling refuses instead of charging the larger
               // amount.
-              maxAuthorizedChargeCents: Math.max(0, Math.round((Number(invoice.total || 0) - Number(invoice.credit_applied || 0)) * 100)),
+              maxAuthorizedChargeCents: Math.round(require('../services/invoice-helpers').invoiceAmountDue(invoice) * 100),
             } : {}),
             deferReceiptDelivery: combinedReceiptArmed,
           });

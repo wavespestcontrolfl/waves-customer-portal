@@ -3796,6 +3796,8 @@ describe('annual prepay renewal helpers', () => {
       expect.objectContaining({ workflow: 'annual_prepay_renewal_reminder' }),
     );
     expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
+    // The prepaid-year wording is for prepay terms only: a termite plan's generic 15/7-day email says so.
+    expect(AccountMembershipEmail.sendMembershipRenewalReminder).toHaveBeenCalledWith(expect.objectContaining({ termId: 'term-1', termitePlan: true }));
     expect(markNoticeQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_15_sent_at: expect.any(Date) }));
   });
 

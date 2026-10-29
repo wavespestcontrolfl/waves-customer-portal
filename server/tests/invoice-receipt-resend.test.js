@@ -78,6 +78,15 @@ test('validation and refusals come back as {status, body}, with nothing claimed'
   expect(claimReceiptJobForOperatorSend).not.toHaveBeenCalled();
 });
 
+test('a claim that finds the invoice no longer paid (an Undo reopened it after the first check) sends and stamps nothing', async () => {
+  claimReceiptJobForOperatorSend.mockResolvedValueOnce({ notPaid: true });
+  const out = await sendInvoiceReceipt(ID, {});
+  expect(out).toEqual({ status: 409, body: { error: 'This invoice is no longer paid — nothing was sent.', code: 'invoice_not_paid' } });
+  expect(sendReceiptEmail).not.toHaveBeenCalled();
+  expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+  expect(updates).toEqual([]);
+});
+
 test('both legs: stamps receipt_sent_at with the trimmed, cut memo, writes the activity row, returns the route body', async () => {
   const out = await sendInvoiceReceipt(ID, { via: 'both', memo: `  ${'x'.repeat(500)}  `, actorTechnicianId: 'admin-1' });
   expect(out.status).toBe(200);
@@ -91,12 +100,12 @@ test('both legs: stamps receipt_sent_at with the trimmed, cut memo, writes the a
 
 test('sawUnsent defaults to the live row, and a caller-supplied value (the card\'s state) wins', async () => {
   await sendInvoiceReceipt(ID, {});
-  expect(claimReceiptJobForOperatorSend).toHaveBeenLastCalledWith(ID, { sawUnsent: true });
+  expect(claimReceiptJobForOperatorSend).toHaveBeenLastCalledWith(ID, { sawUnsent: true, requirePaid: true });
   invoice.receipt_sent_at = new Date('2026-10-02T18:14:00Z');
   await sendInvoiceReceipt(ID, {});
-  expect(claimReceiptJobForOperatorSend).toHaveBeenLastCalledWith(ID, { sawUnsent: false });
-  await sendInvoiceReceipt(ID, { sawUnsent: true });
-  expect(claimReceiptJobForOperatorSend).toHaveBeenLastCalledWith(ID, { sawUnsent: true });
+  expect(claimReceiptJobForOperatorSend).toHaveBeenLastCalledWith(ID, { sawUnsent: false, requirePaid: true });
+  await sendInvoiceReceipt(ID, { sawUnsent: true, requirePaid: true });
+  expect(claimReceiptJobForOperatorSend).toHaveBeenLastCalledWith(ID, { sawUnsent: true, requirePaid: true });
 });
 
 test('both legs failing stamps nothing, writes no activity row, and still releases the claim', async () => {
