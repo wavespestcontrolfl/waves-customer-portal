@@ -44,9 +44,6 @@ jest.mock('../services/billing-pause', () => ({
 jest.mock('../services/review-request', () => ({
   enrollForPaidInvoice: jest.fn(async () => undefined),
 }));
-jest.mock('../services/project-report-hold', () => ({
-  scheduleHoldReleaseSweep: jest.fn(),
-}));
 jest.mock('../services/annual-prepay-renewals', () => ({
   syncTermForInvoicePayment: jest.fn(async () => undefined),
 }));

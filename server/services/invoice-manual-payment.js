@@ -471,11 +471,6 @@ async function recordManualPayment(id, {
     }
   }
 
-  // Fire-and-forget: a manually recorded payment (check/cash/Zelle) may
-  // settle an invoice gating a payment-held WDO report — nudge the release
-  // sweep (60s interval is the fallback).
-  require('./project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
-
   try {
     const AnnualPrepayRenewals = require('./annual-prepay-renewals');
     await AnnualPrepayRenewals.syncTermForInvoicePayment(updatedInvoice);

@@ -244,16 +244,6 @@ const ALLOWLIST = [
     reason: 'from_phone matches the imported customer\'s own number (this route always inserts direction: \'inbound\' rows) — a send reservation\'s from_phone is always one of Waves\' own numbers, never a customer\'s.',
   },
   {
-    file: 'routes/admin-projects.js',
-    snippet: 'return db(\'sms_log\')',
-    reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
-  },
-  {
-    file: 'routes/admin-projects.js',
-    snippet: 'let claim = await db(\'sms_log\')',
-    reason: 'metadata key (report_hold_release_key) is exclusive to this project\'s own report-hold-release claim rows — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
-  },
-  {
     file: 'routes/admin-workflows.js',
     snippet: 'const recentReactivations = await db(\'sms_log\')',
     reason: 'message_type restricted to \'reactivation\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',

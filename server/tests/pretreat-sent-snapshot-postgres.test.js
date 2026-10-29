@@ -33,7 +33,7 @@ describe('pretreatSentSnapshot (pure)', () => {
     expect(pretreatSentSnapshot({ project_type: 'pre_treatment_termite_certificate', findings: {} }, {})).toEqual({});
   });
 
-  test('every send that reached the owner writes the copy (send, held release, send with invoice)', () => {
+  test('every send that reached the owner writes the copy (send, send with invoice)', () => {
     const route = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'routes', 'admin-projects.js'), 'utf8');
     // Call sites only (the definition reads "function pretreatSentSnapshot(").
     // Call sites only, each on the row the send delivered: the post-claim
@@ -42,10 +42,9 @@ describe('pretreatSentSnapshot (pure)', () => {
     expect(calls).toEqual([
       'pretreatSentSnapshot(project, projectCols)', // savePretreatSentCopy (send with invoice)
       'pretreatSentSnapshot(updatedProject, projectCols)', // /send
-      'pretreatSentSnapshot(refreshed, projectCols)', // held release
     ]);
     // Send with invoice saves it on the report leg, from its post-claim row.
-    expect(route).toContain('await savePretreatSentCopy(refreshed, projectCols, { reportReached: delivered_report, held: holdActive, claimToken: deliveryClaimToken });');
+    expect(route).toContain('await savePretreatSentCopy(refreshed, projectCols, { reportReached: delivered_report, claimToken: deliveryClaimToken });');
   });
 });
 
