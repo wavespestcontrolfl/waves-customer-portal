@@ -48,6 +48,10 @@ function makeBuilder(table) {
     return Promise.resolve(1);
   });
   b.then = (resolve, reject) => {
+    // the dangling heal's payroll-provenance scan: these fake rows carry no payroll link
+    if (table === 'bank_transactions' && b.whereRaw.mock.calls.some(c => String(c[0]).startsWith('(matched_payroll_check_id IS NOT NULL'))) {
+      return Promise.resolve([]).then(resolve, reject);
+    }
     state.queried.push(table);
     let rows = table === 'bank_transactions' ? state.bankRows
       : table === 'stripe_payouts' ? state.payouts

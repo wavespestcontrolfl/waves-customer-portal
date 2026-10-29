@@ -261,6 +261,28 @@ describe('Finalized run', () => {
     await screen.findByText('Check number saved for Sample Alpha.');
   });
 
+  it('shows each final check its bank status only when the server sends one', async () => {
+    let detail = await openFinal();
+    expect(within(detail).queryByRole('columnheader', { name: 'Bank' })).toBeNull();
+    cleanup();
+    current = finalRun({
+      checks: [
+        check({ status: 'finalized', bank: { state: 'matched', date: '2026-10-28' } }),
+        check({ id: 'check-b', technicianId: 'tech-b', name: 'Sample Beta', payMethod: 'bank_transfer', status: 'finalized', bank: { state: 'needs_pick' } }),
+        check({ id: 'check-c', technicianId: 'tech-c', name: 'Sample Gamma', status: 'finalized', bank: { state: 'not_seen' } }),
+      ],
+    });
+    render(<PayrollSettings />);
+    const section = await screen.findByRole('region', { name: 'Pay runs' });
+    fireEvent.click(await within(section).findByRole('button', { name: /Open pay run for/ }));
+    detail = await screen.findByLabelText(/Pay run for/);
+    const view = within(detail);
+    expect(view.getByRole('columnheader', { name: 'Bank' })).toBeInTheDocument();
+    expect(view.getByText('Bank: matched Oct 28, 2026')).toBeInTheDocument();
+    expect(view.getByText('Bank: needs your pick (Tax page, Bank Import)')).toBeInTheDocument();
+    expect(view.getByText('Bank: not seen yet')).toBeInTheDocument();
+  });
+
   it('opens a printable stub with the year-to-date column and no employer taxes', async () => {
     const print = vi.spyOn(window, 'print').mockImplementation(() => {});
     const detail = await openFinal();
