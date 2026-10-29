@@ -706,6 +706,19 @@ button charges the COMBINED total via one PI carrying a per-invoice
 metadata allocation (services/pay-combined.js is the one authority for
 selection, allocation, and settle). Sibling TOKENS still never ride the
 payload, and gate off ⇒ byte-identical to the single-invoice surface.
+Each itemized row also carries `pastDue` — the server's ET-correct
+overdue verdict (open-balance `is_overdue`); the page renders a "Past due
+since" caption from it and does no date math, and points to the customer
+portal / Waves app instead of linking sibling invoices. `/invoice.pdf`
+prints the SAME itemization (one shared builder, `payPagePreviousBalance`),
+and only when `/setup` would actually charge it (`payPageCombinedBalance`:
+no opted-in account credit in play, full or partial, since setup decides
+credit under its own locks; no required-save capture hold), under a "Total
+due today" line — what the Pay button charges, never
+labeled an account balance — with no sibling tokens and no service names
+(service names ride only the EMAILED invoice PDF, which reaches the
+customer's own saved recipient); gate off ⇒ no sibling read and the PDF
+is unchanged.
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries
 an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,
