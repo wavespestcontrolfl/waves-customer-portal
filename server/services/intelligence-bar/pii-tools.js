@@ -45,6 +45,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'convert_lead',
   // void_invoice previews name the customer and the invoice.
   'void_invoice',
+  // schedule_sms previews name the customer, the last four digits of the number and the exact text.
+  'schedule_sms',
   // The invoice edit cards name the customer and the invoice (edit_invoice also its title and notes).
   'edit_invoice',
   'archive_invoice',

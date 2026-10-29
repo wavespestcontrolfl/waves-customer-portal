@@ -391,6 +391,8 @@ const SCOPE_SNAPSHOT = {
     'compose_email',
     // set_customer_bill_to carries customer_id: the Bill-To and invoices it moves are that customer's own.
     'set_customer_bill_to',
+    // schedule_sms carries customer_id: the queued text is that customer's own.
+    'schedule_sms',
     // The Agent Review draft cards carry decision_id: a decision_id is a task record (validateRecordTarget binds the decision's customer to the task customer).
     'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft',
     // resolve_dispatch_alert carries alert_id or job_id: inside a customer-specific task validateRecordTarget binds it to the alert's own visit (alertVisitBinding), so only that customer's alert passes.

@@ -105,6 +105,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // void_invoice (owner ruling 2026-10-12): the Invoices page's Void handler, run in process behind a card;
   // an invoice with nothing collected only, sends nothing.
   'void_invoice',
+  // schedule_sms (owner ruling 2026-10-28, gap 5 and B1): the Communications page's schedule-sms handler, run through the
+  // shared queue writer behind a card on every login; one plain customer text at one day and time, 8 AM to 8 PM ET only.
+  'schedule_sms',
   // The Invoices page's edit-type handlers (owner ruling 2026-10-12), each run in process behind its own card: edit an unpaid
   // invoice's title, notes or due date, archive / unarchive a voided invoice, unvoid. None sends or moves money.
   'edit_invoice',

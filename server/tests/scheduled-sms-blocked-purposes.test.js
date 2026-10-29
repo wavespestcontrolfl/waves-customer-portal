@@ -6,7 +6,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const commsSource = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-communications.js'), 'utf8');
+// The queue (and its fence) moved out of the route into the shared writer the Intelligence Bar also calls.
+const commsSource = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduled-sms-queue.js'), 'utf8');
 const schedulerSource = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
 
 describe('schedule-sms marketing-grade block (consent split)', () => {

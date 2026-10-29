@@ -131,6 +131,8 @@ const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_pay
 // attribution (preview.pinned_recipient.linked_customer) instead.
 const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_sms',
+  // The queued text goes to the customer at the scheduled minute.
+  'schedule_sms',
   'reply_via_sms',
   'trigger_review_request',
   // The confirmed run emails and/or texts the customer their paid receipt.
@@ -159,6 +161,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
+// schedule_sms: its card lines come from its own preview (schedule-sms-tools.js cardLines): the exact text, who and when.
+CURATED_PREVIEW_TOOL_NAMES.add('schedule_sms');
 // The invoice edit cards: card lines come from their own previews (invoice-edit-tools.js cardLines). None sends anything.
 for (const name of ['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // The invoice reminder and payment-plan cards: their card lines come from their own previews (invoice-reminder-tools.js and
@@ -247,6 +251,7 @@ const ACTION_LABELS = {
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
+  schedule_sms: 'Schedule a text to a customer',
   edit_invoice: 'Edit an invoice’s title, notes or due date (sends nothing)',
   archive_invoice: 'Archive a voided invoice (sends nothing)',
   unarchive_invoice: 'Unarchive an invoice (sends nothing)',
@@ -925,6 +930,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'convert_lead' && preview?.preview === true) {
     for (const line of require('./lead-convert-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
+  // schedule_sms: the exact text, the customer and number, the From number and the send time in words.
+  if (toolName === 'schedule_sms' && preview?.preview === true) {
+    for (const line of require('./schedule-sms-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {
     for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
@@ -1340,7 +1349,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // irreversible whatever the database undo can do — the canceled
     // PaymentIntent cannot be restored, and the customer's payment link is
     // dead (codex #4348 r7 P2).
-    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
+    // schedule_sms contacts the customer but is not "cannot be undone": the queued text is cancelable until it sends.
+    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || (notifiesCustomer && toolName !== 'schedule_sms') || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
       // The Bill action writes a 'billed' visit disposition no portal path
       // removes (voiding the draft leaves the visit "already handled").
       || (toolName === 'repair_closeout' && Array.isArray(preview?.steps) && preview.steps.some((st) => st.step === 'bill_visit'))

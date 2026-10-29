@@ -234,6 +234,11 @@ const ALLOWLIST = [
     reason: 'by-id, status \'scheduled\' read of the one row being cancelled (workflow-ownership recheck after the CAS matched nothing) — not a message-history reader, and \'scheduled\' excludes \'sending\' reservations.',
   },
   {
+    file: 'services/intelligence-bar/schedule-sms-tools.js',
+    snippet: "const rows = await trx('sms_log')",
+    reason: "alreadyQueued (schedule_sms repeated Confirm, also its read-back): status filtered to 'scheduled', which excludes 'sending' — an unresolved reservation cannot match; it looks for the identical queued text, not message history.",
+  },
+  {
     file: 'routes/admin-communications.js',
     snippet: 'const logged = outcome.providerMessageId && await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',

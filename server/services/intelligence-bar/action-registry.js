@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive, ibAgentReviewDraftsLive } = require('../../config/feature-gates');
+const { ibAcceptEstimateLive, ibCreateInvoiceLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive, ibAgentReviewDraftsLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive, officeReadLive, ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL } = require('./admin-read-tools');
@@ -77,6 +77,7 @@ const MODULES = [
   ['record-payment-tools', 'RECORD_PAYMENT_TOOLS', 'executeRecordPaymentTool'],
   ['lead-convert-tools', 'LEAD_CONVERT_TOOLS', 'executeLeadConvertTool'],
   ['void-invoice-tools', 'VOID_INVOICE_TOOLS', 'executeVoidInvoiceTool'],
+  ['schedule-sms-tools', 'SCHEDULE_SMS_TOOLS', 'executeScheduleSmsTool'],
   ['invoice-edit-tools', 'INVOICE_EDIT_TOOLS', 'executeInvoiceEditTool'],
   ['invoice-reminder-tools', 'INVOICE_REMINDER_TOOLS', 'executeInvoiceReminderTool'],
   ['payment-plan-tools', 'PAYMENT_PLAN_TOOLS', 'executePaymentPlanTool'],
@@ -153,6 +154,7 @@ const GATED_ACTIONS = {
   record_payment: () => ibRecordPaymentLive(),
   convert_lead: () => ibLeadConvertLive(),
   void_invoice: () => ibVoidInvoiceLive(),
+  schedule_sms: () => ibScheduleSmsLive(),
   edit_invoice: () => ibInvoiceEditsLive(),
   archive_invoice: () => ibInvoiceEditsLive(),
   unarchive_invoice: () => ibInvoiceEditsLive(),

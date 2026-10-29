@@ -929,15 +929,28 @@ async function markSuggestionScheduled({ decisionId, scheduledFor }, dbh = db) {
  * decision ids so the scheduled row can record them (fire = ignored,
  * cancel/failure = reopened).
  */
-async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = db) {
-  if (!phoneLast10) return [];
-  // Suggest-workflow decisions always link the INBOUND sms_log row, where
-  // from_phone is the customer and to_phone is the Waves line — matching
-  // to_phone would park every suggestion that arrived on that line.
-  const pendingQuery = dbh('agent_decisions as ad')
+// The pending house-voice suggestions on one phone's thread: the query parkThreadSuggestions parks, and
+// threadHasPendingSuggestion asks about without changing anything.
+// Suggest-workflow decisions always link the INBOUND sms_log row, where
+// from_phone is the customer and to_phone is the Waves line — matching
+// to_phone would park every suggestion that arrived on that line.
+function pendingThreadSuggestionsQuery(phoneLast10, dbh = db) {
+  return dbh('agent_decisions as ad')
     .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
     .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
     .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10]);
+}
+
+// Read-only: is a suggested reply waiting on this phone's thread? The Intelligence Bar's schedule_sms refuses
+// while one is (a queued text would park it and become uncancelable from the bar).
+async function threadHasPendingSuggestion(phoneLast10, dbh = db) {
+  if (!phoneLast10) return false;
+  return !!(await pendingThreadSuggestionsQuery(phoneLast10, dbh).first('ad.id'));
+}
+
+async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = db) {
+  if (!phoneLast10) return [];
+  const pendingQuery = pendingThreadSuggestionsQuery(phoneLast10, dbh);
   if (excludeDecisionId) pendingQuery.whereNot('ad.id', excludeDecisionId);
   const pending = await pendingQuery.select('ad.id');
   if (!pending.length) return [];
@@ -1487,6 +1500,7 @@ module.exports = {
   revertDraftsToShadow,
   markSuggestionScheduled,
   parkThreadSuggestions,
+  threadHasPendingSuggestion,
   createReplyHoldingReservation,
   settleReplyHoldingReservation,
   reserveHumanReply,
