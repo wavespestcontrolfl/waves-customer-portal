@@ -571,19 +571,10 @@ function buildRows() {
     notes: 'Rate depends on plug spacing (6", 9", or 12") and treated area; small jobs carry a minimum.',
   }));
 
-  add('top_dressing', () => rangeRow({
-    key: 'top_dressing',
-    name: 'Lawn Top Dressing Service',
-    unit: 'per job',
-    // Both pricing modes: estimated area (65% reduction) and exact-area
-    // (measured, or recurring-lawn customers) on typical turf areas.
-    values: sweepValues(
-      TYPICAL_TURF.flatMap((sq) =>
-        ['eighth', 'quarter'].flatMap((depth) => [false, true].map((exactArea) => ({ sq, depth, exactArea })))),
-      ({ sq, depth, exactArea }) => sp.priceTopDressing(sq, depth, exactArea),
-      (r) => r.price),
-    notes: 'Recurring-plan customers receive a discounted rate; larger measured areas price higher at the same per-area rates.',
-  }));
+  // top_dressing is deliberately NOT published (owner 2026-10-29): the engine
+  // formula is a floor that loses money on larger lawns, so every top dressing
+  // job is quote-only and the office prices it by hand. A published low/high
+  // would read as a price list. Same omission rule as rodent_plugging below.
 
   // Auto-priced residential shapes: a bare lot and a planted/treed property
   // (bed area + tree count + access) at a typical scope.

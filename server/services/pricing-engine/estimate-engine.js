@@ -121,6 +121,9 @@ const {
 } = require('./commercial-helpers');
 const { resolveCommercialCadence, resolveCommercialPestCadenceOverride, resolveCommercialLawnCadenceOverride } = require('./commercial-risk-type');
 
+// Every top dressing line is quote-only: the office prices it by hand (owner 2026-10-29).
+const TOP_DRESSING_QUOTE_ONLY_REASON = 'top_dressing_quote_only';
+
 function serviceSelected(value) {
   if (value === true) return true;
   if (!value || typeof value !== 'object') return false;
@@ -1861,7 +1864,21 @@ function generateEstimate(input) {
     if (explicitArea > 0) {
       result.detail = `Covers ${Math.round(explicitArea).toLocaleString()} sq ft`;
     }
-    lineItems.push(stampTurfReview(result, explicitArea <= 0));
+    stampTurfReview(result, explicitArea <= 0);
+    // Quote-only (owner 2026-10-29): the formula price is a floor that loses
+    // money on larger lawns, so the office prices every top dressing job by
+    // hand. The line keeps the formula number for internal audit, but it
+    // rides the existing custom-quote contract (requiresManualReview +
+    // requiresCustomQuote), which every send, accept and public-quote gate
+    // already reads. A turf-review reason set above stays the customQuoteReason.
+    result.requiresManualReview = true;
+    result.manualReviewReasons = Array.from(new Set([
+      ...(result.manualReviewReasons || []),
+      TOP_DRESSING_QUOTE_ONLY_REASON,
+    ]));
+    result.requiresCustomQuote = true;
+    if (!result.customQuoteReason) result.customQuoteReason = TOP_DRESSING_QUOTE_ONLY_REASON;
+    lineItems.push(result);
   }
   if (services.dethatching && !useCommercialManualQuote(services.dethatching, 'lawn_care')) {
     const dethatchingOptions = serviceOptions(services.dethatching);
