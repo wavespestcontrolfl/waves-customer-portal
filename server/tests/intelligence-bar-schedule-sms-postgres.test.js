@@ -278,4 +278,75 @@ jest.setTimeout(60000);
     expect((await scheduleCustomerSms(base, { techRole: 'technician', technicianId: ctx.technicianId }, {})).status).toBe(403);
     expect(await rowsFor(c.id)).toHaveLength(0);
   });
+  // A link built for another customer must never ride a scheduled text to this one (Codex round 3 on #6944): the
+  // dispatcher replays the row with no link check, so the writer (the page's path and the bar's) is the only fence.
+  describe('links that belong to another customer', () => {
+    const host = 'https://portal.wavespestcontrol.com';
+    const writerInput = (c, body) => ({ to: c.phone, body, scheduledFor: `${sendDate()}T10:00`, customerId: c.id });
+
+    test('a reservice link of another customer: the page\'s writer refuses (409), nothing queued; the customer\'s own link queues', async () => {
+      const ctx = { techRole: 'admin', technicianId: (await admin()).technicianId };
+      const tag = randomUUID().replace(/-/g, '').slice(0, 20);
+      const mine = await customer({ reservice_token: `own${tag}` });
+      const other = await customer({ reservice_token: `oth${tag}` });
+      const refused = await scheduleCustomerSms(writerInput(mine, `Book here ${host}/reservice/oth${tag}`), ctx, {});
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({ code: 'customer_link_owner_mismatch' });
+      expect(refused.body.error).toMatch(/different customer than the recipient/);
+      expect(await rowsFor(mine.id)).toHaveLength(0);
+      expect(await rowsFor(other.id)).toHaveLength(0);
+      const ok = await scheduleCustomerSms(writerInput(mine, `Book here ${host}/reservice/own${tag}`), ctx, {});
+      expect(ok.status).toBe(200);
+      expect(await rowsFor(mine.id)).toHaveLength(1);
+    });
+
+    test('the same link through the bar: no card for another customer\'s link, and the customer\'s own link queues one text', async () => {
+      const ctx = await admin();
+      const tag = randomUUID().replace(/-/g, '').slice(0, 20);
+      const mine = await customer({ reservice_token: `own${tag}` });
+      await customer({ reservice_token: `oth${tag}` });
+      const foreign = await executeScheduleSmsTool('schedule_sms', input(mine.id, { message: `Book here ${host}/reservice/oth${tag}` }), ctx);
+      expect(foreign.preview).not.toBe(true);
+      expect(foreign.code).toBeTruthy();
+      const own = input(mine.id, { message: `Book here ${host}/reservice/own${tag}` });
+      const card = await executeScheduleSmsTool('schedule_sms', own, ctx);
+      expect(card.preview).toBe(true);
+      expect(await confirm(ctx, own, card)).toMatchObject({ success: true, state: 'scheduled' });
+      expect(await rowsFor(mine.id)).toHaveLength(1);
+    });
+
+    test('the writer refuses another customer\'s link on its own, whatever the bar approved', async () => {
+      const ctx = await admin();
+      const tag = randomUUID().replace(/-/g, '').slice(0, 20);
+      const mine = await customer({ reservice_token: `own${tag}` });
+      await customer({ reservice_token: `oth${tag}` });
+      const card = await executeScheduleSmsTool('schedule_sms', input(mine.id), ctx);
+      // The writer is handed text the card did not approve: its own link check stops it with nothing written.
+      const out = await scheduleCustomerSms(writerInput(mine, `Book here ${host}/reservice/oth${tag}`), { techRole: 'admin', technicianId: ctx.technicianId }, {
+        underLock: async () => null,
+      });
+      expect(card.preview).toBe(true);
+      expect(out).toMatchObject({ status: 409, body: { code: 'customer_link_owner_mismatch' } });
+      expect(await rowsFor(mine.id)).toHaveLength(0);
+    });
+
+    test('appointment, service report and receipt links never queue, anyone\'s: the immediate-only fence refuses them before the insert', async () => {
+      const ctx = { techRole: 'admin', technicianId: (await admin()).technicianId };
+      const mine = await customer();
+      const links = [
+        ['Appointment page', `${host}/appointment/abcDEF123_-xyz789QWERTY`],
+        ['Service report', `${host}/report/${'b'.repeat(32)}`],
+        ['Receipt', `${host}/receipt/${'r'.repeat(64)}`],
+      ];
+      for (const [label, link] of links) {
+        const out = await scheduleCustomerSms(writerInput(mine, `Here you go ${link}`), ctx, {});
+        expect(out.status).toBe(400);
+        expect(out.body.error).toContain(`${label} links are re-checked at delivery`);
+        const card = await executeScheduleSmsTool('schedule_sms', input(mine.id, { message: `Here you go ${link}` }), await admin());
+        expect(card.preview).not.toBe(true);
+        expect(card.code).toBe('link_not_schedulable');
+      }
+      expect(await rowsFor(mine.id)).toHaveLength(0);
+    });
+  });
 });

@@ -24,7 +24,9 @@
  *  11. the from number must be a Waves Twilio number (400);
  *  12. an Agent Review draft must still own a pending decision (409), then the decision is parked in the transaction.
  *
- * Effects, one transaction under the suggest-thread lock: refuse (409) when an automated reply is mid-send to the same
+ * Effects, one transaction under the suggest-thread lock: verify the bearer links in the text belong to the recipient (the
+ * immediate send's commit-phase check; 409, or 503 when unreadable; the dispatcher replays rows with no link check);
+ * refuse (409) when an automated reply is mid-send to the same
  * thread; park the used Agent Review decision and every other pending house-voice suggestion on the thread; insert the
  * sms_log row (status scheduled, scheduled_for, message_type, admin_user_id, metadata human_authored / decision ids /
  * linked visits). After the commit: stamp the Speed-to-Lead first response (best effort).
@@ -201,6 +203,31 @@ const SCHEDULE_GUARDS = [
   },
 ];
 
+// The same shape, run inside the thread lock right before the insert (live state a minute-old check would miss).
+const LOCKED_GUARDS = [
+  // Bearer links (appointment page, service report, receipt, pay, estimate, ...) must belong to the recipient's
+  // account: the scheduled-text dispatcher replays the row with no link check, so this is the only place a link
+  // built for one customer is stopped from reaching another. The immediate send's own commit-phase verification
+  // (comms-tools customerLinkSendRefusal, bearerSeamCheck included), with the immediate page path's statuses:
+  // 409 for a refused link, 503 when the check could not be read.
+  {
+    check: async (c) => {
+      const recipientSelected = Boolean(c.customerId && c.trusted.customerId);
+      const refusal = await require('./intelligence-bar/comms-tools').customerLinkSendRefusal(c.cleanBody, c.to, c.trusted.customerId, { recipientSelected });
+      return refusal && { status: /try again/i.test(refusal.error) ? 503 : 409, error: refusal.error, extra: { code: refusal.code } };
+    },
+  },
+];
+
+// The first guard that refuses, as the writer's { status, body } answer, or null to go on.
+async function firstRefusal(guards, c) {
+  for (const guard of guards) {
+    const hit = await guard.check(c);
+    if (hit) return fail(guard.status || hit.status, guard.error || hit.error, guard.extra || hit.extra);
+  }
+  return null;
+}
+
 // What the bar's under-lock hook may answer, by the key it sets: the answer for the caller, nothing written.
 const UNDER_LOCK_OUTCOMES = {
   refuse: (v) => fail(v.status || 409, v.error, v.code ? { code: v.code } : {}),
@@ -228,10 +255,8 @@ async function scheduleCustomerSms(input, actor, hooks = {}) {
     to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId, translationTrialId,
     hooks, cleanBody: typeof body === 'string' ? body.trim() : '', linkedVisitIds: scheduledLinkedVisitIds,
   };
-  for (const guard of SCHEDULE_GUARDS) {
-    const hit = await guard.check(c);
-    if (hit) return fail(guard.status || hit.status, guard.error || hit.error, guard.extra);
-  }
+  const refused = await firstRefusal(SCHEDULE_GUARDS, c);
+  if (refused) return refused;
   const { cleanBody, sendAt, chosenFrom, agentDecision } = c;
   const trustedCustomerId = c.trusted.customerId;
 
@@ -255,6 +280,8 @@ async function scheduleCustomerSms(input, actor, hooks = {}) {
     const verdict = (await hooks.underLock?.(trx)) || {};
     const outcome = Object.keys(UNDER_LOCK_OUTCOMES).find((key) => verdict[key]);
     if (outcome) return { stop: UNDER_LOCK_OUTCOMES[outcome](verdict[outcome]) };
+    const linkStop = await firstRefusal(LOCKED_GUARDS, c);
+    if (linkStop) return { stop: linkStop };
 
     // Don't queue a reply while an autonomous house-voice reply (Phase E) is mid-send to this thread — it could
     // land as a duplicate when this one dispatches. The 'scheduled' sms_log row inserted below is itself the

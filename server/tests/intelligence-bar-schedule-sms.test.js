@@ -16,12 +16,14 @@ jest.mock('../services/scheduled-sms-queue', () => ({
   scheduledSmsLinkRefusal: (...a) => mockLinkRefusal(...a),
 }));
 const mockProposalRefusal = jest.fn();
+const mockBearerRefusal = jest.fn();
 const mockResolveCustomer = jest.fn();
 // The shared standalone rule list_queued_messages and cancel_queued_message use (comms-tools smsIneligibilityReason); the real
 // one runs in the Postgres suite. Here a row tied to an Agent Review decision stands for "another workflow owns it".
 const mockIneligible = (row) => (JSON.parse(row.metadata || '{}').agent_decision_id ? 'This text is tied to an Agent Review suggestion and can\'t be cancelled here.' : null);
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   sendSmsProposalRefusal: (...a) => mockProposalRefusal(...a),
+  customerLinkSendRefusal: (...a) => mockBearerRefusal(...a),
   resolveCustomer: (...a) => mockResolveCustomer(...a),
   smsIneligibilityReason: (...a) => mockIneligible(...a),
 }));
@@ -80,6 +82,7 @@ beforeEach(() => {
   envGate(true);
   mockLinkRefusal.mockResolvedValue(null);
   mockProposalRefusal.mockResolvedValue(null);
+  mockBearerRefusal.mockResolvedValue(null);
   mockResolveCustomer.mockResolvedValue(null);
   mockQueue.mockResolvedValue({ status: 200, body: { success: true, id: 'sms-1', scheduledFor: '2099-01-05T15:00:00.000Z' } });
   mockPending = jest.spyOn(suggestMode, 'threadHasPendingSuggestion').mockResolvedValue(false);
@@ -260,6 +263,12 @@ describe('inputs the card refuses', () => {
     expect(await preview()).toMatchObject({ code: 'link_not_schedulable', error: expect.stringMatching(/Auto Pay/) });
     mockLinkRefusal.mockResolvedValueOnce({ status: 503, error: 'Could not verify the links in this message — try again in a moment.' });
     expect(await preview()).toMatchObject({ code: 'link_unverified' });
+  });
+
+  test('a link that belongs to another customer gets no card: the commit-phase link check runs for this customer', async () => {
+    mockBearerRefusal.mockResolvedValueOnce({ success: false, blocked: true, code: 'customer_link_owner_mismatch', error: 'A customer link in this text belongs to a different customer than the recipient — remove it. Nothing was sent.' });
+    expect(await preview()).toMatchObject({ code: 'customer_link_owner_mismatch', error: expect.stringMatching(/different customer.*Nothing was scheduled/) });
+    expect(mockBearerRefusal).toHaveBeenCalledWith(expect.any(String), PHONE, CUST, { phase: 'commit' });
   });
 
   test('an opted-out or suppressed number gets no card, in the send path\'s own words', async () => {

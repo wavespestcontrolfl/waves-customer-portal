@@ -163,6 +163,10 @@ async function buildPlan(input) {
   const { scheduledSmsLinkRefusal } = require('../scheduled-sms-queue');
   const linkRefusal = await scheduledSmsLinkRefusal(message, customer.phone);
   if (linkRefusal) return refusal(`${linkRefusal.error}. Nothing was scheduled.`, linkRefusal.status === 503 ? 'link_unverified' : 'link_not_schedulable');
+  // The writer repeats the commit-phase link check inside its lock; run it here too so a link built for another
+  // customer never gets a card that Confirm would refuse (read-only: the composer-only links are already refused above).
+  const foreignLink = await require('./comms-tools').customerLinkSendRefusal(message, customer.phone, customer.id, { phase: 'commit' });
+  if (foreignLink) return refusal(`${foreignLink.error} Nothing was scheduled.`, foreignLink.code || 'link_not_schedulable');
   const blocked = await require('./comms-tools').sendSmsProposalRefusal({ customer_id: customer.id, phone: customer.phone, message, message_type: 'manual' });
   if (blocked) return { ...blocked, error: `${blocked.error || 'This text cannot go out.'} Nothing was scheduled.`, code: blocked.code || 'send_blocked' };
   // A suggested reply waiting on this thread would be parked by the queued text, which then cannot be listed or
