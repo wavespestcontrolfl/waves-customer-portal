@@ -11,6 +11,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts } = require('../utils/datetime-et');
 const { firstPresent, num } = require('./bouncie-payload');
+const { truckViewsPerVehicleLive } = require('../config/feature-gates');
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -681,6 +682,50 @@ async function computeMonthlySummary(equipmentId, monthDate) {
 /**
  * Get dashboard stats: today's driving, MTD stats, live vehicle location
  */
+/** The "today" figures for one set of mileage_log rows (all vehicles, or one). */
+function dayStats(rows) {
+  const miles = (list) => list.reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
+  return {
+    total_miles: parseFloat(miles(rows).toFixed(2)),
+    business_miles: parseFloat(miles(rows.filter(t => t.is_business)).toFixed(2)),
+    trip_count: rows.length,
+    drive_minutes: rows.reduce((s, t) => s + (t.duration_minutes || 0), 0),
+    idle_minutes: rows.reduce((s, t) => s + (t.idle_minutes || 0), 0),
+    customer_stops: rows.filter(t => t.customer_id).length,
+    irs_deduction: parseFloat(rows.reduce((s, t) => s + parseFloat(t.deduction_amount || 0), 0).toFixed(2)),
+  };
+}
+
+/** The month-to-date figures for one set of mileage_log rows (all vehicles, or one). */
+function monthStats(rows) {
+  const miles = (list) => list.reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
+  const totalMiles = miles(rows);
+  const uniqueDays = new Set(rows.map(t => t.trip_date)).size;
+  return {
+    total_miles: parseFloat(totalMiles.toFixed(2)),
+    business_miles: parseFloat(miles(rows.filter(t => t.is_business)).toFixed(2)),
+    trip_count: rows.length,
+    irs_deduction: parseFloat(rows.reduce((s, t) => s + parseFloat(t.deduction_amount || 0), 0).toFixed(2)),
+    fuel_consumed_gal: parseFloat(rows.reduce((s, t) => s + parseFloat(t.fuel_consumed_gal || 0), 0).toFixed(3)),
+    drive_days: uniqueDays,
+    avg_daily_miles: uniqueDays > 0 ? parseFloat((totalMiles / uniqueDays).toFixed(1)) : 0,
+  };
+}
+
+/**
+ * Technician name by Bouncie device: technicians.bouncie_imei is the link.
+ * @returns {Promise<Map<string, string>>} IMEI -> technician name
+ */
+async function technicianNamesByImei() {
+  const rows = await db('technicians').whereNotNull('bouncie_imei').select('name', 'bouncie_imei');
+  const names = new Map();
+  for (const r of rows) {
+    const imei = String(r.bouncie_imei).trim();
+    if (imei && !names.has(imei)) names.set(imei, r.name);
+  }
+  return names;
+}
+
 async function getDashboard() {
   try {
     const today = etDateString();
@@ -688,61 +733,52 @@ async function getDashboard() {
 
     // Today's trips
     const todayTrips = await db('mileage_log').where('trip_date', today);
-    const todayMiles = todayTrips.reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
-    const todayBusinessMiles = todayTrips.filter(t => t.is_business).reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
-    const todayDriveMin = todayTrips.reduce((s, t) => s + (t.duration_minutes || 0), 0);
-    const todayIdleMin = todayTrips.reduce((s, t) => s + (t.idle_minutes || 0), 0);
-    const todayCustomerStops = todayTrips.filter(t => t.customer_id).length;
-    const todayIrsDeduction = todayTrips.reduce((s, t) => s + parseFloat(t.deduction_amount || 0), 0);
 
     // MTD
     const mtdTrips = await db('mileage_log')
       .where('trip_date', '>=', monthStart)
       .where('trip_date', '<=', today);
-    const mtdMiles = mtdTrips.reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
-    const mtdBusinessMiles = mtdTrips.filter(t => t.is_business).reduce((s, t) => s + parseFloat(t.distance_miles || 0), 0);
-    const mtdIrsDeduction = mtdTrips.reduce((s, t) => s + parseFloat(t.deduction_amount || 0), 0);
-    const mtdFuel = mtdTrips.reduce((s, t) => s + parseFloat(t.fuel_consumed_gal || 0), 0);
-    const uniqueDays = new Set(mtdTrips.map(t => t.trip_date)).size;
-    const avgDailyMiles = uniqueDays > 0 ? parseFloat((mtdMiles / uniqueDays).toFixed(1)) : 0;
 
     // Live vehicle (try loading existing bouncie service)
-    let liveVehicle = null;
+    let liveVehicles = [];
     try {
       const bouncieService = require('./bouncie');
       const svc = bouncieService.default || bouncieService;
       const instance = typeof svc === 'function' ? new svc() : svc;
       if (instance && typeof instance.getVehicles === 'function') {
-        const vehicles = await instance.getVehicles();
-        liveVehicle = vehicles[0] || null;
+        liveVehicles = await instance.getVehicles();
       }
     } catch (_) {
       // bouncie service may not be available
     }
 
-    return {
-      today: {
-        date: today,
-        total_miles: parseFloat(todayMiles.toFixed(2)),
-        business_miles: parseFloat(todayBusinessMiles.toFixed(2)),
-        trip_count: todayTrips.length,
-        drive_minutes: todayDriveMin,
-        idle_minutes: todayIdleMin,
-        customer_stops: todayCustomerStops,
-        irs_deduction: parseFloat(todayIrsDeduction.toFixed(2)),
-      },
-      mtd: {
-        month: monthStart,
-        total_miles: parseFloat(mtdMiles.toFixed(2)),
-        business_miles: parseFloat(mtdBusinessMiles.toFixed(2)),
-        trip_count: mtdTrips.length,
-        irs_deduction: parseFloat(mtdIrsDeduction.toFixed(2)),
-        fuel_consumed_gal: parseFloat(mtdFuel.toFixed(3)),
-        drive_days: uniqueDays,
-        avg_daily_miles: avgDailyMiles,
-      },
-      live_vehicle: liveVehicle,
+    const result = {
+      today: { date: today, ...dayStats(todayTrips) },
+      mtd: { month: monthStart, ...monthStats(mtdTrips) },
+      live_vehicle: liveVehicles[0] || null,
     };
+
+    if (truckViewsPerVehicleLive()) {
+      // Split the SAME two reads by device; no query per vehicle.
+      const byVehicle = new Map();
+      const group = (id, name) => {
+        if (!byVehicle.has(id)) byVehicle.set(id, { name: name || id, today: [], mtd: [] });
+        return byVehicle.get(id);
+      };
+      for (const t of mtdTrips) group(String(t.vehicle_id ?? ''), t.vehicle_name).mtd.push(t);
+      for (const t of todayTrips) group(String(t.vehicle_id ?? ''), t.vehicle_name).today.push(t);
+      const technicians = await technicianNamesByImei();
+      result.vehicles = [...byVehicle].map(([id, g]) => ({
+        vehicle_id: id,
+        vehicle_name: g.name,
+        technician: technicians.get(id) || null,
+        today: { date: today, ...dayStats(g.today) },
+        mtd: { month: monthStart, ...monthStats(g.mtd) },
+      })).sort((a, b) => b.mtd.total_miles - a.mtd.total_miles);
+      result.live_vehicles = liveVehicles.map(v => ({ ...v, technician: technicians.get(String(v.imei)) || null }));
+    }
+
+    return result;
   } catch (err) {
     logger.error(`[bouncie-mileage] getDashboard error: ${err.message}`);
     throw err;
@@ -914,6 +950,7 @@ module.exports = {
   computeDailySummary,
   computeMonthlySummary,
   getDashboard,
+  technicianNamesByImei,
   getIrsReport,
   exportIrsCsv,
   _test: {
