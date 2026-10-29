@@ -6694,7 +6694,7 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
     .where('updated_at', '<', olderThan)
     .orderBy('updated_at', 'asc')
     .limit(limit)
-    .select('id', 'stripe_payment_intent_id', 'invoice_number', 'total', 'credit_applied');
+    .select('id', 'stripe_payment_intent_id', 'invoice_number', 'total', 'credit_applied', 'amount_paid');
   const stripeClient = rows.length ? getStripe() : null;
   for (const row of rows) {
     // ACH-evidence gate: status='processing' + a PI is NOT proof of a bank
@@ -6753,7 +6753,7 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
     // (sendAchProcessing's own fallback is the gross total).
     const cashAmount = combinedAllocationForAck
       ? require('../services/pay-combined').allocationTotalCents(combinedAllocationForAck) / 100
-      : Math.round((Number(row.total || 0) - Number(row.credit_applied || 0)) * 100) / 100;
+      : invoiceAmountDue(row);
     logger.warn(`[stripe-webhook] ACH ack sweep re-running acknowledgment for invoice ${row.invoice_number || row.id} (claim was released or never taken; email ${priorEmailAttempt ? 'already attempted — SMS-only' : 'never attempted — both legs'})`);
     await dispatchAchProcessingAcknowledgment({
       invoiceId: row.id,

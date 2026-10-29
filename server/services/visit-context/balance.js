@@ -20,7 +20,7 @@ async function openInvoiceFacts(customerId, { db = defaultDb } = {}) {
     // homeowner's balance (Codex r1).
     .whereNull('payer_id')
     .first(
-      db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance'),
+      db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0)::float as balance'),
       db.raw('COUNT(*)::int as count'),
       db.raw("COALESCE(BOOL_OR(status = 'overdue'), false) as overdue"),
     );

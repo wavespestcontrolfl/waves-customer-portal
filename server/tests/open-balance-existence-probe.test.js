@@ -36,7 +36,7 @@ test('the projection carries NO amount columns — the figure never leaves the d
   const { database, captured } = makeDb([{ id: 'i1', invoice_number: 'WPC-1', scheduled_service_id: null }]);
   await openBalanceExists('c-1', { database });
   expect(captured.select).toEqual(['id', 'invoice_number', 'scheduled_service_id']);
-  for (const col of ['total', 'subtotal', 'credit_applied', 'discount_amount']) {
+  for (const col of ['total', 'subtotal', 'credit_applied', 'amount_paid', 'discount_amount']) {
     expect(captured.select).not.toContain(col);
   }
   // The cents test happens IN SQL, with the same integer arithmetic

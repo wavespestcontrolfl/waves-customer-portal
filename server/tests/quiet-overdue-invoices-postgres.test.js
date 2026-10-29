@@ -50,6 +50,7 @@ postgres('quiet overdue invoices query (PostgreSQL)', () => {
       t.string('status');
       t.decimal('total', 10, 2).notNullable().defaultTo(0);
       t.decimal('credit_applied', 10, 2).notNullable().defaultTo(0);
+      t.decimal('amount_paid', 10, 2).notNullable().defaultTo(0);
       t.date('due_date');
       t.timestamp('sent_at');
       t.timestamp('sms_sent_at');
