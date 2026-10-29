@@ -71,6 +71,7 @@ const { shiftCloseReviewLive, payrollTimeOffLive } = require('../config/feature-
 const {
   payLinesOn, openLinesFor, priceLines, totalsOf, markLinesPaid, reopenLinesOfRun,
 } = require('./payroll-pay-lines');
+const { syncReviewBonusLines } = require('./payroll-review-bonuses');
 const { familyEmployeeOn, familyExemptIds } = require('./payroll-family-employee');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -726,6 +727,12 @@ function describeProblems({ blocked, waiting }) {
   return `Fix these before you finalize. ${parts.join('. ')}.`;
 }
 
+// Review bonus lines follow the payouts (GATE_PAYROLL_REVIEW_BONUS_IMPORT). Called inside a pay run
+// transaction after the payroll lock and before evaluate().
+const syncReviewBonuses = (trx, weekStart, actorId) => syncReviewBonusLines(trx, {
+  weekEnd: addStaffWorkDays(weekStart, 6), lock: true, actorId,
+});
+
 async function draftRun(input, actor, conn = db) {
   const v = validate(createSchema, input);
   const { start, end } = validateWeek(v.weekStart);
@@ -740,6 +747,7 @@ async function draftRun(input, actor, conn = db) {
       const [inserted] = await trx('payroll_runs').insert({ week_start: start, pay_date: payDate, created_by: actorId }).returning('id');
       const id = inserted && inserted.id ? inserted.id : inserted;
       const run = await loadRun(trx, id);
+      await syncReviewBonuses(trx, start, actorId);
       const evaluation = await evaluate(trx, run, { lock: true });
       if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length) {
         throw new PayrollError(409, 'No W-2 hours to pay for that week.');
@@ -762,6 +770,7 @@ async function recomputeRun(runId, actor, conn = db) {
     if (payLinesOn()) await lockPayrollMutations(trx);
     const run = await loadRun(trx, runId, { lock: true });
     if (run.status !== 'draft') throw new PayrollError(409, 'Only a draft pay run can be recomputed.');
+    await syncReviewBonuses(trx, run.week_start, actorId);
     const evaluation = await evaluate(trx, run, { lock: true });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
@@ -812,6 +821,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await lockPayrollMutations(trx);
     const run = await loadRun(trx, runId, { lock: true });
     if (run.status !== 'draft') throw new PayrollError(409, `This pay run is already ${run.status}.`);
+    await syncReviewBonuses(trx, run.week_start, actorId);
     const evaluation = await evaluate(trx, run, { lock: true });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
     if (!evaluation.checks.length) throw new PayrollError(409, 'There are no paychecks to finalize.');
@@ -829,7 +839,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
     const now = trx.fn.now();
     await trx('payroll_checks').where({ run_id: runId, status: 'draft' }).update({ status: 'finalized' });
     // The lines this run paid stay locked from the evaluation above; mark them paid with their check.
-    if (payLinesOn()) await markLinesPaid(trx, runId, evaluation.lines);
+    if (payLinesOn()) await markLinesPaid(trx, runId, evaluation.lines, actorId);
     await trx('payroll_runs').where({ id: runId }).update({ status: 'finalized', finalized_by: actorId, finalized_at: now });
     await audit(trx, actorId, 'payroll.run_finalized', 'payroll_runs', runId, { run_id: runId });
   });

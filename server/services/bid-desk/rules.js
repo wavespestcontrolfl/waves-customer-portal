@@ -7,6 +7,7 @@
  *   reminderDue(bid, now)           which due-date reminder (if any) is owed right now
  *   datesDue(bid, now)              the questions and job-walk reminders owed right now (GATE_BID_CHECKLIST)
  *   daysLeft(dueAt, now)            whole ET calendar days until the due date
+ *   lapsedBid(bid, now)             a bid that closes itself (GATE_BID_DESK_AUTO_DATES; the caller checks the gate)
  *
  * The date rule: an email never overwrites a due date. A date the operator confirmed is final; a date that was read
  * from an earlier email stays as it was and the bid is flagged `needs_date_confirmation` so a person looks.
@@ -92,6 +93,25 @@ function datesDue(bid, now = new Date()) {
   return due;
 }
 
+// The note a bid carries after it closed itself. A bid with this note never closes itself again, so one the owner
+// sets back to 'new' stays open.
+const AUTO_CLOSE_NOTE = 'Closed by itself';
+const LAPSED_AFTER_MS = DAY_MS;
+// A date still waiting on an addendum check (needs_date_confirmation) is given this long before the bid closes.
+const LAPSED_FLAGGED_AFTER_MS = 30 * DAY_MS;
+
+/**
+ * True when an open bid should close itself as 'no_bid': still 'new' (never marked 'bid'), a due date more than 1 day
+ * past (more than 30 days past when the date is flagged for confirmation), no submission recorded, and not closed by
+ * itself before. A bid with no date never closes. Pure; the caller checks GATE_BID_DESK_AUTO_DATES.
+ */
+function lapsedBid(bid, now = new Date()) {
+  if (!bid || bid.status !== 'new' || !bid.due_at || bid.submitted_at) return false;
+  if (String(bid.decision_note || '').startsWith(AUTO_CLOSE_NOTE)) return false;
+  const past = new Date(now).getTime() - new Date(bid.due_at).getTime();
+  return past > (bid.needs_date_confirmation ? LAPSED_FLAGGED_AFTER_MS : LAPSED_AFTER_MS);
+}
+
 // ET calendar days from today to the due date (0 = due today, negative = past). null without a date.
 function daysLeft(dueAt, now = new Date()) {
   if (!dueAt) return null;
@@ -102,4 +122,6 @@ function daysLeft(dueAt, now = new Date()) {
   return Math.round((toUtcDay(dueAt) - toUtcDay(now)) / DAY_MS);
 }
 
-module.exports = { attachPatch, reminderDue, datesDue, daysLeft, OPEN_STATUSES, FILL_FIELDS };
+module.exports = {
+  attachPatch, reminderDue, datesDue, daysLeft, lapsedBid, OPEN_STATUSES, FILL_FIELDS, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS,
+};

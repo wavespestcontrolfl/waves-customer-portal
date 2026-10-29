@@ -383,6 +383,17 @@ async function executeBITool(toolName, input) {
       }
       const opsLine = buildOpsLine(kpis);
 
+      // GATE_BI_TECH_SCORECARD: the last full week per technician. Off = no key at all.
+      let techScorecard = null;
+      if (require('../config/feature-gates').biTechScorecardLive()) {
+        try {
+          techScorecard = await require('./bi-tech-scorecard').buildTechScorecard(db);
+        } catch (err) {
+          logger.warn(`[bi-agent] technician scorecard failed: ${err.message}`);
+          techScorecard = { rows: [], unavailable: 'scorecard failed' };
+        }
+      }
+
       return {
         servicesThisWeek: total,
         completedThisWeek: completed,
@@ -399,6 +410,7 @@ async function executeBITool(toolName, input) {
           current: 'a live snapshot as of today (ET) — no 30-day baseline (e.g. AR days)',
           cohort: 'customers who joined before the 7- / 30-day window began, counted as still active if they are active today (ET) (e.g. retention)',
         },
+        ...(techScorecard ? { techScorecard } : {}),
       };
     }
 

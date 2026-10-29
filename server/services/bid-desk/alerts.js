@@ -59,6 +59,8 @@ function newBidSpec(bid, email) {
       subject: subjectFor(bid),
       doneWhen: 'bid_decided',
       who: 'person',
+      // No bid, and Bid once the due date is confirmed (alert-buttons.js, GATE_BID_ALERT_BUTTONS): the Bid desk's save step.
+      buttons: require('./alert-buttons').bidButtons(),
     },
     detail: `New bid invite: ${title} from ${buyer}, ${dueWords(bid)}`,
   };

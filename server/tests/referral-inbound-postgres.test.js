@@ -606,7 +606,7 @@ jest.mock('../services/customer-credit', () => ({
       expect(row.actions.map((a) => a.id)).toEqual(['confirm', 'dismiss']);
       // A technician login is served no buttons, and its bell list does not show the row at all.
       const rawRows = await NotificationService.getAdminNotifications(30, 0, { role: 'admin' });
-      expect(buttons.withAlertButtons(rawRows, { role: 'technician' })[0]).not.toHaveProperty('actions');
+      expect((await buttons.withAlertButtons(rawRows, { role: 'technician' }))[0]).not.toHaveProperty('actions');
       expect(await NotificationService.getAdminNotifications(30, 0, { role: 'technician', technicianId: randomUUID() })).toEqual([]);
 
       await expect(tap(row, 'dismiss')).resolves.toEqual({ status: 200, body: { success: true, message: 'Ames Fenn is marked not a referral.' } });
@@ -700,7 +700,7 @@ jest.mock('../services/customer-credit', () => ({
         recipient_type: 'admin', category: 'inbound_sms', title: '1 text from Fixture Person', body: 'Is Friday still on?',
         link: '/admin/communications?thread=x', metadata: JSON.stringify({ triggerKey: 'sms_reply', dedupeKey: `sms-thread:${randomUUID()}`, buttons: buttons.closeNoteButtons('handled') }),
       }).returning('id');
-      const [served] = buttons.withAlertButtons(await NotificationService.getAdminNotifications(30, 0, { role: 'admin' }), { role: 'admin' });
+      const [served] = await buttons.withAlertButtons(await NotificationService.getAdminNotifications(30, 0, { role: 'admin' }), { role: 'admin' });
       expect(served).toMatchObject({ id: row.id, actions: [{ id: 'handled', label: 'Handled' }] });
       return served;
     };
