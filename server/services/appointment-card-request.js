@@ -44,6 +44,7 @@ const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
 const { callBookingDateOnly } = require('./call-booking-catalog');
+const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isAmbiguousProviderOutcome } = require('./sms-auto-send');
 
@@ -131,6 +132,15 @@ function cancelFeeText() {
     logger.warn(`[appt-card-request] cancel-fee amount unavailable — omitting disclosure: ${err.message}`);
     return null;
   }
+}
+
+// One-time visits only (owner ruling 2026-10-29): the late-cancel/no-show
+// fee is never disclosed on, frozen onto, or charged for a recurring-plan
+// visit — the plan itself is the commitment. The visit row must carry the
+// recurring lineage columns (is_recurring, recurring_parent_id,
+// recurring_pattern).
+function visitCarriesCancelFee(visit) {
+  return !isRecurringLineageVisit(visit);
 }
 
 // SMS clause — deliberately COMPACT and GSM-7-safe (no em-dash): the rendered
@@ -593,10 +603,13 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
 
     const visit = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'service_id', 'card_link_sent_at', 'estimated_price');
+      .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'service_id', 'card_link_sent_at', 'estimated_price', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
     if (!visit) return skip('visit_not_found');
     if (!visit.customer_id) return skip('no_customer');
     if (!LIVE_VISIT_STATUSES.includes(visit.status)) return skip(`visit_not_live:${visit.status}`);
+    // The invite's fee clause, handed back on inline links so the composer
+    // renders the same disclosure this funnel would text.
+    const feeLine = visitCarriesCancelFee(visit) ? cancelFeeLine() : '';
     const dateOnly = callBookingDateOnly(visit.scheduled_date);
     if (dateOnly && dateOnly < etDateString(new Date())) return skip('visit_in_past');
 
@@ -880,7 +893,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     if (existing) {
       if (existing.status === 'pending' && existing.token) {
         if (delivery === 'inline') {
-          return { requested: false, action: 'link_created', reason: 'request_exists', secureUrl: portalUrl(`/secure/${existing.token}`) };
+          return { requested: false, action: 'link_created', reason: 'request_exists', secureUrl: portalUrl(`/secure/${existing.token}`), cancelFeeLine: feeLine };
         }
         // A pending row whose text never went out — an inline /book step
         // the customer abandoned, or a prior send that failed after the
@@ -929,7 +942,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       service_type: visit.service_type || 'service',
       date_line: dateLineFor(visit.scheduled_date),
       secure_link: secureUrl,
-      cancel_fee_line: cancelFeeLine(),
+      cancel_fee_line: feeLine,
     };
     // The BASE render is the live kill-switch check at the send boundary
     // (Codex #2987 P1): it must run — and pass — before a variant body can
@@ -991,12 +1004,12 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           .where({ scheduled_service_id: visit.id })
           .first('status', 'token');
         if (raced?.status === 'pending' && raced.token) {
-          return { requested: false, action: 'link_created', reason: 'request_exists', secureUrl: portalUrl(`/secure/${raced.token}`) };
+          return { requested: false, action: 'link_created', reason: 'request_exists', secureUrl: portalUrl(`/secure/${raced.token}`), cancelFeeLine: feeLine };
         }
         return skip('request_exists');
       }
       logger.info(`[appt-card-request] inline capture link created for visit ${visit.id} (trigger ${trigger})`);
-      return { requested: true, action: 'link_created', reason: 'created', secureUrl };
+      return { requested: true, action: 'link_created', reason: 'created', secureUrl, cancelFeeLine: feeLine };
     }
 
     // 4. One text, ever — atomic claim on the visit row (claimCardLinkSend:
@@ -1353,7 +1366,19 @@ function startInvitationEmailLeg({ visit, secureUrl, planChoice }) {
 // omits the fee sentence entirely; never a term we didn't freeze.
 async function runInvitationEmailLeg({ visit, secureUrl, planChoice }) {
   const { sendAutopaySetupInvitation } = require('./card-enrollment-email');
-  let emailFeeDisclosure = readCancelFeeDisclosure();
+  // Callers pass differently-shaped visit rows, so the recurring lineage is
+  // read here. A failed read omits the fee sentence — never a term we can't
+  // confirm applies.
+  let carriesFee = false;
+  try {
+    const lineage = await db('scheduled_services')
+      .where({ id: visit.id })
+      .first('is_recurring', 'recurring_parent_id', 'recurring_pattern');
+    carriesFee = !!lineage && visitCarriesCancelFee(lineage);
+  } catch (err) {
+    logger.warn(`[appt-card-request] email recurring-lineage read failed for visit ${visit.id} — omitting the fee sentence: ${err.message}`);
+  }
+  let emailFeeDisclosure = carriesFee ? readCancelFeeDisclosure() : null;
   if (emailFeeDisclosure) {
     try {
       const stampedRows = await db('appointment_card_requests')
@@ -2220,7 +2245,7 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
 
   const visit = await db('scheduled_services')
     .where({ id: request.scheduled_service_id })
-    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'estimated_price');
+    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'estimated_price', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
   // Live price recheck (Codex #3077 P1): a request minted before the
   // $0/unpriced send guard existed — or a visit repriced to $0 after the
   // link went out — must not render the capture form, mint a SetupIntent,
@@ -2232,7 +2257,9 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
     : null;
   // Read ONCE, up front: the payload note and the render stamp below both
   // consume this same snapshot (Codex #3153 r4 P1).
-  const feeDisclosure = visitPriced ? readCancelFeeDisclosure() : null;
+  // A recurring-plan visit shows no fee, so the render stamp below pins the
+  // row to "nothing disclosed".
+  const feeDisclosure = visitPriced && visitCarriesCancelFee(visit) ? readCancelFeeDisclosure() : null;
   const base = {
     firstName: customer?.first_name || null,
     serviceType: visit?.service_type || null,
@@ -2633,6 +2660,18 @@ async function feeEligibleRequestForVisit(scheduledServiceId) {
     return { request: null, reason: 'charge_review', unresolved: true };
   }
   if (request.fee_status) return { request: null, reason: `fee_${request.fee_status}` };
+  // One-time visits only (owner ruling 2026-10-29) — this also releases
+  // fee terms a recurring-plan visit agreed to before the ruling. Fail
+  // CLOSED on a lookup error, like the checks below.
+  try {
+    const visit = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('is_recurring', 'recurring_parent_id', 'recurring_pattern');
+    if (!visitCarriesCancelFee(visit)) return { request: null, reason: 'recurring_visit' };
+  } catch (err) {
+    logger.error(`[appt-card-request] recurring-lineage lookup failed for visit ${scheduledServiceId} — fee rail fails closed: ${err.message}`);
+    return { request: null, reason: 'recurring_check_failed', unresolved: true };
+  }
   // A third-party payer assigned AFTER the card was secured exempts the
   // homeowner from this lane (Codex #3153 r6 P1): the capture flow fails
   // closed on payer changes at render and completion, and the completion
@@ -2679,6 +2718,7 @@ function skipRule(skipReason, requestStatus = null) {
   if (reason === 'not_completed' || reason === 'no_charge_target') return { code: 'not_secured' };
   if (reason === 'no_agreed_fee' || reason === 'no_fee_consent') return { code: 'no_agreed_fee' };
   if (reason === 'payer_billed') return { code: 'payer_billed' };
+  if (reason === 'recurring_visit') return { code: 'recurring_visit' };
   // A hold row in ANY status owns this visit's fee event — held holds are
   // answered by the hold preview before this rail runs, so what reaches
   // here is a parked/charged/released hold. Don't guess which.
@@ -3993,7 +4033,6 @@ module.exports = {
   resolveExemption,
   renderTemplate,
   dateLineFor,
-  cancelFeeLine,
   LIVE_VISIT_STATUSES,
   TEMPLATE_KEY,
   PLAN_TEMPLATE_KEY,

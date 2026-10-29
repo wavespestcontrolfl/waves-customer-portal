@@ -269,6 +269,16 @@ describe('chargeAppointmentNoShowFee — gate and eligibility', () => {
     expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 
+  test('recurring-plan visit with agreed fee terms → recurring_visit skip, never charged (owner ruling 2026-10-29)', async () => {
+    mockTableHandlers = {
+      ...handlersWith(),
+      scheduled_services: { first: () => ({ is_recurring: true, recurring_parent_id: null, recurring_pattern: 'quarterly' }) },
+    };
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ charged: false, reason: 'recurring_visit' });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
   test('payer assigned after securing → payer_billed skip, the homeowner card is never penalty-charged (Codex #3153 r6)', async () => {
     require('../services/payer').resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-9' });
     const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });

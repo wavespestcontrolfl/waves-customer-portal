@@ -1518,6 +1518,7 @@ const CANCEL_FEE_RULE_TEXT = {
   no_agreed_fee: 'A card is saved, but no late-cancel fee was agreed for this visit, so nothing will be charged.',
   secured_no_fee_terms: 'This visit was secured without a late-cancel fee agreement (an existing saved card or prepaid coverage; no fee terms were shown), so nothing will be charged.',
   payer_billed: 'A card is saved, but a third-party payer is billed for this visit, so the homeowner\'s card will not be charged.',
+  recurring_visit: 'This is a recurring-plan visit, and the late-cancel fee applies only to one-time visits, so nothing will be charged.',
   hold_parked: 'The saved card hold for this visit is parked — it follows the customer\'s rebooked visit — so this cancel charges nothing.',
   card_hold_lane: 'This visit\'s fee is handled by the estimate card hold, not the appointment card — this cancel starts no new charge; check the hold\'s status on the visit.',
   card_removed: 'The customer removed the saved card, so nothing can be charged.',
