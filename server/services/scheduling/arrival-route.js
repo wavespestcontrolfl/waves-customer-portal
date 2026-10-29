@@ -1064,6 +1064,18 @@ function saveRoadTimesLive() {
   return gateEnvValue('GATE_SAVE_ROAD_TIMES') && pickerRoadCheckLive();
 }
 
+// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, "start the builds", Route
+// Check Everywhere build 2a): the staff saves that checked only for an overlap
+// (New Appointment, lead booking, the Intelligence Bar's create, reschedule
+// and move-stops tools, bulk reschedule) also run the dispatcher's
+// arrival-window route check on the saved visit and show its warning. Warn
+// only: a route result never blocks a save. Cache road times only
+// (`roads: 'cache'`, no Google call). Needs the arrival-window route check
+// itself (arrivalWindowRoutingEnabled), the check that Edit's save runs.
+function routeCheckStaffSavesLive() {
+  return gateEnvValue('GATE_ROUTE_CHECK_STAFF_SAVES') && arrivalWindowRoutingEnabled();
+}
+
 // A staff save's travel for `date`: on a road day, the road times the pickers
 // bought (cache only, never a purchase); otherwise null, the model.
 function staffSaveTravel(date) {
@@ -1103,3 +1115,4 @@ module.exports = {
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
   _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },
 };
+module.exports.routeCheckStaffSavesLive = routeCheckStaffSavesLive;
