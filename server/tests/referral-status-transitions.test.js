@@ -295,3 +295,35 @@ test('rejecting a conversion past the milestone threshold keeps the level and bo
     expect(upd.vals.available_balance_cents).toBeUndefined();
   });
 });
+
+test('the milestone rule names each level once, at 3, 5 and 10 conversions', () => {
+  const { milestoneLevelEarned } = require('../services/referral-engine');
+  expect([
+    [2, 'none'], [3, 'none'], [3, 'advocate'], [4, 'advocate'], [5, 'advocate'], [6, 'ambassador'], [10, 'ambassador'], [12, 'champion'], [5, null],
+  ].map(([converted, level]) => milestoneLevelEarned(converted, level))).toEqual([
+    null, 'advocate', null, null, 'ambassador', null, 'champion', null, 'ambassador',
+  ]);
+});
+
+test('a conversion that brings a promoter to 3 awards the advocate bonus once', async () => {
+  const state = freshState();
+  state.promoter = { id: 'promo-1', total_referrals_converted: 3, milestone_level: 'none' };
+  primeDb(state);
+  await withServer(async (base) => {
+    expect((await convert(base)).status).toBe(200);
+  });
+  const awards = state.updates.filter((u) => u.table === 'referral_promoters' && u.vals.milestone_level);
+  expect(awards).toHaveLength(1);
+  expect(awards[0].vals.milestone_level).toBe('advocate');
+  expect(awards[0].vals.available_balance_cents.bindings).toEqual([2500]);
+});
+
+test('a conversion past a level already held awards nothing', async () => {
+  const state = freshState();
+  state.promoter = { id: 'promo-1', total_referrals_converted: 4, milestone_level: 'advocate' };
+  primeDb(state);
+  await withServer(async (base) => {
+    expect((await convert(base)).status).toBe(200);
+  });
+  expect(state.updates.filter((u) => u.table === 'referral_promoters' && u.vals.milestone_level)).toHaveLength(0);
+});

@@ -28,7 +28,7 @@ jest.mock('../services/email-template-library', () => ({
   redactEmailAddresses: (s) => s,
 }));
 // A synthetic internal account stands in for the real list (no real names in tests).
-jest.mock('../services/internal-test-customers', () => ({ INTERNAL_TEST_CUSTOMERS: ['fixture internal'] }));
+jest.mock('../services/internal-test-customers', () => ({ INTERNAL_TEST_CUSTOMERS: ['fixture internal'], isInternalTestCustomerId: () => false }));
 // The credit ledger has its own suites; here only the postings are counted.
 jest.mock('../services/customer-credit', () => ({
   postCreditMovement: jest.fn(async () => ({ id: 'movement' })),
@@ -177,6 +177,24 @@ jest.mock('../services/customer-credit', () => ({
       t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
     });
     await require('../models/migrations/20261026150000_referral_inbound_reviews').up(db);
+    // The admin bell's columns (migrations 20260401000080, 20260928220000, 20261001001500), for the new-referral bell.
+    await db.schema.withSchema(mockSchema).createTable('notifications', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.string('recipient_type', 20).notNullable();
+      t.uuid('recipient_id');
+      t.string('category', 30).notNullable();
+      t.string('title', 200).notNullable();
+      t.text('body');
+      t.string('icon', 10);
+      t.string('link', 300);
+      t.jsonb('metadata');
+      t.timestamp('read_at', { useTz: true });
+      t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
+      t.text('detail');
+      t.timestamp('done_at', { useTz: true });
+      t.string('done_by', 64);
+      t.text('resolution');
+    });
 
     inbound = require('../services/referral-inbound');
     ({ postCreditMovement } = require('../services/customer-credit'));
@@ -192,6 +210,7 @@ jest.mock('../services/customer-credit', () => ({
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    await db('notifications').del();
     await db('referral_inbound_reviews').del();
     await db('referrals').del();
     await db('service_records').del();
@@ -452,5 +471,109 @@ jest.mock('../services/customer-credit', () => ({
     await expect(inbound.confirmInboundReferral({ customerId: typedIn.id, referrerCustomerId: randomUUID() }))
       .rejects.toMatchObject({ statusCode: 404, code: 'REFERRER_NOT_FOUND' });
     expect(await db('referral_inbound_reviews').count('* as n').first()).toEqual({ n: '0' });
+  });
+  test('one customer\'s card reads alone', async () => {
+    const referrer = await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'WAVES-JANE' });
+    const first = await linkCustomer('WAVES-JANE');
+    await linkCustomer('WAVES-JANE');
+    const only = await inbound.listInboundReferrals(db, { customerId: first.id });
+    expect(only.map((c) => c.customerId)).toEqual([first.id]);
+    expect(await inbound.listInboundReferrals(db, { customerId: referrer.id })).toEqual([]);
+    expect(await inbound.listInboundReferrals()).toHaveLength(2);
+  });
+
+  describe('the new-referral bell (GATE_REFERRAL_INBOUND_BELL)', () => {
+    let bell;
+    let buttons;
+    let NotificationService;
+    const saved = {};
+    const TECH = randomUUID();
+
+    beforeAll(() => {
+      for (const key of ['GATE_REFERRAL_INBOUND_BELL', 'GATE_REFERRAL_INBOUND_CONFIRM']) saved[key] = process.env[key];
+      process.env.GATE_REFERRAL_INBOUND_BELL = 'true';
+      process.env.GATE_REFERRAL_INBOUND_CONFIRM = 'true';
+      bell = require('../services/referral-inbound-bell');
+      buttons = require('../services/admin-alert-buttons');
+      NotificationService = require('../services/notification-service');
+    });
+    afterAll(() => {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+
+    // The bell list as an admin is served it.
+    const served = async () => buttons.withAlertButtons(await NotificationService.getAdminNotifications(30, 0, { role: 'admin' }), { role: 'admin' });
+    const tap = (row, actionId) => buttons.runAlertButton({ notificationId: row.id, actionId, version: row.version, technicianId: TECH, role: 'admin' });
+    const answerOf = (customerId) => db('referral_inbound_reviews').where({ customer_id: customerId }).first();
+
+    test('a card rings once with its buttons; Not a referral from the bell answers it, records the tap, and rings nothing again', async () => {
+      await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'WAVES-JANE' });
+      const friend = await linkCustomer('WAVES-JANE', { first_name: 'Ames', last_name: 'Fenn' });
+      await expect(bell.syncReferralInboundBells()).resolves.toEqual({ raised: 1, unchanged: 0, closed: 0, failed: 0 });
+      await expect(bell.syncReferralInboundBells()).resolves.toEqual({ raised: 0, unchanged: 1, closed: 0, failed: 0 });
+
+      const [row] = await served();
+      expect(row).toMatchObject({ category: 'customer', title: "Customers — confirm Ames Fenn's referrer", link: '/admin/referrals?tab=queue' });
+      expect(row.actions.map((a) => a.id)).toEqual(['confirm', 'dismiss']);
+      // A technician login is served no buttons, and its bell list does not show the row at all.
+      const rawRows = await NotificationService.getAdminNotifications(30, 0, { role: 'admin' });
+      expect(buttons.withAlertButtons(rawRows, { role: 'technician' })[0]).not.toHaveProperty('actions');
+      expect(await NotificationService.getAdminNotifications(30, 0, { role: 'technician', technicianId: randomUUID() })).toEqual([]);
+
+      await expect(tap(row, 'dismiss')).resolves.toEqual({ status: 200, body: { success: true, message: 'Ames Fenn is marked not a referral.' } });
+      expect(await answerOf(friend.id)).toMatchObject({ outcome: 'dismissed', reviewed_by: TECH });
+      const after = await db('notifications').where({ id: row.id }).first();
+      expect(after.done_at).not.toBeNull();
+      expect(after.resolution).toBe('Marked not a referral');
+      expect(after.metadata.buttonTap).toMatchObject({ action: 'dismiss', by: TECH, outcome: 'done' });
+      expect(await served()).toEqual([]);
+
+      await expect(tap(row, 'dismiss')).resolves.toMatchObject({ status: 409, body: { error: 'done' } });
+      await expect(bell.syncReferralInboundBells()).resolves.toEqual({ raised: 0, unchanged: 0, closed: 0, failed: 0 });
+      expect(await db('notifications').count('* as n').first()).toEqual({ n: '1' });
+    });
+
+    test('Confirm from the bell runs the Queue\'s confirm with the code owner and sends and pays nothing now', async () => {
+      const referrer = await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'WAVES-JANE' });
+      const friend = await linkCustomer('WAVES-JANE', { first_name: 'Ames', last_name: 'Fenn' });
+      await bell.syncReferralInboundBells();
+      const [row] = await served();
+      await expect(tap(row, 'confirm')).resolves.toEqual({
+        status: 200, body: { success: true, message: "Jane Smith is confirmed as Ames Fenn's referrer. $25 each after the first plan visit." },
+      });
+      const referral = await db('referrals').where({ referrer_customer_id: referrer.id }).first();
+      expect(referral).toMatchObject({ status: 'signed_up', source: 'inbound_link', referrer_reward_status: 'pending_service' });
+      expect(await answerOf(friend.id)).toMatchObject({ outcome: 'confirmed', reviewed_by: TECH });
+      expect(postCreditMovement).not.toHaveBeenCalled();
+      expect(await db('notifications').where({ id: row.id }).first()).toMatchObject({ resolution: 'Referrer confirmed' });
+    });
+
+    test('an answer in the Queue closes the open row', async () => {
+      const referrer = await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'WAVES-JANE' });
+      const friend = await linkCustomer('WAVES-JANE');
+      await bell.syncReferralInboundBells();
+      const [row] = await served();
+      await inbound.confirmInboundReferral({ customerId: friend.id, referrerCustomerId: referrer.id });
+      expect(await db('notifications').where({ id: row.id }).first()).toMatchObject({ done_by: 'episodes', resolution: 'Referrer confirmed' });
+      expect(await served()).toEqual([]);
+    });
+
+    test('once a plan visit is done, the row offers no Confirm, and a Confirm sent anyway is refused', async () => {
+      await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'WAVES-JANE' });
+      const friend = await linkCustomer('WAVES-JANE');
+      await bell.syncReferralInboundBells();
+      const [before] = await served();
+      await recurringVisit(friend.id);
+      await bell.syncReferralInboundBells();
+      const [row] = await served();
+      expect(row.actions.map((a) => a.id)).toEqual(['dismiss']);
+      // A Confirm on the row as it rang first: the row changed, so the tap runs nothing.
+      await expect(tap(before, 'confirm')).resolves.toMatchObject({ status: 409, body: { error: 'changed' } });
+      expect(await answerOf(friend.id)).toBeUndefined();
+      expect(await db('referrals').count('* as n').first()).toEqual({ n: '0' });
+    });
   });
 });

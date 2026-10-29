@@ -200,9 +200,12 @@ function suggestionView(c, extra = {}) {
 /**
  * Plan customers with referral evidence and no referral row or office answer
  * yet, newest first. Each item carries the evidence and the likely referrers.
+ * `customerId`: that one customer's card only (the new-referral bell reads a
+ * card again before it rings or runs a button), [] when it is not waiting.
  */
-async function listInboundReferrals(conn = db) {
+async function listInboundReferrals(conn = db, { customerId = null } = {}) {
   const rows = await conn('customers as c')
+    .modify((qb) => { if (customerId) qb.where('c.id', customerId); })
     .whereNull('c.deleted_at')
     .whereRaw(ON_PLAN_SQL)
     .where(function evidence() {
@@ -292,6 +295,18 @@ async function checkedReferrer(conn, referrerCustomerId, referee) {
   return referrer;
 }
 
+// An answered card's bell row (referral-inbound-bell.js) closes with the answer,
+// whether it came from the Queue, the bell or a script. After the commit, and
+// never a reason to fail the answer itself: the sweep closes it next if this
+// fails.
+async function closeBell(customerId, outcome) {
+  try {
+    await require('./referral-inbound-bell').closeReferralInboundBell(customerId, outcome);
+  } catch (err) {
+    logger.warn(`[referral-inbound] bell row not closed for ${outcome} answer: ${err.code || err.message}`);
+  }
+}
+
 /**
  * The office confirms `referrerCustomerId` as the person who referred
  * `customerId`. Makes the referral row, converts it, and posts both credits
@@ -359,6 +374,7 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
     });
     return { referral: row, current: locked };
   });
+  await closeBell(customerId, 'confirmed');
 
   // Post-commit, the existing steps. Each is idempotent and re-checks its own
   // guards under a row lock, so a failure here leaves a pending referral the
@@ -399,7 +415,7 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
 // The office says this customer was not referred (or the referrer cannot be
 // found). The customer leaves the list for good.
 async function dismissInboundReferral({ customerId, reviewedBy = null }) {
-  return db.transaction(async (trx) => {
+  const result = await db.transaction(async (trx) => {
     const referee = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
     if (!referee) throw inboundError(404, 'NOT_FOUND', 'Customer not found');
     if (await trx('referral_inbound_reviews').where({ customer_id: customerId }).first('id')) {
@@ -408,6 +424,8 @@ async function dismissInboundReferral({ customerId, reviewedBy = null }) {
     await trx('referral_inbound_reviews').insert({ customer_id: customerId, outcome: 'dismissed', reviewed_by: reviewedBy });
     return { customerId, dismissed: true };
   });
+  await closeBell(customerId, 'dismissed');
+  return result;
 }
 
 module.exports = {

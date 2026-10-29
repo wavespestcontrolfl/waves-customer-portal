@@ -1176,6 +1176,19 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
 // ---------------------------------------------------------------------------
 // 5. checkMilestones
 // ---------------------------------------------------------------------------
+// The milestone level a promoter with `converted` conversions has earned past
+// `currentLevel`, or null. Pure: the one rule applyMilestone awards by, which
+// the new-referral bell also reads so it never offers a Confirm that would
+// award one (a bonus and a text at the tap; referral-inbound-bell.js).
+const MILESTONE_BONUS_SETTING = { champion: 'milestone_10_bonus_cents', ambassador: 'milestone_5_bonus_cents', advocate: 'milestone_3_bonus_cents' };
+function milestoneLevelEarned(converted, currentLevel) {
+  const level = currentLevel || 'none';
+  if (converted >= 10 && level !== 'champion') return 'champion';
+  if (converted >= 5 && !['champion', 'ambassador'].includes(level)) return 'ambassador';
+  if (converted >= 3 && !['champion', 'ambassador', 'advocate'].includes(level)) return 'advocate';
+  return null;
+}
+
 // Award a milestone bonus inside an EXISTING transaction. Locks the promoter
 // row with forUpdate() and re-reads the level under the lock, so concurrent
 // conversions for the same promoter serialize and a threshold can't be crossed
@@ -1186,23 +1199,9 @@ async function applyMilestone(trx, promoterId, settings) {
   if (!promoter) return null;
 
   const converted = promoter.total_referrals_converted;
-  const currentLevel = promoter.milestone_level || 'none';
-
-  let newLevel = currentLevel;
-  let bonusCents = 0;
-
-  if (converted >= 10 && currentLevel !== 'champion') {
-    newLevel = 'champion';
-    bonusCents = settings.milestone_10_bonus_cents;
-  } else if (converted >= 5 && !['champion', 'ambassador'].includes(currentLevel)) {
-    newLevel = 'ambassador';
-    bonusCents = settings.milestone_5_bonus_cents;
-  } else if (converted >= 3 && !['champion', 'ambassador', 'advocate'].includes(currentLevel)) {
-    newLevel = 'advocate';
-    bonusCents = settings.milestone_3_bonus_cents;
-  }
-
-  if (newLevel === currentLevel) return null;
+  const newLevel = milestoneLevelEarned(converted, promoter.milestone_level);
+  if (!newLevel) return null;
+  const bonusCents = settings[MILESTONE_BONUS_SETTING[newLevel]];
 
   await trx('referral_promoters').where({ id: promoterId }).update({
     milestone_level: newLevel,
@@ -1479,6 +1478,7 @@ module.exports = {
   nextRewardEmailAt,
   recentRewardCreditsQuery,
   checkMilestones,
+  milestoneLevelEarned,
   getSettings,
   getLiveSettings,
   updateSettings,
