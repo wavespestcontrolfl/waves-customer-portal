@@ -3701,7 +3701,11 @@ function ServicesTab() {
   // A visit is a day with a completed service, not a record: one stop can
   // carry several appointments, sibling records, or a record that never
   // completed (scheduled / in_progress / incomplete / cancelled).
-  const visitDay = (s) => String(s.date || '').split('T')[0];
+  // Keyed off parseDate, the same ET day the year buckets and sort use.
+  const visitDay = (s) => {
+    const dt = parseDate(s.date);
+    return Number.isNaN(dt.getTime()) ? '' : `${dt.getFullYear()}-${dt.getMonth() + 1}-${dt.getDate()}`;
+  };
   const isCompletedVisit = (s) => s.status === 'completed' && visitDay(s);
   const thisYearVisits = new Set(thisYearServices.filter(isCompletedVisit).map(visitDay)).size;
   // WaveGuard memberships don't account for an hourly/per-visit time figure in the
