@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { createHash } = require('node:crypto');
 const { etDateString, parseETDateTime, addETDays, etParts, etNthWeekdayOfMonth } = require('../utils/datetime-et');
+const { LAWN_ROUNDS_9, lawnRoundDate, roundOf } = require('./lawn-rounds');
 
 // Minimum plausible gap in DAYS between two visits of a series, per
 // recurring_pattern: ~70% of the nominal interval (a month counts 21 days).
@@ -16,6 +17,11 @@ const MIN_GAP_DAYS_BY_PATTERN = {
   // threshold applies; the Oct→Feb winter gap is longer than any threshold
   // and can never false-positive.
   seasonal_feb_oct: 21,
+  // Lawn 9x rounds: a visit moves anywhere inside its 40-day round, so a
+  // legitimate neighbour pair can sit closer than the 35-49 day cadence. This
+  // only catches two visits crowded together; a visit outside its round is
+  // hasAcceptedScheduleSpacingGap's finding.
+  [LAWN_ROUNDS_9]: 14,
   every_6_weeks: 29,
   bimonthly: 42,
   quarterly: 63,
@@ -504,12 +510,33 @@ function weekendShiftBaseDate(row, dateStr, seeder) {
   return dateStr;
 }
 
+// Lawn rounds: the k-th visit after the series anchor belongs in the round of
+// lawnRoundDate(anchor, k). A visit may sit anywhere inside that round (a
+// move or a weekend shift is not drift); outside it is the finding, and so is
+// a skipped or doubled round, which shifts every later visit one round.
+function lawnRoundsOutOfRound(sorted) {
+  let anchor = null;
+  let k = 0;
+  return sorted.some((row) => {
+    // An exception with no recorded cadence position breaks the count; the
+    // run after it is anchored on its own first visit (as the spacing walk
+    // below does).
+    if (row.date_exception) { anchor = null; return false; }
+    const date = formatDateOnly(row.scheduled_date);
+    if (!anchor) { anchor = date; k = 0; return false; }
+    k += 1;
+    const round = roundOf(lawnRoundDate(anchor, k));
+    return !round || date < round.start || date > round.end;
+  });
+}
+
 function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
   // Rebooker's stored cadence position keeps an exception in its original
   // slot even if the actual appointment moved past another application.
   const sorted = rows.map((row) => row.date_exception && row.date_exception_cadence_date
     ? { ...row, scheduled_date: formatDateOnly(row.date_exception_cadence_date), date_exception: false }
     : row).sort((a, b) => formatDateOnly(a.scheduled_date).localeCompare(formatDateOnly(b.scheduled_date)));
+  if (pattern === LAWN_ROUNDS_9) return lawnRoundsOutOfRound(sorted);
   let anchorIndex = 0;
   let expectedTerm = [];
   return sorted.some((row, index) => {
@@ -664,6 +691,8 @@ async function acceptedRecurringScheduleGaps(conn, { now, cutoff, estimateIds, c
 
 module.exports = {
   MIN_GAP_DAYS_BY_PATTERN,
+  lawnRoundsOutOfRound,
+  hasAcceptedScheduleSpacingGap,
   auditRecurringScheduleAnomalies,
   buildRecurringScheduleAnomalySql,
   formatAnomaly,
