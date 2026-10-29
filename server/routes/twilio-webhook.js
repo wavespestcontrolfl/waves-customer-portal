@@ -600,9 +600,20 @@ router.post('/sms', async (req, res) => {
     // redesign (audit 2026-09-09); this just removes the regex machinery
     // that used to try to protect that same boundary from inside the
     // detector.
-    const optCommand = complianceEligible
+    let optCommand = complianceEligible
       ? detectSmsOptCommand(Body)
       : { action: null };
+    // GATE_SMS_BARE_YES_REPLY: YES is a Twilio opt-in keyword, but a bare YES
+    // from a number with nothing to restore is an answer ("Reply YES to
+    // book"), not START. It takes the ordinary inbound path below (the reply
+    // bell, the inbound consumers) instead of the re-subscribe reply. START
+    // and the other opt-in keywords are unchanged.
+    if (optCommand.action === 'opt_in' && optCommand.sourceKeyword === 'YES'
+      && require('../config/feature-gates').smsBareYesReplyLive?.() === true
+      && await require('../services/messaging/bare-yes-reply').bareYesIsReply({ phone: normalizeE164(From) || From, customerId: customer?.id || null })) {
+      logger.info(`[sms-optin] bare YES from ${maskPhone(From)} handled as a reply (nothing to re-subscribe)`);
+      optCommand = { action: null };
+    }
 
     // Save the inbox message before any classifier await: the durable SID
     // claim suppresses retries even if the process dies during a model call.
