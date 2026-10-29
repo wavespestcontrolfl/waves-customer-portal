@@ -33,7 +33,7 @@ async function acceptanceTaxRefusal({ invoice, members, customer, trx }) {
     let authority;
     for (const member of members) {
       const tax = await require('./tax-calculator').calculateTax(
-        customer.id, member.service_type, taxableBase, { database: trx },
+        customer.id, member.service_type, taxableBase, { database: trx, propertyId: member.property_id || undefined },
       );
       rates.add(Number(tax.rate));
       authority ||= tax;
@@ -371,7 +371,7 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
     const rates = new Set();
     for (const { member, lineItems } of billed) {
       for (const label of [member.service_type, ...lineItems.filter((line) => line.amount > 0).map((line) => line.category)]) {
-        const tax = await require('./tax-calculator').calculateTax(customer.id, label, 100, { database: trx });
+        const tax = await require('./tax-calculator').calculateTax(customer.id, label, 100, { database: trx, propertyId: member.property_id || undefined });
         rates.add(tax.rate);
       }
     }

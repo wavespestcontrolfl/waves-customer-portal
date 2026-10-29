@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
-const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS } = require('../config/county-zips');
-const { slabHomeNoTaxLive, lawnSprayNoTaxLive, buildingUseTaxLive } = require('../config/feature-gates');
+const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS, DESOTO_ZIPS } = require('../config/county-zips');
+const { slabHomeNoTaxLive, lawnSprayNoTaxLive, buildingUseTaxLive, taxServiceCountyLive, slabBusinessSiteTaxLive } = require('../config/feature-gates');
 
 // Waves operates in ET. Use ET calendar date regardless of server TZ (Railway=UTC).
 function todayET() {
@@ -16,6 +16,22 @@ const CANONICAL_COUNTY_KEYS = new Map(
 // pest work (or mosquito work) that keeps a service taxable.
 const GROUNDS_TERMS = /\b(?:lawns?|turf|sod|trees?|shrubs?|palms?|weeds?|fertili[sz]\w*|pre-?emergent|fire\s?ants?|dethatch\w*|top-?dress\w*|plugging|aerat\w*)\b/i;
 const BUILDING_PEST_TERMS = /\b(?:pests?|termites?|rodents?|rats?|mice|mouse|(?:cock)?roach(?:es)?|palmetto|bed\s?bugs?|fleas?|ticks?|bees?|wasps?|hornets?|ants?|spiders?|silverfish|scorpions?|crickets?|wdo|mosquito(?:es)?|misting)\b/i;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// 2026 rates of the neighbor counties that have no seeded tax_rates row
+// (Florida DOR form DR-15DSS, 2026 discretionary sales surtax rates). Used
+// only with GATE_TAX_SERVICE_COUNTY on, and only when no tax_rates row covers
+// the county: a row added on the admin tax page always wins. Without them
+// these counties get the flat 7% fallback.
+const NEIGHBOR_COUNTY_RATES_2026 = Object.freeze({
+  Lee: Object.freeze({ state: 0.06, surtax: 0.005, combined: 0.065 }),
+  Collier: Object.freeze({ state: 0.06, surtax: 0, combined: 0.06 }),
+  DeSoto: Object.freeze({ state: 0.06, surtax: 0.015, combined: 0.075 }),
+});
+
+// A rate as a percent for the reason text: 0.005 -> "0.5", 0.01 -> "1".
+const pct = (value) => String(Math.round(parseFloat(value) * 1000) / 10);
 
 const TaxCalculator = {
 
@@ -81,17 +97,21 @@ const TaxCalculator = {
     const isCommercial = opts.isCommercial === true
       || customer.property_type === 'commercial' || customer.property_type === 'business';
 
-    const notTaxable = await this.serviceNotTaxable(conn, serviceType, isCommercial);
+    const notTaxable = await this.serviceNotTaxable(conn, serviceType, isCommercial, { customer, opts });
     if (notTaxable) return notTaxable;
 
-    // 3. Look up county tax rate
-    const county = this.inferCountyFromZip(customer.zip);
+    // 3. Look up county tax rate. The surtax is due in the county where the
+    // service is delivered (s. 212.054(3)(a)): with GATE_TAX_SERVICE_COUNTY on,
+    // the serviced property's ZIP names it (taxZipFor), else the customer's ZIP.
+    const { zip: taxZip, fromProperty } = await this.taxZipFor(conn, customer, opts);
+    const sourceField = fromProperty ? { countySource: 'property' } : {};
+    const county = this.inferCountyFromZip(taxZip);
     if (!county) {
       // Default: FL residential pest control is NOT taxable; commercial gets 6% state + 1% surtax
       const defaultRate = isCommercial ? 0.07 : 0;
       const amount = Math.round(subtotal * defaultRate * 100) / 100;
       if (!isCommercial) return { rate: 0, amount: 0, taxable: false, county: 'unknown', reason: 'Residential pest control — FL sales tax exempt' };
-      return { rate: defaultRate, amount, taxable: true, county: 'unknown', reason: 'Default FL rate (county could not be inferred from ZIP)' };
+      return { rate: defaultRate, amount, taxable: true, county: 'unknown', reason: `Default FL rate (county could not be inferred from ${fromProperty ? "the property's " : ''}ZIP)`, ...sourceField };
     }
 
     // Bound by effective_date so a staged future-dated rate (posted ahead of
@@ -128,15 +148,22 @@ const TaxCalculator = {
       .orderBy('effective_date', 'desc')
       .first();
 
-    const rate = taxRate ? parseFloat(taxRate.combined_rate) : 0.07;
+    // No row for the county: a neighbor county's 2026 rate (gate on), else the
+    // flat 7% fallback, as before.
+    const neighbor = !taxRate && NEIGHBOR_COUNTY_RATES_2026[county] && taxServiceCountyLive()
+      ? NEIGHBOR_COUNTY_RATES_2026[county] : null;
+    const rate = taxRate ? parseFloat(taxRate.combined_rate) : (neighbor ? neighbor.combined : 0.07);
     const amount = Math.round(subtotal * rate * 100) / 100;
+    const stateRate = taxRate ? taxRate.state_rate : (neighbor ? neighbor.state : 0.06);
+    const surtax = taxRate ? taxRate.county_surtax : (neighbor ? neighbor.surtax : 0.01);
 
     return {
       rate,
       amount,
       taxable: true,
       county,
-      reason: `${county} County — ${(rate * 100).toFixed(1)}% (state ${taxRate ? (parseFloat(taxRate.state_rate) * 100).toFixed(0) : '6'}% + county ${taxRate ? (parseFloat(taxRate.county_surtax) * 100).toFixed(0) : '1'}% surtax)`,
+      reason: `${county} County${fromProperty ? ' (property ZIP)' : ''} — ${(rate * 100).toFixed(1)}% (state ${pct(stateRate)}% + county ${pct(surtax)}% surtax)`,
+      ...sourceField,
     };
   },
 
@@ -144,7 +171,7 @@ const TaxCalculator = {
    * Step 2 of calculateTax: the no-tax answer this service earns, or null when
    * the county rate applies (a taxable or unknown service).
    */
-  async serviceNotTaxable(conn, serviceType, isCommercial) {
+  async serviceNotTaxable(conn, serviceType, isCommercial, { customer = null, opts = {} } = {}) {
     if (!serviceType) return null;
     // Pre-construction termite treatment (slab pre-treat): Florida taxes it
     // only for a nonresidential building (Rule 12A-1.009); for a home it is
@@ -152,9 +179,15 @@ const TaxCalculator = {
     // account is commercial. A builder's account holds homes and its own
     // offices alike, so the service name carries the building's use here
     // (GATE_SLAB_HOME_NO_TAX); the account-level use in step 1b covers a
-    // whole residential site.
+    // whole residential site. A commercial account's slab job whose serviced
+    // property has Occupancy "Commercial" (the office's per-site mark) is a
+    // business building's and keeps the county tax (GATE_SLAB_BUSINESS_SITE_TAX).
     if (slabHomeNoTaxLive() && this.isHomeSlabPretreat(serviceType)) {
-      return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Pre-construction termite treatment for a home — not taxable (FL Rule 12A-1.009)' };
+      const businessSite = isCommercial && customer && customer.building_use !== 'residential'
+        && slabBusinessSiteTaxLive() && (await this.servicedOccupancy(conn, customer, opts)) === 'commercial';
+      if (!businessSite) {
+        return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Pre-construction termite treatment for a home — not taxable (FL Rule 12A-1.009)' };
+      }
     }
     // Lawn and landscape treatments: Florida does not tax lawn spraying,
     // residential or nonresidential (Rule 12A-1.009(6)), and taxes pest control
@@ -232,6 +265,55 @@ const TaxCalculator = {
     return CANONICAL_COUNTY_KEYS.get(key) || null;
   },
 
+  /**
+   * The ZIP that names the tax county, and whether it came from the serviced
+   * property. With GATE_TAX_SERVICE_COUNTY on, a caller that knows where the
+   * service is delivered passes opts.propertyId (a saved property of this
+   * customer) or opts.scheduledServiceId (a visit of this customer, whose saved
+   * property is read); that property's ZIP wins. No id, an id that is not this
+   * customer's, a property without a ZIP, or the gate off = the customer's own
+   * ZIP, as before (and no query).
+   */
+  async taxZipFor(conn, customer, { propertyId, scheduledServiceId } = {}) {
+    const [pid, visitId] = [propertyId, scheduledServiceId].map((id) => String(id ?? '').trim());
+    if ((UUID_RE.test(pid) || UUID_RE.test(visitId)) && taxServiceCountyLive()) {
+      let row = null;
+      if (UUID_RE.test(pid)) {
+        row = await conn('customer_properties').where({ id: pid, customer_id: customer.id }).first('zip');
+      }
+      if (!String(row?.zip ?? '').trim() && UUID_RE.test(visitId)) {
+        row = await conn('scheduled_services as s')
+          .join('customer_properties as p', 'p.id', 's.property_id')
+          .where({ 's.id': visitId, 's.customer_id': customer.id, 'p.customer_id': customer.id })
+          .first('p.zip as zip');
+      }
+      const zip = String(row?.zip ?? '').trim();
+      if (zip) return { zip, fromProperty: true };
+    }
+    return { zip: customer.zip, fromProperty: false };
+  },
+
+  /**
+   * The serviced property's occupancy_type, by the same ids taxZipFor reads:
+   * opts.propertyId (a saved property of this customer), else the saved
+   * property of opts.scheduledServiceId (a visit of this customer). No id, or
+   * an id that is not this customer's = null.
+   */
+  async servicedOccupancy(conn, customer, { propertyId, scheduledServiceId } = {}) {
+    const [pid, visitId] = [propertyId, scheduledServiceId].map((id) => String(id ?? '').trim());
+    let row = null;
+    if (UUID_RE.test(pid)) {
+      row = await conn('customer_properties').where({ id: pid, customer_id: customer.id }).first('occupancy_type');
+    }
+    if (!row && UUID_RE.test(visitId)) {
+      row = await conn('scheduled_services as s')
+        .join('customer_properties as p', 'p.id', 's.property_id')
+        .where({ 's.id': visitId, 's.customer_id': customer.id, 'p.customer_id': customer.id })
+        .first('p.occupancy_type as occupancy_type');
+    }
+    return row?.occupancy_type ?? null;
+  },
+
   inferCountyFromZip(zip) {
     if (!zip) return null;
     const z = String(zip).substring(0, 5);
@@ -241,6 +323,7 @@ const TaxCalculator = {
     if (CHARLOTTE_ZIPS.includes(z)) return 'Charlotte';
     if (LEE_ZIPS.includes(z)) return 'Lee';
     if (COLLIER_ZIPS.includes(z)) return 'Collier';
+    if (DESOTO_ZIPS.includes(z) && taxServiceCountyLive()) return 'DeSoto';
     return null;
   },
 };

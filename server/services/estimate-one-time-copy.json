@@ -337,6 +337,22 @@
       "sub": "Droppings, nesting, and the pheromone trail removed and disinfected — approve online and pick a day. Licensed & insured."
     }
   },
+  "rodent_dead_animal_removal": {
+    "outcome": "The dead animal is found and removed, and the spot is treated for odor.",
+    "includes": [
+      "A technician searches the area you picked and removes the dead rodent",
+      "The spot is cleaned and treated for odor at its source",
+      "Odor fades over the next few days once the source is removed",
+      "This visit does not seal the way in. Ask us about exclusion if more rodents may be getting inside"
+    ],
+    "assurance": null,
+    "terms": "Pay on service day. No contract.",
+    "hero": {
+      "eyebrow": "Your dead rodent removal",
+      "h1": "Hello {first}, your dead rodent removal quote is ready!",
+      "sub": "A technician finds and removes the animal and treats the area for odor. Approve online and pick a day. Licensed & insured."
+    }
+  },
   "rodent_bait_setup": {
     "outcome": "Rodent pressure handled outside — before it gets into the structure.",
     "includes": [

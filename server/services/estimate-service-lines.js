@@ -356,7 +356,7 @@ function selectedServiceKeysFromInputs(inputs = {}) {
   if (inputs.svcMosquito || inputs.svcOnetimeMosquito) keys.push('mosquito');
   if (inputs.svcTs) keys.push('tree_shrub');
   if (inputs.svcInjection) keys.push('palm_injection');
-  if (inputs.svcRodentBait || inputs.svcRodentTrap || inputs.svcRodentSanitation || inputs.svcExclusion) keys.push('rodent');
+  if (inputs.svcRodentBait || inputs.svcRodentTrap || inputs.svcRodentSanitation || inputs.svcRodentDeadAnimal || inputs.svcExclusion) keys.push('rodent');
   if (inputs.svcTermiteBait || inputs.svcTrenching || inputs.svcBoracare || inputs.svcPreslab || inputs.svcFoam) keys.push('termite');
   return unique(keys);
 }

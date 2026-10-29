@@ -563,6 +563,15 @@ function areaAddOnProfileFields(service, item, amount) {
   };
 }
 
+// Dead Rodent Removal & Odor Treatment: the engine's on-site minutes for the chosen access tier
+// (45 easy reach, 90 attic) are a duration floor for the booking, like an area add-on's minutes.
+// A row without them (an older save) keeps the catalog default.
+function deadAnimalProfileFields(service, item) {
+  if (service !== 'rodent_dead_animal_removal') return {};
+  const minutes = Math.ceil(Number(item.onSiteMinutes));
+  return minutes > 0 ? { durationMinutes: minutes } : {};
+}
+
 // Billable one-time services for a one-time accept, so the reserved appointment's
 // service label + notes show the actual mix (e.g. a pest visit plus a separately
 // billed Bora-Care wood treatment) instead of a generic "One-time service" that
@@ -709,7 +718,8 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     }
     // Third arg is the RAW engine key off the breakdown item — the catalog's
     // identity, distinct from the display category passed first.
-    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null, areaAddOnProfileFields(service, item, amount));
+    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null,
+      { ...areaAddOnProfileFields(service, item, amount), ...deadAnimalProfileFields(service, item) });
   }
   return rows;
 }
@@ -817,18 +827,20 @@ function seasonalDateSegments(dateFrom, dateTo, seasonal) {
   return segments.length ? segments : [[from, to]];
 }
 
-// A one-time visit that carries area add-ons reserves at least the sum of their
-// engine on-site minutes, whatever the capacity gate says (the default 60 would
-// book a three-add-on visit into one hour). The add-ons ride the visit's
-// primary service: when a non-add-on service is also sold it keeps the minutes
-// today's rule gives it (`base`) and the add-ons come on top; add-ons alone are
-// sized by the larger of `base` and their sum. No add-on, no change. The result
-// is not capped at MAX_ESTIMATE_SLOT_DURATION_MINUTES: a floor the cap lowered
-// would not be a floor. With the capacity gate on the catalog pass sums the same
-// minutes per service (resolveCatalogSlotProfile).
+// A one-time visit that carries area add-ons (or a Dead Rodent Removal line, whose
+// sold access tier carries its on-site minutes: 45 easy reach, 90 attic) reserves
+// at least the sum of their engine on-site minutes, whatever the capacity gate
+// says (the default 60 would book a three-add-on visit, or an attic search, into
+// one hour). These rows ride the visit's primary service: when another service is
+// also sold it keeps the minutes today's rule gives it (`base`) and theirs come on
+// top; alone they are sized by the larger of `base` and their sum. None, no
+// change. The result is not capped at MAX_ESTIMATE_SLOT_DURATION_MINUTES: a floor
+// the cap lowered would not be a floor. With the capacity gate on the catalog pass
+// sums the same minutes per service (resolveCatalogSlotProfile).
+const ON_SITE_MINUTE_ENGINE_KEYS = new Set([AREA_ADDON_ENGINE_KEY, 'rodent_dead_animal_removal']);
 function oneTimeVisitDurationMinutes(base, services, serviceMode) {
   if (serviceMode !== 'one_time') return base;
-  const addOns = services.filter((row) => row.engineKey === AREA_ADDON_ENGINE_KEY);
+  const addOns = services.filter((row) => ON_SITE_MINUTE_ENGINE_KEYS.has(row.engineKey));
   const addOnMinutes = addOns.reduce((sum, row) => sum + (Number(row.durationMinutes) || 0), 0);
   if (!(addOnMinutes > 0)) return base;
   const floor = addOns.length < services.length ? base + addOnMinutes : Math.max(base, addOnMinutes);

@@ -9,6 +9,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 const { postCreditMovement, round2 } = require('./customer-credit');
 const { toE164, isLikelyE164, phoneMatchDigits } = require('../utils/phone');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -539,12 +540,13 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   return { ...referral, lead_id: leadId, status: smsSent ? 'contacted' : 'sms_failed', sms_sent: smsSent };
 }
 
-// Email twin of the reward SMS (referral.reward_earned template) — fired
-// from the SAME two moments as the SMS: immediately at conversion when
-// require_service_completion is off, or at first-service credit when it's
-// on. Best-effort and idempotent per referral, so the two call sites can
-// never double-send. Promoters aren't always customers, so the send goes
-// straight to promoter.customer_email.
+// The referrer's reward email (referral.reward_earned template). Sent
+// immediately at conversion, beside the reward SMS, when
+// require_service_completion is off; when it is on, sent alone by
+// sendDueReferralRewardEmails at the next 9:00 AM ET after the first-service
+// credit (owner 2026-10-29). Best-effort and idempotent per referral, so the
+// two call sites can never double-send. Promoters aren't always customers, so
+// the send goes straight to promoter.customer_email.
 async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destination = 'referral_balance') {
   try {
     const email = String(promoter?.customer_email || '').trim();
@@ -586,6 +588,62 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
   }
 }
 
+// Owner 2026-10-29, "we just do the email moving forward": a referral credit
+// sends the referrer ONE thank-you email at the next 9:00 AM ET after it posts
+// (a credit before 9:00 AM sends that morning), and no reward text. This covers
+// every path that posts the credit (creditReferralOnFirstService): the first
+// visit's completion, the quiet issued-invoice closeout and the office's late
+// confirm. The email's idempotency key (referral.reward_earned:<id>) is the sent
+// marker, so a credit is emailed once across runs and replicas.
+const REWARD_EMAIL_AT_ET = '09:00';
+const REWARD_EMAIL_LOOKBACK_DAYS = 7;
+
+function nextRewardEmailAt(at) {
+  const when = at instanceof Date ? at : new Date(at);
+  const sameDay = parseETDateTime(`${etDateString(when)}T${REWARD_EMAIL_AT_ET}`);
+  return when <= sameDay ? sameDay : parseETDateTime(`${etDateString(addETDays(when, 1))}T${REWARD_EMAIL_AT_ET}`);
+}
+
+// The referrer's credit rows (one per credited referral) posted in the last
+// REWARD_EMAIL_LOOKBACK_DAYS.
+function recentRewardCreditsQuery(conn, now) {
+  return conn('customer_credit_ledger as l')
+    .join('referrals as r', 'r.id', 'l.referral_id')
+    .where('l.source', 'referral')
+    .where('l.delta', '>', 0)
+    .whereRaw('l.customer_id = r.referrer_customer_id')
+    .where('r.status', 'credited')
+    .whereNotNull('r.promoter_id')
+    .where('l.created_at', '>=', new Date(now.getTime() - REWARD_EMAIL_LOOKBACK_DAYS * 86400000))
+    .orderBy('l.created_at', 'asc')
+    .select('r.*', 'l.delta as credit_dollars', 'l.created_at as credited_at');
+}
+
+// Run by scheduler.js (every 15 minutes, 9:00-11:45 AM ET). A credit whose
+// morning was missed goes out the next morning; one older than
+// REWARD_EMAIL_LOOKBACK_DAYS is left alone. The email library decides whether
+// an earlier attempt counts as sent (a final provider answer) or is retried
+// (failed, still queued), the same rule a repeat sendTemplate call applies.
+async function sendDueReferralRewardEmails({ now = new Date() } = {}) {
+  const { shouldRetryExistingMessage } = require('./email-template-library');
+  const credits = await recentRewardCreditsQuery(db, now);
+  let attempted = 0;
+  for (const credit of credits) {
+    if (nextRewardEmailAt(credit.credited_at) > now) continue;
+    const earlier = await db('email_messages')
+      .where({ idempotency_key: `referral.reward_earned:${credit.id}` })
+      .first('status');
+    if (earlier && !shouldRetryExistingMessage(earlier)) continue;
+    const promoter = await db('referral_promoters').where({ id: credit.promoter_id }).first();
+    if (!promoter) continue;
+    // Best-effort, as before: sendRewardEarnedEmail logs a send error, and the
+    // next run tries again while the credit is inside the lookback.
+    await sendRewardEarnedEmail(promoter, credit, Number(credit.credit_dollars), 'account_credit');
+    attempted += 1;
+  }
+  return { credits: credits.length, attempted };
+}
+
 // ---------------------------------------------------------------------------
 // 3. convertReferral
 // ---------------------------------------------------------------------------
@@ -606,7 +664,13 @@ function referralRewardAlreadyStaged(referral) {
     || STAGED_REWARD_STATUSES.includes(referral.referrer_reward_status);
 }
 
-async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
+// deferredOnly (the new-referral bell's Confirm, referral-inbound-bell.js): this conversion may neither send
+// nor pay anything now. It is refused inside the money-critical section below, under the promoter row lock,
+// when the program pays rewards at once or the conversion earns a milestone (a bonus and a text). `trx`: run
+// that section on the caller's transaction (only with deferredOnly, so no post-commit leg can run before the
+// caller commits), so a refusal also undoes what the caller wrote.
+async function convertReferral(referralId, { customerId, tier, monthlyValue, trx: callerTrx = null, deferredOnly = false } = {}) {
+  if (callerTrx && !deferredOnly) throw new Error('convertReferral joins a caller transaction only when deferredOnly');
   const settings = await getSettings();
 
   // Calculate reward (base + tier bonus)
@@ -620,7 +684,7 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
   // Money-critical section. Lock the referral row and only credit when it is still in a
   // pre-conversion state, so a double-click / retry that hits convert twice can no longer
   // credit the promoter balance twice. The referral flip + balance increment commit together.
-  const outcome = await db.transaction(async (trx) => {
+  const convert = async (trx) => {
     const referral = await trx('referrals').where({ id: referralId }).forUpdate().first();
     if (!referral) throw new Error('Referral not found');
 
@@ -636,6 +700,18 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
     // Idempotency guard: anything already converted/rejected/lost is a no-op (no re-credit).
     if (!CONVERTIBLE_STATUSES.includes(referral.status)) {
       return { referral, alreadyConverted: true };
+    }
+
+    if (deferredOnly) {
+      if (!settings.require_service_completion) {
+        throw referralError(409, 'REWARD_NOT_DEFERRED', 'Referral rewards are paid at once now. Confirm it in Referrals → Queue.');
+      }
+      const promoter = referral.promoter_id
+        ? await trx('referral_promoters').where({ id: referral.promoter_id }).forUpdate().first('total_referrals_converted', 'milestone_level')
+        : null;
+      if (promoter && milestoneLevelEarned(Number(promoter.total_referrals_converted || 0) + 1, promoter.milestone_level)) {
+        throw referralError(409, 'MILESTONE_DUE', 'This referral earns a milestone bonus. Confirm it in Referrals → Queue.');
+      }
     }
 
     const updates = {
@@ -668,7 +744,8 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
     }
 
     return { referral, alreadyConverted: false, milestoneAward };
-  });
+  };
+  const outcome = callerTrx ? await convert(callerTrx) : await db.transaction(convert);
 
   if (outcome.alreadyConverted) {
     logger.info(`[ReferralEngine] Referral ${referralId} already converted (status=${outcome.referral.status}); skipping re-credit.`);
@@ -691,9 +768,10 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
   // would be skipped for good.
   //
   // Reward SMS routing depends on WHEN the reward is earned:
-  //  - require_service_completion ON  → deferred: the referrer's reward SMS + the
-  //    real money are issued when the referee completes their first recurring
-  //    service (see creditReferralOnFirstService).
+  //  - require_service_completion ON  → deferred: the real money is issued when
+  //    the referee completes their first recurring service
+  //    (creditReferralOnFirstService), and the referrer's thank-you email follows
+  //    at the next 9:00 AM ET (sendDueReferralRewardEmails). No reward text.
   //  - require_service_completion OFF → immediate: the promoter was already
   //    credited in the transaction above and never reaches that helper, so the
   //    reward SMS must be sent here or the immediate-earned referrer is paid silently.
@@ -968,9 +1046,11 @@ async function updateReferralStatus(referralId, { status, adminNotes, lostReason
 // reward — the promoter balance / payout columns are tracking only). A one-time
 // service never qualifies. Idempotent: the referral's first_service_completed
 // flag is the single-use guard, re-checked under a row lock.
-// `notify: false` posts both credits but sends neither the reward SMS nor the
-// reward email — the quiet issued-invoice closeout (GitHub r12 P1 #4127).
-async function creditReferralOnFirstService({ customerId, serviceId, notify = true }) {
+// Sends nothing: the referrer's thank-you is one email at the next 9:00 AM ET
+// (sendDueReferralRewardEmails, owner 2026-10-29 "we just do the email moving
+// forward"), on every path that posts the credit, the quiet issued-invoice
+// closeout and the office's late confirm included. No reward text.
+async function creditReferralOnFirstService({ customerId, serviceId }) {
   if (!customerId || !serviceId) return null;
 
   const customer = await db('customers').where({ id: customerId }).first('id', 'phone', 'first_name');
@@ -1108,52 +1188,6 @@ async function creditReferralOnFirstService({ customerId, serviceId, notify = tr
 
   if (outcome.skipped) return null;
 
-  // Post-commit: notify the referrer their reward landed (non-critical).
-  if (notify && outcome.referral.promoter_id) {
-    try {
-      const promoter = await db('referral_promoters').where({ id: outcome.referral.promoter_id }).first();
-      if (promoter && promoter.customer_phone) {
-        // Own try: the credit is already posted — an SMS failure must not
-        // skip the reward email below.
-        try {
-        const rewardSms = await renderReferralSms('referral_reward', {
-          referrer_name: promoter.first_name,
-          referee_name: outcome.referral.referee_name || outcome.referral.referral_first_name || 'your friend',
-          reward_amount: `$${Math.round(outcome.referrerDollars)}`,
-        }, settings.reward_sms_template, {
-          workflow: 'referral_reward',
-          entity_type: 'referral',
-          entity_id: outcome.referral.id,
-        });
-        await sendSMS(promoter.customer_phone, rewardSms, {
-          customerId: promoter.customer_id,
-          messageType: 'referral_reward',
-          referralId: outcome.referral.id,
-          promoterId: promoter.id,
-          entryPoint: 'referral_engine_first_service',
-        });
-        } catch (smsErr) {
-          logger.warn(`[ReferralEngine] reward SMS leg failed for referral ${outcome.referral.id}: ${smsErr.message}`);
-        }
-      }
-      if (promoter) {
-        // Email leg for the deferred-earned path — same moment the money
-        // is actually issued; idempotency key keeps it single-send even
-        // if a conversion-time email ever fired for this referral. This path
-        // pays out as an account credit, so the copy must say so. Own try:
-        // an SMS failure above must not swallow the email for a reward that
-        // has already been committed.
-        try {
-          await sendRewardEarnedEmail(promoter, outcome.referral, outcome.referrerDollars, 'account_credit');
-        } catch (emailErr) {
-          logger.warn(`[ReferralEngine] reward email leg failed for referral ${outcome.referral.id}: ${emailErr.message}`);
-        }
-      }
-    } catch (smsErr) {
-      logger.warn(`[ReferralEngine] reward SMS failed for referral ${outcome.referral.id}: ${smsErr.message}`);
-    }
-  }
-
   logger.info(`[ReferralEngine] First recurring service for customer ${customerId} → credited referral ${outcome.referral.id}: referrer $${outcome.referrerDollars}, referee $${refereeDollars}`);
   return { referralId: outcome.referral.id, referrerDollars: outcome.referrerDollars, refereeDollars };
 }
@@ -1161,6 +1195,19 @@ async function creditReferralOnFirstService({ customerId, serviceId, notify = tr
 // ---------------------------------------------------------------------------
 // 5. checkMilestones
 // ---------------------------------------------------------------------------
+// The milestone level a promoter with `converted` conversions has earned past
+// `currentLevel`, or null. Pure: the one rule applyMilestone awards by, which
+// the new-referral bell also reads so it never offers a Confirm that would
+// award one (a bonus and a text at the tap; referral-inbound-bell.js).
+const MILESTONE_BONUS_SETTING = { champion: 'milestone_10_bonus_cents', ambassador: 'milestone_5_bonus_cents', advocate: 'milestone_3_bonus_cents' };
+function milestoneLevelEarned(converted, currentLevel) {
+  const level = currentLevel || 'none';
+  if (converted >= 10 && level !== 'champion') return 'champion';
+  if (converted >= 5 && !['champion', 'ambassador'].includes(level)) return 'ambassador';
+  if (converted >= 3 && !['champion', 'ambassador', 'advocate'].includes(level)) return 'advocate';
+  return null;
+}
+
 // Award a milestone bonus inside an EXISTING transaction. Locks the promoter
 // row with forUpdate() and re-reads the level under the lock, so concurrent
 // conversions for the same promoter serialize and a threshold can't be crossed
@@ -1171,23 +1218,9 @@ async function applyMilestone(trx, promoterId, settings) {
   if (!promoter) return null;
 
   const converted = promoter.total_referrals_converted;
-  const currentLevel = promoter.milestone_level || 'none';
-
-  let newLevel = currentLevel;
-  let bonusCents = 0;
-
-  if (converted >= 10 && currentLevel !== 'champion') {
-    newLevel = 'champion';
-    bonusCents = settings.milestone_10_bonus_cents;
-  } else if (converted >= 5 && !['champion', 'ambassador'].includes(currentLevel)) {
-    newLevel = 'ambassador';
-    bonusCents = settings.milestone_5_bonus_cents;
-  } else if (converted >= 3 && !['champion', 'ambassador', 'advocate'].includes(currentLevel)) {
-    newLevel = 'advocate';
-    bonusCents = settings.milestone_3_bonus_cents;
-  }
-
-  if (newLevel === currentLevel) return null;
+  const newLevel = milestoneLevelEarned(converted, promoter.milestone_level);
+  if (!newLevel) return null;
+  const bonusCents = settings[MILESTONE_BONUS_SETTING[newLevel]];
 
   await trx('referral_promoters').where({ id: promoterId }).update({
     milestone_level: newLevel,
@@ -1460,7 +1493,11 @@ module.exports = {
   updateReferralStatus,
   confirmFirstService,
   creditReferralOnFirstService,
+  sendDueReferralRewardEmails,
+  nextRewardEmailAt,
+  recentRewardCreditsQuery,
   checkMilestones,
+  milestoneLevelEarned,
   getSettings,
   getLiveSettings,
   updateSettings,
